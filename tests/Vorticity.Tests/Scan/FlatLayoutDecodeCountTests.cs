@@ -1,20 +1,20 @@
-// A chunk larger than a batch is decoded once PER BATCH, which is quadratic in the row count.
+// A chunk larger than a batch is decoded once per scan, not once per batch: decoding the whole
+// node for every batch and slicing that batch's rows out of it is correct and quadratic in the
+// row count.
 //
-// FlatLayoutReader.Execute decodes `total` -- the whole node -- and then slices out the batch's
-// rows. Upstream calls the layout indivisible and so does the comment there, and for READING the
-// segment that is right: a flat layout's bytes cannot be fetched in parts. Decoding them once per
-// batch is a different claim, and it is the one that costs.
+// A flat layout is indivisible for READING -- its bytes cannot be fetched in parts -- and the
+// reference implementation says so too. Decoding them once per batch is a different claim, and
+// it is the one that costs, so FlatLayoutReader decodes the chunk once and retains it for the
+// batches that follow.
 //
-// WHY NOTHING SAW IT. Every conformance corpus file is 8193 rows or fewer, and the benchmark file is
-// 64 splits of 1024 rows, so a chunk is never bigger than the 8192-row batch and the factor is
-// exactly 1. It took generating 1M-row single-encoding files to make it visible, and then it was
-// 90x on ten times the rows -- `vortex.fsst` at 3.4 SECONDS for a million values, against 26.5 ms
-// with the subdivision removed.
+// NO SHIPPED FILE SHOWS IT. Every conformance corpus file is 8193 rows or fewer, and the benchmark
+// file is 64 splits of 1024 rows, so a chunk is never bigger than the 8192-row batch and the
+// factor there is exactly 1.
 //
-// THIS TEST NEEDS NO SUCH FILE. The quantity is exact and machine-independent -- values materialized
-// per scan -- so a few tens of thousands of rows show the shape that a timing would need millions to
-// show through the noise. It is pinned at `Ideal`, each value once, so a return of the per-batch
-// decode shows as a rise.
+// THIS TEST NEEDS NO LARGE FILE. The quantity is exact and machine-independent -- values
+// materialized per scan -- so a few tens of thousands of rows show the shape that a timing would
+// need millions to show through the noise. It is pinned at `Ideal`, each value once, so a return
+// of the per-batch decode shows as a rise.
 using System;
 using System.Collections.Generic;
 using System.Globalization;

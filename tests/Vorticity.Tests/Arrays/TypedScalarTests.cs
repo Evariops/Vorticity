@@ -1,5 +1,5 @@
 // One test per row of the typed scalar mapping table, plus the ways each row can be violated.
-// The wire bytes are produced by Phase 0's ScalarProtobuf writer, so these exercise the typed
+// The wire bytes are produced by the library's ScalarProtobuf writer, so these exercise the typed
 // interpreter and not a hand-rolled encoder.
 using System;
 using System.Text;
@@ -332,10 +332,9 @@ public sealed class TypedScalarTests
 
     /// <summary>A variant scalar reads as its nested typed scalar, RFC 0015's <c>(dtype, value)</c>.</summary>
     /// <remarks>
-    /// This asserted the OPPOSITE until `vortex.variant` gained a decoder: a variant scalar was
-    /// refused, because nothing could do anything with one. The `vortex.variant` corpus files are
-    /// exactly this shape -- a constant carrier holding `variant(i32 = 1)` -- so refusing it made
-    /// them unreadable. What is validated is the NESTED half against its own dtype, which is what
+    /// Do not refuse a variant scalar: the `vortex.variant` corpus files are exactly this shape --
+    /// a constant carrier holding `variant(i32 = 1)` -- so refusing it would make them
+    /// unreadable. What is validated is the NESTED half against its own dtype, which is what
     /// keeps `variant(i32 = 1)` a checked value rather than an opaque blob.
     /// </remarks>
     [Fact]

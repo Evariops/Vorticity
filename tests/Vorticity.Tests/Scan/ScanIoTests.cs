@@ -1,6 +1,6 @@
 // The two I/O properties the scan promises and no value comparison can show.
 //
-// F4 - PROJECTION PRUNES I/O. Scanning one column of a wide file must never ask the source for the
+// PROJECTION PRUNES I/O. Scanning one column of a wide file must never ask the source for the
 // other columns' segments. Without this test "projection" is a claim about the shape of the output,
 // not a feature: a reader that decoded all eleven columns and then dropped ten would pass every
 // value assertion in the suite.
@@ -216,9 +216,9 @@ public sealed class ScanIoTests
     }
 
     /// <summary>
-    /// The segments a Phase 1 read of <paramref name="node"/> touches, following the same child
-    /// selection the layout readers make: a zoned or stats layout reads only its data child, and a
-    /// dict layout reads both its values and its codes.
+    /// The segments an unfiltered read of <paramref name="node"/> touches, following the same
+    /// child selection the layout readers make: a zoned or stats layout reads only its data child,
+    /// and a dict layout reads both its values and its codes.
     /// </summary>
     private static void CollectReadSegments(in LayoutNode node, HashSet<uint> into)
     {

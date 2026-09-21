@@ -489,7 +489,7 @@ public sealed class LayoutTreeStructureTests
     public void ZonedBoundedMinIsAScalarAndBoundedMaxIsAStruct()
     {
         // The asymmetry is real: bounded_min's partial is the element type, bounded_max's is
-        // {bound, unknown} (vortex-array-0.86.1/src/aggregate_fn/fns/bounded_max/mod.rs).
+        // {bound, unknown}.
         SyntheticLayout root = new SyntheticLayout("vortex.zoned", 8)
             .WithMetadata(ZonedMetadataBytes(4, "vortex.bounded_max", "vortex.bounded_min"))
             .With(SyntheticLayout.Flat(8, 0), SyntheticLayout.Flat(2, 1));
@@ -535,7 +535,8 @@ public sealed class LayoutTreeStructureTests
     public void ZonedBoundedAggregateWithUnusableOptionsDisablesPruning()
     {
         // BoundedMin::deserialize requires exactly eight bytes and a non-zero value; upstream fails
-        // the read, we degrade to "no zone map" (never a wrong value: Phase 1 prunes with nothing).
+        // the read, we degrade to "no zone map": the scan then prunes nothing, which is slower but
+        // never wrong.
         AggregateSpecList specs = new AggregateSpecList();
         specs.Add("vortex.bounded_min"u8, [1, 2, 3]);
 
@@ -625,9 +626,8 @@ public sealed class LayoutTreeStructureTests
     [Fact]
     public void AnUnknownLayoutIdParsesAndStopsThere()
     {
-        // "vortex.zzzzz", not a real id. This was "vortex.list" until that layout gained a reader
-        // -- the fourth example of its kind to expire by being implemented. An id registered nowhere
-        // cannot.
+        // "vortex.zzzzz", not a real id: a real layout id stops being unknown once that layout
+        // gains a reader, and an id registered nowhere cannot.
         SyntheticLayout root = new SyntheticLayout("vortex.zzzzz", 8)
             .With(SyntheticLayout.Flat(8, 0), SyntheticLayout.Flat(8, 1));
 

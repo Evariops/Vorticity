@@ -2,7 +2,7 @@
 // for any other root - and the per-statistic DType rule that upstream has a regression test for
 // because it was once wrong.
 //
-// 573 of the 819 golden files carry statistics, so the shape rule is exercised on real bytes by
+// Most golden files carry statistics, so the shape rule is exercised on real bytes by
 // VortexFileCorpusTests; what is left for here is the values, the widened sum DType, the tri-state
 // distinction between absent and present-and-zero, and the two malformed shapes.
 using System;
@@ -70,8 +70,8 @@ public sealed class VortexFileStatisticsTests
     [Fact]
     public async Task TheSumDTypeWidensTheFieldDTypeRatherThanMatchingIt()
     {
-        // vortex-array-0.86.1/src/aggregate_fn/fns/sum/mod.rs: unsigned to u64?, signed to i64?,
-        // floats to f64?, bool to u64?, decimal to precision + 10 (capped at 76), same scale.
+        // The Rust reference's sum aggregate widens unsigned to u64?, signed to i64?, floats to
+        // f64?, bool to u64?, decimal to precision + 10 (capped at 76), same scale.
         CorpusEntry entry = CorpusManifest.Find("types/user_metadata_segments");
         await using VortexFile file = await Open(CorpusManifest.Bytes(entry.Id));
 

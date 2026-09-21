@@ -18,7 +18,7 @@
 // re-chunked wrongly after a rebase, and a commit that landed while its writer was told it had not.
 //
 // THE MODEL SCHEDULE DRIVES `ReplaceObjects` DIRECTLY, since a model of synthetic leaves has no rows
-// to merge. The real compactor and vacuum (steps 41 and 43) run in their own schedule, over real
+// to merge. The real compactor and vacuum run in their own schedule, over real
 // objects, where the invariant is the store's: every version a vacuum retained still verifies.
 using System;
 using System.Collections.Generic;

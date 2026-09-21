@@ -1,7 +1,7 @@
-// THE ACCEPTANCE TEST OF PHASE 1, one test case per corpus file.
+// THE ACCEPTANCE TEST OF THE READER, one test case per corpus file.
 //
-// "Every corpus file whose encodings are in Phase 1 scope reads back value for value equal to its
-// Rust-produced sidecar." One [Theory] case per file rather than one loop over 616 of them,
+// Every corpus file whose encodings this build implements reads back value for value equal to its
+// Rust-produced sidecar. One [Theory] case per file rather than one loop over the whole corpus,
 // because at this volume the runner's own per-case reporting is the localization mechanism: a
 // failure names the file in the test id before its message names the column and the row.
 using System;

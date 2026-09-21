@@ -372,8 +372,8 @@ public sealed class DTypeEquivalenceTests
 
     /// <summary>
     /// SplitMix64. Deterministic across machines and runtime versions, which
-    /// <see cref="System.Random"/> is not guaranteed to be; the Phase 0 contract requires a fixed
-    /// seed precisely so a failure reproduces.
+    /// <see cref="System.Random"/> is not guaranteed to be; the seed is fixed precisely so a
+    /// failure reproduces.
     /// </summary>
     private struct Rng
     {

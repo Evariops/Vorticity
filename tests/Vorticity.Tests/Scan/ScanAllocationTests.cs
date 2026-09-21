@@ -28,9 +28,8 @@ using Xunit;
 
 namespace Vorticity.Tests.Scan;
 
-// IN THE SERIALISED COLLECTION since the degree-2 axis joined: that axis counts every thread's
-// bytes, so anything else the process allocates while it runs lands in its figure. Measured in the
-// suite without this, it read 560 805 B a batch against 3 434 alone.
+// IN THE SERIALISED COLLECTION because the degree-2 axis counts every thread's bytes, so anything
+// else the process allocates while it runs would land in its figure.
 [Collection(nameof(AllocationCollection))]
 public sealed class ScanAllocationTests
 {
@@ -209,8 +208,8 @@ public sealed class ScanAllocationTests
     /// Two and not one, because a reversal cannot make fewer. The scan underneath yields a batch
     /// over the rows in file order, the reversed rows are a different root, and a
     /// <see cref="RecordBatch"/> is sealed, with readonly fields, precisely so that neither is
-    /// recycled. Everything else the walk once rebuilt per batch is gone: it read 40 200 B while it
-    /// built a plan, an enumerable and a filter for every split, a split being a batch.
+    /// recycled. Nothing else may be rebuilt per batch: not a plan, an enumerable or a filter for
+    /// every split, a split being a batch here.
     /// </para>
     /// </remarks>
     [Fact]

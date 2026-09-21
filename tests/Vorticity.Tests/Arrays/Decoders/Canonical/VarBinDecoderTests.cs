@@ -292,8 +292,8 @@ public sealed class VarBinDecoderTests
             () => h.Decode(b, node, h.Types.Utf8(Nullability.NonNullable), 2));
     }
 
-    // `validate_view` (vortex-array-0.86.1/src/arrays/varbinview/array.rs) checks the prefix
-    // between the bounds check and the UTF-8 check: `vortex_ensure!(view.prefix == bytes[..4])`.
+    // Upstream's `validate_view` checks the prefix between the bounds check and the UTF-8 check:
+    // `vortex_ensure!(view.prefix == bytes[..4])`.
     // The prefix is a redundant copy of the value's own first four bytes, not a hint, and Arrow
     // consumers use it as a comparison fast path - so a view carrying the wrong four bytes is a
     // malformed file, and carrying it through into the arena is a wrong-answer hazard.

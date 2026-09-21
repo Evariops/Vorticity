@@ -1,17 +1,14 @@
 // Which corpus files this build cannot read, and why, as a number that only goes down.
 //
-// THE GAP IS CLOSED: 856 of the 856 shipped files are readable, and the ceiling is 0. What is left
-// is the direction this was always worth more for. The conformance sweep reports "856 of 856
-// IN-SCOPE files read back value for value", which is a true statement about a set THIS BUILD
-// DEFINES: dropping a registration moves a file out of scope, the file leaves the denominator, and
-// the sweep still says 100%. This test counts the files that left, so that failure has somewhere to
-// show up.
+// EVERY SHIPPED FILE IS READABLE, and the ceiling is 0, so what this guards is regression. The
+// conformance sweep reports "856 of 856 IN-SCOPE files read back value for value", which is a
+// true statement about a set THIS BUILD DEFINES: dropping a registration moves a file out of
+// scope, the file leaves the denominator, and the sweep still says 100%. This test counts the
+// files that left, so that failure has somewhere to show up.
 //
-// It was written when 41 files were in the gap, as a ratchet on a backlog, and the header then
-// carried a table of what blocked them - vortex.map at 22 files, pco at 4, zstd_buffers at 4,
-// fastlanes.delta at 5. All of it is gone. Keeping a ceiling of 8 after the last one landed would
-// mean eight decoders could be dropped without a test going red, which is the opposite of what this
-// file is for: a ratchet that is never lowered defends nothing.
+// A ceiling left above the count would let that many decoders be dropped without a test going
+// red, which is the opposite of what this file is for: a ratchet that is never lowered defends
+// nothing.
 //
 // AT ZERO THE CEILING IS AN EQUALITY, and that is deliberate. Every file the repository ships is
 // readable; a new corpus file carrying a component this build does not decode turns this red, which

@@ -6,8 +6,8 @@
 // the open, from the tail it already holds; and a point lookup -- through a sorted run in fence
 // pages, a filter tree, a count, a key cursor, a fragment -- costs the same requests and the same
 // bytes on a file of one gibibyte and on the same file of ten, both sparse: nothing on the read path
-// depends on the file's length. The SHA-256 the retired sidecar bound by until step 26 read the
-// whole file; this is the test that would have said so.
+// depends on the file's length. An index bound to its file by a hash of the whole file would read
+// all of it; this is the test that would say so.
 using System;
 using System.Collections.Generic;
 using System.IO;

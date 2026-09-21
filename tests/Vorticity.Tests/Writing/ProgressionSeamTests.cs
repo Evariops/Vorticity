@@ -87,7 +87,7 @@ public sealed class ProgressionSeamTests
 
     /// <summary>
     /// A column that climbs by one past its type's maximum is no progression, though every
-    /// difference the lanes take in the type's own width is one (step 28a's register walk).
+    /// difference the lanes of the pass's register walk take in the type's own width is one.
     /// </summary>
     [Theory]
     [InlineData(0, 200)]

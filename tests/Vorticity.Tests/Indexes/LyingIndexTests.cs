@@ -487,7 +487,7 @@ public sealed class LyingIndexTests
         {
             for (int j = i + 1; j < candidates.Count; j++)
             {
-                // ANY TWO SEGMENTS: since step 22 a column has one run and the last chunk's, so the
+                // ANY TWO SEGMENTS: a column has one run and the last chunk's, so the
                 // rows of "another run" are those of another segment of the same one, whose range
                 // covers the whole file.
                 if (candidates[i].Segment.Length == candidates[j].Segment.Length

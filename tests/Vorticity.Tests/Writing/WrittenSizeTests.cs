@@ -40,9 +40,9 @@ public sealed class WrittenSizeTests
     /// A ceiling that stays put while improvements land stops guarding: the slack it leaves grows
     /// until a regression fits inside it, so the ceiling comes down with every gain.
     /// <para>
-    /// 0.65 leaves **1,32 %**, so a 1,5 % size regression is red. Not tighter on purpose: 0.645
-    /// would leave 0,54 % and would trip on a corpus addition rather than on a regression, and
-    /// 0.651 would sit exactly on the criterion with nothing in hand.
+    /// Not tighter on purpose: a ceiling closer to the measured ratio would trip on a corpus
+    /// addition rather than on a regression. Not looser either: the headroom must stay smaller
+    /// than the size regression it is there to turn red.
     /// </para>
     /// <para>
     /// The file's identity in every postscript -- sixteen bytes of value, the entry's key and
@@ -107,12 +107,12 @@ public sealed class WrittenSizeTests
         // directory); the file's identity in every postscript -- 16 bytes of value, the entry's
         // key and segment, and the padding they move (72 or 96 B); and the index directory's
         // XXH3-64 trailer, on the files that carry one (8 B).
-        ("types/utf8_nonnull_r8193", 16_902),    // 17 chunks in, 17 zones; +96 B since the file statistics segment (11a); +138 B, the dictionary probe (12e); +72 B, the identity (20); +8 B, the directory checksum (21)
-        ("types/utf8_nullable_r8193", 17_382),   // 17 chunks in, 17 zones; +96 B, same; +138 B, same; +72 B, same; +8 B, same
+        ("types/utf8_nonnull_r8193", 16_902),    // 17 chunks in, 17 zones; including the file statistics segment (96 B), the dictionary probe (138 B), the identity (72 B) and the directory checksum (8 B)
+        ("types/utf8_nullable_r8193", 17_382),   // 17 chunks in, 17 zones; including the same four
         // The copy of the carried remainder materializes only the bytes its views name, so the
         // heap written for a chunk never carries the strings of blocks already emitted.
-        ("encodings/fsst", 4_004),               // 8 chunks in, 8 zones; +96 B, same; +96 B, the identity (20)
-        ("encodings/dict", 3_134),               // 8 chunks in, 8 zones; +96 B, same; +138 B, the dictionary probe (12e); +72 B, the identity (20); +8 B, the directory checksum (21)
+        ("encodings/fsst", 4_004),               // 8 chunks in, 8 zones; including the file statistics segment (96 B) and the identity (96 B)
+        ("encodings/dict", 3_134),               // 8 chunks in, 8 zones; including the file statistics segment (96 B), the dictionary probe (138 B), the identity (72 B) and the directory checksum (8 B)
     ];
 
     [Fact]
@@ -188,7 +188,7 @@ public sealed class WrittenSizeTests
     /// <remarks>
     /// This axis exists because the corpus sweep cannot see the multi-chunk path, so a change
     /// confined to it is invisible to the only size oracle this repository has.
-    /// Here every column of every file is in nine chunks or more, and the assertion is equality.
+    /// Here every column of every file is in eight chunks or more, and the assertion is equality.
     /// </remarks>
     [Fact]
     public async Task TheMultiChunkPathWritesTheSameBytes()
@@ -297,9 +297,9 @@ public sealed class WrittenSizeTests
     /// <summary>Open options for one entry: the schema out of band when the file has none.</summary>
     /// <param name="entry">The corpus entry about to be opened.</param>
     /// <remarks>
-    /// <c>types/no_dtype_segment</c> reached this sweep only when <c>vortex.map</c> gained a decoder
-    /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c> by
-    /// contract, so the donor is a real corpus file with the identical schema.
+    /// <c>types/no_dtype_segment</c> is in scope and carries no DType segment. Opening it without a
+    /// DType is a <c>VortexFormatException</c> by contract, so the donor is a real corpus file with
+    /// the identical schema.
     /// </remarks>
     private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
         entry.HasDTypeSegment

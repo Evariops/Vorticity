@@ -1,5 +1,5 @@
-// The precision -> storage-width table is transcribed from
-// vortex-array-0.86.1/src/dtype/decimal/types.rs::smallest_decimal_value_type. Every boundary pair
+// The precision -> storage-width table is transcribed from the reference implementation's
+// smallest_decimal_value_type. Every boundary pair
 // is asserted on both sides, because a guessed boundary reads a legal file at the wrong width.
 using System;
 using Vorticity;

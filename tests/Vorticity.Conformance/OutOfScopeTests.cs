@@ -6,11 +6,11 @@
 // "unsupported encoding" tells a user nothing about which encoding, which edition introduced it, or
 // which of the three registries refused it - and a requirement no test checks is a wish.
 //
-// "Rather than a wrong answer" is the other half of that sentence and it is enforced here too. Four
-// of the 203 out-of-scope files carry their unsupported encoding ONLY inside a zone map, which an
-// unfiltered Phase 1 scan never decodes (ZonedLayoutReader: "the zones child is never read"). For
-// those, not throwing is correct - and the harness proves it by requiring the file to read back
-// value for value, exactly as an in-scope file must. Silence alone is never accepted.
+// "Rather than a wrong answer" is the other half of that sentence and it is enforced here too. A
+// file can carry its unsupported encoding ONLY inside a zone map, which an unfiltered scan never
+// decodes (ZonedLayoutReader reads only the data child). For such a file, not throwing is
+// correct - and the harness proves it by requiring the file to read back value for value, exactly
+// as an in-scope file must. Silence alone is never accepted.
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -97,7 +97,7 @@ public sealed class OutOfScopeTests
         {
             // A file that embeds no DType and is given none cannot be opened at all: that is
             // malformed input, not an unsupported component. It is
-            // the only such file in the corpus and it is out of scope for other reasons too.
+            // the only such file in the corpus.
             await Assert.ThrowsAsync<VortexFormatException>(async () =>
                 await VortexFile.OpenAsync(entry.FullPath, TestContext.Current.CancellationToken));
             return;

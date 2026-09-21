@@ -1,9 +1,8 @@
-// vortex.stats, the only layout this library reads that nothing had ever exercised.
+// vortex.stats, the only layout this library reads that no corpus file exercises.
 //
 // It is the legacy zone map of editions core2025.05.0 through core2025.10.0, read upstream by the
 // same ZonedReader as vortex.zoned and structurally identical to it - data at child 0. Vortex 0.86.1
-// has no writer path that emits one, so no corpus file contains one, so `StatsLayoutReader` shipped
-// with a header explaining why it exists and no test that ran a byte through it. A reader can
+// has no writer path that emits one, so no corpus file contains one. A reader can
 // support a component and never once be exercised, and nothing in the suite could tell the
 // difference between that and a reader that does not support it at all.
 //
@@ -20,9 +19,8 @@
 // against an oracle that is the same bytes read by a different reader.
 //
 // PARTIAL BY CONSTRUCTION, AND THE LIMIT IS WORTH STATING. Upstream's two vtables both take
-// (data, zones) and both put data at child 0 — vortex-layout-0.86.1/src/layouts/zoned/mod.rs says
-// "expects exactly 2 children (data, zones)" for each — but the legacy one validates child 1
-// against a stats-table dtype where the modern one expects aggregate specs. Only the id was
+// exactly two children, (data, zones), and both put data at child 0, but the legacy one validates
+// child 1 against a stats-table dtype where the modern one expects aggregate specs. Only the id was
 // patched, so this fixture's child 1 is still a zoned zone map. That exercises everything
 // StatsLayoutReader actually does, which is resolve child 0 and read it, and it does NOT exercise
 // legacy metadata parsing. A fixture claiming otherwise would be asserting a schema it does not

@@ -1,4 +1,4 @@
-// F9: "a conformant writer targeting an explicit edition".
+// A conformant writer targeting an explicit edition.
 //
 // An edition is a frozen set of component ids with a read-forever guarantee, so naming one is the
 // only way to say "every Vortex from version N onward can read this". That makes the claim

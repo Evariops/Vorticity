@@ -1,9 +1,9 @@
 // Lazy component resolution is REALIZED HERE, not merely permitted elsewhere.
 //
-// Every other component refrains from throwing early. This one is what makes that pay off: steps 1
-// and 2 of the executor walk only the subtrees the FieldMask selects, so an unknown array encoding
-// in an unprojected column is never decoded and an unknown layout on an unvisited subtree is never
-// resolved.
+// Every other component refrains from throwing early. This one is what makes that pay off: both
+// passes of the executor, segment registration and decoding, walk only the subtrees the FieldMask
+// selects, so an unknown array encoding in an unprojected column is never decoded and an unknown
+// layout on an unvisited subtree is never resolved.
 //
 // The fixture is real, not forged at test time: forged/negative/unknown_encoding_id.vortex is
 // containers/uncompressed_canonical.vortex with the 16 bytes "vortex.primitive" at offset 99392

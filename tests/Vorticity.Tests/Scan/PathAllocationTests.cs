@@ -13,11 +13,11 @@
 //
 // WHY THIS IS A TEST RATHER THAN AN ASSERTION IN THE BENCHMARK. Allocations are the one performance
 // quantity that is deterministic: the same build allocates the same bytes on any machine, so it can
-// be a hard barrier rather than a barrier with margin. (With one clause this file had to discover
-// the hard way and AllocationCollection below records: deterministic for a process that is not
-// contending on ArrayPool<T>.Shared.) A hard barrier is only worth having where it runs, and what
-// CI runs is `dotnet test`, not BenchmarkDotNet. So the ceilings live here, next to
-// WrittenSizeTests, whose shape this copies deliberately:
+// be a hard barrier rather than a barrier with margin. (With one clause, recorded on
+// AllocationCollection below: deterministic for a process that is not contending on
+// ArrayPool<T>.Shared.) A hard barrier is only worth having where it runs, and what CI runs is
+// `dotnet test`, not BenchmarkDotNet. So the ceilings live here, next to WrittenSizeTests, whose
+// shape this copies deliberately:
 //
 //   * the ceiling sits JUST above the measured value, so a regression is red and an improvement is
 //     green;
@@ -28,10 +28,10 @@
 //
 // WHY THE FLOOR OF SEVERAL RUNS AND NOT ONE. Tiered JIT promotes methods on a call-count threshold,
 // and the promotion allocates. Measuring once means measuring whichever run happened to absorb it -
-// ScanAllocationTests records the same trap, where 1.3 kB of rejit spread over a window read as a
-// plausible per-batch regression on one run in twenty. The minimum over several runs is the honest
-// steady-state figure, and it is a floor rather than an average so that anything allocated on EVERY
-// run still raises it.
+// ScanAllocationTests records the same trap, where a rejit inside a measured window reads as a
+// plausible per-batch regression. The minimum over several runs is the honest steady-state
+// figure, and it is a floor rather than an average so that anything allocated on EVERY run still
+// raises it.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -85,12 +85,11 @@ public sealed class AllocationCollection
 /// does not run. The gap is not small and it is not uniform: it scales with how much code the
 /// axis runs, which is exactly what makes it look like a regression.
 /// <para>
-/// WHY THIS GUARD EXISTS AT ALL. `dotnet test` with no argument builds Debug,
-/// so the plain, documented, obvious command turned all twelve axes red at once with numbers that
-/// were individually plausible. That cost a bisect over twenty commits before the configuration was
-/// suspected -- and the failure would have said nothing about the library even if every commit had
-/// been correct, which they were. CI and `bench/gate.sh` both pass `-c Release`, so the ratchet
-/// still bites where it is meant to; what was missing was for a Debug run to SAY SO instead of
+/// WHY THIS GUARD EXISTS AT ALL. `dotnet test` with no argument builds Debug, so without it the
+/// plain, documented, obvious command turns every axis red at once, with numbers that are each
+/// plausible and say nothing about the library -- the kind of failure that sends someone
+/// bisecting commits before the configuration is suspected. CI and `bench/gate.sh` both pass
+/// `-c Release`, so the ratchet still bites where it is meant to; a Debug run SAYS SO instead of
 /// lying quantitatively.
 /// </para>
 /// <para>
@@ -112,7 +111,7 @@ internal static class ReleaseOnlyCeilings
             "Allocation ceilings are Release figures: a Debug build has the JIT optimizer off and "
                 + "allocates more on every axis, by 500 B to 32 kB depending on how much the axis "
                 + "decodes. Nothing is wrong with the library. Run `dotnet test -c Release`, which "
-                + "is what CI and bench/gate.sh run. See BENCH-AUDIT.md B22.");
+                + "is what CI and bench/gate.sh run.");
     }
 }
 
@@ -164,12 +163,10 @@ public sealed class PathAllocationTests
     private static readonly (string Axis, string File, long Ceiling, Func<string, ValueTask<long>> Path)[] Axes =
     [
         ("open, footer only", File, 15_360, FooterOnly),
-        // 133_632 -> 133_640: `VortexFile` gained one reference field, the lazily parsed
-        // `LayoutTree` that every scan of an open file now shares instead of re-deriving. Eight
-        // bytes once per OPEN, against a layout-tree parse once per `ExecuteAsync` - and this axis
-        // opens the file and reads one batch, so it pays the eight and collects none of the
-        // saving. The ratchet is here to make a change like that be noticed and argued, which is
-        // what this comment is.
+        // `VortexFile` holds one reference to the lazily parsed `LayoutTree` that every scan of
+        // an open file shares instead of re-deriving: eight bytes once per OPEN, against a
+        // layout-tree parse once per `ExecuteAsync`. This axis opens the file and reads one batch,
+        // so it pays the eight and collects none of the saving.
         //
         // A scan context holds, behind one reference rather than inline, the comparison an
         // encoding may answer instead of decoding, so that only a scan that pushes one pays for it.
@@ -192,7 +189,7 @@ public sealed class PathAllocationTests
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
-        // masks. The two allocate differently by construction, and only one of them was watched.
+        // masks. The two allocate differently by construction, so each has its own ceiling.
         // The first thing the pair says is not what one would guess: on this file PRUNING ALLOCATES
         // MORE than not pruning while keeping ~100 rows of 65 536.
         //
@@ -280,7 +277,7 @@ public sealed class PathAllocationTests
     /// reads as retention, on whichever axis it falls, whether or not that path changed.
     /// </para>
     /// <para>
-    /// The assertion is unchanged and so is what it catches: a path that retains across opens
+    /// Floors at both ends still catch what the assertion is for: a path that retains across opens
     /// raises its floor too, and a floor is the steady-state figure retention actually moves.
     /// </para>
     /// </remarks>

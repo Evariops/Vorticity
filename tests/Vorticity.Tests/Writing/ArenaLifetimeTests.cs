@@ -1,10 +1,6 @@
-// WHY THIS FILE EXISTS: the shared-dictionary layout was attempted twice, produced a file
-// SMALLER than the reference's both times, and both times read back PERMUTED. Three causes were
-// eliminated one after another - the reader, the compressor, the code width - and the fourth was
-// never found, because it was not being looked for in the writer's data model.
-//
-// This is that fourth cause, isolated from the 200-line change that exposed it and from the
-// 8 193-row corpus file it was being debugged through. It needs no writer change at all: the
+// WHY THIS FILE EXISTS: a batch's arena is recycled, and a dictionary shared across chunks that
+// keeps indices into it reads back PERMUTED -- with correct codes, a correct reader and a correct
+// width, so the fault is nowhere but in the writer's data model. It needs no writer at all: the
 // invariant it documents belongs to the SCAN, and the writer merely consumes it.
 //
 // THE INVARIANT. `ColumnCompressor.Dictionary` represents a dictionary entry as the ROW INDEX of
@@ -14,9 +10,6 @@
 // that: `BatchAsyncEnumerable` resets its arena per batch and refills it, and the corpus is written
 // by reading reference files and writing them back. So at `CompleteAsync` the shared entries are
 // gathered from whatever batch happens to be resident, and every code names the wrong row.
-//
-// Permuted values, with correct codes, a correct reader and a correct width - which is the exact
-// symptom, and the reason the three eliminations were all true and all beside the point.
 //
 // WHAT THIS COSTS ANYONE WHO SHARES STATE ACROSS BATCHES. Coalescing small chunks needs the same
 // thing from the other direction: `CanonicalConcat` across arenas is blocked because batch

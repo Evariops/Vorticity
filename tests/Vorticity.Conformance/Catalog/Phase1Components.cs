@@ -1,12 +1,12 @@
 // What this build actually implements, asked of the build itself.
 //
 // The registration below is now a NO-OP, and `ScopeSplitTests.TheShippedDecoderTableIsWiredUp`
-// asserts that it is. `ArrayDecoderTable`'s static constructor names all twenty-three decoders,
-// so every slot is already filled by the time anything here looks, and
-// `ShippedTableWasEmpty` reads false. It is kept, still guarded by IsImplemented, for exactly one
-// reason: it is the measurement that proves the corpus numbers below are the library's and not the
-// harness's. Delete it and a regression that empties the static constructor again turns 616
-// passing files into 616 files the harness quietly rescued.
+// asserts that it is. `ArrayDecoderTable`'s static constructor names every decoder, so every
+// slot is already filled by the time anything here looks, and `ShippedTableWasEmpty` reads false.
+// It is kept, still guarded by IsImplemented, for exactly one reason: it is the measurement that
+// proves the corpus numbers below are the library's and not the harness's. Delete it and a
+// regression that empties the static constructor turns every passing file into a file the
+// harness quietly rescued.
 using System;
 using System.Text;
 using Vorticity.Arrays;

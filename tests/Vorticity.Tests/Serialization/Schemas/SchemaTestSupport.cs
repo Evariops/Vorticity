@@ -1,7 +1,7 @@
 // Shared helpers for the schema-accessor tests.
 //
 // Two things need controlling that a managed byte[] does not give us:
-//   * the ADDRESS a buffer lands on, because Phase 0's GetStructVector<T> checks the alignment of
+//   * the ADDRESS a buffer lands on, because GetStructVector<T> checks the alignment of
 //     the element address for any T whose natural alignment exceeds 1 (ushort, uint);
 //   * the exact BYTES, because the builder always produces well-formed, well-aligned output and
 //     several of the rules under test can only be violated by hand-assembling a buffer.

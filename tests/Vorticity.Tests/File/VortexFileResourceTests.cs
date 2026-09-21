@@ -1,7 +1,7 @@
 // Resource-bound tests: the shapes where a small, entirely legal file asks the reader to do a
-// disproportionate amount of work. Phase 0's review found one of these (a 3.6 KB DType DAG that
-// hung the parser); the open path's equivalent is FlatBuffers string SHARING in the footer's
-// encoding dictionaries.
+// disproportionate amount of work. The dtype parser has its own (a DType DAG of a few kilobytes
+// whose shared children a tree walk expands exponentially); the open path's equivalent is
+// FlatBuffers string SHARING in the footer's encoding dictionaries.
 //
 // A FlatBuffers string may be referenced by any number of tables. `array_specs` is a vector of
 // tables each holding one string offset, so a footer of F bytes can declare F/8 spec entries that
@@ -210,7 +210,7 @@ public sealed class VortexFileResourceTests
     [Fact]
     public void TheFormatConstantsMatchTheReference()
     {
-        // vortex-file-0.86.1/src/lib.rs, and its own assertions.
+        // The Rust reference's file-format constants, and the assertions it makes about them.
         Assert.Equal(8, VortexFileFormat.EofSize);
         Assert.Equal(65527, VortexFileFormat.MaxPostscriptSize);
         Assert.Equal(65535, VortexFileFormat.InitialReadSize);

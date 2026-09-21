@@ -1,6 +1,6 @@
 // Corpus plumbing for the canonical decoders' tests.
 //
-// The 819 golden files are the only oracle in Phase 1 that was not written by us, so every decoder
+// The golden files are the only oracle in the suite that was not written by us, so every decoder
 // in this component is pointed at real bytes. What this file does NOT do is the value-by-value
 // conformance sweep - that belongs to the conformance component. It reads exactly
 // the files whose root layout is a single `vortex.flat` leaf covering the whole schema, which makes

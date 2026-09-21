@@ -1,10 +1,11 @@
 // User metadata segments: keys AND payload bytes, against the sidecar.
 //
-// They need their own test because both corpus files that carry metadata - types/user_metadata_segments
-// and containers/postscript_max_metadata - use encodings Phase 1 does not decode, so the in-scope
-// value pass never reaches them. Their metadata is readable all the same: metadata values are lazy
-// and live in their own segments, entirely independent of the column encodings, and a reader that
-// could not hand back a 256-byte blob because some other column is ALP would be wrong.
+// They have their own test, apart from the value pass, because metadata must be readable whatever
+// the columns are encoded with: metadata values are lazy and live in their own segments, entirely
+// independent of the column encodings, and a reader that could not hand back a 256-byte blob
+// because some other column is ALP would be wrong. So the corpus files that carry metadata -
+// types/user_metadata_segments and containers/postscript_max_metadata - are opened here and their
+// metadata read without a single column being scanned.
 //
 // The sidecar distinguishes a present-but-empty segment (`b64: ""`) from an absent one (no key at
 // all), and conformance.empty is exactly that case.

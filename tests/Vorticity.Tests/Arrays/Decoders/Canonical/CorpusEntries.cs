@@ -1,21 +1,18 @@
 // GENERATED LIST, but generated once and checked in on purpose: a test that discovers its own
-// inputs by scanning a directory silently passes when the directory is empty. These are the corpus
-// entries whose root layout is a single `vortex.flat` leaf and whose array tree uses only the
-// twenty-three encodings Phase 1 decodes, so each one is decodable end to end without a layout
-// reader.
+// inputs by scanning a directory silently passes when the directory is empty. These are corpus
+// entries whose root layout is a single `vortex.flat` leaf, so each one is decodable end to end
+// without a layout reader.
 //
-// The two lists below partition those 195 single-flat-leaf entries exactly, which is the property
-// that makes them worth checking in: an entry that moves from one to the other because a decoder
-// landed has to be moved by hand, and an entry that belongs to neither is a corpus change nobody
-// looked at.
+// Being checked in, the list does not follow the corpus: a single-flat-leaf entry the corpus gains
+// is decoded here only once it is added by hand.
 namespace Vorticity.Tests.Arrays.Decoders.Canonical;
 
 internal static class CorpusEntries
 {
     /// <summary>
-    /// The 137 single-flat-leaf corpus entries. 85 of them need only the fourteen canonical
-    /// encodings; the other 52 also reach a compressed one. Every single-flat-leaf entry of the
-    /// corpus decodes, so there is no list of entries that do not.
+    /// The single-flat-leaf corpus entries decoded here. Some need only the fourteen canonical
+    /// encodings; the others also reach a compressed encoding or a variant. Every single-flat-leaf
+    /// entry of the corpus decodes, so there is no list of entries that do not.
     /// </summary>
     internal static readonly string[] All =
     [

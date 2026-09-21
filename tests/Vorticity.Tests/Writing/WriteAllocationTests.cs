@@ -96,11 +96,11 @@ public sealed class WriteAllocationTests
         // The ALP integers and the dictionary codes come from the pool and go back to it: each is
         // a whole column's worth, eight bytes a row for the first and four for the second, and
         // both are built while PRICING, so the candidate that loses would pay for them too.
-        ("containers/zoned_many_zones_nulls", 709_800),   // 709 368 mesurés ; était 2 130 000 (1 233 728 mesurés, -42,5 %)
+        ("containers/zoned_many_zones_nulls", 709_800),   // 709 368 measured
         ("distributions/high_cardinality_i64_r8193", 73_700),   // 73 256 measured, including the `Auto` index and the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
-        ("encodings/fsst", 235_800),   // 235 320 mesurés (12e) : Auto ; était 235 100
-        ("encodings/onpair", 69_200),   // 68 768 mesurés ; était 224 400 (85 176 mesurés, -19,3 %)
-        ("types/utf8_nullable_r1025", 215_000),   // 214 568 mesurés ; était 219 200 (218 696 mesurés, -1,9 %)
+        ("encodings/fsst", 235_800),   // 235 320 measured, including the `Auto` index
+        ("encodings/onpair", 69_200),   // 68 768 measured
+        ("types/utf8_nullable_r1025", 215_000),   // 214 568 measured
 
         // THE REMAINING COMPONENTS, on the write side, so that each has an allocation ratchet:
         // `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant`. Note
@@ -109,11 +109,11 @@ public sealed class WriteAllocationTests
         // this SHAPE of data cost", which is the question a ratchet can answer. Whether our writer
         // re-elects the same encoding is a different question and `bench/crosscheck.sh` is where
         // it is asked.
-        ("encodings/fastlanes_delta", 66_100),   // 65 632 mesurés (12e) : +1,0 kB, Auto. Était 64 700 : 64 584 mesurés (11a) : +1,9 kB par fichier, le segment de statistiques ; était 62 900
+        ("encodings/fastlanes_delta", 66_100),   // 65 632 measured, including the `Auto` index and the file statistics segment: per file, not per row
         ("encodings/pco", 67_600),   // 67 440 measured alone and in the suite under DOTNET_TieredPGO=0, 67 512 in the suite with dynamic PGO: the measurement is process-wide, so the gap follows the JIT's instrumentation, not the writer
         // The read half of this axis keeps a `ZstandardDecoder` per node, so a change on the zstd
         // read path can move this ceiling while the write path stays put.
-        ("encodings/zstd", 209_100),   // 208 624 mesurés ; était 225 032 (225 032 mesurés, -7,3 %)
+        ("encodings/zstd", 209_100),   // 208 624 measured
         ("encodings/map", 89_100),   // 88 616 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
         ("encodings/variant", 68_200),   // 67 792 measured, including the file statistics segment, the `Auto` index and the two transit ScanContexts the writer creates, whose read-side fields it never uses: per file, not per row (a context reduced to the arena is the fix if that ever matters)
 
@@ -121,47 +121,30 @@ public sealed class WriteAllocationTests
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
         // patch. The second is the case that made the patch buffers worth renting, and a ratchet
         // that only held the easy shape would have said nothing about it.
-        ("encodings/alp", 89_500),   // 89 064 mesurés ; était 121 900 (121 856 mesurés, -26,9 %)
-        ("encodings/alprd", 67_300),   // 66 800 mesurés ; était 99 900 (99 592 mesurés, -32,9 %)
+        ("encodings/alp", 89_500),   // 89 064 measured
+        ("encodings/alprd", 67_300),   // 66 800 measured
     ];
 
-    // FOUR OF THESE FIVE CAME DOWN AGAIN WHEN FSST STOPPED ALLOCATING WHAT IT THROWS AWAY.
     // Pricing FSST means training a table and compressing the whole column, and on a column it
     // loses -- which is the common case, because it is priced against zstd and against the plain
     // form -- the heap, the row table and the code stream are all garbage the moment it returns
-    // null. Rented instead of allocated, with a row as two ints rather than a
-    // `ReadOnlyMemory<byte>` in a `List`:
-    //
-    //     containers/zoned_many_zones_nulls   12 061 328 B -> 7 866 272 B   -35%
-    //     encodings/fsst                       1 148 096 B ->   303 624 B   -74%
-    //     types/utf8_nullable_r1025              490 944 B ->   298 624 B   -39%
-    //     encodings/onpair                       495 408 B ->   365 392 B   -26%
-    //
-    // The corpus still rewrites to 9 942 348 bytes, unchanged to the byte: the sampler draws the
-    // same lines and the trainer reaches the same tables.
+    // null. So they are rented rather than allocated, with a row as two ints rather than a
+    // `ReadOnlyMemory<byte>` in a `List`, and the ceilings above count on it.
 
-    // FOUR OF THESE FIVE WENT UP WHEN REPARTITIONING LANDED, and that is a trade rather than a
-    // regression, so it is written down rather than rounded over. A writer that buffers rows needs
-    // an arena to buffer them in, and the rows it buffers are materialized into it -- a fixed cost
-    // per FILE, plus a second materialization when several batches are concatenated into one chunk.
-    // On a file whose rows fit in one block that cost is all there is, and it is worth 3% to 20%:
-    //
-    //     containers/zoned_many_zones_nulls   32 172 440 B -> 12 059 208 B   -62%
-    //     distributions/high_cardinality         381 512 B ->    463 704 B   +22%
-    //     encodings/fsst                       1 129 768 B ->  1 148 096 B    +2%
-    //     encodings/onpair                       477 008 B ->    495 408 B    +4%
-    //     types/utf8_nullable_r1025              472 544 B ->    490 944 B    +4%
-    //
-    // What it buys, on the file large enough to have chunks to save: 64 chunks become 3, which is
-    // 20 MB of write allocation and -76% of the allocation a SCAN of that file costs
-    // (RewrittenComparison: 147 510 B -> 35 437 B). Setting `RowBlockSize = null` restores the old
-    // figures exactly, for a caller whose batches are already its chunking.
+    // Repartitioning costs allocation, and that is a trade rather than a regression. A writer that
+    // buffers rows needs an arena to buffer them in, and the rows it buffers are materialized into
+    // it -- a fixed cost per FILE, plus a second materialization when several batches are
+    // concatenated into one chunk. On a file whose rows fit in one block that cost is all there
+    // is; on a file large enough to have chunks to save, it buys far fewer chunks, less write
+    // allocation, and a scan of the file written that allocates far less. Setting
+    // `RowBlockSize = null` writes one chunk per batch and drops that cost, for a caller whose
+    // batches are already its chunking.
 
     /// <summary>
     /// A shape guard, in bytes per row, over and above each file's own ceiling.
     /// </summary>
     /// <remarks>
-    /// The per-file ceilings catch a regression on these five files. This catches the thing they
+    /// The per-file ceilings catch a regression on these files. This catches the thing they
     /// cannot: a cost that scales with the DATA rather than the schema would pass every per-file
     /// ceiling the day it was set and fail on the first larger file anyone wrote. Set well above
     /// the worst current figure rather than near it, because it is not the tight bound - it is the

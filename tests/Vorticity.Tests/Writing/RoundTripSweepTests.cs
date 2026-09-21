@@ -102,8 +102,7 @@ public sealed class RoundTripSweepTests
             // output for types/no_dtype_segment is fine - RoundTrip reads it back with default
             // options - but `verify_written` opens the REFERENCE file to compare against, and that
             // one has no dtype segment by construction, so the Rust side fails at open. Supplying a
-            // schema is a capability the example does not have; teaching it one is the better fix
-            // and is recorded rather than done here.
+            // schema is a capability the example does not have; teaching it one is the better fix.
             if (!entry.HasDTypeSegment)
             {
                 continue;
@@ -338,19 +337,17 @@ public sealed class RoundTripSweepTests
     /// </summary>
     /// <param name="entry">The corpus entry about to be opened.</param>
     /// <remarks>
-    /// <c>types/no_dtype_segment</c> is the corpus's only such file, and it reached this sweep only
-    /// when <c>vortex.map</c> gained a decoder and the file became in-scope. Opening it without a
-    /// DType is a <c>VortexFormatException</c> BY CONTRACT, so a failure on it would be the sweep
-    /// calling the wrong overload rather than anything about the round trip. The donor is a real
-    /// file with the identical schema, which is the same approach <c>Phase1CompositionTests</c>
-    /// already takes.
+    /// <c>types/no_dtype_segment</c> is the corpus's only such file, and it is in scope. Opening it
+    /// without a DType is a <c>VortexFormatException</c> BY CONTRACT, so a failure on it would be
+    /// the sweep calling the wrong overload rather than anything about the round trip. The donor is
+    /// a real file with the identical schema, which is the same approach
+    /// <c>Phase1CompositionTests</c> takes.
     /// </remarks>
     private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
         entry.HasDTypeSegment
             ? VortexOpenOptions.Default
             : new VortexOpenOptions { DType = OutOfBandSchema.Value };
 
-    /// <summary>Whether a zone map of this schema can carry string bounds: a top-level utf8 or binary.</summary>
     /// <summary>A struct of booleans, primitives, strings and bytes: what a leaf entry summarises plainly.</summary>
     private static bool PlainColumns(DType schema)
     {
@@ -400,6 +397,7 @@ public sealed class RoundTripSweepTests
         return range.Bytes.ToArray();
     }
 
+    /// <summary>Whether a zone map of this schema can carry string bounds: a top-level utf8 or binary.</summary>
     private static bool HasStringField(DType schema)
     {
         if (schema.Kind is DTypeKind.Utf8 or DTypeKind.Binary)

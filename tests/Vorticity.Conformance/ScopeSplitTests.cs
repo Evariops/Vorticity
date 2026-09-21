@@ -17,12 +17,9 @@ public sealed class ScopeSplitTests
 {
     // Bumped deliberately, one decoder at a time: a moved count is the visible half of a
     // decoder landing, and an unexplained move is the visible half of one being dropped.
-    // 616/203 was Phase 1. +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts, +5
-    // vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair, and
-    // finally +8 for vortex.variant and vortex.parquet.variant.
     //
-    // THE SPLIT IS NOW 856/0, and the zero is the point: every file of the conformance corpus is
-    // readable by this build. There is no remaining component "deferred to Vortex 1.1" and none in
+    // THE SPLIT IS 856/0, and the zero is the point: every file of the conformance corpus is
+    // readable by this build. No component is left unread, whether "deferred to Vortex 1.1" or in
     // no core edition -- `fastlanes.delta` and `vortex.zstd_buffers` are both read, and both
     // variants are. What is still refused is a SHAPE rather than an id: a shredded variant, the
     // two-buffer form of fsst, the pco modes the generator cannot produce. Each of those is refused
@@ -88,9 +85,9 @@ public sealed class ScopeSplitTests
     /// The library's own decoder registration, as a measurement rather than a comment:
     /// <see cref="Vorticity.Arrays.ArrayDecoderTable"/>'s static constructor must name every
     /// decoder the build owns, so that a caller who opens a file and scans it from an application -
-    /// no test harness in the process - decodes something. While that constructor was empty the
-    /// harness registered the decoders itself and every corpus number below was a harness result,
-    /// not a library one. This is the test that stops that from coming back silently.
+    /// no test harness in the process - decodes something. Were that constructor empty, the
+    /// harness would register the decoders itself and every corpus number would be a harness
+    /// result, not a library one. This is the test that stops that from happening silently.
     /// </summary>
     [Fact]
     public void TheShippedDecoderTableIsWiredUp()

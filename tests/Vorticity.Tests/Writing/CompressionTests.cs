@@ -1,4 +1,4 @@
-// F10, first half: the writer picks an encoding per column chunk.
+// The writer picks an encoding per column chunk.
 //
 // Two properties, and as everywhere else they fail for opposite reasons. The value tests assert
 // compression changes no value -- the round-trip sweep already covers that across the whole corpus,

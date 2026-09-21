@@ -1,4 +1,4 @@
-// Builds well-formed - and deliberately malformed - Vortex file containers from the Phase 0
+// Builds well-formed - and deliberately malformed - Vortex file containers from the library's
 // writers. The corpus proves the open path reads real files; this proves it rejects the shapes no
 // real writer produces, and it is the only way to reach the open's second read, taken when the
 // footer segments fall outside the first tail read, which no golden file exercises.

@@ -2,11 +2,10 @@
 //
 // A `DecodeSelected` override is an optimization with a correctness obligation: it must produce a
 // node INDISTINGUISHABLE from what the default produces - decode the node whole, then gather - for
-// the same rows. Six encodings override it now (`fastlanes.bitpacked`, `fastlanes.for`,
-// `vortex.zigzag`, `vortex.alp`, `vortex.dict`, `vortex.runend`, `vortex.sequence`,
-// `vortex.constant`), each with its own arithmetic, and each with a way to be subtly wrong that no
-// single hand-written fixture would reach: an off-by-one in a bit-packed lane index, a patch
-// applied at the pre-selection position, a run boundary searched with `>=` instead of `>`.
+// the same rows. Many encodings override it -- the reflection test below finds every one -- each
+// with its own arithmetic, and each with a way to be subtly wrong that no single hand-written
+// fixture would reach: an off-by-one in a bit-packed lane index, a patch applied at the
+// pre-selection position, a run boundary searched with `>=` instead of `>`.
 //
 // SO THE ORACLE IS THE FULL SCAN, over every in-scope corpus file. For each file the test reads
 // every row, then takes a scattered set of indices and asserts the values match the ones the full
@@ -88,8 +87,8 @@ public sealed class TakeSpecializationTests
             $"TAKE SWEEP: {files} corpus files, {rows} taken values compared against a full scan.");
 
         // The coverage floor: without it a run where every file was skipped would pass silently.
-        // Not 774 - the corpus carries r0 and r1 files by design, and a file with fewer than two
-        // rows has no scattered take to make.
+        // Not the in-scope count - the corpus carries r0 and r1 files by design, and a file with
+        // fewer than two rows has no scattered take to make.
         Assert.True(files > 550, $"only {files} files were compared");
         Assert.Equal(string.Empty, failures.ToString());
     }
@@ -147,10 +146,10 @@ public sealed class TakeSpecializationTests
     /// <remarks>
     /// A FLAG THAT DESCRIBES CODE MUST BE CHECKED AGAINST THE CODE. `FlatLayoutReader` routes a take
     /// through the retained-chunk cache for every encoding whose `DecodeSelected` is the fallback,
-    /// and straight through for every encoding that overrides it. Both halves are load-
-    /// bearing and in opposite directions: a false negative leaves an encoding decoding its node
-    /// once per wanted row - 64.17 on `vortex.zstd` - and a false positive forces a full decode on
-    /// an encoding that reaches one row without one, which would cost the `fsst` take its 0.21.
+    /// and straight through for every encoding that overrides it. Both halves are load-bearing, in
+    /// opposite directions: the flag set on an encoding that does not override leaves it decoding
+    /// its node once per wanted row, and the flag missing on one that does forces a full decode on
+    /// an encoding such as `fsst` that reaches one row without one.
     ///
     /// A hand-maintained list would drift the first time a decoder is specialized, so the list is
     /// not maintained here: the declaring type of the method IS the fact, and the flag is asserted

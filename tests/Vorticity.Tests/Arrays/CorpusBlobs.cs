@@ -1,9 +1,9 @@
 // A deliberately minimal, test-only walk from a .vortex file down to its array blobs, built on the
-// Phase 0 spine plus fb-schemas alone. It exists because the sidecar's `layout` line carries each
-// vortex.flat node's `array_tree` - the (id, nchildren, nbuffers, metadata_len) shape of the
-// serialized array - and that is a free oracle for the blob parser that nothing else in Phase 1
-// has. The real file opener and layout readers do this properly; this does just enough of it
-// to reach the segments, and never claims to validate anything.
+// postscript, footer and layout FlatBuffer views alone. It exists because the sidecar's `layout`
+// line carries each vortex.flat node's `array_tree` - the (id, nchildren, nbuffers, metadata_len)
+// shape of the serialized array - and that is a free oracle for the blob parser. The real file
+// opener and layout readers do this properly; this does just enough of it to reach the segments,
+// and never claims to validate anything.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -160,9 +160,8 @@ internal sealed class CorpusBlobs
 
     private static string LocateCorpus([CallerFilePath] string thisFile = "")
     {
-        // Walk up from this source file rather than from AppContext.BaseDirectory: the check
-        // project that builds this component lives outside the repository, so its output directory
-        // says nothing about where the corpus is.
+        // Walk up from this source file rather than from AppContext.BaseDirectory: the output
+        // directory says nothing about where the corpus is.
         DirectoryInfo? dir = new FileInfo(thisFile).Directory;
         while (dir is not null)
         {

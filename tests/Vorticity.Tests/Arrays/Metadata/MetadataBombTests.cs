@@ -1,5 +1,5 @@
-// Inputs designed to be legal-looking and expensive. Phase 0's review found a 3.6 KB file that hung
-// the DType parser because FlatBuffers sub-table sharing makes the graph a DAG; Protobuf has no
+// Inputs designed to be legal-looking and expensive. FlatBuffers sub-table sharing lets a file of a
+// few kilobytes make its graph a DAG that hangs a parser walking it as a tree; Protobuf has no
 // sharing, so the equivalent risks here are unbounded recursion, unbounded allocation, and a growth
 // loop that overflows. Each is pinned below.
 using System;

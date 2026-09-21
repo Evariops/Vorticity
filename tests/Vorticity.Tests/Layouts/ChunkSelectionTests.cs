@@ -1,6 +1,6 @@
 // The chunked layout's binary-search chunk selection, in isolation.
 //
-// Transcribed from vortex-layout-0.86.1/src/layouts/chunked/reader.rs `chunk_range`; every boundary
+// Transcribed from the reference chunked layout reader's `chunk_range`; every boundary
 // gets its own case because "start exactly on a chunk start, one before, one after" is where an
 // off-by-one hides and produces a plausible, wrong answer rather than a crash.
 using System;

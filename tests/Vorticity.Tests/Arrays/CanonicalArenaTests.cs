@@ -323,8 +323,8 @@ public sealed class CanonicalArenaTests
         Assert.Throws<VortexFormatException>(
             () => arena.AddBare((CanonicalKind)10, _types.Bool(Nullability.NonNullable), 0, Validity.NonNullable));
 
-        // And the one just added is accepted, so the test says where the bound IS and not only where
-        // it is not -- it read as "9 is malformed" for as long as that was true by accident.
+        // And the last defined kind is accepted, so the test says where the bound IS and not only
+        // where it is not.
         int bare = arena.AddBare(
             CanonicalKind.Constant, _types.Bool(Nullability.NonNullable), 0, Validity.NonNullable);
         Assert.Equal(CanonicalKind.Constant, arena.GetNode(bare).Kind);

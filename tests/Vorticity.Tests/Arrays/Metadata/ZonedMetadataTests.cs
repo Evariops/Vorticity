@@ -123,9 +123,8 @@ public sealed class ZonedMetadataTests
     [Fact]
     public void ZoneLengthZeroIsAccepted()
     {
-        // Upstream keeps such a layout and disables pruning rather than failing the read
-        // (vortex-layout-0.86.1/src/layouts/zoned/mod.rs, "Backward compat: older files may
-        // encode zone_len == 0").
+        // Upstream keeps such a layout and disables pruning rather than failing the read, because
+        // older files may encode zone_len == 0.
         AggregateSpecList specs = new AggregateSpecList();
         byte[] metadata = Zoned(1, 0, Spec("vortex.max"u8, SkipNansOptions));
         ZonedMetadata value = ZonedMetadata.Read(metadata, specs);

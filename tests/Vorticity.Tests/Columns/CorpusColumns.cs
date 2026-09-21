@@ -1,6 +1,6 @@
 // A deliberately minimal, test-only path from a .vortex file to a RecordBatch. The layout
 // readers and the scan do this properly; this walks the three layout encodings that get
-// us to real decoded values in 496 of the corpus's 819 files - vortex.zoned, vortex.struct and
+// us to real decoded values in much of the corpus - vortex.zoned, vortex.struct and
 // vortex.flat - and refuses everything else. It exists because agreeing with our own fixtures
 // proves nothing: these values were written by Vortex 0.86.1 and the expectations come from the
 // sidecar.
@@ -205,10 +205,10 @@ internal sealed class CorpusColumns : IAsyncDisposable
                 {
                     DType field = dtype.GetField(i);
 
-                    // Map, Union and Variant are out of Phase 1 scope and reach the caller as
-                    // VortexUnsupportedException("dtype"). The all-dtypes corpus structs each carry
-                    // one map field, so stand a Null node in its place rather than lose the whole
-                    // file; SidecarValues skips those fields on the expectation side too.
+                    // This walker does not read Map, Union or Variant fields. The all-dtypes corpus
+                    // structs each carry one map field, so stand a Null node in its place rather
+                    // than lose the whole file; SidecarValues skips those fields on the
+                    // expectation side too.
                     if (field.Kind is DTypeKind.Map or DTypeKind.Union or DTypeKind.Variant)
                     {
                         children[i] = context.Canonical.AddNull(field, rows);
@@ -273,8 +273,8 @@ internal sealed class CorpusColumns : IAsyncDisposable
 
     private static string LocateCorpus([CallerFilePath] string thisFile = "")
     {
-        // Walk up from this source file rather than from AppContext.BaseDirectory: the check
-        // project that builds this component lives outside the repository.
+        // Walk up from this source file rather than from AppContext.BaseDirectory, which says
+        // nothing about where the corpus is.
         DirectoryInfo? dir = new FileInfo(thisFile).Directory;
         while (dir is not null)
         {

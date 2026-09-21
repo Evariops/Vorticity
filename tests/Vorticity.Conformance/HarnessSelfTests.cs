@@ -1,9 +1,9 @@
 // Tests of the oracle, not of the library.
 //
-// A conformance harness that cannot fail is worse than no harness: it reports 616 passes whatever
-// the reader does. These are the tests that make "616 of 616 passed" mean something - each one
-// feeds the comparison something it MUST reject, and asserts it rejects it, at the right column and
-// the right row.
+// A conformance harness that cannot fail is worse than no harness: it reports every file passed
+// whatever the reader does. These are the tests that make "every file passed" mean something - each
+// one feeds the comparison something it MUST reject, and asserts it rejects it, at the right column
+// and the right row.
 //
 // The two float cases are the ones the sidecar format is built around: `bits` is normative so
 // that a wrong NaN payload or a -0.0 read as +0.0 fails the comparison. Here that claim is

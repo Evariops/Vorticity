@@ -1,4 +1,4 @@
-// F11, closing the loop: a file Vorticity wrote is a file Vorticity can prune.
+// Closing the loop: a file Vorticity wrote is a file Vorticity can prune.
 //
 // The round-trip and cross-check suites both pass whether or not a zone map is written, because a
 // zone map changes no value -- which is exactly why it needs its own tests. Three things have to be

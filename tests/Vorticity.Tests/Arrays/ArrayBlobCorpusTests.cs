@@ -17,7 +17,7 @@ namespace Vorticity.Tests.Arrays;
 public sealed class ArrayBlobCorpusTests
 {
     // Ten entries spanning the usual array shapes, plus the extras that exercise a distinct
-    // code path: an inlined array tree, a zero-row file, and the two forced-unsupported encodings.
+    // code path: an inlined array tree, a zero-row file, fastlanes.delta and vortex.patched.
     public static TheoryData<string> Entries =>
     [
         "encodings/constant",
@@ -119,12 +119,10 @@ public sealed class ArrayBlobCorpusTests
         // The writer pre-populates every id its edition permits, so a declared-but-unresolvable id
         // must never be an error.
         //
-        // AND THERE ARE NONE LEFT, which is what this now asserts and is a stronger statement than
-        // the one it replaces. The corpus file declares all 34 ids `core2026.08.3` permits, and
-        // this build resolves every one of them: `vortex.variant` and `vortex.parquet.variant` were
-        // the last two. The tolerance itself is still tested -- by
-        // `ScanContextTests`, over a forged id from a namespace no edition will ever define, which
-        // is the case the tolerance actually exists for.
+        // AND THERE ARE NONE, which is what this asserts. The corpus file declares all 34 ids
+        // `core2026.08.3` permits, and this build resolves every one of them. The tolerance itself
+        // is tested by `ScanContextTests`, over a forged id from a namespace no edition will ever
+        // define, which is the case the tolerance actually exists for.
         CorpusBlobs blobs = CorpusBlobs.Load("types/i64_nonnull_r1024");
         Assert.NotEmpty(blobs.ArrayEncodingIds);
 

@@ -310,7 +310,7 @@ public sealed class IndexFragmentTests
 
     /// <summary>
     /// A sorted run on a column, required: a run weighs about what its column weighs, and the
-    /// budget would otherwise abandon it at any size (the lesson of step 39c).
+    /// budget would otherwise abandon it at any size.
     /// </summary>
     private static WritePolicy Runs(string column) =>
         WritePolicy.None.For(column, IndexPolicy.SortedRuns.AsRequired());

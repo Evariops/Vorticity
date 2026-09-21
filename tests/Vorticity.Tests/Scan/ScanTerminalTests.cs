@@ -6,8 +6,8 @@
 // never wrong.
 //
 // One test is about the batch enumerator, not the terminals: the pipelined path (a degree above
-// 1) built its batch straight from the decoded split, without the take and without the filter.
-// Found when the split's execution was moved to the one place both now share.
+// 1) must apply the take and the filter exactly as the sequential one does, rather than build its
+// batch straight from the decoded split.
 using System;
 using System.Collections.Generic;
 using System.Text;

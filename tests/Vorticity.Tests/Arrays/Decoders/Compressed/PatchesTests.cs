@@ -115,7 +115,7 @@ public sealed class PatchesTests
     [Fact]
     public void ChunkOffsetsAreReadAndValidatedButNotUsed()
     {
-        // Phase 1 never slices patches, so the chunk offsets have nothing to accelerate. They must
+        // Nothing slices patches, so the chunk offsets have nothing to accelerate. They must
         // still be present and well formed, because their presence is what moves the validity
         // child of a bit-packed node to index 3.
         BitPackedTestShapes.AssertChunkOffsetsShapeDecodes();

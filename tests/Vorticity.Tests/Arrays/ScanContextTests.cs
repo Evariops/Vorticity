@@ -2,9 +2,9 @@
 // dispatch site.
 //
 // End-to-end DecodeValidity coverage - decoding a real vortex.bool or vortex.constant validity
-// child - needs wave C's decoders and arrives with them. What is testable now is every branch that
-// does not dispatch, the bitmap collapse itself, and the fact that a node whose encoding this build
-// cannot decode fails at USE with a named component.
+// child - is left to the decoder tests, which run over real corpus blobs. What is tested here is
+// every branch that does not dispatch, the bitmap collapse itself, and the fact that a node whose
+// encoding this build cannot decode fails at USE with a named component.
 using System;
 using Vorticity;
 using Vorticity.Arrays;
@@ -17,12 +17,10 @@ namespace Vorticity.Tests.Arrays;
 
 public sealed class ScanContextTests
 {
-    // Slot 2 is the stand-in for "an id this build does not decode". It has been three different
-    // ids -- fastlanes.delta, vortex.pco, vortex.variant -- each replaced when the id gained a
-    // decoder. There is no unimplemented array id left to borrow, so it is now a FORGED one from a
-    // namespace no edition will define, which is also the case a reader most needs to get right: a
-    // file from the future. The point of the slot is unchanged: the table resolves every id at
-    // open, and an unknown one is fatal only where it is USED.
+    // Slot 2 is the stand-in for "an id this build does not decode". Every real array id has a
+    // decoder, so it is a FORGED one from a namespace no edition will define, which is also the
+    // case a reader most needs to get right: a file from the future. The point of the slot: the
+    // table resolves every id at open, and an unknown one is fatal only where it is USED.
 
     private static readonly string[] Ids = ["vortex.primitive", "vortex.bool", "vortex.acme.future_codec"];
 
@@ -115,7 +113,7 @@ public sealed class ScanContextTests
     [Fact]
     public void DecodingANodeThisBuildCannotDecodeFailsAtUseWithTheIdAndTheKind()
     {
-        // Lazy resolution: the blob parsed fine (spec index 2 -> vortex.variant -> Unknown); the throw
+        // Lazy resolution: the blob parsed fine (spec index 2 -> a forged id -> Unknown); the throw
         // happens here, at the dispatch site, and names the component.
         using ScanContext scan = new ScanContext(Ids);
         LoadOneNode(scan, encoding: 2);

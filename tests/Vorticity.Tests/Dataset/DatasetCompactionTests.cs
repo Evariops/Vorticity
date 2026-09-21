@@ -407,7 +407,7 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task TheTopLevelOfACappedDatasetHasNoSize()
     {
-        // The header's `Levels` (step 43c): the same data as above, where level 1 went over its size
+        // The header's `Levels`: the same data as above, where level 1 went over its size
         // and moved up. Capped at two levels, level 1 is the top: it only grows, and a drain ends.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -507,7 +507,7 @@ public sealed class DatasetCompactionTests
     public async Task ACompositeKeyHoldingANullIsRefusedByName()
     {
         // What stays refused: a composite run holds no tuple with a null, so a merge through it
-        // would drop the row. One column's null keys are read last and merged (the test above
+        // would drop the row. One column's null keys are read last and merged (the test below,
         // `TheNullKeysOfOneColumnAreMergedLast`); a tuple's are not.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -532,9 +532,9 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task TheNullKeysOfOneColumnAreMergedLast()
     {
-        // Debt 2 of the closing plan, closed: a key column holding nulls compacts. The core's
-        // key-ordered read delivers them last, which is where the merge's row encoding sorts them,
-        // so no row is dropped and the output reads back keyed rows first, nulls after.
+        // A key column holding nulls compacts. The core's key-ordered read delivers them last,
+        // which is where the merge's row encoding sorts them, so no row is dropped and the output
+        // reads back keyed rows first, nulls after.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = types.Struct(
@@ -552,8 +552,8 @@ public sealed class DatasetCompactionTests
 
         // Before any compaction, the read merge across the four objects puts them in the same place,
         // in both directions: the merge encodes nulls last because the core delivers them last. The
-        // first run of this test put them first -- the row encoding's own default -- and a null head
-        // went out before another object's largest keys.
+        // row encoding's own default puts them first, and a null head would then go out before
+        // another object's largest keys.
         foreach (bool descending in (bool[])[false, true])
         {
             List<double?> merged = await MeasuresAsync(dataset.Scan().InKeyOrder("measure", descending));

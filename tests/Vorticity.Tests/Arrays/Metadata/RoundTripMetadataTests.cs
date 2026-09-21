@@ -163,7 +163,7 @@ public sealed class RoundTripMetadataTests
     [Fact]
     public void PatchesRejectsSignedIndicesPType()
     {
-        // vortex-array-0.86.1/src/patches.rs: "Patch indices must be unsigned integers".
+        // Upstream refuses them too: "Patch indices must be unsigned integers".
         foreach (PType signed in new[] { PType.I8, PType.I16, PType.I32, PType.I64, PType.F32, PType.F64 })
         {
             byte[] bytes = new WireBuilder().VarintField(1, 4).VarintField(3, (ulong)signed).ToArray();

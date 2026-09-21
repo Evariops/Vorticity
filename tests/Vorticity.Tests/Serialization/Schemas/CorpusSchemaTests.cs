@@ -162,8 +162,8 @@ public sealed class CorpusSchemaTests
             ReadOnlySpan<SegmentSpec> specs = footer.SegmentSpecs;
             segments = specs.ToArray();
 
-            // Upstream rejects an unordered segment map ("Segment offsets are not ordered",
-            // vortex-file-0.86.1/src/footer/mod.rs); every corpus file satisfies it.
+            // The reference reader rejects an unordered segment map ("Segment offsets are not
+            // ordered"); every corpus file satisfies it.
             for (int i = 1; i < segments.Length; i++)
             {
                 Assert.True(segments[i - 1].Offset <= segments[i].Offset, $"{id}: segments unordered");

@@ -1,5 +1,5 @@
-// All 819 golden files, opened. That is 819 real postscripts and footers written by Vortex 0.86.1
-// and it is the only oracle in Phase 1 that can tell the open path it is wrong about a real file.
+// Every golden file, opened: real postscripts and footers written by Vortex 0.86.1, and the
+// oracle that can tell the open path it is wrong about a real file.
 //
 // The I/O-count assertion in OpensEveryCorpusFile makes the open's headline promise measurable:
 // one length probe plus one tail read, for every one of them.

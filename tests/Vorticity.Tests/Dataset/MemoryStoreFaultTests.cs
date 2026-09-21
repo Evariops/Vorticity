@@ -5,8 +5,8 @@
 // in-memory store injects a latency λ and no CPU cost; a cold clustering-key lookup completes
 // within D × λ, D the number of dependent requests it makes, which no total of requests can
 // prove, since parallel requests hide in a total. So the store must be able to be slow, and the
-// first test here is the smallest possible instance of that invariant: ten requests issued
-// together cost one λ, ten issued in a row cost ten.
+// first test here is the smallest possible instance of that invariant: requests issued together
+// cost one λ, and requests issued in a row cost one λ each.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;

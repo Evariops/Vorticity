@@ -64,9 +64,9 @@ internal static class LayoutExecutor
             }
         }
 
-        // Map, Union and Variant have no canonical form in Phase 1 (CanonicalFill rejects them),
-        // and a ZERO-ROW file of one of those dtypes declares no array ids at all, so the encoding
-        // check above cannot see it. The manifest's dtype display is the cheap discriminator.
+        // CanonicalFill has no zeroed form for Map, Union or Variant, and a ZERO-ROW file of one
+        // of those dtypes declares no array ids at all, so the encoding check above cannot see it.
+        // The manifest's dtype display is the cheap discriminator.
         if (entry.DType.Contains("map(", StringComparison.Ordinal)
             || entry.DType.Contains("variant", StringComparison.Ordinal)
             || entry.DType.Contains("union", StringComparison.Ordinal))

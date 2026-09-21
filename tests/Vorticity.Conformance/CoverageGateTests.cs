@@ -82,11 +82,11 @@ public sealed class CoverageGateTests
     }
 
     /// <summary>
-    /// The gap this gate cannot close, stated rather than left to be discovered: every corpus file
+    /// The gap this gate watches, stated rather than left to be discovered: every corpus file
     /// carrying non-ASCII or NUL-bearing UTF-8 VALUES is compressed with vortex.fsst or
-    /// vortex.onpair and is therefore out of Phase 1 scope. So the in-scope pass compares no
-    /// multi-byte string value, and the sidecar's `char_count` - which exists precisely because it
-    /// differs from `len` on every non-ASCII value - is never exercised by it.
+    /// vortex.onpair. Were those out of scope, the in-scope pass would compare no multi-byte
+    /// string value, and the sidecar's `char_count` - which exists precisely because it differs
+    /// from `len` on every non-ASCII value - would never be exercised by it.
     /// (Non-ASCII field NAMES are covered: types/struct_field_names is in scope.)
     /// </summary>
     [Fact]
@@ -118,11 +118,11 @@ public sealed class CoverageGateTests
 
         Assert.True(total > 0, "the corpus is supposed to carry non-ASCII utf8 somewhere");
 
-        // The number this gate exists for. Every non-ASCII utf8 file in the corpus was out of scope
-        // until vortex.fsst and vortex.onpair landed, so the suite was checking UTF-8 handling
-        // against nothing at all -- multi-byte sequences straddling the 12-byte inline/reference
-        // view boundary, embedded NULs, the lot. A regression that put them back out of scope would
-        // be invisible in the pass count.
+        // The number this gate exists for. Without vortex.fsst and vortex.onpair every non-ASCII
+        // utf8 file in the corpus is out of scope, and the suite checks UTF-8 handling against
+        // nothing at all -- multi-byte sequences straddling the 12-byte inline/reference view
+        // boundary, embedded NULs, the lot. A regression that put them out of scope would be
+        // invisible in the pass count.
         Assert.True(
             inScope * 2 > total,
             $"only {inScope} of {total} non-ASCII utf8 files are in scope; UTF-8 handling is then " +

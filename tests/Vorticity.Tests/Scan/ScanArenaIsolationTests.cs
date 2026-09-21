@@ -11,7 +11,8 @@
 //
 // A thread race is a flaky test. This asserts the invariant that makes the race impossible instead:
 // after a scan is planned and fully drained, the file's arena holds exactly the nodes it held at
-// open. Both fixtures below moved before the fix - masked at decode time, zoned at parse time.
+// open. The fixtures below cover the two places a derivation can hide: decode time (masked) and
+// parse time (zoned).
 using System;
 using System.Collections.Generic;
 using System.Threading;

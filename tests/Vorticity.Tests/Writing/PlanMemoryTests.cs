@@ -40,7 +40,7 @@ public sealed class PlanMemoryTests
     /// Four chunks of one i64 column -- a bit-packed one, a progression, a constant, a progression
     /// -- each one block long. After the packing has held, the progression must still be written as
     /// a sequence and the constant as a single run: the verdicts the reference chooser reaches on
-    /// every chunk, and the bytes the writer produced before plan memory existed.
+    /// every chunk, and the bytes the writer produces without plan memory.
     /// </summary>
     [Fact]
     public async Task AHeldBitPackingDoesNotOutrankAProgressionOrAConstant()
@@ -65,19 +65,17 @@ public sealed class PlanMemoryTests
     /// the chunk is a progression all the same, and the column's bytes are the one-block file's.
     /// </summary>
     /// <remarks>
-    /// Found by the test above: with eight blocks per chunk BOTH choosers packed every progression
-    /// (48 532 bytes), because the block seeded from the previous chunk's last row broke the step,
-    /// the merge took a broken block for a broken chunk, and the chooser trusted the merge without
-    /// the walk it makes when the steps are unknown. Plan memory plays no part: the fused pass
-    /// steps every block from its predecessor. The 672 bytes over the one-block file are the zone
-    /// map's: 32 blocks summarised instead of 4.
+    /// The block seeded from the previous chunk's last row must not carry the jump as its own
+    /// break: the merge would take a broken block for a broken chunk, and BOTH choosers, trusting
+    /// the merge instead of the walk they make when the steps are unknown, would pack every
+    /// progression. Plan memory plays no part: the fused pass steps every block from its
+    /// predecessor. The 672 bytes over the one-block file are the zone map's: 32 blocks summarised
+    /// instead of 4.
     /// </remarks>
     [Fact]
     public async Task AProgressionThatStartsAChunkAfterAJumpIsStillAProgression()
     {
         (long size, List<string> disagreements) = await Write(rowBlock: 1024);
-        // 19 820 since the file's identity (step 20); 19 724 since the file statistics segment
-        // (11a); 19 604 before it.
         Assert.Equal(19_820, size);
         Assert.True(
             disagreements.Count == 0,
@@ -156,11 +154,8 @@ public sealed class PlanMemoryTests
             Assert.Equal(0, withoutTable);
             // The bytes the reference chooser's dictionaries make, whether the table or a walk built
             // them: pinned so that a table that served a different dictionary would show here first.
-            // 35 855 since the directory's checksum trailer (step 21); 35 847 since the file's
-            // identity (step 20). 35 775 since Auto became the default
-            // (12e): the column is a dictionary, so the file carries its dict.probe entry and the
-            // directory that lists it. 35 636 since the file statistics segment (11a); 35 540
-            // before it.
+            // The column is a dictionary, so under the default index policy the file also carries
+            // its dict.probe entry and the directory that lists it.
             Assert.Equal(35_855, new FileInfo(path).Length);
         }
         finally
@@ -240,8 +235,6 @@ public sealed class PlanMemoryTests
             // their widths. With the tail left uncounted, the second walked too. The bytes are the
             // walk's, whichever priced the packing.
             Assert.Equal(3, fromWidths);
-            // 43 532 since the file's identity (step 20); 43 436 since the file statistics segment
-            // (11a); 43 316 before it.
             Assert.Equal(43_532, new FileInfo(path).Length);
         }
         finally

@@ -1,4 +1,4 @@
-// One in-scope corpus file, read and compared end to end. This is the acceptance test of Phase 1
+// One in-scope corpus file, read and compared end to end. This is the reader's acceptance test
 // reduced to a method: open the file, scan it, and check every value, every validity bit and every
 // nested structure against the Rust-produced sidecar, localizing any disagreement to
 // (file, column, row).
@@ -129,8 +129,7 @@ internal static class ConformanceRunner
 
             // types/no_dtype_segment has no dtype segment, so opening it without one is a
             // VortexFormatException and the caller is expected to supply the
-            // schema. It reached this runner only when vortex.map gained a decoder and the file
-            // became in-scope; the donor is a real corpus file with the identical schema.
+            // schema. The donor is a real corpus file with the identical schema.
             await using VortexFile file = await VortexFile
                 .OpenAsync(entry.FullPath, OpenOptionsFor(entry), cancellationToken)
                 .ConfigureAwait(false);

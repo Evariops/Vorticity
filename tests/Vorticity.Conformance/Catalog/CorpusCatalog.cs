@@ -1,6 +1,6 @@
 // The corpus manifest, and its split into in-scope and out-of-scope files.
 //
-// THE SPLIT IS COMPUTED, NOT LISTED. A hand-maintained list of the 616 files Phase 1 can read would
+// THE SPLIT IS COMPUTED, NOT LISTED. A hand-maintained list of the files this build can read would
 // be wrong the first time a decoder lands and nobody would notice; worse, it is the exact mechanism
 // by which a failing file gets quietly "excluded". So the classification asks the LIBRARY: every
 // array id in the manifest entry goes through EncodingRegistry.ResolveArray and
@@ -65,7 +65,7 @@ internal sealed class CorpusEntry
     public override string ToString() => Id;
 }
 
-/// <summary>Why one file is outside Phase 1: the component ids the build does not implement.</summary>
+/// <summary>Why one file is out of scope: the component ids the build does not implement.</summary>
 internal sealed class ScopeVerdict
 {
     internal required CorpusEntry Entry { get; init; }

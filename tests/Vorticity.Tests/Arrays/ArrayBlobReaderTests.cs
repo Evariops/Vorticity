@@ -430,8 +430,8 @@ public sealed class ArrayBlobReaderTests
     [Fact]
     public void StatisticsAreReadWithoutBeingDecoded()
     {
-        // Every array node in all 819 corpus files carries a stats table, so this path is hot even
-        // though nothing in Phase 1 reads a statistic for a correctness decision.
+        // Every array node in every corpus file carries a stats table, so this path is hot even
+        // though nothing in the reader uses a statistic for a correctness decision.
         CorpusBlobs blobs = CorpusBlobs.Load("types/i64_nonnull_r1024");
         ArrayEncodingId[] encodings = new ArrayEncodingId[blobs.ArrayEncodingIds.Length];
         for (int i = 0; i < encodings.Length; i++)

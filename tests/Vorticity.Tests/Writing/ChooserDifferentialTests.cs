@@ -2,8 +2,8 @@
 // two are compared plan against plan on every column chunk of every in-scope corpus file, through
 // the probe `ColumnCompressor.Differential`.
 //
-// WHY PLANS AND NOT BYTES. `WrittenSizeTests` is byte-exact and it is the anchor of the whole
-// refactor, but a byte total cannot see two divergences that compensate, and a byte-identical file
+// WHY PLANS AND NOT BYTES. `WrittenSizeTests` is byte-exact, but a byte total cannot see two
+// divergences that compensate, and a byte-identical file
 // can hide a chooser that reaches the same plan for a different reason. A description says what the
 // chooser DECIDED -- scheme, width, transform, reference, entry count, a fingerprint of the arrays
 // -- and two choosers that agree on every description agree on every byte and on why.
@@ -46,10 +46,11 @@ public sealed class ChooserDifferentialTests
         // the chooser marks such plans, they are counted here and reported, and only the rest is
         // held to zero. What memory costs on the wire is `WrittenSizeTests`' question.
         //
-        // AND ZERO HERE PROVED NOTHING ABOUT MEMORY: no file of this corpus has a bit-packed chunk
-        // followed by a progression, so the one place memory changed a plan -- and doubled a file
-        // -- was never in front of this probe. `PlanMemoryTests` puts that transition in front of
-        // it, on a file built for the purpose, and holds the memory count to zero as well.
+        // AND ZERO HERE PROVES NOTHING ABOUT MEMORY: no file of this corpus has a bit-packed chunk
+        // followed by a progression, the transition where a held packing could stand in front of
+        // a sequence, so it never comes in front of this probe. `PlanMemoryTests` puts that
+        // transition in front of it, on a file built for the purpose, and holds the memory count
+        // to zero as well.
         List<string> fromMemory = disagreements.FindAll(static line => line.Contains(": memory ", StringComparison.Ordinal));
         List<string> real = disagreements.FindAll(static line => !line.Contains(": memory ", StringComparison.Ordinal));
         Console.Out.Write(

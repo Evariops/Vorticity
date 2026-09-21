@@ -1,9 +1,9 @@
-// Renders a DType in the grammar the corpus manifest uses, which is Rust's `impl Display for
-// DType` (vortex-array-0.86.1/src/dtype/dtype_impl.rs:549) and not our own DType.ToString().
+// Renders a DType in the grammar the corpus manifest uses, which is the Rust reference's
+// `impl Display for DType` and not our own DType.ToString().
 //
 // The two differ deliberately: DTypeFormatter prints `struct{...}`, elides after 32 fields and
 // truncates at 2048 characters, all of which are right for a diagnostic and wrong for a
-// byte-for-byte comparison against 819 manifest strings. This renderer exists so the corpus test
+// byte-for-byte comparison against every manifest string. This renderer exists so the corpus test
 // can compare the whole schema exactly - including the extension dtypes, whose rendering needs
 // their metadata decoded (`id[metadata](storage)`).
 //

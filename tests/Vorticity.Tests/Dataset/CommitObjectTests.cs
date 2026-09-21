@@ -119,7 +119,7 @@ public sealed class CommitObjectTests
     [Fact]
     public void AFragmentAddedBeforeAPageIsWhereItsReferenceSays()
     {
-        // The order a real indexing commit adds things in (step 42b): the fragment first, because
+        // The order a real indexing commit adds things in: the fragment first, because
         // its reference goes into the leaf entry that a page written after it holds. Every reference
         // handed out is final, whatever follows it.
         CommitObjectBuilder builder = new CommitObjectBuilder(9);

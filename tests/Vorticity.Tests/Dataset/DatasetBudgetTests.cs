@@ -4,8 +4,8 @@
 // lookup costs at most R requests and B bytes, constants of the design, asserted equal across data
 // objects of 1 GiB, 10 GiB and 100 GiB (sparse, only the bytes read matter) and across datasets of
 // 1, 10³ and 10⁶ objects (synthetic leaves). Two axes, and they fail differently: the SIZE axis
-// catches anything on the read path that scales with an object's length, which step 27 already
-// proved for one file and which a dataset must not reintroduce; the COUNT axis catches a descent
+// catches anything on the read path that scales with an object's length, which ReadBudgetTests
+// holds for one file and which a dataset must not reintroduce; the COUNT axis catches a descent
 // that walks a level instead of descending it, which no single-file test can see at all.
 //
 // AND A THIRD INVARIANT A COUNT CANNOT PROVE. "The dependent requests are the critical path […]

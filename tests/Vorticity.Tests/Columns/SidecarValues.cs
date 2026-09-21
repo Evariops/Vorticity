@@ -63,11 +63,11 @@ internal static class SidecarValues
 
     /// <summary>
     /// The <c>kind</c> of the sidecar's root dtype node - <c>"struct"</c>, <c>"primitive"</c>, and
-    /// so on. Used instead of the header's display string because Phase 0's DTypeFormatter spells
-    /// two constructs differently from the reference: an extension is <c>ext(vortex.date, i32)</c>
-    /// rather than <c>vortex.date[days](i32)</c>, and a fixed-size list is <c>fsl(i32, 3)</c>
-    /// rather than <c>fixed_size_list(i32)[3]</c>. Both are Phase 0 gaps, reported rather than
-    /// patched, and comparing against the manifest's dtype is the conformance suite's job anyway.
+    /// so on. Used instead of the header's display string because the library's DTypeFormatter
+    /// spells two constructs differently from the reference: an extension is
+    /// <c>ext(vortex.date, i32)</c> rather than <c>vortex.date[days](i32)</c>, and a fixed-size
+    /// list is <c>fsl(i32, 3)</c> rather than <c>fixed_size_list(i32)[3]</c>. Neither is patched
+    /// around here, and comparing against the manifest's dtype is the conformance suite's job.
     /// </summary>
     internal static string RootKind(string entry)
     {
@@ -86,10 +86,11 @@ internal static class SidecarValues
 
     /// <summary>
     /// Whether this entry's values are reachable through the test walker: only vortex.flat,
-    /// vortex.struct and vortex.zoned layouts, a root dtype Phase 1 decodes, and only array
-    /// encodings this build implements. Everything is read off the sidecar, so the decision never
-    /// depends on the code under test - except the last check, which asks the registry directly
-    /// because "which encodings does this build decode" has no sidecar answer.
+    /// vortex.struct and vortex.zoned layouts, a root dtype that is not a map, a union or a
+    /// variant, and only array encodings this build implements. Everything is read off the
+    /// sidecar, so the decision never depends on the code under test - except the last check,
+    /// which asks the registry directly because "which encodings does this build decode" has no
+    /// sidecar answer.
     /// </summary>
     internal static bool IsWalkable(string entry)
     {
@@ -171,9 +172,8 @@ internal static class SidecarValues
 
     /// <summary>
     /// Whether every array encoding in one <c>vortex.flat</c> leaf's tree has a decoder in this
-    /// build. vortex.fsst, vortex.alp, vortex.zstd, vortex.onpair, vortex.decimal_byte_parts,
-    /// fastlanes.delta and vortex.patched are all out of Phase 1 scope, and the files carrying
-    /// them belong to the conformance suite's expected-failure list rather than here.
+    /// build. A file whose leaf reaches one that has none is left to the conformance suite, which
+    /// requires the scan to name the missing component.
     /// </summary>
     private static bool ArrayIsDecodable(JsonElement node)
     {

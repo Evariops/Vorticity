@@ -89,7 +89,7 @@ public sealed class FooterSchemaTests
     [Fact]
     public void Absent_segment_specs_is_an_error_not_an_empty_vector()
     {
-        // Upstream: "FileLayout missing segment specs" - vortex-file-0.86.1/src/footer/mod.rs.
+        // The reference reader rejects it too: "FileLayout missing segment specs".
         using FlatBufferBuilder b = new();
         b.StartTable();
         b.AddOffset(3, 0);

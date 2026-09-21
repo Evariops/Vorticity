@@ -109,9 +109,8 @@ public sealed class IndexDirectoryTests
     [Fact]
     public void AVersionOneDirectoryIsRefusedWithItsReason()
     {
-        // Version 1 had no trailer and no checksum per region. Nothing has written it since step 21,
-        // and the Rust forge fixture that was said to be one never existed: it is refused like any
-        // unknown version, and the file reads without its index, which is a hint.
+        // Version 1 had no trailer and no checksum per region. Nothing writes it: it is refused
+        // like any unknown version, and the file reads without its index, which is a hint.
         IndexDirectory written = new IndexDirectory(
             Rows, 0, WritePolicy.None,
             [new IndexEntry(IndexKinds.BloomSbbf, [0u], 8_192, [], [new IndexRun(0, 1, [new IndexSegment(512, 9, 6)], [])])]);

@@ -1,4 +1,4 @@
-// The Phase 1 integration seam, exercised once end to end on real corpus files:
+// The integration seam from open to node tree, exercised once end to end on real corpus files:
 //
 //     VortexFile.OpenAsync                                      (file-open)
 //   -> LayoutView walk of RootLayoutBytes                       (fb-schemas)
@@ -7,11 +7,10 @@
 //   -> ArrayBlobReader.Load into an ArrayNodeArena              (array-blob)
 //   -> the serialized node tree, with every node's metadata run through its codec
 //
-// It stops at the node tree on purpose: no decoder exists yet, and the point of this file is to
-// prove the six landed components COMPOSE rather than merely link. Everything else in the suite
-// tests one component against a harness of its own; this is the only place where file-open's
-// encoding table feeds the blob reader, where the layout's segment id indexes file-open's segment
-// map, and where the bytes come off a real ISegmentSource instead of a byte[] copy.
+// It stops at the node tree on purpose: decoding is tested on its own, and the point of this file
+// is to prove the components above COMPOSE rather than merely link. Here file-open's encoding
+// table feeds the blob reader, the layout's segment id indexes file-open's segment map, and the
+// bytes come off a real ISegmentSource instead of a byte[] copy.
 //
 // The oracle is the Rust-produced sidecar: its `layout` record carries the layout tree (encoding
 // id, row count, segment ids) and, on every vortex.flat leaf, the serialized array's
@@ -296,11 +295,10 @@ public sealed class Phase1CompositionTests
         string path = CorpusBlobs.Path("types/i64_nonnull_r1024", ".vortex");
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
 
-        // EVERY DECLARED ID RESOLVES. This asserted the opposite -- that some declared id was
-        // Unknown and the open tolerated it -- until `vortex.variant` and `vortex.parquet.variant`
-        // gained decoders and the corpus's whole edition-permitted set became readable. The
-        // tolerance is still real and still tested, over a forged id in `ScanContextTests`; what
-        // this file can check is that the classification happens at open, for every entry.
+        // EVERY DECLARED ID RESOLVES: the corpus writer declares every id its editions permit, and
+        // each of them has a decoder. The open's tolerance of an Unknown id is real and tested,
+        // over a forged id in `ScanContextTests`; what this file can check is that the
+        // classification happens at open, for every entry.
         for (int i = 0; i < file.ArrayEncodingCount; i++)
         {
             Assert.NotEmpty(file.GetArrayEncodingId(i));

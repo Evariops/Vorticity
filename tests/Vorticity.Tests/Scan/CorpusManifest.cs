@@ -1,6 +1,6 @@
 // The corpus manifest, read once for the whole scan suite.
 //
-// DISPOSITION IS COMPUTED, NEVER LISTED. Whether a file is in Phase 1 scope is decided by asking
+// DISPOSITION IS COMPUTED, NEVER LISTED. Whether a file is in scope is decided by asking
 // the registries - ArrayDecoderTable.IsImplemented, LayoutReaderTable.IsImplemented,
 // ExtensionDTypeRegistry.Resolve - about the ids the manifest says the file actually contains. A
 // hand-maintained list rots the first time a decoder lands, and it would let a

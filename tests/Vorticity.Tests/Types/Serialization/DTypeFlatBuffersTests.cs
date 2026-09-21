@@ -925,14 +925,13 @@ public sealed class DTypeFlatBuffersTests
     [Fact]
     public void ExtensionMetadata_IsWrittenPresentEvenWhenEmpty()
     {
-        // OUR WRITER MUST NOT USE THE SHORTER ENCODING. The reference requires the field:
-        // vortex-array-0.86.1/src/dtype/serde/flatbuffers.rs does
+        // OUR WRITER MUST NOT USE THE SHORTER ENCODING. The reference requires the field: its
+        // FlatBuffers dtype reader does
         // `fb_ext.metadata().ok_or_else(|| vortex_err!("failed to parse extension metadata ..."))`,
         // so an omitted vector makes the dtype unreadable by Vortex Rust.
         //
-        // This was a real bug, and only the Rust cross-check could see it: our reader collapses
-        // absent and empty, so the round-trip test passed on all 16 uuid files in the corpus while
-        // the reference rejected every one of them.
+        // A round trip cannot see this: our reader collapses absent and empty, so it passes while
+        // the reference rejects the file. Only the Rust cross-check and this probe catch it.
         DTypeArena arena = new DTypeArena();
         DType storage = arena.FixedSizeList(
             arena.Primitive(PType.U8, Nullability.NonNullable), 16, Nullability.NonNullable);

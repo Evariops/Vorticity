@@ -8,8 +8,8 @@ namespace Vorticity.Tests.Types;
 
 /// <summary>
 /// <c>ToString</c> is what <c>vxdump</c> prints and what a failing assertion shows, so it is part
-/// of the contract, not a debugging convenience. Every example listed in the Phase 0 contract is
-/// asserted literally here.
+/// of the contract, not a debugging convenience. Every example of that format is asserted
+/// literally here.
 /// </summary>
 public sealed class DTypeFormatTests
 {

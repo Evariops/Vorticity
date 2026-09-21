@@ -111,10 +111,7 @@ public sealed class EncodingRegistryTests
     [Fact]
     public void GettingADecoderForAnUnknownIdNamesTheIdAndTheKind()
     {
-        // A FORGED ID, and the comment above this test predicted the day it would need one: the
-        // example has been changed five times -- fastlanes.delta, vortex.patched, the vortex.list
-        // layout, vortex.pco, then the two variants -- each time because the id gained a reader.
-        // There is no unimplemented array id left to borrow, so the id is one no edition will ever
+        // A FORGED ID: every real array id has a decoder, so the id is one no edition will ever
         // define, which is also the case a reader most needs to handle well: a file from the
         // future.
         VortexUnsupportedException error =

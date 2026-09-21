@@ -2,24 +2,23 @@
 //
 // The three helpers take a `PType` and an index and switch on the type to
 // decide how to read one value; calling them per row pays that switch per row, for a property of
-// the CALL, not of the row. `ComparisonKernels` is the measurement that makes the rule worth
-// having: hoisting the type switch, the validity switch and the operator switch out of the loop was
-// 97.2 us to 16.1 us on 65 536 rows of `i64 < literal` -- six times -- and the same shape is still
-// present in 27 other places.
+// the CALL, not of the row. `ComparisonKernels` is what makes the rule worth having: hoisting the
+// type switch, the validity switch and the operator switch out of its loop made `i64 < literal`
+// several times faster, and every per-row call counted below has the same shape.
 //
-// The rule was written down in the audit and enforced nowhere, which means it held exactly as long
-// as whoever remembered it was reviewing. This is the ratchet that remembers.
+// A rule that is only written down holds exactly as long as whoever remembers it is reviewing.
+// This is the ratchet that remembers.
 //
 // WHAT IT COUNTS, AND WHY THAT AND NOT THE RULE ITSELF. "Is this call inside a per-row loop" is not
 // decidable by reading a line; it needs the loop around it. So this counts something coarser and
 // mechanical -- every CALL to the three helpers in `src/Vorticity`, per file -- and holds each
-// file at a ceiling. The per-row subset is carried in the same table, beside the point that will
-// remove it, and comes down with the total when phase 2 wires a site onto a typed kernel.
+// file at a ceiling. The per-row subset is carried in the same table, beside what will remove it,
+// and comes down with the total when a site is wired onto a typed kernel.
 //
 // The coarseness costs one thing and buys another. It costs a false red when a call is added in a
 // legitimate category: a bounds check, a single value, an error path. That red is a one-line table
-// edit plus a sentence in the commit saying which category the new call is in -- which is the
-// classification the audit's annexe A had to do by hand, now demanded at the moment it is cheap.
+// edit plus a sentence in the commit saying which category the new call is in -- a classification
+// demanded at the moment it is cheap, rather than done by hand over the whole library later.
 // It buys the case the rule exists for: a `ReadInteger` added inside a loop turns a file red on the
 // commit that does it, rather than being found by a profile a month later.
 //
@@ -27,8 +26,7 @@
 //
 //   * `CanonicalSupport.cs`, which DEFINES `ReadInteger`. A definition is not a dispatch.
 //   * comment lines, including `<c>ReadInteger</c>` in a doc comment. Counting prose would make a
-//     ratchet that goes red when someone explains the rule it enforces, and annexe A's own "66"
-//     was reproduced here only after excluding them.
+//     ratchet that goes red when someone explains the rule it enforces.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -57,7 +55,8 @@ public sealed partial class PerRowDispatchTests
     /// <para>
     /// LOWER BOTH NUMBERS BY HAND when a site is wired, in the same commit, exactly as
     /// <c>WrittenSizeTests</c> and <c>PathAllocationTests</c> are lowered. Raising one needs the
-    /// commit message to say which of annexe A's four categories the new call belongs to.
+    /// commit message to say which category the new call belongs to: a per-row loop, a bound, a
+    /// single value or an error path.
     /// </para>
     /// <para>
     /// THE CEILING IS THE EXACT COUNT, with no margin, because this quantity has no variance at all
@@ -65,10 +64,10 @@ public sealed partial class PerRowDispatchTests
     /// call to hide in.
     /// </para>
     /// <para>
-    /// The <c>PerRow</c> column is the audit's classification, not a measurement: nothing here can
-    /// check that a given call is inside a loop. It is asserted only to be no larger than the
-    /// file's total, which keeps the table coherent; its real job is to say what the total is
-    /// MADE OF, so that lowering it is a decision and not an accident.
+    /// The <c>PerRow</c> column is a classification made by reading the code, not a
+    /// measurement: nothing here can check that a given call is inside a loop. It is asserted only
+    /// to be no larger than the file's total, which keeps the table coherent; its real job is to
+    /// say what the total is MADE OF, so that lowering it is a decision and not an accident.
     /// </para>
     /// </remarks>
     private static readonly (string File, int Calls, int PerRow, string Point)[] Sites =
@@ -97,14 +96,14 @@ public sealed partial class PerRowDispatchTests
         ("Writing/BitPackPlan.cs", 2, 2, "W-11"),
     ];
 
-    /// <summary>The grand totals, which are annexe A's two headline numbers.</summary>
+    /// <summary>The table's two grand totals, starting with every call it allows.</summary>
     /// <remarks>
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
     private const int TotalCalls = 55;
 
-    /// <summary>Calls annexe A classifies as being inside a per-row or per-patch loop.</summary>
+    /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
     /// It can drop while a file's ceiling stays put, when a per-row call is wired and the call
     /// left in the file is an error path: that change of COMPOSITION is what this column exists
@@ -146,7 +145,7 @@ public sealed partial class PerRowDispatchTests
                     $"{file} has {actual} calls against a ceiling of {ceiling}. If the new one is " +
                     "inside a per-row loop it is the thing this test exists to stop; if it is a " +
                     "bound, a single value or an error path, raise the ceiling here and say which " +
-                    "in the commit message (PERF-AUDIT-v2.md annexe A has the four categories).");
+                    "in the commit message.");
             }
 
             if (actual < ceiling)
@@ -168,8 +167,8 @@ public sealed partial class PerRowDispatchTests
         foreach ((string file, int actual) in counted.OrderBy(e => e.Key, StringComparer.Ordinal))
         {
             bad.Add(
-                $"{file} has {actual} call(s) and no entry in this table. Classify it against " +
-                "PERF-AUDIT-v2.md annexe A and add a row.");
+                $"{file} has {actual} call(s) and no entry in this table. Classify it (per-row " +
+                "loop, bound, single value or error path) and add a row.");
         }
 
         Assert.Equal(TotalCalls, calls);

@@ -28,9 +28,7 @@ public sealed class ScanCorpusTests
 
         // A snapshot, not a configuration: if a decoder lands or is withdrawn this number moves,
         // and the test is updated to the new snapshot rather than the computation being replaced by
-        // a list. 616 was Phase 1; +32 vortex.decimal_byte_parts, +6 vortex.datetimeparts,
-        // +5 vortex.zstd, +33 vortex.alp, +6 vortex.alprd, +30 vortex.fsst, +46 vortex.onpair,
-        // +2 distributions/sorted_disjoint_utf8, +4 fastlanes.delta, +23 vortex.map, +1 vortex.patched, +4 vortex.zstd_buffers, +1 the vortex.list layout, +4 vortex.pco.
+        // a list.
         Assert.Equal(856, inScope.Count);
     }
 
@@ -70,8 +68,8 @@ public sealed class ScanCorpusTests
         // return values.
         //
         // "Or not at all" is not a hedge: a zero-row file decodes nothing, and a file whose only
-        // out-of-scope encoding sits in a zone map is never asked to decode it, because Phase 1
-        // does not prune. Both read correctly and both are still out of scope by id.
+        // out-of-scope encoding sits in a zone map is never asked to decode it: a scan without a
+        // filter does not prune. Both read correctly and both are still out of scope by id.
         Decoders.EnsureRegistered();
         StringBuilder wrong = new StringBuilder();
         int named = 0;
