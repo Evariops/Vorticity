@@ -126,7 +126,13 @@ internal static class ClrFit
         if (extensions is not null && column.Kind == VortexTypeKind.Extension && extensions.TryGet(column.ExtensionId!, out ExtensionRegistration registration)
             && registration.ClrType == (Nullable.GetUnderlyingType(shape.Type) ?? shape.Type))
         {
-            return true;
+            if (registration.StorageType.NonNullable == column.StorageType!.NonNullable)
+            {
+                return true;
+            }
+
+            reason = $"the file stores '{column.ExtensionId}' as {column.StorageType.NonNullable}, and its registration reads {registration.StorageType.NonNullable}.";
+            return false;
         }
 
         if (shape.Kind == ClrKind.Unsupported)

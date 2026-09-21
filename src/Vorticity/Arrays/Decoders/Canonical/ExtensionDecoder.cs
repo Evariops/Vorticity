@@ -38,25 +38,32 @@ internal sealed class ExtensionDecoder : ArrayDecoder
         CanonicalSupport.RequireKind(dtype, DTypeKind.Extension, Id);
 
         DType storageDType = dtype.StorageType;
-        ValidateExtensionDType(dtype, storageDType);
+        ValidateExtensionDType(dtype, storageDType, context.Scan.HasFile ? context.Scan.File.Session.Options.Extensions : null);
 
         int storageIndex = context.DecodeChild(in node, 0, storageDType, length);
         return context.Canonical.AddExtension(dtype, length, storageIndex);
     }
 
     /// <summary>
-    /// Resolves the extension id and parses its metadata against the storage dtype. An unsupported
-    /// extension component fails here, when the field is first used, rather than when the dtype was
-    /// parsed: this is the only site in a decode that may raise
-    /// <see cref="VortexUnsupportedException"/> with kind <c>"dtype"</c>.
+    /// Resolves the extension id and parses its metadata against the storage dtype. An extension
+    /// neither built in nor registered on the session fails here, when the field is first used,
+    /// rather than when the dtype was parsed: this is the only site in a decode that may raise
+    /// <see cref="VortexUnsupportedException"/> for a dtype. A registered one decodes as its storage,
+    /// which its registration reads.
     /// </summary>
-    internal static void ValidateExtensionDType(DType dtype, DType storage)
+    internal static void ValidateExtensionDType(DType dtype, DType storage, VortexExtensionRegistry? extensions = null)
     {
         ReadOnlySpan<byte> id = dtype.ExtensionIdUtf8;
+        ExtensionKind kind = ExtensionDTypeRegistry.Resolve(id);
+        if (kind == ExtensionKind.Unknown && extensions is not null && extensions.IsRegistered(id))
+        {
+            return;
+        }
+
         ExtensionDTypeRegistry.RequireSupported(id);
 
         ReadOnlySpan<byte> metadata = dtype.ExtensionMetadata;
-        switch (ExtensionDTypeRegistry.Resolve(id))
+        switch (kind)
         {
             case ExtensionKind.Date:
                 ExtensionDTypeRegistry.ReadDateUnit(metadata, storage);
