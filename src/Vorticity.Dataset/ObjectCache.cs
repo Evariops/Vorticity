@@ -18,15 +18,17 @@ internal sealed class ObjectCache : IAsyncDisposable
 {
     private readonly IObjectStore _store;
     private readonly int _capacity;
+    private readonly VortexSession _session;
     private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
     private readonly Dictionary<string, Held> _open = new Dictionary<string, Held>(StringComparer.Ordinal);
     private readonly LinkedList<string> _idle = new LinkedList<string>();
     private bool _disposed;
 
-    internal ObjectCache(IObjectStore store, int capacity)
+    internal ObjectCache(IObjectStore store, int capacity, VortexSession? session = null)
     {
         _store = store;
         _capacity = Math.Max(1, capacity);
+        _session = session ?? VortexSession.Default;
     }
 
     /// <summary>How many objects are open, leased or idle.</summary>
@@ -91,11 +93,14 @@ internal sealed class ObjectCache : IAsyncDisposable
             VortexOpenOptions options = fragments.Count == 0
                 ? new VortexOpenOptions()
                 : new VortexOpenOptions { Read = new VortexReadOptions { IndexFragments = fragments } };
+            // Through the session, so the store sees at most its reads in flight and a segment read
+            // once is served from its cache to every scan that asks again.
             ObjectSegmentSource source = new ObjectSegmentSource(_store, entry.Key);
             VortexFile file;
             try
             {
-                file = await VortexFile.OpenAsync(source, options, cancellationToken).ConfigureAwait(false);
+                file = await VortexFile.OpenAsync(SessionReader.Wrap(source, _session), options, cancellationToken).ConfigureAwait(false);
+                file.Session = _session;
             }
             catch
             {

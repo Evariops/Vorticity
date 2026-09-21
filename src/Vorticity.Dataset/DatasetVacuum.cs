@@ -1,18 +1,19 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace Vorticity.Dataset;
 
 /// <summary>How a vacuum runs.</summary>
-internal sealed record VacuumOptions
+public sealed record VacuumOptions
 {
     /// <summary>
-    /// The clock the window counts against; the system's by default. It must be the store's, since
-    /// the ages it compares are the store's timestamps.
+    /// The clock the window counts against; the system's by default. It must agree with the
+    /// store's, since the ages it compares are the store's timestamps.
     /// </summary>
-    public TimeProvider Clock { get; init; } = TimeProvider.System;
+    public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
     /// <summary>Marks and reports what would be deleted, and deletes nothing.</summary>
     public bool DryRun { get; init; }
@@ -21,29 +22,37 @@ internal sealed record VacuumOptions
     /// The share of a kept commit object that live pages and fragments must reach for it not to be
     /// reported <see cref="VacuumResult.Sparse"/>: 0.25 by default.
     /// </summary>
-    public double RepackBelow { get; init; } = 0.25;
+    internal double RepackBelow { get; init; } = 0.25;
 }
 
 /// <summary>What a vacuum found and did.</summary>
-/// <param name="Latest">The version it marked from, which it always keeps.</param>
-/// <param name="Retained">The versions inside the window, newest first.</param>
-/// <param name="Window">The window it applied: the dataset's retention, or seven days when unset.</param>
-/// <param name="PagesRead">The distinct pages the marking read.</param>
-/// <param name="Deleted">The objects it deleted, or would have, on a dry run: commits first.</param>
-/// <param name="Young">The unmarked objects it kept because they are younger than the window.</param>
-/// <param name="Sparse">
-/// The commit objects kept alive only by references into them, whose live pages and fragments are
-/// under <see cref="VacuumOptions.RepackBelow"/> of their bytes: what
-/// <see cref="VortexDataset.RepackAsync"/> would free at the next vacuum past the window.
-/// </param>
-internal sealed record VacuumResult(
-    ulong Latest,
-    IReadOnlyList<ulong> Retained,
-    TimeSpan Window,
-    long PagesRead,
-    IReadOnlyList<string> Deleted,
-    IReadOnlyList<string> Young,
-    IReadOnlyList<ulong> Sparse);
+public sealed record VacuumResult
+{
+    /// <summary>The version it marked from, which it always keeps; 0 when the store holds no dataset.</summary>
+    public ulong Latest { get; init; }
+
+    /// <summary>The versions inside the window, newest first.</summary>
+    public ImmutableArray<ulong> Retained { get; init; } = [];
+
+    /// <summary>The window it applied: the dataset's retention, or seven days when it sets none.</summary>
+    public TimeSpan Window { get; init; }
+
+    /// <summary>The distinct tree pages the marking read.</summary>
+    public long PagesRead { get; init; }
+
+    /// <summary>The objects it deleted, or would have on a dry run: commit objects first.</summary>
+    public ImmutableArray<string> Deleted { get; init; } = [];
+
+    /// <summary>The unreferenced objects it kept because they are younger than the window: writers in flight.</summary>
+    public ImmutableArray<string> Young { get; init; } = [];
+
+    /// <summary>
+    /// The commit objects kept alive only by references into them, whose live pages and fragments are
+    /// under <see cref="VacuumOptions.RepackBelow"/> of their body: what a repack would free at the
+    /// next vacuum past the window.
+    /// </summary>
+    internal IReadOnlyList<ulong> Sparse { get; init; } = [];
+}
 
 /// <summary>
 /// Deletes what no version inside the retention window references, and never runs by itself. Ages
@@ -56,8 +65,6 @@ internal static class DatasetVacuum
     /// <summary>The retention window applied when the dataset sets none.</summary>
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromDays(7);
 
-    private const int ListPage = 1_000;
-
     /// <summary>Marks from every version inside the window, then sweeps what is unmarked and old.</summary>
     /// <exception cref="CommitFormatException">A page it must mark from is not what its reference says.</exception>
     /// <exception cref="ObjectNotFoundException">A page it must mark from is missing; nothing was deleted.</exception>
@@ -66,12 +73,12 @@ internal static class DatasetVacuum
     {
         ArgumentNullException.ThrowIfNull(store);
         options ??= new VacuumOptions();
-        DateTimeOffset now = options.Clock.GetUtcNow();
+        DateTimeOffset now = options.TimeProvider.GetUtcNow();
 
         (ulong latest, CommitObject? head) = await DatasetCommitter.LatestAsync(store, cancellationToken).ConfigureAwait(false);
         if (head is null)
         {
-            return new VacuumResult(0, [], DefaultWindow, 0, [], [], []);
+            return new VacuumResult { Window = DefaultWindow };
         }
 
         RetentionSettings retention = head.Header.Retention;
@@ -80,7 +87,7 @@ internal static class DatasetVacuum
         // A commit newer than the one marked from is not this vacuum's to judge.
         List<(ulong Version, string Key, DateTimeOffset Created)> commits = [];
         Dictionary<ulong, long> lengths = [];
-        foreach (string key in await ListAllAsync(store, CommitKey.Prefix, cancellationToken).ConfigureAwait(false))
+        foreach (string key in await store.ListAllAsync(CommitKey.Prefix, cancellationToken).ConfigureAwait(false))
         {
             if (CommitKey.TryParse(key, out ulong version) && version <= latest
                 && await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) is { } found)
@@ -123,23 +130,27 @@ internal static class DatasetVacuum
 
         List<string> deleted = [];
         List<string> young = [];
+        List<string> batch = [];
         for (int i = commits.Count - 1; i >= 0; i--)
         {
             (ulong version, string key, DateTimeOffset created) = commits[i];
             if (!markedCommits.Contains(version))
             {
-                await SweepAsync(key, created).ConfigureAwait(false);
+                Sweep(key, created);
             }
         }
 
-        foreach (string key in await ListAllAsync(store, CommitKey.DataPrefix, cancellationToken).ConfigureAwait(false))
+        await DeleteAsync().ConfigureAwait(false);
+        foreach (string key in await store.ListAllAsync(CommitKey.DataPrefix, cancellationToken).ConfigureAwait(false))
         {
             if (!markedData.Contains(key)
                 && await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) is { } found)
             {
-                await SweepAsync(key, found.LastModified).ConfigureAwait(false);
+                Sweep(key, found.LastModified);
             }
         }
+
+        await DeleteAsync().ConfigureAwait(false);
 
         // The ratio is over the body, past the header: a header inlines copies of the pages it has
         // in hand, so taken over the whole object every superseded commit would look half dead
@@ -160,7 +171,16 @@ internal static class DatasetVacuum
         }
 
         sparse.Sort();
-        return new VacuumResult(latest, retained, window, seen.Count, deleted, young, sparse);
+        return new VacuumResult
+        {
+            Latest = latest,
+            Retained = [.. retained],
+            Window = window,
+            PagesRead = seen.Count,
+            Deleted = [.. deleted],
+            Young = [.. young],
+            Sparse = sparse,
+        };
 
         async ValueTask MarkAsync(PageReference reference, int depth)
         {
@@ -197,7 +217,7 @@ internal static class DatasetVacuum
             }
         }
 
-        async ValueTask SweepAsync(string key, DateTimeOffset created)
+        void Sweep(string key, DateTimeOffset created)
         {
             if (now - created < window)
             {
@@ -205,30 +225,20 @@ internal static class DatasetVacuum
                 return;
             }
 
-            if (!options.DryRun)
-            {
-                await store.DeleteAsync(key, cancellationToken).ConfigureAwait(false);
-            }
-
+            batch.Add(key);
             deleted.Add(key);
         }
-    }
 
-    private static async ValueTask<List<string>> ListAllAsync(
-        IObjectStore store, string prefix, CancellationToken cancellationToken)
-    {
-        List<string> keys = [];
-        string? after = null;
-        while (true)
+        // Commit objects in one batch, then data objects in another, so the commits go first as
+        // the marking requires, and each kind costs the store a request per batch rather than per key.
+        async ValueTask DeleteAsync()
         {
-            IReadOnlyList<string> page = await store.ListAsync(prefix, after, ListPage, cancellationToken).ConfigureAwait(false);
-            if (page.Count == 0)
+            if (batch.Count > 0 && !options.DryRun)
             {
-                return keys;
+                await store.DeleteAsync(batch, cancellationToken).ConfigureAwait(false);
             }
 
-            keys.AddRange(page);
-            after = page[^1];
+            batch = [];
         }
     }
 }

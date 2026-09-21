@@ -24,6 +24,9 @@ internal sealed record CommitOptions
     /// <summary>What a node's summary is, or null for the one the object entries carry.</summary>
     public ISummaryFold? Fold { get; init; }
 
+    /// <summary>The clock a header's creation time is read from.</summary>
+    public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
+
     /// <summary>A rule in its starting state.</summary>
     public IBoundaryRule NewRule() => Rule?.Fresh() ?? new ProllyBoundaryRule(Seed);
 
@@ -133,7 +136,7 @@ internal static class DatasetCommitter
                 Version = version,
                 Parent = parent,
                 Seed = options.Seed,
-                CreatedAtUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                CreatedAtUnixMilliseconds = options.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
                 Levels = LevelsOf(next, builder, pages),
             };
 

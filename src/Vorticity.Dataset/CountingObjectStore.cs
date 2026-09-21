@@ -1,13 +1,17 @@
 using System;
 using System.Collections.Generic;
+using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace Vorticity.Dataset;
 
-/// <summary>Wraps a store and records what passes through it, including a lower bound on how many
-/// round trips the caller waited for one after another.</summary>
-internal sealed class CountingObjectStore : IObjectStore
+/// <summary>
+/// Wraps a store and records what passes through it, including a lower bound on how many round
+/// trips the caller waited for one after another: the number a read budget is held to.
+/// </summary>
+public sealed class CountingObjectStore : IObjectStore
 {
     private readonly IObjectStore _inner;
     private readonly bool _ownsInner;
@@ -19,7 +23,9 @@ internal sealed class CountingObjectStore : IObjectStore
     private int _inFlight;
     private long _steps;
 
-    /// <summary>Wraps a store; <c>ownsInner</c> makes disposing this dispose it too.</summary>
+    /// <summary>Wraps a store.</summary>
+    /// <param name="inner">The store that does the work.</param>
+    /// <param name="ownsInner">Whether disposing this store disposes <paramref name="inner"/>.</param>
     public CountingObjectStore(IObjectStore inner, bool ownsInner = false)
     {
         ArgumentNullException.ThrowIfNull(inner);
@@ -27,7 +33,7 @@ internal sealed class CountingObjectStore : IObjectStore
         _ownsInner = ownsInner;
     }
 
-    /// <summary>Every operation counted, by kind.</summary>
+    /// <summary>Every operation counted, whatever its kind.</summary>
     public long Requests
     {
         get
@@ -45,15 +51,6 @@ internal sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>How many operations of one kind were asked.</summary>
-    public long CountOf(ObjectOperation operation)
-    {
-        lock (_gate)
-        {
-            return _operations[(int)operation];
-        }
-    }
-
     /// <summary>Bytes handed back by <see cref="GetRangeAsync"/>.</summary>
     public long BytesRead
     {
@@ -66,7 +63,7 @@ internal sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>Bytes accepted by <see cref="PutIfAbsentAsync"/>, whether or not the key was free.</summary>
+    /// <summary>Bytes announced to <see cref="PutIfAbsentAsync"/>, whether or not the key was free.</summary>
     public long BytesWritten
     {
         get
@@ -78,7 +75,7 @@ internal sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>Keys returned by <see cref="ListAsync"/>.</summary>
+    /// <summary>Keys handed back by <see cref="ListAsync"/>.</summary>
     public long KeysListed
     {
         get
@@ -90,8 +87,10 @@ internal sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>How many times an operation started with the store idle, a lower bound on the
-    /// round trips waited for one after another.</summary>
+    /// <summary>
+    /// How many times an operation started with the store idle: a lower bound on the round trips
+    /// waited for one after another, which a total of requests cannot give.
+    /// </summary>
     public long DependentSteps
     {
         get
@@ -103,8 +102,18 @@ internal sealed class CountingObjectStore : IObjectStore
         }
     }
 
-    /// <summary>Forgets everything counted so far. Call it with nothing in flight, or the step in
-    /// progress is counted twice.</summary>
+    /// <summary>How many operations of one kind were asked; a listing counts once however many keys it hands back.</summary>
+    /// <param name="operation">The kind.</param>
+    /// <returns>The count.</returns>
+    public long CountOf(ObjectOperation operation)
+    {
+        lock (_gate)
+        {
+            return _operations[(int)operation];
+        }
+    }
+
+    /// <summary>Forgets everything counted so far; call it with nothing in flight, or the step in progress is counted twice.</summary>
     public void Reset()
     {
         lock (_gate)
@@ -155,18 +164,18 @@ internal sealed class CountingObjectStore : IObjectStore
 
     /// <inheritdoc/>
     public async ValueTask<PutOutcome> PutIfAbsentAsync(
-        string key, ReadOnlyMemory<byte> content, CancellationToken cancellationToken)
+        string key, PipeReader content, long length, CancellationToken cancellationToken)
     {
         Enter(ObjectOperation.PutIfAbsent);
         lock (_gate)
         {
-            // Counted even when the key turns out to be taken: the bytes crossed the seam anyway.
-            _bytesWritten += content.Length;
+            // Counted even when the key turns out to be taken: the bytes were offered to the seam.
+            _bytesWritten += length;
         }
 
         try
         {
-            return await _inner.PutIfAbsentAsync(key, content, cancellationToken).ConfigureAwait(false);
+            return await _inner.PutIfAbsentAsync(key, content, length, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -175,12 +184,12 @@ internal sealed class CountingObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
-    public async ValueTask<bool> DeleteAsync(string key, CancellationToken cancellationToken)
+    public async ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken)
     {
         Enter(ObjectOperation.Delete);
         try
         {
-            return await _inner.DeleteAsync(key, cancellationToken).ConfigureAwait(false);
+            await _inner.DeleteAsync(keys, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -189,24 +198,49 @@ internal sealed class CountingObjectStore : IObjectStore
     }
 
     /// <inheritdoc/>
-    public async ValueTask<IReadOnlyList<string>> ListAsync(
-        string prefix, string? startAfter, int max, CancellationToken cancellationToken)
+    public async IAsyncEnumerable<string> ListAsync(
+        string prefix, string? startAfter, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        Enter(ObjectOperation.List);
-        try
+        // One operation per listing, in flight while its first key is awaited: that is the request a
+        // caller waits for, and the later keys of a page cost it nothing.
+        IAsyncEnumerator<string> keys = _inner.ListAsync(prefix, startAfter, cancellationToken).GetAsyncEnumerator(cancellationToken);
+        await using (keys.ConfigureAwait(false))
         {
-            IReadOnlyList<string> keys = await _inner.ListAsync(prefix, startAfter, max, cancellationToken)
-                .ConfigureAwait(false);
-            lock (_gate)
+            bool first = true;
+            while (true)
             {
-                _keysListed += keys.Count;
-            }
+                bool more;
+                if (first)
+                {
+                    Enter(ObjectOperation.List);
+                    try
+                    {
+                        more = await keys.MoveNextAsync().ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        Leave();
+                    }
 
-            return keys;
-        }
-        finally
-        {
-            Leave();
+                    first = false;
+                }
+                else
+                {
+                    more = await keys.MoveNextAsync().ConfigureAwait(false);
+                }
+
+                if (!more)
+                {
+                    yield break;
+                }
+
+                lock (_gate)
+                {
+                    _keysListed++;
+                }
+
+                yield return keys.Current;
+            }
         }
     }
 

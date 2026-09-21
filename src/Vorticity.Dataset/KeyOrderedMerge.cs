@@ -13,9 +13,10 @@ namespace Vorticity.Dataset;
 /// <summary>
 /// One object waiting to be merged. <c>Bound</c> is a lower bound on its keys in the merge's
 /// encoding, empty when none is known, which has it opened before any row is emitted; of two rows
-/// with one key, the lower <c>Rank</c> comes first.
+/// with one key, the lower <c>Rank</c> comes first. <c>FirstRow</c> is where its rows start among
+/// the dataset's, which its runs' rows are counted from.
 /// </summary>
-internal readonly record struct MergeObject(ObjectEntry Entry, ReadOnlyMemory<byte> Bound, long Rank);
+internal readonly record struct MergeObject(ObjectEntry Entry, ReadOnlyMemory<byte> Bound, long Rank, long FirstRow = 0);
 
 /// <summary>
 /// Objects' key-ordered batches merged into one key order, one contiguous run of a batch at a time.
@@ -25,7 +26,7 @@ internal readonly record struct MergeObject(ObjectEntry Entry, ReadOnlyMemory<by
 /// </summary>
 internal sealed class KeyOrderedMerge : IAsyncDisposable
 {
-    private readonly VortexDataset _dataset;
+    private readonly DatasetSnapshot _version;
     private readonly IAsyncEnumerator<MergeObject> _objects;
     private readonly Func<VortexFile, ScanBuilder> _scan;
     private readonly Action<ObjectLease>? _opened;
@@ -49,7 +50,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     /// the emitting input runs through them, which keeps a compaction's runs longest.
     /// </summary>
     internal KeyOrderedMerge(
-        VortexDataset dataset,
+        DatasetSnapshot version,
         IAsyncEnumerable<MergeObject> objects,
         IReadOnlyList<string> paths,
         bool descending,
@@ -58,7 +59,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         Action<ObjectLease>? opened,
         CancellationToken cancellationToken)
     {
-        _dataset = dataset;
+        _version = version;
         _objects = objects.GetAsyncEnumerator(cancellationToken);
         _scan = scan;
         _opened = opened;
@@ -95,6 +96,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
 
     /// <summary>The most inputs held open at once.</summary>
     internal int MostOpen { get; private set; }
+
+    /// <summary>Where the rows of the object the run comes from start among the dataset's.</summary>
+    internal long CurrentFirstRow => Emitting().FirstRow;
 
     /// <summary>
     /// How one key column sorts in a merge in this direction. Nulls go last in both directions,
@@ -212,9 +216,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
 
     private async ValueTask OpenAsync(MergeObject next)
     {
-        ObjectLease lease = await _dataset.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
+        ObjectLease lease = await _version.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
         _opened?.Invoke(lease);
-        MergeInput input = new MergeInput(lease, next.Entry.Key, next.Rank, _paths, _fields);
+        MergeInput input = new MergeInput(lease, next.Entry.Key, next.Rank, next.FirstRow, _paths, _fields);
         try
         {
             await input.StartAsync(_scan(lease.File), _cancellationToken).ConfigureAwait(false);
@@ -330,11 +334,12 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         // may dispose what it was given, and stepping past it must not read it again.
         private int _rows;
 
-        internal MergeInput(ObjectLease lease, string key, long rank, string[] paths, RowSortField[] fields)
+        internal MergeInput(ObjectLease lease, string key, long rank, long firstRow, string[] paths, RowSortField[] fields)
         {
             _lease = lease;
             Object = key;
             Rank = rank;
+            FirstRow = firstRow;
             _paths = paths;
             _fields = fields;
         }
@@ -344,6 +349,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
 
         /// <summary>Where its ties go.</summary>
         internal long Rank { get; }
+
+        /// <summary>Where the object's rows start among the dataset's.</summary>
+        internal long FirstRow { get; }
 
         internal bool IsLive => _batch is not null;
 

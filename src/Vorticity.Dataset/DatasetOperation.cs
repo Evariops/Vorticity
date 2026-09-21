@@ -62,8 +62,8 @@ internal abstract record DatasetOperation
     public sealed record Repack(IReadOnlyList<ulong> Versions) : DatasetOperation;
 }
 
-/// <summary>What re-applying one operation decided.</summary>
-internal enum OperationOutcome
+/// <summary>What a commit made of one change, once re-applied to the version it landed on.</summary>
+public enum OperationOutcome
 {
     /// <summary>It changed the tree.</summary>
     Applied = 0,

@@ -1,9 +1,12 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.IO;
 
 namespace Vorticity.Dataset;
 
@@ -12,12 +15,13 @@ namespace Vorticity.Dataset;
 /// content is not: a process that dies mid-write leaves a short object under a taken key, which the
 /// format detects on read rather than the store preventing it.
 /// </summary>
-internal sealed class FileObjectStore : IObjectStore
+public sealed class FileObjectStore : IObjectStore
 {
     private readonly string _root;
     private bool _disposed;
 
     /// <summary>Opens a store over a directory, creating it if needed.</summary>
+    /// <param name="root">The directory the objects live in.</param>
     public FileObjectStore(string root)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(root);
@@ -70,23 +74,31 @@ internal sealed class FileObjectStore : IObjectStore
             }
 
             int available = (int)Math.Min(length, size - offset);
-            byte[] bytes = new byte[available];
-            int read = 0;
-            while (read < available)
+            (byte[] bytes, PooledBuffer owner) = PooledBuffer.Rent(available);
+            try
             {
-                int got = await System.IO.RandomAccess
-                    .ReadAsync(stream.SafeFileHandle, bytes.AsMemory(read), offset + read, cancellationToken)
-                    .ConfigureAwait(false);
-                if (got == 0)
+                int read = 0;
+                while (read < available)
                 {
-                    throw new ObjectStoreException(
-                        $"'{key}' ended after {read} of {available} bytes; it changed under the read.");
+                    int got = await RandomAccess
+                        .ReadAsync(stream.SafeFileHandle, bytes.AsMemory(read, available - read), offset + read, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (got == 0)
+                    {
+                        throw new ObjectStoreException(
+                            $"'{key}' ended after {read} of {available} bytes; it changed under the read.");
+                    }
+
+                    read += got;
                 }
 
-                read += got;
+                return new ObjectRange(new SegmentLease(bytes.AsMemory(0, available), owner), Token(new FileInfo(path)));
             }
-
-            return ObjectRange.CopyOf(bytes, Token(new FileInfo(path)));
+            catch
+            {
+                owner.Dispose();
+                throw;
+            }
         }
     }
 
@@ -104,78 +116,143 @@ internal sealed class FileObjectStore : IObjectStore
 
     /// <inheritdoc/>
     public async ValueTask<PutOutcome> PutIfAbsentAsync(
-        string key, ReadOnlyMemory<byte> content, CancellationToken cancellationToken)
+        string key, PipeReader content, long length, CancellationToken cancellationToken)
     {
-        ObjectKey.Check(key);
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        string path = PathOf(key);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        ArgumentNullException.ThrowIfNull(content);
         FileStream stream;
+        string path;
         try
         {
-            stream = new FileStream(
-                path,
-                FileMode.CreateNew,
-                FileAccess.Write,
-                FileShare.None,
-                bufferSize: 1,
-                Durable ? FileOptions.Asynchronous | FileOptions.WriteThrough : FileOptions.Asynchronous);
+            ObjectKey.Check(key);
+            ArgumentOutOfRangeException.ThrowIfNegative(length);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            cancellationToken.ThrowIfCancellationRequested();
+            path = PathOf(key);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            try
+            {
+                stream = new FileStream(
+                    path,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 1,
+                    Durable ? FileOptions.Asynchronous | FileOptions.WriteThrough : FileOptions.Asynchronous);
+            }
+            catch (IOException) when (System.IO.File.Exists(path))
+            {
+                await content.CompleteAsync().ConfigureAwait(false);
+                return PutOutcome.Exists;
+            }
         }
-        catch (IOException) when (System.IO.File.Exists(path))
+        catch (Exception refused)
         {
-            return PutOutcome.Exists;
+            await content.CompleteAsync(refused).ConfigureAwait(false);
+            throw;
         }
 
+        Exception? failure = null;
         try
         {
             await using (stream.ConfigureAwait(false))
             {
-                await stream.WriteAsync(content, cancellationToken).ConfigureAwait(false);
+                if (length > 0)
+                {
+                    stream.SetLength(length);
+                }
+
+                long written = 0;
+                while (true)
+                {
+                    ReadResult result = await content.ReadAsync(cancellationToken).ConfigureAwait(false);
+                    ReadOnlySequence<byte> buffer = result.Buffer;
+                    if (written + buffer.Length > length)
+                    {
+                        throw new ObjectStoreException(
+                            $"'{key}' was announced as {length} bytes and its content runs past them.");
+                    }
+
+                    foreach (ReadOnlyMemory<byte> segment in buffer)
+                    {
+                        await RandomAccess.WriteAsync(stream.SafeFileHandle, segment, written, cancellationToken).ConfigureAwait(false);
+                        written += segment.Length;
+                    }
+
+                    content.AdvanceTo(buffer.End);
+                    if (result.IsCanceled)
+                    {
+                        throw new OperationCanceledException($"The content of '{key}' was cancelled after {written} bytes.");
+                    }
+
+                    if (result.IsCompleted)
+                    {
+                        break;
+                    }
+                }
+
+                if (written != length)
+                {
+                    throw new ObjectStoreException($"'{key}' was announced as {length} bytes and its content ended after {written}.");
+                }
             }
         }
-        catch
+        catch (Exception caught)
         {
             // The claim is ours and the content is not: take the key back rather than leave a torn
             // object behind.
+            failure = caught;
             TryDelete(path);
             throw;
+        }
+        finally
+        {
+            await content.CompleteAsync(failure).ConfigureAwait(false);
         }
 
         return PutOutcome.Created;
     }
 
     /// <inheritdoc/>
-    public ValueTask<bool> DeleteAsync(string key, CancellationToken cancellationToken)
+    public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken)
     {
-        ObjectKey.Check(key);
+        ArgumentNullException.ThrowIfNull(keys);
         ObjectDisposedException.ThrowIf(_disposed, this);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        string path = PathOf(key);
-        if (!System.IO.File.Exists(path))
+        foreach (string key in keys)
         {
-            return new ValueTask<bool>(false);
+            ObjectKey.Check(key);
         }
 
-        System.IO.File.Delete(path);
-        return new ValueTask<bool>(true);
+        foreach (string key in keys)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            string path = PathOf(key);
+            if (System.IO.File.Exists(path))
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+
+        return ValueTask.CompletedTask;
     }
 
     /// <inheritdoc/>
-    public ValueTask<IReadOnlyList<string>> ListAsync(
-        string prefix, string? startAfter, int max, CancellationToken cancellationToken)
+    public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(prefix);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(max);
         ObjectDisposedException.ThrowIf(_disposed, this);
-        cancellationToken.ThrowIfCancellationRequested();
+        return System.Linq.AsyncEnumerable.ToAsyncEnumerable(Keys(prefix, startAfter, cancellationToken));
+    }
 
-        // A directory walk has no order, so the ordinal order callers rely on is imposed here.
+    /// <summary>
+    /// The keys under a prefix, sorted: a directory walk has no order, so the ordinal order callers
+    /// rely on is imposed here, over one walk, when the enumeration starts.
+    /// </summary>
+    private IEnumerable<string> Keys(string prefix, string? startAfter, CancellationToken cancellationToken)
+    {
         List<string> keys = [];
         foreach (string file in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
         {
+            cancellationToken.ThrowIfCancellationRequested();
             string key = Path.GetRelativePath(_root, file).Replace(Path.DirectorySeparatorChar, '/');
             if (key.StartsWith(prefix, StringComparison.Ordinal)
                 && (startAfter is not { } after || string.CompareOrdinal(key, after) > 0))
@@ -185,12 +262,10 @@ internal sealed class FileObjectStore : IObjectStore
         }
 
         keys.Sort(StringComparer.Ordinal);
-        if (keys.Count > max)
+        foreach (string key in keys)
         {
-            keys.RemoveRange(max, keys.Count - max);
+            yield return key;
         }
-
-        return new ValueTask<IReadOnlyList<string>>(keys);
     }
 
     /// <inheritdoc/>

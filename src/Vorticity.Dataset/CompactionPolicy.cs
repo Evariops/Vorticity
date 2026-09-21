@@ -44,15 +44,17 @@ internal static class CompactionPolicy
         }
 
         CompactionJob? job = Choose(dataset, levels, objects, bytes, settings, style);
-        return new CompactionPlan(
-            dataset.Version,
-            objects,
-            bytes,
-            dataset.Lag,
-            clustered,
-            style,
-            job,
-            fragmented);
+        return new CompactionPlan
+        {
+            Version = dataset.Version,
+            ObjectsByLevel = [.. objects],
+            BytesByLevel = [.. bytes],
+            Lag = dataset.Lag,
+            IsClustered = clustered,
+            Style = style,
+            Job = job,
+            FragmentedObjects = fragmented,
+        };
     }
 
     /// <summary>The first trigger that fires, in order of priority.</summary>
@@ -137,7 +139,7 @@ internal static class CompactionPolicy
         }
 
         return new CompactionJob(
-            from, to, style, trigger, inputs, settings.TargetBytes(to), FirstRow(levels, inputs));
+            from, to, style, trigger, inputs, settings.TargetBytes(to), FirstRow(dataset, levels, inputs));
     }
 
     /// <summary>The objects a leveled compaction drains out of the source level.</summary>
@@ -191,8 +193,13 @@ internal static class CompactionPolicy
         return run.Count > best.Count ? run : best;
     }
 
-    /// <summary>Where the first of the inputs' rows sits in the dataset, in the tree's own order.</summary>
-    private static long FirstRow(List<List<CompactionInput>> levels, List<CompactionInput> inputs)
+    /// <summary>
+    /// Where the first of the inputs sits, in the tree's own order: its position when the dataset
+    /// is ordered by arrival, which the outputs take over, and its first row otherwise. The position
+    /// and the first row agree until an object is removed, and after that only the position keeps the
+    /// outputs where the inputs were.
+    /// </summary>
+    private static long FirstRow(VortexDataset dataset, List<List<CompactionInput>> levels, List<CompactionInput> inputs)
     {
         HashSet<string> taken = new HashSet<string>(StringComparer.Ordinal);
         foreach (CompactionInput input in inputs)
@@ -205,7 +212,7 @@ internal static class CompactionPolicy
         {
             if (taken.Contains(input.Entry.Key))
             {
-                return row;
+                return dataset.Key is null ? VortexDataset.PositionAt(input.Key.Span) : row;
             }
 
             row += input.Entry.Rows;

@@ -65,7 +65,7 @@ internal static class CommitFormat
 internal readonly record struct CommitTrailer(long TableOffset, int TableLength, long ObjectLength, ulong Checksum);
 
 /// <summary>A commit object is not what it claims to be.</summary>
-internal sealed class CommitFormatException : Exception
+internal sealed class CommitFormatException : VortexException
 {
     /// <summary>Creates the exception with a default message.</summary>
     public CommitFormatException()

@@ -10,29 +10,44 @@ using Vorticity.Writing;
 namespace Vorticity.Dataset;
 
 /// <summary>What one compaction did.</summary>
-/// <param name="Version">The version it created, or the one it found when it was abandoned.</param>
-/// <param name="FromLevel">The level it read.</param>
-/// <param name="ToLevel">The level it wrote.</param>
-/// <param name="Trigger">Why it ran.</param>
-/// <param name="Style">Whether it merged or concatenated.</param>
-/// <param name="ObjectsIn">The objects it read.</param>
-/// <param name="ObjectsOut">The objects it wrote.</param>
-/// <param name="Rows">The rows it rewrote.</param>
-/// <param name="BytesIn">The bytes it read, the denominator of write amplification.</param>
-/// <param name="BytesOut">The bytes it wrote.</param>
-/// <param name="Outcome">What the commit made of it.</param>
-internal sealed record CompactionResult(
-    ulong Version,
-    int FromLevel,
-    int ToLevel,
-    CompactionTrigger Trigger,
-    CompactionStyle Style,
-    long ObjectsIn,
-    long ObjectsOut,
-    long Rows,
-    long BytesIn,
-    long BytesOut,
-    OperationOutcome Outcome);
+public sealed record CompactionResult
+{
+    /// <summary>The version it created, or the one it found when it was abandoned.</summary>
+    public ulong Version { get; init; }
+
+    /// <summary>The level it read.</summary>
+    public int FromLevel { get; init; }
+
+    /// <summary>The level it wrote.</summary>
+    public int ToLevel { get; init; }
+
+    /// <summary>Why it ran.</summary>
+    public CompactionTrigger Trigger { get; init; }
+
+    /// <summary>Whether it merged or concatenated.</summary>
+    public CompactionStyle Style { get; init; }
+
+    /// <summary>The objects it read.</summary>
+    public long ObjectsIn { get; init; }
+
+    /// <summary>The objects it wrote.</summary>
+    public long ObjectsOut { get; init; }
+
+    /// <summary>The rows it rewrote.</summary>
+    public long Rows { get; init; }
+
+    /// <summary>The bytes it read, the denominator of write amplification.</summary>
+    public long BytesIn { get; init; }
+
+    /// <summary>The bytes it wrote.</summary>
+    public long BytesOut { get; init; }
+
+    /// <summary>
+    /// What the commit made of it: applied, or abandoned because another compaction took an input
+    /// first, in which case its outputs are left for vacuum.
+    /// </summary>
+    public OperationOutcome Outcome { get; init; }
+}
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the clustering key when there is
 /// one, a concatenation otherwise.</summary>
@@ -108,18 +123,20 @@ internal static class DatasetCompactor
         CommitResult commit = await dataset
             .CommitAsync([replacement], cancellationToken).ConfigureAwait(false);
 
-        return new CompactionResult(
-            commit.Version,
-            job.FromLevel,
-            job.ToLevel,
-            job.Trigger,
-            job.Style,
-            job.Inputs.Count,
-            outputs.Written.Count,
-            rows,
-            job.Bytes,
-            outputs.Bytes,
-            commit.Outcomes.Count == 1 ? commit.Outcomes[0] : OperationOutcome.Applied);
+        return new CompactionResult
+        {
+            Version = commit.Version,
+            FromLevel = job.FromLevel,
+            ToLevel = job.ToLevel,
+            Trigger = job.Trigger,
+            Style = job.Style,
+            ObjectsIn = job.Inputs.Count,
+            ObjectsOut = outputs.Written.Count,
+            Rows = rows,
+            BytesIn = job.Bytes,
+            BytesOut = outputs.Bytes,
+            Outcome = commit.Outcomes.Count == 1 ? commit.Outcomes[0] : OperationOutcome.Applied,
+        };
     }
 
     private static void Check(ClusteringKey? key, CompactionJob job)
@@ -198,18 +215,20 @@ internal static class DatasetCompactor
             }
         }
 
-        return new CompactionResult(
-            commit.Version,
-            job.FromLevel,
-            job.ToLevel,
-            job.Trigger,
-            job.Style,
-            job.Inputs.Count,
-            job.Inputs.Count,
-            0,
-            bytesIn,
-            bytesOut,
-            outcome);
+        return new CompactionResult
+        {
+            Version = commit.Version,
+            FromLevel = job.FromLevel,
+            ToLevel = job.ToLevel,
+            Trigger = job.Trigger,
+            Style = job.Style,
+            ObjectsIn = job.Inputs.Count,
+            ObjectsOut = job.Inputs.Count,
+            Rows = 0,
+            BytesIn = bytesIn,
+            BytesOut = bytesOut,
+            Outcome = outcome,
+        };
     }
 
     /// <summary>Each input's rows, in its own order, one after another.</summary>
@@ -256,7 +275,7 @@ internal static class DatasetCompactor
 
         IReadOnlyList<string> paths = key.Paths;
         KeyOrderedMerge merge = new KeyOrderedMerge(
-            dataset,
+            dataset.Snapshot,
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
             key.Paths,
             descending: false,

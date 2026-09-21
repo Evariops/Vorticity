@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Keys;
+using Vorticity.Layouts;
 using Vorticity.RowEncoding;
 using Vorticity.Scanning;
 using Vorticity.Types;
@@ -33,7 +35,7 @@ internal sealed class DatasetScanMetrics
     /// <summary>Rents the object cache answered without opening anything.</summary>
     public long CacheHits { get; internal set; }
 
-    /// <summary>The objects a count answered from their entries, without opening them.</summary>
+    /// <summary>The objects an answer took from their entries, without opening them.</summary>
     public long ObjectsCounted { get; internal set; }
 
     /// <summary>
@@ -43,22 +45,36 @@ internal sealed class DatasetScanMetrics
     public int Cursors { get; internal set; }
 }
 
-/// <summary>Builds a scan over every object of one version of a dataset.</summary>
+/// <summary>
+/// Builds a scan over every object of one version of a dataset: the engine a
+/// <see cref="DatasetScanSource"/> compiles the core's scans to. Each object is read by the core's
+/// own file scan, carrying the filter, the projection, the rows and the options, and its batches
+/// are counted from the object's first row among the dataset's.
+/// </summary>
 internal sealed class DatasetScanBuilder
 {
     private readonly VortexDataset _dataset;
+    private readonly DatasetSnapshot _version;
     private VortexExpr? _filter;
-    private string[]? _projection;
+    private FieldMask? _mask;
     private bool _indexes = true;
     private bool _summaries = true;
     private long _from;
     private long _to = long.MaxValue;
     private bool _rowsSet;
+    private long[]? _take;
     private string[]? _orderPaths;
     private bool _descending;
     private DatasetScanMetrics? _metrics;
+    private ScanMetrics? _counters;
+    private ScanOptions _options = ScanOptions.Default;
+    private bool _keepEncodings;
 
-    internal DatasetScanBuilder(VortexDataset dataset) => _dataset = dataset;
+    internal DatasetScanBuilder(VortexDataset dataset, DatasetSnapshot version)
+    {
+        _dataset = dataset;
+        _version = version;
+    }
 
     /// <summary>Keeps the rows the predicate selects.</summary>
     public DatasetScanBuilder Where(VortexExpr filter)
@@ -67,10 +83,10 @@ internal sealed class DatasetScanBuilder
         return this;
     }
 
-    /// <summary>Reads only these columns.</summary>
-    public DatasetScanBuilder Select(params string[] paths)
+    /// <summary>Reads only the columns of <paramref name="mask"/>, which is resolved against the dataset's schema and so fits every object.</summary>
+    public DatasetScanBuilder Project(in FieldMask mask)
     {
-        _projection = paths;
+        _mask = mask;
         return this;
     }
 
@@ -79,20 +95,58 @@ internal sealed class DatasetScanBuilder
     /// tree's row sums, so an object outside the range is neither opened nor counted and a subtree
     /// outside it is never read.
     /// </summary>
-    /// <exception cref="InvalidOperationException"><see cref="InKeyOrder(string, bool)"/> was already set.</exception>
+    /// <exception cref="InvalidOperationException">The scan is key-ordered, or selects rows by index.</exception>
     public DatasetScanBuilder Rows(long from, long to)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(from);
         ArgumentOutOfRangeException.ThrowIfLessThan(to, from);
-        if (_orderPaths is not null)
+        if (_orderPaths is not null || _take is not null)
         {
             throw new InvalidOperationException(
-                "A key-ordered scan walks the objects' key sources; it cannot also select rows by position (12 §6).");
+                "A scan selects rows by range, by index or by key order, one of them at a time.");
         }
 
         _from = from;
         _to = to;
         _rowsSet = true;
+        return this;
+    }
+
+    /// <summary>
+    /// Reads only the dataset's rows at <paramref name="rows"/>, sorted and deduplicated. An object
+    /// that holds none of them is neither opened nor counted.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">A row is negative, or past the version's rows.</exception>
+    /// <exception cref="InvalidOperationException">The scan is key-ordered, or selects a range.</exception>
+    public DatasetScanBuilder Take(ReadOnlySpan<long> rows)
+    {
+        if (_orderPaths is not null || _rowsSet)
+        {
+            throw new InvalidOperationException(
+                "A scan selects rows by range, by index or by key order, one of them at a time.");
+        }
+
+        long[] sorted = rows.ToArray();
+        Array.Sort(sorted);
+        int distinct = 0;
+        for (int i = 0; i < sorted.Length; i++)
+        {
+            if (i == 0 || sorted[i] != sorted[distinct - 1])
+            {
+                sorted[distinct++] = sorted[i];
+            }
+        }
+
+        if (distinct > 0 && (sorted[0] < 0 || sorted[distinct - 1] >= _version.RowCount))
+        {
+            long wrong = sorted[0] < 0 ? sorted[0] : sorted[distinct - 1];
+            throw new ArgumentOutOfRangeException(
+                nameof(rows), wrong, $"Version {_version.Version} of the dataset holds {_version.RowCount} rows.");
+        }
+
+        _take = sorted.AsSpan(0, distinct).ToArray();
+        _from = distinct == 0 ? 0 : _take[0];
+        _to = distinct == 0 ? 0 : _take[^1] + 1;
         return this;
     }
 
@@ -106,16 +160,16 @@ internal sealed class DatasetScanBuilder
     /// that stops after <c>k</c> rows never opens an object whose minimum lies past the k-th key; on
     /// any other column every object the summaries keep may be open at once. A row whose key is null
     /// comes last in both directions, and an object with no source for the column is refused when
-    /// the merge reaches it. Mutually exclusive with <see cref="Rows"/>.
+    /// the merge reaches it.
     /// </remarks>
-    /// <exception cref="InvalidOperationException"><see cref="Rows"/> was already set.</exception>
+    /// <exception cref="InvalidOperationException">The scan selects rows by range or by index.</exception>
     public DatasetScanBuilder InKeyOrder(string path, bool descending = false) => InKeyOrder([path], descending);
 
     /// <summary>
     /// Delivers the rows in the order of a composite key, the tuple of the given columns in key
     /// order. A row whose tuple holds a null is in no run and is not delivered.
     /// </summary>
-    /// <exception cref="InvalidOperationException"><see cref="Rows"/> was already set.</exception>
+    /// <exception cref="InvalidOperationException">The scan selects rows by range or by index.</exception>
     public DatasetScanBuilder InKeyOrder(IReadOnlyList<string> paths, bool descending = false)
     {
         ArgumentNullException.ThrowIfNull(paths);
@@ -126,13 +180,13 @@ internal sealed class DatasetScanBuilder
 
         foreach (string path in paths)
         {
-            _ = ClusteringKey.Resolve(_dataset.Schema, path);
+            _ = ClusteringKey.Resolve(_dataset.DType, path);
         }
 
-        if (_rowsSet)
+        if (_rowsSet || _take is not null)
         {
             throw new InvalidOperationException(
-                "A key-ordered scan walks the objects' key sources; it cannot also select rows by position (12 §6).");
+                "A key-ordered scan walks the objects' key sources; it cannot also select rows by range or by index.");
         }
 
         _orderPaths = [.. paths];
@@ -164,9 +218,28 @@ internal sealed class DatasetScanBuilder
         return this;
     }
 
-    /// <summary>The batches of every object the scan did not skip, in key order.</summary>
+    /// <summary>Adds what every object's own scan requests, decodes and delivers to <paramref name="counters"/>.</summary>
+    public DatasetScanBuilder WithCounters(ScanMetrics counters)
+    {
+        _counters = counters;
+        return this;
+    }
+
+    /// <summary>
+    /// Runs every object's scan under <paramref name="options"/>: the batch cap, zone-map pruning,
+    /// the degree of parallelism, the prefetch and compaction; <paramref name="keepEncodings"/> lets
+    /// the decoders deliver dictionary and run-end columns encoded.
+    /// </summary>
+    public DatasetScanBuilder WithOptions(ScanOptions options, bool keepEncodings)
+    {
+        _options = options ?? throw new ArgumentNullException(nameof(options));
+        _keepEncodings = keepEncodings;
+        return this;
+    }
+
+    /// <summary>The batches of every object the scan did not skip, in key order, borrowed: each is valid until the next is asked for.</summary>
     public async IAsyncEnumerable<RecordBatch> ExecuteAsync(
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         if (_orderPaths is { } paths)
         {
@@ -180,43 +253,51 @@ internal sealed class DatasetScanBuilder
 
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
-            ObjectLease lease = await _dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            if (Covered(held) == 0)
+            {
+                continue;
+            }
+
+            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
                 await foreach (RecordBatch batch in Of(lease.File, held).ExecuteAsync()
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
-                    yield return batch;
+                    yield return InDataset(batch, held.FirstRow);
                 }
             }
         }
     }
 
     /// <summary>
-    /// The rows the scan selects, without materialising them. A range on the clustering key is
-    /// counted from the entries: an object whose summary bounds lie wholly inside the range, and
-    /// whose key holds no null, contributes its row count without being opened. Any other filter
-    /// opens every object the summaries keep.
+    /// The rows the scan selects, without materialising them, cheapest proof first: an object whose
+    /// covered rows are all kept is counted from its entry without being opened, which is every
+    /// object when there is no filter and, under a range on the clustering key, an object whose
+    /// summary bounds lie wholly inside it and whose key holds no null; any other object is counted
+    /// by its own file's count, from statistics, zone maps and indexes before any decode.
     /// </summary>
     public async ValueTask<long> CountAsync(CancellationToken cancellationToken = default)
     {
         long rows = 0;
-        KeyRange? range = _summaries && !_rowsSet ? KeyRange.Of(_dataset, _filter) : null;
+        KeyRange? range = CountRange();
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
-            if (range is { } key && key.Holds(held.Entry.Summaries))
+            long covered = Covered(held);
+            if (covered == 0)
             {
-                rows += held.Entry.Rows;
-                if (_metrics is { } counted)
-                {
-                    counted.ObjectsCounted++;
-                }
-
                 continue;
             }
 
-            ObjectLease lease = await _dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            if (Settled(held, range))
+            {
+                rows += covered;
+                RecordCounted();
+                continue;
+            }
+
+            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -229,13 +310,25 @@ internal sealed class DatasetScanBuilder
 
     /// <summary>
     /// Whether the scan would return at least one row; the first object that holds one answers for
-    /// the dataset.
+    /// the dataset, and one whose entry settles it answers without being opened.
     /// </summary>
     public async ValueTask<bool> AnyAsync(CancellationToken cancellationToken = default)
     {
+        KeyRange? range = CountRange();
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
-            ObjectLease lease = await _dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            if (Covered(held) == 0)
+            {
+                continue;
+            }
+
+            if (Settled(held, range))
+            {
+                RecordCounted();
+                return true;
+            }
+
+            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -264,10 +357,190 @@ internal sealed class DatasetScanBuilder
         ExtremeAsync(path, wantMin: false, cancellationToken);
 
     /// <summary>
+    /// What the scan would read, without reading a data object. A level 0 that has outgrown its
+    /// ceiling is reported as a lag rather than refused, since compaction is the caller's own
+    /// background job and the answers stay correct meanwhile.
+    /// </summary>
+    public async ValueTask<DatasetPlan> ExplainAsync(CancellationToken cancellationToken = default)
+    {
+        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        long objects = 0;
+        long rows = 0;
+        List<long> keptByLevel = [];
+        await foreach (PositionedObject held in _version
+            .WalkAsync(Pruner(), _from, _to, metrics, cancellationToken).ConfigureAwait(false))
+        {
+            if (Covered(held) == 0)
+            {
+                continue;
+            }
+
+            objects++;
+            rows += held.Entry.Rows;
+            while (keptByLevel.Count <= held.Level)
+            {
+                keptByLevel.Add(0);
+            }
+
+            keptByLevel[held.Level]++;
+        }
+
+        DatasetLevels levels = _version.Levels;
+        long[] byLevel = new long[Math.Max(levels.Count, 1)];
+        for (int level = 0; level < byLevel.Length; level++)
+        {
+            byLevel[level] = levels[level].Entries;
+        }
+
+        return new DatasetPlan(
+            _version.Version,
+            byLevel,
+            levels.LagAtLevelZero(),
+            _version.Header.ClusteringKey.Count > 0,
+            objects,
+            rows,
+            metrics.ObjectsSkipped,
+            metrics.SubtreesSkipped,
+            _orderPaths is null ? null : _orderPaths.Length == 1 ? _orderPaths[0] : "(" + string.Join(", ", _orderPaths) + ")",
+            CursorBound(objects, keptByLevel));
+    }
+
+    /// <summary>
+    /// What the scan will do as the core's plan, summed over the objects it would open: each one's
+    /// own plan, worked out from its statistics, zone maps and indexes, and before them the rows the
+    /// summaries refute as one step. No data segment is read, but every kept object is opened.
+    /// </summary>
+    /// <remarks>
+    /// An object the summaries refute is never opened, so its blocks are counted at the block size
+    /// of the objects that were, or at the dataset's own when none was.
+    /// </remarks>
+    public async ValueTask<ScanPlan> PlanAsync(CancellationToken cancellationToken = default)
+    {
+        long keptRows = 0;
+        long blockRows = 0;
+        long blocks = 0;
+        long live = 0;
+        long segments = 0;
+        long bytes = 0;
+        bool mayMatch = false;
+        List<PruningStep> steps = [];
+        Dictionary<string, int> stepAt = new Dictionary<string, int>(StringComparer.Ordinal);
+        bool exact = true;
+        long exactRows = 0;
+        long pruned = 0;
+        long proven = 0;
+        long decoded = 0;
+        List<string> sources = [];
+        long runs = 0;
+        long entries = 0;
+        KeyRange? range = CountRange();
+        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        {
+            long covered = Covered(held);
+            if (covered == 0)
+            {
+                continue;
+            }
+
+            keptRows += covered;
+            ScanExplanation plan;
+            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
+            {
+                RecordOpen(lease);
+                ScanBuilder scan = _orderPaths is { } paths ? OrderedOf(lease.File, paths, withKey: false) : Of(lease.File, held);
+                plan = await scan.ExplainAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            blockRows = blockRows == 0 ? plan.BlockRows : blockRows;
+            blocks += plan.Blocks;
+            live += plan.LiveBlocks;
+            segments += plan.SegmentsToRead;
+            bytes += plan.BytesToRead;
+            mayMatch |= plan.FileMayMatch;
+            foreach (PruningStep step in plan.Pruning)
+            {
+                if (stepAt.TryGetValue(step.Structure, out int at))
+                {
+                    PruningStep sum = steps[at];
+                    steps[at] = sum with
+                    {
+                        BlocksPruned = sum.BlocksPruned + step.BlocksPruned,
+                        SegmentsRead = sum.SegmentsRead + step.SegmentsRead,
+                        BytesRead = sum.BytesRead + step.BytesRead,
+                    };
+                }
+                else
+                {
+                    stepAt[step.Structure] = steps.Count;
+                    steps.Add(step);
+                }
+            }
+
+            if (Settled(held, range) || plan.Count is null)
+            {
+                exactRows += covered;
+            }
+            else
+            {
+                CountExplanation count = plan.Count;
+                exact &= count.ExactCover;
+                exactRows += count.ExactCount;
+                pruned += count.SplitsPruned;
+                proven += count.SplitsProven;
+                decoded += count.SplitsDecoded;
+            }
+
+            if (plan.Order is { } order)
+            {
+                string source = order.Source.ToString();
+                if (!sources.Contains(source))
+                {
+                    sources.Add(source);
+                }
+
+                runs += order.RunsInRange;
+                entries += order.EntriesInRange;
+            }
+        }
+
+        long coveredRows = _take is { } take ? take.Length : Math.Max(Math.Min(_to, _version.RowCount) - _from, 0);
+        long refuted = Math.Max(coveredRows - keptRows, 0);
+        long perBlock = blockRows > 0 ? blockRows : Math.Max(_dataset.Options.Write.BlockRows, 1);
+        long refutedBlocks = (refuted + perBlock - 1) / perBlock;
+        List<PruningStep> pruning = new List<PruningStep>(steps.Count + 1);
+        if (refutedBlocks > 0)
+        {
+            pruning.Add(new PruningStep("object summaries", Narrow(refutedBlocks), 0, 0));
+        }
+
+        pruning.AddRange(steps);
+        return new ScanPlan(
+            coveredRows,
+            Narrow(blocks + refutedBlocks),
+            Narrow(live),
+            Narrow(segments),
+            bytes,
+            mayMatch,
+            [.. pruning],
+            new CountPlan(exact, exactRows, Narrow(pruned), Narrow(proven), Narrow(decoded)),
+            _orderPaths is null
+                ? null
+                : new OrderPlan(sources.Count == 0 ? nameof(KeySourceKind.None) : string.Join('+', sources), Narrow(runs), entries, _descending));
+    }
+
+    /// <summary>
+    /// The objects this scan will read, in key order, each with its first row: the walk with its
+    /// skips applied, and not one byte of any data object read.
+    /// </summary>
+    public IAsyncEnumerable<PositionedObject> ObjectsAsync(CancellationToken cancellationToken = default) =>
+        WalkAsync(cancellationToken);
+
+    /// <summary>
     /// The extreme over the objects, each one skipped when its own summary cannot beat the best so
-    /// far. A summary's min is at or below the object's true minimum, so a summary min that already
-    /// loses cannot hide a winner behind it; the bounds need not be exact, and no shortcut here may
-    /// assume they are.
+    /// far, and taken from its summary without being opened when that summary is exact and covers
+    /// every row the scan keeps in it. A summary's min is at or below the object's true minimum, so
+    /// a summary min that already loses cannot hide a winner behind it.
     /// </summary>
     private async ValueTask<FilterLiteral> ExtremeAsync(
         string path, bool wantMin, CancellationToken cancellationToken)
@@ -276,6 +549,11 @@ internal sealed class DatasetScanBuilder
         FilterLiteral best = FilterLiteral.Null;
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
+            if (Covered(held) == 0)
+            {
+                continue;
+            }
+
             if (_summaries && Loses(held.Entry.Summaries, path, best, wantMin))
             {
                 if (_metrics is { } skipped)
@@ -286,7 +564,18 @@ internal sealed class DatasetScanBuilder
                 continue;
             }
 
-            ObjectLease lease = await _dataset.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+            if (_summaries && _filter is null && Whole(held) && Exact(held.Entry.Summaries, path, wantMin, out FilterLiteral bound))
+            {
+                if (Beats(bound, best, wantMin))
+                {
+                    best = bound;
+                }
+
+                RecordCounted();
+                continue;
+            }
+
+            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
@@ -320,6 +609,19 @@ internal sealed class DatasetScanBuilder
         return column.HasMax && Comparable(column.Max, best) && KeyCursor.Compare(column.Max, best) <= 0;
     }
 
+    /// <summary>The true extreme an object's summary records, when it records one.</summary>
+    private static bool Exact(ObjectSummaries summaries, string path, bool wantMin, out FilterLiteral bound)
+    {
+        bound = FilterLiteral.Null;
+        if (!summaries.TryGet(path, out ColumnSummary column) || !column.IsExact)
+        {
+            return false;
+        }
+
+        bound = wantMin ? column.Min : column.Max;
+        return (wantMin ? column.HasMin : column.HasMax) && bound.Kind != FilterLiteralKind.Null;
+    }
+
     private static bool Beats(FilterLiteral candidate, FilterLiteral best, bool wantMin) =>
         best.Kind == FilterLiteralKind.Null
         || !Comparable(candidate, best)
@@ -329,62 +631,53 @@ internal sealed class DatasetScanBuilder
     private static bool Comparable(FilterLiteral left, FilterLiteral right) =>
         left.Kind == right.Kind && left.Kind != FilterLiteralKind.Null;
 
+    /// <summary>The range on the clustering key the entries can count the filter by, or null.</summary>
+    private KeyRange? CountRange() => _filter is not null && _summaries ? KeyRange.Of(_dataset, _filter) : null;
+
     /// <summary>
-    /// What the scan would read, without reading a data object. A level 0 that has outgrown its
-    /// ceiling is reported as a lag rather than refused, since compaction is the caller's own
-    /// background job and the answers stay correct meanwhile.
+    /// Whether every row the scan covers in an object is kept, known without opening it: there is
+    /// no filter, or the object lies wholly inside the scan and inside a range on the clustering key.
     /// </summary>
-    public async ValueTask<DatasetPlan> ExplainAsync(CancellationToken cancellationToken = default)
+    private bool Settled(in PositionedObject held, KeyRange? range) =>
+        _filter is null || (range is { } key && Whole(held) && key.Holds(held.Entry.Summaries));
+
+    /// <summary>Whether the scan covers every row of an object.</summary>
+    private bool Whole(in PositionedObject held) =>
+        _take is null && _from <= held.FirstRow && held.FirstRow + held.Entry.Rows <= _to;
+
+    /// <summary>The object's rows the scan covers: those it takes by index, or its part of the range.</summary>
+    private long Covered(in PositionedObject held)
     {
-        DatasetScanMetrics metrics = new DatasetScanMetrics();
-        DatasetScanBuilder counted = new DatasetScanBuilder(_dataset)
+        if (_take is not null)
         {
-            _filter = _filter,
-            _projection = _projection,
-            _indexes = _indexes,
-            _summaries = _summaries,
-            _from = _from,
-            _to = _to,
-            _rowsSet = _rowsSet,
-            _orderPaths = _orderPaths,
-            _descending = _descending,
-            _metrics = metrics,
-        };
-
-        long objects = 0;
-        long rows = 0;
-        List<long> keptByLevel = [];
-        await foreach (PositionedObject held in counted.WalkAsync(cancellationToken).ConfigureAwait(false))
-        {
-            objects++;
-            rows += held.Entry.Rows;
-            while (keptByLevel.Count <= held.Level)
-            {
-                keptByLevel.Add(0);
-            }
-
-            keptByLevel[held.Level]++;
+            return TakenBy(held).Count;
         }
 
-        DatasetLevels levels = _dataset.Levels;
-        long[] byLevel = new long[Math.Max(levels.Count, 1)];
-        for (int level = 0; level < byLevel.Length; level++)
-        {
-            byLevel[level] = levels[level].Entries;
-        }
-
-        return new DatasetPlan(
-            _dataset.Version,
-            byLevel,
-            levels.LagAtLevelZero(),
-            _dataset.ClusteringKeyPaths.Count > 0,
-            objects,
-            rows,
-            metrics.ObjectsSkipped,
-            metrics.SubtreesSkipped,
-            _orderPaths is null ? null : _orderPaths.Length == 1 ? _orderPaths[0] : "(" + string.Join(", ", _orderPaths) + ")",
-            CursorBound(objects, keptByLevel));
+        long lower = Math.Max(_from, held.FirstRow);
+        long upper = Math.Min(_to, held.FirstRow + held.Entry.Rows);
+        return Math.Max(upper - lower, 0);
     }
+
+    /// <summary>Where the object's rows begin and how many there are among the rows the scan takes.</summary>
+    private (int First, int Count) TakenBy(in PositionedObject held)
+    {
+        long[] take = _take!;
+        int first = LowerBound(take, held.FirstRow);
+        int end = LowerBound(take, held.FirstRow + held.Entry.Rows);
+        return (first, end - first);
+    }
+
+    private static int LowerBound(long[] sorted, long value)
+    {
+        int found = Array.BinarySearch(sorted, value);
+        return found >= 0 ? found : ~found;
+    }
+
+    private static int Narrow(long value) => (int)Math.Min(value, int.MaxValue);
+
+    /// <summary>A file's batch seen as the dataset's rows: row 0 is the object's row <c>StartRow</c>, after the rows before the object.</summary>
+    private static RecordBatch InDataset(RecordBatch batch, long firstRow) =>
+        firstRow == 0 ? batch : batch.Rebased(firstRow + batch.StartRow);
 
     /// <summary>
     /// The most objects the scan will hold open at once, stated before any is read: one in the
@@ -427,22 +720,12 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     private bool RidesDisjointLevels(string[] paths) =>
         IsClusteringKey(paths)
-        && (!_descending || (paths.Length == 1 && HasKeyOrderBounds(ClusteringKey.Resolve(_dataset.Schema, paths[0]))));
+        && (!_descending || (paths.Length == 1 && HasKeyOrderBounds(ClusteringKey.Resolve(_dataset.DType, paths[0]))));
 
-    /// <summary>
-    /// The objects this scan will read, in key order, each with its first row: the walk with its
-    /// skips applied, and not one byte of any data object read.
-    /// </summary>
-    public IAsyncEnumerable<PositionedObject> ObjectsAsync(CancellationToken cancellationToken = default) =>
-        WalkAsync(cancellationToken);
+    private SummaryPruner? Pruner() => _summaries && _filter is { } filter ? new SummaryPruner(filter) : null;
 
     private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken) =>
-        _dataset.WalkAsync(
-            _summaries && _filter is { } filter ? new SummaryPruner(filter) : null,
-            _from,
-            _to,
-            _metrics,
-            cancellationToken);
+        _version.WalkAsync(Pruner(), _from, _to, _metrics, cancellationToken);
 
     private void RecordOpen(ObjectLease lease)
     {
@@ -457,16 +740,24 @@ internal sealed class DatasetScanBuilder
         }
     }
 
+    private void RecordCounted()
+    {
+        if (_metrics is { } metrics)
+        {
+            metrics.ObjectsCounted++;
+        }
+    }
+
     /// <summary>The key-ordered read: every kept object's own key-ordered scan, merged.</summary>
     private async IAsyncEnumerable<RecordBatch> MergedAsync(
-        string[] paths, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        string[] paths, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         // The key is read whatever the projection says, and dropped before a batch goes out.
-        string[] selected = _projection ?? [];
-        bool drop = _projection is not null && !Array.TrueForAll(paths, path => Covers(selected, path));
+        FieldMask mask = _mask ?? FieldMask.All;
+        bool drop = !mask.IsAll && !Array.TrueForAll(paths, path => Covers(mask, _dataset.DType, path));
         Projection? kept = null;
         KeyOrderedMerge merge = new KeyOrderedMerge(
-            _dataset,
+            _version,
             MergeObjectsAsync(paths, cancellationToken),
             paths,
             _descending,
@@ -481,17 +772,18 @@ internal sealed class DatasetScanBuilder
                 while (await merge.MoveNextAsync().ConfigureAwait(false))
                 {
                     RecordBatch run = merge.Current;
+                    long firstRow = merge.CurrentFirstRow;
                     if (!drop)
                     {
-                        yield return run;
+                        yield return InDataset(run, firstRow);
                         continue;
                     }
 
-                    kept ??= Projection.Parse(run.DType, selected);
+                    kept ??= Projection.Parse(run.DType, PathsOf(mask, _dataset.DType));
                     RecordBatch projected = run.Project(kept.Value);
                     try
                     {
-                        yield return projected;
+                        yield return InDataset(projected, firstRow);
                     }
                     finally
                     {
@@ -518,7 +810,7 @@ internal sealed class DatasetScanBuilder
     /// not downward.
     /// </summary>
     private async IAsyncEnumerable<MergeObject> MergeObjectsAsync(
-        string[] paths, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        string[] paths, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         string path = paths[0];
         if (!_summaries || (!_descending && IsClusteringKey(paths)))
@@ -529,14 +821,14 @@ internal sealed class DatasetScanBuilder
             await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
             {
                 ReadOnlyMemory<byte> bound = _summaries ? VortexDataset.OrderOf(held.TreeKey) : default;
-                yield return new MergeObject(held.Entry, bound, _descending ? -ordinal : ordinal);
+                yield return new MergeObject(held.Entry, bound, _descending ? -ordinal : ordinal, held.FirstRow);
                 ordinal++;
             }
 
             yield break;
         }
 
-        DType dtype = ClusteringKey.Resolve(_dataset.Schema, path);
+        DType dtype = ClusteringKey.Resolve(_dataset.DType, path);
         RowSortField field = KeyOrderedMerge.Field(_descending);
         List<MergeObject> objects = [];
         long position = 0;
@@ -545,7 +837,7 @@ internal sealed class DatasetScanBuilder
             ReadOnlyMemory<byte> bound = paths.Length > 1 && _descending
                 ? default
                 : SummaryBound(held.Entry.Summaries, path, dtype, field, _descending);
-            objects.Add(new MergeObject(held.Entry, bound, _descending ? -position : position));
+            objects.Add(new MergeObject(held.Entry, bound, _descending ? -position : position, held.FirstRow));
             position++;
         }
 
@@ -597,56 +889,80 @@ internal sealed class DatasetScanBuilder
     };
 
     /// <summary>Whether a projection already reads a path, itself or through an ancestor.</summary>
-    private static bool Covers(string[] projection, string path)
+    private static bool Covers(FieldMask mask, DType schema, string path)
     {
-        foreach (string selected in projection)
+        FieldMask at = mask;
+        DType type = schema;
+        foreach (string segment in path.Split('.'))
         {
-            if (string.Equals(selected, path, StringComparison.Ordinal)
-                || (path.StartsWith(selected, StringComparison.Ordinal)
-                    && path.Length > selected.Length
-                    && path[selected.Length] == '.'))
+            if (at.IsAll)
             {
                 return true;
             }
+
+            int field = type.Kind == DTypeKind.Struct ? type.IndexOfField(segment) : -1;
+            if (field < 0 || !at.Includes(field))
+            {
+                return false;
+            }
+
+            at = at.Descend(field);
+            type = type.GetField(field);
         }
 
-        return false;
+        return true;
     }
 
-    /// <summary>One object's own key-ordered scan, carrying this builder's filter and projection.</summary>
-    private ScanBuilder OrderedOf(VortexFile file, string[] paths, bool withKey)
+    /// <summary>The <c>.</c>-separated paths a projection reads, by the schema's field names.</summary>
+    private static string[] PathsOf(FieldMask mask, DType schema)
     {
-        ScanBuilder scan = file.ScanBuilder();
-        if (_filter is { } filter)
-        {
-            scan = scan.Where(filter);
-        }
+        List<string> paths = [];
+        Collect(mask, schema, string.Empty, paths);
+        return [.. paths];
 
-        if (_projection is { } projection)
+        static void Collect(FieldMask at, DType type, string prefix, List<string> into)
         {
-            scan = scan.Project(projection);
-            if (withKey)
+            if (prefix.Length > 0 && (at.IsAll || at.IsEmpty || type.Kind != DTypeKind.Struct))
             {
-                scan = scan.Project(paths);
+                into.Add(prefix);
+                return;
+            }
+
+            for (int i = 0; i < at.NamedFieldCount; i++)
+            {
+                int field = at.GetNamedField(i);
+                string name = type.GetFieldName(field);
+                Collect(at.Descend(field), type.GetField(field), prefix.Length == 0 ? name : prefix + "." + name, into);
             }
         }
-
-        scan = scan.InKeyOrder(paths, _descending);
-        return _indexes ? scan : scan.WithIndexes(false);
     }
 
-    /// <summary>The file's own scan, carrying this builder's filter, projection and row range.</summary>
-    private ScanBuilder Of(VortexFile file, PositionedObject held)
+    /// <summary>One object's own key-ordered scan, carrying this builder's filter, projection and options.</summary>
+    private ScanBuilder OrderedOf(VortexFile file, string[] paths, bool withKey)
     {
-        ScanBuilder scan = file.ScanBuilder();
-        if (_filter is { } filter)
+        ScanBuilder scan = Configure(file.ScanBuilder());
+        if (withKey)
         {
-            scan = scan.Where(filter);
+            scan.Project(paths);
         }
 
-        if (_projection is { } projection)
+        return scan.InKeyOrder(paths, _descending);
+    }
+
+    /// <summary>The file's own scan, carrying this builder's filter, projection, options and the rows that fall in this object.</summary>
+    private ScanBuilder Of(VortexFile file, PositionedObject held)
+    {
+        ScanBuilder scan = Configure(file.ScanBuilder());
+        if (_take is { } take)
         {
-            scan = scan.Project(projection);
+            (int first, int count) = TakenBy(held);
+            long[] local = new long[count];
+            for (int i = 0; i < count; i++)
+            {
+                local[i] = take[first + i] - held.FirstRow;
+            }
+
+            return scan.Take(local);
         }
 
         // The range is the dataset's; the file's is the part of it that falls inside this object.
@@ -654,10 +970,40 @@ internal sealed class DatasetScanBuilder
         long upper = _to == long.MaxValue ? held.Entry.Rows : Math.Min(_to - held.FirstRow, held.Entry.Rows);
         if (lower > 0 || upper < held.Entry.Rows)
         {
-            scan = scan.Rows(new RowRange(lower, Math.Max(upper, lower)));
+            scan.Rows(new RowRange(lower, Math.Max(upper, lower)));
         }
 
-        return _indexes ? scan : scan.WithIndexes(false);
+        return scan;
+    }
+
+    /// <summary>A file's scan under this builder's filter, projection and options.</summary>
+    private ScanBuilder Configure(ScanBuilder scan)
+    {
+        if (_filter is { } filter)
+        {
+            scan.Where(filter);
+        }
+
+        if (_mask is { } mask)
+        {
+            scan.ProjectMask(in mask);
+        }
+
+        if (_options.BatchRows > 0)
+        {
+            scan.WithMaxBatchRows(_options.BatchRows);
+        }
+
+        int degree = _options.DegreeOfParallelism > 0
+            ? _options.DegreeOfParallelism
+            : _dataset.Session.Options.MaxDegreeOfParallelism;
+        scan.WithPruning(_options.Pruning)
+            .WithIndexes(_indexes)
+            .WithDegreeOfParallelism(Math.Max(degree, 1))
+            .WithPrefetch(_options.Prefetch)
+            .WithCompaction(_options.Compact)
+            .WithEncodings(_keepEncodings);
+        return _counters is { } counters ? scan.WithMetrics(counters) : scan;
     }
 }
 

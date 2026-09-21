@@ -85,8 +85,8 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         if (wanted > _maxBytes)
         {
             throw new ObjectStoreException(
-                $"'{_key}' would buffer {wanted} bytes, over this sink's {_maxBytes}. A store that " +
-                "streams -- a multipart upload -- is what writes an object this size (13 §11).");
+                $"'{_key}' would buffer {wanted} bytes, over the {_maxBytes} an object may take while it is " +
+                "written (DatasetOptions.MaxObjectBytes).");
         }
 
         if (wanted > _buffer.Length)

@@ -80,7 +80,7 @@ internal sealed class ObjectSegmentSource : ISegmentReader
                 $"Segment {spec.Offset}+{spec.Length} of '{_key}' ended after {range.Length} bytes.");
         }
 
-        return PinnedArraySegmentOwner.CopyOf(range.Bytes.Span, 1 << spec.AlignmentExponent);
+        return Aligned(range.Bytes, 1 << spec.AlignmentExponent);
     }
 
     /// <inheritdoc/>
@@ -120,7 +120,7 @@ internal sealed class ObjectSegmentSource : ISegmentReader
         slots.Sort((left, right) => requests.GetSpec(left).Offset.CompareTo(requests.GetSpec(right).Offset));
         SegmentSpec[] sorted = ArrayPool<SegmentSpec>.Shared.Rent(slots.Count);
         CoalescedRun[] runs = ArrayPool<CoalescedRun>.Shared.Rent(slots.Count);
-        ObjectRange?[] ranges;
+        ObjectRange[] ranges;
         int runCount;
         try
         {
@@ -130,7 +130,7 @@ internal sealed class ObjectSegmentSource : ISegmentReader
             }
 
             runCount = SegmentCoalescer.Plan(sorted.AsSpan(0, slots.Count), runs.AsSpan(0, slots.Count), _options);
-            ranges = new ObjectRange?[runCount];
+            ranges = new ObjectRange[runCount];
 
             // Issued together, so the runs cost one step of the critical path however many they are.
             Task<ObjectRange>[] reads = new Task<ObjectRange>[runCount];
@@ -142,29 +142,31 @@ internal sealed class ObjectSegmentSource : ISegmentReader
                     .AsTask();
             }
 
+            int received = 0;
             try
             {
-                for (int r = 0; r < runCount; r++)
+                for (; received < runCount; received++)
                 {
-                    ranges[r] = await reads[r].ConfigureAwait(false);
+                    ranges[received] = await reads[received].ConfigureAwait(false);
                 }
             }
             catch
             {
-                // A failure leaves the other reads in flight, each owning a buffer this batch must
-                // return: skipping them would send those buffers to the finalizer instead of the
-                // pool and leave their faults unobserved, so they are all awaited before throwing.
+                // A failure leaves the other reads in flight, each holding bytes this batch must
+                // release: skipping them would leave their leases to the finalizer and their faults
+                // unobserved, so they are all awaited before throwing.
                 for (int r = 0; r < runCount; r++)
                 {
-                    if (ranges[r] is { } taken)
+                    if (r < received)
                     {
-                        taken.Dispose();
+                        ranges[r].Dispose();
                         continue;
                     }
 
                     try
                     {
-                        (await reads[r].ConfigureAwait(false)).Dispose();
+                        ObjectRange late = await reads[r].ConfigureAwait(false);
+                        late.Dispose();
                     }
                     catch
                     {
@@ -189,23 +191,21 @@ internal sealed class ObjectSegmentSource : ISegmentReader
             for (int r = 0; r < runCount; r++)
             {
                 CoalescedRun run = runs[r];
-                ObjectRange range = ranges[r]!;
-                Note(range);
-                if (range.Length != run.Length)
+                Note(ranges[r]);
+                ReadOnlySequence<byte> bytes = ranges[r].Bytes;
+                if (bytes.Length != run.Length)
                 {
                     throw new VortexFormatException(
-                        $"Run {run.Start}+{run.Length} of '{_key}' ended after {range.Length} bytes.");
+                        $"Run {run.Start}+{run.Length} of '{_key}' ended after {bytes.Length} bytes.");
                 }
 
                 while (slot < slots.Count && sorted[slot].Offset < (ulong)(run.Start + run.Length))
                 {
                     SegmentSpec spec = sorted[slot];
-                    int at = checked((int)((long)spec.Offset - run.Start));
+                    long at = (long)spec.Offset - run.Start;
                     requests.SetResult(
                         slots[slot],
-                        PinnedArraySegmentOwner.CopyOf(
-                            range.Bytes.Span.Slice(at, checked((int)spec.Length)),
-                            1 << spec.AlignmentExponent));
+                        Aligned(bytes.Slice(at, checked((int)spec.Length)), 1 << spec.AlignmentExponent));
                     slot++;
                 }
             }
@@ -221,7 +221,7 @@ internal sealed class ObjectSegmentSource : ISegmentReader
         {
             for (int r = 0; r < runCount; r++)
             {
-                ranges[r]?.Dispose();
+                ranges[r].Dispose();
             }
 
             ArrayPool<CoalescedRun>.Shared.Return(runs);
@@ -248,7 +248,7 @@ internal sealed class ObjectSegmentSource : ISegmentReader
             using ObjectRange range = await _store.GetRangeAsync(_key, offset, length, cancellationToken)
                 .ConfigureAwait(false);
             Note(range);
-            return PinnedArraySegmentOwner.CopyOf(range.Bytes.Span, alignment);
+            return Aligned(range.Bytes, alignment);
         }
         catch (ArgumentOutOfRangeException cause) when (cause.ParamName == "offset")
         {
@@ -264,8 +264,19 @@ internal sealed class ObjectSegmentSource : ISegmentReader
         return _ownsStore ? _store.DisposeAsync() : ValueTask.CompletedTask;
     }
 
+    /// <summary>
+    /// A copy of <paramref name="bytes"/> at the alignment its segment declares, which a store's
+    /// buffer does not guarantee, whether the bytes arrived in one block or several.
+    /// </summary>
+    private static PinnedArraySegmentOwner Aligned(ReadOnlySequence<byte> bytes, int alignment)
+    {
+        PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.Allocate(checked((int)bytes.Length), alignment);
+        bytes.CopyTo(owner.WritableSpan);
+        return owner;
+    }
+
     /// <summary>Records the object's token, and refuses a read of an object that changed under us.</summary>
-    private void Note(ObjectRange range)
+    private void Note(in ObjectRange range)
     {
         string? known = Volatile.Read(ref _token);
         if (known is null)

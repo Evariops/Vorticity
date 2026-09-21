@@ -95,8 +95,7 @@ internal static class DatasetIndexer
         if (target.TreeKey.IsEmpty)
         {
             throw new ArgumentException(
-                "The object must come from the dataset's own walk (Scan().ObjectsAsync()), which knows " +
-                "where its leaf is.",
+                "The object must come from the dataset's own walk, which knows where its leaf is.",
                 nameof(target));
         }
 

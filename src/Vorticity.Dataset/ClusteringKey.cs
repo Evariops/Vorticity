@@ -89,12 +89,21 @@ internal sealed class ClusteringKey
     /// carries no run on the key. Null rather than an exception: a dataset may hold imported objects
     /// it did not write, and every consumer here has an answer for one.
     /// </summary>
-    public async ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, CancellationToken cancellationToken)
+    public ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, CancellationToken cancellationToken) =>
+        TryOpenAsync(file, indexes: true, cancellationToken);
+
+    /// <summary>
+    /// <see cref="TryOpenAsync(VortexFile, CancellationToken)"/>, from the file's key indexes or,
+    /// without <paramref name="indexes"/>, from a column its statistics say is sorted only.
+    /// </summary>
+    public async ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, bool indexes, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(file);
         try
         {
-            return await file.Keys(_paths).OpenAsync(cancellationToken).ConfigureAwait(false);
+            KeyCursorBuilder keys = file.Keys(_paths);
+            return await (indexes ? keys : keys.WithSource(KeySourceKind.SortedColumn))
+                .OpenAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (VortexUnsupportedException)
         {
