@@ -292,6 +292,14 @@ internal sealed class ScanContext : IDisposable
     internal Scanning.ScanMetrics? Metrics { get; set; }
 
     /// <summary>
+    /// Whether a column's own node may stay a dictionary or run-end node rather than be decoded to
+    /// canonical form. Per scan like <see cref="Metrics"/>, false unless the consumer reads the
+    /// encoded form; a layout reader clears it for a child that is not its rows, since a codes or
+    /// offsets child is read as plain values.
+    /// </summary>
+    internal bool KeepEncodings { get; set; }
+
+    /// <summary>
     /// Replaces the selection and returns what was there, for a reader that re-bases it per child.
     /// </summary>
     /// <param name="rows">The new selection, or <see langword="null"/> to clear it.</param>

@@ -233,7 +233,7 @@ internal sealed class FlatLayoutReader : LayoutReader
                 int retained = -1;
                 try
                 {
-                    retained = context.Decode.DecodeRoot(in chunkRoot, node.DType, total);
+                    retained = context.Decode.DecodeRoot(in chunkRoot, node.DType, total, context.KeepEncodings);
                 }
                 finally
                 {
@@ -287,13 +287,13 @@ internal sealed class FlatLayoutReader : LayoutReader
         // scan from allocating the holder at all: these paths are held to a ceiling in bytes.
         if (fields.IsAll)
         {
-            return context.Decode.DecodeRoot(in root, node.DType, total);
+            return context.Decode.DecodeRoot(in root, node.DType, total, context.KeepEncodings);
         }
 
         FieldMask outer = context.ExchangePushedFields(fields);
         try
         {
-            return context.Decode.DecodeRoot(in root, node.DType, total);
+            return context.Decode.DecodeRoot(in root, node.DType, total, context.KeepEncodings);
         }
         finally
         {
@@ -493,7 +493,8 @@ internal sealed class FlatLayoutReader : LayoutReader
         // Counted like the whole-node decodes above: what a positional take materializes is its
         // selection, and a decode no instrument counts is a decode nobody sees.
         Decoded(context, context.Selection.Length);
-        int taken = context.Decode.DecodeRootSelected(in root, node.DType, total, context.Selection);
+        int taken = context.Decode.DecodeRootSelected(
+            in root, node.DType, total, context.Selection, context.KeepEncodings);
         return MaskProjection.Apply(context.Decode, taken, in fields);
     }
 

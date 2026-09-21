@@ -41,6 +41,9 @@ internal sealed class ZstdBuffersDecoder : ArrayDecoder
     {
         ArgumentNullException.ThrowIfNull(context);
 
+        // The inner node is this node with its buffers restored, so it inherits the grant.
+        bool keep = context.KeepsEncoding;
+
         ReadOnlySpan<byte> tree = node.Arena.TreeSpan;
         ReadOnlySpan<byte> metadata = node.Metadata;
 
@@ -154,7 +157,7 @@ internal sealed class ZstdBuffersDecoder : ArrayDecoder
                 buffers,
                 -1));
 
-        return context.DecodeRoot(new ArrayNode(node.Arena, synthetic), dtype, length);
+        return context.DecodeRoot(new ArrayNode(node.Arena, synthetic), dtype, length, keep);
     }
 
     /// <summary>The byte offset of <paramref name="inner"/> within <paramref name="outer"/>.</summary>

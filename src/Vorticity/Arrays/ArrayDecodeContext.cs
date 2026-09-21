@@ -22,6 +22,11 @@ internal sealed class ArrayDecodeContext
     private readonly ScanContext _scan;
     private int _depth;
 
+    // A one-shot grant for the next node dispatched, taken at dispatch into `_keepHere` and cleared,
+    // so no child inherits it unless a wrapper passes it on explicitly.
+    private bool _keepNext;
+    private bool _keepHere;
+
     internal ArrayDecodeContext(ScanContext scan)
     {
         _scan = scan;
@@ -77,11 +82,8 @@ internal sealed class ArrayDecodeContext
     /// <returns>The canonical node's index in <see cref="Canonical"/>.</returns>
     /// <exception cref="VortexFormatException">The node violates its encoding's contract.</exception>
     /// <exception cref="VortexUnsupportedException">This build does not decode that encoding.</exception>
-    public int Decode(in ArrayNode node, DType dtype, int length)
-    {
-        _depth = 0;
-        return DecodeNode(in node, dtype, length);
-    }
+    public int Decode(in ArrayNode node, DType dtype, int length) =>
+        DecodeRoot(in node, dtype, length, keepEncoding: false);
 
     /// <summary>Alias for <see cref="Decode"/>, for call sites that read better naming the root.</summary>
     /// <param name="node">The serialized root node.</param>
@@ -89,6 +91,35 @@ internal sealed class ArrayDecodeContext
     /// <param name="length">The row count this node must produce.</param>
     /// <returns>The canonical node's index in <see cref="Canonical"/>.</returns>
     public int DecodeRoot(in ArrayNode node, DType dtype, int length) => Decode(in node, dtype, length);
+
+    /// <summary>
+    /// <see cref="Decode"/>, letting the root stay a dictionary or run-end node when
+    /// <paramref name="keepEncoding"/> is set.
+    /// </summary>
+    /// <param name="node">The serialized root node.</param>
+    /// <param name="dtype">The DType this node must produce.</param>
+    /// <param name="length">The row count this node must produce.</param>
+    /// <param name="keepEncoding">Whether the root is a column's own node, delivered to a consumer that reads the encoded form.</param>
+    /// <returns>The node's index in <see cref="Canonical"/>.</returns>
+    internal int DecodeRoot(in ArrayNode node, DType dtype, int length, bool keepEncoding)
+    {
+        _depth = 0;
+        _keepNext = keepEncoding;
+        return DecodeNode(in node, dtype, length);
+    }
+
+    /// <summary>
+    /// Whether the decoder now running may publish a dictionary or run-end node instead of the
+    /// canonical form. Valid only at the decoder's entry: every child it decodes takes the grant
+    /// over, so a decoder reads it before decoding anything.
+    /// </summary>
+    internal bool KeepsEncoding => _keepHere;
+
+    /// <summary>
+    /// Passes this decoder's grant to the next node it decodes, for a wrapper whose one child is
+    /// the column itself -- an extension's storage.
+    /// </summary>
+    internal void KeepEncodingInChild() => _keepNext = _keepHere;
 
     /// <summary>
     /// Decodes only <paramref name="wanted"/> rows of a root node. Resets the depth budget.
@@ -99,9 +130,24 @@ internal sealed class ArrayDecodeContext
     /// <param name="wanted">Row indices, strictly ascending, all in <c>[0, length)</c>.</param>
     /// <returns>The canonical node's index, holding <c>wanted.Length</c> rows.</returns>
     public int DecodeRootSelected(
-        in ArrayNode node, DType dtype, int length, ReadOnlySpan<int> wanted)
+        in ArrayNode node, DType dtype, int length, ReadOnlySpan<int> wanted) =>
+        DecodeRootSelected(in node, dtype, length, wanted, keepEncoding: false);
+
+    /// <summary>
+    /// The selective root decode, letting the root stay encoded when
+    /// <paramref name="keepEncoding"/> is set.
+    /// </summary>
+    /// <param name="node">The serialized root node.</param>
+    /// <param name="dtype">The DType this node must produce.</param>
+    /// <param name="length">The row count the node would produce, which bounds the indices.</param>
+    /// <param name="wanted">Row indices, strictly ascending, all in <c>[0, length)</c>.</param>
+    /// <param name="keepEncoding">Whether the root is a column's own node, delivered encoded.</param>
+    /// <returns>The node's index, holding <c>wanted.Length</c> rows.</returns>
+    internal int DecodeRootSelected(
+        in ArrayNode node, DType dtype, int length, ReadOnlySpan<int> wanted, bool keepEncoding)
     {
         _depth = 0;
+        _keepNext = keepEncoding;
         return DecodeNodeSelected(in node, dtype, length, wanted);
     }
 
@@ -432,10 +478,18 @@ internal sealed class ArrayDecodeContext
 
     // ------------------------------------------------------------------------------ internals
 
-    internal void ResetBatch() => _depth = 0;
+    internal void ResetBatch()
+    {
+        _depth = 0;
+        _keepNext = false;
+        _keepHere = false;
+    }
 
     private int DecodeNode(in ArrayNode node, DType dtype, int length)
     {
+        _keepHere = _keepNext;
+        _keepNext = false;
+
         // Semantic array depth. The FlatBuffers table budget charged at load counts tables, which
         // is a different quantity: only this one bounds how deep a decode recurses.
         VortexLimits.CheckDepth(++_depth, VortexLimits.MaxArrayDepth, "Array");
@@ -464,6 +518,8 @@ internal sealed class ArrayDecodeContext
     private int DecodeNodeSelected(
         in ArrayNode node, DType dtype, int length, ReadOnlySpan<int> wanted)
     {
+        _keepHere = _keepNext;
+        _keepNext = false;
         VortexLimits.CheckDepth(++_depth, VortexLimits.MaxArrayDepth, "Array");
 
         if (length < 0)

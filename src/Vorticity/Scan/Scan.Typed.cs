@@ -129,7 +129,10 @@ public sealed partial class Scan<TRecord>
     {
         Begin();
         RecordBinding binding = Binding;
-        return new AsyncEnumerator(this, _source.BatchesAsync(Spec(), _metrics).GetAsyncEnumerator(cancellationToken), binding);
+
+        // The one sink whose consumer can read a column encoded: Column<T>.Encoding and its views.
+        ScanSpec spec = Spec() with { KeepEncodings = true };
+        return new AsyncEnumerator(this, _source.BatchesAsync(spec, _metrics).GetAsyncEnumerator(cancellationToken), binding);
     }
 
     /// <summary>The batches, each owned by the caller, who disposes it.</summary>

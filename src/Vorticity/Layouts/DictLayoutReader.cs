@@ -137,8 +137,26 @@ internal sealed class DictLayoutReader : LayoutReader
         }
 
         DType dtype = context.Canonical.GetNode(valuesIndex).DType;
+        if (context.KeepEncodings)
+        {
+            // Both children were read with encoded delivery cleared, so they are plain values; the
+            // node keeps them as they are and nothing is gathered.
+            int produced = context.Canonical.GetNode(valuesIndex).Length;
+            if (produced != valuesLength)
+            {
+                LayoutsThrow.Format(
+                    $"A {Id} layout's values child produced {produced} rows; the layout declares {valuesLength}.");
+            }
+
+            return EncodedNodes.Dictionary(
+                context.Decode, dtype, codesIndex, valuesIndex, valuesLength, Id, CodeOwner);
+        }
+
         return Gather(context, dtype, valuesIndex, valuesLength, codesIndex, length);
     }
+
+    /// <summary>What an out-of-range code is attributed to, in the message that reports it.</summary>
+    private const string CodeOwner = "A " + Id + " layout's";
 
     /// <summary>The one message for an out-of-range code, from whichever path found it.</summary>
     /// <remarks>

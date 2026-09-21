@@ -60,6 +60,10 @@ internal sealed class RunEndDecoder : ArrayDecoder
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
         ReadOnlySpan<int> wanted, bool selective)
     {
+        // Read before the children are decoded, which take the grant over. A take keeps the
+        // canonical form: its rows are scattered, and runs of scattered rows are not runs.
+        bool keep = context.KeepsEncoding && !selective;
+
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
 
@@ -112,6 +116,12 @@ internal sealed class RunEndDecoder : ArrayDecoder
         {
             ValidateEnds(ends, metadata.EndsPType, runCount, offset, length);
             context.MarkNodeChecked(in node);
+        }
+
+        if (keep)
+        {
+            return EncodedNodes.RunEnd(
+                context, dtype, length, ends, metadata.EndsPType, runCount, offset, valuesIndex, Id);
         }
 
         ValidityReader valuesValidity = ValidityReader.Of(context.Canonical, values.Validity);

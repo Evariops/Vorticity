@@ -493,6 +493,7 @@ internal sealed class ScanBuilder
         {
             Prefetch = _prefetch,
             Compact = _compact,
+            KeepEncodings = _keepEncodings,
         };
 
         if (_orderPath is not null)
