@@ -47,21 +47,10 @@ internal sealed record ValueModel(
     };
 
     /// <summary>
-    /// The <c>T</c> of the columns <c>ReadRows</c> reads: <see cref="ColumnType"/> with text unannotated,
-    /// because the text accessors extend <c>Column&lt;string&gt;</c> and a <c>Column&lt;string?&gt;</c>
-    /// receiver is a nullability mismatch.
-    /// </summary>
-    public string ReadColumnType => Kind switch
-    {
-        ValueKind.Scalar when Scalar == ScalarKind.Utf8 => CoreType,
-        ValueKind.List => "global::System.ReadOnlyMemory<" + Element!.ReadColumnType + ">",
-        _ => ColumnType,
-    };
-
-    /// <summary>
     /// The <c>T</c> of the builders <c>WriteRows</c> appends to: <see cref="ColumnType"/> with text
-    /// unannotated for the same reason; a list keeps its elements' annotations, which its generic
-    /// appends infer from the span they take.
+    /// unannotated, because the text appends extend <c>ColumnBuilder&lt;string&gt;</c> and a
+    /// <c>ColumnBuilder&lt;string?&gt;</c> receiver is a nullability mismatch; a list keeps its
+    /// elements' annotations, which its generic appends infer from the span they take.
     /// </summary>
     public string WriteColumnType => Kind == ValueKind.Scalar && Scalar == ScalarKind.Utf8 ? CoreType : ColumnType;
 
