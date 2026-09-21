@@ -311,7 +311,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         if (_lanes.Length > 1)
         {
-            return new ValueTask<bool>(MoveNextPipelinedAsync());
+            return MoveNextPipelinedAsync();
         }
 
         ReleaseCurrent();
@@ -816,7 +816,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     // -------------------------------------------------------------------------------- pipelined
 
-    private async Task<bool> MoveNextPipelinedAsync()
+    // Pooled, as the lanes' own work is: the state machine of a call that suspends is rented rather
+    // than allocated, so the pipelined path allocates nothing per batch in steady state either.
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<bool> MoveNextPipelinedAsync()
     {
         ReleaseCurrent();
         _token.ThrowIfCancellationRequested();
@@ -833,16 +836,16 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         int root;
         try
         {
-            root = await lane.Work!.ConfigureAwait(false);
+            root = await lane.Completion.ConfigureAwait(false);
         }
         catch
         {
-            lane.Work = null;
+            lane.Running = false;
             lane.Context.ResetBatch();
             throw;
         }
 
-        lane.Work = null;
+        lane.Running = false;
         _pending = lane.Rows;
         _currentLane = lane;
 
@@ -876,13 +879,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
             Lane lane = _lanes[(int)(_started % lanes)];
             lane.Rows = split;
-            // Bound once per lane, not once per split: a lane outlives every split it runs and is
-            // all the closure holds, so starting a split from `Task.Run(() => RunLaneAsync(lane))`
-            // would build a closure and a delegate every time. Bound here rather than where the
-            // lane is made, because a scan that never pumps -- which is every sequential one --
-            // would otherwise pay for a delegate it does not call.
-            lane.Start ??= () => RunLaneAsync(lane);
-            lane.Work = Task.Run(lane.Start, _token);
+            lane.Start(this);
             _started++;
         }
     }
@@ -893,7 +890,29 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// so a batch is the same batch whatever the degree. Building the batch straight from the
     /// decoded split instead would silently return every row of a filtered or taken scan.
     /// </summary>
-    private async Task<int> RunLaneAsync(Lane lane)
+    /// <summary>A lane's loop: one split per signal, each reported on the lane, until the lane is stopped.</summary>
+    /// <remarks>
+    /// Its first step waits, so the call returns to the pump at once; every later step resumes on
+    /// the thread pool, where the lane's sources schedule it.
+    /// </remarks>
+    private async Task LaneLoopAsync(Lane lane)
+    {
+        while (await lane.NextAsync().ConfigureAwait(false))
+        {
+            lane.Taken();
+            try
+            {
+                lane.Done(await RunLaneAsync(lane).ConfigureAwait(false));
+            }
+            catch (Exception error)
+            {
+                lane.Failed(error);
+            }
+        }
+    }
+
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<int> RunLaneAsync(Lane lane)
     {
         ScanContext context = lane.Context;
         RowRange rows = lane.Rows;
@@ -927,23 +946,21 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         for (int i = 0; i < _lanes.Length; i++)
         {
             Lane lane = _lanes[i];
-            Task<int>? work = lane.Work;
-            if (work is null)
+            if (!lane.Running)
             {
                 continue;
             }
 
-            lane.Work = null;
             try
             {
-                await work.ConfigureAwait(false);
+                await lane.Completion.ConfigureAwait(false);
             }
             catch (Exception)
             {
                 // Disposal must not throw, and an abandoned split's failure has no one to report to.
-                // Awaiting it is what keeps it from surfacing as an unobserved task exception.
             }
 
+            lane.Running = false;
             lane.Context.ResetBatch();
         }
 
@@ -954,7 +971,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         for (int i = 0; i < _lanes.Length; i++)
         {
-            if (_lanes[i].Work is not null)
+            if (_lanes[i].Running)
             {
                 return true;
             }
@@ -975,6 +992,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         for (int i = 0; i < _lanes.Length; i++)
         {
+            _lanes[i].Stop();
+
             // The kept segments first: they hold a reference of their own, and the context's
             // disposal is what gives the batch's back.
             _lanes[i].Kept.Clear();
@@ -983,8 +1002,18 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>One decode flow: its own <see cref="ScanContext"/>, never shared.</summary>
-    private sealed class Lane
+    /// <remarks>
+    /// A lane runs one loop for the whole scan, started with its first split: the loop waits for a
+    /// split on one reusable source and reports the batch on another, and both resume their waiter
+    /// on the thread pool. So a split allocates nothing, where a <c>Task.Run</c> per split would
+    /// allocate a task and its promise, and a split that suspends rents its state machine.
+    /// </remarks>
+    private sealed class Lane : IValueTaskSource<bool>, IValueTaskSource<int>
     {
+        private ManualResetValueTaskSourceCore<bool> _go = new() { RunContinuationsAsynchronously = true };
+        private ManualResetValueTaskSourceCore<int> _done = new() { RunContinuationsAsynchronously = true };
+        private Task? _loop;
+
         internal Lane(ScanContext context) => Context = context;
 
         internal ScanContext Context { get; }
@@ -997,10 +1026,54 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         internal RowRange Rows { get; set; }
 
-        internal Task<int>? Work { get; set; }
+        /// <summary>Whether a split was started on this lane and its result not yet taken.</summary>
+        internal bool Running { get; set; }
 
-        /// <summary>This lane's body, bound to it once so the pump allocates nothing to start it.</summary>
-        internal Func<Task<int>>? Start { get; set; }
+        /// <summary>The split in flight, to be awaited once.</summary>
+        internal ValueTask<int> Completion => new ValueTask<int>(this, _done.Version);
+
+        /// <summary>Hands the split in <see cref="Rows"/> to the lane's loop, starting the loop with the first one.</summary>
+        internal void Start(BatchAsyncEnumerator owner)
+        {
+            Running = true;
+            _done.Reset();
+            _loop ??= owner.LaneLoopAsync(this);
+            _go.SetResult(true);
+        }
+
+        /// <summary>Ends the loop; the lane holds no split.</summary>
+        internal void Stop()
+        {
+            if (_loop is not null && !Running)
+            {
+                _go.SetResult(false);
+                _loop = null;
+            }
+        }
+
+        /// <summary>The next split, or false once the lane is stopped.</summary>
+        internal ValueTask<bool> NextAsync() => new ValueTask<bool>(this, _go.Version);
+
+        /// <summary>Makes the lane ready for its next split; called by the loop before it reports.</summary>
+        internal void Taken() => _go.Reset();
+
+        internal void Done(int root) => _done.SetResult(root);
+
+        internal void Failed(Exception error) => _done.SetException(error);
+
+        bool IValueTaskSource<bool>.GetResult(short token) => _go.GetResult(token);
+
+        ValueTaskSourceStatus IValueTaskSource<bool>.GetStatus(short token) => _go.GetStatus(token);
+
+        void IValueTaskSource<bool>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
+            _go.OnCompleted(continuation, state, token, flags);
+
+        int IValueTaskSource<int>.GetResult(short token) => _done.GetResult(token);
+
+        ValueTaskSourceStatus IValueTaskSource<int>.GetStatus(short token) => _done.GetStatus(token);
+
+        void IValueTaskSource<int>.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
+            _done.OnCompleted(continuation, state, token, flags);
 
         /// <summary>The rows the filter kept, as words in the batch's arena, when the block is delivered whole.</summary>
         internal Buffers.VortexBuffer Selection { get; set; }
