@@ -32,6 +32,12 @@ internal abstract class IndexBuilder : IDisposable
 
     internal long WrittenBytes { get; private set; }
 
+    /// <summary>
+    /// Whether a payload of it is already in the file. A verdict of Auto's share or of the budget
+    /// no longer drops such a builder, since what it wrote would stay as bytes nothing lists.
+    /// </summary>
+    protected bool Committed => WrittenBytes > 0;
+
     /// <summary>What the builder has built but still holds unqueued.</summary>
     protected virtual long OpenBytes => 0;
 
@@ -68,7 +74,7 @@ internal abstract class IndexBuilder : IDisposable
     /// </summary>
     internal virtual void Judge(ColumnFacts facts)
     {
-        if (AutoShare <= 0 || Abandoned is not null || facts.ColumnBytes <= 0)
+        if (AutoShare <= 0 || Abandoned is not null || facts.ColumnBytes <= 0 || Committed)
         {
             return;
         }

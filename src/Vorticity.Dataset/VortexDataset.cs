@@ -292,7 +292,7 @@ internal sealed class VortexDataset : IAsyncDisposable
             await foreach (RecordBatch batch in batches.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 rows += batch.RowCount;
-                await draft.Writer.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+                await draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
             }
 
             await draft.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);

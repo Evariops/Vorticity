@@ -174,6 +174,9 @@ public readonly ref struct Columns<TRecord>
     /// <returns>False for a null.</returns>
     public bool IsValid(int index) => ArenaWords.IsValid(Arena, StructNode(), index);
 
+    /// <summary>The rows the filter kept as words, or empty when every row is selected.</summary>
+    internal ReadOnlySpan<ulong> SelectionWords => _selection;
+
     /// <summary>The column of member <paramref name="index"/>.</summary>
     /// <typeparam name="T">The member's .NET type.</typeparam>
     /// <param name="index">The member's position in the record.</param>

@@ -51,6 +51,9 @@ public readonly ref struct BatchView
     /// <summary>Which rows passed the filter.</summary>
     public Selection Selection => _selection.IsEmpty ? new Selection(RowCount) : new Selection(_selection, RowCount, _selected);
 
+    /// <summary>The rows the filter kept as words, or empty when every row is selected.</summary>
+    internal ReadOnlySpan<ulong> SelectionWords => _selection;
+
     internal VortexExtensionRegistry? Extensions => Batch?.Session?.Options.Extensions;
 
     /// <summary>Column <paramref name="index"/> of the batch.</summary>

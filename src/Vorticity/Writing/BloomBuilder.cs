@@ -535,7 +535,7 @@ internal sealed class BloomBuilder : IndexBuilder
     private bool GivesUpInBlock(long rawBound)
     {
         int distinct = _block.Count;
-        if (distinct == 0 || distinct < _policy.MinDistinct)
+        if (distinct == 0 || distinct < _policy.MinDistinct || Committed)
         {
             return false;
         }
@@ -583,7 +583,7 @@ internal sealed class BloomBuilder : IndexBuilder
             // of the column's raw bytes: the column compresses to no more than those, so the
             // verdict the chunk would reach is already known and the filter is never laid out.
             long projected = Bytes + ((long)words * sizeof(uint));
-            if (AutoShare > 0 && projected * 1000 > _rawBytes * AutoShare)
+            if (AutoShare > 0 && !Committed && projected * 1000 > _rawBytes * AutoShare)
             {
                 GiveUp(projected, _rawBytes);
                 BlockFilterBlocks.Add(0);

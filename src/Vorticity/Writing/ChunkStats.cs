@@ -10,6 +10,9 @@ internal interface IChunkLedger
 
     /// <summary>Records that a list chunk's elements had to be counted directly.</summary>
     void ElementsUnserved();
+
+    /// <summary>Whether a column is priced by its bytes alone, decode speed aside.</summary>
+    bool SizeFirst { get; }
 }
 
 /// <summary>
@@ -94,6 +97,9 @@ internal readonly struct ChunkStats
 
     /// <summary>The column's memory of its last chunk, or none.</summary>
     internal ColumnWriter.PlanMemory? Memory => _column?.Memory;
+
+    /// <summary>Whether the file asks for its columns priced by their bytes alone.</summary>
+    internal bool SizeFirst => _ledger is { SizeFirst: true };
 
     /// <summary>Tells the column its bit-packing was priced from the ingested widths.</summary>
     internal void NoteWidthsServed() => _column?.NoteWidthsServed();

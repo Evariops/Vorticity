@@ -28,7 +28,11 @@ public enum CompressionProfile : byte
     /// <summary>The cheapest encodings to write, and no index.</summary>
     Fastest,
 
-    /// <summary>Size over decode speed.</summary>
+    /// <summary>
+    /// Size over decode speed: every column chunk is priced by its bytes alone, run-end among the
+    /// other candidates, and zstd, FSST and ALP are tried under the best exact plan's bytes rather
+    /// than only where no exact plan applies. The write costs more, and a read may decode slower.
+    /// </summary>
     Smallest,
 
     /// <summary>Every column canonical: no encoding at all.</summary>
@@ -123,6 +127,11 @@ public sealed record VortexWriteOptions
     public Guid? Identity { get; init; }
 
     /// <summary>User metadata the file carries, by key; read back through <c>VortexFile.Metadata</c>.</summary>
+    /// <remarks>
+    /// At most 14 entries, keys of at most 64 UTF-8 bytes, and none of the keys this library writes
+    /// itself; <c>CreateWriter</c> refuses the rest. An append keeps the file's own entries, and an
+    /// entry named again takes its new value.
+    /// </remarks>
     public ImmutableDictionary<string, ReadOnlyMemory<byte>> Metadata
     {
         get => _metadata;

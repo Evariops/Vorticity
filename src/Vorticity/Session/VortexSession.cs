@@ -181,34 +181,69 @@ public sealed class VortexSession : IAsyncDisposable
     /// <param name="path">The destination.</param>
     /// <param name="schema">The file's columns.</param>
     /// <param name="options">What the file looks like; null for the defaults.</param>
-    /// <returns>The writer; the caller completes and disposes it.</returns>
-    /// <exception cref="ArgumentException">A hint or an index names a column the schema does not have.</exception>
+    /// <returns>The writer; the caller completes and disposes it. Disposed without completing, it deletes the file.</returns>
+    /// <exception cref="ArgumentException">A hint or an index names a column the schema does not have, or the metadata does not fit a postscript.</exception>
+    /// <exception cref="VortexUnsupportedException">The schema names a component the target edition does not carry.</exception>
     public VortexFileWriter CreateWriter(string path, VortexSchema schema, VortexWriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(schema);
         ThrowIfDisposed();
-        return VortexFileWriter.Create(path, VortexTypes.ToDType(schema, new DTypeArena()), options ?? VortexWriteOptions.Default, this);
+        VortexFileWriter writer = VortexFileWriter.Create(path, VortexTypes.ToDType(schema, new DTypeArena()), options ?? VortexWriteOptions.Default, this);
+        writer.Declare(schema);
+        return writer;
+    }
+
+    /// <summary>Starts a file at <paramref name="path"/> whose columns are the members of <typeparamref name="TRecord"/>.</summary>
+    /// <typeparam name="TRecord">The record type; its schema is the file's.</typeparam>
+    /// <param name="path">The destination, replaced if it exists.</param>
+    /// <param name="options">What the file looks like; null for the defaults.</param>
+    /// <returns>The writer; the caller completes and disposes it. Disposed without completing, it deletes the file.</returns>
+    /// <exception cref="ArgumentException">A hint or an index names a column the record does not have.</exception>
+    public VortexFileWriter CreateWriter<TRecord>(string path, VortexWriteOptions? options = null)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        VortexFileWriter writer = CreateWriter(path, TRecord.Schema, options);
+        try
+        {
+            writer.Builder<TRecord>();
+        }
+        catch
+        {
+            writer.Abandon();
+            throw;
+        }
+
+        return writer;
     }
 
     /// <summary>Starts a file written to <paramref name="sink"/>: a file, a socket, a multipart upload.</summary>
-    /// <param name="sink">Where the bytes go; <c>FlushAsync</c> waits for it to accept them.</param>
+    /// <param name="sink">
+    /// Where the bytes go; <c>FlushAsync</c> waits for it to accept them. The writer completes the
+    /// pipe when the file is whole, and completes it with an error when the file is abandoned.
+    /// </param>
     /// <param name="schema">The file's columns.</param>
     /// <param name="options">What the file looks like; null for the defaults.</param>
     /// <returns>The writer; the caller completes and disposes it.</returns>
+    /// <exception cref="ArgumentException">A hint or an index names a column the schema does not have, or the metadata does not fit a postscript.</exception>
     public VortexFileWriter CreateWriter(PipeWriter sink, VortexSchema schema, VortexWriteOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(sink);
         ArgumentNullException.ThrowIfNull(schema);
         ThrowIfDisposed();
-        return VortexFileWriter.Create(sink, VortexTypes.ToDType(schema, new DTypeArena()), options ?? VortexWriteOptions.Default, this);
+        VortexFileWriter writer = VortexFileWriter.Create(sink, VortexTypes.ToDType(schema, new DTypeArena()), options ?? VortexWriteOptions.Default, this);
+        writer.Declare(schema);
+        return writer;
     }
 
     /// <summary>Opens the file at <paramref name="path"/> to append rows to it.</summary>
     /// <param name="path">A file this library wrote, or one of the same shape.</param>
     /// <param name="options">What the new rows look like; null takes the file's own policy.</param>
     /// <param name="cancellationToken">Cancels the reads and the first writes.</param>
-    /// <returns>The writer, positioned after the file's rows; <c>RowCount</c> says where the append resumes.</returns>
+    /// <returns>
+    /// The writer, positioned after the file's rows; <c>RowCount</c> says where the append resumes.
+    /// Abandoned, or disposed without completing, it truncates the file back to what it was.
+    /// </returns>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this library can continue.</exception>
     public ValueTask<VortexFileWriter> AppendAsync(string path, VortexWriteOptions? options = null, CancellationToken cancellationToken = default)
     {

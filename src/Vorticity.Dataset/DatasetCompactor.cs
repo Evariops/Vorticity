@@ -344,7 +344,7 @@ internal static class DatasetCompactor
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
         {
             _draft ??= _dataset.StartObject();
-            await _draft.Writer.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
+            await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
             _rows += batch.RowCount;
         }
 
