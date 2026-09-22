@@ -371,8 +371,6 @@ internal static class Program
             .Order(StringComparer.Ordinal),
     ];
 
-#pragma warning disable IL2026, IL2070 // The benchmark host is never trimmed: BenchmarkSwitcher
-                                       // reflects over this same assembly to find the classes at all.
     private static string[] UncategorizedClasses() =>
     [
         .. typeof(Program).Assembly.GetTypes()
@@ -386,7 +384,6 @@ internal static class Program
             .Select(t => t.Name)
             .Order(StringComparer.Ordinal),
     ];
-#pragma warning restore IL2026, IL2070
 
     /// <summary>Prints what this project can be asked to do.</summary>
     /// <remarks>

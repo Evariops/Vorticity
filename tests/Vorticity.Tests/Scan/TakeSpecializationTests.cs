@@ -17,7 +17,6 @@
 // the same block or the same run.
 using System;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -156,10 +155,6 @@ public sealed class TakeSpecializationTests
     /// against it.
     /// </remarks>
     [Fact]
-    [UnconditionalSuppressMessage(
-        "Trimming",
-        "IL2075:DynamicallyAccessedMembers",
-        Justification = "A test, never trimmed, and the decoders it reflects over are rooted by the table.")]
     public void TheSelectionFlagMatchesTheOverridesItDescribes()
     {
         Decoders.EnsureRegistered();

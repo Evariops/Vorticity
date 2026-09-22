@@ -1,0 +1,17 @@
+<Project>
+
+  <!-- Library-only properties, decided once the project has said what it is, and only where the
+       project has not decided them itself (the generator, on netstandard2.0, declines them). An
+       executable that wants the AOT and trim analyzers asks for them itself, as vxdump does.
+       InvariantGlobalization is an application property and is set on the executable projects
+       (vxdump, benchmarks), never here: it has no effect on a class library, which avoids
+       culture-sensitive APIs by construction instead. -->
+  <PropertyGroup Condition="'$(OutputType)' != 'Exe'">
+    <IsAotCompatible Condition="'$(IsAotCompatible)' == ''">true</IsAotCompatible>
+    <IsTrimmable Condition="'$(IsTrimmable)' == ''">true</IsTrimmable>
+    <EnableAotAnalyzer Condition="'$(EnableAotAnalyzer)' == ''">true</EnableAotAnalyzer>
+    <EnableTrimAnalyzer Condition="'$(EnableTrimAnalyzer)' == ''">true</EnableTrimAnalyzer>
+    <EnableSingleFileAnalyzer Condition="'$(EnableSingleFileAnalyzer)' == ''">true</EnableSingleFileAnalyzer>
+  </PropertyGroup>
+
+</Project>

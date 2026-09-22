@@ -14,17 +14,6 @@
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <ServerGarbageCollection>false</ServerGarbageCollection>
 
-    <!-- This host is not a library: it is never trimmed, never published as a single file, and the
-         A/B command loads a second build of the library by reflection on purpose, which is the one
-         thing trimming cannot follow. The library-only block upstream is guarded on OutputType,
-         which MSBuild has not read yet when that file is imported, so the guard misses and the
-         guarded properties land here as well. Declining them is saying what this project is. -->
-    <IsAotCompatible>false</IsAotCompatible>
-    <IsTrimmable>false</IsTrimmable>
-    <EnableAotAnalyzer>false</EnableAotAnalyzer>
-    <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
-    <EnableSingleFileAnalyzer>false</EnableSingleFileAnalyzer>
-
     <!-- The central Microsoft.CodeAnalysis.CSharp is the oldest compiler the generator loads into,
          and pinning it here would downgrade the one BenchmarkDotNet builds its harness with. This
          host references no generator, so its transitive versions are its packages' own. -->
