@@ -59,18 +59,19 @@ public sealed class SortedColumnLieTests
     [Fact]
     public async Task ASeekIntoTheLyingZoneIsRefusedUnderVerification()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] bytes = await WriteAsync();
         Forge(bytes, Value(Target), 15_990L);
 
         await using MemorySegmentSource source = new MemorySegmentSource(bytes);
         await using VortexFile file = await VortexFile.OpenAsync(source, Options(verify: true), CancellationToken.None);
-        await using KeyCursor cursor = await file.Keys("sorted").WithSource(KeySourceKind.SortedColumn).OpenAsync();
+        await using KeyCursor cursor = await file.Keys("sorted").WithSource(KeySourceKind.SortedColumn).OpenAsync(ct);
 
         // A zone far from the lie decodes and verifies; the lying zone does not.
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(Value(100)), SeekOp.Exact));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(Value(100)), SeekOp.Exact, ct));
         await Assert.ThrowsAsync<VortexFormatException>(
-            async () => await cursor.SeekAsync(FilterLiteral.From(Value(Target - 10)), SeekOp.AtOrAfter));
+            async () => await cursor.SeekAsync(FilterLiteral.From(Value(Target - 10)), SeekOp.AtOrAfter, ct));
     }
 
     [Fact]

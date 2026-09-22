@@ -51,20 +51,21 @@ public sealed class CompositeKeyTests
     [Fact]
     public async Task AWalkOfTheTupleIsEveryNonNullTupleInEncodedOrder()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(withEncoder: true);
         List<(byte[] Key, long Row)> oracle = Oracle(row => City(row) is string city
             ? RowEncoder.EncodeKey([FilterLiteral.From(Country(row)), FilterLiteral.From(city)], [Utf8, Utf8N], [Asc, Asc])
             : null);
 
-        await using KeyCursor cursor = await written.File.Keys("country", "city").OpenAsync();
+        await using KeyCursor cursor = await written.File.Keys("country", "city").OpenAsync(ct);
         Assert.Equal(FilterLiteralKind.Bytes, cursor.KeyKind);
         Assert.Equal(oracle.Count, cursor.EntryCount);
         Assert.Equal(new RowKeyEncoder(Asc).Format, cursor.KeyFormat);
         Assert.StartsWith("vortex-row " + RowEncoder.VortexVersion, cursor.KeyFormat, StringComparison.Ordinal);
 
         int index = 0;
-        for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextAsync())
+        for (bool ok = await cursor.SeekFirstAsync(ct); ok; ok = await cursor.NextAsync(ct))
         {
             Assert.True(cursor.KeyBytes.SequenceEqual(oracle[index].Key), $"entry {index}: the key differs");
             Assert.Equal(oracle[index].Row, cursor.Row);
@@ -80,6 +81,7 @@ public sealed class CompositeKeyTests
     [InlineData("ZZ")]
     public async Task APrefixOfTheLeadingColumnIsASeekAndAWalk(string country)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(withEncoder: true);
         List<(byte[] Key, long Row)> oracle = Oracle(row => City(row) is string city && Country(row) == country
@@ -88,11 +90,11 @@ public sealed class CompositeKeyTests
 
         // The spec's overload infers a non-nullable utf8, which is the leading column's dtype.
         byte[] prefix = RowEncoder.EncodeKey([FilterLiteral.From(country)], [Asc]);
-        await using KeyCursor cursor = await written.File.Keys("country", "city").OpenAsync();
+        await using KeyCursor cursor = await written.File.Keys("country", "city").OpenAsync(ct);
         List<long> rows = [];
-        for (bool ok = await cursor.SeekAsync(FilterLiteral.From(prefix), SeekOp.AtOrAfter);
+        for (bool ok = await cursor.SeekAsync(FilterLiteral.From(prefix), SeekOp.AtOrAfter, ct);
              ok && cursor.KeyBytes.StartsWith(prefix);
-             ok = await cursor.NextAsync())
+             ok = await cursor.NextAsync(ct))
         {
             rows.Add(cursor.Row);
         }
@@ -103,15 +105,16 @@ public sealed class CompositeKeyTests
     [Fact]
     public async Task AnIntegerLeadsAKeyAtItsOwnWidthAndSignsOrderIt()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(withEncoder: true);
         List<(byte[] Key, long Row)> oracle = Oracle(row =>
             RowEncoder.EncodeKey([FilterLiteral.From((long)Number(row)), FilterLiteral.From(Country(row))], [I32, Utf8], [Asc, Asc]));
 
-        await using KeyCursor cursor = await written.File.Keys("n", "country").OpenAsync();
+        await using KeyCursor cursor = await written.File.Keys("n", "country").OpenAsync(ct);
         long previous = long.MinValue;
         int index = 0;
-        for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextAsync())
+        for (bool ok = await cursor.SeekFirstAsync(ct); ok; ok = await cursor.NextAsync(ct))
         {
             Assert.Equal(oracle[index].Row, cursor.Row);
             long n = Number((int)cursor.Row);
@@ -124,12 +127,12 @@ public sealed class CompositeKeyTests
 
         // A seek at -1 lands on the first row whose number is -1.
         byte[] minusOne = RowEncoder.EncodeKey([FilterLiteral.From(-1L)], [I32], [Asc]);
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(minusOne), SeekOp.AtOrAfter));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(minusOne), SeekOp.AtOrAfter, ct));
         Assert.Equal(-1, Number((int)cursor.Row));
         Assert.True(cursor.KeyBytes.StartsWith(minusOne));
 
         // Distinct walks the tuples once each.
-        await using KeyCursor distinct = await written.File.Keys("n", "country").Distinct().OpenAsync();
+        await using KeyCursor distinct = await written.File.Keys("n", "country").Distinct().OpenAsync(ct);
         HashSet<(int, string)> tuples = [];
         for (int row = 0; row < Rows; row++)
         {
@@ -137,7 +140,7 @@ public sealed class CompositeKeyTests
         }
 
         int keys = 0;
-        for (bool ok = await distinct.SeekFirstAsync(); ok; ok = await distinct.NextAsync())
+        for (bool ok = await distinct.SeekFirstAsync(ct); ok; ok = await distinct.NextAsync(ct))
         {
             keys++;
         }
@@ -148,6 +151,7 @@ public sealed class CompositeKeyTests
     [Fact]
     public async Task WithoutAnEncoderTheKeyIsAbandonedAndTheCursorRefusedByName()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(withEncoder: false);
         IndexWriteReport report = Assert.Single(written.Report.Indexes, r => r.Column == "(country, city)");
@@ -155,11 +159,11 @@ public sealed class CompositeKeyTests
         Assert.Contains("KeyEncoder", report.Reason, StringComparison.Ordinal);
 
         VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
-            async () => await written.File.Keys("country", "city").OpenAsync());
+            async () => await written.File.Keys("country", "city").OpenAsync(ct));
         Assert.Contains("IndexPolicy.ForKey", refused.Message, StringComparison.Ordinal);
 
         // The policy still records the key, so an append would ask for it again.
-        IndexDirectory? directory = await written.File.ReadIndexDirectoryAsync();
+        IndexDirectory? directory = await written.File.ReadIndexDirectoryAsync(ct);
         Assert.NotNull(directory);
         Assert.Equal(2, directory.Policy.Keys.Count);
         Assert.Equal(["country", "city"], directory.Policy.Keys[0].Paths);
@@ -170,6 +174,7 @@ public sealed class CompositeKeyTests
     [Fact]
     public async Task AFileWithCompositeKeysScansAndPrunesAsWithout()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(withEncoder: true);
         VortexFile file = written.File;
@@ -180,11 +185,11 @@ public sealed class CompositeKeyTests
         }
 
         VortexExpr filter = Expr.Eq(Expr.Field("country"), Expr.Literal(FilterLiteral.From("DE")));
-        Assert.Equal(expected, await file.ScanBuilder().Where(filter).CountAsync());
-        Assert.Equal(expected, await file.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
+        Assert.Equal(expected, await file.ScanBuilder().Where(filter).CountAsync(ct));
+        Assert.Equal(expected, await file.ScanBuilder().Where(filter).WithIndexes(false).CountAsync(ct));
 
         // The composite entry does not pose as a single column's source.
-        KeyPlan single = await file.Keys("country").ExplainAsync();
+        KeyPlan single = await file.Keys("country").ExplainAsync(ct);
         Assert.Equal(KeySourceKind.None, single.Source);
         Assert.Throws<ArgumentException>(() => WritePolicy.None.ForKey(["country"], IndexSpec.SortedRuns));
         Assert.Throws<ArgumentException>(() => WritePolicy.None.ForKey(["a", "b"], IndexSpec.Postings));
@@ -200,6 +205,7 @@ public sealed class CompositeKeyTests
         // clustering key's compaction and key-ordered reads need. The oracle is the walk's: every
         // non-null tuple in encoded order, ties in row order, reversed descending; the filter, on
         // a column the tuple does not hold, removes rows and nothing else.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(withEncoder: true);
         List<(byte[] Key, long Row)> oracle = Oracle(row => City(row) is string city && Number(row) > 0
@@ -235,7 +241,7 @@ public sealed class CompositeKeyTests
 
         Assert.Equal(oracle.ConvertAll(e => $"{Country((int)e.Row)}|{City((int)e.Row)}|{Number((int)e.Row)}"), delivered);
 
-        ScanExplanation plan = await written.File.ScanBuilder().InKeyOrder(["country", "city"], descending).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().InKeyOrder(["country", "city"], descending).ExplainAsync(ct);
         Assert.Equal("(country, city)", plan.Order!.Path);
         Assert.Equal(KeySourceKind.SortedRuns, plan.Order.Source);
 

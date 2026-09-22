@@ -78,7 +78,7 @@ public sealed class SortedRunsCursorTests
     {
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
-        KeyPlan plan = await written.File.Keys(column).ExplainAsync();
+        KeyPlan plan = await written.File.Keys(column).ExplainAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(KeySourceKind.SortedRuns, plan.Source);
         Assert.True(plan.Runs > 1, $"{plan.Runs} runs");
@@ -91,13 +91,14 @@ public sealed class SortedRunsCursorTests
     [MemberData(nameof(Columns))]
     public async Task AFullWalkIsTheOracleForwardAndBackward(string column)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         List<Entry> oracle = Oracle(column);
-        await using KeyCursor cursor = await written.File.Keys(column).OpenAsync();
+        await using KeyCursor cursor = await written.File.Keys(column).OpenAsync(ct);
 
         int index = 0;
-        for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextAsync())
+        for (bool ok = await cursor.SeekFirstAsync(ct); ok; ok = await cursor.NextAsync(ct))
         {
             AssertAt(cursor, oracle, index++);
         }
@@ -105,7 +106,7 @@ public sealed class SortedRunsCursorTests
         Assert.Equal(oracle.Count, index);
         Assert.False(cursor.IsValid);
 
-        for (bool ok = await cursor.SeekLastAsync(); ok; ok = await cursor.PrevAsync())
+        for (bool ok = await cursor.SeekLastAsync(ct); ok; ok = await cursor.PrevAsync(ct))
         {
             AssertAt(cursor, oracle, --index);
         }
@@ -117,10 +118,11 @@ public sealed class SortedRunsCursorTests
     [MemberData(nameof(Columns))]
     public async Task TheFiveOperatorsLandWhereTheOracleSays(string column)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         List<Entry> oracle = Oracle(column);
-        await using KeyCursor cursor = await written.File.Keys(column).OpenAsync();
+        await using KeyCursor cursor = await written.File.Keys(column).OpenAsync(ct);
 
         foreach (FilterLiteral key in Probes(column, oracle))
         {
@@ -132,7 +134,7 @@ public sealed class SortedRunsCursorTests
             await Check(cursor, oracle, key, SeekOp.Before, lower - 1);
             await Check(cursor, oracle, key, SeekOp.Exact, lower < upper ? lower : -1);
 
-            Assert.Equal(lower, await cursor.RankAsync(key));
+            Assert.Equal(lower, await cursor.RankAsync(key, ct));
         }
     }
 
@@ -140,15 +142,16 @@ public sealed class SortedRunsCursorTests
     [MemberData(nameof(Columns))]
     public async Task StepsAcrossAFlipStayOnTheOracle(string column)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         List<Entry> oracle = Oracle(column);
-        await using KeyCursor cursor = await written.File.Keys(column).OpenAsync();
+        await using KeyCursor cursor = await written.File.Keys(column).OpenAsync(ct);
 
         // A deterministic zigzag: runs of steps one way, then the other, each flip a re-seek.
         Random random = new Random(12345);
         int index = oracle.Count / 3;
-        Assert.True(await cursor.SeekRankAsync(index));
+        Assert.True(await cursor.SeekRankAsync(index, ct));
         AssertAt(cursor, oracle, index);
         for (int leg = 0; leg < 40; leg++)
         {
@@ -157,11 +160,11 @@ public sealed class SortedRunsCursorTests
             for (int s = 0; s < steps; s++)
             {
                 int next = forward ? index + 1 : index - 1;
-                bool moved = forward ? await cursor.NextAsync() : await cursor.PrevAsync();
+                bool moved = forward ? await cursor.NextAsync(ct) : await cursor.PrevAsync(ct);
                 Assert.Equal(next >= 0 && next < oracle.Count, moved);
                 if (!moved)
                 {
-                    Assert.True(await cursor.SeekRankAsync(index));
+                    Assert.True(await cursor.SeekRankAsync(index, ct));
                     break;
                 }
 
@@ -175,33 +178,35 @@ public sealed class SortedRunsCursorTests
     [MemberData(nameof(Columns))]
     public async Task RankSelectAndKeyCountAgree(string column)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         List<Entry> oracle = Oracle(column);
-        await using KeyCursor cursor = await written.File.Keys(column).OpenAsync();
+        await using KeyCursor cursor = await written.File.Keys(column).OpenAsync(ct);
 
         for (int i = 0; i < oracle.Count; i += 97)
         {
-            Assert.True(await cursor.SeekRankAsync(i));
+            Assert.True(await cursor.SeekRankAsync(i, ct));
             AssertAt(cursor, oracle, i);
             FilterLiteral key = cursor.Key;
-            long count = await cursor.KeyCountAsync();
+            long count = await cursor.KeyCountAsync(ct);
             Assert.Equal(Upper(oracle, key) - Lower(oracle, key), count);
 
             // The count leaves the position where it was.
             AssertAt(cursor, oracle, i);
-            long rank = await cursor.RankAsync(key);
+            long rank = await cursor.RankAsync(key, ct);
             Assert.InRange(i, rank, rank + count - 1);
         }
 
-        Assert.False(await cursor.SeekRankAsync(oracle.Count));
-        Assert.False(await cursor.SeekRankAsync(-1));
+        Assert.False(await cursor.SeekRankAsync(oracle.Count, ct));
+        Assert.False(await cursor.SeekRankAsync(-1, ct));
     }
 
     [Theory]
     [MemberData(nameof(Columns))]
     public async Task NextKeyVisitsEachKeyOnceAndPrevKeyReversesIt(string column)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         List<Entry> oracle = Oracle(column);
@@ -214,35 +219,36 @@ public sealed class SortedRunsCursorTests
             }
         }
 
-        await using KeyCursor cursor = await written.File.Keys(column).Distinct().OpenAsync();
+        await using KeyCursor cursor = await written.File.Keys(column).Distinct().OpenAsync(ct);
         int group = 0;
-        for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextKeyAsync())
+        for (bool ok = await cursor.SeekFirstAsync(ct); ok; ok = await cursor.NextKeyAsync(ct))
         {
             AssertAt(cursor, oracle, firsts[group++]);
         }
 
         Assert.Equal(firsts.Count, group);
 
-        Assert.True(await cursor.SeekLastAsync());
+        Assert.True(await cursor.SeekLastAsync(ct));
         for (int g = firsts.Count - 1; g > 0; g--)
         {
-            Assert.True(await cursor.PrevKeyAsync());
+            Assert.True(await cursor.PrevKeyAsync(ct));
             AssertAt(cursor, oracle, firsts[g] - 1);
         }
 
-        Assert.False(await cursor.PrevKeyAsync());
+        Assert.False(await cursor.PrevKeyAsync(ct));
     }
 
     [Fact]
     public async Task TheRunCacheKeepsWhatWasReadWithinItsBudget()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         List<Entry> oracle = Oracle("i64");
 
-        await using (KeyCursor cursor = await written.File.Keys("i64").OpenAsync())
+        await using (KeyCursor cursor = await written.File.Keys("i64").OpenAsync(ct))
         {
-            Assert.True(await cursor.SeekFirstAsync());
+            Assert.True(await cursor.SeekFirstAsync(ct));
         }
 
         IndexRunCache cache = written.File.RunCache;
@@ -251,11 +257,11 @@ public sealed class SortedRunsCursorTests
 
         // A budget of nothing keeps nothing, and the walk is the same walk.
         await using VortexFile bare = await VortexFile.OpenAsync(
-            written.Path, new VortexOpenOptions { Read = new VortexReadOptions { IndexCacheBytes = 0 } });
-        await using (KeyCursor cursor = await bare.Keys("i64").OpenAsync())
+            written.Path, new VortexOpenOptions { Read = new VortexReadOptions { IndexCacheBytes = 0 } }, ct);
+        await using (KeyCursor cursor = await bare.Keys("i64").OpenAsync(ct))
         {
             int index = 0;
-            for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextAsync())
+            for (bool ok = await cursor.SeekFirstAsync(ct); ok; ok = await cursor.NextAsync(ct))
             {
                 AssertAt(cursor, oracle, index++);
             }
@@ -268,12 +274,12 @@ public sealed class SortedRunsCursorTests
         // A budget of one segment evicts as it goes and stays under its cap.
         long one = cache.Bytes / cache.Count;
         await using VortexFile tight = await VortexFile.OpenAsync(
-            written.Path, new VortexOpenOptions { Read = new VortexReadOptions { IndexCacheBytes = 2 * one } });
-        await using (KeyCursor cursor = await tight.Keys("i64").OpenAsync())
+            written.Path, new VortexOpenOptions { Read = new VortexReadOptions { IndexCacheBytes = 2 * one } }, ct);
+        await using (KeyCursor cursor = await tight.Keys("i64").OpenAsync(ct))
         {
             for (int i = 0; i < oracle.Count; i += 311)
             {
-                Assert.True(await cursor.SeekRankAsync(i));
+                Assert.True(await cursor.SeekRankAsync(i, ct));
                 AssertAt(cursor, oracle, i);
                 Assert.True(tight.RunCache.Bytes <= 2 * one);
             }
@@ -283,26 +289,27 @@ public sealed class SortedRunsCursorTests
     [Fact]
     public async Task AStepInsideALoadedSegmentAllocatesNothing()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
-        await using KeyCursor cursor = await written.File.Keys("text").OpenAsync();
+        await using KeyCursor cursor = await written.File.Keys("text").OpenAsync(ct);
 
-        Assert.True(await cursor.SeekFirstAsync());
+        Assert.True(await cursor.SeekFirstAsync(ct));
         for (int warm = 0; warm < 256; warm++)
         {
-            await cursor.NextAsync();
+            await cursor.NextAsync(ct);
         }
 
         // Warm, then measure from a fresh position: the steps that stay in loaded segments are
         // synchronous, and a borrowed key costs nothing.
-        Assert.True(await cursor.SeekFirstAsync());
+        Assert.True(await cursor.SeekFirstAsync(ct));
         long bytes = 0;
         long before = GC.GetAllocatedBytesForCurrentThread();
         int synchronous = 0;
         for (int step = 0; step < 256; step++)
         {
-            ValueTask<bool> move = cursor.NextAsync();
+            ValueTask<bool> move = cursor.NextAsync(ct);
             if (move.IsCompletedSuccessfully)
             {
                 synchronous++;
@@ -321,27 +328,28 @@ public sealed class SortedRunsCursorTests
     [Fact]
     public async Task ASeekOfTheWrongDomainIsRefusedAndTheZerosAreTwoKeys()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
-        await using KeyCursor cursor = await written.File.Keys("f32").OpenAsync();
+        await using KeyCursor cursor = await written.File.Keys("f32").OpenAsync(ct);
 
-        await Assert.ThrowsAsync<ArgumentException>(async () => await cursor.SeekAsync(FilterLiteral.From(1L), SeekOp.Exact));
+        await Assert.ThrowsAsync<ArgumentException>(async () => await cursor.SeekAsync(FilterLiteral.From(1L), SeekOp.Exact, ct));
 
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(-0.0), SeekOp.Exact));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(-0.0), SeekOp.Exact, ct));
         Assert.True(double.IsNegative(cursor.Key.FloatValue));
-        long negative = await cursor.KeyCountAsync();
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(0.0), SeekOp.Exact));
+        long negative = await cursor.KeyCountAsync(ct);
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(0.0), SeekOp.Exact, ct));
         Assert.False(double.IsNegative(cursor.Key.FloatValue));
         Assert.Equal(Rows / Floats.Length, negative);
-        Assert.Equal(Rows / Floats.Length, await cursor.KeyCountAsync());
+        Assert.Equal(Rows / Floats.Length, await cursor.KeyCountAsync(ct));
 
         // The NaNs are the ends: nothing after the positive one, nothing before the negative one,
         // and each is a key of its own.
-        Assert.False(await cursor.SeekAsync(FilterLiteral.From(PositiveNaN), SeekOp.After));
-        Assert.False(await cursor.SeekAsync(FilterLiteral.From(NegativeNaN), SeekOp.Before));
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(NegativeNaN), SeekOp.Exact));
+        Assert.False(await cursor.SeekAsync(FilterLiteral.From(PositiveNaN), SeekOp.After, ct));
+        Assert.False(await cursor.SeekAsync(FilterLiteral.From(NegativeNaN), SeekOp.Before, ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(NegativeNaN), SeekOp.Exact, ct));
         Assert.True(double.IsNaN(cursor.Key.FloatValue) && double.IsNegative(cursor.Key.FloatValue));
-        Assert.True(await cursor.SeekLastAsync());
+        Assert.True(await cursor.SeekLastAsync(ct));
         Assert.True(double.IsNaN(cursor.Key.FloatValue) && !double.IsNegative(cursor.Key.FloatValue));
     }
 
@@ -361,6 +369,7 @@ public sealed class SortedRunsCursorTests
     [MemberData(nameof(CoverFilters))]
     public async Task AnExactCoverCountsReadsAndBoundsLikeTheDecode(string text)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         (string column, VortexExpr filter, Func<FilterLiteral, bool> matches) = Parse(text);
@@ -369,24 +378,24 @@ public sealed class SortedRunsCursorTests
 
         // The count and the membership, from the runs alone: no data segment is read.
         ScanMetrics metrics = new ScanMetrics();
-        Assert.Equal(oracle.Count, await file.ScanBuilder().Where(filter).WithMetrics(metrics).CountAsync());
+        Assert.Equal(oracle.Count, await file.ScanBuilder().Where(filter).WithMetrics(metrics).CountAsync(ct));
         Assert.Equal(0, metrics.ValuesDecoded);
-        Assert.Equal(oracle.Count > 0, await file.ScanBuilder().Where(filter).AnyAsync());
+        Assert.Equal(oracle.Count > 0, await file.ScanBuilder().Where(filter).AnyAsync(ct));
 
         // The same numbers through every other tier, and without the index.
-        Assert.Equal(oracle.Count, await file.ScanBuilder().Where(filter).WithTiers(TerminalTiers.All & ~TerminalTiers.ExactCover).CountAsync());
-        Assert.Equal(oracle.Count, await file.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
+        Assert.Equal(oracle.Count, await file.ScanBuilder().Where(filter).WithTiers(TerminalTiers.All & ~TerminalTiers.ExactCover).CountAsync(ct));
+        Assert.Equal(oracle.Count, await file.ScanBuilder().Where(filter).WithIndexes(false).CountAsync(ct));
 
         // Under a range, the slices' rows are walked and intersected.
         RowRange range = new RowRange(1_000, 4_500);
         long inRange = oracle.FindAll(e => e.Row >= range.Start && e.Row < range.End).Count;
-        Assert.Equal(inRange, await file.ScanBuilder().Where(filter).Rows(range).CountAsync());
+        Assert.Equal(inRange, await file.ScanBuilder().Where(filter).Rows(range).CountAsync(ct));
 
         // The extremes of the covered column are the ends of the slices.
-        FilterLiteral min = await file.ScanBuilder().Where(filter).MinAsync(column);
-        FilterLiteral max = await file.ScanBuilder().Where(filter).MaxAsync(column);
-        FilterLiteral decodedMin = await file.ScanBuilder().Where(filter).WithTiers(TerminalTiers.Decode).MinAsync(column);
-        FilterLiteral decodedMax = await file.ScanBuilder().Where(filter).WithTiers(TerminalTiers.Decode).MaxAsync(column);
+        FilterLiteral min = await file.ScanBuilder().Where(filter).MinAsync(column, ct);
+        FilterLiteral max = await file.ScanBuilder().Where(filter).MaxAsync(column, ct);
+        FilterLiteral decodedMin = await file.ScanBuilder().Where(filter).WithTiers(TerminalTiers.Decode).MinAsync(column, ct);
+        FilterLiteral decodedMax = await file.ScanBuilder().Where(filter).WithTiers(TerminalTiers.Decode).MaxAsync(column, ct);
         Assert.True(SameExtreme(decodedMin, min), $"min {Describe(min)} against {Describe(decodedMin)}");
         Assert.True(SameExtreme(decodedMax, max), $"max {Describe(max)} against {Describe(decodedMax)}");
 
@@ -410,6 +419,7 @@ public sealed class SortedRunsCursorTests
     [Fact]
     public async Task ExplainSaysWhatTheIndexSelectsHowACountResolvesAndWhatAnOrderWalks()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         VortexFile file = written.File;
@@ -417,7 +427,7 @@ public sealed class SortedRunsCursorTests
         (_, VortexExpr filter, Func<FilterLiteral, bool> matches) = Parse("i64 >= 2400");
         List<Entry> oracle = Oracle("i64").FindAll(e => matches(e.Key));
 
-        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
         Assert.NotNull(plan.Count);
         Assert.True(plan.Count.ExactCover);
         Assert.Equal(oracle.Count, plan.Count.ExactCount);
@@ -426,11 +436,11 @@ public sealed class SortedRunsCursorTests
         Assert.Null(plan.Order);
 
         // Without the index, no cover; a take narrows it off too.
-        ScanExplanation off = await file.ScanBuilder().Where(filter).WithIndexes(false).ExplainAsync();
+        ScanExplanation off = await file.ScanBuilder().Where(filter).WithIndexes(false).ExplainAsync(ct);
         Assert.False(off.Count!.ExactCover);
         Assert.Equal(0, off.RowsSelectedByIndex);
 
-        ScanExplanation ordered = await file.ScanBuilder().Where(filter).InKeyOrder("i64", descending: true).ExplainAsync();
+        ScanExplanation ordered = await file.ScanBuilder().Where(filter).InKeyOrder("i64", descending: true).ExplainAsync(ct);
         OrderExplanation order = Assert.IsType<OrderExplanation>(ordered.Order);
         Assert.Equal(KeySourceKind.SortedRuns, order.Source);
         Assert.Equal(oracle.Count, order.EntriesInRange);
@@ -453,13 +463,14 @@ public sealed class SortedRunsCursorTests
 
         Assert.Equal(runsWithKeys, order.RunsInRange);
 
-        ScanExplanation nothing = await file.ScanBuilder().InKeyOrder("i64").WithIndexes(false).ExplainAsync();
+        ScanExplanation nothing = await file.ScanBuilder().InKeyOrder("i64").WithIndexes(false).ExplainAsync(ct);
         Assert.Equal(KeySourceKind.None, nothing.Order!.Source);
     }
 
     [Fact]
     public async Task TheEventSourceCountsSeeksStepsRunsAndCountTiersWhileSomeoneListens()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
         VortexFile file = written.File;
@@ -472,9 +483,9 @@ public sealed class SortedRunsCursorTests
         long decoded = log.CountBlocksDecoded;
         long windows = log.KeyOrderWindows;
 
-        await using (KeyCursor cursor = await file.Keys("text").OpenAsync())
+        await using (KeyCursor cursor = await file.Keys("text").OpenAsync(ct))
         {
-            for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextAsync())
+            for (bool ok = await cursor.SeekFirstAsync(ct); ok; ok = await cursor.NextAsync(ct))
             {
             }
         }
@@ -484,7 +495,7 @@ public sealed class SortedRunsCursorTests
         Assert.True(log.IndexRunsRead > runs);
 
         VortexExpr notIndexed = Expr.Ne(Expr.Field("f32"), Expr.Literal(FilterLiteral.From(0.0)));
-        await file.ScanBuilder().Where(notIndexed).CountAsync();
+        await file.ScanBuilder().Where(notIndexed).CountAsync(ct);
         Assert.True(log.CountBlocksDecoded > decoded);
 
         await foreach (RecordBatch batch in file.ScanBuilder().InKeyOrder("i64").WithMaxBatchRows(500).ExecuteAsync())
@@ -575,13 +586,14 @@ public sealed class SortedRunsCursorTests
     [Fact]
     public async Task TheDictionariesServeADistinctWalkOfTheColumnsTheWriterEncodedSo()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(IndexSpec.Auto);
         int served = 0;
         List<string> refused = [];
         foreach (string column in (string[])[.. Names, "label"])
         {
-            KeyPlan plan = await written.File.Keys(column).Distinct().WithSource(KeySourceKind.Dictionary).ExplainAsync();
+            KeyPlan plan = await written.File.Keys(column).Distinct().WithSource(KeySourceKind.Dictionary).ExplainAsync(ct);
             if (plan.Source != KeySourceKind.Dictionary)
             {
                 KeySourceRejection why = Assert.Single(plan.Rejected, r => r.Source == KeySourceKind.Dictionary);
@@ -606,6 +618,7 @@ public sealed class SortedRunsCursorTests
     [Fact]
     public async Task ADistinctWalkOverPostingsReadsNoDataSegment()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         RecordingSegmentSource? counting = null;
         await using Written written = await Written.CreateAsync(
@@ -614,9 +627,9 @@ public sealed class SortedRunsCursorTests
         VortexFile file = written.File;
         counting!.ResetCounters();
 
-        await using KeyCursor cursor = await file.Keys("text").Distinct().OpenAsync();
+        await using KeyCursor cursor = await file.Keys("text").Distinct().OpenAsync(ct);
         int keys = 0;
-        for (bool ok = await cursor.SeekFirstAsync(); ok; ok = await cursor.NextAsync())
+        for (bool ok = await cursor.SeekFirstAsync(ct); ok; ok = await cursor.NextAsync(ct))
         {
             keys++;
         }
@@ -643,21 +656,22 @@ public sealed class SortedRunsCursorTests
     [Fact]
     public async Task ADistinctChoiceTakesTheCheapestKeySourceAndSaysWhy()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using (Written postings = await Written.CreateAsync(PolicyOf(KeySourceKind.Postings)))
         {
-            KeyPlan keys = await postings.File.Keys("i64").Distinct().ExplainAsync();
+            KeyPlan keys = await postings.File.Keys("i64").Distinct().ExplainAsync(ct);
             Assert.Equal(KeySourceKind.Postings, keys.Source);
             Assert.False(keys.HasRows);
 
             // Without Distinct(), keys without rows are refused by name.
-            KeyPlan rows = await postings.File.Keys("i64").ExplainAsync();
+            KeyPlan rows = await postings.File.Keys("i64").ExplainAsync(ct);
             Assert.Equal(KeySourceKind.None, rows.Source);
             Assert.Contains(rows.Rejected, r => r.Source == KeySourceKind.Postings && r.Reason.Contains("Distinct()", StringComparison.Ordinal));
         }
 
         await using Written runs = await Written.CreateAsync();
-        KeyPlan plan = await runs.File.Keys("i64").Distinct().ExplainAsync();
+        KeyPlan plan = await runs.File.Keys("i64").Distinct().ExplainAsync(ct);
         Assert.Equal(KeySourceKind.SortedRuns, plan.Source);
         Assert.True(plan.HasRows);
     }
