@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -555,68 +556,65 @@ internal sealed class DistinctTable
     /// before, which is still what decides.
     /// </para>
     /// <para>
-    /// A hit writes its code into the call's slice of the codes and nothing else: the row count is
-    /// set from the loop's own index before each call that reads it -- a miss, a null -- and once
-    /// at the end, never incremented through the object row after row.
+    /// The rows whose views are recent are coded by <see cref="Recall"/>, a loop that calls
+    /// nothing and writes nothing but their codes, so that what it holds stays in registers. Any
+    /// other row -- a null, a miss, an out-of-line value -- stops it and is probed here, with the
+    /// row count set from the index before the call that reads it and once at the end, never
+    /// incremented through the object row after row.
     /// </para>
     /// </remarks>
     private void ProbeViews(CanonicalNode node, in ValidityMask mask, int start, int count)
     {
         ReadOnlySpan<byte> views = node.Views.Span;
-        ReadOnlySpan<ulong> pairs = MemoryMarshal.Cast<byte, ulong>(views);
-        Span<ulong> recentLow = stackalloc ulong[RecentViews];
-        Span<ulong> recentHigh = stackalloc ulong[RecentViews];
+        ReadOnlySpan<ulong> pairs = MemoryMarshal.Cast<byte, ulong>(views).Slice(start * 2, count * 2);
+        Span<ulong> recent = stackalloc ulong[RecentViews * 2];
         Span<int> recentCode = stackalloc int[RecentViews];
         recentCode.Fill(-1);
-        bool allValid = mask.AllValid;
+        ReadOnlySpan<byte> bits = mask.AllValid ? default : mask.Bits;
         int first = _rows;
         Span<int> codes = _codes.AsSpan(first, count);
         for (int i = 0; i < count; i++)
         {
+            if (!mask.AllInvalid)
+            {
+                i = Recall(pairs, codes, recent, recentCode, bits, mask.BitOffset + start, i);
+                if (i == count)
+                {
+                    break;
+                }
+            }
+
             int row = start + i;
-            if (!allValid && !mask.IsValid(row))
-            {
-                _rows = first + i;
-                NullRow();
-                if (_abandoned)
-                {
-                    return;
-                }
-
-                continue;
-            }
-
-            ulong low = pairs[row * 2];
-            ulong high = pairs[(row * 2) + 1];
-            int size = (int)(uint)low;
-            if (size <= 12)
-            {
-                int slot = (int)KeyHash.Mix(low ^ (high * 0x9E3779B97F4A7C15UL)) & (RecentViews - 1);
-                int known = recentCode[slot];
-                if (known >= 0 && recentLow[slot] == low && recentHigh[slot] == high)
-                {
-                    codes[i] = known;
-                    continue;
-                }
-
-                _rows = first + i;
-                InsertBytes(views.Slice((row * ViewSize) + 4, size));
-                if (_abandoned)
-                {
-                    return;
-                }
-
-                recentLow[slot] = low;
-                recentHigh[slot] = high;
-                recentCode[slot] = codes[i];
-                continue;
-            }
-
-            ReadOnlySpan<byte> view = views.Slice(row * ViewSize, ViewSize);
-            int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
-            int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
             _rows = first + i;
-            InsertBytes(node.GetDataBuffer(buffer).Span.Slice(offset, size));
+            if (!mask.IsValid(row))
+            {
+                NullRow();
+            }
+            else
+            {
+                ulong low = pairs[i * 2];
+                ulong high = pairs[(i * 2) + 1];
+                int size = (int)(uint)low;
+                if (size <= 12)
+                {
+                    InsertBytes(views.Slice((row * ViewSize) + 4, size));
+                    if (!_abandoned)
+                    {
+                        int slot = RecentSlot(low, high);
+                        recent[slot * 2] = low;
+                        recent[(slot * 2) + 1] = high;
+                        recentCode[slot] = codes[i];
+                    }
+                }
+                else
+                {
+                    ReadOnlySpan<byte> view = views.Slice(row * ViewSize, ViewSize);
+                    int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
+                    int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
+                    InsertBytes(node.GetDataBuffer(buffer).Span.Slice(offset, size));
+                }
+            }
+
             if (_abandoned)
             {
                 return;
@@ -625,6 +623,45 @@ internal sealed class DistinctTable
 
         _rows = first + count;
     }
+
+    /// <summary>
+    /// Codes the rows from <paramref name="i"/> on whose views are recent, and returns the first
+    /// that is not -- null, not recent, or out of line -- or the row count.
+    /// </summary>
+    /// <remarks>
+    /// Only inline views are remembered, and a view's first word holds its size, so a row that
+    /// matches a recent view is inline without being asked.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int Recall(
+        ReadOnlySpan<ulong> pairs, Span<int> codes, ReadOnlySpan<ulong> recent,
+        ReadOnlySpan<int> recentCode, ReadOnlySpan<byte> bits, int bitOffset, int i)
+    {
+        for (; i < codes.Length; i++)
+        {
+            if (!bits.IsEmpty && !CanonicalSupport.BitAt(bits, bitOffset + i))
+            {
+                return i;
+            }
+
+            ulong low = pairs[i * 2];
+            ulong high = pairs[(i * 2) + 1];
+            int slot = RecentSlot(low, high);
+            int known = recentCode[slot];
+            if (known < 0 || recent[slot * 2] != low || recent[(slot * 2) + 1] != high)
+            {
+                return i;
+            }
+
+            codes[i] = known;
+        }
+
+        return codes.Length;
+    }
+
+    /// <summary>Where a view sits among the recent ones.</summary>
+    private static int RecentSlot(ulong low, ulong high) =>
+        (int)KeyHash.Mix(low ^ (high * 0x9E3779B97F4A7C15UL)) & (RecentViews - 1);
 
     /// <summary>
     /// The null is a value like any other, with a code of its own, so a nullable dictionary has at

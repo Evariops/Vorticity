@@ -1209,8 +1209,24 @@ internal static class BlockStatsPass
         // row's increment reads back, a chain through memory on a column where every row is a
         // boundary.
         long boundaries = 0;
+        ReadOnlySpan<byte> bits = allValid ? default : mask.Bits;
         for (int i = 1; i < count; i++)
         {
+            if (!tracking && !mask.AllInvalid)
+            {
+                // Past the order, the pairs the views settle are counted by a loop of their own
+                // that calls nothing; the pair it stops at is this loop's. Every row it passed
+                // was valid.
+                int settled = ViewBoundaries(
+                    pairs, bits, mask.BitOffset, start + i, start + count, ref boundaries, ref repeats) - start;
+                previousValid |= settled > i;
+                i = settled;
+                if (i == count)
+                {
+                    break;
+                }
+            }
+
             int row = start + i;
             bool valid = allValid || mask.IsValid(row);
             if (!allValid && valid != previousValid)
@@ -1286,6 +1302,65 @@ internal static class BlockStatsPass
         int last = start + count - 1;
         bool lastValid = mask.IsValid(last);
         Store(previous, lastValid, lastValid ? Value(node, views, last) : default);
+    }
+
+    /// <summary>
+    /// Counts the run boundaries of rows <c>[row, end)</c> of a column whose order is no longer
+    /// tracked, each row against the one before it, for as long as both are valid and their views
+    /// settle the question; returns the first row they do not, or <paramref name="end"/>.
+    /// </summary>
+    /// <remarks>
+    /// Views settle every pair but two out-of-line values of one size, which only their bytes can
+    /// tell apart. The loop calls nothing, so that what it holds stays in registers: in the loop of
+    /// every case, the calls of the rare ones cost each row a trip through the stack.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int ViewBoundaries(
+        ReadOnlySpan<ulong> pairs, ReadOnlySpan<byte> bits, int bitOffset, int row, int end,
+        ref long boundaries, ref bool repeats)
+    {
+        long found = 0;
+        bool repeat = false;
+        for (; row < end; row++)
+        {
+            if (!bits.IsEmpty
+                && !(CanonicalSupport.BitAt(bits, bitOffset + row - 1)
+                    && CanonicalSupport.BitAt(bits, bitOffset + row)))
+            {
+                break;
+            }
+
+            ulong a0 = pairs[(row - 1) * 2];
+            ulong a1 = pairs[((row - 1) * 2) + 1];
+            ulong b0 = pairs[row * 2];
+            ulong b1 = pairs[(row * 2) + 1];
+            if (a0 == b0 && a1 == b1)
+            {
+                repeat = true;
+                continue;
+            }
+
+            uint size = (uint)a0;
+            if (size != (uint)b0)
+            {
+                found++;
+                continue;
+            }
+
+            if (size > 12)
+            {
+                break;
+            }
+
+            if (!InlineEqual(a0, a1, b0, b1, (int)size))
+            {
+                found++;
+            }
+        }
+
+        boundaries += found;
+        repeats |= repeat;
+        return row;
     }
 
     /// <summary>

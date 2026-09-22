@@ -1,6 +1,8 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -137,56 +139,140 @@ internal sealed class StringBounds
 
     /// <summary>Folds the valid rows <c>[start, start + count)</c> of a varbinview into the block.</summary>
     /// <remarks>
+    /// <para>
     /// A row is compared with the bounds by key first: two strings whose keys differ compare as
     /// their keys do, so a column of short or diverse values is decided by two integer compares a
     /// row. A string of twelve bytes or fewer is read from its view, one word for its key, and never
     /// as a span; a key that ties a bound's is settled by the lengths while either value is eight
     /// bytes or fewer, and by the bytes past the eighth otherwise.
+    /// </para>
+    /// <para>
+    /// Nearly every row changes nothing, and <see cref="Settled"/> passes over those in a loop
+    /// that calls nothing, so that what it holds stays in registers rather than going through the
+    /// stack around a call it would almost never make. The row it stops at is folded here.
+    /// </para>
     /// </remarks>
     internal void Accumulate(CanonicalArena arena, CanonicalNode node, int start, int count)
     {
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        if (mask.AllInvalid)
+        {
+            return;
+        }
+
         ReadOnlySpan<byte> views = node.Views.Span;
-        bool allValid = mask.AllValid;
+        ReadOnlySpan<byte> heap = node.DataBufferCount == 1 ? node.GetDataBuffer(0).Span : default;
+        ReadOnlySpan<byte> bits = mask.AllValid ? default : mask.Bits;
+        int end = start + count;
+        for (int row = start; row < end; row++)
+        {
+            row = Settled(views, heap, bits, mask.BitOffset, row, end);
+            if (row == end)
+            {
+                break;
+            }
+
+            Fold(node, views, in mask, row);
+        }
+    }
+
+    /// <summary>The rank of a length past which equal keys no longer settle an order.</summary>
+    private const int Unsettled = sizeof(ulong) + 1;
+
+    /// <summary>
+    /// The first row from <paramref name="row"/> on that might move a bound, or <paramref name="end"/>.
+    /// </summary>
+    /// <remarks>
+    /// A row is ranked by its key and then by its length, clamped at <see cref="Unsettled"/>: with
+    /// a key tied, a value of eight bytes or fewer sorts by its length, and two longer ones sort by
+    /// bytes the key does not hold -- which is <see cref="Fold"/>'s work, not this loop's. A row
+    /// ranked between the bounds, or equal to one below <see cref="Unsettled"/>, is a value between
+    /// them or equal to one, and changes nothing. The conditions are combined without
+    /// short-circuits: on a column of few values a row ties a bound often and in no pattern.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int Settled(
+        ReadOnlySpan<byte> views, ReadOnlySpan<byte> heap, ReadOnlySpan<byte> bits, int bitOffset,
+        int row, int end)
+    {
+        if (_minLength < 0)
+        {
+            return row;
+        }
+
         int keep = _limit + 1;
         ulong minKey = _minKey;
         ulong maxKey = _maxKey;
-        int minLength = _minLength;
-        int maxLength = _maxLength;
-        for (int row = start; row < start + count; row++)
+        int minRank = Math.Min(_minLength, Unsettled);
+        int maxRank = Math.Min(_maxLength, Unsettled);
+        for (; row < end; row++)
         {
-            if (!allValid && !mask.IsValid(row))
+            if (!bits.IsEmpty && !CanonicalSupport.BitAt(bits, bitOffset + row))
             {
                 continue;
             }
 
             ReadOnlySpan<byte> view = views.Slice(row * 16, 16);
-            int size = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view);
-            int length = Math.Min(size, keep);
-            ulong key = Key(size <= 12 ? view.Slice(4, 8) : BlockStatsPass.Value(node, views, row), length);
-            if (minLength < 0
-                || key < minKey
-                || (key == minKey && Tie(node, views, row, length, _min.AsSpan(0, minLength)) < 0))
+            int size = BinaryPrimitives.ReadInt32LittleEndian(view);
+            ReadOnlySpan<byte> first;
+            if (size <= 12)
             {
-                BlockStatsPass.Value(node, views, row)[..length].CopyTo(_min);
-                minLength = length;
-                minKey = key;
+                first = view.Slice(4, 8);
+            }
+            else if (!heap.IsEmpty)
+            {
+                first = heap.Slice(BinaryPrimitives.ReadInt32LittleEndian(view[12..]), 8);
+            }
+            else
+            {
+                return row;
             }
 
-            if (maxLength < 0
-                || key > maxKey
-                || (key == maxKey && Tie(node, views, row, length, _max.AsSpan(0, maxLength)) > 0))
+            int length = Math.Min(size, keep);
+            ulong key = Key(first, length);
+            int rank = Math.Min(length, Unsettled);
+            bool atMin = key == minKey;
+            bool atMax = key == maxKey;
+            if ((key < minKey) | (atMin & (rank < minRank))
+                | (key > maxKey) | (atMax & (rank > maxRank))
+                | ((rank == Unsettled) & (atMin | atMax)))
             {
-                BlockStatsPass.Value(node, views, row)[..length].CopyTo(_max);
-                maxLength = length;
-                maxKey = key;
+                return row;
             }
         }
 
-        _minKey = minKey;
-        _maxKey = maxKey;
-        _minLength = minLength;
-        _maxLength = maxLength;
+        return end;
+    }
+
+    /// <summary>Folds one row into the bounds: a row <see cref="Settled"/> stopped at.</summary>
+    private void Fold(CanonicalNode node, ReadOnlySpan<byte> views, in ValidityMask mask, int row)
+    {
+        if (!mask.IsValid(row))
+        {
+            return;
+        }
+
+        ReadOnlySpan<byte> view = views.Slice(row * 16, 16);
+        int size = BinaryPrimitives.ReadInt32LittleEndian(view);
+        int length = Math.Min(size, _limit + 1);
+        ulong key = Key(size <= 12 ? view.Slice(4, 8) : BlockStatsPass.Value(node, views, row), length);
+        if (_minLength < 0
+            || key < _minKey
+            || (key == _minKey && Tie(node, views, row, length, _min.AsSpan(0, _minLength)) < 0))
+        {
+            BlockStatsPass.Value(node, views, row)[..length].CopyTo(_min);
+            _minLength = length;
+            _minKey = key;
+        }
+
+        if (_maxLength < 0
+            || key > _maxKey
+            || (key == _maxKey && Tie(node, views, row, length, _max.AsSpan(0, _maxLength)) > 0))
+        {
+            BlockStatsPass.Value(node, views, row)[..length].CopyTo(_max);
+            _maxLength = length;
+            _maxKey = key;
+        }
     }
 
     /// <summary>
@@ -203,7 +289,7 @@ internal sealed class StringBounds
     /// </remarks>
     private static ulong Key(ReadOnlySpan<byte> bytes, int length)
     {
-        ulong word = System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(bytes);
+        ulong word = BinaryPrimitives.ReadUInt64BigEndian(bytes);
         return length >= sizeof(ulong) ? word : word & ~(ulong.MaxValue >> (8 * length));
     }
 
