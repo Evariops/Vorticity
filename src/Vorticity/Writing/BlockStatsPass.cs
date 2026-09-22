@@ -1372,6 +1372,7 @@ internal static class BlockStatsPass
     /// of the first word and the next eight the second word. The bytes past the size are masked
     /// out rather than trusted to be zero: a view built elsewhere need not have cleared them.
     /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static bool InlineEqual(ulong a0, ulong a1, ulong b0, ulong b1, int size)
     {
         ulong head = (a0 ^ b0) >> 32;

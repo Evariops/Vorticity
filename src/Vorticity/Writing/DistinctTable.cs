@@ -660,6 +660,7 @@ internal sealed class DistinctTable
     }
 
     /// <summary>Where a view sits among the recent ones.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int RecentSlot(ulong low, ulong high) =>
         (int)KeyHash.Mix(low ^ (high * 0x9E3779B97F4A7C15UL)) & (RecentViews - 1);
 

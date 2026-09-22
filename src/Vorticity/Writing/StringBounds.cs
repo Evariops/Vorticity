@@ -183,12 +183,20 @@ internal sealed class StringBounds
     /// The first row from <paramref name="row"/> on that might move a bound, or <paramref name="end"/>.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A row is ranked by its key and then by its length, clamped at <see cref="Unsettled"/>: with
     /// a key tied, a value of eight bytes or fewer sorts by its length, and two longer ones sort by
     /// bytes the key does not hold -- which is <see cref="Fold"/>'s work, not this loop's. A row
-    /// ranked between the bounds, or equal to one below <see cref="Unsettled"/>, is a value between
-    /// them or equal to one, and changes nothing. The conditions are combined without
-    /// short-circuits: on a column of few values a row ties a bound often and in no pattern.
+    /// ranked between the bounds, or equal to a short one, is a value between them or equal to
+    /// one, and changes nothing.
+    /// </para>
+    /// <para>
+    /// A bound longer than eight bytes has its rank moved once, out of the loop, so that the
+    /// comparison stops what only bytes can settle: the minimum's above every rank, so that any row
+    /// of its key stops; the maximum's to eight, so that a long row of its key stops and a short
+    /// one, a prefix of it, passes. The conditions are combined without short-circuits: on a
+    /// column of few values a row ties a bound often and in no pattern.
+    /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private int Settled(
@@ -200,11 +208,14 @@ internal sealed class StringBounds
             return row;
         }
 
-        int keep = _limit + 1;
+        int cap = Math.Min(_limit + 1, Unsettled);
         ulong minKey = _minKey;
         ulong maxKey = _maxKey;
         int minRank = Math.Min(_minLength, Unsettled);
         int maxRank = Math.Min(_maxLength, Unsettled);
+        minRank = minRank == Unsettled ? Unsettled + 1 : minRank;
+        maxRank = maxRank == Unsettled ? sizeof(ulong) : maxRank;
+        ReadOnlySpan<ulong> masks = KeyMasks;
         for (; row < end; row++)
         {
             if (!bits.IsEmpty && !CanonicalSupport.BitAt(bits, bitOffset + row))
@@ -228,14 +239,10 @@ internal sealed class StringBounds
                 return row;
             }
 
-            int length = Math.Min(size, keep);
-            ulong key = Key(first, length);
-            int rank = Math.Min(length, Unsettled);
-            bool atMin = key == minKey;
-            bool atMax = key == maxKey;
-            if ((key < minKey) | (atMin & (rank < minRank))
-                | (key > maxKey) | (atMax & (rank > maxRank))
-                | ((rank == Unsettled) & (atMin | atMax)))
+            int rank = size < cap ? size : cap;
+            ulong key = BinaryPrimitives.ReadUInt64BigEndian(first) & masks[rank];
+            if ((key < minKey) | ((key == minKey) & (rank < minRank))
+                | (key > maxKey) | ((key == maxKey) & (rank > maxRank)))
             {
                 return row;
             }
@@ -243,6 +250,14 @@ internal sealed class StringBounds
 
         return end;
     }
+
+    /// <summary>Per rank, the bits of a key that belong to the value: its first bytes, up to eight.</summary>
+    private static ReadOnlySpan<ulong> KeyMasks =>
+    [
+        0x0000_0000_0000_0000, 0xFF00_0000_0000_0000, 0xFFFF_0000_0000_0000, 0xFFFF_FF00_0000_0000,
+        0xFFFF_FFFF_0000_0000, 0xFFFF_FFFF_FF00_0000, 0xFFFF_FFFF_FFFF_0000, 0xFFFF_FFFF_FFFF_FF00,
+        0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF,
+    ];
 
     /// <summary>Folds one row into the bounds: a row <see cref="Settled"/> stopped at.</summary>
     private void Fold(CanonicalNode node, ReadOnlySpan<byte> views, in ValidityMask mask, int row)
@@ -287,11 +302,8 @@ internal sealed class StringBounds
     /// that is a prefix of another sorts first. Equal keys decide nothing -- "a" and "a\0" share
     /// one -- and <see cref="Tie"/> then does.
     /// </remarks>
-    private static ulong Key(ReadOnlySpan<byte> bytes, int length)
-    {
-        ulong word = BinaryPrimitives.ReadUInt64BigEndian(bytes);
-        return length >= sizeof(ulong) ? word : word & ~(ulong.MaxValue >> (8 * length));
-    }
+    private static ulong Key(ReadOnlySpan<byte> bytes, int length) =>
+        BinaryPrimitives.ReadUInt64BigEndian(bytes) & KeyMasks[Math.Min(length, Unsettled)];
 
     /// <summary>How a row compares with a bound whose key it shares.</summary>
     /// <remarks>
