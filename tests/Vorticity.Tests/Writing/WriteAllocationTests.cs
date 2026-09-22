@@ -97,11 +97,11 @@ public sealed class WriteAllocationTests
         // both are built while PRICING, so the candidate that loses would pay for them too. So do
         // the buffers a scheme produces for the blob -- packed blocks, patches, FSST's stream and
         // row tables, a varbin heap -- which the blob hands back once it is laid out.
-        ("containers/zoned_many_zones_nulls", 414_176),   // 413 760 measured, including 40 bytes more on each of the 64 batches it reads, the public writer and report, and its text column's string bounds
+        ("containers/zoned_many_zones_nulls", 413_664),   // 413 248 measured, including 40 bytes more on each of the 64 batches it reads, the public writer and report, and its text column's string bounds
         ("distributions/high_cardinality_i64_r8193", 72_948),   // 72 808 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row, and the writer's zstd encoder
-        ("encodings/fsst", 67_096),   // 66 632 measured
-        ("encodings/onpair", 69_288),   // 68 840 measured, including the public writer and report and the text column's string bounds
-        ("types/utf8_nullable_r1025", 211_144),   // 210 704 measured, including the public writer and report and the text column's string bounds
+        ("encodings/fsst", 66_976),   // 66 512 measured
+        ("encodings/onpair", 69_168),   // 68 720 measured, including the public writer and report and the text column's string bounds
+        ("types/utf8_nullable_r1025", 211_064),   // 210 624 measured, including the public writer and report and the text column's string bounds
 
         // THE REMAINING COMPONENTS, on the write side, so that each has an allocation ratchet:
         // `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant`. Note
@@ -114,7 +114,7 @@ public sealed class WriteAllocationTests
         ("encodings/pco", 66_432),   // 66 312 measured alone; in the suite with dynamic PGO the process-wide measurement adds the JIT's instrumentation, 72 bytes that are not the writer's
         // The read half of this axis keeps a `ZstandardDecoder` per node, so a change on the zstd
         // read path can move this ceiling while the write path stays put.
-        ("encodings/zstd", 205_468),   // 204 984 measured, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
+        ("encodings/zstd", 205_348),   // 204 864 measured, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
         ("encodings/map", 70_164),   // 70 056 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
         ("encodings/variant", 67_752),   // 67 568 measured, including the file statistics segment, the public writer and report, and the two transit ScanContexts the writer creates, whose read-side fields it never uses: per file, not per row (a context reduced to the arena is the fix if that ever matters)
 

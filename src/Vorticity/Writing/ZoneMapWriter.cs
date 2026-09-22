@@ -249,16 +249,8 @@ internal static class ZoneMapWriter
     /// <c>vortex.bounded_min</c>'s partial: a nullable scalar, null for a zone with no valid value.
     /// </summary>
     private static int BoundedMin(
-        CanonicalArena arena, DTypeArena types, DType element, IReadOnlyList<ZoneString> strings)
-    {
-        byte[]?[] values = new byte[]?[strings.Count];
-        for (int i = 0; i < values.Length; i++)
-        {
-            values[i] = strings[i].Present ? strings[i].Min : null;
-        }
-
-        return Views(arena, types, element, values);
-    }
+        CanonicalArena arena, DTypeArena types, DType element, IReadOnlyList<ZoneString> strings) =>
+        Views(arena, types, element, strings, max: false);
 
     /// <summary>
     /// <c>vortex.bounded_max</c>'s partial: a nullable struct of a nullable bound and a non-null
@@ -270,25 +262,39 @@ internal static class ZoneMapWriter
         IReadOnlyList<ZoneString> strings)
     {
         int count = strings.Count;
-        byte[]?[] values = new byte[]?[count];
-        bool[] present = new bool[count];
         int bytes = CanonicalSupport.BitmapByteCount(count);
         VortexBuffer unknown = arena.Allocate(Math.Max(bytes, 1), 1, out Span<byte> unknownBits);
         for (int i = 0; i < count; i++)
         {
-            present[i] = strings[i].Present;
-            values[i] = strings[i].Present ? strings[i].Max : null;
-            if (strings[i].Present && strings[i].Max is null)
+            ZoneString zone = strings[i];
+            if (zone.Present && zone.Max is null)
             {
                 CanonicalSupport.SetBit(unknownBits, i);
             }
         }
 
         Span<int> children = stackalloc int[2];
-        children[0] = Views(arena, types, element, values);
+        children[0] = Views(arena, types, element, strings, max: true);
         children[1] = arena.AddBool(
             types.Bool(Nullability.NonNullable), count, Arrays.Validity.NonNullable, unknown, 0);
-        return arena.AddStruct(partial, count, Mask(arena, types, present), children);
+
+        // The struct is present where the zone is: the minimum's validity, which is presence.
+        return arena.AddStruct(partial, count, Mask(arena, types, strings, max: false), children);
+    }
+
+    /// <summary>
+    /// The bound a zone contributes to <c>vortex.bounded_min</c> or, when <paramref name="max"/>,
+    /// to <c>vortex.bounded_max</c>: null for a zone with no valid value, and for a maximum no cut
+    /// can bound.
+    /// </summary>
+    private static ReadOnlyMemory<byte>? Bound(in ZoneString zone, bool max)
+    {
+        if (!zone.Present)
+        {
+            return null;
+        }
+
+        return max ? zone.Max : zone.Min;
     }
 
     private static DType BoundedMaxPartial(DTypeArena types, DType element)
@@ -298,15 +304,15 @@ internal static class ZoneMapWriter
         return types.Struct(names, fields, Nullability.Nullable);
     }
 
-    private static int Views(CanonicalArena arena, DTypeArena types, DType dtype, byte[]?[] values)
+    /// <summary>The zones' minimums, or their maximums, as a varbinview column; a zone without one is null.</summary>
+    private static int Views(
+        CanonicalArena arena, DTypeArena types, DType dtype, IReadOnlyList<ZoneString> strings, bool max)
     {
-        int count = values.Length;
+        int count = strings.Count;
         int heapBytes = 0;
-        bool[] valid = new bool[count];
         for (int i = 0; i < count; i++)
         {
-            valid[i] = values[i] is not null;
-            heapBytes += values[i] is { Length: > 12 } value ? value.Length : 0;
+            heapBytes += Bound(strings[i], max) is { Length: > 12 } value ? value.Length : 0;
         }
 
         Span<byte> data = default;
@@ -315,11 +321,12 @@ internal static class ZoneMapWriter
         int written = 0;
         for (int i = 0; i < count; i++)
         {
-            if (values[i] is not { } value)
+            if (Bound(strings[i], max) is not { } bound)
             {
                 continue;
             }
 
+            ReadOnlySpan<byte> value = bound.Span;
             Span<byte> view = viewBytes.Slice(i * 16, 16);
             System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(view, value.Length);
             if (value.Length <= 12)
@@ -328,25 +335,26 @@ internal static class ZoneMapWriter
                 continue;
             }
 
-            value.AsSpan(0, 4).CopyTo(view[4..]);
+            value[..4].CopyTo(view[4..]);
             System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(view[12..], written);
             value.CopyTo(data[written..]);
             written += value.Length;
         }
 
-        Validity validity = Mask(arena, types, valid);
+        Validity validity = Mask(arena, types, strings, max);
         return heapBytes > 0
             ? arena.AddVarBinView(dtype, count, validity, views, [heap])
             : arena.AddVarBinView(dtype, count, validity, views, default);
     }
 
-    private static Validity Mask(CanonicalArena arena, DTypeArena types, bool[] valid)
+    /// <summary>The validity of <see cref="Views"/>: set where the zone has the bound.</summary>
+    private static Validity Mask(CanonicalArena arena, DTypeArena types, IReadOnlyList<ZoneString> strings, bool max)
     {
-        int count = valid.Length;
+        int count = strings.Count;
         int set = 0;
-        foreach (bool bit in valid)
+        for (int i = 0; i < count; i++)
         {
-            set += bit ? 1 : 0;
+            set += Bound(strings[i], max) is null ? 0 : 1;
         }
 
         if (set == count)
@@ -363,7 +371,7 @@ internal static class ZoneMapWriter
         VortexBuffer bits = arena.Allocate(Math.Max(bytes, 1), 1, out Span<byte> destination);
         for (int i = 0; i < count; i++)
         {
-            if (valid[i])
+            if (Bound(strings[i], max) is not null)
             {
                 CanonicalSupport.SetBit(destination, i);
             }

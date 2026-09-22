@@ -247,7 +247,7 @@ public sealed partial class VortexFileWriter
     {
         if (bounds.NullCount >= zoneRows)
         {
-            return new ZoneString(false, null, null);
+            return new ZoneString(false, default, null);
         }
 
         if (!bounds.HasMin || bounds.Min.Kind != FilterLiteralKind.Bytes)
@@ -258,7 +258,22 @@ public sealed partial class VortexFileWriter
         byte[]? max = bounds.HasMax && bounds.Max.Kind == FilterLiteralKind.Bytes
             ? bounds.Max.BytesValue.ToArray()
             : null;
-        return new ZoneString(true, bounds.Min.BytesValue.ToArray(), max);
+        return new ZoneString(true, bounds.Min.BytesValue.ToArray(), UpperOrUnknown(max));
+    }
+
+    /// <summary>An upper bound as a zone's maximum: none stays none, rather than becoming an empty bound.</summary>
+    /// <remarks>
+    /// Written out rather than converted: a null array converts to an empty memory, and an empty
+    /// maximum is a bound that prunes every non-empty value, where none is a bound that prunes nothing.
+    /// </remarks>
+    private static ReadOnlyMemory<byte>? UpperOrUnknown(byte[]? bound)
+    {
+        if (bound is null)
+        {
+            return null;
+        }
+
+        return new ReadOnlyMemory<byte>(bound);
     }
 
     /// <summary>
@@ -286,8 +301,8 @@ public sealed partial class VortexFileWriter
 
             cut[i] = new ZoneString(
                 true,
-                StringBounds.LowerBound(zone.Min, limit, utf8),
-                zone.Max is null ? null : StringBounds.UpperBound(zone.Max, limit, utf8));
+                StringBounds.LowerBound(zone.Min.Span, limit, utf8),
+                zone.Max is not { } max ? null : UpperOrUnknown(StringBounds.UpperBound(max.Span, limit, utf8)));
         }
 
         return cut;

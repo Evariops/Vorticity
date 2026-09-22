@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Text;
 using Vorticity.Arrays;
@@ -11,13 +12,23 @@ namespace Vorticity.Writing;
 /// One block's bounded string extremes. A null <c>Max</c> is the aggregate's <c>unknown</c>: no
 /// bound could be built, and a reader prunes nothing on the maximum.
 /// </summary>
-internal readonly record struct ZoneString(bool Present, byte[]? Min, byte[]? Max);
+internal readonly record struct ZoneString(bool Present, ReadOnlyMemory<byte> Min, ReadOnlyMemory<byte>? Max);
 
 /// <summary>A column writer's string bounds: the open block's accumulator and one entry per closed block.</summary>
-internal sealed class StringZones
+/// <remarks>
+/// The bounds' bytes are slices of chunks this owns and never copies: a zone's two bounds are a
+/// few dozen bytes, and an array each would be two objects per zone of every text column. A chunk
+/// is only ever appended to, so a slice handed out stays valid whatever the chunks after it do.
+/// </remarks>
+internal sealed class StringZones : IReadOnlyList<ZoneString>
 {
+    /// <summary>The largest chunk, past which the chunks stop doubling.</summary>
+    private const int MaxChunk = 1 << 16;
+
     private readonly List<ZoneString?> _closed = [];
     private StringBounds? _open;
+    private byte[] _chunk = [];
+    private int _chunkUsed;
 
     /// <param name="limit">The byte limit; at least 1.</param>
     internal StringZones(int limit) => Limit = limit;
@@ -32,32 +43,68 @@ internal sealed class StringZones
     }
 
     /// <summary>Closes the open block; a column that never saw a string range records an empty zone.</summary>
-    internal void Close() => _closed.Add(_open?.Close() ?? new ZoneString(false, null, null));
+    internal void Close() => _closed.Add(_open?.Close(this) ?? new ZoneString(false, default, null));
 
     /// <summary>Takes an old block's bounds, already cut; <see langword="null"/> when it has none.</summary>
     internal void Seed(ZoneString? zone) => _closed.Add(zone);
 
-    /// <summary>Every block's bounds in order, or <see langword="null"/> when one block lacks them.</summary>
-    internal ZoneString[]? All(int blocks)
+    /// <summary>
+    /// Every block's bounds in order, read through this list, or <see langword="null"/> when one
+    /// block lacks them.
+    /// </summary>
+    internal IReadOnlyList<ZoneString>? All(int blocks)
     {
         if (_closed.Count != blocks)
         {
             return null;
         }
 
-        ZoneString[] zones = new ZoneString[blocks];
         for (int i = 0; i < blocks; i++)
         {
-            if (_closed[i] is not { } zone)
+            if (_closed[i] is null)
             {
                 return null;
             }
-
-            zones[i] = zone;
         }
 
-        return zones;
+        return this;
     }
+
+    /// <summary>A copy of <paramref name="bytes"/> in the chunks, for a bound that outlives the accumulator.</summary>
+    internal ReadOnlyMemory<byte> Keep(ReadOnlySpan<byte> bytes)
+    {
+        if (_chunk.Length - _chunkUsed < bytes.Length)
+        {
+            // The chunk before stays where it is: the slices already handed out point into it. The
+            // first holds one zone's two bounds, which is all a column of one block ever needs.
+            int first = 2 * (Limit + 1);
+            _chunk = new byte[Math.Max(bytes.Length, Math.Min(Math.Max(_chunk.Length * 2, first), MaxChunk))];
+            _chunkUsed = 0;
+        }
+
+        Memory<byte> slice = _chunk.AsMemory(_chunkUsed, bytes.Length);
+        bytes.CopyTo(slice.Span);
+        _chunkUsed += bytes.Length;
+        return slice;
+    }
+
+    /// <summary>Closed blocks, once <see cref="All"/> has vouched that every one has its bounds.</summary>
+    public int Count => _closed.Count;
+
+    /// <summary>Block <paramref name="index"/>'s bounds.</summary>
+    public ZoneString this[int index] => _closed[index] ?? throw new InvalidOperationException(
+        $"Block {index} has no string bounds; All should have refused the column.");
+
+    /// <inheritdoc/>
+    public IEnumerator<ZoneString> GetEnumerator()
+    {
+        for (int i = 0; i < _closed.Count; i++)
+        {
+            yield return this[i];
+        }
+    }
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 }
 
 /// <summary>
@@ -113,21 +160,42 @@ internal sealed class StringBounds
         }
     }
 
-    /// <summary>The block's bounds, cut; the accumulator starts the next block empty.</summary>
-    internal ZoneString Close()
+    /// <summary>The block's bounds, cut and kept in <paramref name="zones"/>; the accumulator starts the next block empty.</summary>
+    /// <remarks>
+    /// The upper bound is cut and incremented in the accumulator's own bytes, which the next block
+    /// overwrites anyway, so the only copy made is the one <paramref name="zones"/> keeps.
+    /// </remarks>
+    internal ZoneString Close(StringZones zones)
     {
         if (_minLength < 0)
         {
-            return new ZoneString(false, null, null);
+            return new ZoneString(false, default, null);
         }
 
-        ZoneString zone = new ZoneString(
-            true,
-            LowerBound(_min.AsSpan(0, _minLength), _limit, _utf8),
-            UpperBound(_max.AsSpan(0, _maxLength), _limit, _utf8));
+        ReadOnlySpan<byte> min = _min.AsSpan(0, _minLength);
+        ReadOnlyMemory<byte> lower = zones.Keep(min.Length <= _limit ? min : min[..Cut(min, _limit, _utf8)]);
+
+        // No `cond ? kept : null` here: its type would be the memory rather than the nullable, and
+        // the null would pass through the conversion from an array and come out an empty bound
+        // instead of an unknown one.
+        Span<byte> max = _max.AsSpan(0, _maxLength);
+        ReadOnlyMemory<byte>? upper = null;
+        if (max.Length <= _limit)
+        {
+            upper = zones.Keep(max);
+        }
+        else
+        {
+            Span<byte> bound = max[..Cut(max, _limit, _utf8)];
+            if (Increment(bound, _utf8))
+            {
+                upper = zones.Keep(bound);
+            }
+        }
+
         _minLength = -1;
         _maxLength = -1;
-        return zone;
+        return new ZoneString(true, lower, upper);
     }
 
     /// <summary>A value of at most <paramref name="limit"/> bytes that sorts at or below this one.</summary>
@@ -146,7 +214,7 @@ internal sealed class StringBounds
         }
 
         byte[] bound = value[..Cut(value, limit, utf8)].ToArray();
-        return utf8 ? IncrementLastCharacter(bound) : IncrementBytes(bound);
+        return Increment(bound, utf8) ? bound : null;
     }
 
     /// <summary>
@@ -173,30 +241,34 @@ internal sealed class StringBounds
         throw new InvalidOperationException("A utf8 value has no character boundary within four bytes.");
     }
 
-    /// <summary>Adds one with carry, from the right; null when every byte wrapped.</summary>
-    private static byte[]? IncrementBytes(byte[] bound)
+    /// <summary>Turns a cut value into the upper bound, in place; false when there is none.</summary>
+    private static bool Increment(Span<byte> bound, bool utf8) =>
+        utf8 ? IncrementLastCharacter(bound) : IncrementBytes(bound);
+
+    /// <summary>Adds one with carry, from the right; false when every byte wrapped.</summary>
+    private static bool IncrementBytes(Span<byte> bound)
     {
         for (int i = bound.Length - 1; i >= 0; i--)
         {
             bound[i] = unchecked((byte)(bound[i] + 1));
             if (bound[i] != 0)
             {
-                return bound;
+                return true;
             }
         }
 
-        return null;
+        return false;
     }
 
     /// <summary>
     /// The last character becomes the next scalar value when that is a character of the same
     /// encoded width; nothing else is tried, and there is no carry into the character before.
     /// </summary>
-    private static byte[]? IncrementLastCharacter(byte[] bound)
+    private static bool IncrementLastCharacter(Span<byte> bound)
     {
         if (bound.Length == 0)
         {
-            return null;
+            return false;
         }
 
         int last = bound.Length - 1;
@@ -205,7 +277,7 @@ internal sealed class StringBounds
             last--;
         }
 
-        if (Rune.DecodeFromUtf8(bound.AsSpan(last), out Rune rune, out int width) != System.Buffers.OperationStatus.Done
+        if (Rune.DecodeFromUtf8(bound[last..], out Rune rune, out int width) != System.Buffers.OperationStatus.Done
             || last + width != bound.Length)
         {
             throw new InvalidOperationException("A utf8 bound does not end on a whole character.");
@@ -213,16 +285,16 @@ internal sealed class StringBounds
 
         if (!Rune.IsValid(rune.Value + 1))
         {
-            return null;
+            return false;
         }
 
         Rune next = new Rune(rune.Value + 1);
         if (next.Utf8SequenceLength != width)
         {
-            return null;
+            return false;
         }
 
-        next.EncodeToUtf8(bound.AsSpan(last));
-        return bound;
+        next.EncodeToUtf8(bound[last..]);
+        return true;
     }
 }
