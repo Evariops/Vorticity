@@ -84,23 +84,22 @@ public sealed class WriteAllocationTests
     /// and not per row, which is the distinction this file exists to make.
     /// </para>
     /// </remarks>
-    // `Auto` is the default, and the ceilings below carry it: the index writer and its per-column
-    // arrays, a Bloom builder per column it indexes (two hash sets whose tables come from the
-    // pool, a queue, two lists), the reason for an abandon, the report entries, and for a
-    // dictionary file the directory. Per file and per column, never per row, so the per-row guard
-    // does not carry it. The filters themselves are not built for a column `Auto` will abandon --
-    // the abandon is decided at the first block, on the raw bytes -- or a high-cardinality column
-    // would pay for filters it then throws away.
+    // The default writes no index, so the ceilings below carry none of the index machinery. They
+    // carry the public writer instead: its own state, 152 bytes over the engine's writer, and the
+    // report CompleteAsync returns, 104 bytes, 40 a column and a list a column of what each chunk
+    // was written as. Per file and per column, never per row, so the per-row guard does not carry
+    // it. A utf8 or binary column's zones also carry bounded string extremes, and that column pays
+    // for them: the accumulator, an entry a block, the bounds, and two more zone-map fields.
     private static readonly (string Id, long Ceiling)[] Files =
     [
         // The ALP integers and the dictionary codes come from the pool and go back to it: each is
         // a whole column's worth, eight bytes a row for the first and four for the second, and
         // both are built while PRICING, so the candidate that loses would pay for them too.
-        ("containers/zoned_many_zones_nulls", 709_800),   // 709 368 measured
-        ("distributions/high_cardinality_i64_r8193", 73_700),   // 73 256 measured, including the `Auto` index and the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
-        ("encodings/fsst", 235_800),   // 235 320 measured, including the `Auto` index
-        ("encodings/onpair", 69_200),   // 68 768 measured
-        ("types/utf8_nullable_r1025", 215_000),   // 214 568 measured
+        ("containers/zoned_many_zones_nulls", 711_624),   // 711 208 measured, including 40 bytes more on each of the 64 batches it reads, the public writer and report, and its text column's string bounds
+        ("distributions/high_cardinality_i64_r8193", 73_204),   // 73 024 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
+        ("encodings/fsst", 235_800),   // 67 128 measured
+        ("encodings/onpair", 69_808),   // 69 360 measured, including the public writer and report and the text column's string bounds
+        ("types/utf8_nullable_r1025", 215_608),   // 215 168 measured, including the public writer and report and the text column's string bounds
 
         // THE REMAINING COMPONENTS, on the write side, so that each has an allocation ratchet:
         // `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant`. Note
@@ -109,20 +108,20 @@ public sealed class WriteAllocationTests
         // this SHAPE of data cost", which is the question a ratchet can answer. Whether our writer
         // re-elects the same encoding is a different question and `bench/crosscheck.sh` is where
         // it is asked.
-        ("encodings/fastlanes_delta", 66_100),   // 65 632 measured, including the `Auto` index and the file statistics segment: per file, not per row
-        ("encodings/pco", 67_600),   // 67 440 measured alone and in the suite under DOTNET_TieredPGO=0, 67 512 in the suite with dynamic PGO: the measurement is process-wide, so the gap follows the JIT's instrumentation, not the writer
+        ("encodings/fastlanes_delta", 65_540),   // 65 448 measured, including the file statistics segment: per file, not per row
+        ("encodings/pco", 67_040),   // 66 912 measured alone; in the suite with dynamic PGO the process-wide measurement adds the JIT's instrumentation, 72 bytes that are not the writer's
         // The read half of this axis keeps a `ZstandardDecoder` per node, so a change on the zstd
         // read path can move this ceiling while the write path stays put.
-        ("encodings/zstd", 209_100),   // 208 624 measured
-        ("encodings/map", 89_100),   // 88 616 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
-        ("encodings/variant", 68_200),   // 67 792 measured, including the file statistics segment, the `Auto` index and the two transit ScanContexts the writer creates, whose read-side fields it never uses: per file, not per row (a context reduced to the arena is the fix if that ever matters)
+        ("encodings/zstd", 210_140),   // 209 656 measured, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
+        ("encodings/map", 89_100),   // 88 992 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
+        ("encodings/variant", 68_456),   // 68 272 measured, including the file statistics segment, the public writer and report, and the two transit ScanContexts the writer creates, whose read-side fields it never uses: per file, not per row (a context reduced to the arena is the fix if that ever matters)
 
         // THE TWO ALP SHAPES, so that the ALP write path is watched on both of its cases:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
         // patch. The second is the case that made the patch buffers worth renting, and a ratchet
         // that only held the easy shape would have said nothing about it.
-        ("encodings/alp", 89_500),   // 89 064 measured
-        ("encodings/alprd", 67_300),   // 66 800 measured
+        ("encodings/alp", 88_940),   // 88 504 measured
+        ("encodings/alprd", 66_740),   // 66 232 measured
     ];
 
     // Pricing FSST means training a table and compressing the whole column, and on a column it
@@ -382,7 +381,7 @@ public sealed class WriteAllocationTests
     /// over-count - and the class runs alone, so there is nothing else to over-count.
     ///
     /// The READ half is inside the measurement and cannot be subtracted without a second harness.
-    /// PathAllocationTests prices it: 190 672 B for a full scan of the largest file here. The
+    /// PathAllocationTests prices it: 193 760 B for a full scan of the largest file here. The
     /// figures below are therefore an upper bound on what writing costs, which is the honest
     /// direction for a ceiling.
     /// </remarks>

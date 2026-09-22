@@ -181,11 +181,31 @@ public sealed class PathAllocationTests
         // A lane keeps the segments its last batch read in one pooled array, and the next batch of
         // the same chunk reuses them: a segment spans every block of its chunk, so without this the
         // scan asks the source for the same bytes once per block.
-        ("open, first batch", File, 133_800, FirstBatch),
-        ("full scan", File, 190_976, FullScan),
-        ("projected scan, 1 of 5 columns", File, 134_144, ProjectedScan),
-        ("take 64 rows from 64 splits", File, 192_048, ScatteredTake),
-        ("selective filter, pruning on", File, 141_824, PrunedFilter),
+        //
+        // A file carries the session it was opened in and, once asked for, the public views of its
+        // schema, statistics, metadata, edition and components; and each column's statistics carry
+        // the column type and the sum type they read their values back as: 64 bytes an open and 16 a
+        // column, which the footer-only axis pays inside its headroom.
+        //
+        // A scan carries what its prefetching lanes run on, even with one lane: on the lane two
+        // reusable value-task sources, its loop and a segment waiter, beside the rows a filter kept
+        // and the root as decoded; the segments the scan holds for its next batches and the lock the
+        // lanes take them under; the blocks decoded and pruned, counted in the plan's units; the
+        // switches of prefetch, compaction and encoded delivery. 328 bytes a scan, and 8 an arena for
+        // its table of the words a typed reader asks for.
+        //
+        // A batch carries its session, its public schema, the rows a filter kept when it is
+        // delivered whole, and whether it owns its arena: 40 bytes more on every batch.
+        ("open, first batch", File, 134_320, FirstBatch),
+        ("full scan", File, 194_016, FullScan),
+        ("projected scan, 1 of 5 columns", File, 137_184, ProjectedScan),
+        // A take or a filter goes through the filtered delivery, whose enumerable and enumerator hold
+        // one more field each: 16 bytes a scan.
+        ("take 64 rows from 64 splits", File, 195_104, ScatteredTake),
+        // The filter's field references hold one more field each, and the zone column the pruning
+        // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
+        // context that reads the zone map.
+        ("selective filter, pruning on", File, 142_440, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -198,7 +218,7 @@ public sealed class PathAllocationTests
         // grows with the number of zones. Keep `ZoneColumn.Zones` a range rather than an iterator,
         // and that context's arenas sized for what they hold rather than for a batch: either one
         // undone costs more than the whole gap that remains.
-        ("selective filter, pruning off", File, 135_192, UnprunedFilter),
+        ("selective filter, pruning off", File, 138_264, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
@@ -206,15 +226,17 @@ public sealed class PathAllocationTests
         // This ceiling also carries the read contract's per-scan state -- the mask of live blocks
         // and the metrics sink, a reference each on the enumerable, the enumerator and the lane's
         // context -- and the headroom the neighbouring axes have.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_760, FullScan),
-        ("scan, vortex.pco", "encodings/pco", 29_200, FullScan),
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 28_200, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 29_640, FullScan),
         // A node's frames go through one decoder per node, reset between frames, rather than the
         // one-shot `ZstandardDecoder.TryDecompress`, which builds and tears down a native
         // decompression context per call: this ceiling pays for one managed decoder per scan so
         // that the scan does not pay for a native context per frame.
-        ("scan, vortex.zstd", "encodings/zstd", 27_760, FullScan),
-        ("scan, vortex.map", "encodings/map", 28_160, FullScan),
-        ("scan, vortex.variant", "encodings/variant", 27_672, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 28_200, FullScan),
+        // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
+        // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
+        ("scan, vortex.map", "encodings/map", 28_648, FullScan),
+        ("scan, vortex.variant", "encodings/variant", 28_112, FullScan),
     ];
 
     [Fact]
