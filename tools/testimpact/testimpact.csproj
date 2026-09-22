@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Tools.TestImpact</RootNamespace>
+    <AssemblyName>testimpact</AssemblyName>
+    <Description>Chooses the test classes a change can affect, from the methods each class runs.</Description>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>

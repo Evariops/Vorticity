@@ -91,3 +91,6 @@ docs/history/
 # ---- Recorded benchmark runs (bench/compare.sh --record) ----
 bench/.runs/
 bench/.ab/
+
+# ---- The map of the methods each test class runs (tools/testimpact map), rebuilt locally ----
+tests/.impact/

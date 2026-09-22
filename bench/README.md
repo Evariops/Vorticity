@@ -39,6 +39,7 @@ dotnet run -c Release PROJ -- <arguments>
 | every allocation site over many scenarios, and whether it grows with the rows | `python3 bench/profile/inventory.py . <out.md> <allocation output directories…>` | seconds | one table of sites (library line and its source, allocating line, type), cold and warm counts per trace; a scenario traced at two sizes (`scan-1048576`, `scan-10485760`) says which sites are paid per batch or chunk rather than per scan |
 | every branch a scenario takes | `bench/profile.sh trace <scenario> <file> <rows>` | 30 s | Processor Trace, for Instruments to open. An M4 or later, and Processor Trace allowed in System Settings → Privacy & Security → Developer Tools |
 | a ratchet | `dotnet test Vorticity.slnx -c Release` | ~1 min | the suite plus the nine allocation, count and budget ratchets |
+| a change, and only the tests it can affect | `dotnet run -c Release --project tools/testimpact -- run` (after `-- map` once) | seconds | the test classes that ran a method the working tree changed against `HEAD` (`--base REF` for another), from a map of what each class runs: every class in a process of its own with inlining off, the JIT's list of compiled methods recorded (35 s). A constant, a build file or the source generator runs everything; a new class runs; a comment or a `using` runs nothing |
 
 **A fast-profile figure is a direction, not a number.** Anything under about 5 % on a kernel, and
 every figure that gets recorded, is confirmed with `--full` on the one class concerned. Why, and
