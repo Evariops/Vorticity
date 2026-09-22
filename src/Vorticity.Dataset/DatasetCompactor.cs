@@ -69,7 +69,7 @@ internal static class DatasetCompactor
         ArgumentNullException.ThrowIfNull(job);
         if (job.Inputs.Count == 0)
         {
-            throw new ArgumentException("A compaction reads at least one object (13 §5.3).", nameof(job));
+            throw new ArgumentException("A compaction reads at least one object.", nameof(job));
         }
 
         if (job.Trigger == CompactionTrigger.Fragments)
@@ -103,7 +103,7 @@ internal static class DatasetCompactor
         {
             throw new InvalidOperationException(
                 $"The compaction read {job.Rows} row(s) from {job.Inputs.Count} object(s) and wrote " +
-                $"{rows}: a rewrite that loses rows is the one failure it must not have (13 §5.3).");
+                $"{rows}: a rewrite that loses rows is the one failure it must not have.");
         }
 
         List<(int Level, ReadOnlyMemory<byte> Key)> consumed = [];
@@ -146,8 +146,8 @@ internal static class DatasetCompactor
             throw new VortexUnsupportedException(
                 "clustering key",
                 ComponentKind.Feature,
-                "A leveled compaction merges on the clustering key, and this dataset declares none " +
-                "(13 §4.1). Compact it tiered, which concatenates.");
+                "A leveled compaction merges on the clustering key, and this dataset declares none. " +
+                "Compact it tiered, which concatenates.");
         }
 
         // A single column's null keys are read, last, where the encoding puts them; a composite
@@ -169,7 +169,7 @@ internal static class DatasetCompactor
                         input.Entry.Key,
                         ComponentKind.Feature,
                         $"'{path}' holds {column.NullCount} null(s) in this object, and a composite key's " +
-                        "run holds no tuple with a null (12 §4.6): the merge would drop those rows. Declare " +
+                        "run holds no tuple with a null: the merge would drop those rows. Declare " +
                         "the composite clustering key on non-nullable columns.");
                 }
             }

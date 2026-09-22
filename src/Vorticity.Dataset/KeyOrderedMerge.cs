@@ -227,7 +227,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
                 throw new VortexFormatException(
                     $"'{next.Entry.Key}' holds a key below the bound it was ordered by: its summaries " +
                     "or its leaf key are not a lower bound on its rows, so a key-ordered read across " +
-                    "objects would deliver them out of order (13 §6.6).");
+                    "objects would deliver them out of order.");
             }
         }
         catch
@@ -290,7 +290,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         if (count <= 0)
         {
             throw new InvalidOperationException(
-                $"The merge chose '{chosen.Object}' and could emit none of its rows (13 §6.6).");
+                $"The merge chose '{chosen.Object}' and could emit none of its rows.");
         }
 
         return (chosen, count);

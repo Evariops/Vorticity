@@ -397,7 +397,7 @@ internal static class DatasetCommitter
 
                 default:
                     throw new ArgumentException(
-                        $"An operation of type {operation.GetType().Name} is not one of §8.2's.", nameof(operations));
+                        $"An operation of type {operation.GetType().Name} is not one a commit knows.", nameof(operations));
             }
         }
 

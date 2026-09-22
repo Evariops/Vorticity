@@ -105,7 +105,7 @@ internal static class DatasetIndexer
                 entry.Key,
                 ComponentKind.Index,
                 "The object carries no identity, being written by another writer: a fragment would " +
-                "bind it by the store's token, which its entry does not carry (13 §7). Rewrite it " +
+                "bind it by the store's token, which its entry does not carry. Rewrite it " +
                 "through the dataset, which embeds the index instead.");
         }
 
