@@ -25,8 +25,10 @@ internal static class UserMetadata
                 $"A file carries at most {MaxEntries} metadata entries besides its own; {metadata.Count} were given.", "options");
         }
 
-        foreach (string key in metadata.Keys)
+        // The entries rather than Keys, whose enumerator is an allocated iterator.
+        foreach (KeyValuePair<string, ReadOnlyMemory<byte>> entry in metadata)
         {
+            string key = entry.Key;
             if (key.Length == 0)
             {
                 throw new ArgumentException("A metadata key is not empty.", "options");

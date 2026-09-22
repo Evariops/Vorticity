@@ -4,6 +4,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using Vorticity.Editions;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -470,11 +471,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
         RequireSchemaInTarget(schema, options.TargetEdition, extensions);
         bool tabular = schema.Kind == DTypeKind.Struct;
-        foreach (string path in options.Hints.Keys)
+        // The entries rather than Keys, whose enumerator is an allocated iterator.
+        foreach (KeyValuePair<string, EncodingHint> hint in options.Hints)
         {
-            if (!Names(schema, tabular, path))
+            if (!Names(schema, tabular, hint.Key))
             {
-                throw new ArgumentException($"The encoding hint '{path}' names no column of the schema {schema}.", nameof(options));
+                throw new ArgumentException($"The encoding hint '{hint.Key}' names no column of the schema {schema}.", nameof(options));
             }
         }
 
@@ -1142,34 +1144,39 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>What the completed file holds, from the writer's own accounts.</summary>
+    /// <remarks>
+    /// Each array is filled whole and nothing else holds it, so the report takes it as it is: an
+    /// immutable array over it costs no copy and no builder.
+    /// </remarks>
     private WriteReport BuildReport()
     {
-        ImmutableArray<int>.Builder chunks = ImmutableArray.CreateBuilder<int>(_chunkRows.Count);
-        foreach (long rows in _chunkRows)
+        int[] chunks = new int[_chunkRows.Count];
+        for (int i = 0; i < chunks.Length; i++)
         {
-            chunks.Add(checked((int)rows));
+            chunks[i] = checked((int)_chunkRows[i]);
         }
 
         ImmutableArray<IndexWriteReport> indexes = _indexes is { } writer
             ? [.. writer.Reports]
             : ImmutableArray<IndexWriteReport>.Empty;
-        return new WriteReport(_rowCount, _blockRows, chunks.MoveToImmutable(), _reportBytes, ReportColumns(), indexes);
+        return new WriteReport(
+            _rowCount, _blockRows, ImmutableCollectionsMarshal.AsImmutableArray(chunks), _reportBytes, ReportColumns(), indexes);
     }
 
     private ImmutableArray<ColumnWriteReport> ReportColumns()
     {
-        ImmutableArray<ColumnWriteReport>.Builder reports = ImmutableArray.CreateBuilder<ColumnWriteReport>(_fieldCount);
+        ColumnWriteReport[] reports = new ColumnWriteReport[_fieldCount];
         for (int field = 0; field < _fieldCount; field++)
         {
             ColumnWriter column = _columns[field];
-            reports.Add(new ColumnWriteReport(_isTabular ? _schema.GetFieldName(field) : string.Empty, [.. _written[field]])
+            reports[field] = new ColumnWriteReport(_isTabular ? _schema.GetFieldName(field) : string.Empty, [.. _written[field]])
             {
                 PlansPriced = column.PlansPriced,
                 PlansHeld = column.PlansHeld,
-            });
+            };
         }
 
-        return reports.MoveToImmutable();
+        return ImmutableCollectionsMarshal.AsImmutableArray(reports);
     }
 
     /// <summary>
