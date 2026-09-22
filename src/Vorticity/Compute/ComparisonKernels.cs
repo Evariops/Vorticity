@@ -689,20 +689,26 @@ internal static partial class ComparisonKernels
                 throw Mismatch("a signed integer", literal.Kind);
         }
 
-        ReadOnlySpan<byte> bytes = values;
+        CompareSigned(ptype, values, mask, op, wanted, destination);
+    }
+
+    private static void CompareSigned(
+        PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, long wanted,
+        Span<byte> destination)
+    {
         switch (ptype)
         {
             case PType.I8:
-                CompareOp<sbyte, long>(bytes, mask, op, wanted, destination);
+                CompareOp<sbyte, long>(values, mask, op, wanted, destination);
                 break;
             case PType.I16:
-                CompareOp<short, long>(bytes, mask, op, wanted, destination);
+                CompareOp<short, long>(values, mask, op, wanted, destination);
                 break;
             case PType.I32:
-                CompareOp<int, long>(bytes, mask, op, wanted, destination);
+                CompareOp<int, long>(values, mask, op, wanted, destination);
                 break;
             default:
-                CompareOp<long, long>(bytes, mask, op, wanted, destination);
+                CompareOp<long, long>(values, mask, op, wanted, destination);
                 break;
         }
     }
@@ -737,20 +743,26 @@ internal static partial class ComparisonKernels
                 throw Mismatch("an unsigned integer", literal.Kind);
         }
 
-        ReadOnlySpan<byte> bytes = values;
+        CompareUnsigned(ptype, values, mask, op, wanted, destination);
+    }
+
+    private static void CompareUnsigned(
+        PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, ulong wanted,
+        Span<byte> destination)
+    {
         switch (ptype)
         {
             case PType.U8:
-                CompareOp<byte, ulong>(bytes, mask, op, wanted, destination);
+                CompareOp<byte, ulong>(values, mask, op, wanted, destination);
                 break;
             case PType.U16:
-                CompareOp<ushort, ulong>(bytes, mask, op, wanted, destination);
+                CompareOp<ushort, ulong>(values, mask, op, wanted, destination);
                 break;
             case PType.U32:
-                CompareOp<uint, ulong>(bytes, mask, op, wanted, destination);
+                CompareOp<uint, ulong>(values, mask, op, wanted, destination);
                 break;
             default:
-                CompareOp<ulong, ulong>(bytes, mask, op, wanted, destination);
+                CompareOp<ulong, ulong>(values, mask, op, wanted, destination);
                 break;
         }
     }
@@ -967,38 +979,37 @@ internal static partial class ComparisonKernels
     }
 
     /// <summary>
-    /// A signed integer column against a float literal, in the literal's domain.
+    /// A signed integer column against a float literal, exactly.
     /// </summary>
     /// <remarks>
     /// <c>x &lt; 3.5</c> on an integer column is a legal and ordinary predicate, so it is answered
-    /// rather than refused. The comparison happens in <see cref="double"/>, which is exact for
-    /// magnitudes below 2^53 and can be off by one above it -- the same limit any engine that
-    /// compares an i64 against a double lands on, and far better than rejecting the predicate.
-    /// <para>
-    /// The widening is the only thing that distinguishes this from any other comparison, so it is
-    /// the only thing it says: the physical type, the operator and the validity are resolved once
-    /// by the same <see cref="CompareOp{TValue,TWide}"/> every other column goes through, rather
-    /// than asked again on every row.
-    /// </para>
+    /// rather than refused. It is answered in the column's domain, not the literal's: comparing
+    /// each value as a <see cref="double"/> is exact below 2^53 and off by one above it, whereas the
+    /// integers below a float are exactly the integers below its ceiling, those above it the ones
+    /// above its floor, and none equals a float that is not integral. So the literal is placed on
+    /// the integers once, and the rows are compared by the same integer kernel every other literal
+    /// goes through. A literal beyond the column's range decides every row alike.
     /// </remarks>
     private static void CompareSignedAgainstFloat(
         PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, double wanted,
         Span<byte> destination)
     {
-        switch (ptype)
+        if (!TryPlace(op, wanted, out ComparisonOp exact, out double bound))
         {
-            case PType.I8:
-                CompareOp<sbyte, double>(values, mask, op, wanted, destination);
-                break;
-            case PType.I16:
-                CompareOp<short, double>(values, mask, op, wanted, destination);
-                break;
-            case PType.I32:
-                CompareOp<int, double>(values, mask, op, wanted, destination);
-                break;
-            default:
-                CompareOp<long, double>(values, mask, op, wanted, destination);
-                break;
+            FillAnswer(mask, op == ComparisonOp.NotEqual, destination);
+        }
+        else if (bound >= 9223372036854775808.0)
+        {
+            // Every value of the column is below the bound.
+            FillAnswer(mask, exact is ComparisonOp.Less or ComparisonOp.LessOrEqual or ComparisonOp.NotEqual, destination);
+        }
+        else if (bound < -9223372036854775808.0)
+        {
+            FillAnswer(mask, exact is ComparisonOp.Greater or ComparisonOp.GreaterOrEqual or ComparisonOp.NotEqual, destination);
+        }
+        else
+        {
+            CompareSigned(ptype, values, mask, exact, (long)bound, destination);
         }
     }
 
@@ -1007,20 +1018,58 @@ internal static partial class ComparisonKernels
         PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, ComparisonOp op, double wanted,
         Span<byte> destination)
     {
-        switch (ptype)
+        if (!TryPlace(op, wanted, out ComparisonOp exact, out double bound))
         {
-            case PType.U8:
-                CompareOp<byte, double>(values, mask, op, wanted, destination);
-                break;
-            case PType.U16:
-                CompareOp<ushort, double>(values, mask, op, wanted, destination);
-                break;
-            case PType.U32:
-                CompareOp<uint, double>(values, mask, op, wanted, destination);
-                break;
+            FillAnswer(mask, op == ComparisonOp.NotEqual, destination);
+        }
+        else if (bound >= 18446744073709551616.0)
+        {
+            FillAnswer(mask, exact is ComparisonOp.Less or ComparisonOp.LessOrEqual or ComparisonOp.NotEqual, destination);
+        }
+        else if (bound < 0)
+        {
+            FillAnswer(mask, exact is ComparisonOp.Greater or ComparisonOp.GreaterOrEqual or ComparisonOp.NotEqual, destination);
+        }
+        else
+        {
+            CompareUnsigned(ptype, values, mask, exact, (ulong)bound, destination);
+        }
+    }
+
+    /// <summary>
+    /// Moves a comparison against a float onto the integers: the integer bound the same rows
+    /// compare against, under the same operator.
+    /// </summary>
+    /// <param name="op">The operator.</param>
+    /// <param name="wanted">The float literal.</param>
+    /// <param name="exact">The operator to apply to <paramref name="bound"/>.</param>
+    /// <param name="bound">An integral value, possibly beyond every integer type's range.</param>
+    /// <returns>
+    /// <see langword="false"/> when no integer relates to the literal: a NaN, or an equality with a
+    /// float that is not integral, which no row satisfies and every row is unequal to.
+    /// </returns>
+    private static bool TryPlace(ComparisonOp op, double wanted, out ComparisonOp exact, out double bound)
+    {
+        exact = op;
+        bound = wanted;
+        if (double.IsNaN(wanted))
+        {
+            return false;
+        }
+
+        double floor = Math.Floor(wanted);
+        switch (op)
+        {
+            case ComparisonOp.Equal:
+            case ComparisonOp.NotEqual:
+                return floor == wanted;
+            case ComparisonOp.Less:
+            case ComparisonOp.GreaterOrEqual:
+                bound = Math.Ceiling(wanted);
+                return true;
             default:
-                CompareOp<ulong, double>(values, mask, op, wanted, destination);
-                break;
+                bound = floor;
+                return true;
         }
     }
 
@@ -1120,18 +1169,22 @@ internal static partial class ComparisonKernels
     /// <param name="order">The sign of <c>column - literal</c>, the same for every row.</param>
     /// <param name="destination">One state per row.</param>
     private static void FillFromOrder(
-        ValidityMask mask, ComparisonOp op, int order, Span<byte> destination)
+        ValidityMask mask, ComparisonOp op, int order, Span<byte> destination) =>
+        FillAnswer(mask, Apply(op, order), destination);
+
+    /// <summary>One answer for every valid row, and unknown for a null.</summary>
+    private static void FillAnswer(ValidityMask mask, bool answer, Span<byte> destination)
     {
-        byte answer = Apply(op, order) ? Trilean.True : Trilean.False;
+        byte state = answer ? Trilean.True : Trilean.False;
         if (mask.AllValid)
         {
-            Trilean.Fill(destination, answer);
+            Trilean.Fill(destination, state);
             return;
         }
 
         for (int i = 0; i < destination.Length; i++)
         {
-            destination[i] = mask.IsValid(i) ? answer : Trilean.Unknown;
+            destination[i] = mask.IsValid(i) ? state : Trilean.Unknown;
         }
     }
 
