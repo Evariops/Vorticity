@@ -108,7 +108,7 @@ reaches the filter typed, not formatted into the text, and is checked against th
 compared with. A hole of the wrong type throws at `Where`, naming both:
 
 ```
-a string hole against an integer column: Column 'Day' is a column of i32, which System.String does not map to: a string reads a utf8 column.
+a string hole against an integer column: Column 'Day' is a column of i32, which string does not map to: a string reads a utf8 column.
 a column the file does not have: The file has no column 'Month'; its schema is struct{Day: i32, Celsius: f64?, City: utf8}.
 ```
 

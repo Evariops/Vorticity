@@ -57,7 +57,7 @@ nullable columns is [nullable-columns.md](nullable-columns.md).
 
 * **A non-nullable column refuses a nullable builder.** Asking for `ColumnBuilder<int?>` over `Day`
   throws `VortexSchemaException`: *Column 'Day' is i32, which is not nullable; ask for a builder of
-  Int32 instead of Nullable`1.* The other way round is fine: a `ColumnBuilder<double>` over a nullable
+  int instead of int?.* The other way round is fine: a `ColumnBuilder<double>` over a nullable
   column writes it all valid.
 * **The value under a null is not a value.** Whatever the slot holds is written, and a reader goes by
   the bitmap.

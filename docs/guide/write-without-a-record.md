@@ -54,8 +54,8 @@ Reading such a file back uses the same names: `file.Scan("id", "payload")` yield
 ## Watch out
 
 * **A type that does not fit throws when the builder is asked for**, with `VortexSchemaException`:
-  *Column 'id' is a column of i64, which System.Int32 does not map to: a Int32 reads a i32 column
-  exactly; convert after the read.* There is no conversion on the way in.
+  *Column 'id' is a column of i64, which int does not map to: a int maps to a i32 column exactly;
+  convert it before a write or after a read.* There is no conversion on the way in.
 * **Names match exactly.** `Column<T>(name)` compares ordinally, and a name the schema does not have
   throws: *The builder has no column 'identifier'; its schema is struct{…}.* A record binds with a
   case-insensitive fallback; the untyped builder does not.

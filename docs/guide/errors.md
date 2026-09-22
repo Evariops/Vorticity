@@ -88,9 +88,9 @@ message names the member, the column and both types:
 
 ```
 a non-nullable member over a nullable column -> VortexSchemaException: Member 'Celsius' of RequiredCelsius is not nullable and its column 'Celsius' is (f64?); declare the member nullable.
-a text literal against an integer column -> VortexSchemaException: Column 'Day' is a column of i32, which System.String does not map to: a string reads a utf8 column.
+a text literal against an integer column -> VortexSchemaException: Column 'Day' is a column of i32, which string does not map to: a string reads a utf8 column.
 a column the file does not have, by name -> VortexSchemaException: The file has no column 'nope'; its schema is struct{Day: i32, Celsius: f64?, City: utf8}.
-a nullable builder over a non-nullable column -> VortexSchemaException: Column 'Day' is i32, which is not nullable; ask for a builder of Int32 instead of Nullable`1.
+a nullable builder over a non-nullable column -> VortexSchemaException: Column 'Day' is i32, which is not nullable; ask for a builder of int instead of int?.
 ```
 
 On the typed path most of these cannot be written at all: a literal of the wrong type does not
