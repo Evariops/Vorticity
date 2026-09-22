@@ -25,7 +25,7 @@ await using (VortexFileWriter writer = session.CreateWriter<Reading>(path, optio
 Day: RunEnd x31, Sequence
 Celsius: Zstd x31, Alp
 City: RunEnd x32
-metadata keys producer, vorticity.identity; producer = acme/1.4
+metadata keys producer; producer = acme/1.4
 identity 0199f0c4-7d2a-7c3e-9a51-3f6b2c1d4e5f, edition core2026.08.0, 499196 bytes
 written again with the same identity: the same bytes; without one: different bytes
 ```
@@ -115,8 +115,8 @@ block holds all of them and no bound can rule one out.
   the data instead. The zone maps are kept, so `Day > 2000` still reads 0 of 123 blocks.
 * **`Metadata`** holds at most 14 entries, with keys of at most 64 UTF-8 bytes, besides the library's
   own; `CreateWriter` refuses more: *A file carries at most 14 metadata entries besides its own; 15
-  were given.* `file.Metadata.Keys` lists the library's own entries too (`vorticity.identity`), and
-  `ReadAsync(key)` returns a copy of the value. An append keeps the file's entries, and an entry named
+  were given.* `file.Metadata.Keys` lists the caller's entries only, and `ReadAsync(key)` returns a
+  copy of the value. An append keeps the file's entries, and an entry named
   again takes its new value.
 * **`Identity`** pinned makes the write reproducible: the same rows and options gave the same bytes
   twice, and a write without it gave different bytes. Each write draws a fresh identity otherwise,

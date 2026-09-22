@@ -144,10 +144,9 @@ either way, since they are what the counters are made of.
 
 * **The counters carry no tags.** Tell two files or two tenants apart with one session each and
   the scan's `Statistics`, or with the activities, which nest under your own.
-* The scan counters are added together, when the scan ends: a listener that enables only
-  `vortex.scan.requests` without `vortex.scan.rows` receives nothing from scans.
-* On the tool path, `Statistics.CacheHits` is always 0; the session's `SegmentCache.Hits` and the
-  `vortex.cache.hits` counter still count its hits.
+* The scan counters are added when the scan ends, each for whoever listens to it.
+* A scan's `Statistics.CacheHits` is the session cache's hits between the scan's start and its end:
+  a scan running beside another on the same session counts the other's hits too.
 
 ## Run it
 

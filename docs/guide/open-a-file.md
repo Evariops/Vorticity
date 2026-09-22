@@ -17,7 +17,7 @@ await using (VortexFile file = await VortexFile.OpenAsync(path))
 ```
 struct{Day: i32, Celsius: f64?, City: utf8}
 1000000 rows, 1564708 bytes, edition Core20260800
-identity dab3a772-f320-44ad-a9ac-a1bf74fc7e21, metadata keys [vorticity.identity]
+identity 0000ed02-bb12-418a-8abc-611bb42a9615, metadata keys []
 ```
 
 `VortexFile.OpenAsync(path)` opens in `VortexSession.Default` and maps the file into memory. This is
@@ -35,7 +35,8 @@ What the file tells you before a scan:
 | `Statistics` | per column null count, order flags, and the bounds of a numeric column ([statistics-and-pruning.md](statistics-and-pruning.md)) |
 | `TornTail` | not null when the file opened at the version before a torn append ([append-and-repair.md](append-and-repair.md)) |
 
-The identity is stored as metadata under `vorticity.identity`, which is why that key shows up.
+The identity is stored as metadata of the library's own, which `Metadata.Keys` leaves out: the keys
+it lists are the ones the writer's `VortexWriteOptions.Metadata` gave.
 
 ## In a session, from a source
 
