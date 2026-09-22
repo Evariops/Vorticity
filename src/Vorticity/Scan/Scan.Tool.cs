@@ -26,6 +26,9 @@ public sealed class Scan
     private RowRange? _rows;
     private long[]? _take;
     private ScanOptions _options = ScanOptions.Default;
+    private CancellationToken _cancellation;
+    private long _cacheHitsAtStart;
+    private long _cacheHitsAtEnd;
     private int _used;
 
     internal Scan(ScanSource source, ReadOnlySpan<string> columns)
@@ -84,7 +87,7 @@ public sealed class Scan
     }
 
     /// <summary>Scans the rows at <paramref name="indices"/> only, delivered in their blocks with a selection.</summary>
-    /// <param name="indices">File rows, in any order.</param>
+    /// <param name="indices">File rows, in any order; sorted and deduplicated.</param>
     /// <returns>This scan.</returns>
     public Scan Rows(params ReadOnlySpan<long> indices)
     {
@@ -95,7 +98,16 @@ public sealed class Scan
 
         long[] sorted = indices.ToArray();
         Array.Sort(sorted);
-        _take = sorted;
+        int distinct = 0;
+        for (int i = 0; i < sorted.Length; i++)
+        {
+            if (i == 0 || sorted[i] != sorted[distinct - 1])
+            {
+                sorted[distinct++] = sorted[i];
+            }
+        }
+
+        _take = sorted.AsSpan(0, distinct).ToArray();
         return this;
     }
 
@@ -108,8 +120,20 @@ public sealed class Scan
         return this;
     }
 
+    /// <summary>
+    /// Cancels the enumeration at a batch boundary: <c>await foreach (BatchView b in scan.WithCancellation(ct))</c>,
+    /// since <c>await foreach</c> passes no token to <see cref="GetAsyncEnumerator"/>.
+    /// </summary>
+    /// <param name="cancellationToken">The token; a token passed to <see cref="GetAsyncEnumerator"/> itself takes precedence.</param>
+    /// <returns>This scan.</returns>
+    public Scan WithCancellation(CancellationToken cancellationToken)
+    {
+        _cancellation = cancellationToken;
+        return this;
+    }
+
     /// <summary>What the sink did; valid once it has run.</summary>
-    public ScanStatistics Statistics => ScanStatistics.From(_metrics, 0);
+    public ScanStatistics Statistics => ScanStatistics.From(_metrics, Math.Max(0, _cacheHitsAtEnd - _cacheHitsAtStart));
 
     /// <summary>Enumerates the batches as borrowed views.</summary>
     /// <param name="cancellationToken">Cancels at a batch boundary.</param>
@@ -117,7 +141,8 @@ public sealed class Scan
     public AsyncEnumerator GetAsyncEnumerator(CancellationToken cancellationToken = default)
     {
         Begin();
-        return new AsyncEnumerator(this, _source.BatchesAsync(Spec(), _metrics).GetAsyncEnumerator(cancellationToken), Schema, _source.Session);
+        CancellationToken token = cancellationToken.CanBeCanceled ? cancellationToken : _cancellation;
+        return new AsyncEnumerator(this, _source.BatchesAsync(Spec(), _metrics).GetAsyncEnumerator(token), Schema, _source.Session);
     }
 
     /// <summary>The batches, each owned by the caller, who disposes it.</summary>
@@ -177,6 +202,7 @@ public sealed class Scan
             throw new InvalidOperationException("A scan is single-use: build another one for another sink.");
         }
 
+        _cacheHitsAtStart = _source.Session.Options.SegmentCache?.Hits ?? 0;
         _activity = VortexTelemetry.StartScan("tool");
     }
 
@@ -184,6 +210,7 @@ public sealed class Scan
     {
         if (Interlocked.Exchange(ref _ended, 1) == 0)
         {
+            _cacheHitsAtEnd = _source.Session.Options.SegmentCache?.Hits ?? 0;
             VortexTelemetry.ScanEnded(_metrics, _activity);
             _activity = null;
         }

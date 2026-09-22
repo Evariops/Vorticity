@@ -17,10 +17,8 @@ internal static class CancelWork
             int batches = 0;
             try
             {
-                await using Scan<Reading>.AsyncEnumerator batch = file.Scan<Reading>().GetAsyncEnumerator(cts.Token);
-                while (await batch.MoveNextAsync())
+                await foreach (Columns<Reading> cols in file.Scan<Reading>().WithCancellation(cts.Token))
                 {
-                    Columns<Reading> cols = batch.Current;
                     if (cols.RowCount > 0 && ++batches == 2)
                     {
                         await cts.CancelAsync();

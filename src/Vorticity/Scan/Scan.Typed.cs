@@ -31,6 +31,7 @@ public sealed partial class Scan<TRecord>
     private string? _orderPath;
     private bool _descending;
     private ScanOptions _options = ScanOptions.Default;
+    private CancellationToken _cancellation;
     private long _cacheHitsAtStart = -1;
     private long _cacheHitsAtEnd;
     private int _used;
@@ -119,6 +120,18 @@ public sealed partial class Scan<TRecord>
         return this;
     }
 
+    /// <summary>
+    /// Cancels the enumeration at a batch boundary: <c>await foreach (var c in scan.WithCancellation(ct))</c>,
+    /// since <c>await foreach</c> passes no token to <see cref="GetAsyncEnumerator"/>.
+    /// </summary>
+    /// <param name="cancellationToken">The token; a token passed to <see cref="GetAsyncEnumerator"/> itself takes precedence.</param>
+    /// <returns>This scan.</returns>
+    public Scan<TRecord> WithCancellation(CancellationToken cancellationToken)
+    {
+        _cancellation = cancellationToken;
+        return this;
+    }
+
     /// <summary>What the last sink did; valid once it has run.</summary>
     public ScanStatistics Statistics => ScanStatistics.From(_metrics, Math.Max(0, _cacheHitsAtEnd - _cacheHitsAtStart));
 
@@ -132,7 +145,8 @@ public sealed partial class Scan<TRecord>
 
         // The one sink whose consumer can read a column encoded: Column<T>.Encoding and its views.
         ScanSpec spec = Spec() with { KeepEncodings = true };
-        return new AsyncEnumerator(this, _source.BatchesAsync(spec, _metrics).GetAsyncEnumerator(cancellationToken), binding);
+        CancellationToken token = cancellationToken.CanBeCanceled ? cancellationToken : _cancellation;
+        return new AsyncEnumerator(this, _source.BatchesAsync(spec, _metrics).GetAsyncEnumerator(token), binding);
     }
 
     /// <summary>The batches, each owned by the caller, who disposes it.</summary>
