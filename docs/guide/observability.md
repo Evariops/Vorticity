@@ -54,12 +54,12 @@ each flush and at completion. After the sample's two filtered scans, a count on 
 a small write:
 
 ```
-total vortex.cache.hits = 124
+total vortex.cache.hits = 29
 total vortex.cache.misses = 66
-total vortex.scan.blocks_decoded = 28
+total vortex.scan.blocks_decoded = 151
 total vortex.scan.blocks_pruned = 218
-total vortex.scan.bytes_requested = 1994896
-total vortex.scan.requests = 210
+total vortex.scan.bytes_requested = 659796
+total vortex.scan.requests = 95
 total vortex.scan.rows = 200000
 total vortex.write.bytes = 3012
 ```
@@ -73,8 +73,8 @@ One activity per scan, named `vortex.scan.typed` or `vortex.scan.tool` after the
 and one per write, `vortex.write`. Each carries what the operation did as tags, set when it ends:
 
 ```
-activity vortex.scan.typed [Unset]: vortex.rows=100000, vortex.batches=14, vortex.requests=43, vortex.bytes_requested=466220, vortex.blocks_decoded=14, vortex.blocks_pruned=109
-activity vortex.scan.tool [Unset]: vortex.rows=0, vortex.batches=0, vortex.requests=124, vortex.bytes_requested=1062456, vortex.blocks_decoded=0, vortex.blocks_pruned=0
+activity vortex.scan.typed [Unset]: vortex.rows=100000, vortex.batches=14, vortex.requests=22, vortex.bytes_requested=165424, vortex.blocks_decoded=14, vortex.blocks_pruned=109
+activity vortex.scan.tool [Unset]: vortex.rows=0, vortex.batches=0, vortex.requests=51, vortex.bytes_requested=328948, vortex.blocks_decoded=123, vortex.blocks_pruned=0
 activity vortex.write [Unset]: vortex.rows=2, vortex.bytes=3012, vortex.completed=True
 activity vortex.write [Error]: vortex.rows=1, vortex.bytes=0, vortex.completed=False
 ```
@@ -103,16 +103,17 @@ Console.WriteLine($"scan {run}: {stats.Rows} rows in {stats.Batches} batches, {s
 ```
 
 ```
-scan 1: 100000 rows in 14 batches, 43 requests, 466220 bytes, 14 blocks decoded, 109 pruned, 11 cache hits
-scan 2: 100000 rows in 14 batches, 43 requests, 466220 bytes, 14 blocks decoded, 109 pruned, 33 cache hits
+scan 1: 100000 rows in 14 batches, 22 requests, 165424 bytes, 14 blocks decoded, 109 pruned, 0 cache hits
+scan 2: 100000 rows in 14 batches, 22 requests, 165424 bytes, 14 blocks decoded, 109 pruned, 22 cache hits
 ```
 
 `ScanStatistics` is a `readonly record struct` of seven `long`s: `Rows`, `Batches`, `Requests`,
 `BytesRequested`, `BlocksDecoded`, `BlocksPruned` and `CacheHits`. `Requests` counts the segments
-the scan asked for, the ones the cache then served included, which is why the second scan asks as
-much as the first and finds three times as much in the cache. The same record is on the tool scan
-and on a grouped aggregation. What the scan was going to do, before it runs, is `ExplainAsync`:
-[statistics-and-pruning.md](statistics-and-pruning.md) puts the two side by side.
+the scan asked for, each once, the ones the cache then served included, which is why the second
+scan asks as much as the first and finds all 22 in the cache, where the first found none. The same
+record is on the tool scan and on a grouped aggregation. What the scan was going to do, before it
+runs, is `ExplainAsync`: [statistics-and-pruning.md](statistics-and-pruning.md) puts the two side
+by side.
 
 ## The segment cache
 
@@ -125,7 +126,7 @@ await using (VortexFile file = await session.OpenAsync(new FileSegmentSource(pat
 ```
 
 ```
-cache: 124 hits, 66 misses, 0 bytes held
+cache: 29 hits, 66 misses, 0 bytes held
 ```
 
 A path handed to `OpenAsync` is memory-mapped, and a mapping has nothing to cache: its reads never

@@ -18,7 +18,7 @@ Print("Day >= 900", scan.Statistics);
 plan, Day >= 900: 1000000 rows, 14 of 123 blocks live, 22 segments, 165424 bytes to read, may match True
   zone map: 109 blocks pruned, 1 segments and 2124 bytes read to decide
   count: exact True, 100000 rows, 109 pruned, 13 proven, 1 decoded
-ran, Day >= 900: 100000 rows in 14 batches, 43 requests, 466220 bytes, 14 blocks decoded, 109 pruned
+ran, Day >= 900: 100000 rows in 14 batches, 22 requests, 165424 bytes, 14 blocks decoded, 109 pruned
 ```
 
 `Print` writes the fields of the two records; the sample has it. 2 124 bytes of zone maps decided
@@ -26,14 +26,14 @@ that 109 of the file's 123 blocks hold nothing for this predicate, and they were
 
 ## The plan, before
 
-`ExplainAsync()` reads the file's statistics, its zone maps and its indexes, never the data, and
-returns a `ScanPlan`:
+`ExplainAsync()` reads the file's statistics, its zone maps and its indexes, and of the data at
+most the few segments of a sorted column it searches, and returns a `ScanPlan`:
 
 | field | what it says |
 |---|---|
-| `Rows` | the rows the scan covers |
-| `Blocks`, `LiveBlocks` | the blocks, and those no structure could prove empty |
-| `Segments`, `BytesToRead` | the distinct segments the live blocks need, and their bytes |
+| `Rows` | the rows the scan covers: the file's, those of a range, or the rows a take takes |
+| `Blocks`, `LiveBlocks` | the blocks those rows touch, and those no structure could prove empty |
+| `Segments`, `BytesToRead` | the distinct segments the live blocks need, with what consulting the structures reads, and their bytes |
 | `MayMatch` | false when the file's statistics prove the scan empty |
 | `Pruning` | one `PruningStep` per structure, cheapest first: `Structure`, `BlocksPruned`, and the `SegmentsRead` and `BytesRead` it took to consult |
 | `Count` | how a `CountAsync` of the scan would be answered |
@@ -50,12 +50,12 @@ by them, or left to decode.
 delivered, `Requests` and `BytesRequested` made to the source, `BlocksDecoded`, `BlocksPruned`,
 and `CacheHits` from the session's segment cache ([threads.md](threads.md)).
 
-**On this file the plan's bytes and the run's do not agree.** The plan counts each segment once,
-22 of them and 165 424 bytes; the run made 43 requests for 466 220 bytes. A segment here holds
-several blocks of one column, and the scan asks for it once per block that needs it. A mapped file
-serves the repeat from memory; over a `FileSegmentSource` or a remote source, a session
-`SegmentCache` is what keeps it from reaching the disk or the network again. `BlocksDecoded` does
-match `LiveBlocks`: 14.
+**The plan's bytes and the run's agree.** The plan counts each segment once, 22 of them and
+165 424 bytes with the zone maps; the run made 22 requests for 165 424 bytes. A segment here holds
+several blocks of one column, and the scan reads it once for all the blocks that need it. A second
+scan reads it again; over a `FileSegmentSource` or a remote source, a session `SegmentCache` is
+what keeps it from reaching the disk or the network again. `BlocksDecoded` matches `LiveBlocks`:
+14.
 
 ## A filter that prunes, and one that cannot
 
@@ -63,16 +63,16 @@ Measured on the demonstration file, 1 564 708 bytes:
 
 | | live blocks | requests | bytes requested | rows |
 |---|---|---|---|---|
-| no filter | 123 of 123 | 369 | 5 084 356 | 1 000 000 |
-| `Day >= 900` | 14 of 123 | 43 | 466 220 | 100 000 |
-| `Celsius > 45` | 123 of 123 | 370 | 5 087 464 | 122 500 |
-| `Day >= 5000` | 0 of 123 | 0 | 0 | 0 |
+| no filter | 123 of 123 | 150 | 1 540 608 | 1 000 000 |
+| `Day >= 900` | 14 of 123 | 22 | 165 424 | 100 000 |
+| `Celsius > 45` | 123 of 123 | 151 | 1 543 716 | 122 500 |
+| `Day >= 5000` | 0 of 123 | 1 | 2 124 | 0 |
 
 The rows are in `Day` order, so 109 blocks are provably outside `Day >= 900`: a tenth of the reading
 for a tenth of the rows. `Celsius` walks its whole range inside every block, so no block can be
 excluded, and the predicate costs one request more than no filter: the 3 108 bytes of zone maps read
-to find that out. `Day >= 5000` is settled by the file's own maximum, and the run reads nothing;
-its plan still reports the 2 124 bytes of zone maps `ExplainAsync` consulted.
+to find that out. `Day >= 5000` lies above the file's own maximum, and `MayMatch` says so; the run
+still consults the zone maps, one request of 2 124 bytes, as its plan reports, and decodes nothing.
 
 ## Three levels
 
@@ -133,8 +133,8 @@ of their own, with what they cost to consult.
 ## Watch out
 
 * `ExplainAsync` on a scan with no filter is still worth running: it gives the file's shape.
-* `Blocks` and `LiveBlocks` ignore `Rows(...)`: a take of two rows still reports 123 of 123. Its
-  `Segments` and `BytesToRead` are right ([read-rows-by-index.md](read-rows-by-index.md)).
+* `Blocks` and `LiveBlocks` follow `Rows(...)`: a range of ten rows plans 1 block of 1, a take of
+  two rows 2 of 2, with `Rows` 2 ([read-rows-by-index.md](read-rows-by-index.md)).
 * `Statistics` read before the sink has run are zeros, and a scan runs one sink only.
 * `ScanOptions.Pruning = false` and `UseIndexes = false` turn the structures off, to check them,
   never to change a result.

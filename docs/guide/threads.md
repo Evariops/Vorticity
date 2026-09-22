@@ -54,8 +54,10 @@ the session.` Two `await using` declarations in that order, as above, do it righ
 **The cache and the bound on reads apply to a source that does I/O**: a `FileSegmentSource`, as
 above, or your own `ISegmentSource` ([object-store.md](object-store.md)). A path opened with
 `session.OpenAsync(path)` is memory-mapped, and a mapping has nothing to bound or to cache. With the
-cache, a fifth scan of the file made 369 requests and the cache served all 369; over the five scans
-it counted 1 605 hits and 240 misses, and held 1 504 KiB, the data segments of a 1.5 MB file.
+cache, a fifth scan of the file made 150 requests and the cache served all 150; over the five scans
+it counted 585 hits and 165 misses, and held 1 504 KiB, the data segments of a 1.5 MB file. The
+concurrent scans missed a few more than the file's 150 segments: two scans that ask for one at the
+same moment both miss it.
 
 ## What is safe to share
 
@@ -87,9 +89,9 @@ Measured on the demonstration file, warmed, each variant run in turn, the best o
 
 | | degree 1 | degree 4 |
 |---|---|---|
-| a scan that counts rows | 4.7 ms | 3.8 ms |
-| `GroupBy(r => r.City)` with an average | 8.9 ms | 2.8 ms |
-| `Where(r => r.Celsius > 20.0).SumAsync(r => r.Celsius)` | 6.0 ms | 2.0 ms |
+| a scan that counts rows | 4.7 ms | 3.6 ms |
+| `GroupBy(r => r.City)` with an average | 8.7 ms | 2.9 ms |
+| `Where(r => r.Celsius > 20.0).SumAsync(r => r.Celsius)` | 6.2 ms | 1.9 ms |
 
 An aggregate keeps one state per chunk and merges them at the end, so its chunks run side by side:
 three times faster at four threads. A scan that hands batches to your loop gains little: it still
@@ -101,8 +103,8 @@ and the ratios are what to read.
 
 `ScanOptions.Prefetch` is how many batches are decoded ahead of the loop, 1 by default, so that the
 decode of the next batch overlaps your work on this one; the scan holds at most that many batches
-more. On a mapped file with a loop that works on every value it changed nothing measurable, 7.2 ms,
-7.1 ms and 7.2 ms at 0, 1 and 2. It pays when the source has latency to hide, which a remote one
+more. On a mapped file with a loop that works on every value it changed nothing measurable, 8.0 ms,
+8.2 ms and 7.9 ms at 0, 1 and 2. It pays when the source has latency to hide, which a remote one
 does.
 
 ## Local and remote

@@ -29,7 +29,7 @@ ScanStatistics stats = scan.Statistics;
 plan: 14 of 123 blocks, 24 segments, 171472 bytes
   zone map pruned 109 blocks, reading 8172 bytes to decide
 6116 rows, from day 900
-ran: 14 blocks decoded, 109 pruned, 45 requests, 472268 bytes
+ran: 14 blocks decoded, 109 pruned, 24 requests, 171472 bytes
 ```
 
 **The filter is exact.** What comes back is the matching rows and nothing else, compacted into
@@ -111,27 +111,27 @@ Counts from the sample, each with its plan:
 
 | predicate | rows | live blocks | requests | bytes | how the count was answered |
 |---|---|---|---|---|---|
-| `r.Day >= 900` | 100 000 | 14 of 123 | 0 | 0 | exact from the structures |
-| `r.Day.In(1, 2, 3)` | 3 000 | 1 of 123 | 0 | 0 | exact from the structures |
+| `r.Day >= 900` | 100 000 | 14 of 123 | 2 | 2 328 | exact from the structures |
+| `r.Day.In(1, 2, 3)` | 3 000 | 1 of 123 | 2 | 2 464 | exact from the structures |
 | `r.Celsius == null` | 20 000 | 123 of 123 | 1 | 3 108 | every block proven from its null count |
-| `r.Celsius > 45.0` | 122 500 | 123 of 123 | 124 | 3 989 416 | 123 blocks evaluated |
-| `r.City == "Paris"` | 125 006 | 123 of 123 | 124 | 1 062 456 | 123 blocks evaluated |
-| `r.City.StartsWith("L")` | 249 999 | 123 of 123 | 124 | 1 062 456 | 123 blocks evaluated |
+| `r.Celsius > 45.0` | 122 500 | 123 of 123 | 51 | 1 204 356 | 123 blocks evaluated |
+| `r.City == "Paris"` | 125 006 | 123 of 123 | 51 | 328 948 | 123 blocks evaluated |
+| `r.City.StartsWith("L")` | 249 999 | 123 of 123 | 51 | 328 948 | 123 blocks evaluated |
 
-The rows are in `Day` order, so a block's bounds settle `Day >= 900` for 109 blocks of 123 and the
-count reads nothing. `Celsius` walks its whole range inside every block and every city appears in
-every block, so no block can be excluded and each value is compared. **This is a property of the
-data, not of the predicate**: write the rows in the order of the column you filter on, or at least
-clustered by it.
+The rows are in `Day` order, so a block's bounds settle `Day >= 900` for 109 blocks of 123, and the
+count reads only the zone maps of `Day` and one small segment of it that places the boundary.
+`Celsius` walks its whole range inside every block and every city appears in every block, so no
+block can be excluded and each value is compared. **This is a property of the data, not of the
+predicate**: write the rows in the order of the column you filter on, or at least clustered by it.
 
 ## Before and after
 
-`ExplainAsync` reads the statistics and zone maps, never the data, and returns a `ScanPlan`: the
-live blocks, the segments and bytes they need, and a `PruningStep` per structure consulted with what
-it pruned and what consulting it cost. `Statistics`, read after the sink, says what the scan did.
-The two counts of bytes above differ because `Statistics.Requests` counts, per batch, the segments
-that batch asked for: a segment shared by several live blocks is counted by each
-([statistics-and-pruning.md](statistics-and-pruning.md)).
+`ExplainAsync` reads the statistics and zone maps, and of the data at most the few segments of a
+sorted column it searches, and returns a `ScanPlan`: the live blocks, the segments and bytes they
+need, and a `PruningStep` per structure consulted with what it pruned and what consulting it cost.
+`Statistics`, read after the sink, says what the scan did. The two agree above, 24 segments and
+171 472 bytes: the scan reads each segment once, however many live blocks share it, and both count
+the zone maps consulted ([statistics-and-pruning.md](statistics-and-pruning.md)).
 
 The cheapest questions need no scan at all: `CountAsync` and `AnyAsync` answer from the structures
 wherever they suffice, and `file.MayMatch<Reading>(r => r.Day >= 5000)` compares the predicate with

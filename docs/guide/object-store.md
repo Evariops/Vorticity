@@ -133,23 +133,23 @@ await using (VortexFile opened = await VortexSession.Default.OpenAsync(new Store
 
 ```
 open from the store: 1000000 rows; 2 requests (1 get, 1 head, 0 put, 0 list), 2 dependent steps, 65536 bytes read, 0 written
-mean of Celsius for Day >= 900: 30.000; 21 requests (21 get, 0 head, 0 put, 0 list), 21 dependent steps, 231908 bytes read, 0 written
-a full scan, 1000000 rows: 225 requests (225 get, 0 head, 0 put, 0 list), 225 dependent steps, 2739476 bytes read, 0 written
-a full scan through a session with a segment cache, 1000000 rows: 153 requests (153 get, 0 head, 0 put, 0 list), 148 dependent steps, 1591012 bytes read, 0 written
+mean of Celsius for Day >= 900: 30.000; 15 requests (15 get, 0 head, 0 put, 0 list), 13 dependent steps, 134204 bytes read, 0 written
+a full scan, 1000000 rows: 150 requests (150 get, 0 head, 0 put, 0 list), 150 dependent steps, 1540608 bytes read, 0 written
+a full scan through a session with a segment cache, 1000000 rows: 150 requests (150 get, 0 head, 0 put, 0 list), 149 dependent steps, 1540608 bytes read, 0 written
 ```
 
 The open costs one ranged read of the tail, plus the head the sample asks for the length. From
 there every projection and filter of the guide works, and each saves requests, not just bytes: a
-filtered mean reads 21 ranges of the file's 153 segments. The session's `MaxConcurrentReads` bounds
-the reads in flight across every file it opens this way, and its segment cache applies too. On
-this file the cache is worth having for a single scan: a chunk that spans several blocks is
-otherwise fetched more than once, 225 requests and 2.7 MB for a 1.5 MB file, where a session with
-a `SegmentCache` fetched each of the 153 segments once.
+filtered mean reads 15 ranges of the file's 150 segments. The session's `MaxConcurrentReads` bounds
+the reads in flight across every file it opens this way, and its segment cache applies too. A
+scan fetches each segment once, even a chunk that spans several blocks: 150 requests and 1.54 MB
+for a 1.56 MB file, with a cache or without. The cache pays across scans: a second scan through
+the same session fetches nothing ([open-a-file.md](open-a-file.md)).
 
 The source receives the ranges of a batch together, so a source over a network store can coalesce
 neighbouring ranges into one request; the sample's does not, to stay short. Because the reads of a
-scan overlap, `DependentSteps` and, with a cache, the exact byte count move a little from one run
-to the next; the request counts do not.
+scan overlap, `DependentSteps` moves a little from one run to the next; the request and byte counts
+do not.
 
 ## Watch out
 

@@ -17,7 +17,7 @@ await using (VortexFile file = await VortexFile.OpenAsync(path))
 ```
 struct{Day: i32, Celsius: f64?, City: utf8}
 1000000 rows, 1564708 bytes, edition Core20260800
-identity 0000ed02-bb12-418a-8abc-611bb42a9615, metadata keys []
+identity f6595d25-2b99-4160-9071-63ffd454d25f, metadata keys []
 ```
 
 `VortexFile.OpenAsync(path)` opens in `VortexSession.Default` and maps the file into memory. This is
@@ -53,10 +53,10 @@ await TimeAsync("bytes in memory", await session.OpenAsync(new MemorySegmentSour
 `TimeAsync` scans the whole file three times and prints the best:
 
 ```
-a path            a full scan in 6.5 ms
-a mapped source   a full scan in 6.1 ms
-positional reads  a full scan in 7.0 ms
-bytes in memory   a full scan in 6.9 ms
+a path            a full scan in 6.6 ms
+a mapped source   a full scan in 6.7 ms
+positional reads  a full scan in 6.3 ms
+bytes in memory   a full scan in 6.8 ms
 ```
 
 A session owns the memory pool, the segment cache, the bound on reads in flight and the degree of
@@ -131,16 +131,17 @@ await using VortexSession cached = VortexSession.Create(options => options.Segme
 ```
 
 ```
-a full scan: the plan names 150 segments, 1540608 bytes; the source served 225 requests, 2739476 bytes
-with a segment cache, scan 1: the source served 156 requests, 1641424 bytes; 69 cache hits
-with a segment cache, scan 2: the source served 0 requests, 0 bytes; 225 cache hits
+a full scan: the plan names 150 segments, 1540608 bytes; the source served 150 requests, 1540608 bytes
+with a segment cache, scan 1: the source served 150 requests, 1540608 bytes; 0 cache hits
+with a segment cache, scan 2: the source served 0 requests, 0 bytes; 150 cache hits
 ```
 
-The plan of a full scan names 150 segments, 1.54 MB, about the whole file. Without a cache the
-source was asked 225 times for 2.7 MB: a segment that spans several batches is read again for a
-later batch that needs it. Over a mapping or bytes in memory the repeat costs nothing. Over a source where a read is
-a request, give the session a `SegmentCache`: the first scan then reads nearly every segment once
-(156 requests for 150 segments in this run), and a second scan of the same file reads nothing.
+The plan of a full scan names 150 segments, 1.54 MB, about the whole file, and the source serves
+exactly that: 150 requests for 1.54 MB. A scan reads each segment once, and a segment that spans
+several batches is shared by them rather than read again for each. The cache works across scans:
+the first scan of a session with a `SegmentCache` reads the same 150 segments and finds none in the
+cache, and a second scan of the same file reads nothing, the 150 segments coming from the cache.
+Over a source where a read is a request, that is the reason to give the session one.
 
 ## Watch out
 

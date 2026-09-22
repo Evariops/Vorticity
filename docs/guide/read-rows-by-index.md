@@ -47,13 +47,14 @@ Taking two rows of a million, against reading all of them, on the demonstration 
 | | requests | bytes | blocks decoded |
 |---|---|---|---|
 | `Rows(4, 900_000)` | 6 | 64 856 | 2 |
-| the whole file | 369 | 5 084 356 | 123 |
+| the whole file | 150 | 1 540 608 | 123 |
 
 The take reads the segments of the two blocks the rows are in, for the record's three columns, and
 decodes those two blocks; it never touches the 121 between them. That is the shape of the cost: **a
 take is priced in blocks, not rows.** Two rows in one block cost one block, two rows far apart cost
-two, and the blocks here are 8 192 rows. `ExplainAsync()` gives the same figure before the read,
-6 segments and 64 856 bytes to read, and a record with fewer members reads fewer segments.
+two, and the blocks here are 8 192 rows. `ExplainAsync()` gives the same figures before the read,
+2 rows, 2 of 2 blocks live, 6 segments and 64 856 bytes to read, and a record with fewer members
+reads fewer segments.
 
 ## With a filter
 
@@ -86,8 +87,8 @@ the same under Compact = false: 8191 rows from row 4, selected rows 4 10 20
   ([diagnostics.md](diagnostics.md)).
 * A row past the end throws `ArgumentOutOfRangeException: The file has 1000000 rows.` when the
   scan starts, not when `Rows` is called.
-* The plan's `LiveBlocks` and `Blocks` count the whole file for a take or a range, 123 of 123 here;
-  its `Segments` and `BytesToRead` are the take's. Read those to price one.
+* The plan of a take or a range counts only the blocks its rows touch: 2 of 2 for the take above,
+  1 of 1 for the range of ten rows, whose `Segments` and `BytesToRead` are 3 and 50 404.
 * An owned batch from `ToBatchesAsync` does not carry the selection: a take through it hands over
   the whole span of each block, 15 264 rows for these two ([owned-batches.md](owned-batches.md)).
   Use the borrowed columns, or `ToRecordsAsync`, which yields the two rows only.

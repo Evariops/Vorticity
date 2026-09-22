@@ -20,8 +20,8 @@ await foreach (var (_, celsius, _) in scan)
 ```
 
 ```
-the loop: mean 29.4001 over 1000000 rows, 7.7 ms
-  123 batches, 123 blocks decoded, 369 requests, 5084356 bytes
+the loop: mean 29.4001 over 1000000 rows, 8.2 ms
+  123 batches, 123 blocks decoded, 150 requests, 1540608 bytes
 ```
 
 That mean is wrong, and on purpose: `Celsius` is nullable, and `Values` is the raw buffer, which
@@ -84,28 +84,30 @@ double? mean = await file.Scan<Reading>().AvgAsync(r => r.Celsius);
 
 ```
 AvgAsync: mean 30.0000, 5.1 ms
-  123 blocks decoded, 123 requests, 3986308 bytes
+  1 blocks decoded, 50 requests, 1201248 bytes
 ```
 
 The right answer, faster, and no batch ever reaches your code: the aggregate runs block by block
-inside the scan, skips the nulls, and reads the one column it needs. The loop above read three,
-because the record names three: [project-columns.md](project-columns.md) is how to name fewer.
+inside the scan, skips the nulls, and reads the one column it needs, 50 segments of the 150. The
+loop above read three, because the record names three: [project-columns.md](project-columns.md) is
+how to name fewer. For an aggregate, `BlocksDecoded` counts the blocks it had to bring to the
+canonical form; it folded the other 122 in the form they are stored in
+([aggregates.md](aggregates.md)).
 
 A file this library writes carries, per column, a null count, order flags and, for a numeric
 column, a minimum and a maximum; it carries no sum. `MinAsync`, `MaxAsync` and `CountAsync`
-without a filter answer from those statistics and read nothing; `SumAsync` and `AvgAsync` decode
+without a filter answer from those statistics and read nothing; `SumAsync` and `AvgAsync` read
 the column. [aggregates.md](aggregates.md) has the rest of the operators.
 
 ## What it costs
 
-* **Reads.** `Statistics.Requests` counts the segments each batch asked for: 369 for three columns
-  over 123 batches, 5.1 MB named for a file of 1.56 MB, because a segment that spans several
-  batches is asked for by each. Over the mapped file of `VortexFile.OpenAsync(path)` that costs
-  nothing; over a source where a read is a request, [open-a-file.md](open-a-file.md) shows what a
-  `SegmentCache` on the session saves.
+* **Reads.** `Statistics.Requests` counts the segments the scan read: 150 for three columns over
+  123 batches, 1.54 MB for a file of 1.56 MB, because a segment that spans several batches is read
+  once and shared by them. A second scan reads them all again; over a source where a read is a
+  request, [open-a-file.md](open-a-file.md) shows what a `SegmentCache` on the session saves.
 * **Memory.** One batch is decoded ahead of the one you hold (`ScanOptions.Prefetch`, 1 by
   default), in buffers that alternate rather than accumulate.
-* **Allocations.** A whole scan allocated 122 632 bytes over 123 batches and 142 488 bytes over
+* **Allocations.** A whole scan allocated 111 440 bytes over 123 batches and 125 776 bytes over
   245: about 100 KB to start a scan, then under 200 bytes per batch, counted process-wide with
   `GC.GetTotalAllocatedBytes`, so the thread that decodes ahead is included.
 
