@@ -209,7 +209,7 @@ internal sealed class ScanContext : IDisposable
     /// from outside a single <c>LayoutReader.Execute</c> call, and every node the redirected decode
     /// produces is reachable only through the index that call returns.
     /// </remarks>
-    public CanonicalArena Canonical => _building?.Arena ?? _batchCanonical;
+    public CanonicalArena Canonical => _child?.Arena ?? _building?.Arena ?? _batchCanonical;
 
     /// <summary>The batch's own arena, which <see cref="ResetBatch"/> clears.</summary>
     private readonly CanonicalArena _batchCanonical;
@@ -219,6 +219,15 @@ internal sealed class ScanContext : IDisposable
     /// will become, which gathers the segments the decode depends on as it runs.
     /// </summary>
     private RetainedChunk? _building;
+
+    /// <summary>
+    /// Set while a child of the node being decoded into <see cref="_building"/> is decoded into an
+    /// arena of its own, to be lent to every entry of the chunk that reads it.
+    /// </summary>
+    private RetainedChunk? _child;
+
+    /// <summary>The claim this context holds on such a child, not decoded yet, or null.</summary>
+    private RetainedChunk? _childClaim;
 
     /// <summary>
     /// The <see cref="Vorticity.Buffers.SegmentOwner"/> references for this batch's segments. Exactly one refcount
@@ -727,11 +736,95 @@ internal sealed class ScanContext : IDisposable
     internal bool IsRetaining => _building is not null;
 
     /// <summary>
+    /// Whether the retained decode in flight may retain a child of its node one level down: it is
+    /// not itself such a child, whose own children are decoded in place.
+    /// </summary>
+    internal bool CanRetainChild => _building is not null && _child is null;
+
+    /// <summary>
+    /// The retained child under <paramref name="key"/>, lent to the entry being decoded, when one is
+    /// published; otherwise a claim on it, which the caller closes with
+    /// <see cref="BeginRetainedChildDecode"/> and <see cref="EndRetainedChildDecode"/>.
+    /// </summary>
+    /// <param name="key">From <see cref="ChildKey"/>.</param>
+    /// <param name="arena">The arena holding the child.</param>
+    /// <param name="nodeIndex">The child's node in <paramref name="arena"/>.</param>
+    /// <returns><see langword="true"/> when the child is retained.</returns>
+    /// <remarks>
+    /// Another context decoding the same child is waited for, which is safe while this context
+    /// holds its one entry's claim: see <see cref="RetainedChunks"/>.
+    /// </remarks>
+    /// <exception cref="InvalidOperationException">No retained decode is in flight, or a child's is.</exception>
+    internal bool TryGetRetainedChild(long key, out CanonicalArena arena, out int nodeIndex)
+    {
+        if (!CanRetainChild)
+        {
+            throw new InvalidOperationException(
+                "A child is retained under an entry being decoded, and never under another child.");
+        }
+
+        AbandonRetainedChild();
+        if (_retained!.TryGetFor(key, this, Batch, _building!, out RetainedChunk? claim, out arena, out nodeIndex))
+        {
+            return true;
+        }
+
+        _childClaim = claim;
+        return false;
+    }
+
+    /// <summary>Redirects <see cref="Canonical"/> at the arena of the child this context has claimed.</summary>
+    /// <returns>The arena, which the caller must close with <see cref="EndRetainedChildDecode"/>.</returns>
+    /// <exception cref="InvalidOperationException">No child is claimed.</exception>
+    internal CanonicalArena BeginRetainedChildDecode()
+    {
+        RetainedChunk claim = _childClaim ?? throw new InvalidOperationException(
+            "No child is claimed on this scan context: a child's decode follows a miss of TryGetRetainedChild.");
+        _childClaim = null;
+        _child = claim;
+        CanonicalArena arena = claim.Arena ??= new CanonicalArena();
+        claim.Depend(Segments.OwnerHolding(Nodes.FirstBlobBuffer()));
+        return arena;
+    }
+
+    /// <summary>
+    /// Ends the child's redirect and publishes it, lent to the entry being decoded, or discards it
+    /// when its decode failed.
+    /// </summary>
+    /// <param name="nodeIndex">The decoded child's index in its arena, or -1.</param>
+    internal void EndRetainedChildDecode(int nodeIndex)
+    {
+        RetainedChunk? entry = _child;
+        _child = null;
+        if (entry is null)
+        {
+            return;
+        }
+
+        if (nodeIndex < 0)
+        {
+            _retained!.Abandon(entry);
+            return;
+        }
+
+        _retained!.PublishFor(entry, nodeIndex, Batch, _building!);
+    }
+
+    private void AbandonRetainedChild()
+    {
+        if (_childClaim is { } claim)
+        {
+            _childClaim = null;
+            _retained!.Abandon(claim);
+        }
+    }
+
+    /// <summary>
     /// Records that a layout reader loaded <paramref name="owner"/>'s segment into the node arena
     /// while a retained decode runs, so the entry keeps that segment alive.
     /// </summary>
     /// <param name="owner">The owner, held by the batch's request set; no reference taken.</param>
-    internal void NoteSegment(SegmentOwner owner) => _building?.Depend(owner);
+    internal void NoteSegment(SegmentOwner owner) => (_child ?? _building)?.Depend(owner);
 
     /// <summary>
     /// The retained decode for <paramref name="key"/>, if one is held; otherwise a claim on the key,
@@ -777,6 +870,7 @@ internal sealed class ScanContext : IDisposable
     /// <summary>Gives up the claim a miss of <see cref="TryGetRetained"/> made, for a path that decodes nothing under it.</summary>
     internal void AbandonRetained()
     {
+        AbandonRetainedChild();
         if (_claim is { } claim)
         {
             _claim = null;

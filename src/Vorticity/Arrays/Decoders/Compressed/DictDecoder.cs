@@ -154,24 +154,14 @@ internal sealed class DictDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// The most values a dictionary may hold and still be decoded in windows. The values child is
-    /// decoded again for every window, since a window is a retained decode and nothing is shared
-    /// inside one; a dictionary of few values pays little for that, and one of many keeps the whole
-    /// chunk instead.
+    /// The codes decode a range and the values are read whole, retained once for every window of
+    /// the chunk and lent to each: see <see cref="ArrayDecodeContext.DecodeChildShared"/>.
     /// </summary>
-    private const int LargestValuesPerWindow = 4096;
-
     /// <inheritdoc/>
     public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
     {
         ArgumentNullException.ThrowIfNull(context);
-        if (node.ChildCount != 2)
-        {
-            return false;
-        }
-
-        DictMetadata metadata = DictMetadata.Read(node.Metadata);
-        return metadata.ValuesLength <= (ulong)LargestValuesPerWindow && context.ChildDecodesRange(in node, 0);
+        return node.ChildCount == 2 && context.ChildDecodesRange(in node, 0);
     }
 
     /// <summary>The range's codes over the whole values, as a take is the wanted codes over the whole values.</summary>
@@ -241,7 +231,7 @@ internal sealed class DictDecoder : ArrayDecoder
         // node itself, and asking again here would retain the same bytes twice.
         int valuesIndex = whole
             ? context.DecodeChild(in node, 1, dtype, valuesLength)
-            : context.DecodeChildShared(in node, 1, dtype, valuesLength);
+            : context.DecodeWholeChild(in node, 1, dtype, valuesLength);
         int produced = count;
 
         CanonicalNode codesNode = context.Canonical.GetNode(codesIndex);

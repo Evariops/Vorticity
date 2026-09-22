@@ -94,68 +94,78 @@ internal readonly ref struct Patches
     /// here rather than per patch: otherwise every patch pays `ReadUnsigned`'s switch and a
     /// variable-width `Slice(..).CopyTo(..)`, which dominates a scan whose patch set is large.
     /// </remarks>
-    public readonly void ApplyAll(ReadOnlySpan<byte> values, int width, Span<byte> destination)
+    public readonly void ApplyAll(ReadOnlySpan<byte> values, int width, Span<byte> destination) =>
+        Scatter(values, width, 0, _count, 0, _arrayLength, destination);
+
+    /// <summary>
+    /// Scatters patches <c>[first, last)</c>, whose positions all lie in
+    /// <c>[start, start + rows)</c>, into a destination that begins at row <paramref name="start"/>.
+    /// </summary>
+    private readonly void Scatter(
+        ReadOnlySpan<byte> values, int width, int first, int last, int start, int rows, Span<byte> destination)
     {
         switch (_indicesPType)
         {
             case PType.U8:
-                ApplyAll<byte>(values, width, destination);
+                Scatter<byte>(values, width, first, last, start, rows, destination);
                 break;
             case PType.U16:
-                ApplyAll<ushort>(values, width, destination);
+                Scatter<ushort>(values, width, first, last, start, rows, destination);
                 break;
             case PType.U32:
-                ApplyAll<uint>(values, width, destination);
+                Scatter<uint>(values, width, first, last, start, rows, destination);
                 break;
             default:
-                ApplyAll<ulong>(values, width, destination);
+                Scatter<ulong>(values, width, first, last, start, rows, destination);
                 break;
         }
     }
 
-    private readonly void ApplyAll<TIndex>(
-        ReadOnlySpan<byte> values, int width, Span<byte> destination)
+    private readonly void Scatter<TIndex>(
+        ReadOnlySpan<byte> values, int width, int first, int last, int start, int rows, Span<byte> destination)
         where TIndex : unmanaged
     {
-        ReadOnlySpan<TIndex> indices = MemoryMarshal.Cast<byte, TIndex>(_indices)[.._count];
+        ReadOnlySpan<TIndex> indices = MemoryMarshal.Cast<byte, TIndex>(_indices)[first..last];
+        ulong offset = (ulong)_offset + (ulong)start;
         switch (width)
         {
             case 1:
-                Scatter<TIndex, byte>(indices, values, destination);
+                Scatter<TIndex, byte>(indices, values, first, offset, rows, destination);
                 break;
             case 2:
-                Scatter<TIndex, ushort>(indices, values, destination);
+                Scatter<TIndex, ushort>(indices, values, first, offset, rows, destination);
                 break;
             case 4:
-                Scatter<TIndex, uint>(indices, values, destination);
+                Scatter<TIndex, uint>(indices, values, first, offset, rows, destination);
                 break;
             case 8:
-                Scatter<TIndex, ulong>(indices, values, destination);
+                Scatter<TIndex, ulong>(indices, values, first, offset, rows, destination);
                 break;
             default:
-                for (int i = 0; i < _count; i++)
+                Span<byte> target = destination[..(rows * width)];
+                for (int i = 0; i < indices.Length; i++)
                 {
-                    int position = (int)(Widen(indices[i]) - (ulong)_offset);
-                    values.Slice(i * width, width)
-                        .CopyTo(destination.Slice(position * width, width));
+                    int position = (int)(Widen(indices[i]) - offset);
+                    values.Slice((first + i) * width, width)
+                        .CopyTo(target.Slice(position * width, width));
                 }
 
                 break;
         }
     }
 
-    private readonly void Scatter<TIndex, TValue>(
-        ReadOnlySpan<TIndex> indices, ReadOnlySpan<byte> values, Span<byte> destination)
+    private static void Scatter<TIndex, TValue>(
+        ReadOnlySpan<TIndex> indices, ReadOnlySpan<byte> values, int first, ulong offset, int rows, Span<byte> destination)
         where TIndex : unmanaged
         where TValue : unmanaged
     {
-        ReadOnlySpan<TValue> source = MemoryMarshal.Cast<byte, TValue>(values)[..indices.Length];
-        Span<TValue> target = MemoryMarshal.Cast<byte, TValue>(destination)[.._arrayLength];
-        ulong offset = (ulong)_offset;
+        ReadOnlySpan<TValue> source = MemoryMarshal.Cast<byte, TValue>(values).Slice(first, indices.Length);
+        Span<TValue> target = MemoryMarshal.Cast<byte, TValue>(destination)[..rows];
         for (int i = 0; i < indices.Length; i++)
         {
-            // Validated at construction: every index ascends, is at or above the offset, and the
-            // last one is inside the array -- so every position is in [0, ArrayLength).
+            // Validated at construction: every index ascends, is at or above the patch offset, and
+            // the last one is inside the array; the caller passes only the patches of its rows, so
+            // every position here is in [0, rows).
             target[(int)(Widen(indices[i]) - offset)] = source[i];
         }
     }
@@ -259,6 +269,50 @@ internal readonly ref struct Patches
                 values.Slice(i * width, width).CopyTo(destination.Slice(at * width, width));
             }
         }
+    }
+
+    /// <summary>
+    /// Overwrites the patched rows of <c>[start, start + count)</c>, at their places in a
+    /// destination that holds that range alone.
+    /// </summary>
+    /// <param name="patches">The validated patch set, over the full row space.</param>
+    /// <param name="values">The patch values, one per patch, at <paramref name="width"/> bytes.</param>
+    /// <param name="width">Bytes per value.</param>
+    /// <param name="start">The range's first row.</param>
+    /// <param name="count">The range's row count.</param>
+    /// <param name="destination">The range's values, <paramref name="count"/> rows.</param>
+    /// <remarks>
+    /// The range's patches are bounded by two binary searches and then scattered as
+    /// <see cref="ApplyAll"/> scatters the whole set, so a window of a chunk pays for its own
+    /// patches and not for the chunk's.
+    /// </remarks>
+    public static void ApplyRange(
+        in Patches patches, ReadOnlySpan<byte> values, int width, int start, int count, Span<byte> destination)
+    {
+        int first = FirstAtOrAfter(in patches, start, 0);
+        int last = FirstAtOrAfter(in patches, start + count, first);
+        patches.Scatter(values, width, first, last, start, count, destination);
+    }
+
+    /// <summary>The first patch in <c>[from, Count]</c> whose position is at or after <paramref name="row"/>.</summary>
+    private static int FirstAtOrAfter(in Patches patches, int row, int from)
+    {
+        int low = from;
+        int high = patches.Count;
+        while (low < high)
+        {
+            int middle = low + ((high - low) >> 1);
+            if (patches.GetPosition(middle) < row)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return low;
     }
 
     /// <summary>

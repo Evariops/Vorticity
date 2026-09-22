@@ -458,20 +458,28 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         int patchCount = ArrayDecodeContext.CheckedLength(
             patchesMetadata.Length, $"{Id} patch count");
 
+        // A range reads the whole patch set, decoded once for every range of the node.
+        bool whole = start == 0 && count == length;
         DType indicesType = context.Types.Primitive(
             patchesMetadata.IndicesPType, Nullability.NonNullable);
-        int indicesIndex = context.DecodeChild(in node, 0, indicesType, patchCount);
-        int valuesIndex = context.DecodeChild(in node, 1, dtype, patchCount);
+        int indicesIndex = whole
+            ? context.DecodeChild(in node, 0, indicesType, patchCount)
+            : context.DecodeWholeChild(in node, 0, indicesType, patchCount);
+        int valuesIndex = whole
+            ? context.DecodeChild(in node, 1, dtype, patchCount)
+            : context.DecodeWholeChild(in node, 1, dtype, patchCount);
 
         if (patchesMetadata.HasChunkOffsets)
         {
-            // Read, validated and then deliberately unused: nothing here slices a patch set, so the
-            // per-chunk index offsets have nothing to accelerate.
+            // Read, validated and then deliberately unused: the range's first patch is found by a
+            // binary search over the indices, which the per-chunk offsets would only shorten.
             int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(
                 patchesMetadata.ChunkOffsetsLength, $"{Id} patch chunk_offsets_len");
             DType chunkOffsetsType = context.Types.Primitive(
                 patchesMetadata.ChunkOffsetsPType, Nullability.NonNullable);
-            int chunkOffsets = context.DecodeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength);
+            int chunkOffsets = whole
+                ? context.DecodeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength)
+                : context.DecodeWholeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength);
             CompressedValues.RequireIndexChild(
                 context, chunkOffsets, patchesMetadata.ChunkOffsetsPType, chunkOffsetsLength, Id,
                 "patch_chunk_offsets");
@@ -506,16 +514,12 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
 
         ReadOnlySpan<byte> source = values.Values.Span;
-        int end = start + count;
-        for (int i = 0; i < patches.Count; i++)
+        if (whole)
         {
-            int position = patches.GetPosition(i);
-            if (position < start || position >= end)
-            {
-                continue;
-            }
-
-            source.Slice(i * width, width).CopyTo(destination.Slice((position - start) * width, width));
+            patches.ApplyAll(source, width, destination);
+            return;
         }
+
+        Patches.ApplyRange(in patches, source, width, start, count, destination);
     }
 }

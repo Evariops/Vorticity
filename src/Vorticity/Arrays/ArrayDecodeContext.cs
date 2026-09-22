@@ -273,16 +273,16 @@ internal sealed class ArrayDecodeContext
     /// For a child <b>every row of the parent shares</b>: a dictionary's values, where a batch that
     /// wants one row still needs the entry that row points at, so the selection never narrows it and
     /// each batch decodes the whole of it again. On a chunk larger than the batch that is the same
-    /// waste the flat reader's retention exists for -- but the reader does not reach here, because
-    /// it retains only for an encoding with no specialized selective decode, and a dictionary has
-    /// one for its codes.
+    /// waste the flat reader's retention exists for, and the same holds for every window of a chunk
+    /// the reader decodes in windows.
     /// </para>
     /// <para>
-    /// Retained only inside a reader-opened scope, which is what says the node outlives the batch,
-    /// and never inside another retained decode, whose arena is already the one being filled.
-    /// Outside either, this is <see cref="DecodeChild"/> and nothing more. The window costs a
-    /// handful of records: a slice's buffers are views onto the retained arena, whose entry cannot
-    /// be evicted while the batch that touched it is alive.
+    /// Retained only inside a reader-opened scope, which is what says the node outlives the batch.
+    /// Outside one, this is <see cref="DecodeChild"/> and nothing more. Inside a retained decode the
+    /// child is retained one level down and lent to the entry being decoded, which then keeps it
+    /// from eviction; inside a child's own decode it is decoded in place. The window costs a handful
+    /// of records: a slice's buffers are views onto the retained arena, whose entry cannot be
+    /// evicted while the batch or the entry that reads it is alive.
     /// </para>
     /// <para>
     /// Internal where <see cref="DecodeChild"/> is public, because what it promises is a property
@@ -294,10 +294,37 @@ internal sealed class ArrayDecodeContext
     internal int DecodeChildShared(in ArrayNode node, int childIndex, DType childDType, int childLength)
     {
         ArrayNode child = node.GetChild(childIndex);
-        if (_scan.NodeCheckScope is not uint segment || _scan.IsRetaining ||
+        if (_scan.NodeCheckScope is not uint segment ||
             ScanContext.ChildKey(segment, child.Index) is not long key)
         {
-            return DecodeNode(in child, childDType, childLength);
+            return DecodeSharedChild(in child, childDType, childLength);
+        }
+
+        if (_scan.IsRetaining)
+        {
+            // Inside a retained decode, a window's, the child is retained one level down and lent
+            // to the entry being decoded, so every window of the chunk reads the one decode of it;
+            // below that level it is decoded in place.
+            if (!_scan.CanRetainChild)
+            {
+                return DecodeSharedChild(in child, childDType, childLength);
+            }
+
+            if (!_scan.TryGetRetainedChild(key, out CanonicalArena lent, out int lentNode))
+            {
+                lent = _scan.BeginRetainedChildDecode();
+                lentNode = -1;
+                try
+                {
+                    lentNode = DecodeSharedChild(in child, childDType, childLength);
+                }
+                finally
+                {
+                    _scan.EndRetainedChildDecode(lentNode);
+                }
+            }
+
+            return Layouts.CanonicalSlice.SliceAcross(lent, Canonical, lentNode, 0, childLength);
         }
 
         if (!_scan.TryGetRetained(key, out CanonicalArena held, out int retained))
@@ -306,7 +333,7 @@ internal sealed class ArrayDecodeContext
             retained = -1;
             try
             {
-                retained = DecodeNode(in child, childDType, childLength);
+                retained = DecodeSharedChild(in child, childDType, childLength);
             }
             finally
             {
@@ -315,6 +342,37 @@ internal sealed class ArrayDecodeContext
         }
 
         return Layouts.CanonicalSlice.SliceAcross(held, Canonical, retained, 0, childLength);
+    }
+
+    /// <summary>
+    /// Decodes a child every range of its parent reads whole, a patch set or run ends: once for all
+    /// the ranges, through <see cref="DecodeChildShared"/>, when its decode materializes anything,
+    /// and in place when it is a view, which retaining would only cost an entry.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's DType.</param>
+    /// <param name="childLength">The child's row count.</param>
+    /// <returns>The child's index in the batch's arena, holding every row.</returns>
+    internal int DecodeWholeChild(in ArrayNode node, int childIndex, DType childDType, int childLength) =>
+        ChildMaterializesNothing(in node, childIndex, childDType)
+            ? DecodeChild(in node, childIndex, childDType, childLength)
+            : DecodeChildShared(in node, childIndex, childDType, childLength);
+
+    /// <summary>
+    /// Shared children materialized, across every scan in the process: once per chunk when they are
+    /// shared as they should be, once per window or per batch when they are not.
+    /// </summary>
+    /// <remarks>
+    /// Internal and diagnostic, as <c>FlatLayoutReader.ValuesDecoded</c> is: without it, a child
+    /// decoded once per window rather than once per chunk is invisible to the tests.
+    /// </remarks>
+    internal static long SharedChildrenDecoded;
+
+    private int DecodeSharedChild(in ArrayNode child, DType childDType, int childLength)
+    {
+        System.Threading.Interlocked.Increment(ref SharedChildrenDecoded);
+        return DecodeNode(in child, childDType, childLength);
     }
 
     /// <summary>

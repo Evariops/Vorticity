@@ -324,8 +324,8 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// <returns>Always <see langword="true"/>: another context decoding the window is waited for.</returns>
     /// <remarks>
     /// The O(n) checks a node's side tables need are remembered from one window to the next under
-    /// the node's check scope: they are facts about the node, and every window of it is the same
-    /// node.
+    /// the node's check scope, and its shared children are retained once for every window of it:
+    /// they are facts about the node, and every window of it is the same node.
     /// </remarks>
     private static bool TryAcquireWindow(
         in ArrayNode root, in LayoutNode node, in FieldMask fields, ScanContext context, int total,

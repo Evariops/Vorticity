@@ -11,9 +11,9 @@ namespace Vorticity.Tests.Layouts;
 
 /// <summary>
 /// A chunk larger than a window is read a window at a time, row for row what a whole decode
-/// gives, with every value decoded once: the encodings that decode a range of their rows, a
-/// progression, packed integers, a dictionary of few values, bits with nulls, and one that does
-/// not and keeps the whole chunk, side by side in one table.
+/// gives, with every value decoded once: a progression, packed integers, a dictionary of few
+/// strings, bits with nulls and a dictionary of many doubles whose values every window borrows,
+/// side by side in one table.
 /// </summary>
 public sealed class WindowedChunkTests
 {
@@ -113,7 +113,7 @@ public sealed class WindowedChunkTests
         Directory.CreateDirectory(directory);
         string path = Path.Combine(directory, $"wide-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
 
-        // A block target far above the table: every column is one chunk, several windows long.
+        // A block target far above the table, so that a column's first chunk spans several windows.
         VortexWriteOptions options = new VortexWriteOptions { DataBlockTargetBytes = 64 << 20 };
         await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Wide>(path, options);
         Wide[] block = new Wide[writer.BlockRows];

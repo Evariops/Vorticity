@@ -14,8 +14,15 @@ namespace Vorticity.Arrays;
 /// A chunk larger than a batch is decoded once and each batch borrows a window of it. The lanes of
 /// a scan take consecutive batches in turn, so a table per lane would decode a chunk once per lane
 /// that meets it; one table per scan decodes it once, and a context that asks for a chunk another
-/// context is decoding waits for that decode instead of starting its own. A context holds at most
-/// one claim at a time and never waits while it holds one, so the waits cannot form a cycle.
+/// context is decoding waits for that decode instead of starting its own.
+/// </para>
+/// <para>
+/// An entry may view another: a window of a dictionary views the dictionary's values, decoded once
+/// for every window of the chunk under a key of their own and lent to each window that reads them.
+/// A lent entry outlives every entry it is lent to, whatever its own age. A context holds at most
+/// two claims, an entry and a child of the node it is decoding, and it waits only for an entry
+/// while it holds none or for a child of the node it is decoding: every wait is for a node deeper
+/// in the array than any node the waiting context holds, so the waits cannot form a cycle.
 /// </para>
 /// <para>
 /// An entry is borrowed by every batch that touched it, and a batch is dead once the scan has
@@ -36,10 +43,12 @@ namespace Vorticity.Arrays;
 internal sealed class RetainedChunks : IDisposable
 {
     private readonly int _capacity;
+    private readonly int _lendingCapacity;
     private Dictionary<long, RetainedChunk>? _entries;
     private RetainedChunk? _spares;
     private long _floor;
     private bool _prepare;
+    private bool _lending;
     private bool _disposed;
 
     /// <param name="columns">
@@ -58,6 +67,10 @@ internal sealed class RetainedChunks : IDisposable
     internal RetainedChunks(int columns, int lanes)
     {
         _capacity = Math.Max(2 * columns + 2, 4);
+
+        // A column whose windows view a lent child holds two windows and two children at a chunk
+        // boundary; the table grows to that once, at the first loan, which the first window makes.
+        _lendingCapacity = Math.Max(4 * columns + 2, 6);
         _prepare = lanes > 1;
     }
 
@@ -80,7 +93,31 @@ internal sealed class RetainedChunks : IDisposable
     /// scan above one lane can ever wait.
     /// </remarks>
     internal bool TryGet(
-        long key, ScanContext claimant, long batch, out RetainedChunk? claim, out CanonicalArena arena, out int nodeIndex)
+        long key, ScanContext claimant, long batch, out RetainedChunk? claim, out CanonicalArena arena, out int nodeIndex) =>
+        TryGetCore(key, claimant, batch, borrower: null, out claim, out arena, out nodeIndex);
+
+    /// <summary>
+    /// As <see cref="TryGet(long, ScanContext, long, out RetainedChunk?, out CanonicalArena, out int)"/>,
+    /// for a child of the entry <paramref name="borrower"/> whose decode is in flight: a published
+    /// entry is lent to it on the spot, so that it cannot be evicted before the borrower is, and a
+    /// claim is lent as it is published.
+    /// </summary>
+    /// <param name="key">The child's retention key.</param>
+    /// <param name="claimant">The context asking, which holds <paramref name="borrower"/>'s claim.</param>
+    /// <param name="batch">The number of the batch asking.</param>
+    /// <param name="borrower">The entry being decoded, whose records will view the child.</param>
+    /// <param name="claim">The claim, when the child is not published.</param>
+    /// <param name="arena">The arena holding the child, when it is published.</param>
+    /// <param name="nodeIndex">The child's node in <paramref name="arena"/>, when it is published.</param>
+    /// <returns><see langword="true"/> when the child is published.</returns>
+    internal bool TryGetFor(
+        long key, ScanContext claimant, long batch, RetainedChunk borrower,
+        out RetainedChunk? claim, out CanonicalArena arena, out int nodeIndex) =>
+        TryGetCore(key, claimant, batch, borrower, out claim, out arena, out nodeIndex);
+
+    private bool TryGetCore(
+        long key, ScanContext claimant, long batch, RetainedChunk? borrower,
+        out RetainedChunk? claim, out CanonicalArena arena, out int nodeIndex)
     {
         lock (this)
         {
@@ -96,6 +133,7 @@ internal sealed class RetainedChunks : IDisposable
                             entry.LastTouched = batch;
                         }
 
+                        borrower?.Borrow(entry);
                         claim = null;
                         arena = entry.Arena!;
                         nodeIndex = entry.NodeIndex;
@@ -119,7 +157,14 @@ internal sealed class RetainedChunks : IDisposable
                 taken.Claimant = claimant;
                 taken.NodeIndex = -1;
                 taken.LastTouched = batch;
-                (_entries ??= new Dictionary<long, RetainedChunk>(_capacity))[key] = taken;
+                _entries ??= new Dictionary<long, RetainedChunk>(_capacity);
+                if (borrower is not null && !_lending)
+                {
+                    _lending = true;
+                    _entries.EnsureCapacity(_lendingCapacity);
+                }
+
+                _entries[key] = taken;
                 claim = taken;
                 arena = null!;
                 nodeIndex = -1;
@@ -160,7 +205,18 @@ internal sealed class RetainedChunks : IDisposable
     /// <param name="claim">The claim <see cref="TryGet"/> handed out.</param>
     /// <param name="nodeIndex">The decoded node's index in the claim's arena.</param>
     /// <param name="batch">The number of the batch that decoded it.</param>
-    internal void Publish(RetainedChunk claim, int nodeIndex, long batch)
+    internal void Publish(RetainedChunk claim, int nodeIndex, long batch) =>
+        PublishCore(claim, nodeIndex, batch, borrower: null);
+
+    /// <summary>Publishes a claimed child, decoded, lends it to <paramref name="borrower"/>, and wakes whoever waits for it.</summary>
+    /// <param name="claim">The claim <see cref="TryGetFor"/> handed out.</param>
+    /// <param name="nodeIndex">The decoded node's index in the claim's arena.</param>
+    /// <param name="batch">The number of the batch that decoded it.</param>
+    /// <param name="borrower">The entry being decoded, whose records will view the child.</param>
+    internal void PublishFor(RetainedChunk claim, int nodeIndex, long batch, RetainedChunk borrower) =>
+        PublishCore(claim, nodeIndex, batch, borrower);
+
+    private void PublishCore(RetainedChunk claim, int nodeIndex, long batch, RetainedChunk? borrower)
     {
         lock (this)
         {
@@ -172,12 +228,14 @@ internal sealed class RetainedChunks : IDisposable
             }
 
             claim.RetainSegments();
+            borrower?.Borrow(claim);
             Monitor.PulseAll(this);
         }
     }
 
     /// <summary>Gives up a claim whose decode did not publish, and wakes whoever waits for it.</summary>
     /// <param name="claim">The claim <see cref="TryGet"/> handed out.</param>
+    /// <remarks>What the claim had borrowed is given back, and a lender it was the last to borrow is evicted when its own time has passed.</remarks>
     internal void Abandon(RetainedChunk claim)
     {
         lock (this)
@@ -189,6 +247,7 @@ internal sealed class RetainedChunks : IDisposable
 
             claim.Arena?.Reset();
             claim.Forget();
+            ReturnLoans(claim);
             Recycle(claim);
             Monitor.PulseAll(this);
         }
@@ -230,15 +289,23 @@ internal sealed class RetainedChunks : IDisposable
             foreach (KeyValuePair<long, RetainedChunk> held in _entries)
             {
                 RetainedChunk entry = held.Value;
-                if (entry.NodeIndex >= 0 && entry.LastTouched < batch)
+                if (Dead(entry))
                 {
-                    // Removing while enumerating is what a dictionary allows.
+                    // Removing while enumerating is what a dictionary allows, the removal of a
+                    // lender the eviction frees included.
                     _entries.Remove(held.Key);
                     Evict(entry);
                 }
             }
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="entry"/> is published, touched by no batch from the floor on, and
+    /// viewed by no live entry: what makes it evictable.
+    /// </summary>
+    private bool Dead(RetainedChunk entry) =>
+        entry.NodeIndex >= 0 && entry.Borrowers == 0 && entry.LastTouched < _floor;
 
     /// <summary>Releases every entry and every spare arena.</summary>
     public void Dispose()
@@ -255,15 +322,18 @@ internal sealed class RetainedChunks : IDisposable
             {
                 foreach (RetainedChunk entry in _entries.Values)
                 {
+                    entry.Arena?.Reset();
                     if (entry.NodeIndex >= 0)
                     {
-                        Evict(entry);
+                        entry.ReleaseSegments();
                     }
                     else
                     {
-                        entry.Arena?.Reset();
                         entry.Forget();
                     }
+
+                    entry.ForgetLoans();
+                    Recycle(entry);
                 }
 
                 _entries.Clear();
@@ -291,7 +361,43 @@ internal sealed class RetainedChunks : IDisposable
     {
         entry.Arena?.Reset();
         entry.ReleaseSegments();
+        ReturnLoans(entry);
         Recycle(entry);
+    }
+
+    /// <summary>
+    /// Gives back every entry <paramref name="entry"/> borrowed, evicting a lender no one borrows
+    /// any more once its own time has passed; the lender is a child, deeper than any entry that
+    /// borrows it, so the walk ends.
+    /// </summary>
+    private void ReturnLoans(RetainedChunk entry)
+    {
+        if (entry.Borrowed is { } lender)
+        {
+            entry.Borrowed = null;
+            Returned(lender);
+        }
+
+        if (entry.MoreBorrowed is { Count: > 0 } more)
+        {
+            foreach (RetainedChunk other in more)
+            {
+                Returned(other);
+            }
+
+            more.Clear();
+        }
+    }
+
+    private void Returned(RetainedChunk lender)
+    {
+        lender.Borrowers--;
+        if (Dead(lender) && _entries is not null &&
+            _entries.TryGetValue(lender.Key, out RetainedChunk? held) && ReferenceEquals(held, lender))
+        {
+            _entries.Remove(lender.Key);
+            Evict(lender);
+        }
     }
 
     private void Recycle(RetainedChunk entry)
@@ -336,6 +442,42 @@ internal sealed class RetainedChunk
 
     /// <summary>Any further segment the decode read, when it read more than one.</summary>
     internal List<SegmentOwner>? MoreSegments;
+
+    /// <summary>How many live entries view this one's arena: it outlives every one of them.</summary>
+    internal int Borrowers;
+
+    /// <summary>The first entry this one's records view, a child decoded once for every window of its chunk.</summary>
+    internal RetainedChunk? Borrowed;
+
+    /// <summary>Any further entry this one's records view, when it views more than one.</summary>
+    internal List<RetainedChunk>? MoreBorrowed;
+
+    /// <summary>Records that this entry views <paramref name="lender"/>, once; the table's lock is held.</summary>
+    internal void Borrow(RetainedChunk lender)
+    {
+        if (ReferenceEquals(lender, this) || ReferenceEquals(Borrowed, lender) ||
+            (MoreBorrowed is { } more && more.Contains(lender)))
+        {
+            return;
+        }
+
+        lender.Borrowers++;
+        if (Borrowed is null)
+        {
+            Borrowed = lender;
+            return;
+        }
+
+        (MoreBorrowed ??= []).Add(lender);
+    }
+
+    /// <summary>Clears the loans in both directions without giving anything back, for a table being disposed.</summary>
+    internal void ForgetLoans()
+    {
+        Borrowers = 0;
+        Borrowed = null;
+        MoreBorrowed?.Clear();
+    }
 
     /// <summary>Adds a segment the decode depends on, once; no reference is taken here.</summary>
     internal void Depend(SegmentOwner? owner)
