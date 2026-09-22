@@ -260,6 +260,25 @@ internal sealed class RowVectorCases : IDisposable
         }
     }
 
+    /// <summary>
+    /// The columns of one case as the batch the public encoder takes: one field per column, in
+    /// order, typed by the column's dtype, with no struct above them.
+    /// </summary>
+    /// <param name="columns">The node indices <see cref="Build"/> returned.</param>
+    /// <returns>A view over the arena's columns.</returns>
+    internal BatchView Batch(int[] columns)
+    {
+        VortexField[] fields = new VortexField[columns.Length];
+        for (int i = 0; i < columns.Length; i++)
+        {
+            fields[i] = new VortexField(
+                "c" + i.ToString(CultureInfo.InvariantCulture),
+                VortexTypes.FromDType(Arena.GetNode(columns[i]).DType));
+        }
+
+        return new BatchView(Arena, columns, VortexSchema.Create(fields));
+    }
+
     public void Dispose() => Arena.Reset();
 
     private static byte[] Utf8(string text) => Encoding.UTF8.GetBytes(text);

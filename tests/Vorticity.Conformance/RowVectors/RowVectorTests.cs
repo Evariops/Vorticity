@@ -52,7 +52,7 @@ public sealed class RowVectorTests
             int[] columns = builder.Build(name);
             Assert.Equal(expected.Fields.Length, columns.Length);
 
-            using RowKeys keys = RowEncoder.Encode(builder.Arena, columns, expected.Fields);
+            using RowKeys keys = RowEncoder.Encode(builder.Batch(columns), expected.Fields);
             if (keys.RowCount != expected.Rows.Length)
             {
                 failures.Add($"{name}: {keys.RowCount} rows, reference had {expected.Rows.Length}");
