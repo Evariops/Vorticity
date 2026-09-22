@@ -53,6 +53,14 @@ internal readonly struct BitPackPlan
         Exceptions = exceptions;
     }
 
+    /// <summary>
+    /// The plan for values already known to fit <paramref name="bitWidth"/> bits: no transform to
+    /// speak of, no exception, nothing measured. For the children of an encoding that cut its
+    /// values to their widths itself, as ALP-RD does.
+    /// </summary>
+    internal static BitPackPlan Fitting(int bitWidth) =>
+        new BitPackPlan(BitPackTransform.Frame, 0, bitWidth, 0, 0);
+
     /// <summary>Which map was chosen.</summary>
     internal BitPackTransform Transform { get; }
 

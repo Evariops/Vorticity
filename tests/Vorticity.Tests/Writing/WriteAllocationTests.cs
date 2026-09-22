@@ -121,9 +121,12 @@ public sealed class WriteAllocationTests
         // THE TWO ALP SHAPES, so that the ALP write path is watched on both of its cases:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
         // patch. The second is the case that made the patch buffers worth renting, and a ratchet
-        // that only held the easy shape would have said nothing about it.
+        // that only held the easy shape would have said nothing about it. Since the writer has
+        // ALP-RD, `alprd` is written as ALP-RD rather than plain, its column about an eighth
+        // smaller: the ceiling rose by 552 bytes for it, the file's encoding table growing once more
+        // for its two extra ids and the plan and its two packed children.
         ("encodings/alp", 66_452),   // 66 016 measured
-        ("encodings/alprd", 65_308),   // 64 800 measured
+        ("encodings/alprd", 65_860),   // 65 352 measured
     ];
 
     // Pricing FSST means training a table and compressing the whole column, and on a column it

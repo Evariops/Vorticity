@@ -119,6 +119,7 @@ internal sealed class PlanSeed
             => ColumnScheme.BitPacked,
         ArrayEncodingId.Sequence => ColumnScheme.Sequence,
         ArrayEncodingId.Alp => ColumnScheme.Alp,
+        ArrayEncodingId.AlpRd => ColumnScheme.AlpRd,
         ArrayEncodingId.Fsst => ColumnScheme.Fsst,
         ArrayEncodingId.Zstd => ColumnScheme.Zstd,
         _ => null,

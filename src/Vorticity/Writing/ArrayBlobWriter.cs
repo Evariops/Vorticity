@@ -267,6 +267,11 @@ internal static class ArrayBlobWriter
             return WriteAlp(blob, arena, nodeIndex, plan.Alp!, encodings);
         }
 
+        if (plan.Scheme == ColumnScheme.AlpRd)
+        {
+            return WriteAlpRd(blob, arena, nodeIndex, plan.AlpRd!, encodings);
+        }
+
         if (plan.Scheme == ColumnScheme.Sequence)
         {
             return WriteSequence(blob, arena, nodeIndex, plan.Sequence.GetValueOrDefault(), encodings);
@@ -322,6 +327,28 @@ internal static class ArrayBlobWriter
         in BitPackPlan plan,
         EncodingDictionary encodings)
     {
+        int bitpacked = WritePacked(blob, arena, nodeIndex, in plan, encodings);
+        Span<int> wrapper = stackalloc int[1];
+        wrapper[0] = bitpacked;
+        return plan.Transform == BitPackTransform.ZigZag
+            ? Node(blob, encodings, "vortex.zigzag"u8, default, wrapper, [])
+            : Node(
+                blob, encodings, "fastlanes.for"u8,
+                ReferenceBytes(blob, plan.Reference, arena.GetNode(nodeIndex).PType), wrapper, []);
+    }
+
+    /// <summary>
+    /// The <c>fastlanes.bitpacked</c> node alone, with its patches and its validity under it: what
+    /// <see cref="WriteBitPacked"/> wraps, and what an encoding whose children it sized itself
+    /// writes bare.
+    /// </summary>
+    private static int WritePacked(
+        Workspace blob,
+        CanonicalArena arena,
+        int nodeIndex,
+        in BitPackPlan plan,
+        EncodingDictionary encodings)
+    {
         CanonicalNode node = arena.GetNode(nodeIndex);
         PType ptype = node.PType;
         int width = ptype.ByteWidth();
@@ -368,18 +395,10 @@ internal static class ArrayBlobWriter
 
         childCount += Validity(blob, arena, node, encodings, children[childCount..]);
 
-        int bitpacked = Node(
+        return Node(
             blob, encodings, "fastlanes.bitpacked"u8,
             BitPackedBytes(blob, (uint)plan.BitWidth, patched, in patches),
             children[..childCount], packedBuffer);
-
-        Span<int> wrapper = stackalloc int[1];
-        wrapper[0] = bitpacked;
-        return plan.Transform == BitPackTransform.ZigZag
-            ? Node(blob, encodings, "vortex.zigzag"u8, default, wrapper, [])
-            : Node(
-                blob, encodings, "fastlanes.for"u8, ReferenceBytes(blob, plan.Reference, ptype),
-                wrapper, []);
     }
 
     /// <summary>
@@ -1062,6 +1081,98 @@ internal static class ArrayBlobWriter
             ? new AlpMetadata(e, f, in patches)
             : new AlpMetadata(e, f);
         AlpMetadata.Write(ref writer, in value);
+        return writer.WrittenSpan;
+    }
+
+    /// <summary>
+    /// Writes <c>vortex.alprd</c>: no buffers, and the left parts, the right parts and, when some
+    /// high bits missed the dictionary, the patch indices and values.
+    /// </summary>
+    /// <remarks>
+    /// The shape is the one both readers take, and the one the reference writes. The left parts are
+    /// the codes, <c>u16</c> as the reference reads them, and they carry the column's validity,
+    /// which is where a reader finds it; the right parts are the low bits at the float's own width,
+    /// never null. Both are bare <c>fastlanes.bitpacked</c> at the widths the cut gave them: the
+    /// codes need the bits of the dictionary's length and the right parts the bits below the cut,
+    /// which the plan established, so running them through the chooser would only rediscover that
+    /// at the price of a dictionary probe over every right part. A patch replaces a row's high bits
+    /// outright, so its values are raw <c>u16</c> patterns, not codes.
+    /// </remarks>
+    private static int WriteAlpRd(
+        Workspace blob,
+        CanonicalArena arena,
+        int nodeIndex,
+        AlpRdPlan plan,
+        EncodingDictionary encodings)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        int rows = node.Length;
+        DTypeArena types = node.DType.Arena;
+        int width = plan.Width;
+        PType rightPType = width == sizeof(ulong) ? PType.U64 : PType.U32;
+
+        // Uninitialized: each CopyTo fills its buffer whole.
+        VortexBuffer leftBuffer = arena.AllocateUninitialized(
+            rows * sizeof(ushort), sizeof(ushort), out Span<byte> leftBytes);
+        MemoryMarshal.AsBytes(plan.Codes).CopyTo(leftBytes);
+        VortexBuffer rightBuffer = arena.AllocateUninitialized(rows * width, width, out Span<byte> rightBytes);
+        plan.Right.CopyTo(rightBytes);
+
+        // The parts live in the arena from here on, so the pool can have them back before writing
+        // them rents anything.
+        plan.ReleaseParts();
+        int leftNode = arena.AddPrimitive(
+            types.Primitive(PType.U16, node.DType.Nullability), rows, node.Validity, PType.U16, leftBuffer);
+        int rightNode = arena.AddPrimitive(
+            types.Primitive(rightPType, Nullability.NonNullable), rows, Arrays.Validity.NonNullable,
+            rightPType, rightBuffer);
+
+        Span<int> children = stackalloc int[4];
+        int childCount = 2;
+        int exceptions = plan.ExceptionCount;
+        PatchesMetadata patches = default;
+        try
+        {
+            BitPackPlan codes = BitPackPlan.Fitting(AlpRdPlan.LeftBitWidth(plan.DictionaryLength));
+            BitPackPlan low = BitPackPlan.Fitting(plan.RightBitWidth);
+            children[0] = WritePacked(blob, arena, leftNode, in codes, encodings);
+            children[1] = WritePacked(blob, arena, rightNode, in low, encodings);
+            if (exceptions > 0)
+            {
+                PType indicesPType = FsstPlan.IndexPType(rows);
+                patches = PatchesMetadata.Create((ulong)exceptions, 0, indicesPType);
+                children[2] = WriteIndexArray(blob, encodings, plan.ExceptionRows, indicesPType);
+                (byte[] values, int length) = plan.TakeExceptionValues();
+                children[3] = WriteRawPrimitive(
+                    blob, encodings, new PendingBuffer(values, length, Exponent(sizeof(ushort)), rented: true));
+                childCount = 4;
+            }
+        }
+        finally
+        {
+            plan.Release();
+        }
+
+        return Node(
+            blob, encodings, "vortex.alprd"u8, AlpRdBytes(blob, plan, exceptions > 0, in patches),
+            children[..childCount], []);
+    }
+
+    private static ReadOnlySpan<byte> AlpRdBytes(
+        Workspace blob, AlpRdPlan plan, bool hasPatches, in PatchesMetadata patches)
+    {
+        ReadOnlySpan<ushort> patterns = plan.Dictionary;
+        Span<uint> dictionary = stackalloc uint[AlpRdPlan.MaxDictionarySize];
+        for (int i = 0; i < patterns.Length; i++)
+        {
+            dictionary[i] = patterns[i];
+        }
+
+        PatchesMetadata? optional = hasPatches ? patches : null;
+        AlpRdMetadata value = new AlpRdMetadata(
+            (uint)plan.RightBitWidth, (uint)patterns.Length, patterns.Length, PType.U16, in optional);
+        ref ProtoWriter writer = ref blob.Metadata();
+        AlpRdMetadata.Write(ref writer, in value, dictionary[..patterns.Length]);
         return writer.WrittenSpan;
     }
 

@@ -53,6 +53,12 @@ internal enum ColumnScheme : byte
     /// dereferences a null plan. Read the numbers, not the order.
     /// </remarks>
     Zstd = 7,
+
+    /// <summary>
+    /// ALP-RD: the scheme full-precision floats want, whose high bits recur where no short decimal
+    /// form exists.
+    /// </summary>
+    AlpRd = 8,
 }
 
 /// <summary>The chosen scheme and the indices it needs.</summary>
@@ -79,6 +85,9 @@ internal readonly struct ColumnPlan
 
     /// <summary>The encoded column, for <see cref="ColumnScheme.Alp"/>.</summary>
     internal AlpPlan? Alp { get; private init; }
+
+    /// <summary>The split column, for <see cref="ColumnScheme.AlpRd"/>.</summary>
+    internal AlpRdPlan? AlpRd { get; private init; }
 
     /// <summary>The base and step, for <see cref="ColumnScheme.Sequence"/>.</summary>
     internal SequencePlan? Sequence { get; private init; }
@@ -164,6 +173,9 @@ internal readonly struct ColumnPlan
     internal static ColumnPlan ForAlp(AlpPlan plan) =>
         new ColumnPlan(ColumnScheme.Alp, [], []) { Alp = plan };
 
+    internal static ColumnPlan ForAlpRd(AlpRdPlan plan) =>
+        new ColumnPlan(ColumnScheme.AlpRd, [], []) { AlpRd = plan };
+
     internal static ColumnPlan ForBitPacking(BitPackPlan plan) =>
         new ColumnPlan(ColumnScheme.BitPacked, [], []) { BitPack = plan };
 
@@ -210,6 +222,9 @@ internal readonly struct ColumnPlan
         ColumnScheme.Alp =>
             $"alp e={Alp!.ExponentE} f={Alp.ExponentF} size={Alp.EncodedSize} " +
             $"patches={Alp.PatchIndices.Length}",
+        ColumnScheme.AlpRd =>
+            $"alprd right={AlpRd!.RightBitWidth} dictionary={AlpRd.DictionaryLength} " +
+            $"exceptions={AlpRd.ExceptionCount} size={AlpRd.EncodedSize}",
         _ => Scheme.ToString(),
     };
 
@@ -706,6 +721,7 @@ internal static class ColumnCompressor
             // holding a pooled buffer that nothing will write.
             reference.Zstd?.Release();
             reference.Alp?.Release();
+            reference.AlpRd?.Release();
             reference.Fsst?.Release();
             reference.ReleaseCodes();
         }
@@ -923,6 +939,24 @@ internal static class ColumnCompressor
             }
         }
 
+        // The floats ALP refuses, those with no short decimal form, still share their high bits,
+        // and ALP-RD cuts those off into a dictionary of eight. It decodes at the speed of the
+        // bit-packing underneath it and a row at a time, so a take reads only the rows it wants,
+        // where a zstd frame is decompressed whole. So zstd, still held to the quarter it has to
+        // save on the plain form, now also has to save a tenth on ALP-RD -- the margin it has to
+        // clear against FSST, for the same reason. A tighter bar than that would hand ALP-RD
+        // columns zstd makes a fifth smaller, and the file would grow for a faster read no one
+        // asked for. The search's estimate stands in for ALP-RD's bytes until zstd has lost, so
+        // that the split, which reads every row, is made only for a plan that will be kept: on
+        // values that repeat, zstd wins by several times.
+        AlpRdPlan.Cut? cut = null;
+        if (node.Kind == CanonicalKind.Primitive && node.PType.IsFloat() && Allows(target, "vortex.alprd")
+            && AlpRdPlan.Search(arena, nodeIndex) is { } found
+            && found.EstimatedBytes(node.Length) * 10 < plain * 9)
+        {
+            cut = found;
+        }
+
         // Zstd is compared with FSST rather than reached when FSST fails, and the difference is the
         // whole point: a string column FSST wins on can still be smaller as a zstd frame, so
         // running zstd only once every other scheme has declined is cheap and useless. A scheme
@@ -941,7 +975,27 @@ internal static class ColumnCompressor
             && Allows(target, "vortex.zstd")
             && (gatesOff || DataBytes(node) >= ZstdMinimumBytes))
         {
-            frame = ZstdPlan.TryBuild(arena, nodeIndex, plain, workspace);
+            // The primitive margin keeps a frame below three quarters of the size it is handed:
+            // six fifths of ALP-RD's bytes makes that nine tenths of them.
+            frame = ZstdPlan.TryBuild(
+                arena, nodeIndex,
+                cut is { } priced ? Math.Min(plain, priced.EstimatedBytes(node.Length) * 6 / 5) : plain,
+                workspace);
+        }
+
+        if (cut is { } chosen)
+        {
+            if (frame is not null)
+            {
+                return ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.FrameLength };
+            }
+
+            // The exact split can still miss the margin the estimate cleared, when the rows the
+            // sample skipped hold more exceptions; the column then stays as it is.
+            if (AlpRdPlan.TryBuild(arena, nodeIndex, plain, in chosen) is { } split)
+            {
+                return ColumnPlan.ForAlpRd(split) with { PredictedBytes = split.BufferBytes };
+            }
         }
 
         FsstPlan? fsst = null;
@@ -1600,6 +1654,20 @@ internal static class ColumnCompressor
                 return alp is null
                     ? ColumnPlan.Canonical
                     : ColumnPlan.ForAlp(alp) with { PredictedBytes = alp.EncodedSize };
+            }
+
+            case ColumnScheme.AlpRd:
+            {
+                if (node.Kind != CanonicalKind.Primitive || !node.PType.IsFloat()
+                    || !Allows(target, "vortex.alprd"))
+                {
+                    return ColumnPlan.Canonical;
+                }
+
+                AlpRdPlan? split = AlpRdPlan.TryBuild(arena, nodeIndex, plain);
+                return split is null
+                    ? ColumnPlan.Canonical
+                    : ColumnPlan.ForAlpRd(split) with { PredictedBytes = split.BufferBytes };
             }
 
             case ColumnScheme.Zstd:
