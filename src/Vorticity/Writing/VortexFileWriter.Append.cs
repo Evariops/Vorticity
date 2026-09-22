@@ -216,6 +216,7 @@ public sealed partial class VortexFileWriter
         for (int field = 0; field < _fieldCount; field++)
         {
             _columnSegments[field].AddRange(plan.Columns[field].KeptSegments);
+            _written[field].AddRange(plan.Columns[field].KeptEncodings);
             _columns[field].Seed(plan.Columns[field].Blocks, Recut(plan.Columns[field].Strings, field));
             if (plan.Seeds[field] is { } seed)
             {
@@ -521,6 +522,12 @@ public sealed partial class VortexFileWriter
                 zones = (await ZonePruningPlan.PlanAsync(file, tree, every, cancellationToken).ConfigureAwait(false)).Zones;
             }
 
+            List<string> encodings = new List<string>(file.ArrayEncodingCount);
+            for (int i = 0; i < file.ArrayEncodingCount; i++)
+            {
+                encodings.Add(file.GetArrayEncodingId(i));
+            }
+
             FileStatistics? statistics = file.HasFileStatistics ? file.FileStatistics : null;
             for (int field = 0; field < fields; field++)
             {
@@ -561,6 +568,15 @@ public sealed partial class VortexFileWriter
 
                 columns[field] = OldColumn.From(statistics, field, rows, hasZones, blocks, chunks[field], keptChunks);
                 columns[field].Strings = hasZones ? strings : null;
+
+                // The report's entry of each chunk kept, from the tail of its segment.
+                string[] kept = new string[keptChunks];
+                for (int c = 0; c < keptChunks; c++)
+                {
+                    kept[c] = await WrittenAs.ReadAsync(file, chunks[field][c].Flat, dtype, encodings, cancellationToken).ConfigureAwait(false);
+                }
+
+                columns[field].KeptEncodings = kept;
             }
 
             // The re-opened chunk, owned: the file is closed before the append writes.
@@ -579,12 +595,6 @@ public sealed partial class VortexFileWriter
                     int root = owned.CopyFrom(batch.Arena, batch.RootIndex);
                     reopened.Add(new RecordBatch(owned, root, batch.StartRow));
                 }
-            }
-
-            List<string> encodings = new List<string>(file.ArrayEncodingCount);
-            for (int i = 0; i < file.ArrayEncodingCount; i++)
-            {
-                encodings.Add(file.GetArrayEncodingId(i));
             }
 
             List<long> keptChunkRows = [];
@@ -803,6 +813,9 @@ public sealed partial class VortexFileWriter
         internal ZoneString?[]? Strings { get; set; }
 
         internal required List<int> KeptSegments { get; init; }
+
+        /// <summary>What each kept chunk's values were written as, for the report.</summary>
+        internal IReadOnlyList<string> KeptEncodings { get; set; } = [];
 
         internal required bool HasZones { get; init; }
 

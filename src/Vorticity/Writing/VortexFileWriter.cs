@@ -45,6 +45,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <summary>Per root field, the segment index of each batch's column.</summary>
     private readonly List<int>[] _columnSegments;
 
+    /// <summary>Per root field, what each chunk's values were written as, for the report.</summary>
+    private readonly List<string>[] _written;
+
     /// <summary>Per batch, its row count; every field's chunk list has the same shape.</summary>
     private readonly List<long> _chunkRows = [];
 
@@ -238,11 +241,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         // A non-struct root is one column whose layout IS the root, with no struct level above it.
         _fieldCount = _isTabular ? schema.FieldCount : 1;
         _columnSegments = new List<int>[Math.Max(_fieldCount, 1)];
+        _written = new List<string>[Math.Max(_fieldCount, 1)];
         _columns = new ColumnWriter[Math.Max(_fieldCount, 1)];
         _fieldNodes = new int[Math.Max(_fieldCount, 1)];
         for (int i = 0; i < _columnSegments.Length; i++)
         {
             _columnSegments[i] = [];
+            _written[i] = [];
             // The distinct table has a consumer only if the edition can write a dictionary.
             _columns[i] = new ColumnWriter
             {
@@ -958,6 +963,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
             using ArrayBlobWriter.BlobLease blob =
                 ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress, stats);
+            _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
             int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
             _columnSegments[field].Add(segment);
             _indexes?.AddColumnBytes(field, _segments[segment].Length);
@@ -1141,15 +1147,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         for (int field = 0; field < _fieldCount; field++)
         {
             ColumnWriter column = _columns[field];
-            ImmutableArray<string>.Builder encodings = ImmutableArray.CreateBuilder<string>(_chunkRows.Count);
-            int block = 0;
-            for (int chunk = 0; chunk < _chunkRows.Count; chunk++)
-            {
-                encodings.Add(column.SchemeAt(block)?.ToString() ?? string.Empty);
-                block += ChunkBlocks(_chunkRows[chunk], _blockRows);
-            }
-
-            reports.Add(new ColumnWriteReport(_isTabular ? _schema.GetFieldName(field) : string.Empty, encodings.MoveToImmutable())
+            reports.Add(new ColumnWriteReport(_isTabular ? _schema.GetFieldName(field) : string.Empty, [.. _written[field]])
             {
                 PlansPriced = column.PlansPriced,
                 PlansHeld = column.PlansHeld,

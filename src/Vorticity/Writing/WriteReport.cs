@@ -14,7 +14,13 @@ public readonly record struct WriteBytes(long Total, long Data, long Statistics,
 
 /// <summary>What one top-level column was written as.</summary>
 /// <param name="Path">The column, as a scan spells it; empty for a file whose root is not a struct.</param>
-/// <param name="Encodings">The scheme each chunk was encoded with, in chunk order.</param>
+/// <param name="Encodings">
+/// What each chunk's values were written as, in chunk order: the name of the
+/// <see cref="EncodingHint"/> scheme, <c>Canonical</c> for values stored plain, or the array id of
+/// an encoding no scheme writes, which only a chunk an append kept from another writer can carry.
+/// An extension is looked through to its storage and a list to its elements; a struct reads
+/// <c>{field: encoding, ...}</c>, and so do a map's entries and a variant's metadata and value.
+/// </param>
 public sealed record ColumnWriteReport(string Path, ImmutableArray<string> Encodings)
 {
     /// <summary>Chunks that had a remembered plan to consult.</summary>
