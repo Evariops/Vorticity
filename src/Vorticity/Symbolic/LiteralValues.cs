@@ -18,6 +18,11 @@ internal static class LiteralValues
             return default;
         }
 
+        if (TryPrimitive(literal, out T? primitive))
+        {
+            return primitive;
+        }
+
         ClrShape shape = ClrShape.For<T>.Value;
         Type core = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
         object value = shape.Kind switch
@@ -42,6 +47,34 @@ internal static class LiteralValues
         };
 
         return (T)value;
+    }
+
+    /// <summary>
+    /// A key of a primitive type without a box: under the <c>typeof</c> tests the JIT specializes each
+    /// <c>(T)(object)</c> away, so a cursor walking a column of integers reads its keys for free.
+    /// </summary>
+    private static bool TryPrimitive<T>(FilterLiteral literal, out T? value)
+    {
+        long signed = literal.Kind == FilterLiteralKind.Unsigned ? unchecked((long)literal.UnsignedValue) : literal.SignedValue;
+        if (literal.Kind is FilterLiteralKind.Signed or FilterLiteralKind.Unsigned)
+        {
+            if (typeof(T) == typeof(long)) { value = (T)(object)signed; return true; }
+            if (typeof(T) == typeof(int)) { value = (T)(object)(int)signed; return true; }
+            if (typeof(T) == typeof(short)) { value = (T)(object)(short)signed; return true; }
+            if (typeof(T) == typeof(sbyte)) { value = (T)(object)(sbyte)signed; return true; }
+            if (typeof(T) == typeof(ulong)) { value = (T)(object)unchecked((ulong)signed); return true; }
+            if (typeof(T) == typeof(uint)) { value = (T)(object)(uint)signed; return true; }
+            if (typeof(T) == typeof(ushort)) { value = (T)(object)(ushort)signed; return true; }
+            if (typeof(T) == typeof(byte)) { value = (T)(object)(byte)signed; return true; }
+        }
+        else if (literal.Kind == FilterLiteralKind.Float)
+        {
+            if (typeof(T) == typeof(double)) { value = (T)(object)literal.FloatValue; return true; }
+            if (typeof(T) == typeof(float)) { value = (T)(object)(float)literal.FloatValue; return true; }
+        }
+
+        value = default;
+        return false;
     }
 
     private static long Stored(FilterLiteral literal) =>

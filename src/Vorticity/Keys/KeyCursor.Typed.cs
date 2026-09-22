@@ -96,22 +96,25 @@ namespace Vorticity
         private readonly IKeyWalker _walker;
         private readonly ColumnSym _column;
 
+        /// <summary>Set when a move was cancelled or failed half way, which leaves the walker's position undefined.</summary>
+        private bool _broken;
+
         internal KeyCursor(IKeyWalker walker, ColumnSym column)
         {
             _walker = walker;
             _column = column;
         }
 
-        /// <summary>Whether the cursor is positioned on an entry.</summary>
-        public bool IsValid => _walker.IsValid;
+        /// <summary>Whether the cursor is positioned on an entry; false after a move that was cancelled or failed, until the next move succeeds.</summary>
+        public bool IsValid => !_broken && _walker.IsValid;
 
         /// <summary>The current entry's key.</summary>
         /// <exception cref="InvalidOperationException">The cursor is not positioned.</exception>
-        public TKey Key => LiteralValues.ToValue<TKey>(_walker.Key, _column.Type)!;
+        public TKey Key => LiteralValues.ToValue<TKey>(Positioned().Key, _column.Type)!;
 
         /// <summary>The current entry's file row; then <c>Rows(row)</c> on a scan reads it.</summary>
         /// <exception cref="InvalidOperationException">The cursor is not positioned, or it walks distinct keys without rows.</exception>
-        public long Row => _walker.Row;
+        public long Row => Positioned().Row;
 
         /// <summary>Whether the entries carry rows: false for a distinct walk a postings index serves.</summary>
         public bool HasRows => _walker.HasRows;
@@ -119,12 +122,12 @@ namespace Vorticity
         /// <summary>Positions on the smallest key.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether there is one.</returns>
-        public ValueTask<bool> SeekFirstAsync(CancellationToken cancellationToken = default) => _walker.SeekFirstAsync(cancellationToken);
+        public ValueTask<bool> SeekFirstAsync(CancellationToken cancellationToken = default) => MoveAsync(_walker.SeekFirstAsync(cancellationToken));
 
         /// <summary>Positions on the largest key.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether there is one.</returns>
-        public ValueTask<bool> SeekLastAsync(CancellationToken cancellationToken = default) => _walker.SeekLastAsync(cancellationToken);
+        public ValueTask<bool> SeekLastAsync(CancellationToken cancellationToken = default) => MoveAsync(_walker.SeekLastAsync(cancellationToken));
 
         /// <summary>Positions relative to <paramref name="key"/>.</summary>
         /// <param name="key">The key, in the column's type.</param>
@@ -132,33 +135,33 @@ namespace Vorticity
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether an entry satisfies it.</returns>
         public ValueTask<bool> SeekAsync(TKey key, SeekOp op, CancellationToken cancellationToken = default) =>
-            _walker.SeekAsync(Literal(key), op, cancellationToken);
+            MoveAsync(_walker.SeekAsync(Literal(key), op, cancellationToken));
 
         /// <summary>Positions on the entry of rank <paramref name="rank"/>, counting from zero in key order.</summary>
         /// <param name="rank">The rank.</param>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether there is one.</returns>
-        public ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken = default) => _walker.SeekRankAsync(rank, cancellationToken);
+        public ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken = default) => MoveAsync(_walker.SeekRankAsync(rank, cancellationToken));
 
         /// <summary>Moves to the next entry.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether there is one.</returns>
-        public ValueTask<bool> NextAsync(CancellationToken cancellationToken = default) => _walker.NextAsync(cancellationToken);
+        public ValueTask<bool> NextAsync(CancellationToken cancellationToken = default) => MoveAsync(_walker.NextAsync(cancellationToken));
 
         /// <summary>Moves to the previous entry.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether there is one.</returns>
-        public ValueTask<bool> PrevAsync(CancellationToken cancellationToken = default) => _walker.PrevAsync(cancellationToken);
+        public ValueTask<bool> PrevAsync(CancellationToken cancellationToken = default) => MoveAsync(_walker.PrevAsync(cancellationToken));
 
         /// <summary>Moves to the first entry of the next distinct key.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether there is one.</returns>
-        public ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken = default) => _walker.NextKeyAsync(cancellationToken);
+        public ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken = default) => MoveAsync(_walker.NextKeyAsync(cancellationToken));
 
         /// <summary>Moves to the first entry of the previous distinct key.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether there is one.</returns>
-        public ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken = default) => _walker.PrevKeyAsync(cancellationToken);
+        public ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken = default) => MoveAsync(_walker.PrevKeyAsync(cancellationToken));
 
         /// <summary>The number of entries whose key is below <paramref name="key"/>.</summary>
         /// <param name="key">The key.</param>
@@ -166,10 +169,33 @@ namespace Vorticity
         /// <returns>The rank.</returns>
         public ValueTask<long> RankAsync(TKey key, CancellationToken cancellationToken = default) => _walker.RankAsync(Literal(key), cancellationToken);
 
-        /// <summary>The number of distinct keys.</summary>
+        /// <summary>How many entries share the current key; the position does not move.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
-        /// <returns>The count.</returns>
-        public ValueTask<long> KeyCountAsync(CancellationToken cancellationToken = default) => _walker.KeyCountAsync(cancellationToken);
+        /// <returns>The count, at least one.</returns>
+        /// <exception cref="InvalidOperationException">The cursor is not positioned, or it walks distinct keys without rows.</exception>
+        public ValueTask<long> KeyCountAsync(CancellationToken cancellationToken = default) => Positioned().KeyCountAsync(cancellationToken);
+
+        private IKeyWalker Positioned() =>
+            _broken
+                ? throw new InvalidOperationException("The cursor's last move was cancelled or failed, so it has no position; seek again.")
+                : _walker;
+
+        /// <summary>Awaits a move, and marks the cursor unpositioned when the move does not complete.</summary>
+        [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder<>))]
+        private async ValueTask<bool> MoveAsync(ValueTask<bool> move)
+        {
+            try
+            {
+                bool found = await move.ConfigureAwait(false);
+                _broken = false;
+                return found;
+            }
+            catch
+            {
+                _broken = true;
+                throw;
+            }
+        }
 
         /// <summary>Releases the key source.</summary>
         /// <returns>A task that completes when it is released.</returns>
