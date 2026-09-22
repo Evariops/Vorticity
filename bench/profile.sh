@@ -7,8 +7,9 @@
 #              cycles, folded per function and per source line by bench/profile/cycles.py. Without
 #              rounds, enough of them for about two seconds of work.
 # allocations  every allocation of every round, stopped on under lldb, with its type, its size and
-#              its stack, by bench/profile/allocations.py. Nothing is sampled, and the totals per
-#              round are the runner's own. A stop costs about 5 ms: three rounds by default.
+#              its stack, by bench/profile/allocations.py: the managed ones, whose totals per round
+#              are the runner's own, and the native ones, the C allocator and mmap. Nothing is
+#              sampled. A stop costs about 5 ms: three rounds by default.
 # trace        Processor Trace, every branch the rounds take, for Instruments to open. It needs an
 #              M4 or later and Processor Trace allowed in System Settings, Privacy & Security,
 #              Developer Tools.
@@ -89,7 +90,7 @@ case "$mode" in
         lldb --batch \
             -o "target symbols add '$runner.dSYM'" \
             -o "command script import '$root/bench/profile/allocations.py'" \
-            -o "allocations '$out' '$root'" \
+            -o "allocations '$out' '$root' 48 --native" \
             -- "$runner" --scenario "$scenario" "$file" "$rows" --repeat "$rounds" |
             grep -E '^(round=|rows=|[0-9]+ allocations|error)' | tee "$out/runner.txt"
         echo "report: $out/allocations.md"

@@ -9,10 +9,14 @@ The rounds are delimited by the runner's `AllocatedSoFar`, which it calls once b
 round and once after each: the breakpoints are only armed between the first and the last of those
 calls, so the runtime's own start and exit are not recorded.
 
+With `--native` it also stops on the C allocator and on `mmap`, which is where native memory comes
+from: an aligned block a segment owner takes, a zstd context, a mapping. The runtime's own calls
+show too, and the stacks tell them apart from the ones this repository makes.
+
 Usage, from lldb:
 
     command script import allocations.py
-    allocations <output directory> <repository root> [depth]
+    allocations <output directory> <repository root> [depth] [--native]
 
 with the runner and its arguments already set as the target, `--repeat` among them.
 """
@@ -38,6 +42,26 @@ HELPERS = {
     'RhAllocateNewArray': 'array',
     'RhNewString': 'array',
 }
+
+# The C allocator's entry points, and the registers whose product is the size each asks for. The
+# typed variants are what code built against a recent SDK calls instead of the plain ones.
+NATIVE = {
+    'malloc': (0,),
+    'calloc': (0, 1),
+    'realloc': (1,),
+    'valloc': (0,),
+    'posix_memalign': (2,),
+    'aligned_alloc': (1,),
+    'malloc_type_malloc': (0,),
+    'malloc_type_calloc': (0, 1),
+    'malloc_type_realloc': (1,),
+    'malloc_type_valloc': (0,),
+    'malloc_type_posix_memalign': (2,),
+    'malloc_type_aligned_alloc': (1,),
+    'mmap': (1,),
+}
+
+NATIVE_MODULES = {'mmap': 'libsystem_kernel.dylib'}
 
 MARKER = 'Vorticity_Benchmarks_Runner_Vorticity_Bench_Runner_Program__AllocatedSoFar'
 
@@ -147,6 +171,17 @@ class Recorder:
             size = base
         self.hits.append((round_index, x0, size, self.stack(lr, fp, sp)))
 
+    def record_native(self, round_index, name, registers, frame, allocator):
+        """A native allocation, unless it is one allocator entry point calling another."""
+        lr = frame.FindRegister('lr').GetValueAsUnsigned()
+        if allocator(lr):
+            return
+        size = 1
+        for index in registers:
+            size *= frame.FindRegister('x%d' % index).GetValueAsUnsigned()
+        fp = frame.FindRegister('fp').GetValueAsUnsigned()
+        self.hits.append((round_index, 'native ' + name, size, self.stack(lr, fp, frame.GetSP())))
+
 
 class Symbols:
     """Names and source lines for code addresses and MethodTables, cached.
@@ -163,6 +198,8 @@ class Symbols:
         self.code = {}
 
     def type_name(self, address):
+        if isinstance(address, str):
+            return address
         return self.types.get(address - self.slide, '0x%x' % address)
 
     def shorten(self, path):
@@ -203,8 +240,10 @@ class Symbols:
 
 def command(debugger, arguments, result, internal_dict):
     parts = shlex.split(arguments)
+    native = '--native' in parts
+    parts = [part for part in parts if part != '--native']
     if len(parts) < 2:
-        result.SetError('usage: allocations <output directory> <repository root> [depth]')
+        result.SetError('usage: allocations <output directory> <repository root> [depth] [--native]')
         return
     directory = parts[0]
     root = parts[1].rstrip('/') + '/'
@@ -224,6 +263,24 @@ def command(debugger, arguments, result, internal_dict):
         breakpoint = target.BreakpointCreateBySBAddress(found[name])
         breakpoint.SetEnabled(False)
         helpers[breakpoint.GetID()] = (name, kind, breakpoint)
+
+    natives = {}
+    if native:
+        for name, registers in NATIVE.items():
+            breakpoint = target.BreakpointCreateByName(name, NATIVE_MODULES.get(name, 'libsystem_malloc.dylib'))
+            breakpoint.SetEnabled(False)
+            natives[breakpoint.GetID()] = (name, registers, breakpoint)
+
+    callers = {}
+
+    def allocator(address):
+        """Whether a return address lies in one of the allocator's own entry points."""
+        known = callers.get(address)
+        if known is None:
+            symbol = target.ResolveLoadAddress(address - 1).GetSymbol()
+            known = symbol.IsValid() and (symbol.GetName() or '').lstrip('_') in NATIVE
+            callers[address] = known
+        return known
 
     started = time.time()
     error = lldb.SBError()
@@ -246,12 +303,16 @@ def command(debugger, arguments, result, internal_dict):
                 # after the last call belongs to the exit, and the report drops it.
                 marks += 1
                 if marks == 1:
-                    for _, _, breakpoint in helpers.values():
+                    for _, _, breakpoint in list(helpers.values()) + list(natives.values()):
                         breakpoint.SetEnabled(True)
                 continue
             entry = helpers.get(identifier)
             if entry is not None:
                 recorder.record(marks - 1, entry[1], thread.GetFrameAtIndex(0))
+                continue
+            entry = natives.get(identifier)
+            if entry is not None:
+                recorder.record_native(marks - 1, entry[0], entry[1], thread.GetFrameAtIndex(0), allocator)
         process.Continue()
 
     elapsed = time.time() - started
@@ -262,7 +323,7 @@ def command(debugger, arguments, result, internal_dict):
 
 
 def report(directory, hits, symbols, marks, elapsed, status):
-    rounds = collections.defaultdict(lambda: [0, 0])
+    rounds = collections.defaultdict(lambda: [0, 0, 0, 0])
     by_type = collections.defaultdict(lambda: collections.Counter())
     by_site = collections.defaultdict(lambda: collections.Counter())
     by_ours = collections.defaultdict(lambda: collections.Counter())
@@ -279,8 +340,10 @@ def report(directory, hits, symbols, marks, elapsed, status):
         site = next((frame for frame in frames if frame[1] is not None), frames[0])
         mine = next((frame for frame in frames if frame[2]), None)
         phase = 'cold' if round_index == 0 else 'warm'
-        rounds[round_index][0] += 1
-        rounds[round_index][1] += size
+        # The managed columns are what the runner's own count covers; the native ones are not.
+        column = 2 if isinstance(table, str) else 0
+        rounds[round_index][column] += 1
+        rounds[round_index][column + 1] += size
         by_type[phase][(name,)] += size
         by_type[phase + '#'][(name,)] += 1
         site_key = (site[1] or site[0], site[0], name)
@@ -299,10 +362,10 @@ def report(directory, hits, symbols, marks, elapsed, status):
     out.append('%d rounds recorded (the first is cold), %.1fs under the debugger, exit status %d.' % (
         max(last, 0), elapsed, status))
     out.append('')
-    out.append('| round | objects | bytes |')
-    out.append('|---:|---:|---:|')
+    out.append('| round | objects | bytes | native calls | native bytes |')
+    out.append('|---:|---:|---:|---:|---:|')
     for index in sorted(rounds):
-        out.append('| %d | %d | %d |' % (index, rounds[index][0], rounds[index][1]))
+        out.append('| %d | %d | %d | %d | %d |' % ((index,) + tuple(rounds[index])))
 
     def section(title, table, counts, heads, scale, top=40):
         out.append('')
