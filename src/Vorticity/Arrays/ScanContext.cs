@@ -518,14 +518,20 @@ internal sealed class ScanContext : IDisposable
     ///
     /// Keyed rather than listed, because the lookup is asked once per retained column and per
     /// batch, and a walk over the entries would make a wide read cost the square of its columns.
-    /// Keyed and nothing beside it, because a second collection would cost another field on every
-    /// scan context: the eviction sweep removes entries while it enumerates them, which a
-    /// dictionary allows.
+    ///
+    /// Keyed and nothing beside it, evicted entries included: an evicted entry, its arena reset, stays
+    /// in the dictionary with no node, and is taken back out to hold the next chunk. A collection of
+    /// spares beside it would cost a field on every scan context, and its storage would be allocated
+    /// at the first eviction, which is a chunk into the scan rather than its first batch.
     /// </remarks>
     private Dictionary<long, RetainedChunk>? _retained;
 
-    /// <summary>Evicted entries, with their arenas, kept to be refilled rather than reallocated.</summary>
-    private Stack<RetainedChunk>? _spareChunks;
+    /// <summary>
+    /// The first key an evicted entry is moved to when the key it held is asked for again: above
+    /// every layout and segment key and below every array child key, with or without the answer
+    /// bit, so no published entry can hold it.
+    /// </summary>
+    private const long SpareKeys = 1L << 61;
 
     /// <summary>Counts batches, so an entry can say whether the batch in flight has used it.</summary>
     private long _batchNumber;
@@ -731,6 +737,18 @@ internal sealed class ScanContext : IDisposable
             return false;
         }
 
+        if (entry.NodeIndex < 0)
+        {
+            // Evicted, and still under the key it held: it moves out of the way of the decode this
+            // miss is about to publish under that key, which would otherwise drop it. The move
+            // takes the slot the removal frees, so the dictionary does not grow.
+            _retained.Remove(key);
+            Park(entry);
+            arena = null!;
+            nodeIndex = -1;
+            return false;
+        }
+
         // Touching it is what makes it un-evictable for the rest of this batch, so it has to
         // happen on the hit path and not only when the entry is created.
         entry.LastTouched = _batchNumber;
@@ -783,25 +801,39 @@ internal sealed class ScanContext : IDisposable
 
         _retained ??= [];
 
-        // Removing while enumerating, which a dictionary has allowed since .NET Core 3.0 and which
-        // is what lets the entries be keyed without a second collection beside them.
+        // Every entry no live batch borrows is evicted in place, its arena reset and its segments
+        // released, and the first evicted entry met is the one refilled. Adding while enumerating
+        // is what a dictionary does not allow, which is why an evicted entry keeps its key.
+        RetainedChunk? spare = null;
+        long spareKey = 0;
         foreach (KeyValuePair<long, RetainedChunk> held in _retained)
         {
             RetainedChunk entry = held.Value;
-            if (entry.LastTouched >= _batchNumber)
+            if (entry.NodeIndex >= 0)
             {
-                continue;
+                if (entry.LastTouched >= _batchNumber)
+                {
+                    continue;
+                }
+
+                entry.Arena.Reset();
+                entry.ReleaseSegments();
+                entry.NodeIndex = -1;
             }
 
-            entry.Arena.Reset();
-            entry.ReleaseSegments();
-            (_spareChunks ??= new Stack<RetainedChunk>()).Push(entry);
-            _retained.Remove(held.Key);
+            if (spare is null)
+            {
+                spare = entry;
+                spareKey = held.Key;
+            }
         }
 
-        _building = _spareChunks is { Count: > 0 }
-            ? _spareChunks.Pop()
-            : new RetainedChunk(new CanonicalArena());
+        if (spare is not null)
+        {
+            _retained.Remove(spareKey);
+        }
+
+        _building = spare ?? new RetainedChunk(new CanonicalArena());
 
         // What the decode views is the blob in the node arena, which a flat reader loads just
         // before it begins; a child decoded inside the redirect notes its own segment as it loads.
@@ -834,7 +866,7 @@ internal sealed class ScanContext : IDisposable
             // Nothing was retained on the gathered segments yet, so there is nothing to release.
             entry.Arena.Reset();
             entry.Forget();
-            (_spareChunks ??= new Stack<RetainedChunk>()).Push(entry);
+            Park(entry);
             return;
         }
 
@@ -843,6 +875,18 @@ internal sealed class ScanContext : IDisposable
         entry.LastTouched = _batchNumber;
         entry.RetainSegments();
         (_retained ??= [])[key] = entry;
+    }
+
+    /// <summary>Keeps an evicted entry, with no node, under the first spare key free.</summary>
+    private void Park(RetainedChunk entry)
+    {
+        entry.NodeIndex = -1;
+        Dictionary<long, RetainedChunk> retained = _retained ??= [];
+        long key = SpareKeys;
+        while (!retained.TryAdd(key, entry))
+        {
+            key++;
+        }
     }
 
     /// <summary>
@@ -892,6 +936,7 @@ internal sealed class ScanContext : IDisposable
         _batchCanonical.Reset();
         if (_retained is not null)
         {
+            // An evicted entry has been reset and holds no segment, so this is a no-op for it.
             foreach (RetainedChunk entry in _retained.Values)
             {
                 entry.Arena.Reset();
@@ -899,11 +944,6 @@ internal sealed class ScanContext : IDisposable
             }
 
             _retained.Clear();
-        }
-
-        while (_spareChunks is { Count: > 0 })
-        {
-            _spareChunks.Pop().Arena.Reset();
         }
 
         Segments.Dispose();

@@ -510,9 +510,9 @@ internal sealed partial class CanonicalArena
     private int _dataBufferCount;
 
     // Blocks handed out by Allocate, returned to the pool on Reset. Never handed to a caller as an
-    // owner, because a decoder neither retains nor releases anything.
-    private NativeSegmentOwner[] _owned;
-    private int _ownedCount;
+    // owner, because a decoder neither retains nor releases anything. Chained through the blocks
+    // themselves, so that a batch renting more of them than the one before allocates nothing.
+    private NativeSegmentOwner? _owned;
 
     // The 64-bit words ArenaWords has built for a bool node, by node index, until the arena is reset.
     // Kept beside the records rather than in each of them, so that an arena nobody asks for words
@@ -542,7 +542,6 @@ internal sealed partial class CanonicalArena
         _records = new CanonicalRecord[initialCapacity];
         _children = new int[initialCapacity];
         _dataBuffers = new VortexBuffer[8];
-        _owned = new NativeSegmentOwner[8];
         _pool = pool;
     }
 
@@ -617,11 +616,15 @@ internal sealed partial class CanonicalArena
     /// </remarks>
     public void Reset()
     {
-        for (int i = 0; i < _ownedCount; i++)
+        NativeSegmentOwner? owner = _owned;
+        _owned = null;
+        while (owner is not null)
         {
-            NativeSegmentOwner owner = _owned[i];
-            _owned[i] = null!;
+            // Unlinked before it goes back, because the pool may hand it to another arena at once.
+            NativeSegmentOwner? next = owner.NextOwned;
+            owner.NextOwned = null;
             _pool.Return(owner);
+            owner = next;
         }
 
         // The words view blocks the loop above has just returned, and a node that takes one of these
@@ -631,7 +634,6 @@ internal sealed partial class CanonicalArena
             Array.Clear(_words, 0, Math.Min(_recordCount, _words.Length));
         }
 
-        _ownedCount = 0;
         _recordCount = 0;
         _childCount = 0;
         _dataBufferCount = 0;
@@ -1076,13 +1078,7 @@ internal sealed partial class CanonicalArena
     /// </remarks>
     public VortexBuffer AllocateUninitialized(int byteLength, int alignment, out Span<byte> destination)
     {
-        NativeSegmentOwner owner = _pool.Rent(byteLength, alignment);
-        if (_ownedCount == _owned.Length)
-        {
-            Array.Resize(ref _owned, Grow(_owned.Length));
-        }
-
-        _owned[_ownedCount++] = owner;
+        NativeSegmentOwner owner = Own(_pool.Rent(byteLength, alignment));
         destination = owner.WritableSpan;
         return owner.Buffer;
     }
@@ -1101,19 +1097,20 @@ internal sealed partial class CanonicalArena
     /// </exception>
     public VortexBuffer Allocate(int byteLength, int alignment, out Span<byte> destination)
     {
-        NativeSegmentOwner owner = _pool.Rent(byteLength, alignment);
-        if (_ownedCount == _owned.Length)
-        {
-            Array.Resize(ref _owned, Grow(_owned.Length));
-        }
-
-        _owned[_ownedCount++] = owner;
+        NativeSegmentOwner owner = Own(_pool.Rent(byteLength, alignment));
         destination = owner.WritableSpan;
         destination.Clear();
         return owner.Buffer;
     }
 
     // ------------------------------------------------------------------------------ internals
+
+    private NativeSegmentOwner Own(NativeSegmentOwner owner)
+    {
+        owner.NextOwned = _owned;
+        _owned = owner;
+        return owner;
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal ref readonly CanonicalRecord RecordRef(int index)

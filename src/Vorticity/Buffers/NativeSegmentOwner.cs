@@ -38,6 +38,12 @@ internal sealed class NativeSegmentOwner : SegmentOwner
 
     private static long s_finalizedBlocks;
 
+    /// <summary>
+    /// The next block rented by the same arena, while an arena holds this one: the arena chains
+    /// its blocks through them rather than listing them in an array it would have to grow.
+    /// </summary>
+    internal NativeSegmentOwner? NextOwned;
+
     private unsafe NativeSegmentOwner(
         void* pointer,
         int capacity,
