@@ -36,6 +36,12 @@ internal sealed record ScanSpec
     internal bool KeepEncodings { get; init; }
 
     /// <summary>
+    /// Whether the consumer reads the encoded forms itself, as an aggregation does, so that a block
+    /// counts as decoded only when a column of it reached canonical form.
+    /// </summary>
+    internal bool SinkDecodes { get; init; }
+
+    /// <summary>
     /// Whether <see cref="Live"/> is the filter's mask of live blocks, refined already: the ranges of
     /// one aggregation share one read of the structures instead of each reading them again.
     /// </summary>
@@ -116,7 +122,11 @@ internal sealed class FileScanSource : ScanSource
     {
         ScanExplanation plan = await Builder(spec, new ScanMetrics()).ExplainAsync(cancellationToken).ConfigureAwait(false);
         ScanPlan result = ScanPlan.From(plan);
-        return spec.MatchesNothing ? result with { MayMatch = false } : result;
+
+        // A filter known to match nothing runs no scan at all: it reads nothing and counts zero.
+        return spec.MatchesNothing
+            ? result with { MayMatch = false, LiveBlocks = 0, Segments = 0, BytesToRead = 0, Pruning = [], Count = new CountPlan(true, 0, 0, 0, 0) }
+            : result;
     }
 
     internal override bool MayMatch(VortexExpr filter) => Compute.FileStatisticsPruner.MayMatch(_file, filter);
@@ -176,7 +186,7 @@ internal sealed class FileScanSource : ScanSource
         builder.WithPruning(options.Pruning).WithIndexes(options.UseIndexes);
         int degree = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : Session.Options.MaxDegreeOfParallelism;
         builder.WithDegreeOfParallelism(Math.Max(degree, 1));
-        builder.WithPrefetch(options.Prefetch).WithCompaction(options.Compact).WithEncodings(spec.KeepEncodings);
+        builder.WithPrefetch(options.Prefetch).WithCompaction(options.Compact).WithEncodings(spec.KeepEncodings, spec.SinkDecodes);
         if (spec.Pruned)
         {
             builder.WithPruned(spec.Live);

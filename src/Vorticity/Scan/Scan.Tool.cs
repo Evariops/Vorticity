@@ -249,7 +249,17 @@ public sealed class Scan
 
         /// <summary>Moves to the next batch, releasing the current one.</summary>
         /// <returns>Whether there is one.</returns>
-        public ValueTask<bool> MoveNextAsync() => _inner.MoveNextAsync();
+        [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+        public async ValueTask<bool> MoveNextAsync()
+        {
+            if (await _inner.MoveNextAsync().ConfigureAwait(false))
+            {
+                return true;
+            }
+
+            _scan.End();
+            return false;
+        }
 
         /// <summary>Releases the scan's buffers.</summary>
         /// <returns>A task that completes when every buffer is back.</returns>

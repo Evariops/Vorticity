@@ -123,7 +123,7 @@ internal sealed class TerminalScan
         context.LiveBlocks = live;
         context.Metrics = _metrics;
         using ScanSegments held = new ScanSegments(1);
-        Decodes decodes = new Decodes(held);
+        Decodes decodes = new Decodes(held, blockRows);
 
         // One evaluation window for the whole count, sized for the largest split the plan
         // produces: rented once, so a block costs no allocation.
@@ -141,6 +141,7 @@ internal sealed class TerminalScan
 
                 if (live is not null && !live.AnyLive(split))
                 {
+                    _metrics?.AddBlocksPruned(decodes.Pruned.Add(split, _take));
                     continue;
                 }
 
@@ -185,7 +186,7 @@ internal sealed class TerminalScan
         }
 
         ExactCover? cover = await ExactCover
-            .TryCreateAsync(_file, _filter, _indexes, cancellationToken)
+            .TryCreateAsync(_file, _filter, _indexes, cancellationToken, zones: null, _metrics)
             .ConfigureAwait(false);
         if (cover is null)
         {
@@ -269,7 +270,7 @@ internal sealed class TerminalScan
 
     /// <summary>
     /// Reads a split, the segments an earlier split read already served from what the terminal
-    /// holds, and executes it.
+    /// holds, and executes it; its blocks count as decoded when a column of it is in canonical form.
     /// </summary>
     private async ValueTask<int> ReadAndExecuteAsync(
         ScanContext context, Decodes decodes, RowRange split, CancellationToken cancellationToken)
@@ -296,16 +297,26 @@ internal sealed class TerminalScan
 
         decodes.Held.Publish(context.Segments, batch);
         decodes.Held.Release(batch);
-        return SplitExecution.Execute(context, _tree, in _mask, split, _take);
+        int root = SplitExecution.Execute(context, _tree, in _mask, split, _take);
+        if (_metrics is not null && ScanMetrics.Decoded(context.Canonical, root))
+        {
+            _metrics.AddBlocksDecoded(decodes.Decoded.Add(split, _take));
+        }
+
+        return root;
     }
 
-    /// <summary>What the decodes of one terminal share: the segments held between splits.</summary>
-    private sealed class Decodes(ScanSegments held)
+    /// <summary>What the decodes of one terminal share: the segments held between splits, and the blocks counted.</summary>
+    private sealed class Decodes(ScanSegments held, long blockRows)
     {
         internal ScanSegments Held { get; } = held;
 
         /// <summary>The number of the next split decoded.</summary>
         internal long Next;
+
+        internal BlockTally Decoded = new BlockTally(blockRows);
+
+        internal BlockTally Pruned = new BlockTally(blockRows);
     }
 
     private long CountTrue(ScanContext context, int root, byte[] states)
@@ -372,7 +383,7 @@ internal sealed class TerminalScan
         if (_filter is not null && _wholeFile && _prune && (_tiers & TerminalTiers.ExactCover) != 0)
         {
             ExactCover? cover = await ExactCover
-                .TryCreateAsync(_file, _filter, _indexes, cancellationToken)
+                .TryCreateAsync(_file, _filter, _indexes, cancellationToken, zones: null, _metrics)
                 .ConfigureAwait(false);
             if (cover is not null)
             {
@@ -428,6 +439,7 @@ internal sealed class TerminalScan
         FilterLiteral best = FilterLiteral.Null;
         List<(RowRange Split, FilterLiteral Bound)>? candidates = null;
         List<RowRange>? undecided = null;
+        BlockTally pruned = new BlockTally(live?.BlockRows ?? SplitPlan.NaturalBatchRows(_tree));
         SplitCursor cursor = plan.CreateCursor();
         while (cursor.TryNext(out RowRange split))
         {
@@ -438,6 +450,7 @@ internal sealed class TerminalScan
 
             if (live is not null && !live.AnyLive(split))
             {
+                _metrics?.AddBlocksPruned(pruned.Add(split, _take));
                 continue;
             }
 
@@ -481,7 +494,7 @@ internal sealed class TerminalScan
         context.LiveBlocks = scope;
         context.Metrics = _metrics;
         using ScanSegments held = new ScanSegments(1);
-        Decodes decodes = new Decodes(held);
+        Decodes decodes = new Decodes(held, scope.BlockRows);
         int capacity = (int)Math.Min(plan.MaxRows, int.MaxValue);
         byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 1));
         int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(capacity, 1));

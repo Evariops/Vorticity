@@ -373,7 +373,10 @@ internal static class AggregationEngine
         return new AggregationOutcome(plan, merged.Slots, keys, order);
     }
 
-    /// <summary>The spec of the pass: the columns it reads, their encoded forms kept, whole blocks with their selection, no key order.</summary>
+    /// <summary>
+    /// The spec of the pass: the columns it reads, their encoded forms kept and counted as decoded
+    /// only when an aggregate expands them, whole blocks with their selection, no key order.
+    /// </summary>
     internal static ScanSpec PassSpec(ScanSpec spec, ColumnShape[] columns)
     {
         FieldMaskBuilder mask = new FieldMaskBuilder();
@@ -386,6 +389,7 @@ internal static class AggregationEngine
         {
             Projection = mask.Build(),
             KeepEncodings = true,
+            SinkDecodes = true,
             OrderPath = null,
             Descending = false,
             Options = spec.Options with { Compact = false },

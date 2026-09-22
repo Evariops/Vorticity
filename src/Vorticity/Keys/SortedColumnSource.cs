@@ -68,9 +68,10 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// <param name="path">The column, <c>.</c>-separated for a nested field.</param>
     /// <param name="cancellationToken">Cancels the zone-map read.</param>
     /// <param name="known">The column's zone map, when a pruning pass already read it; null to read it.</param>
+    /// <param name="metrics">The scan's sink, to which the zone map and the zones this source decodes are added; null when nobody asks.</param>
     /// <returns>The source, or null with the reason it is not available.</returns>
     internal static async ValueTask<(SortedColumnSource? Source, string? Reason)> OpenAsync(
-        VortexFile file, string path, CancellationToken cancellationToken, ZoneColumn? known = null)
+        VortexFile file, string path, CancellationToken cancellationToken, ZoneColumn? known = null, ScanMetrics? metrics = null)
     {
         DType schema = file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
@@ -139,7 +140,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         if (zones is null)
         {
             ZonePruningPlan.PruningPlan plan = await ZonePruningPlan
-                .PlanAsync(file, tree, Expr.IsNotNull(field), cancellationToken)
+                .PlanAsync(file, tree, Expr.IsNotNull(field), cancellationToken, steps: null, metrics)
                 .ConfigureAwait(false);
             zones = plan.Zones?.Column(path);
         }
@@ -154,9 +155,12 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         FieldMask mask = Projection.Create(builder.Build()).RootMask;
 
         return (
-            new SortedColumnSource(file, tree, field, mask, zones, kind, firstRow, file.RowCount),
+            new SortedColumnSource(file, tree, field, mask, zones, kind, firstRow, file.RowCount) { Metrics = metrics },
             null);
     }
+
+    /// <summary>The scan's sink, to which the zones this source decodes are added; null when nobody asks.</summary>
+    private ScanMetrics? Metrics { get; init; }
 
     /// <summary>
     /// Orders two keys the way this source's own entries are ordered: IEEE for floats, because
@@ -384,6 +388,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
 
         RowRange range = new RowRange(start, end);
         SplitExecution.Register(_context, _tree, in _mask, range);
+        ScanMetrics.Note(Metrics, _context.Segments);
         await _file.Segments.ReadManyAsync(_context.Segments, cancellationToken).ConfigureAwait(false);
         int root = SplitExecution.Execute(_context, _tree, in _mask, range, take: null);
 

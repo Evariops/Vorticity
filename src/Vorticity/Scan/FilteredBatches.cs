@@ -127,7 +127,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
             }
 
             ExactCover? cover = await ExactCover
-                .TryCreateAsync(_source.File, _filter, _indexes, _token, zones)
+                .TryCreateAsync(_source.File, _filter, _indexes, _token, zones, _source.Metrics)
                 .ConfigureAwait(false);
             if (cover is null)
             {

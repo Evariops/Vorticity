@@ -32,7 +32,7 @@ public sealed partial class Scan<TRecord>
     private bool _descending;
     private ScanOptions _options = ScanOptions.Default;
     private CancellationToken _cancellation;
-    private long _cacheHitsAtStart = -1;
+    private long _cacheHitsAtStart;
     private long _cacheHitsAtEnd;
     private int _used;
 

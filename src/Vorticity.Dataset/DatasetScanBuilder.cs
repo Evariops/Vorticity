@@ -69,6 +69,7 @@ internal sealed class DatasetScanBuilder
     private ScanMetrics? _counters;
     private ScanOptions _options = ScanOptions.Default;
     private bool _keepEncodings;
+    private bool _sinkDecodes;
 
     internal DatasetScanBuilder(VortexDataset dataset, DatasetSnapshot version)
     {
@@ -228,12 +229,14 @@ internal sealed class DatasetScanBuilder
     /// <summary>
     /// Runs every object's scan under <paramref name="options"/>: the batch cap, zone-map pruning,
     /// the degree of parallelism, the prefetch and compaction; <paramref name="keepEncodings"/> lets
-    /// the decoders deliver dictionary and run-end columns encoded.
+    /// the decoders deliver dictionary and run-end columns encoded, and <paramref name="sinkDecodes"/>
+    /// says the consumer reads those forms itself, so that only the blocks it decodes count as decoded.
     /// </summary>
-    public DatasetScanBuilder WithOptions(ScanOptions options, bool keepEncodings)
+    public DatasetScanBuilder WithOptions(ScanOptions options, bool keepEncodings, bool sinkDecodes = false)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _keepEncodings = keepEncodings;
+        _sinkDecodes = sinkDecodes;
         return this;
     }
 
@@ -1002,7 +1005,7 @@ internal sealed class DatasetScanBuilder
             .WithDegreeOfParallelism(Math.Max(degree, 1))
             .WithPrefetch(_options.Prefetch)
             .WithCompaction(_options.Compact)
-            .WithEncodings(_keepEncodings);
+            .WithEncodings(_keepEncodings, _sinkDecodes);
         return _counters is { } counters ? scan.WithMetrics(counters) : scan;
     }
 }

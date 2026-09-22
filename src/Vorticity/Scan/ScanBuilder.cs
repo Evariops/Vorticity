@@ -65,14 +65,18 @@ internal sealed class ScanBuilder
     }
 
     private bool _keepEncodings;
+    private bool _sinkDecodes;
 
     /// <summary>Whether the decoders may deliver dictionary and run-end columns encoded.</summary>
     internal bool KeepEncodings => _keepEncodings;
 
     /// <summary>Lets the decoders deliver dictionary and run-end columns in their encoded form.</summary>
-    internal ScanBuilder WithEncodings(bool keep)
+    /// <param name="keep">Whether they may.</param>
+    /// <param name="sinkDecodes">Whether the consumer reads the encoded forms itself, so that only the blocks it decodes count as decoded.</param>
+    internal ScanBuilder WithEncodings(bool keep, bool sinkDecodes = false)
     {
         _keepEncodings = keep;
+        _sinkDecodes = sinkDecodes;
         return this;
     }
 
@@ -506,6 +510,7 @@ internal sealed class ScanBuilder
             Prefetch = _prefetch,
             Compact = _compact,
             KeepEncodings = _keepEncodings,
+            SinkDecodes = _sinkDecodes,
         };
 
         if (_orderPath is not null)
@@ -564,7 +569,6 @@ internal sealed class ScanBuilder
     {
         LayoutTree tree = _file.LayoutTree;
         (RowRange rows, long natural, long cap) = Frame(tree);
-        long rootRows = tree.Root.RowCount;
 
         Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
         Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
@@ -581,11 +585,24 @@ internal sealed class ScanBuilder
         int splitsPruned = 0;
         int splitsProven = 0;
 
+        // What the scan's first step does after the pruning: ask the filter's exact source, when
+        // it has one, for the rows it proves, unless the zone maps already show they cannot fit a
+        // batch. When they fit, the scan reads the splits holding them and nothing else.
+        (RowSelection? proven, string? structure, ScanMetrics? probe) =
+            await ProbeAsync(rows, natural, plan, pruning.Zones, live, cancellationToken).ConfigureAwait(false);
+
+        // Counted over the splits the scan's rows touch, as the scan counts what it decodes and
+        // prunes: a range or a take covers the blocks it reaches, not the file's.
         long blockRows = live?.BlockRows ?? natural;
-        int blocks = live?.BlockCount ?? checked((int)((rootRows + blockRows - 1) / blockRows));
-        int liveBlocks = live?.LiveCount ?? blocks;
+        BlockTally touched = new BlockTally(blockRows);
+        BlockTally zoned = new BlockTally(blockRows);
+        BlockTally survived = new BlockTally(blockRows);
+        long blocks = 0;
+        long zoneLiveBlocks = 0;
+        long liveBlocks = 0;
 
         int splits = 0;
+        int zoneLiveSplits = 0;
         int liveSplits = 0;
         IO.SegmentRequestSet segments = new IO.SegmentRequestSet();
         try
@@ -602,18 +619,34 @@ internal sealed class ScanBuilder
                     continue;
                 }
 
+                blocks += touched.Add(split, _take);
                 if (live is not null && !live.AnyLive(split))
                 {
                     splitsPruned++;
                     continue;
                 }
 
-                liveSplits++;
-                reader.RegisterSegments(in root, split, in mask, segments);
+                zoneLiveSplits++;
+                zoneLiveBlocks += zoned.Add(split, _take);
                 if (zones is not null && Proves(zones, split))
                 {
                     splitsProven++;
                 }
+
+                if (proven is not null && !proven.Touches(split))
+                {
+                    continue;
+                }
+
+                liveSplits++;
+                liveBlocks += survived.Add(split, proven ?? _take);
+                reader.RegisterSegments(in root, split, in mask, segments);
+            }
+
+            if (structure is not null)
+            {
+                steps.Add(new PruningStep(
+                    structure, checked((int)(zoneLiveBlocks - liveBlocks)), checked((int)probe!.SegmentRequests), probe.BytesRequested));
             }
 
             // The data segments of the live splits, plus what consulting each structure cost:
@@ -635,22 +668,16 @@ internal sealed class ScanBuilder
             // The exact cover, the first tier a count takes: a scan whose cover holds a batch or
             // fewer reads those rows and evaluates nothing.
             CountExplanation? count = null;
-            long selected = 0;
             if (_filter is not null)
             {
                 (bool exact, long covered) = await ExactAsync(cancellationToken).ConfigureAwait(false);
-                if (exact && !_rowsSet && _take is null && covered <= natural)
-                {
-                    selected = covered;
-                }
-
-                count = new CountExplanation(exact, covered, splitsPruned, splitsProven, liveSplits - splitsProven);
+                count = new CountExplanation(exact, covered, splitsPruned, splitsProven, zoneLiveSplits - splitsProven);
             }
 
             OrderExplanation? order = _orderPath is null ? null : await OrderAsync(cancellationToken).ConfigureAwait(false);
             return new ScanExplanation(
-                rows.Length, blockRows, blocks, liveBlocks, steps, splits, liveSplits,
-                selected, toRead, bytes, _file.FileLength, fileMayMatch)
+                _take?.Count ?? rows.Length, blockRows, checked((int)blocks), checked((int)liveBlocks), steps, splits, liveSplits,
+                proven?.Count ?? 0, toRead, bytes, _file.FileLength, fileMayMatch)
             {
                 Count = count,
                 Order = order,
@@ -672,6 +699,43 @@ internal sealed class ScanBuilder
 
         Compute.RangeVerdict verdict = zones.Verdict(split);
         return verdict.IsAllTrue || verdict.IsNoneTrue;
+    }
+
+    /// <summary>
+    /// What the scan's first step asks the filter's exact source, as <c>FilteredBatches</c> asks it:
+    /// the rows it proves when they fit a batch, the structure that answered, and what asking cost.
+    /// </summary>
+    private async System.Threading.Tasks.ValueTask<(RowSelection? Proven, string? Structure, ScanMetrics? Cost)> ProbeAsync(
+        RowRange rows, long natural, SplitPlan plan, Compute.ZonePruner? zones, Compute.BlockMask? live,
+        System.Threading.CancellationToken cancellationToken)
+    {
+        if (_orderPath is not null || !_compact || !_prune || _filter is null || _take is not null
+            || !FilteredBatches.MayFitBatch(plan, natural, zones, live))
+        {
+            return (null, null, null);
+        }
+
+        ScanMetrics cost = new ScanMetrics();
+        Keys.ExactCover? cover = await Keys.ExactCover
+            .TryCreateAsync(_file, _filter, _indexes, cancellationToken, zones, cost)
+            .ConfigureAwait(false);
+        if (cover is null)
+        {
+            return (null, null, null);
+        }
+
+        string structure = cover.Kind == KeySourceKind.SortedColumn ? "sorted column" : "sorted runs";
+        long[]? proven;
+        try
+        {
+            proven = await cover.RowsAsync(rows, natural, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            await cover.DisposeAsync().ConfigureAwait(false);
+        }
+
+        return (proven is null ? null : RowSelection.Create(proven, _file.RowCount), structure, cost);
     }
 
     /// <summary>Whether an exact source covers the filter, and its count.</summary>

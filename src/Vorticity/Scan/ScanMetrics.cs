@@ -1,3 +1,4 @@
+using System;
 using System.Threading;
 
 namespace Vorticity.Scanning;
@@ -126,7 +127,12 @@ internal sealed class ScanMetrics
         Interlocked.Add(ref _rows, rows);
     }
 
-    /// <summary>Blocks decoded: every split read and executed counts its blocks.</summary>
+    /// <summary>
+    /// Blocks whose data the scan decoded to canonical form: every block an enumeration delivers,
+    /// since its consumer reads the columns; for a sink that reads encoded forms itself, only the
+    /// blocks a column of which reached canonical form; for a terminal, the blocks it decoded to
+    /// evaluate its filter.
+    /// </summary>
     public long BlocksDecoded => Interlocked.Read(ref _blocksDecoded);
 
     /// <summary>Blocks skipped because a structure proved them empty.</summary>
@@ -135,7 +141,123 @@ internal sealed class ScanMetrics
     private long _blocksDecoded;
     private long _blocksPruned;
 
-    internal void AddBlocksDecoded(long blocks) => Interlocked.Add(ref _blocksDecoded, blocks);
+    internal void AddBlocksDecoded(long blocks)
+    {
+        if (blocks > 0)
+        {
+            Interlocked.Add(ref _blocksDecoded, blocks);
+        }
+    }
 
-    internal void AddBlocksPruned(long blocks) => Interlocked.Add(ref _blocksPruned, blocks);
+    internal void AddBlocksPruned(long blocks)
+    {
+        if (blocks > 0)
+        {
+            Interlocked.Add(ref _blocksPruned, blocks);
+        }
+    }
+
+    /// <summary>
+    /// Whether any column under <paramref name="node"/> holds values in canonical form: decoded so
+    /// by the reader, or expanded from a dictionary, a run-end or a constant form by whoever read it.
+    /// </summary>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="node">A decoded node of the batch.</param>
+    internal static bool Decoded(Arrays.CanonicalArena arena, int node)
+    {
+        ref readonly Arrays.CanonicalRecord record = ref arena.RecordRef(node);
+        switch (record.Kind)
+        {
+            case Arrays.CanonicalKind.Dictionary:
+            case Arrays.CanonicalKind.RunEnd:
+            case Arrays.CanonicalKind.Constant:
+                return record.Materialized >= 0;
+            case Arrays.CanonicalKind.Null:
+                return false;
+            case Arrays.CanonicalKind.Struct:
+                Arrays.CanonicalNode fields = arena.GetNode(node);
+                for (int i = 0; i < fields.FieldCount; i++)
+                {
+                    if (Decoded(arena, fields.GetFieldIndex(i)))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            case Arrays.CanonicalKind.Extension:
+                return Decoded(arena, arena.GetNode(node).StorageIndex);
+            default:
+                return true;
+        }
+    }
+}
+
+/// <summary>
+/// Counts the blocks a walk of splits touches, each once, for a walk in row order either way: two
+/// splits of one block, when a batch is smaller than a block, count it once.
+/// </summary>
+internal struct BlockTally
+{
+    private readonly long _blockRows;
+    private long _first;
+    private long _last;
+
+    /// <param name="blockRows">The rows of a block: the zone length, or the natural batch size of a file without zone maps.</param>
+    internal BlockTally(long blockRows)
+    {
+        _blockRows = Math.Max(blockRows, 1);
+        _first = -1;
+        _last = -1;
+    }
+
+    /// <summary>The blocks of <paramref name="split"/> the split walked before it did not already touch.</summary>
+    /// <param name="split">The next split of the walk.</param>
+    /// <returns>How many.</returns>
+    internal long Add(RowRange split)
+    {
+        if (split.IsEmpty)
+        {
+            return 0;
+        }
+
+        long first = split.Start / _blockRows;
+        long last = (split.End - 1) / _blockRows;
+        long shared = Math.Max(0, Math.Min(last, _last) - Math.Max(first, _first) + 1);
+        _first = first;
+        _last = last;
+        return last - first + 1 - shared;
+    }
+
+    /// <summary>
+    /// The blocks of <paramref name="split"/> that hold a row of <paramref name="wanted"/>, and were
+    /// not already counted; every block of it when every row is wanted.
+    /// </summary>
+    /// <param name="split">The next split of the walk.</param>
+    /// <param name="wanted">The rows a take asks for, or null.</param>
+    /// <returns>How many.</returns>
+    /// <remarks>
+    /// A split follows the chunks rather than the blocks, so one a take reaches can run into a block
+    /// that holds none of its rows; that block is decoded in passing, and is not one the rows touch.
+    /// </remarks>
+    internal long Add(RowRange split, RowSelection? wanted)
+    {
+        if (wanted is null || split.IsEmpty)
+        {
+            return Add(split);
+        }
+
+        long counted = 0;
+        for (long block = split.Start / _blockRows; block <= (split.End - 1) / _blockRows; block++)
+        {
+            RowRange part = new RowRange(
+                Math.Max(split.Start, block * _blockRows), Math.Min(split.End, (block + 1) * _blockRows));
+            if (wanted.Touches(part))
+            {
+                counted += Add(part);
+            }
+        }
+
+        return counted;
+    }
 }

@@ -255,7 +255,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             else
             {
                 (KeySource? opened, _) = await KeyCursorBuilder
-                    .OpenSourceAsync(file, _owner._path, _owner._indexes, _token)
+                    .OpenSourceAsync(file, _owner._path, _owner._indexes, _token, zones: null, _scan.Metrics)
                     .ConfigureAwait(false);
                 _source = source = opened ?? throw new VortexUnsupportedException(
                     IndexKinds.SortedRuns,
@@ -346,7 +346,35 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             int distinct = Plan(count);
             _selection.Reset(distinct);
             int root = await DecodeAsync(_selection).ConfigureAwait(false);
+            NoteDecoded(distinct);
             return (Arrange(root, count, distinct), _sorted[0]);
+        }
+
+        /// <summary>
+        /// Counts the blocks the window's rows lie in as decoded. A block two windows reach is
+        /// decoded twice and counted twice: what a key order costs over file order.
+        /// </summary>
+        private void NoteDecoded(int distinct)
+        {
+            if (_scan.Metrics is not { } metrics)
+            {
+                return;
+            }
+
+            long blockRows = Math.Max(_live?.BlockRows ?? SplitPlan.NaturalBatchRows(_scan.Tree), 1);
+            long blocks = 0;
+            long last = -1;
+            for (int i = 0; i < distinct; i++)
+            {
+                long block = _sorted[i] / blockRows;
+                if (block != last)
+                {
+                    blocks++;
+                    last = block;
+                }
+            }
+
+            metrics.AddBlocksDecoded(blocks);
         }
 
         /// <summary>Sorts the window's rows into file order and lists the splits they touch; the distinct rows.</summary>

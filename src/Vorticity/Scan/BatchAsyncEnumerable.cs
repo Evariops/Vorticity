@@ -129,7 +129,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live: null, _metrics,
-            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings);
+            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes);
 
     /// <summary>Batches decoded ahead of the consumer, on lanes of their own.</summary>
     internal int Prefetch { get; init; }
@@ -139,6 +139,12 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 
     /// <summary>Whether a dictionary or run-end column reaches the consumer in its encoded form.</summary>
     internal bool KeepEncodings { get; init; }
+
+    /// <summary>
+    /// Whether the consumer reads the encoded forms itself, so that a block counts as decoded only
+    /// when a column of it reached canonical form, rather than whenever it is delivered.
+    /// </summary>
+    internal bool SinkDecodes { get; init; }
 
     /// <summary>The lanes the scan runs on: the degree, widened by the read-ahead.</summary>
     private int Lanes => _reverse ? 1 : Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1);
@@ -150,7 +156,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         BlockMask? live, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live, _metrics,
-            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings);
+            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes);
 
     /// <summary>
     /// Starts a scan whose filter an exact index has already answered: it reads exactly the rows
@@ -163,7 +169,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         BlockMask? live, RowSelection proven, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, proven, live, _metrics,
-            cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings);
+            cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes);
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
     internal bool HasTake => _take is not null;
@@ -228,8 +234,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly CancellationToken _token;
     private readonly Lane[] _lanes;
     private readonly ScanSegments _segments;
+    private readonly bool _sinkDecodes;
 
     private SplitCursor _cursor;
+    private BlockTally _decodedBlocks;
+    private BlockTally _prunedBlocks;
 
     private RecordBatch? _current;
     private Lane? _currentLane;
@@ -255,10 +264,12 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         bool filterProven = false,
         bool reverse = false,
         bool compact = true,
-        bool keepEncodings = false)
+        bool keepEncodings = false,
+        bool sinkDecodes = false)
     {
         _compact = compact;
         _filterProven = filterProven;
+        _sinkDecodes = sinkDecodes;
         _tree = tree;
         _take = take;
         _live = live;
@@ -272,6 +283,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _token = cancellationToken;
         _cursor = plan.CreateCursor(reverse);
         _segments = new ScanSegments(degree);
+
+        // The blocks the plan counts, so that what is decoded and pruned is counted in its units.
+        long blockRows = live?.BlockRows ?? SplitPlan.NaturalBatchRows(tree);
+        _decodedBlocks = new BlockTally(blockRows);
+        _prunedBlocks = new BlockTally(blockRows);
 
         _lanes = new Lane[degree];
         for (int i = 0; i < degree; i++)
@@ -449,9 +465,15 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         while (_cursor.TryNext(out split))
         {
             // A take's own skip comes first: it is a binary search over the index list, while the
-            // mask reads the bit or two the split overlaps.
+            // mask reads the bit or two the split overlaps. A caller's take never held the rows it
+            // skips; rows an exact index proved outside the filter are pruned by that index.
             if (_take is not null && !_take.Touches(split))
             {
+                if (_filterProven)
+                {
+                    NotePruned(split, wanted: null);
+                }
+
                 continue;
             }
 
@@ -460,10 +482,18 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 return true;
             }
 
-            _metrics?.AddBlocksPruned(1);
+            NotePruned(split, _take);
         }
 
         return false;
+    }
+
+    private void NotePruned(RowRange split, RowSelection? wanted)
+    {
+        if (_metrics is not null)
+        {
+            _metrics.AddBlocksPruned(_prunedBlocks.Add(split, wanted));
+        }
     }
 
     private void Register(ScanContext context, RowRange rows) =>
@@ -505,13 +535,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             else
             {
                 root = ExecuteWithTake(lane.Context, _pending, out bool proven);
+                lane.ReadRoot = root;
                 root = ApplyFilter(lane, root, proven);
             }
 
             _current = new RecordBatch(lane.Context, root, _pending.Start);
             _current.Select(lane.Selection, lane.Selected);
             _metrics?.AddBatch(_current.SelectedRows);
-            _metrics?.AddBlocksDecoded(1);
             return true;
         }
         catch
@@ -754,6 +784,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         lane.Selection = default;
         lane.Selected = 0;
         int root = SplitExecution.Execute(context, _tree, in _mask, split, null);
+        lane.ReadRoot = root;
         int rows = context.Canonical.GetNode(root).Length;
         if (_take is null && _evaluator is null)
         {
@@ -880,7 +911,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             _current = new RecordBatch(lane.Context, root, lane.Rows.Start);
             _current.Select(lane.Selection, lane.Selected);
             _metrics?.AddBatch(_current.SelectedRows);
-            _metrics?.AddBlocksDecoded(1);
         }
         catch
         {
@@ -962,6 +992,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
 
             int root = ExecuteWithTake(context, rows, out bool proven);
+            lane.ReadRoot = root;
             return ApplyFilter(lane, root, proven);
         }
         catch
@@ -1016,9 +1047,37 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private void ReleaseCurrent()
     {
         RecordBatch? batch = _current;
+        Lane? lane = _currentLane;
         _current = null;
         _currentLane = null;
+        if (batch is not null && lane is not null)
+        {
+            NoteDecoded(batch, lane);
+        }
+
         batch?.Dispose();
+    }
+
+    /// <summary>
+    /// Counts the blocks of the batch being released, now that its consumer is done with it: all
+    /// of them for a consumer that reads the columns; for one that reads encoded forms itself, only
+    /// when the filter, the consumer or the reader left some column of it in canonical form.
+    /// </summary>
+    private void NoteDecoded(RecordBatch batch, Lane lane)
+    {
+        if (_metrics is null)
+        {
+            return;
+        }
+
+        if (_sinkDecodes
+            && !ScanMetrics.Decoded(batch.Arena, batch.RootIndex)
+            && !ScanMetrics.Decoded(batch.Arena, lane.ReadRoot))
+        {
+            return;
+        }
+
+        _metrics.AddBlocksDecoded(_decodedBlocks.Add(_pending, _take));
     }
 
     private void DisposeLanes()
@@ -1054,6 +1113,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         /// <summary>The number of the split in <see cref="Rows"/> among the splits the scan started, in the order it walks them.</summary>
         internal long Sequence { get; set; }
+
+        /// <summary>The split as the readers decoded it, before the filter and the trim: what says whether a block was decoded.</summary>
+        internal int ReadRoot { get; set; }
 
         /// <summary>Whether a split was started on this lane and its result not yet taken.</summary>
         internal bool Running { get; set; }
