@@ -1241,10 +1241,15 @@ internal static class BlockStatsPass
 
             if (!tracking)
             {
-                bool same = (uint)pairs[a] == (uint)pairs[b]
-                    && (oneHeap
-                        ? Value(views, heap, row - 1).SequenceEqual(Value(views, heap, row))
-                        : SameValue(node, views, pairs, row - 1, row));
+                // Two inline values of one size are equal when the bytes of that size are: they
+                // are in the views, so the answer is two masked word compares and no call.
+                uint size = (uint)pairs[a];
+                bool same = size == (uint)pairs[b]
+                    && (size <= 12
+                        ? InlineEqual(pairs[a], pairs[a + 1], pairs[b], pairs[b + 1], (int)size)
+                        : oneHeap
+                            ? Value(views, heap, row - 1).SequenceEqual(Value(views, heap, row))
+                            : SameValue(node, views, pairs, row - 1, row));
                 if (!same)
                 {
                     stats.RunBoundaries++;
@@ -1275,6 +1280,24 @@ internal static class BlockStatsPass
         int last = start + count - 1;
         bool lastValid = mask.IsValid(last);
         Store(previous, lastValid, lastValid ? Value(node, views, last) : default);
+    }
+
+    /// <summary>
+    /// Whether two inline views of <paramref name="size"/> bytes hold the same value: their first
+    /// <paramref name="size"/> payload bytes, read as the view's two little-endian words.
+    /// </summary>
+    /// <remarks>
+    /// The payload starts at the fifth byte of the view, so its first four bytes are the high half
+    /// of the first word and the next eight the second word. The bytes past the size are masked
+    /// out rather than trusted to be zero: a view built elsewhere need not have cleared them.
+    /// </remarks>
+    internal static bool InlineEqual(ulong a0, ulong a1, ulong b0, ulong b1, int size)
+    {
+        ulong head = (a0 ^ b0) >> 32;
+        ulong tail = a1 ^ b1;
+        ulong headMask = size >= 4 ? uint.MaxValue : (1UL << (8 * size)) - 1;
+        ulong tailMask = size >= 12 ? ulong.MaxValue : size <= 4 ? 0 : (1UL << (8 * (size - 4))) - 1;
+        return ((head & headMask) | (tail & tailMask)) == 0;
     }
 
     /// <summary>

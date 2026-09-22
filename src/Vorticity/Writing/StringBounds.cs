@@ -121,6 +121,10 @@ internal sealed class StringBounds
     private int _minLength = -1;
     private int _maxLength = -1;
 
+    /// <summary>The first eight bytes of the minimum and of the maximum, as <see cref="Key"/> reads them.</summary>
+    private ulong _minKey;
+    private ulong _maxKey;
+
     /// <param name="limit">The byte limit; at least 1.</param>
     /// <param name="utf8">Whether the column is utf8, which decides where a cut may fall.</param>
     internal StringBounds(int limit, bool utf8)
@@ -132,32 +136,70 @@ internal sealed class StringBounds
     }
 
     /// <summary>Folds the valid rows <c>[start, start + count)</c> of a varbinview into the block.</summary>
+    /// <remarks>
+    /// A row is compared with the bounds by key first: two strings whose keys differ compare as
+    /// their keys do, so a column of short or diverse values is decided by two integer compares a
+    /// row, and only a row whose key ties a bound's -- equal first eight bytes -- compares bytes.
+    /// </remarks>
     internal void Accumulate(CanonicalArena arena, CanonicalNode node, int start, int count)
     {
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
         ReadOnlySpan<byte> views = node.Views.Span;
+        bool allValid = mask.AllValid;
         int keep = _limit + 1;
         for (int row = start; row < start + count; row++)
         {
-            if (!mask.IsValid(row))
+            if (!allValid && !mask.IsValid(row))
             {
                 continue;
             }
 
             ReadOnlySpan<byte> value = BlockStatsPass.Value(node, views, row);
             ReadOnlySpan<byte> prefix = value.Length > keep ? value[..keep] : value;
-            if (_minLength < 0 || prefix.SequenceCompareTo(_min.AsSpan(0, _minLength)) < 0)
+            ulong key = Key(prefix);
+            if (_minLength < 0
+                || key < _minKey
+                || (key == _minKey && prefix.SequenceCompareTo(_min.AsSpan(0, _minLength)) < 0))
             {
                 prefix.CopyTo(_min);
                 _minLength = prefix.Length;
+                _minKey = key;
             }
 
-            if (_maxLength < 0 || prefix.SequenceCompareTo(_max.AsSpan(0, _maxLength)) > 0)
+            if (_maxLength < 0
+                || key > _maxKey
+                || (key == _maxKey && prefix.SequenceCompareTo(_max.AsSpan(0, _maxLength)) > 0))
             {
                 prefix.CopyTo(_max);
                 _maxLength = prefix.Length;
+                _maxKey = key;
             }
         }
+    }
+
+    /// <summary>
+    /// The first eight bytes of a value, big-endian, a shorter value padded with zeros.
+    /// </summary>
+    /// <remarks>
+    /// Where two keys differ, the values compare as the keys do: the first byte that differs is
+    /// either a byte of both, or a padding zero against a byte of the longer value, and a value
+    /// that is a prefix of another sorts first. Equal keys decide nothing -- "a" and "a\0" share
+    /// one -- and the caller then compares the bytes.
+    /// </remarks>
+    private static ulong Key(ReadOnlySpan<byte> value)
+    {
+        if (value.Length >= sizeof(ulong))
+        {
+            return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(value);
+        }
+
+        ulong key = 0;
+        for (int i = 0; i < value.Length; i++)
+        {
+            key |= (ulong)value[i] << (56 - (8 * i));
+        }
+
+        return key;
     }
 
     /// <summary>The block's bounds, cut and kept in <paramref name="zones"/>; the accumulator starts the next block empty.</summary>
