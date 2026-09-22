@@ -101,7 +101,7 @@ public sealed record VortexWriteOptions
     /// </summary>
     public VortexEdition TargetEdition { get; init; } = VortexEditions.Default;
 
-    /// <summary>Whether the file carries its statistics: per column the exact minimum, maximum, sum, null count and order.</summary>
+    /// <summary>Whether the file carries its statistics: per column the null count and the order, and the exact minimum and maximum of a numeric column.</summary>
     public bool Statistics { get; init; } = true;
 
     /// <summary>The byte limit of the bounds a text or binary column's zones carry, so that text filters prune; 0 for none.</summary>

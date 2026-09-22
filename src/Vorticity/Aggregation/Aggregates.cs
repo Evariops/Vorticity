@@ -30,7 +30,7 @@ public readonly struct Aggregates<TRecord>
     public Sym<long> CountDistinct<T>(Func<Probe<TRecord>, Sym<T>> column) =>
         Aggregators.CountDistinct(Aggregators.Input(_binding, column));
 
-    /// <summary>The sum of <paramref name="column"/>, accumulated at the width the file statistics use: 64 bits for an integer, a double for a float.</summary>
+    /// <summary>The sum of <paramref name="column"/>, accumulated exactly in 128 bits for an integer, in a double for a float, as unscaled 128 bits for a decimal.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the sum; zero when no row holds a value. Reading it throws <see cref="OverflowException"/> when the sum does not fit <typeparamref name="T"/>.</returns>

@@ -64,7 +64,10 @@ public sealed class VortexColumnAttribute : Attribute
     /// <summary>The unit of a <see cref="DateTime"/>, <see cref="DateTimeOffset"/> or <see cref="TimeOnly"/> member's column; microseconds by default.</summary>
     public TimeUnit Unit { get; set; } = TimeUnit.Microseconds;
 
-    /// <summary>The zone of a <see cref="DateTime"/> member's column, or null for a naive timestamp; a <see cref="DateTimeOffset"/> member is written in UTC.</summary>
+    /// <summary>
+    /// The zone of a <see cref="DateTimeOffset"/> member's column, UTC when null; a <see cref="DateTime"/>
+    /// member's column is naive, or UTC when this says <c>UTC</c>, and another zone is refused.
+    /// </summary>
     public string? TimeZone { get; set; }
 }
 

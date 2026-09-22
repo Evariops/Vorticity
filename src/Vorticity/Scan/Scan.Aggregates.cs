@@ -21,7 +21,7 @@ public sealed partial class Scan<TRecord>
     /// <param name="column">The column.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The sum; zero when no row holds a value.</returns>
-    /// <exception cref="OverflowException">The sum does not fit 64 bits, or does not fit <typeparamref name="T"/>.</exception>
+    /// <exception cref="OverflowException">The sum, exact in 128 bits for integers, does not fit <typeparamref name="T"/>.</exception>
     public ValueTask<T> SumAsync<T>(Func<Probe<TRecord>, Sym<T>> column, CancellationToken cancellationToken = default)
         where T : INumber<T> =>
         ScalarAsync(Aggregators.Sum<T>(Aggregators.Input(Binding, column)), cancellationToken);
@@ -31,7 +31,7 @@ public sealed partial class Scan<TRecord>
     /// <param name="column">The column.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The sum; zero when no row holds a value.</returns>
-    /// <exception cref="OverflowException">The sum does not fit 64 bits, or does not fit <typeparamref name="T"/>.</exception>
+    /// <exception cref="OverflowException">The sum, exact in 128 bits for integers, does not fit <typeparamref name="T"/>.</exception>
     public ValueTask<T> SumAsync<T>(Func<Probe<TRecord>, Sym<T?>> column, CancellationToken cancellationToken = default)
         where T : struct, INumber<T> =>
         ScalarAsync(Aggregators.Sum<T>(Aggregators.Input(Binding, column)), cancellationToken);
