@@ -1523,9 +1523,11 @@ internal sealed partial class CanonicalArena
             ? VortexBuffer.Empty
             : AllocateUninitialized(checked((int)referenced), 1, out into);
 
+        // The gather ends with the last buffered row, once the bytes counted above are all in:
+        // every view past it is inline, and a column of short strings has no buffered row at all.
         Span<uint> words = MemoryMarshal.Cast<byte, uint>(writable);
         int at = 0;
-        for (int j = 0; j < rows; j++)
+        for (int j = 0; at < referenced; j++)
         {
             int w = j * 4;
             uint size = words[w];

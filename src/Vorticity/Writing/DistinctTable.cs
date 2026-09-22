@@ -546,12 +546,19 @@ internal sealed class DistinctTable
     private const int RecentViews = 16;
 
     /// <remarks>
+    /// <para>
     /// A string of twelve bytes or fewer is its view, so a row whose sixteen bytes are a recent
     /// row's is that row's value and takes its code, without the hash, the probe or the byte
     /// compare: the few short labels a dictionary column is made of come back row after row. The
     /// recent views are a small direct-mapped table on the stack, kept for one call, and a view
     /// that is not in it -- or whose padding differs from an equal value's -- goes to the table as
     /// before, which is still what decides.
+    /// </para>
+    /// <para>
+    /// A hit writes its code into the call's slice of the codes and nothing else: the row count is
+    /// set from the loop's own index before each call that reads it -- a miss, a null -- and once
+    /// at the end, never incremented through the object row after row.
+    /// </para>
     /// </remarks>
     private void ProbeViews(CanonicalNode node, in ValidityMask mask, int start, int count)
     {
@@ -562,12 +569,20 @@ internal sealed class DistinctTable
         Span<int> recentCode = stackalloc int[RecentViews];
         recentCode.Fill(-1);
         bool allValid = mask.AllValid;
-        for (int i = 0; i < count && !_abandoned; i++)
+        int first = _rows;
+        Span<int> codes = _codes.AsSpan(first, count);
+        for (int i = 0; i < count; i++)
         {
             int row = start + i;
             if (!allValid && !mask.IsValid(row))
             {
+                _rows = first + i;
                 NullRow();
+                if (_abandoned)
+                {
+                    return;
+                }
+
                 continue;
             }
 
@@ -580,26 +595,35 @@ internal sealed class DistinctTable
                 int known = recentCode[slot];
                 if (known >= 0 && recentLow[slot] == low && recentHigh[slot] == high)
                 {
-                    _codes[_rows++] = known;
+                    codes[i] = known;
                     continue;
                 }
 
+                _rows = first + i;
                 InsertBytes(views.Slice((row * ViewSize) + 4, size));
-                if (!_abandoned)
+                if (_abandoned)
                 {
-                    recentLow[slot] = low;
-                    recentHigh[slot] = high;
-                    recentCode[slot] = _codes[_rows - 1];
+                    return;
                 }
 
+                recentLow[slot] = low;
+                recentHigh[slot] = high;
+                recentCode[slot] = codes[i];
                 continue;
             }
 
             ReadOnlySpan<byte> view = views.Slice(row * ViewSize, ViewSize);
             int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
             int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
+            _rows = first + i;
             InsertBytes(node.GetDataBuffer(buffer).Span.Slice(offset, size));
+            if (_abandoned)
+            {
+                return;
+            }
         }
+
+        _rows = first + count;
     }
 
     /// <summary>

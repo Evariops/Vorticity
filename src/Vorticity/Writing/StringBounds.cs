@@ -139,7 +139,9 @@ internal sealed class StringBounds
     /// <remarks>
     /// A row is compared with the bounds by key first: two strings whose keys differ compare as
     /// their keys do, so a column of short or diverse values is decided by two integer compares a
-    /// row, and only a row whose key ties a bound's -- equal first eight bytes -- compares bytes.
+    /// row. A string of twelve bytes or fewer is read from its view, one word for its key, and never
+    /// as a span; a key that ties a bound's is settled by the lengths while either value is eight
+    /// bytes or fewer, and by the bytes past the eighth otherwise.
     /// </remarks>
     internal void Accumulate(CanonicalArena arena, CanonicalNode node, int start, int count)
     {
@@ -147,6 +149,10 @@ internal sealed class StringBounds
         ReadOnlySpan<byte> views = node.Views.Span;
         bool allValid = mask.AllValid;
         int keep = _limit + 1;
+        ulong minKey = _minKey;
+        ulong maxKey = _maxKey;
+        int minLength = _minLength;
+        int maxLength = _maxLength;
         for (int row = start; row < start + count; row++)
         {
             if (!allValid && !mask.IsValid(row))
@@ -154,52 +160,69 @@ internal sealed class StringBounds
                 continue;
             }
 
-            ReadOnlySpan<byte> value = BlockStatsPass.Value(node, views, row);
-            ReadOnlySpan<byte> prefix = value.Length > keep ? value[..keep] : value;
-            ulong key = Key(prefix);
-            if (_minLength < 0
-                || key < _minKey
-                || (key == _minKey && prefix.SequenceCompareTo(_min.AsSpan(0, _minLength)) < 0))
+            ReadOnlySpan<byte> view = views.Slice(row * 16, 16);
+            int size = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view);
+            int length = Math.Min(size, keep);
+            ulong key = Key(size <= 12 ? view.Slice(4, 8) : BlockStatsPass.Value(node, views, row), length);
+            if (minLength < 0
+                || key < minKey
+                || (key == minKey && Tie(node, views, row, length, _min.AsSpan(0, minLength)) < 0))
             {
-                prefix.CopyTo(_min);
-                _minLength = prefix.Length;
-                _minKey = key;
+                BlockStatsPass.Value(node, views, row)[..length].CopyTo(_min);
+                minLength = length;
+                minKey = key;
             }
 
-            if (_maxLength < 0
-                || key > _maxKey
-                || (key == _maxKey && prefix.SequenceCompareTo(_max.AsSpan(0, _maxLength)) > 0))
+            if (maxLength < 0
+                || key > maxKey
+                || (key == maxKey && Tie(node, views, row, length, _max.AsSpan(0, maxLength)) > 0))
             {
-                prefix.CopyTo(_max);
-                _maxLength = prefix.Length;
-                _maxKey = key;
+                BlockStatsPass.Value(node, views, row)[..length].CopyTo(_max);
+                maxLength = length;
+                maxKey = key;
             }
         }
+
+        _minKey = minKey;
+        _maxKey = maxKey;
+        _minLength = minLength;
+        _maxLength = maxLength;
     }
 
     /// <summary>
-    /// The first eight bytes of a value, big-endian, a shorter value padded with zeros.
+    /// The first eight of a value's first <paramref name="length"/> bytes, big-endian, a shorter
+    /// value padded with zeros.
     /// </summary>
+    /// <param name="bytes">At least eight bytes starting with the value's; those past its length are ignored.</param>
+    /// <param name="length">The value's length, cut to the bound's.</param>
     /// <remarks>
     /// Where two keys differ, the values compare as the keys do: the first byte that differs is
     /// either a byte of both, or a padding zero against a byte of the longer value, and a value
     /// that is a prefix of another sorts first. Equal keys decide nothing -- "a" and "a\0" share
-    /// one -- and the caller then compares the bytes.
+    /// one -- and <see cref="Tie"/> then does.
     /// </remarks>
-    private static ulong Key(ReadOnlySpan<byte> value)
+    private static ulong Key(ReadOnlySpan<byte> bytes, int length)
     {
-        if (value.Length >= sizeof(ulong))
+        ulong word = System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(bytes);
+        return length >= sizeof(ulong) ? word : word & ~(ulong.MaxValue >> (8 * length));
+    }
+
+    /// <summary>How a row compares with a bound whose key it shares.</summary>
+    /// <remarks>
+    /// A key holds the whole of a value of eight bytes or fewer, so when the shorter of the two is
+    /// that short, equal keys make it a prefix of the other: the shorter sorts first, and equal
+    /// lengths are equal values. Only two longer values compare bytes, and only past the eighth.
+    /// </remarks>
+    private static int Tie(
+        CanonicalNode node, ReadOnlySpan<byte> views, int row, int length, ReadOnlySpan<byte> bound)
+    {
+        if (Math.Min(length, bound.Length) <= sizeof(ulong))
         {
-            return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(value);
+            return length.CompareTo(bound.Length);
         }
 
-        ulong key = 0;
-        for (int i = 0; i < value.Length; i++)
-        {
-            key |= (ulong)value[i] << (56 - (8 * i));
-        }
-
-        return key;
+        return BlockStatsPass.Value(node, views, row)[sizeof(ulong)..length]
+            .SequenceCompareTo(bound[sizeof(ulong)..]);
     }
 
     /// <summary>The block's bounds, cut and kept in <paramref name="zones"/>; the accumulator starts the next block empty.</summary>

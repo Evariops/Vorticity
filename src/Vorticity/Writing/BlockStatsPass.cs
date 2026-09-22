@@ -1204,13 +1204,18 @@ internal static class BlockStatsPass
         bool previousValid = firstValid;
         bool tracking = !stats.OrderUntracked && !stats.Unsorted;
         bool repeats = false;
+
+        // Counted here and added once: an increment through the reference is a store the next
+        // row's increment reads back, a chain through memory on a column where every row is a
+        // boundary.
+        long boundaries = 0;
         for (int i = 1; i < count; i++)
         {
             int row = start + i;
             bool valid = allValid || mask.IsValid(row);
             if (!allValid && valid != previousValid)
             {
-                stats.RunBoundaries++;
+                boundaries++;
                 previousValid = valid;
                 if (tracking && !valid)
                 {
@@ -1252,7 +1257,7 @@ internal static class BlockStatsPass
                             : SameValue(node, views, pairs, row - 1, row));
                 if (!same)
                 {
-                    stats.RunBoundaries++;
+                    boundaries++;
                 }
 
                 continue;
@@ -1267,7 +1272,7 @@ internal static class BlockStatsPass
                 continue;
             }
 
-            stats.RunBoundaries++;
+            boundaries++;
             if (order > 0)
             {
                 stats.Unsorted = true;
@@ -1275,6 +1280,7 @@ internal static class BlockStatsPass
             }
         }
 
+        stats.RunBoundaries += boundaries;
         stats.Repeats |= repeats;
 
         int last = start + count - 1;
