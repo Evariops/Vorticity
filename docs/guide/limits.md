@@ -1,77 +1,145 @@
 # Limits
 
-The caps that protect a reader from a hostile file, and how to change them.
+Open a file you did not write: what a hostile file can make the reader do, what it cannot, and the
+caps in between.
 
-A file is untrusted input. Every structure a reader follows has a ceiling, so that a malformed or
-malicious file makes it refuse rather than allocate without bound or recurse forever.
+```csharp
+await using VortexFile file = await VortexSession.Default.OpenAsync(path, new VortexOpenOptions
+{
+    MaxDecompressedSize = ceiling,
+    VerifyStatistics = true,
+});
 
-## The fixed ones
+try
+{
+    long rows = 0;
+    await foreach (Columns<Reading> batch in file.Scan<Reading>())
+    {
+        rows += batch.RowCount;
+    }
 
-`VortexLimits` holds them, and none of them is settable:
+    Console.WriteLine($"ceiling {ceiling}: {rows} rows");
+}
+catch (VortexFormatException e)
+{
+    Console.WriteLine($"ceiling {ceiling}: {e.GetType().Name}: {e.Message}");
+}
+```
+
+```
+ceiling 4096: VortexFormatException: Decoding fastlanes.bitpacked would materialize 65536 bytes, above the 4096-byte decompression ceiling.
+ceiling 1048576: 1000000 rows
+ceiling 268435456: 1000000 rows
+```
+
+**A file is untrusted input.** Every structure the reader follows is bounded, so that a malformed
+or malicious file makes it refuse rather than read out of bounds, allocate without limit, or loop
+forever. A refusal is a `VortexFormatException` for bytes that break the format or a cap, and a
+`VortexUnsupportedException` for a component this build does not implement; nothing else. The
+reasoning behind each cap is in [08-semantics.md](../design/08-semantics.md).
+
+## What a damaged file does
+
+The sample writes a 38 436-byte file, then opens a thousand copies of it, each with four bits
+flipped at random in its last 4 KiB, where the footer, the layout tree and the last chunk live,
+and reads every row of each:
+
+```
+1000 copies of a 38436-byte file, four bits flipped in the last 4 KiB of each:
+  VortexFormatException: 860
+  VortexUnsupportedException: 41
+  read whole: 99
+```
+
+Every failure is one of the two refusals. The 99 copies that read whole are the other half of the
+lesson: **the reader guarantees safety, not integrity.** A flipped bit in a data segment decodes
+to a different value, and the format carries no checksum over data. The index regions do carry
+one, which `VerifyIndexesAsync` and `vxdump --verify` check.
+
+## The fixed caps
+
+`VortexLimits` holds them. None is settable, because each bounds a loop or a recursion the file
+controls:
 
 | | |
 |---|---|
-| `MaxArrayDepth`, `MaxDTypeDepth`, `MaxLayoutDepth` | 64 each — how deep a nested structure may go |
+| `MaxArrayDepth`, `MaxDTypeDepth`, `MaxLayoutDepth` | 64 each: how deep an encoding tree, a type or a layout tree may nest |
 | `MaxFlatBufferDepth` | 128 |
-| `MaxFlatBufferTables` | 1 000 000 |
+| `MaxFlatBufferTables` | 1 000 000 tables visited per traversal, the bound the reference verifiers use |
 | `MaxMetadataSegments` | 16 |
-| `MaxMetadataKeyLength` | 64 |
+| `MaxMetadataKeyLength` | 64 bytes |
 | `MaxCompressionSpecs` | 8 |
-| `MaxAlignment` | 64 bytes, exponent 6 |
+| `MaxAlignment` | 64 bytes, `MaxAlignmentExponent` 6 |
 | `MaxPostscriptSize` | 65 527 bytes |
 
-They exist because each one bounds a loop or a recursion that a file controls. A file that exceeds
-one is malformed, and the reader says so with `VortexFormatException`.
+A file past any of them is malformed, and says so with `VortexFormatException`.
 
-`VortexFileFormat` holds the shape of the tail beside them: an 8-byte end marker, and 65 535 bytes
-read at open by default.
+## The ceiling you set
 
-## The one you set
+`VortexOpenOptions.MaxDecompressedSize` bounds what one decode may produce, and a decode is a
+block. The default is `VortexLimits.DefaultMaxDecompressedSize`, 268 435 456 bytes. It is a
+refusal, not a truncation, and it is the defence against a decompression bomb: a few bytes on
+disk that claim to expand to gigabytes.
+
+The right value is small. A block holds `BlockRows` rows, 8 192 by default, so the widest honest
+block is `BlockRows` times the widest row: 65 536 bytes for one `f64` or `i64` column of the
+demonstration file, which is why 4 096 is refused above and 1 MiB is plenty. Lower the ceiling for
+input you did not write; raise it only for a file you trust whose blocks are genuinely large, such
+as long text values.
+
+## Statistics are claims
+
+A file's statistics and zone maps are what the writer said about the values, and the reader
+prunes by them. A lying file cannot make the reader fault, but it can make it skip blocks it
+should have read. `VerifyStatistics = true` has the reader check what a decode can recompute: a
+masked array's values carry no nulls of their own, and a key cursor walking a sorted column finds
+each zone's null count, order and bounds as stated, and refuses to go on otherwise. It costs a pass
+over the values it checks.
+
+An answer the reader takes from the statistics alone, such as a count, a minimum or a mean that
+no block had to be decoded for, is still the file's claim. For input you do not trust, ask the
+question over the values, or check it against a scan.
+
+## Components this build does not know
+
+A file may name an encoding, a layout or a type this build does not implement. It still opens,
+and the refusal comes when a block needs the component:
 
 ```csharp
-await using VortexFile file = await VortexFile.OpenAsync(path, new VortexOpenOptions
+await using VortexFile file = await VortexSession.Default.OpenAsync(patched, new VortexOpenOptions { AllowUnknownComponents = allow });
+string unsupported = string.Join(", ", file.ArrayEncodings.Where(c => !c.Supported).Select(c => c.Id));
+long rows = 0;
+await foreach (BatchView batch in file.Scan("Day", "City"))
 {
-    Read = new VortexReadOptions { MaxDecompressedSize = 64L * 1024 * 1024 },
-});
+    rows += batch.RowCount;
+}
 ```
 
-`MaxDecompressedSize` bounds what a single decode may materialise. The default is
-`VortexLimits.DefaultMaxDecompressedSize`, 268 435 456 bytes. It is a refusal, not a truncation:
+```
+AllowUnknownComponents=False: opened, not supported: vortex.alz; Day and City read 1000000 rows; Scan<Reading> throws Array vortex.alz
+AllowUnknownComponents=True: opened, not supported: vortex.alz; Day and City read 1000000 rows; Scan<Reading> throws Array vortex.alz
+```
 
-| ceiling | |
-|---|---|
-| 4 096 | refused: `Decoding vortex.runend would materialize 3997696 bytes, above the 4096-byte decompression ceiling.` |
-| 1 048 576 | refused, same block |
-| 268 435 456 | 1 000 000 rows |
-
-This is the defence against a decompression bomb: a few kilobytes on disk that claim to inflate to
-gigabytes. Lower it for input you did not write — low enough to matter, high enough for your largest
-honest block, which `RowBlockSize` times the widest row gives you. Raise it only for a file you
-trust with genuinely large blocks.
-
-## Components a build does not know
-
-`AllowUnknownComponents` is `false` by default: a file naming an encoding, layout, dtype or
-compression scheme this build does not implement is refused at open with
-`VortexUnsupportedException`, which names the `Kind` and the `ComponentId`.
-
-Set it to `true` and the open succeeds; the refusal moves to the moment something actually needs
-that component. A file whose one exotic column you never read then reads fine, and
-`IndexFragmentRefusals` and `IndexDirectoryRefusal` say what was set aside along the way.
+The sample renames the encoding of the `Celsius` column in a copy of the file, so this build no
+longer knows it. The columns that do not use it read in full; the scan that needs it throws
+`VortexUnsupportedException` naming the kind and the id, at its first block. The behaviour is the
+same whichever value `AllowUnknownComponents` has. `file.ArrayEncodings` and
+`file.LayoutEncodings` list what the footer declares, each with `Supported`, so a caller can ask
+before scanning.
 
 ## Watch out
 
 * **The ceiling is per decode, not per scan.** A scan that decodes a thousand blocks of 1 MiB never
   approaches a 256 MiB ceiling; one block that claims 300 MiB trips it.
-* Statistics are claims a file makes about itself. `VerifyStatistics = true` at open has the reader
-  check them against what it decodes — worth it for untrusted input, and not free.
-* `IndexCacheBytes` is a memory ceiling too, though not a safety one: it bounds what one open file
-  keeps of decoded index runs, and 0 keeps nothing.
-* A limit refusal is `VortexFormatException` and an unknown component is `VortexUnsupportedException`
-  — see [errors.md](errors.md) for which is which.
+* The open reads the file's tail in one request of `InitialReadSize` bytes, 64 KiB by default and
+  never less; a footer larger than that costs a second read, not a refusal.
+* `IndexCacheBytes` on the session bounds what each open file keeps of decoded index runs. It is a
+  memory ceiling rather than a safety one, and 0 keeps nothing.
+* A cap refusal is `VortexFormatException`, an unknown component `VortexUnsupportedException`:
+  [errors.md](errors.md) says which is which.
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- limits
+dotnet run -c Release --project samples/Vorticity.Samples -- limits
 ```
