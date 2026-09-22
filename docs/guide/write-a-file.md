@@ -1,141 +1,121 @@
 # Write a file
 
-Write batches out, and see what the writer decided on your behalf.
-
-## The schema
+Fill columns in place, hand them to the writer, and read what it decided on your behalf.
 
 ```csharp
-DTypeArena types = new DTypeArena();
-DType schema = types.Struct(
-    ["city", "celsius"],
-    [types.Utf8(Nullability.NonNullable),
-     types.Primitive(PType.F64, Nullability.Nullable)],
-    Nullability.NonNullable);
-```
-
-The arena owns the type nodes; a `DType` is an index into it. Keep the arena alive as long as the
-types are in use — the writer, the batches and the file all point back into it.
-
-## The batch
-
-Three column shapes cover most files: a primitive, a text column, and a column with nulls.
-
-```csharp
-CanonicalArena arena = new CanonicalArena();
-
-// A primitive column: one buffer, filled in place.
-VortexBuffer degrees = arena.Allocate(rows * sizeof(double), 8, out Span<byte> degreeBytes);
-Span<double> celsius = MemoryMarshal.Cast<byte, double>(degreeBytes);
-for (int i = 0; i < rows; i++)
+await using (VortexFileWriter writer = session.CreateWriter<Reading>(path))
 {
-    celsius[i] = 10.0 + (i * 7919L % 3001) / 100.0;
-}
+    ColumnsBuilder<Reading> b = writer.Builder<Reading>();
+    double[] temperatures = new double[writer.BlockRows];
+    ulong[] validity = new ulong[writer.BlockRows / 64];
 
-// A text column is a view per row: four bytes of length, then the bytes themselves when they are
-// twelve or fewer, otherwise a prefix and the offset of the rest in a data buffer.
-VortexBuffer views = arena.Allocate(rows * 16, 8, out Span<byte> viewBytes);
-for (int i = 0; i < rows; i++)
-{
-    Span<byte> view = viewBytes.Slice(i * 16, 16);
-    int length = Encoding.UTF8.GetBytes(Cities[i % Cities.Length], view[4..]);
-    BinaryPrimitives.WriteInt32LittleEndian(view, length);
-}
+    for (int start = 0; start < Rows; start += writer.BlockRows)
+    {
+        int count = Math.Min(writer.BlockRows, Rows - start);
 
-// One bit per row says whether the value is there; one in a thousand is not.
-VortexBuffer bitmap = arena.Allocate((rows + 7) / 8, 8, out Span<byte> bits);
-bits.Fill(0xFF);
-for (int i = 0; i < rows; i += 1_000)
-{
-    bits[i >> 3] &= (byte)~(1 << (i & 7));
-}
+        Span<int> day = b.Day.GetSpan(count);
+        for (int i = 0; i < day.Length; i++) day[i] = (start + i) / 1_000;
+        b.Day.Advance(day.Length);
 
-int validity = arena.AddBool(types.Bool(Nullability.NonNullable), rows, Validity.NonNullable, bitmap, 0);
-int city = arena.AddVarBinView(schema.GetField(0), rows, Validity.NonNullable, views, [VortexBuffer.Empty]);
-int temperature = arena.AddPrimitive(schema.GetField(1), rows, Validity.Bitmap(validity), PType.F64, degrees);
-int root = arena.AddStruct(schema, rows, Validity.NonNullable, [city, temperature]);
-```
+        Temperatures(start, temperatures.AsSpan(0, count), validity);
+        b.Celsius.Append(temperatures.AsSpan(0, count), validity);
 
-`Validity` says which of four states a column is in: `NonNullable` (the type forbids nulls),
-`AllValid` (nullable, none here), `AllInvalid`, or `Bitmap(node)` (a bit per row). The first two
-cost nothing at all.
+        for (int i = 0; i < count; i++) b.City.Append(cities[(start + i) / 7 % cities.Length]);
 
-Every city here is short enough to live inside its view, so the data buffer is empty —
-`[VortexBuffer.Empty]`. A value over twelve bytes needs its bytes in that buffer, its first four
-bytes copied into the view as a prefix, and the buffer index and offset written at bytes 8 and 12 of
-the view.
+        await writer.WriteAsync(b, ct);
+        if (writer.UnflushedBytes > 8 << 20) await writer.FlushAsync(ct);
+    }
 
-## Writing it
-
-```csharp
-await using (VortexFileWriter writer = VortexFileWriter.Create(path, schema))
-{
-    using RecordBatch batch = new RecordBatch(arena, root, 0);
-    await writer.WriteAsync(batch);
-    report = await writer.CompleteAsync();
+    report = await writer.CompleteAsync(ct);
 }
 ```
 
-`WriteAsync` takes as many batches as you have; the third argument of a `RecordBatch` is the file row
-its first row is, so batches follow one another. `writer.PreferredBatchRows` is the size the writer
-would rather have — 8 192 — and handing it more at once is fine, as here.
+`Reading` is `[VortexRecord] public partial record struct Reading(int Day, double? Celsius, string City)`.
+The record's schema becomes the file's, and the generator gives the builder one property per member:
+`b.Day` is a `ColumnBuilder<int>`, `b.Celsius` a `ColumnBuilder<double?>`, `b.City` a
+`ColumnBuilder<string>`. `cities` holds the city names as UTF-8 byte arrays, and `Temperatures` fills
+a block of values and clears one bit in fifty in `validity`. [records.md](records.md) says what a
+record may hold.
 
-`CompleteAsync` is what makes the file a file: statistics, zone maps, indexes, footer. A writer
-disposed without it, or after `Abandon()`, leaves nothing usable behind.
+## What happens
+
+* `CreateWriter<Reading>` creates the file, replacing whatever was at the path, and binds the record.
+  `Builder<Reading>()` returns the writer's one builder, whose buffers come from the session's pool.
+  Every call returns the same builder.
+* `GetSpan(count)` is the `IBufferWriter` pattern. It hands you exactly `count` slots of the buffer
+  the encoder will read; you fill them and `Advance` commits them. A primitive column is encoded
+  from those bytes where they lie, without a copy.
+* `Append(values, validity)` takes a block of values and its bitmap in one call: bit `i % 64` of
+  word `i / 64` belongs to value `i`, and a set bit means the value is present. A bitmap with every
+  bit set allocates nothing. [write-nulls.md](write-nulls.md) covers the other null appends.
+* `Append` on a text column takes UTF-8 bytes and does not transcode them.
+  [write-text.md](write-text.md) covers strings, formatted values and long values.
+* `WriteAsync(b)` takes the builder's rows and clears it for the next block, keeping its buffers.
+  Once the rows it holds reach a chunk's worth of bytes, it encodes the whole blocks among them.
+* `FlushAsync` hands the encoded chunks to the file. It is the only I/O before completion, and
+  `UnflushedBytes` says how much is waiting for it.
+* `CompleteAsync` writes the pending rows as the last block, then the statistics, the zone maps
+  and the footer, and returns the `WriteReport`.
 
 ## What the writer decided
 
-```csharp
-Console.WriteLine($"{report.RowCount} rows in blocks of {report.BlockRows}, " +
-    $"{report.ChunkRows.Count} chunks, {report.Bytes.Total} bytes");
-foreach (ColumnWriteReport column in report.Columns)
-{
-    Console.WriteLine($"  {column.Path}: {string.Join(", ", column.Encodings)}");
-}
-```
+The report is the only place that says what was chosen. The sample prints it, grouping the
+per-chunk encodings:
 
 ```
-200000 rows in blocks of 8192, 2 chunks, 396025 bytes
-  data 393172, statistics 160, zone maps 1136, indexes 101, footer 1456
-  city: Dict, Dict
-  celsius: Dict, Alp
-  2800000 bytes of values became 396025
+1000000 rows in blocks of 8192, 50 chunks, 1564708 bytes, in 237 ms
+  data 1548084, statistics 200, zone maps 8264, indexes 0, footer 8160
+  chunk rows: 32768 x24, 8192 x24, 16384, 576
+  Day: RunEnd x49, Sequence
+  Celsius: Dict x49, Alp
+  City: RunEnd x50
+read back: 1000000 rows, 1564708 bytes on disk, mean 30.0000 °C
 ```
 
-The report is the only place that says what was chosen. Five city names became a dictionary; the
-temperatures became a dictionary and then a floating-point encoding. Nothing was sampled or guessed:
-the writer priced the candidates on the block it was holding.
+`report.Columns` gives one encoding per chunk and per column. A day lasts a thousand rows, so `Day`
+is written as runs; the last 576 rows all fall on day 999, a progression of step zero. Four hundred
+distinct temperatures make a dictionary, except in the small tail chunk, which took ALP. The city
+changes every seven rows, which is still a run. Nothing was sampled or guessed: the writer priced the
+candidates on each chunk it held. [11-write-strategy.md](../design/11-write-strategy.md) describes
+how.
 
-`report.Indexes` says the same for indexes, each one `Built` or `Abandoned` with the reason — the
-default policy builds what it can pay for out of a budget of a tenth of the file — 100 per mille —
-and gives up the rest. [indexes.md](indexes.md) is that subject.
+`report.Bytes` sums to the file's length. `report.ChunkRows` says how the rows were cut into chunks,
+and [blocks-and-chunks.md](blocks-and-chunks.md) explains why a write of one block at a time comes
+out as alternating chunks of 32 768 and 8 192 rows. `report.Indexes` lists every index the policy
+asked for: none here, since the default is `IndexPolicy.None` ([indexes.md](indexes.md)).
 
-## Appending
+## What it costs
 
-```csharp
-await using VortexFileWriter appender = await VortexFileWriter.AppendAsync(path);
-Console.WriteLine($"appending after {appender.RowCount} rows");   // 196608, not 200000
-await appender.WriteAsync(batch);
-WriteReport appended = await appender.CompleteAsync();            // 210000
-```
-
-An append rewinds to the last whole block and rewrites the tail: after 200 000 rows written in
-blocks of 8 192, it starts again at 196 608 and the 3 392 rows of the partial block are written
-afresh along with the new ones. Give the new batch a `startRow` of `appender.RowCount`.
-
-**Nothing else may hold the file.** An append opens it for writing, so a `VortexFile` still open
-over the same path makes it fail with `IOException`.
+The million rows took 237 ms in this run, first-use compilation included, and 1.56 MB on disk. The
+same rows stored without encoding take 20.8 MB ([writer-options.md](writer-options.md)). The
+columns are encoded on the thread that calls `WriteAsync`. The builder holds up to a chunk's worth
+of rows, about 1 MiB by default, before whole blocks are encoded and released.
 
 ## Watch out
 
-* The arena is reusable: `Reset()` gives its buffers back and lets the next batch start clean. A
-  writing loop should reset rather than allocate a new arena per batch.
-* A `RecordBatch` must be disposed, and disposing it does not reset the arena.
-* The options that change the file are in [options.md](options.md): compression, block size, write
-  profile, target edition, statistics, index budget.
-* For a file whose tail was torn by a crash mid-append, see [append-and-repair.md](append-and-repair.md).
+* **A span does not cross an `await`.** Fill it and call `Advance` before the next `await`: the
+  compiler refuses a `Span<T>` that lives across one.
+* **Every column must hold the same number of rows** when `WriteAsync` is called, and no list may be
+  left open. Otherwise it throws `VortexSchemaException`, for example: *The builder cannot be
+  written: field 1 of struct{…} holds 7 rows and field 0 holds 8. Complete every row before writing
+  it.*
+* **A builder belongs to its writer.** `WriteAsync` refuses another writer's builder with
+  `ArgumentException`. A builder is not thread-safe: one thread fills it and writes it.
+* **`CompleteAsync` is what makes the file.** A writer disposed without it gives the file up, and a
+  created file is deleted. [append-and-repair.md](append-and-repair.md) says what that means for an
+  append.
+* The options that change the file (compression, hints, block size, statistics, edition, metadata,
+  identity) are in [writer-options.md](writer-options.md).
+
+The other ways in: rows instead of columns ([write-rows.md](write-rows.md)), lists and nested
+records ([write-lists-and-records.md](write-lists-and-records.md)), a schema known only at run
+time ([write-without-a-record.md](write-without-a-record.md)), and a stream or an upload as the
+destination ([stream-to-an-object.md](stream-to-an-object.md)).
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- write-a-file
+dotnet run -c Release --project samples/Vorticity.Samples -- write-a-file
 ```
+
+The figures above come from that run.

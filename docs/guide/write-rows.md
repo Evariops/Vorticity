@@ -1,0 +1,72 @@
+# Write rows
+
+Hand the writer records rather than columns: a span you already hold, or a stream that arrives over
+time.
+
+```csharp
+await using VortexFileWriter writer = session.CreateWriter<Reading>(path);
+await writer.WriteAsync<Reading>(readings.AsSpan(), ct);
+report = await writer.CompleteAsync(ct);
+```
+
+```csharp
+await using VortexFileWriter streaming = session.CreateWriter<Reading>(path);
+await streaming.WriteAsync(ReadingsAsync(Rows, ct), ct);
+report = await streaming.CompleteAsync(ct);
+```
+
+`readings` is a `Reading[]` of a million rows; `ReadingsAsync` is an `async IAsyncEnumerable<Reading>`
+that yields the same rows and awaits every ten thousand, as a source reading pages would.
+
+## What happens
+
+* **A span** goes through the record's generated `WriteRows`, which copies it into the writer's
+  builder one column at a time: the numbers through `GetSpan`, the nullable members through
+  `Append(T?)`, the strings transcoded to UTF-8. The rows are read before `WriteAsync` returns, so
+  the array can be reused at once. The builder then behaves as in [write-a-file.md](write-a-file.md).
+* **A stream** is gathered into groups of `BlockRows` rows, 8 192 by default, in a pooled array; each
+  full group is written, and the writer flushes by itself once 8 MiB are waiting (four chunk targets,
+  when that is more). The last partial group is written when the stream ends. The caller counts
+  nothing and calls nothing but `CompleteAsync`.
+
+## What it costs
+
+```
+a span of 1000000 rows: 1522396 bytes, best of three 112 ms
+  chunk rows: 32768 x30, 16384, 576
+a stream of 1000000 rows: 1564708 bytes, best of three 136 ms
+  chunk rows: 32768 x24, 8192 x24, 16384, 576
+```
+
+Rows cost a field copy per row, and a `string` member is transcoded once per row; a list member is
+copied element by element, and a nested record goes through a pooled array. The generated code
+touches one column at a time, which is also why it can beat a hand-written loop that appends every
+column of a row before moving to the next ([write-lists-and-records.md](write-lists-and-records.md)
+measures one).
+
+The stream was slower by the enumeration and 42 KB larger. The difference in size is the chunks: rows
+that arrive one block at a time are sealed as alternating chunks of four blocks and one, where a single
+call over the whole span gives chunks of four. [blocks-and-chunks.md](blocks-and-chunks.md) shows the
+same effect with the builder.
+
+## Watch out
+
+* **Rows are a convenience, not the fast path for wide numeric data.** Filling a column with
+  `GetSpan` or a bulk `Append` skips the per-row copy; [write-a-file.md](write-a-file.md) is that
+  path.
+* **Rows appended to the builder and not yet written are written with these.** The span form shares
+  the writer's builder.
+* **A write that fails part way leaves nothing behind.** If `WriteRows` throws, the builder is cut back
+  to where it was before the call.
+* **The record must cover the file.** `CreateWriter<Reading>` makes the file's schema the record's.
+  Over a file whose schema came from elsewhere (an append, an untyped writer), the record's members
+  are bound to columns by name, and a member with no column throws `VortexSchemaException`.
+* Reading the rows back is [read-rows.md](read-rows.md).
+
+## Run it
+
+```
+dotnet run -c Release --project samples/Vorticity.Samples -- write-rows
+```
+
+The figures above come from that run.
