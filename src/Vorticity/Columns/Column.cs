@@ -89,7 +89,15 @@ public readonly ref struct Column<T>
     public T AsConstant()
     {
         RequireEncoding(ColumnEncoding.Constant);
-        return Length == 0 ? default! : ColumnReader.Read(Canonical(), 0);
+        if (Length == 0)
+        {
+            return default!;
+        }
+
+        // One row of the constant, made canonical, rather than the whole column tiled to read its
+        // first value: the value is the element, whatever the length.
+        int one = Layouts.CanonicalSlice.SliceAcross(Arena, Arena, Node, 0, 1);
+        return ColumnReader.Read(new Column<T>(Arena, one, Type, Extensions).Canonical(), 0);
     }
 
     /// <summary>The column in canonical form: the values decoded, once, into contiguous memory.</summary>
