@@ -220,6 +220,16 @@ public sealed class DTypeConstructionTests
         Assert.Throws<ArgumentException>(() => { arena.Struct(["a"], fields, Nullability.NonNullable); });
     }
 
+    [Fact]
+    public void AnExtensionWithoutAnIdIsMalformedWhenItBecomesASchema()
+    {
+        // The wire can carry an empty id, so the public schema built from it refuses the file,
+        // not the caller.
+        DTypeArena arena = new();
+        DType anonymous = arena.Extension(ReadOnlySpan<byte>.Empty, arena.Primitive(PType.I64, Nullability.NonNullable), ReadOnlySpan<byte>.Empty);
+        Assert.Throws<VortexFormatException>(() => VortexTypes.FromDType(anonymous));
+    }
+
     // ------------------------------------------------------------------ depth cap
 
     [Fact]

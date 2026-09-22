@@ -64,7 +64,9 @@ internal static class VortexTypes
                 type = VortexType.FixedSizeList(FromDType(d.ElementType), checked((int)d.FixedSize));
                 break;
             case DTypeKind.Extension:
-                return VortexType.Extension(d.ExtensionId, FromDType(d.StorageType), d.ExtensionMetadata.ToArray());
+                return string.IsNullOrEmpty(d.ExtensionId)
+                    ? throw new VortexFormatException("An extension dtype names no extension id.")
+                    : VortexType.Extension(d.ExtensionId, FromDType(d.StorageType), d.ExtensionMetadata.ToArray());
             case DTypeKind.Map:
                 return VortexType.Map(FromDType(d.KeyType), FromDType(d.ValueType), nullable);
             case DTypeKind.Union:

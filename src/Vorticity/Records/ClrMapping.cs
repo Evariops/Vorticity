@@ -273,6 +273,13 @@ internal static class TimeZones
             return TimeZoneInfo.Utc;
         }
 
+        // The name comes from the file: an empty one, or one the host will not even look up, is
+        // a zone this host cannot resolve, like a name it does not know.
+        if (string.IsNullOrWhiteSpace(zone))
+        {
+            return null;
+        }
+
         try
         {
             return TimeZoneInfo.FindSystemTimeZoneById(zone);
@@ -282,6 +289,10 @@ internal static class TimeZones
             return null;
         }
         catch (InvalidTimeZoneException)
+        {
+            return null;
+        }
+        catch (ArgumentException)
         {
             return null;
         }
