@@ -1,5 +1,7 @@
 using System;
 using System.Buffers;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -143,10 +145,11 @@ internal sealed class ChunkedLayoutReader : LayoutReader
     /// boundaries.
     /// </para>
     /// <para>
-    /// An encoding that <c>SelectsWithoutFullDecode</c> then materializes these rows alone, and so
-    /// does one that decodes a range of its rows: the rows are their own window, because the window
-    /// the plan gave the batch may hold dead blocks, which no batch reads. Any other encoding
-    /// decodes the chunk once, retains it, and gathers this range out of it. Against the
+    /// An encoding that decodes a range of its rows decodes these rows as one, the selection being a
+    /// dense one, even when it could also take them a row at a time; one that can only take rows
+    /// takes them; the rows are their own window, because the window the plan gave the batch may
+    /// hold dead blocks, which no batch reads. Any other encoding decodes the chunk once, retains
+    /// it, and gathers this range out of it. Against the
     /// whole-chunk path the trade runs both ways: that path decodes the chunk again for every batch
     /// touching it, where this decodes it once, but it then copies rows the whole-chunk path would
     /// merely have sliced.
@@ -159,11 +162,7 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         int[] range = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
         try
         {
-            int start = (int)local.Start;
-            for (int i = 0; i < length; i++)
-            {
-                range[i] = start + i;
-            }
+            Ascending(range.AsSpan(0, length), (int)local.Start);
 
             (int[]? Buffer, int Count) saved = context.ExchangeSelection(range, length);
             int lead = context.WindowLead;
@@ -184,6 +183,29 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         finally
         {
             ArrayPool<int>.Shared.Return(range);
+        }
+    }
+
+    /// <summary>Writes <paramref name="start"/>, <paramref name="start"/> + 1, … into <paramref name="destination"/>.</summary>
+    /// <remarks>A batch's rows are written once per column, so the fill runs four rows a store.</remarks>
+    private static void Ascending(Span<int> destination, int start)
+    {
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && destination.Length >= Vector128<int>.Count)
+        {
+            ref int first = ref MemoryMarshal.GetReference(destination);
+            Vector128<int> step = Vector128.Create(Vector128<int>.Count);
+            Vector128<int> next = Vector128.Create(start) + Vector128<int>.Indices;
+            for (; i <= destination.Length - Vector128<int>.Count; i += Vector128<int>.Count)
+            {
+                next.StoreUnsafe(ref first, (nuint)i);
+                next += step;
+            }
+        }
+
+        for (; i < destination.Length; i++)
+        {
+            destination[i] = start + i;
         }
     }
 

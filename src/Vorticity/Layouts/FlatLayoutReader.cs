@@ -435,6 +435,22 @@ internal sealed class FlatLayoutReader : LayoutReader
         return true;
     }
 
+    /// <summary>
+    /// Whether a selection is every row between its first and its last, which a slice serves with
+    /// views where a gather would copy them one by one.
+    /// </summary>
+    private static bool Contiguous(ReadOnlySpan<int> selection) =>
+        selection.Length > 0 && selection[^1] - selection[0] + 1 == selection.Length;
+
+    /// <summary>
+    /// Whether a selection holds at least half the rows between its first and its last, and at
+    /// least a block of them: below a block a range decode unpacks a whole block for a few rows,
+    /// which the selective route does not.
+    /// </summary>
+    private static bool Dense(ReadOnlySpan<int> selection) =>
+        selection.Length >= Arrays.Decoders.Compressed.FastLanes.BlockSize &&
+        2L * selection.Length >= (long)selection[^1] - selection[0] + 1;
+
     /// <summary>The whole of a retained window, as records in the batch's arena viewing the retained storage.</summary>
     private static int WholeOf(CanonicalArena held, int retained, ScanContext context) =>
         CanonicalSlice.SliceAcross(held, context.Canonical, retained, 0, held.GetNode(retained).Length);
@@ -446,6 +462,12 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// </remarks>
     private static int GatherRebased(ScanContext context, int nodeIndex, int origin, ReadOnlySpan<int> selection)
     {
+        if (Contiguous(selection))
+        {
+            return CanonicalSlice.SliceAcross(
+                context.Canonical, context.Canonical, nodeIndex, selection[0] - origin, selection.Length);
+        }
+
         int[] rented = System.Buffers.ArrayPool<int>.Shared.Rent(selection.Length);
         try
         {
@@ -589,6 +611,16 @@ internal sealed class FlatLayoutReader : LayoutReader
                 }
 
                 return Gather(held, retained, in fields, context, total);
+            }
+
+            // A selection covering most of the rows it spans is a range to the encoding, even one
+            // that takes rows without decoding: decoding the span and gathering out of it touches
+            // each row once in a kernel's stride, where the selective route pays a positioned read
+            // of every row. The rows a partly pruned chunk wants are such a selection, contiguous.
+            if (Dense(context.Selection) && Windowed(context, total) &&
+                TryWindowSelected(in node, rows, in fields, context, total, length, mayDecode: true, ref chunkRoot, ref loaded, out gathered))
+            {
+                return gathered;
             }
 
             // The specialized route re-establishes its own invariants once per batch, and this is
@@ -871,6 +903,13 @@ internal sealed class FlatLayoutReader : LayoutReader
     private static int Gather(
         CanonicalArena held, int retained, in FieldMask fields, ScanContext context, int total)
     {
+        ReadOnlySpan<int> selection = context.Selection;
+        if (Contiguous(selection))
+        {
+            return Narrowed(
+                CanonicalSlice.SliceAcross(held, context.Canonical, retained, selection[0], selection.Length), in fields, context);
+        }
+
         int whole = CanonicalSlice.SliceAcross(held, context.Canonical, retained, 0, total);
         int taken = Compute.CanonicalFilter.Apply(context.Canonical, whole, context.Selection);
         return Narrowed(taken, in fields, context);
