@@ -96,7 +96,7 @@ public sealed class ScanCorpusTests
             catch (VortexUnsupportedException error)
             {
                 named++;
-                if (error.ComponentId.Length == 0 || error.Kind.Length == 0)
+                if (error.ComponentId.Length == 0 || !Enum.IsDefined(error.Kind))
                 {
                     wrong.Append(entry.Id).Append(": unnamed component\n");
                 }

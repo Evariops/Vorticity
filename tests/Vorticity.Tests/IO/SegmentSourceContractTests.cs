@@ -551,7 +551,7 @@ public sealed class SegmentSourceContractTests
         using SegmentRequestSet set = new SegmentRequestSet();
         int slot = set.Add(Spec(1024, 512, 6));
 
-        await source.ReadManyAsync(set, CancellationToken.None);
+        await ((ISegmentReader)source).ReadManyAsync(set, CancellationToken.None);
         await source.DisposeAsync();
 
         Assert.True(content.AsSpan(1024, 512).SequenceEqual(set.GetBuffer(slot).Span));

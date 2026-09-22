@@ -22,10 +22,10 @@ public sealed class LimitsTests
     [Fact]
     public void UnsupportedException_names_id_and_kind()
     {
-        var ex = new VortexUnsupportedException("vortex.pco", VortexComponentKind.Array);
+        var ex = new VortexUnsupportedException("vortex.pco", ComponentKind.Array);
         Assert.Contains("vortex.pco", ex.Message, StringComparison.Ordinal);
         Assert.Contains("array", ex.Message, StringComparison.Ordinal);
         Assert.Equal("vortex.pco", ex.ComponentId);
-        Assert.Equal("array", ex.Kind);
+        Assert.Equal(ComponentKind.Array, ex.Kind);
     }
 }

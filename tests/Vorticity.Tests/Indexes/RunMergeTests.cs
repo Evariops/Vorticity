@@ -54,7 +54,7 @@ public sealed class RunMergeTests
         Decoders.EnsureRegistered();
         int rows = Block * 300;
         (byte[] bytes, WriteReport report) = await WriteAsync(rows);
-        Assert.Equal(300, report.ChunkRows.Count);
+        Assert.Equal(300, report.ChunkRows.Length);
         Assert.Equal(1, report.Index("k", IndexKinds.SortedRuns)!.Runs);
         Assert.Equal(1, report.Index("s", IndexKinds.PostingsBlocks)!.Runs);
 
@@ -119,7 +119,7 @@ public sealed class RunMergeTests
             Guid identity = Guid.NewGuid();
             (byte[] spilled, WriteReport report) = await WriteAsync(
                 rows, identity, scratchMemoryBytes: 0, scratchDirectory: directory);
-            Assert.Equal(chunks, report.ChunkRows.Count);
+            Assert.Equal(chunks, report.ChunkRows.Length);
 
             // The scratch file is gone with the writer.
             Assert.Empty(Directory.GetFiles(directory));

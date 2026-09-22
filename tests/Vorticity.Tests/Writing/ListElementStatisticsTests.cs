@@ -408,7 +408,7 @@ public sealed class ListElementStatisticsTests
             }
 
             WriteReport report = await writer.CompleteAsync();
-            return new Written(path, writer.ElementChunksWithoutStatistics, handed, report.ChunkRows.Count, wrong);
+            return new Written(path, writer.ElementChunksWithoutStatistics, handed, report.ChunkRows.Length, wrong);
         }
         finally
         {

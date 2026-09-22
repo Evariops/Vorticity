@@ -101,13 +101,13 @@ public sealed class EncodingHintTests
             // Without a hint the dense column bit-packs, chunk after chunk.
             Assert.All(plain.Columns[0].Encodings, scheme => Assert.Equal("BitPacked", scheme));
             Assert.All(hinted.Columns[0].Encodings, scheme => Assert.Equal("Zstd", scheme));
-            Assert.True(hinted.Columns[0].Encodings.Count > 1, "the fixture must write several chunks");
+            Assert.True(hinted.Columns[0].Encodings.Length > 1, "the fixture must write several chunks");
 
             // The memory held on every chunk, the first included: a pinned column starts with one,
             // where an unpinned column's first chunk has nothing to consult.
             Assert.Equal(hinted.Columns[0].PlansPriced, hinted.Columns[0].PlansHeld);
-            Assert.Equal(hinted.Columns[0].Encodings.Count, hinted.Columns[0].PlansPriced);
-            Assert.Equal(plain.Columns[0].Encodings.Count - 1, plain.Columns[0].PlansPriced);
+            Assert.Equal(hinted.Columns[0].Encodings.Length, hinted.Columns[0].PlansPriced);
+            Assert.Equal(plain.Columns[0].Encodings.Length - 1, plain.Columns[0].PlansPriced);
 
             // The other column is untouched, and both files hold the same rows.
             Assert.Equal(plain.Columns[1].Encodings, hinted.Columns[1].Encodings);

@@ -83,8 +83,8 @@ public sealed class AppendTests
                     await FeedAsync(writer, start, cut);
                     WriteReport report = await writer.CompleteAsync();
                     Assert.All(report.Indexes, r => Assert.True(
-                        r.Outcome == IndexOutcome.Built || r.Kind == IndexKinds.DictProbe || r.Kind == IndexKinds.BloomSbbf && r.Path != "f",
-                        $"{r.Path} {r.Kind}: {r.Reason}"));
+                        r.Outcome == IndexOutcome.Built || r.Kind == IndexKinds.DictProbe || r.Kind == IndexKinds.BloomSbbf && r.Column != "f",
+                        $"{r.Column} {r.Kind}: {r.Reason}"));
                 }
 
                 start = cut;
@@ -126,7 +126,7 @@ public sealed class AppendTests
             {
                 await FeedAsync(writer, 8_192, Rows);
                 WriteReport report = await writer.CompleteAsync();
-                Assert.Contains(report.Indexes, r => r.Path == "v" && r.Outcome == IndexOutcome.Abandoned);
+                Assert.Contains(report.Indexes, r => r.Column == "v" && r.Outcome == IndexOutcome.Abandoned);
             }
 
             await using VortexFile file = await VortexFile.OpenAsync(path);
@@ -171,7 +171,7 @@ public sealed class AppendTests
                 fromTable = writer.ChunksFromTable;
             }
 
-            Assert.Equal(new long[] { Block }, after.ChunkRows.Skip(after.ChunkRows.Count - 1));
+            Assert.Equal(new int[] { Block }, after.ChunkRows.Skip(after.ChunkRows.Length - 1));
             int seeded = 0;
             int dictionaries = 0;
             for (int field = 0; field < Names.Length; field++)
@@ -298,9 +298,9 @@ public sealed class AppendTests
 
             IReadOnlyList<IndexWriteReport> reports = await VortexFileIndexer.AppendIndexesAsync(
                 later, Policy, new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
-            Assert.Contains(reports, r => r.Path == "v" && r.Kind == IndexKinds.SortedRuns && r.Outcome == IndexOutcome.Built);
-            Assert.Contains(reports, r => r.Path == "s" && r.Kind == IndexKinds.PostingsBlocks && r.Outcome == IndexOutcome.Built);
-            Assert.Contains(reports, r => r.Path == "f" && r.Kind == IndexKinds.BloomSbbf && r.Outcome == IndexOutcome.Built);
+            Assert.Contains(reports, r => r.Column == "v" && r.Kind == IndexKinds.SortedRuns && r.Outcome == IndexOutcome.Built);
+            Assert.Contains(reports, r => r.Column == "s" && r.Kind == IndexKinds.PostingsBlocks && r.Outcome == IndexOutcome.Built);
+            Assert.Contains(reports, r => r.Column == "f" && r.Kind == IndexKinds.BloomSbbf && r.Outcome == IndexOutcome.Built);
 
             // Not a data byte moved: the old file is a prefix of the new one.
             byte[] after = await System.IO.File.ReadAllBytesAsync(later);

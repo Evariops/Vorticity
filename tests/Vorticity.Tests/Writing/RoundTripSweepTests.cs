@@ -10,6 +10,7 @@
 // its coverage is the corpus's rather than the author's, and a silent skip list would put the
 // author back in charge of it.
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -196,7 +197,7 @@ public sealed class RoundTripSweepTests
 
                 WriteReport report = await writer.CompleteAsync(CancellationToken.None);
                 indexes = report.Indexes;
-                columns = report.Columns.Count;
+                columns = report.Columns.Length;
             }
             finally
             {
@@ -387,9 +388,9 @@ public sealed class RoundTripSweepTests
         Assert.Equal((3L, 1L, CompactionStyle.Tiered), (result.ObjectsIn, result.ObjectsOut, result.Style));
 
         string key = string.Empty;
-        await foreach (ObjectEntry entry in dataset.ObjectsAsync())
+        await foreach (DataObject held in dataset.ObjectsAsync())
         {
-            key = entry.Key;
+            key = held.Key;
         }
 
         ObjectHead head = (await store.HeadAsync(key, CancellationToken.None))!.Value;

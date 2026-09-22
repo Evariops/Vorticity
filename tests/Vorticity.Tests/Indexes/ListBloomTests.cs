@@ -301,7 +301,7 @@ public sealed class ListBloomTests
         {
             IReadOnlyList<IndexWriteReport> reports = await VortexFileIndexer.AppendIndexesAsync(
                 later, Policy, new VortexWriteOptions { IndexBudgetPerMille = Unbounded });
-            Assert.Contains(reports, r => r.Path == "items" && r.Outcome == IndexOutcome.Built);
+            Assert.Contains(reports, r => r.Column == "items" && r.Outcome == IndexOutcome.Built);
 
             VortexExpr filter = Expr.ListContains(Expr.Field("items"), FilterLiteral.From(Element(12_345)));
             await using VortexFile a = await VortexFile.OpenAsync(later);
@@ -458,7 +458,7 @@ public sealed class ListBloomTests
             }
 
             WriteReport report = await writer.CompleteAsync();
-            IndexWriteReport index = Assert.Single(report.Indexes, r => r.Path == "items");
+            IndexWriteReport index = Assert.Single(report.Indexes, r => r.Column == "items");
             Assert.Equal(IndexOutcome.Abandoned, index.Outcome);
             return index.Reason!;
         }

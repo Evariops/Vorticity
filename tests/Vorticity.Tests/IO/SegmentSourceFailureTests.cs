@@ -342,7 +342,7 @@ public sealed class SegmentSourceFailureTests
         }
 
         VortexFormatException error = await Assert.ThrowsAsync<VortexFormatException>(
-            async () => await source.ReadAsync(Spec(4096, 128, 6), CancellationToken.None));
+            async () => await ((ISegmentReader)source).ReadAsync(Spec(4096, 128, 6), CancellationToken.None));
 
         Assert.Contains("shorter than its own footer", error.Message, StringComparison.Ordinal);
     }

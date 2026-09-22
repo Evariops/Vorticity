@@ -69,7 +69,7 @@ public sealed class LocatingIndexTests
         // they write. The rows are a whole number of blocks, so no chunk keeps a run of its own.
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
-        int chunks = written.Report.ChunkRows.Count;
+        int chunks = written.Report.ChunkRows.Length;
         Assert.True(chunks > 1);
         Assert.Equal(0, Rows % Block);
 
@@ -217,7 +217,7 @@ public sealed class LocatingIndexTests
 
         // One segment per run is enough to find a key: the run's table says which.
         int stride = column == "key" ? KeyRunOptions.PostingsStride : KeyRunOptions.SortedStride;
-        Assert.True(locating.SegmentsRead <= stride * written.Report.ChunkRows.Count, $"{locating.SegmentsRead} segments read");
+        Assert.True(locating.SegmentsRead <= stride * written.Report.ChunkRows.Length, $"{locating.SegmentsRead} segments read");
     }
 
     [Fact]

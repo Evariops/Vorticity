@@ -136,7 +136,7 @@ public sealed class IndexWriteTests
             .For("id", IndexSpec.SortedRuns);
         (byte[] bytes, WriteReport report) = await WriteAsync(Options(policy));
 
-        Assert.Equal(2, report.Indexes.Count);
+        Assert.Equal(2, report.Indexes.Length);
         foreach (IndexWriteReport index in report.Indexes)
         {
             Assert.Equal(IndexOutcome.Abandoned, index.Outcome);
@@ -165,7 +165,7 @@ public sealed class IndexWriteTests
             Assert.Equal(bytes.Length, report.Bytes.Total);
             Assert.Equal((long)Rows, report.RowCount);
             Assert.True(report.Bytes.Data > 0 && report.Bytes.ZoneMaps > 0 && report.Bytes.Statistics > 0);
-            Assert.Equal(3, report.Columns.Count);
+            Assert.Equal(3, report.Columns.Length);
 
             await using VortexFile file = await OpenAsync(bytes);
             long directory = file.HasIndexDirectory
@@ -184,11 +184,11 @@ public sealed class IndexWriteTests
 
         // Each batch of 5 000 rows emits the whole blocks it completes: 4, 5, 5, 5 blocks, then the
         // short tail at close.
-        Assert.Equal(new long[] { 4_096, 5_120, 5_120, 5_120, 544 }, report.ChunkRows);
-        int chunks = report.ChunkRows.Count;
+        Assert.Equal(new int[] { 4_096, 5_120, 5_120, 5_120, 544 }, report.ChunkRows);
+        int chunks = report.ChunkRows.Length;
         foreach (ColumnWriteReport column in report.Columns)
         {
-            Assert.Equal(chunks, column.Encodings.Count);
+            Assert.Equal(chunks, column.Encodings.Length);
             Assert.InRange(column.PlansHeld, 0, column.PlansPriced);
             Assert.InRange(column.PlanMemoryHitRate, 0.0, 1.0);
         }
@@ -249,7 +249,7 @@ public sealed class IndexWriteTests
     /// </summary>
     private static List<(ulong First, ulong End)> DictionaryBlocks(WriteReport report, IReadOnlyList<string> encodings)
     {
-        Assert.Equal(report.ChunkRows.Count, encodings.Count);
+        Assert.Equal(report.ChunkRows.Length, encodings.Count);
         Assert.Equal(Block, report.BlockRows);
         List<(ulong, ulong)> runs = [];
         long row = 0;

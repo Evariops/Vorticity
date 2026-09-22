@@ -32,7 +32,7 @@ public sealed class RandomAccessRetentionTests
             slots[i] = set.Add(Spec((ulong)(i * 65536), 65536, 6));
         }
 
-        await source.ReadManyAsync(set, CancellationToken.None);
+        await ((ISegmentReader)source).ReadManyAsync(set, CancellationToken.None);
 
         Assert.Equal(1, source.SlicedRunCount);
         Assert.Equal(0, source.CopiedRunCount);
@@ -55,7 +55,7 @@ public sealed class RandomAccessRetentionTests
             slots[i] = set.Add(Spec((ulong)(i * 512 * 1024), 8, 3));
         }
 
-        await source.ReadManyAsync(set, CancellationToken.None);
+        await ((ISegmentReader)source).ReadManyAsync(set, CancellationToken.None);
 
         Assert.Equal(0, source.SlicedRunCount);
         Assert.Equal(1, source.CopiedRunCount);
@@ -81,7 +81,7 @@ public sealed class RandomAccessRetentionTests
         int a = set.Add(Spec(0, 8, 3));
         int b = set.Add(Spec(32768, 8, 3));
 
-        await source.ReadManyAsync(set, CancellationToken.None);
+        await ((ISegmentReader)source).ReadManyAsync(set, CancellationToken.None);
 
         Assert.Equal(1, source.SlicedRunCount);
         Assert.Equal(0, source.CopiedRunCount);
@@ -103,7 +103,7 @@ public sealed class RandomAccessRetentionTests
             int alsoSparse = set.Add(Spec(2 * 1024 * 1024, 8, 3));
             int dense = set.Add(Spec(3 * 1024 * 1024, 512 * 1024, 6));
 
-            await source.ReadManyAsync(set, CancellationToken.None);
+            await ((ISegmentReader)source).ReadManyAsync(set, CancellationToken.None);
 
             Assert.True(content.AsSpan(0, 8).SequenceEqual(set.GetBuffer(sparse).Span));
             Assert.True(content.AsSpan(2 * 1024 * 1024, 8).SequenceEqual(set.GetBuffer(alsoSparse).Span));

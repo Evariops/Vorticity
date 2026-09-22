@@ -150,7 +150,7 @@ public sealed class CompositeKeyTests
     {
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(withEncoder: false);
-        IndexWriteReport report = Assert.Single(written.Report.Indexes, r => r.Path == "(country, city)");
+        IndexWriteReport report = Assert.Single(written.Report.Indexes, r => r.Column == "(country, city)");
         Assert.Equal(IndexOutcome.Abandoned, report.Outcome);
         Assert.Contains("KeyEncoder", report.Reason, StringComparison.Ordinal);
 

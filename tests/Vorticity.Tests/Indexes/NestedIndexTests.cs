@@ -65,10 +65,10 @@ public sealed class NestedIndexTests
         Assert.Equal(IndexOutcome.Built, written.Report.Index("person.address.city", IndexKinds.SortedRuns)?.Outcome);
         Assert.Equal(IndexOutcome.Built, written.Report.Index("(person.address.city, id)", IndexKinds.SortedRuns)?.Outcome);
 
-        IndexWriteReport nope = Assert.Single(reports, r => r.Path == "person.nope");
+        IndexWriteReport nope = Assert.Single(reports, r => r.Column == "person.nope");
         Assert.Equal(IndexOutcome.Abandoned, nope.Outcome);
         Assert.Contains("names no column", nope.Reason, StringComparison.Ordinal);
-        IndexWriteReport auto = Assert.Single(reports, r => r.Path == "person.address");
+        IndexWriteReport auto = Assert.Single(reports, r => r.Column == "person.address");
         Assert.Equal(IndexOutcome.Abandoned, auto.Outcome);
         Assert.Contains("Auto chooses among the top-level columns", auto.Reason, StringComparison.Ordinal);
 
@@ -177,7 +177,7 @@ public sealed class NestedIndexTests
             await Written.WriteAsync(path, indexed: false);
             IReadOnlyList<IndexWriteReport> reports = await VortexFileIndexer.AppendIndexesAsync(
                 path, Policy, new VortexWriteOptions { IndexBudgetPerMille = 1_000_000, KeyEncoder = new RowKeyEncoder(Asc) });
-            Assert.Contains(reports, r => r.Path == "person.address.city" && r.Outcome == IndexOutcome.Built);
+            Assert.Contains(reports, r => r.Column == "person.address.city" && r.Outcome == IndexOutcome.Built);
 
             await using VortexFile file = await VortexFile.OpenAsync(path);
             await AssertWalksAsync(file);

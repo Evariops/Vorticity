@@ -161,8 +161,8 @@ public sealed class CorpusSegmentIoTests
         await using MemoryMappedSegmentSource mapped = MemoryMappedSegmentSource.Open(path);
         await using FileSegmentSource random = FileSegmentSource.Open(path);
 
-        SegmentOwner a = await mapped.ReadRangeAsync(start, tailWanted, 8, CancellationToken.None);
-        SegmentOwner b = await random.ReadRangeAsync(start, tailWanted, 8, CancellationToken.None);
+        SegmentOwner a = await ((ISegmentReader)mapped).ReadRangeAsync(start, tailWanted, 8, CancellationToken.None);
+        SegmentOwner b = await ((ISegmentReader)random).ReadRangeAsync(start, tailWanted, 8, CancellationToken.None);
 
         try
         {
@@ -193,9 +193,9 @@ public sealed class CorpusSegmentIoTests
         SegmentSpec overrun = Spec((ulong)length - 8, 64, 3);
 
         await Assert.ThrowsAsync<VortexFormatException>(
-            async () => await mapped.ReadAsync(overrun, CancellationToken.None));
+            async () => await ((ISegmentReader)mapped).ReadAsync(overrun, CancellationToken.None));
         await Assert.ThrowsAsync<VortexFormatException>(
-            async () => await random.ReadAsync(overrun, CancellationToken.None));
+            async () => await ((ISegmentReader)random).ReadAsync(overrun, CancellationToken.None));
     }
 
     [Theory]

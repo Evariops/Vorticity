@@ -151,8 +151,7 @@ public sealed class ConstantFormTests
     private static async Task Rewrite(string source, string destination)
     {
         await using VortexFile file = await VortexFile.OpenAsync(source, CancellationToken.None);
-        await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(destination, file.DType);
+        await using VortexFileWriter writer = VortexFileWriter.Create(destination, file.DType);
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {

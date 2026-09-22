@@ -18,7 +18,7 @@ public sealed class MemorySegmentSourceTests
     [Fact]
     public async Task A_failing_slot_leaves_no_slot_filled_behind_it()
     {
-        MemorySegmentSource source = new MemorySegmentSource(Pattern(256));
+        ISegmentReader source = new MemorySegmentSource(Pattern(256));
         using SegmentRequestSet set = new SegmentRequestSet();
 
         int first = set.Add(Spec(0, 32));
@@ -43,11 +43,11 @@ public sealed class MemorySegmentSourceTests
         int first = set.Add(Spec(0, 32));
         int escapes = set.Add(Spec(192, 128));
 
-        MemorySegmentSource tooShort = new MemorySegmentSource(Pattern(256));
+        ISegmentReader tooShort = new MemorySegmentSource(Pattern(256));
         await Assert.ThrowsAsync<VortexFormatException>(
             async () => await tooShort.ReadManyAsync(set, CancellationToken.None));
 
-        MemorySegmentSource whole = new MemorySegmentSource(Pattern(512));
+        ISegmentReader whole = new MemorySegmentSource(Pattern(512));
         await whole.ReadManyAsync(set, CancellationToken.None);
 
         Assert.True(set.IsPopulated);
@@ -60,7 +60,7 @@ public sealed class MemorySegmentSourceTests
     {
         // The early return the other three sources have: a second pass over a finished set is a
         // no-op, not a re-read, and not a `SetResult` onto a slot that already holds an owner.
-        MemorySegmentSource source = new MemorySegmentSource(Pattern(256));
+        ISegmentReader source = new MemorySegmentSource(Pattern(256));
         using SegmentRequestSet set = new SegmentRequestSet();
         int slot = set.Add(Spec(0, 32));
 
