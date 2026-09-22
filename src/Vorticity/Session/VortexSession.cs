@@ -293,8 +293,15 @@ public sealed class VortexSession : IAsyncDisposable
         }
     }
 
-    private VortexOpenOptions Effective(VortexOpenOptions? options) =>
-        (options ?? VortexOpenOptions.Default) with { IndexCacheBytes = Options.IndexCacheBytes };
+    /// <summary>The options an open runs under: the caller's, with the session's index cache budget.</summary>
+    /// <remarks>A copy only when the budgets differ, so that an open under the defaults allocates no options.</remarks>
+    private VortexOpenOptions Effective(VortexOpenOptions? options)
+    {
+        VortexOpenOptions given = options ?? VortexOpenOptions.Default;
+        return given.IndexCacheBytes == Options.IndexCacheBytes
+            ? given
+            : given with { IndexCacheBytes = Options.IndexCacheBytes };
+    }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
 

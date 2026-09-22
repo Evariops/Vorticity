@@ -112,17 +112,30 @@ public sealed record VortexOpenOptions
     internal long IndexCacheBytes { get; init; } = VortexReadOptions.DefaultIndexCacheBytes;
 
     /// <summary>Read-time policy for every scan of the opened file.</summary>
+    /// <remarks>
+    /// Options that change none of the read policy's defaults share <see cref="VortexReadOptions.Default"/>,
+    /// so that an open, which asks for it more than once, allocates no policy of its own.
+    /// </remarks>
     internal VortexReadOptions Read
     {
-        get => _read ?? new VortexReadOptions
-        {
-            MaxDecompressedSize = MaxDecompressedSize,
-            VerifyStatistics = VerifyStatistics,
-            IndexCacheBytes = IndexCacheBytes,
-            IndexFragments = Fragments(IndexFragments),
-        };
+        get => _read ?? (ReadsAsDefault
+            ? VortexReadOptions.Default
+            : new VortexReadOptions
+            {
+                MaxDecompressedSize = MaxDecompressedSize,
+                VerifyStatistics = VerifyStatistics,
+                IndexCacheBytes = IndexCacheBytes,
+                IndexFragments = Fragments(IndexFragments),
+            });
         init => _read = value;
     }
+
+    /// <summary>Whether every value the read policy takes from these options is its default.</summary>
+    private bool ReadsAsDefault =>
+        MaxDecompressedSize == VortexLimits.DefaultMaxDecompressedSize
+        && !VerifyStatistics
+        && IndexCacheBytes == VortexReadOptions.DefaultIndexCacheBytes
+        && IndexFragments.IsDefaultOrEmpty;
 
     /// <summary>These options for the first <paramref name="fileLength"/> bytes, refusing a torn tail there.</summary>
     /// <param name="fileLength">The prefix's length.</param>
