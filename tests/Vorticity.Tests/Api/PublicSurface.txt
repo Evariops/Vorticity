@@ -272,18 +272,38 @@ Vorticity:     method bool get_Item(Column<bool>, int)
 Vorticity:     method decimal get_Item(Column<decimal>, int)
 Vorticity:     method int get_Scale(Column<Nullable<decimal>>)
 Vorticity:     method int get_Scale(Column<decimal>)
+Vorticity:     method void CopyTo(Column<DateOnly>, Span<DateOnly>)
+Vorticity:     method void CopyTo(Column<DateTime>, Span<DateTime>)
+Vorticity:     method void CopyTo(Column<DateTimeOffset>, Span<DateTimeOffset>)
+Vorticity:     method void CopyTo(Column<Guid>, Span<Guid>)
+Vorticity:     method void CopyTo(Column<Nullable<DateOnly>>, Span<Nullable<DateOnly>>)
+Vorticity:     method void CopyTo(Column<Nullable<DateTime>>, Span<Nullable<DateTime>>)
+Vorticity:     method void CopyTo(Column<Nullable<DateTimeOffset>>, Span<Nullable<DateTimeOffset>>)
+Vorticity:     method void CopyTo(Column<Nullable<Guid>>, Span<Nullable<Guid>>)
+Vorticity:     method void CopyTo(Column<Nullable<TimeOnly>>, Span<Nullable<TimeOnly>>)
+Vorticity:     method void CopyTo(Column<Nullable<VortexDecimal>>, Span<Nullable<VortexDecimal>>)
+Vorticity:     method void CopyTo(Column<Nullable<bool>>, Span<Nullable<bool>>)
+Vorticity:     method void CopyTo(Column<Nullable<decimal>>, Span<Nullable<decimal>>)
+Vorticity:     method void CopyTo(Column<TimeOnly>, Span<TimeOnly>)
+Vorticity:     method void CopyTo(Column<VortexDecimal>, Span<VortexDecimal>)
+Vorticity:     method void CopyTo(Column<bool>, Span<bool>)
+Vorticity:     method void CopyTo(Column<decimal>, Span<decimal>)
+Vorticity:     method void CopyTo<T>(Column<Nullable<T>>, Span<Nullable<T>>)
 Vorticity:     method void CopyTo<T>(Column<T>, Span<T>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$027C1BC877FD908CC1202CF5E37C6868
+Vorticity:     method void CopyTo(Span<Nullable<TimeOnly>>)
 Vorticity:     property Nullable<TimeOnly> Item[int] { get; }
 Vorticity:     property TimeUnit Unit { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$027C1BC877FD908CC1202CF5E37C6868.<M>$818B4016A1F77038C21C703DD20B5CAA
 Vorticity:     method void <Extension>$(Column<Nullable<TimeOnly>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$1AAB1B51484B53D7DAAB47829228574F
+Vorticity:     method void CopyTo(Span<Guid>)
 Vorticity:     property Guid Item[int] { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$1AAB1B51484B53D7DAAB47829228574F.<M>$4AD1AE562B50841DCAF0132321824A64
 Vorticity:     method void <Extension>$(Column<Guid>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$2077CDA8DB808CA1BF444393CE5A17BA
 Vorticity:     method Column<long> Storage()
+Vorticity:     method void CopyTo(Span<DateTime>)
 Vorticity:     property DateTime Item[int] { get; }
 Vorticity:     property TimeUnit Unit { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$2077CDA8DB808CA1BF444393CE5A17BA.<M>$5E81712FA9A0603D0B2895140F124E2F
@@ -294,6 +314,7 @@ Vorticity: static class Vorticity.ColumnExtensions.<G>$42E7A66D74C946B9F43093725
 Vorticity:     method void <Extension>$(Column<ReadOnlyMemory<byte>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$50A7F12AEB1E8EEBA16C8FEBFD1EDD03
 Vorticity:     method Column<long> Storage()
+Vorticity:     method void CopyTo(Span<DateTimeOffset>)
 Vorticity:     property DateTimeOffset Item[int] { get; }
 Vorticity:     property TimeUnit Unit { get; }
 Vorticity:     property TimeZoneInfo TimeZone { get; }
@@ -301,48 +322,57 @@ Vorticity: static class Vorticity.ColumnExtensions.<G>$50A7F12AEB1E8EEBA16C8FEBF
 Vorticity:     method void <Extension>$(Column<DateTimeOffset>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$5419D99BF57E52664AC1913FA1826C44
 Vorticity:     method Column<TStorage> Storage<TStorage>()
+Vorticity:     method void CopyTo(Span<Nullable<decimal>>)
 Vorticity:     property Nullable<decimal> Item[int] { get; }
 Vorticity:     property int Scale { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$5419D99BF57E52664AC1913FA1826C44.<M>$CF7BDE81E9873C4BD6D2F1E8CD3AD39C
 Vorticity:     method void <Extension>$(Column<Nullable<decimal>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$688FE05FA290186FA098F7FC31DA3D7B
+Vorticity:     method void CopyTo(Span<Nullable<DateTimeOffset>>)
 Vorticity:     property Nullable<DateTimeOffset> Item[int] { get; }
 Vorticity:     property TimeUnit Unit { get; }
 Vorticity:     property TimeZoneInfo TimeZone { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$688FE05FA290186FA098F7FC31DA3D7B.<M>$CF09AEF0033796B0DC857B47F7071E9B
 Vorticity:     method void <Extension>$(Column<Nullable<DateTimeOffset>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$6CCD9F999F27E34095E24BC7F386C9D0
+Vorticity:     method void CopyTo(Span<Nullable<bool>>)
 Vorticity:     property Nullable<bool> Item[int] { get; }
 Vorticity:     property ReadOnlySpan<ulong> Bits { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$6CCD9F999F27E34095E24BC7F386C9D0.<M>$8E5F6F163532589412C612F0794B4F0C
 Vorticity:     method void <Extension>$(Column<Nullable<bool>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$899CE77F0B6C4A20817B85FE35B6D525<$T0>
+Vorticity:     method void CopyTo(Span<Nullable<$T0>>)
 Vorticity:     property Nullable<$T0> Item[int] { get; }
 Vorticity:     property ReadOnlySpan<$T0> Values { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$899CE77F0B6C4A20817B85FE35B6D525<$T0>.<M>$F2D0A1701F313179E6358A5E10E8F69C<T>
 Vorticity:     method void <Extension>$(Column<Nullable<T>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$98E4758CD8F31D57ED2530FDD8B2F4F2
+Vorticity:     method void CopyTo(Span<Nullable<VortexDecimal>>)
 Vorticity:     property Nullable<VortexDecimal> Item[int] { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$98E4758CD8F31D57ED2530FDD8B2F4F2.<M>$F97604A303680903D01161A8A272E4CD
 Vorticity:     method void <Extension>$(Column<Nullable<VortexDecimal>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$9BF3DEBDD357F935BAD3C9C6BEDF6807
+Vorticity:     method void CopyTo(Span<bool>)
 Vorticity:     property ReadOnlySpan<ulong> Bits { get; }
 Vorticity:     property bool Item[int] { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$9BF3DEBDD357F935BAD3C9C6BEDF6807.<M>$2B4A2D3B63476E33755D18E8FF3E9026
 Vorticity:     method void <Extension>$(Column<bool>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$A0344EE3871A26133A22AF0EBAB57A85
 Vorticity:     method Column<TStorage> Storage<TStorage>()
+Vorticity:     method void CopyTo(Span<TimeOnly>)
 Vorticity:     property TimeOnly Item[int] { get; }
 Vorticity:     property TimeUnit Unit { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$A0344EE3871A26133A22AF0EBAB57A85.<M>$6ED4858C31495D6B432442D1EF8D8601
 Vorticity:     method void <Extension>$(Column<TimeOnly>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$A7FA7D2B89BE0F3B4FBC8145CC4C5234
 Vorticity:     method Column<TStorage> Storage<TStorage>()
+Vorticity:     method void CopyTo(Span<VortexDecimal>)
 Vorticity:     property VortexDecimal Item[int] { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$A7FA7D2B89BE0F3B4FBC8145CC4C5234.<M>$DE4B91A74E30F5C8F14D46B14AE116FA
 Vorticity:     method void <Extension>$(Column<VortexDecimal>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$AA55A0C3E7F446A80712C40C4A0E794A
 Vorticity:     method Column<TStorage> Storage<TStorage>()
+Vorticity:     method void CopyTo(Span<decimal>)
 Vorticity:     property decimal Item[int] { get; }
 Vorticity:     property int Scale { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$AA55A0C3E7F446A80712C40C4A0E794A.<M>$E57DFFB05DFEFB4F03C36C35E00C9178
@@ -353,6 +383,7 @@ Vorticity: static class Vorticity.ColumnExtensions.<G>$BAB6435507B18C353C957C7A9
 Vorticity:     method void <Extension>$(Column<Nullable<ReadOnlyMemory<byte>>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$C90645C576B57906DA9BB87285025E06
 Vorticity:     method Column<Nullable<long>> Storage()
+Vorticity:     method void CopyTo(Span<Nullable<DateTime>>)
 Vorticity:     property Nullable<DateTime> Item[int] { get; }
 Vorticity:     property TimeUnit Unit { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$C90645C576B57906DA9BB87285025E06.<M>$0A9272B9139ABE2871588852D165B9D3
@@ -365,6 +396,7 @@ Vorticity:     property ReadOnlySpan<$T0> Values { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$CBB1EB22C96EC95BD2A5A971C144E9E7<$T0>.<M>$2626D948A01743C816DC4E94D3630A93<T>
 Vorticity:     method void <Extension>$(Column<T>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$CDE73426A7685B7CAE523CC31875E9A8
+Vorticity:     method void CopyTo(Span<Nullable<Guid>>)
 Vorticity:     property Nullable<Guid> Item[int] { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$CDE73426A7685B7CAE523CC31875E9A8.<M>$29F1A1742AD143A8424064EF2620B112
 Vorticity:     method void <Extension>$(Column<Nullable<Guid>>)
@@ -375,10 +407,12 @@ Vorticity: static class Vorticity.ColumnExtensions.<G>$D3EF861BA235C36D3CE3F4422
 Vorticity:     method void <Extension>$(Column<ReadOnlyMemory<T>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$DB724A581687CAEDED9B79DF3CE906F4
 Vorticity:     method Column<TStorage> Storage<TStorage>()
+Vorticity:     method void CopyTo(Span<DateOnly>)
 Vorticity:     property DateOnly Item[int] { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$DB724A581687CAEDED9B79DF3CE906F4.<M>$4EC531B667DCC2069E1EC5070DE5243E
 Vorticity:     method void <Extension>$(Column<DateOnly>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$E6635382CECAB661DF6ABE6CD0258555
+Vorticity:     method void CopyTo(Span<Nullable<DateOnly>>)
 Vorticity:     property Nullable<DateOnly> Item[int] { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$E6635382CECAB661DF6ABE6CD0258555.<M>$4E9D5909A22E276040D945561C6A15B3
 Vorticity:     method void <Extension>$(Column<Nullable<DateOnly>>)
@@ -984,9 +1018,11 @@ Vorticity: static class Vorticity.TextColumnExtensions
 Vorticity:     method ReadOnlySpan<byte> get_Item<TText>(Column<TText>, int)
 Vorticity:     method int GetLength<TText>(Column<TText>, int)
 Vorticity:     method string GetString<TText>(Column<TText>, int)
+Vorticity:     method void CopyTo<TText>(Column<TText>, Span<TText>)
 Vorticity: sealed class Vorticity.TextColumnExtensions.<G>$D0D8B4B8A830B2184D6E6E98A94F288E<$T0>
 Vorticity:     method int GetLength(int)
 Vorticity:     method string GetString(int)
+Vorticity:     method void CopyTo(Span<$T0>)
 Vorticity:     property ReadOnlySpan<byte> Item[int] { get; }
 Vorticity: static class Vorticity.TextColumnExtensions.<G>$D0D8B4B8A830B2184D6E6E98A94F288E<$T0>.<M>$046CE9A4E234F57C60D56EB581C88883<TText>
 Vorticity:     method void <Extension>$(Column<TText>)

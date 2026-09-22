@@ -44,6 +44,10 @@ public static class ColumnExtensions
         public T? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index)
             ? ColumnData.Values<T>(column.Arena, column.Node)[index]
             : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<T?> destination) => ColumnData.CopyNullable(column.Arena, column.Node, destination);
     }
 
     extension(Column<bool> column)
@@ -53,6 +57,10 @@ public static class ColumnExtensions
 
         /// <summary>The value of row <paramref name="index"/>.</summary>
         public bool this[int index] => Bit(column.Arena, column.ValuesNode, index);
+
+        /// <summary>Copies the values into <paramref name="destination"/>.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<bool> destination) => ColumnData.CopyBits(column.Arena, column.ValuesNode, destination);
     }
 
     extension(Column<bool?> column)
@@ -62,6 +70,10 @@ public static class ColumnExtensions
 
         /// <summary>The value of row <paramref name="index"/>, or null.</summary>
         public bool? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? Bit(column.Arena, column.ValuesNode, index) : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<bool?> destination) => ColumnData.CopyBits(column.Arena, column.Node, column.ValuesNode, destination);
     }
 
     extension(Column<ReadOnlyMemory<byte>> column)
@@ -81,6 +93,10 @@ public static class ColumnExtensions
         /// <summary>The value of row <paramref name="index"/>.</summary>
         public decimal this[int index] => ColumnData.Decimal(column.Arena, column.Node, index);
 
+        /// <summary>Copies the values into <paramref name="destination"/>.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<decimal> destination) => ColumnData.CopyDecimals(column.Arena, column.Node, destination);
+
         /// <summary>The digits after the point.</summary>
         public int Scale => column.Type.Scale;
 
@@ -95,6 +111,10 @@ public static class ColumnExtensions
     {
         /// <summary>The value of row <paramref name="index"/>, or null.</summary>
         public decimal? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? ColumnData.Decimal(column.Arena, column.Node, index) : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<decimal?> destination) => ColumnData.CopyDecimals(column.Arena, column.Node, destination);
 
         /// <summary>The digits after the point.</summary>
         public int Scale => column.Type.Scale;
@@ -111,6 +131,10 @@ public static class ColumnExtensions
         /// <summary>The value of row <paramref name="index"/>.</summary>
         public VortexDecimal this[int index] => ColumnData.Wide(column.Arena, column.Node, index);
 
+        /// <summary>Copies the values into <paramref name="destination"/>.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<VortexDecimal> destination) => ColumnData.CopyWide(column.Arena, column.Node, destination);
+
         /// <summary>The unscaled values as stored.</summary>
         /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
         /// <returns>The storage column.</returns>
@@ -122,12 +146,20 @@ public static class ColumnExtensions
     {
         /// <summary>The value of row <paramref name="index"/>, or null.</summary>
         public VortexDecimal? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? ColumnData.Wide(column.Arena, column.Node, index) : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<VortexDecimal?> destination) => ColumnData.CopyWide(column.Arena, column.Node, destination);
     }
 
     extension(Column<DateOnly> column)
     {
         /// <summary>The value of row <paramref name="index"/>.</summary>
         public DateOnly this[int index] => Temporal.Date(column.Arena, column.Node, column.Type, index);
+
+        /// <summary>Copies the values into <paramref name="destination"/>.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<DateOnly> destination) => Temporal.Copy<DateOnly, Temporal.Dates>(column.Arena, column.Node, column.Type, destination);
 
         /// <summary>The stored values: days in an <c>int</c>, or milliseconds in a <c>long</c>.</summary>
         /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
@@ -140,12 +172,20 @@ public static class ColumnExtensions
     {
         /// <summary>The value of row <paramref name="index"/>, or null.</summary>
         public DateOnly? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? Temporal.Date(column.Arena, column.Node, column.Type, index) : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<DateOnly?> destination) => Temporal.Copy<DateOnly, Temporal.Dates>(column.Arena, column.Node, column.Type, destination);
     }
 
     extension(Column<TimeOnly> column)
     {
         /// <summary>The value of row <paramref name="index"/>.</summary>
         public TimeOnly this[int index] => Temporal.Time(column.Arena, column.Node, column.Type, index);
+
+        /// <summary>Copies the values into <paramref name="destination"/>.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<TimeOnly> destination) => Temporal.Copy<TimeOnly, Temporal.Times>(column.Arena, column.Node, column.Type, destination);
 
         /// <summary>The unit the values are stored in.</summary>
         public TimeUnit Unit => column.Type.Unit ?? TimeUnit.Microseconds;
@@ -162,6 +202,10 @@ public static class ColumnExtensions
         /// <summary>The value of row <paramref name="index"/>, or null.</summary>
         public TimeOnly? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? Temporal.Time(column.Arena, column.Node, column.Type, index) : null;
 
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<TimeOnly?> destination) => Temporal.Copy<TimeOnly, Temporal.Times>(column.Arena, column.Node, column.Type, destination);
+
         /// <summary>The unit the values are stored in.</summary>
         public TimeUnit Unit => column.Type.Unit ?? TimeUnit.Microseconds;
     }
@@ -170,6 +214,10 @@ public static class ColumnExtensions
     {
         /// <summary>The value of row <paramref name="index"/>; <see cref="DateTimeKind.Utc"/> for a UTC column, unspecified for a naive one.</summary>
         public DateTime this[int index] => Temporal.Timestamp(column.Arena, column.Node, column.Type, index);
+
+        /// <summary>Copies the values into <paramref name="destination"/>.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<DateTime> destination) => Temporal.Copy<DateTime, Temporal.Timestamps>(column.Arena, column.Node, column.Type, destination);
 
         /// <summary>The unit the values are stored in.</summary>
         public TimeUnit Unit => column.Type.Unit ?? TimeUnit.Microseconds;
@@ -184,6 +232,10 @@ public static class ColumnExtensions
         /// <summary>The value of row <paramref name="index"/>, or null.</summary>
         public DateTime? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? Temporal.Timestamp(column.Arena, column.Node, column.Type, index) : null;
 
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<DateTime?> destination) => Temporal.Copy<DateTime, Temporal.Timestamps>(column.Arena, column.Node, column.Type, destination);
+
         /// <summary>The unit the values are stored in.</summary>
         public TimeUnit Unit => column.Type.Unit ?? TimeUnit.Microseconds;
 
@@ -196,6 +248,10 @@ public static class ColumnExtensions
     {
         /// <summary>The value of row <paramref name="index"/>, in the column's zone.</summary>
         public DateTimeOffset this[int index] => Temporal.Zoned(column.Arena, column.Node, column.Type, index);
+
+        /// <summary>Copies the values into <paramref name="destination"/>.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<DateTimeOffset> destination) => Temporal.Copy<DateTimeOffset, Temporal.Zoneds>(column.Arena, column.Node, column.Type, destination);
 
         /// <summary>The unit the values are stored in.</summary>
         public TimeUnit Unit => column.Type.Unit ?? TimeUnit.Microseconds;
@@ -213,6 +269,10 @@ public static class ColumnExtensions
         /// <summary>The value of row <paramref name="index"/>, or null.</summary>
         public DateTimeOffset? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? Temporal.Zoned(column.Arena, column.Node, column.Type, index) : null;
 
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<DateTimeOffset?> destination) => Temporal.Copy<DateTimeOffset, Temporal.Zoneds>(column.Arena, column.Node, column.Type, destination);
+
         /// <summary>The unit the values are stored in.</summary>
         public TimeUnit Unit => column.Type.Unit ?? TimeUnit.Microseconds;
 
@@ -224,12 +284,20 @@ public static class ColumnExtensions
     {
         /// <summary>The value of row <paramref name="index"/>.</summary>
         public Guid this[int index] => ColumnData.Guid(column.Arena, column.Node, index);
+
+        /// <summary>Copies the values into <paramref name="destination"/>.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<Guid> destination) => ColumnData.CopyGuids(column.Arena, column.Node, destination);
     }
 
     extension(Column<Guid?> column)
     {
         /// <summary>The value of row <paramref name="index"/>, or null.</summary>
         public Guid? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? ColumnData.Guid(column.Arena, column.Node, index) : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<Guid?> destination) => ColumnData.CopyGuids(column.Arena, column.Node, destination);
     }
 
     extension<T>(Column<ReadOnlyMemory<T>> column)
@@ -311,34 +379,81 @@ public static class ExtensionColumnExtensions
 /// <summary>The temporal columns' values, from their storage and unit.</summary>
 internal static class Temporal
 {
-    internal static DateOnly Date(CanonicalArena arena, int node, VortexType type, int index)
+    internal static DateOnly Date(CanonicalArena arena, int node, VortexType type, int index) =>
+        Dates.Convert(ColumnData.Int64(arena, node, index), type, index);
+
+    internal static TimeOnly Time(CanonicalArena arena, int node, VortexType type, int index) =>
+        Times.Convert(ColumnData.Int64(arena, node, index), type, index);
+
+    internal static DateTime Timestamp(CanonicalArena arena, int node, VortexType type, int index) =>
+        Timestamps.Convert(ColumnData.Int64(arena, node, index), type, index);
+
+    internal static DateTimeOffset Zoned(CanonicalArena arena, int node, VortexType type, int index) =>
+        Zoneds.Convert(ColumnData.Int64(arena, node, index), type, index);
+
+    /// <summary>Copies every row of a temporal column, its storage resolved once.</summary>
+    internal static void Copy<T, TConvert>(CanonicalArena arena, int node, VortexType type, Span<T> destination)
+        where T : struct
+        where TConvert : struct, IConvert<T>
     {
-        long stored = ColumnData.Int64(arena, node, index);
-        long days = type.Unit == TimeUnit.Milliseconds ? TemporalUnits.FloorDiv(stored, TemporalUnits.MillisecondsPerDay) : stored;
-        return TemporalUnits.TryDate(days, out DateOnly date) ? date : OutOfRange<DateOnly>(index, stored, type);
+        ColumnData.IntegerStorage stored = ColumnData.Integers(arena, node);
+        Span<T> into = ColumnData.Destination(destination, stored.Length);
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = TConvert.Convert(stored[i], type, i);
+        }
     }
 
-    internal static TimeOnly Time(CanonicalArena arena, int node, VortexType type, int index)
+    /// <summary>Copies every row of a nullable temporal column, a null for a null row.</summary>
+    internal static void Copy<T, TConvert>(CanonicalArena arena, int node, VortexType type, Span<T?> destination)
+        where T : struct
+        where TConvert : struct, IConvert<T>
     {
-        long stored = ColumnData.Int64(arena, node, index);
-        return TemporalUnits.TryTime(stored, type.Unit ?? TimeUnit.Microseconds, out TimeOnly time) ? time : OutOfRange<TimeOnly>(index, stored, type);
+        ColumnData.IntegerStorage stored = ColumnData.Integers(arena, node);
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
+        Span<T?> into = ColumnData.Destination(destination, stored.Length);
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = ColumnData.IsValid(valid, i) ? TConvert.Convert(stored[i], type, i) : null;
+        }
     }
 
-    internal static DateTime Timestamp(CanonicalArena arena, int node, VortexType type, int index)
+    /// <summary>One temporal type's conversion from its storage.</summary>
+    internal interface IConvert<T>
     {
-        long stored = ColumnData.Int64(arena, node, index);
-        return TemporalUnits.TryInstant(stored, type.Unit ?? TimeUnit.Microseconds, out long ticks)
-            ? new DateTime(ticks, type.TimeZone is null ? DateTimeKind.Unspecified : DateTimeKind.Utc)
-            : OutOfRange<DateTime>(index, stored, type);
+        static abstract T Convert(long stored, VortexType type, int index);
     }
 
-    internal static DateTimeOffset Zoned(CanonicalArena arena, int node, VortexType type, int index)
+    internal readonly struct Dates : IConvert<DateOnly>
     {
-        long stored = ColumnData.Int64(arena, node, index);
-        return TemporalUnits.TryInstant(stored, type.Unit ?? TimeUnit.Microseconds, out long ticks)
+        public static DateOnly Convert(long stored, VortexType type, int index)
+        {
+            long days = type.Unit == TimeUnit.Milliseconds ? TemporalUnits.FloorDiv(stored, TemporalUnits.MillisecondsPerDay) : stored;
+            return TemporalUnits.TryDate(days, out DateOnly date) ? date : OutOfRange<DateOnly>(index, stored, type);
+        }
+    }
+
+    internal readonly struct Times : IConvert<TimeOnly>
+    {
+        public static TimeOnly Convert(long stored, VortexType type, int index) =>
+            TemporalUnits.TryTime(stored, type.Unit ?? TimeUnit.Microseconds, out TimeOnly time) ? time : OutOfRange<TimeOnly>(index, stored, type);
+    }
+
+    internal readonly struct Timestamps : IConvert<DateTime>
+    {
+        public static DateTime Convert(long stored, VortexType type, int index) =>
+            TemporalUnits.TryInstant(stored, type.Unit ?? TimeUnit.Microseconds, out long ticks)
+                ? new DateTime(ticks, type.TimeZone is null ? DateTimeKind.Unspecified : DateTimeKind.Utc)
+                : OutOfRange<DateTime>(index, stored, type);
+    }
+
+    internal readonly struct Zoneds : IConvert<DateTimeOffset>
+    {
+        public static DateTimeOffset Convert(long stored, VortexType type, int index) =>
+            TemporalUnits.TryInstant(stored, type.Unit ?? TimeUnit.Microseconds, out long ticks)
             && TemporalUnits.TryZoned(ticks, type.ZoneInfo, out DateTimeOffset value)
-            ? value
-            : OutOfRange<DateTimeOffset>(index, stored, type);
+                ? value
+                : OutOfRange<DateTimeOffset>(index, stored, type);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

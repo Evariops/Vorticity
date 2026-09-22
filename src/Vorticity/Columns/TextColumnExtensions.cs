@@ -26,5 +26,9 @@ public static class TextColumnExtensions
         /// <param name="index">A row.</param>
         /// <returns>The length.</returns>
         public int GetLength(int index) => ColumnData.ByteLength(column.Arena, column.Node, index);
+
+        /// <summary>Copies every row into <paramref name="destination"/> as a <see cref="string"/>, which allocates one per row; null for a null.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<TText> destination) => ColumnData.CopyStrings(column.Arena, column.Node, destination);
     }
 }

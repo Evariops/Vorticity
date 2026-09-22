@@ -127,6 +127,17 @@ internal static class RecordEmitter
                 w.Line($"global::System.ReadOnlySpan<{value.UnderlyingType}> values{k} = columns.Column<{value.ColumnType}>({k}).Values;");
                 values[k] = value.Kind == ValueKind.Enum ? $"({value.MemberType})values{k}[i]" : $"values{k}[i]";
             }
+            else if (value.IsNumber)
+            {
+                // The values and the validity words once per column, and a bit test per row: the
+                // indexer of a nullable column resolves the column again on every call.
+                w.Line($"{Vortex}Column<{value.ColumnType}> column{k} = columns.Column<{value.ColumnType}>({k});");
+                w.Line($"global::System.ReadOnlySpan<{value.UnderlyingType}> values{k} = column{k}.Values;");
+                w.Line($"bool allValid{k} = column{k}.IsAllValid;");
+                w.Line($"global::System.ReadOnlySpan<ulong> valid{k} = column{k}.ValidityWords;");
+                string read = value.Kind == ValueKind.Enum ? $"({value.MemberType})values{k}[i]" : $"values{k}[i]";
+                values[k] = $"(allValid{k} || ((valid{k}[i >> 6] >> (i & 63)) & 1UL) != 0 ? {read} : default({value.MemberType}))";
+            }
             else
             {
                 temps.Add((value.MemberType, "temp" + k));
@@ -160,7 +171,7 @@ internal static class RecordEmitter
             }
             else
             {
-                EmitRead(w, value, k, $"temp{k}[i]");
+                EmitRead(w, value, k, $"temp{k}[i]", buffer: $"temp{k}");
             }
 
             w.Line();
@@ -253,7 +264,12 @@ internal static class RecordEmitter
     }
 
     /// <summary>Fills <paramref name="target"/>, an expression of row <c>i</c>, from member <paramref name="k"/>'s column, for every row.</summary>
-    private static void EmitRead(SourceWriter w, ValueModel value, int k, string target)
+    /// <param name="w">The writer.</param>
+    /// <param name="value">The member's type.</param>
+    /// <param name="k">The member's position.</param>
+    /// <param name="target">The expression of row <c>i</c> to fill.</param>
+    /// <param name="buffer">The array <paramref name="target"/> indexes, when it is one: a column then copies itself into it whole.</param>
+    private static void EmitRead(SourceWriter w, ValueModel value, int k, string target, string? buffer = null)
     {
         w.Line("{");
         w.Indent();
@@ -275,6 +291,35 @@ internal static class RecordEmitter
                     w.Line($"global::System.ReadOnlySpan<{value.UnderlyingType}> values = columns.Column<{value.ColumnType}>({k}).Values;");
                     Loop(w, value.Kind == ValueKind.Enum ? $"{target} = ({value.MemberType})values[i];" : $"{target} = values[i];");
                 }
+                else if (value.IsNumber)
+                {
+                    w.Line($"{Vortex}Column<{value.ColumnType}> column = columns.Column<{value.ColumnType}>({k});");
+                    w.Line($"global::System.ReadOnlySpan<{value.UnderlyingType}> values = column.Values;");
+                    string read = value.Kind == ValueKind.Enum ? $"({value.MemberType})values[i]" : "values[i]";
+                    w.Open("if (column.IsAllValid)");
+                    Loop(w, $"{target} = {read};");
+                    w.Close();
+                    w.Open("else");
+                    w.Line("global::System.ReadOnlySpan<ulong> valid = column.ValidityWords;");
+                    Loop(w, $"{target} = ((valid[i >> 6] >> (i & 63)) & 1UL) != 0 ? {read} : default({value.MemberType});");
+                    w.Close();
+                }
+                else if (Copies(value) && buffer is not null)
+                {
+                    // The column copies itself whole: its node resolved once, a conversion per row.
+                    w.Line($"columns.Column<{value.ColumnType}>({k}).CopyTo(new global::System.Span<{value.MemberType}>({buffer}, 0, count));");
+                }
+                else if (Copies(value))
+                {
+                    w.Line($"{value.MemberType}[] copy = {Pool}{value.MemberType}>.Shared.Rent(count);");
+                    w.Open("try");
+                    w.Line($"columns.Column<{value.ColumnType}>({k}).CopyTo(new global::System.Span<{value.MemberType}>(copy, 0, count));");
+                    Loop(w, $"{target} = copy[i];");
+                    w.Close();
+                    w.Open("finally");
+                    w.Line($"{Pool}{value.MemberType}>.Shared.Return(copy, {ContainsReferences}{value.MemberType}>());");
+                    w.Close();
+                }
                 else
                 {
                     w.Line($"{Vortex}Column<{value.ColumnType}> column = columns.Column<{value.ColumnType}>({k});");
@@ -286,6 +331,12 @@ internal static class RecordEmitter
 
         w.Close();
     }
+
+    /// <summary>Whether a column of <paramref name="value"/> copies every row at once through <c>CopyTo</c>.</summary>
+    private static bool Copies(ValueModel value) =>
+        value.Kind == ValueKind.Scalar
+        && value.Scalar is ScalarKind.Bool or ScalarKind.Utf8 or ScalarKind.Decimal or ScalarKind.WideDecimal
+            or ScalarKind.Date or ScalarKind.Time or ScalarKind.Timestamp or ScalarKind.ZonedTimestamp or ScalarKind.Uuid;
 
     /// <summary>
     /// Reads member <paramref name="k"/>'s nested record into a rented temporary, then copies it to
