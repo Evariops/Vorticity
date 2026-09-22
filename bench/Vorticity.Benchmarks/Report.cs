@@ -630,10 +630,12 @@ internal static class Report
                 text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                     $"**Memory.** On the full scan at {scan.Rows:N0} rows our peak is " +
                     $"{scan.Aot!.RssBytes.Median / (1024 * 1024):F0} MiB against " +
-                    $"{scan.Theirs!.RssBytes.Median / (1024 * 1024):F0} MiB. We decode a chunk whole and"));
-                text.AppendLine("hand each batch a window of it, where the reference decodes a split of at most a hundred");
-                text.AppendLine("thousand rows at a time; on a file whose chunks hold half a million rows, that is the");
-                text.AppendLine("difference, and it is the file's chunking rather than its size that sets it.");
+                    $"{scan.Theirs!.RssBytes.Median / (1024 * 1024):F0} MiB. We decode a chunk in windows of"));
+                text.AppendLine("65 536 rows where its encoding can decode a range of its rows, and whole where it cannot,");
+                text.AppendLine("a dictionary of many values or a compressed blob among them; the reference decodes a split");
+                text.AppendLine("of at most a hundred thousand rows at a time. On a file whose chunks hold half a million");
+                text.AppendLine("rows, the chunks held whole are the difference, and it is the file's encodings and");
+                text.AppendLine("chunking rather than its size that set it.");
             }
 
             Row? theirWorst = compared.MaxBy(r => r.Theirs!.RssBytes.Median);
