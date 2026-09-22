@@ -51,9 +51,10 @@ public sealed class RetainedChunkLifetimeTests
     [Fact]
     public async Task EveryWindowOfAKeyOrderedReadReadsTheChunksOwnBytes()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         byte[] bytes = await WriteAsync();
         PoisoningSegmentSource source = new PoisoningSegmentSource(bytes);
-        await using VortexFile file = await VortexFile.OpenAsync(source, VortexOpenOptions.Default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, VortexOpenOptions.Default, ct);
         Assert.Equal(1, FewestChunks(LayoutTree.Parse(file).Root));
 
         List<(long Value, string Name)> read = [];
@@ -87,9 +88,10 @@ public sealed class RetainedChunkLifetimeTests
     [Fact]
     public async Task EveryBatchCutFromOneChunkReadsTheChunksOwnBytes()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         byte[] bytes = await WriteAsync();
         PoisoningSegmentSource source = new PoisoningSegmentSource(bytes);
-        await using VortexFile file = await VortexFile.OpenAsync(source, VortexOpenOptions.Default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, VortexOpenOptions.Default, ct);
         Assert.Equal(1, FewestChunks(LayoutTree.Parse(file).Root));
 
         List<long> values = [];

@@ -254,7 +254,7 @@ public sealed class ScanAllocationTests
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Multi), CancellationToken.None);
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.ScanBuilder().WithMaxBatchRows(500).ExecuteAsync().GetAsyncEnumerator();
+            file.ScanBuilder().WithMaxBatchRows(500).ExecuteAsync().GetAsyncEnumerator(TestContext.Current.CancellationToken);
 
         // Next asserts IsCompletedSuccessfully on every step, which is the property under test.
         int batches = 0;

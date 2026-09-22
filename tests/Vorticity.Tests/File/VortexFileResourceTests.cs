@@ -161,7 +161,7 @@ public sealed class VortexFileResourceTests
                     Assert.False(file.SegmentSpecs.IsEmpty);
                     Assert.Equal("vortex.flat", file.GetLayoutEncodingId(0));
                 }
-            });
+            }, TestContext.Current.CancellationToken);
         }
 
         await Task.WhenAll(readers);

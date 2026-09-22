@@ -104,6 +104,8 @@ public sealed class ScanLazyResolutionTests
     [Fact]
     public async Task AFailedBatchStillReleasesItsSegments()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The throw happens inside Execute, after the read: the context must be reset anyway, or
         // the scan leaks a segment reference for every failed batch.
         Decoders.EnsureRegistered();
@@ -113,7 +115,7 @@ public sealed class ScanLazyResolutionTests
         await using VortexFile file = await VortexFile.OpenAsync(
             source, new VortexOpenOptions(), CancellationToken.None);
 
-        IAsyncEnumerator<RecordBatch> enumerator = file.ScanBuilder().Project("ints").ExecuteAsync().GetAsyncEnumerator();
+        IAsyncEnumerator<RecordBatch> enumerator = file.ScanBuilder().Project("ints").ExecuteAsync().GetAsyncEnumerator(ct);
         await Assert.ThrowsAsync<VortexUnsupportedException>(async () => await enumerator.MoveNextAsync());
 
         // DisposeAsync after a failure must not throw and must not double-release.

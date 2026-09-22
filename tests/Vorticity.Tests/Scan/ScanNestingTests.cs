@@ -129,13 +129,14 @@ public sealed class ScanNestingTests
     [Fact]
     public async Task TwoEnumeratorsOfOneEnumerableRunIndependently()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("distributions/high_cardinality_i64_r8193"), CancellationToken.None);
 
         IAsyncEnumerable<RecordBatch> scan = file.ScanBuilder().WithMaxBatchRows(700).ExecuteAsync();
-        IAsyncEnumerator<RecordBatch> left = scan.GetAsyncEnumerator();
-        IAsyncEnumerator<RecordBatch> right = scan.GetAsyncEnumerator();
+        IAsyncEnumerator<RecordBatch> left = scan.GetAsyncEnumerator(ct);
+        IAsyncEnumerator<RecordBatch> right = scan.GetAsyncEnumerator(ct);
 
         try
         {

@@ -22,7 +22,8 @@ public sealed class DisposedFileTests
     [Fact]
     public async Task AMemberThatReadsTheTailThrowsOnceTheFileIsDisposed()
     {
-        VortexFile file = await VortexFile.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"));
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        VortexFile file = await VortexFile.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"), ct);
         await file.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(() => file.StoredIdentity);
@@ -33,13 +34,14 @@ public sealed class DisposedFileTests
         await Assert.ThrowsAsync<ObjectDisposedException>(
             async () => await file.ReadMetadataAsync(0, CancellationToken.None));
         await Assert.ThrowsAsync<ObjectDisposedException>(
-            async () => await file.ReadIndexDirectoryAsync());
+            async () => await file.ReadIndexDirectoryAsync(ct));
     }
 
     [Fact]
     public async Task AMemberThatAnswersFromTheOpenGoesOnAnswering()
     {
-        VortexFile file = await VortexFile.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"));
+        VortexFile file = await VortexFile.OpenAsync(
+            Corpus.Path("containers/zoned_many_zones_nulls"), TestContext.Current.CancellationToken);
         DType schema = file.DType;
         long rows = file.RowCount;
         long bytes = file.FileLength;
@@ -67,7 +69,8 @@ public sealed class DisposedFileTests
     [Fact]
     public async Task AScanBuiltFromADisposedFileFailsAtItsFirstRead()
     {
-        VortexFile file = await VortexFile.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"));
+        VortexFile file = await VortexFile.OpenAsync(
+            Corpus.Path("containers/zoned_many_zones_nulls"), TestContext.Current.CancellationToken);
         await file.DisposeAsync();
 
         // Building it is allowed: the builder reads nothing. Enumerating it reaches the source,

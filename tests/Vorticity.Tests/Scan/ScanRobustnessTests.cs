@@ -67,7 +67,7 @@ public sealed class ScanRobustnessTests
         string path = TempPath();
         try
         {
-            await System.IO.File.WriteAllBytesAsync(path, []);
+            await System.IO.File.WriteAllBytesAsync(path, [], TestContext.Current.CancellationToken);
             await Assert.ThrowsAsync<VortexFormatException>(async () =>
             {
                 await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
@@ -87,14 +87,15 @@ public sealed class ScanRobustnessTests
     [InlineData(100_000)]
     public async Task ATruncatedFileIsAFormatErrorNotACrash(int keep)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
-        byte[] whole = await System.IO.File.ReadAllBytesAsync(Corpus.Path("containers/uncompressed_canonical"));
+        byte[] whole = await System.IO.File.ReadAllBytesAsync(Corpus.Path("containers/uncompressed_canonical"), ct);
         Assert.True(keep < whole.Length);
 
         string path = TempPath();
         try
         {
-            await System.IO.File.WriteAllBytesAsync(path, whole.AsMemory(0, keep).ToArray());
+            await System.IO.File.WriteAllBytesAsync(path, whole.AsMemory(0, keep).ToArray(), ct);
 
             // Either the open rejects it or the scan does; nothing else is acceptable, and in
             // particular no IndexOutOfRange, no OverflowException and no wrong answer.
@@ -177,7 +178,7 @@ public sealed class ScanRobustnessTests
             source, new VortexOpenOptions(), CancellationToken.None);
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator();
+            file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator(TestContext.Current.CancellationToken);
 
         Assert.True(await enumerator.MoveNextAsync());
         Assert.True(await enumerator.MoveNextAsync());
@@ -214,7 +215,7 @@ public sealed class ScanRobustnessTests
             source, new VortexOpenOptions(), CancellationToken.None);
 
         IAsyncEnumerator<RecordBatch> enumerator =
-            file.ScanBuilder().WithMaxBatchRows(100).ExecuteAsync().GetAsyncEnumerator();
+            file.ScanBuilder().WithMaxBatchRows(100).ExecuteAsync().GetAsyncEnumerator(TestContext.Current.CancellationToken);
 
         Assert.True(await enumerator.MoveNextAsync());
         await Assert.ThrowsAsync<IOException>(async () => await enumerator.MoveNextAsync());

@@ -52,9 +52,11 @@ public sealed class FilterConstantTypeTests
     [Fact]
     public async Task TheRefusalComesBeforeAnythingIsRead()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The whole point: the rows are there, so an empty answer would have been believable.
         await using VortexFile file = await Open(Flat);
-        Assert.Equal(1024, await file.ScanBuilder().Where(Expr.IsNotNull(Expr.Field("a"))).CountAsync());
+        Assert.Equal(1024, await file.ScanBuilder().Where(Expr.IsNotNull(Expr.Field("a"))).CountAsync(ct));
 
         VortexExpr wrong = Expr.Gt(Expr.Field("a"), Expr.Literal(FilterLiteral.From("900")));
         Assert.Throws<ArgumentException>(() => file.ScanBuilder().Where(wrong));
@@ -81,7 +83,7 @@ public sealed class FilterConstantTypeTests
             () => file.ScanBuilder().Where(Expr.Eq(Expr.Field("c"), Expr.Literal(FilterLiteral.From(1)))));
 
         VortexExpr right = Expr.Eq(Expr.Field("c"), Expr.Literal(FilterLiteral.From(true)));
-        Assert.Equal(512, await file.ScanBuilder().Where(right).CountAsync());
+        Assert.Equal(512, await file.ScanBuilder().Where(right).CountAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -122,7 +124,7 @@ public sealed class FilterConstantTypeTests
         await using VortexFile file = await Open(Mixed);
         long rows = await file.ScanBuilder()
             .Where(Expr.Ge(Expr.Field("stamp"), Expr.Literal(FilterLiteral.From(0L))))
-            .CountAsync();
+            .CountAsync(TestContext.Current.CancellationToken);
         Assert.True(rows > 0);
 
         Assert.Throws<ArgumentException>(
@@ -152,7 +154,7 @@ public sealed class FilterConstantTypeTests
         // documented answer rather than a mistyped comparison.
         await using VortexFile file = await Open(Flat);
         VortexExpr nothing = Expr.Eq(Expr.Field("a"), Expr.Literal(FilterLiteral.Null));
-        Assert.Equal(0, await file.ScanBuilder().Where(nothing).CountAsync());
+        Assert.Equal(0, await file.ScanBuilder().Where(nothing).CountAsync(TestContext.Current.CancellationToken));
         Assert.True(file.MayMatch(nothing));
     }
 

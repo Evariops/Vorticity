@@ -315,7 +315,8 @@ public sealed class VortexFileCorpusTests
         foreach (string id in ids)
         {
             CorpusEntry entry = CorpusManifest.Find(id);
-            await using VortexFile file = await VortexFile.OpenAsync(CorpusManifest.FullPath(entry));
+            await using VortexFile file = await VortexFile.OpenAsync(
+                CorpusManifest.FullPath(entry), TestContext.Current.CancellationToken);
             Assert.Equal(entry.RowCount, file.RowCount);
             Assert.Equal(entry.DType, ManifestDTypeFormatter.Format(file.DType));
             Assert.Equal(entry.SizeBytes, file.FileLength);
@@ -325,23 +326,24 @@ public sealed class VortexFileCorpusTests
     [Fact]
     public async Task AnEmptyOrTruncatedFileOnDiskIsRejectedThroughTheMemoryMappedPath()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string directory = System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), "vorticity-file-open-" + Guid.NewGuid().ToString("N"));
         System.IO.Directory.CreateDirectory(directory);
         try
         {
             string empty = System.IO.Path.Combine(directory, "empty.vortex");
-            await System.IO.File.WriteAllBytesAsync(empty, []);
-            await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(empty));
+            await System.IO.File.WriteAllBytesAsync(empty, [], ct);
+            await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(empty, ct));
 
             string tiny = System.IO.Path.Combine(directory, "tiny.vortex");
-            await System.IO.File.WriteAllBytesAsync(tiny, [0x56, 0x54, 0x58, 0x46]);
-            await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(tiny));
+            await System.IO.File.WriteAllBytesAsync(tiny, [0x56, 0x54, 0x58, 0x46], ct);
+            await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(tiny, ct));
 
             string truncated = System.IO.Path.Combine(directory, "truncated.vortex");
             byte[] bytes = CorpusManifest.Bytes("containers/all_null_i64_explicit_validity_r1025");
-            await System.IO.File.WriteAllBytesAsync(truncated, bytes.AsSpan(0, bytes.Length / 2).ToArray());
-            await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(truncated));
+            await System.IO.File.WriteAllBytesAsync(truncated, bytes.AsSpan(0, bytes.Length / 2).ToArray(), ct);
+            await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(truncated, ct));
         }
         finally
         {

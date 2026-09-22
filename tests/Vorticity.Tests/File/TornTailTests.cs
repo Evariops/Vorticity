@@ -49,14 +49,15 @@ public sealed class TornTailTests
     [Fact]
     public async Task ATornAppendOpensAtTheVersionBeforeItWhereverItTore()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = TempPath();
         try
         {
             byte[] first = await WriteAsync(0, 3_000);
-            await System.IO.File.WriteAllBytesAsync(path, first);
+            await System.IO.File.WriteAllBytesAsync(path, first, ct);
             await AppendAsync(path, 3_000, 9_000);
-            byte[] appended = await System.IO.File.ReadAllBytesAsync(path);
+            byte[] appended = await System.IO.File.ReadAllBytesAsync(path, ct);
             int added = appended.Length - first.Length;
 
             // One byte short, inside the end-of-file record, the postscript, the footer, half the
@@ -73,14 +74,14 @@ public sealed class TornTailTests
 
                 // Its indexes are the version's own.
                 VortexExpr present = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(1_234))));
-                Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync());
-                Assert.True(await file.MayMatchAsync(present));
+                Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync(ct));
+                Assert.True(await file.MayMatchAsync(present, ct));
             }
 
             // Torn beyond the first append's end, the file opens at it.
-            await System.IO.File.WriteAllBytesAsync(path, appended.AsSpan(0, appended.Length).ToArray());
+            await System.IO.File.WriteAllBytesAsync(path, appended.AsSpan(0, appended.Length).ToArray(), ct);
             await AppendAsync(path, 9_000, 10_000);
-            byte[] twice = await System.IO.File.ReadAllBytesAsync(path);
+            byte[] twice = await System.IO.File.ReadAllBytesAsync(path, ct);
             await using VortexFile second = await OpenAsync(twice.AsSpan(0, twice.Length - 11).ToArray());
             Assert.Equal((long)appended.Length, second.TornTail!.ValidLength);
             Assert.Equal(Expected(0, 9_000), await ReadAsync(second));
@@ -94,6 +95,7 @@ public sealed class TornTailTests
     [Fact]
     public async Task AWholeFileOpensAsItStandsWithNoReadMore()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] bytes = await WriteAsync(0, 3_000);
         long[] reads = new long[2];
@@ -101,7 +103,7 @@ public sealed class TornTailTests
         foreach (VortexTornTailPolicy policy in (VortexTornTailPolicy[])[VortexTornTailPolicy.ReadPrevious, VortexTornTailPolicy.Refuse])
         {
             CountingSource source = new CountingSource(new MemorySegmentSource(bytes));
-            await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions { TornTail = policy });
+            await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions { TornTail = policy }, ct);
             Assert.Null(file.TornTail);
             reads[at++] = source.Reads;
         }
@@ -112,10 +114,11 @@ public sealed class TornTailTests
     [Fact]
     public async Task AFileThatDoesNotBeginAsVortexIsRefusedWithoutAWalk()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         byte[] noise = new byte[8 << 20];
         new Random(25).NextBytes(noise);
         CountingSource source = new CountingSource(new MemorySegmentSource(noise));
-        await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(source, VortexOpenOptions.Default));
+        await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(source, VortexOpenOptions.Default, ct));
 
         // The tail, and the four bytes that say it is not Vortex.
         Assert.InRange(source.Reads, 1, 2);
@@ -125,11 +128,12 @@ public sealed class TornTailTests
     [Fact]
     public async Task TheRefusingPolicyAndAFileWithNoWholeVersionKeepTheFailure()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] whole = await WriteAsync(0, 3_000);
         byte[] torn = whole.AsSpan(0, whole.Length - 9).ToArray();
         VortexFormatException refused = await Assert.ThrowsAsync<VortexFormatException>(async () =>
-            await VortexFile.OpenAsync(new MemorySegmentSource(torn), new VortexOpenOptions { TornTail = VortexTornTailPolicy.Refuse }));
+            await VortexFile.OpenAsync(new MemorySegmentSource(torn), new VortexOpenOptions { TornTail = VortexTornTailPolicy.Refuse }, ct));
 
         // A first write torn has no version before it: the open fails with the tail's own reason.
         VortexFormatException fallen = await Assert.ThrowsAsync<VortexFormatException>(async () => await OpenAsync(torn));
@@ -139,27 +143,30 @@ public sealed class TornTailTests
     [Fact]
     public async Task NothingIsWrittenBehindATear()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = TempPath();
         try
         {
-            await System.IO.File.WriteAllBytesAsync(path, await WriteAsync(0, 3_000));
+            await System.IO.File.WriteAllBytesAsync(path, await WriteAsync(0, 3_000), ct);
             await AppendAsync(path, 3_000, 5_000);
-            byte[] appended = await System.IO.File.ReadAllBytesAsync(path);
+            byte[] appended = await System.IO.File.ReadAllBytesAsync(path, ct);
             byte[] torn = appended.AsSpan(0, appended.Length - 21).ToArray();
-            await System.IO.File.WriteAllBytesAsync(path, torn);
+            await System.IO.File.WriteAllBytesAsync(path, torn, ct);
 
             VortexFormatException append = await Assert.ThrowsAsync<VortexFormatException>(
-                async () => await VortexFileWriter.AppendAsync(path, Options));
+                async () => await VortexFileWriter.AppendAsync(path, Options, ct));
             VortexFormatException index = await Assert.ThrowsAsync<VortexFormatException>(
-                async () => await VortexFileIndexer.AppendIndexesAsync(path, WritePolicy.None.For("id", IndexSpec.SortedRuns)));
+                async () => await VortexFileIndexer.AppendIndexesAsync(
+                    path, WritePolicy.None.For("id", IndexSpec.SortedRuns), cancellationToken: ct));
             VortexFormatException fragment;
-            await using (VortexFile previous = await VortexFile.OpenAsync(path))
+            await using (VortexFile previous = await VortexFile.OpenAsync(path, ct))
             {
                 Assert.NotNull(previous.TornTail);
                 fragment = await Assert.ThrowsAsync<VortexFormatException>(
                     async () => await VortexFileIndexer.BuildFragmentAsync(
-                        previous, WritePolicy.None.For("id", IndexSpec.SortedRuns), new RowRange(0, previous.RowCount)));
+                        previous, WritePolicy.None.For("id", IndexSpec.SortedRuns), new RowRange(0, previous.RowCount),
+                        cancellationToken: ct));
             }
 
             foreach (VortexFormatException refusal in (VortexFormatException[])[append, index, fragment])
@@ -169,12 +176,12 @@ public sealed class TornTailTests
             }
 
             // Not a byte moved.
-            Assert.Equal(torn, await System.IO.File.ReadAllBytesAsync(path));
+            Assert.Equal(torn, await System.IO.File.ReadAllBytesAsync(path, ct));
 
             // The repair is the caller's, and after it the file is whole again.
-            VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path);
+            VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path, ct);
             Assert.True(repaired.Truncated);
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             Assert.Null(file.TornTail);
             Assert.Equal(3_000, file.RowCount);
         }
