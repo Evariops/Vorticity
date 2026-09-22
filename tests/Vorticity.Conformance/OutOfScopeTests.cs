@@ -26,7 +26,7 @@ namespace Vorticity.Conformance;
 
 public sealed class OutOfScopeTests
 {
-    private static readonly string[] Kinds = ["array", "layout", "dtype"];
+    private static readonly ComponentKind[] Kinds = [ComponentKind.Array, ComponentKind.Layout, ComponentKind.DType];
 
     /// <summary>
     /// Every file that uses at least one component this build does not implement.
@@ -129,9 +129,9 @@ public sealed class OutOfScopeTests
         Assert.Contains(error.ComponentId, unsupportedOnTheDataPath);
         Assert.Contains(error.Kind, Kinds);
 
-        // Both, in the message a user actually sees.
+        // Both, in the message a user actually sees, where the kind is spelled in lower case.
         Assert.Contains(error.ComponentId, error.Message, StringComparison.Ordinal);
-        Assert.Contains(error.Kind, error.Message, StringComparison.Ordinal);
+        Assert.Contains(error.Kind.ToString().ToLowerInvariant(), error.Message, StringComparison.Ordinal);
     }
 
     /// <summary>

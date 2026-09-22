@@ -84,7 +84,7 @@ public sealed class LazyResolutionTests
 
         // An unsupported component is reported with the id AND the kind, in the message.
         Assert.Equal(ForgedId, error.ComponentId);
-        Assert.Equal("array", error.Kind);
+        Assert.Equal(ComponentKind.Array, error.Kind);
         Assert.Contains(ForgedId, error.Message, StringComparison.Ordinal);
         Assert.Contains("array", error.Message, StringComparison.Ordinal);
     }
@@ -184,6 +184,6 @@ public sealed class LazyResolutionTests
         });
 
         Assert.Equal(ForgedId, error.ComponentId);
-        Assert.Equal("array", error.Kind);
+        Assert.Equal(ComponentKind.Array, error.Kind);
     }
 }
