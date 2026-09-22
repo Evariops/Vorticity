@@ -150,7 +150,37 @@ internal sealed class DictDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start: 0, count: length);
+    }
+
+    /// <summary>
+    /// The most values a dictionary may hold and still be decoded in windows. The values child is
+    /// decoded again for every window, since a window is a retained decode and nothing is shared
+    /// inside one; a dictionary of few values pays little for that, and one of many keeps the whole
+    /// chunk instead.
+    /// </summary>
+    private const int LargestValuesPerWindow = 4096;
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (node.ChildCount != 2)
+        {
+            return false;
+        }
+
+        DictMetadata metadata = DictMetadata.Read(node.Metadata);
+        return metadata.ValuesLength <= (ulong)LargestValuesPerWindow && context.ChildDecodesRange(in node, 0);
+    }
+
+    /// <summary>The range's codes over the whole values, as a take is the wanted codes over the whole values.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
     }
 
     /// <summary>
@@ -167,12 +197,12 @@ internal sealed class DictDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, selective: true, start: 0, count: wanted.Length);
     }
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start, int count)
     {
         // Read before the children are decoded, which take the grant over.
         bool keep = context.KeepsEncoding;
@@ -197,19 +227,22 @@ internal sealed class DictDecoder : ArrayDecoder
             null => dtype.Nullability,
         };
 
+        bool whole = !selective && start == 0 && count == length;
         DType codesType = context.Types.Primitive(metadata.CodesPType, codesNullability);
         int codesIndex = selective
             ? context.DecodeChildSelected(in node, 0, codesType, length, wanted)
-            : context.DecodeChild(in node, 0, codesType, length);
+            : whole
+                ? context.DecodeChild(in node, 0, codesType, length)
+                : context.DecodeChildRange(in node, 0, codesType, length, start, count);
 
-        // Shared only on the selective path. The selection narrows the codes and never the values,
-        // so a take that visits a hundred batches of one chunk would decode this child a hundred
-        // times; on the whole-node path the reader above has already retained the node itself, and
-        // asking again here would retain the same bytes twice.
-        int valuesIndex = selective
-            ? context.DecodeChildShared(in node, 1, dtype, valuesLength)
-            : context.DecodeChild(in node, 1, dtype, valuesLength);
-        int produced = selective ? wanted.Length : length;
+        // Shared only when the codes are narrowed. A selection or a range narrows the codes and
+        // never the values, so a take that visits a hundred batches of one chunk would decode this
+        // child a hundred times; on the whole-node path the reader above has already retained the
+        // node itself, and asking again here would retain the same bytes twice.
+        int valuesIndex = whole
+            ? context.DecodeChild(in node, 1, dtype, valuesLength)
+            : context.DecodeChildShared(in node, 1, dtype, valuesLength);
+        int produced = count;
 
         CanonicalNode codesNode = context.Canonical.GetNode(codesIndex);
         if (codesNode.Kind != CanonicalKind.Primitive)

@@ -668,6 +668,23 @@ internal sealed class ScanContext : IDisposable
     internal static long LayoutKey(int layoutNodeIndex) => (1L << 32) | (uint)layoutNodeIndex;
 
     /// <summary>
+    /// The retention key for one window of a flat layout's chunk, the <paramref name="windowIndex"/>th
+    /// run of the reader's window length; <see langword="null"/> when the pair cannot be named.
+    /// </summary>
+    /// <remarks>
+    /// A namespace of its own under bit 61, apart from the whole chunk under the bare segment id
+    /// and from the shared children under bit 62: a chunk decoded whole and a window of the same
+    /// chunk are different entries with different lifetimes, and a lookup that confused them would
+    /// hand a batch a node of the wrong length.
+    /// </remarks>
+    /// <param name="segmentId">The chunk's segment.</param>
+    /// <param name="windowIndex">The window's position in the chunk.</param>
+    internal static long? WindowKey(uint segmentId, int windowIndex) =>
+        segmentId < (1u << 31) && windowIndex >= 0 && windowIndex < (1 << 20)
+            ? (1L << 61) | ((long)segmentId << 20) | (uint)windowIndex
+            : null;
+
+    /// <summary>
     /// The retention key for one serialized array node inside a segment's blob, or
     /// <see langword="null"/> when the pair cannot be named without collision.
     /// </summary>

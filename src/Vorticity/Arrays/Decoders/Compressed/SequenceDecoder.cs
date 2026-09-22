@@ -34,7 +34,19 @@ internal sealed class SequenceDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, first: 0, produced: length);
+    }
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node) => true;
+
+    /// <summary>The closed form again, started at the range's first row.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, first: start, produced: count);
     }
 
     /// <summary>
@@ -50,12 +62,12 @@ internal sealed class SequenceDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, selective: true, first: 0, produced: wanted.Length);
     }
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int first, int produced)
     {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 0, Id);
@@ -112,7 +124,6 @@ internal sealed class SequenceDecoder : ArrayDecoder
         EnsureLastExpressible(ptype, baseBits, multiplierAscending, multiplierMagnitude, length);
 
         int width = ptype.ByteWidth();
-        int produced = selective ? wanted.Length : length;
         int total = ArrayDecodeContext.CheckedMultiply(produced, width, "Sequence values");
         // Left uninitialized: every arm of the switch below generates all `produced` elements.
         VortexBuffer output = CompressedValues.AllocateUninitialized(
@@ -121,16 +132,16 @@ internal sealed class SequenceDecoder : ArrayDecoder
         switch (width)
         {
             case 1:
-                Generate<byte>(destination, baseBits, multiplierBits, wanted, selective);
+                Generate<byte>(destination, baseBits, multiplierBits, wanted, selective, first);
                 break;
             case 2:
-                Generate<ushort>(destination, baseBits, multiplierBits, wanted, selective);
+                Generate<ushort>(destination, baseBits, multiplierBits, wanted, selective, first);
                 break;
             case 4:
-                Generate<uint>(destination, baseBits, multiplierBits, wanted, selective);
+                Generate<uint>(destination, baseBits, multiplierBits, wanted, selective, first);
                 break;
             default:
-                Generate<ulong>(destination, baseBits, multiplierBits, wanted, selective);
+                Generate<ulong>(destination, baseBits, multiplierBits, wanted, selective, first);
                 break;
         }
 
@@ -141,7 +152,7 @@ internal sealed class SequenceDecoder : ArrayDecoder
 
     private static void Generate<T>(
         Span<byte> destination, ulong baseBits, ulong multiplierBits, ReadOnlySpan<int> wanted,
-        bool selective)
+        bool selective, int first)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         Span<T> values = MemoryMarshal.Cast<byte, T>(destination);
@@ -159,6 +170,10 @@ internal sealed class SequenceDecoder : ArrayDecoder
 
             return;
         }
+
+        // A range starts where its first row falls in the progression; the multiply wraps exactly
+        // as accumulating up to it would.
+        start = unchecked(start + (T.CreateTruncating((uint)first) * step));
 
         // The accumulator is a loop-carried dependency one add deep, so the serial loop runs at the
         // latency of an add per value however wide the machine is. `base + i * step` is the same

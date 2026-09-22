@@ -195,6 +195,47 @@ internal sealed class ArrayDecodeContext
         return DecodeNode(in child, childDType, childLength);
     }
 
+    /// <summary>Whether <paramref name="node"/>'s encoding decodes a range of its rows, children included.</summary>
+    /// <param name="node">The node.</param>
+    internal bool DecodesRange(in ArrayNode node) =>
+        ArrayDecoderTable.Require(_scan, node.Encoding, node.EncodingSpecIndex).DecodesRange(this, in node);
+
+    /// <summary>Whether child <paramref name="childIndex"/> of <paramref name="node"/> decodes a range of its rows.</summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    public bool ChildDecodesRange(in ArrayNode node, int childIndex)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        return DecodesRange(in child);
+    }
+
+    /// <summary>
+    /// Decodes rows <c>[start, start + count)</c> of child <paramref name="childIndex"/>, which
+    /// <see cref="ChildDecodesRange"/> must have answered for.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's DType.</param>
+    /// <param name="childLength">The child's whole row count.</param>
+    /// <param name="start">The first row of the range.</param>
+    /// <param name="count">How many rows.</param>
+    /// <returns>The child's index in the batch's arena, holding <paramref name="count"/> rows.</returns>
+    public int DecodeChildRange(
+        in ArrayNode node, int childIndex, DType childDType, int childLength, int start, int count)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        return DecodeNodeRange(in child, childDType, childLength, start, count);
+    }
+
+    /// <summary>Decodes rows <c>[start, start + count)</c> of a root, as <see cref="DecodeRoot(in ArrayNode, DType, int, bool)"/> decodes it whole.</summary>
+    internal int DecodeRootRange(
+        in ArrayNode node, DType dtype, int length, int start, int count, bool keepEncoding)
+    {
+        _depth = 0;
+        _keepNext = keepEncoding;
+        return DecodeNodeRange(in node, dtype, length, start, count);
+    }
+
     /// <summary>
     /// Decodes child <paramref name="childIndex"/> of <paramref name="node"/> once for the scan
     /// rather than once per batch, and hands the caller a window onto it.
@@ -385,6 +426,63 @@ internal sealed class ArrayDecodeContext
     }
 
     /// <summary>
+    /// Whether the validity child at <paramref name="firstValidityChildIndex"/>, when there is one,
+    /// decodes a range of its rows.
+    /// </summary>
+    /// <param name="node">The array node.</param>
+    /// <param name="firstValidityChildIndex">Where the validity child sits, when present.</param>
+    public bool ValidityDecodesRange(in ArrayNode node, int firstValidityChildIndex) =>
+        node.ChildCount <= firstValidityChildIndex || ChildDecodesRange(in node, firstValidityChildIndex);
+
+    /// <summary>
+    /// The validity of rows <c>[start, start + count)</c> of <paramref name="node"/>, read as
+    /// <see cref="DecodeValidity"/> reads the whole.
+    /// </summary>
+    /// <param name="node">The array node.</param>
+    /// <param name="firstValidityChildIndex">Where the validity child sits, when present.</param>
+    /// <param name="nullability">The node's declared nullability.</param>
+    /// <param name="length">The node's whole row count.</param>
+    /// <param name="start">The first row of the range.</param>
+    /// <param name="count">How many rows.</param>
+    public Validity DecodeValidityRange(
+        in ArrayNode node, int firstValidityChildIndex, Nullability nullability, int length, int start, int count)
+    {
+        int childCount = node.ChildCount;
+        if (childCount == firstValidityChildIndex)
+        {
+            return Validity.FromNullability(nullability);
+        }
+
+        if (childCount != firstValidityChildIndex + 1)
+        {
+            ArraysThrow.Format(
+                $"An array with validity has {firstValidityChildIndex} or " +
+                $"{firstValidityChildIndex + 1} children; this one has {childCount}.");
+        }
+
+        DType boolType = Types.Bool(Nullability.NonNullable);
+        int decoded = DecodeChildRange(in node, firstValidityChildIndex, boolType, length, start, count);
+        CanonicalNode bits = Canonical.GetNode(decoded);
+        if (bits.Kind != CanonicalKind.Bool)
+        {
+            ArraysThrow.Format($"A validity child decoded to {bits.Kind}, not Bool.");
+        }
+
+        if (bits.Length != count)
+        {
+            ArraysThrow.Format(
+                $"A validity child of {bits.Length} rows cannot describe a range of {count}.");
+        }
+
+        return ClassifyValidityBits(bits.Bits.Span, bits.BitOffset, count) switch
+        {
+            ValidityBitmapShape.AllClear => Validity.AllInvalid,
+            ValidityBitmapShape.AllSet => Validity.AllValid,
+            _ => Validity.Bitmap(decoded),
+        };
+    }
+
+    /// <summary>
     /// Allocates a canonical node of <paramref name="kind"/> with only the four common fields set.
     /// Prefer the typed <c>CanonicalArena.AddXxx</c> builders, which validate their buffers.
     /// </summary>
@@ -542,6 +640,36 @@ internal sealed class ArrayDecodeContext
             _scan, node.Encoding, node.EncodingSpecIndex);
 
         int result = decoder.DecodeSelected(this, in node, dtype, length, wanted);
+        _depth--;
+        return result;
+    }
+
+    private int DecodeNodeRange(in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        _keepHere = _keepNext;
+        _keepNext = false;
+        VortexLimits.CheckDepth(++_depth, VortexLimits.MaxArrayDepth, "Array");
+
+        if (length < 0)
+        {
+            ArraysThrow.Format($"An array node cannot produce {length} rows.");
+        }
+
+        if (start < 0 || count <= 0 || (long)start + count > length)
+        {
+            ArraysThrow.Format(
+                $"A range of [{start}, {(long)start + count}) escapes an array node of {length} rows.");
+        }
+
+        if (dtype.IsDefault)
+        {
+            throw new ArgumentException("A node cannot be decoded without a DType.", nameof(dtype));
+        }
+
+        ArrayDecoder decoder = ArrayDecoderTable.Require(
+            _scan, node.Encoding, node.EncodingSpecIndex);
+
+        int result = decoder.DecodeRange(this, in node, dtype, length, start, count);
         _depth--;
         return result;
     }

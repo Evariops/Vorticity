@@ -30,7 +30,23 @@ internal sealed class ForDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start: 0, count: length);
+    }
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.ChildCount == 1 && context.ChildDecodesRange(in node, 0);
+    }
+
+    /// <summary>Transparent to a range as to a take: the child's range, plus the reference.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
     }
 
     /// <summary>
@@ -47,12 +63,12 @@ internal sealed class ForDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, selective: true, start: 0, count: wanted.Length);
     }
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start, int count)
     {
 
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
@@ -78,11 +94,13 @@ internal sealed class ForDecoder : ArrayDecoder
         // node has no validity of its own: the child's is the array's.
         int encoded = selective
             ? context.DecodeChildSelected(in node, 0, dtype, length, wanted)
-            : context.DecodeChild(in node, 0, dtype, length);
+            : start == 0 && count == length
+                ? context.DecodeChild(in node, 0, dtype, length)
+                : context.DecodeChildRange(in node, 0, dtype, length, start, count);
 
-        // Everything below is expressed in the number of rows produced, which the selection
-        // shortens; the child's own bound checks still use the node's declared length.
-        int produced = selective ? wanted.Length : length;
+        // Everything below is expressed in the number of rows produced, which the selection or
+        // the range shortens; the child's own bound checks still use the node's declared length.
+        int produced = count;
 
         // The child is checked before the zero-reference shortcut, so a child that decoded to the
         // wrong shape is rejected whatever the reference happens to be.

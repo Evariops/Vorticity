@@ -36,7 +36,32 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, 0, length, ranged: false);
+    }
 
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.ValidityDecodesRange(in node, 0);
+    }
+
+    /// <summary>
+    /// The range's views over the whole data buffers: the views are sixteen bytes a row and the
+    /// data they point into is shared by every row, so a range is a window onto the views and
+    /// nothing else moves.
+    /// </summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, start, count, ranged: true);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count, bool ranged)
+    {
         EncodingMetadata.RequireEmpty(node.Metadata, Id);
         CanonicalSupport.RequireBinaryLike(dtype, Id);
 
@@ -47,11 +72,17 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
                 $"{Id} requires at least 1 buffer (the views); this node has {bufferCount}.");
         }
 
-        Validity validity = context.DecodeValidity(in node, 0, dtype.Nullability, length);
+        Validity validity = ranged
+            ? context.DecodeValidityRange(in node, 0, dtype.Nullability, length, start, count)
+            : context.DecodeValidity(in node, 0, dtype.Nullability, length);
 
         int dataBufferCount = bufferCount - 1;
         VortexBuffer views = node.GetBuffer(dataBufferCount);
         CanonicalSupport.RequireExactBuffer(views, length, CanonicalSupport.ViewSize, Id + " views");
+        if (ranged)
+        {
+            views = views.Slice(start * CanonicalSupport.ViewSize, count * CanonicalSupport.ViewSize);
+        }
 
         Span<VortexBuffer> stack = stackalloc VortexBuffer[StackBuffers];
         Scratch<VortexBuffer> data = new Scratch<VortexBuffer>(dataBufferCount, stack);
@@ -63,8 +94,8 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
                 buffers[i] = node.GetBuffer(i);
             }
 
-            ValidateViews(context, views.Span, buffers, validity, length, dtype.Kind == DTypeKind.Utf8);
-            return context.Canonical.AddVarBinView(dtype, length, validity, views, buffers);
+            ValidateViews(context, views.Span, buffers, validity, count, dtype.Kind == DTypeKind.Utf8);
+            return context.Canonical.AddVarBinView(dtype, count, validity, views, buffers);
         }
         finally
         {

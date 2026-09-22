@@ -45,4 +45,32 @@ internal sealed class PrimitiveDecoder : ArrayDecoder
 
         return context.Canonical.AddPrimitive(dtype, length, validity, ptype, values);
     }
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.ValidityDecodesRange(in node, 0);
+    }
+
+    /// <summary>A window onto the values buffer: no byte moves, whatever the range.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        EncodingMetadata.RequireEmpty(node.Metadata, Id);
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
+        CanonicalSupport.RequireKind(dtype, DTypeKind.Primitive, Id);
+
+        PType ptype = dtype.PType;
+        int width = ptype.ByteWidth();
+        VortexBuffer values = node.GetBuffer(0);
+        CanonicalSupport.RequireExactBuffer(values, length, width, Id + " values");
+        Validity validity = context.DecodeValidityRange(in node, 0, dtype.Nullability, length, start, count);
+
+        return context.Canonical.AddPrimitive(
+            dtype, count, validity, ptype, values.Slice((int)((long)start * width), (int)((long)count * width)));
+    }
 }

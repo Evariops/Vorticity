@@ -44,6 +44,23 @@ internal sealed class ConstantDecoder : ArrayDecoder
         return ConstantCanonicalizer.Build(context, dtype, length, in scalar);
     }
 
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node) => true;
+
+    /// <summary>Every row is the same value, so a range only changes how many are built.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
+
+        TypedScalar scalar = TypedScalarReader.Read(
+            node.GetBuffer(0).Span, dtype, context.Scalars, context.Types);
+
+        return ConstantCanonicalizer.Build(context, dtype, count, in scalar);
+    }
+
     /// <summary>
     /// Every row is the same value, so selecting rows only changes how many are built.
     /// </summary>

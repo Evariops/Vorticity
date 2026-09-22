@@ -77,6 +77,45 @@ internal abstract class ArrayDecoder
     }
 
     /// <summary>
+    /// Whether <see cref="DecodeRange"/> can produce a contiguous range of this node's rows without
+    /// materializing the rows outside it, given what <paramref name="node"/>'s children are encoded as.
+    /// </summary>
+    /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
+    /// <param name="node">The serialized node.</param>
+    /// <remarks>
+    /// Asked per node rather than per encoding, because the answer is the encoding's and its
+    /// children's together: a frame of reference over bit-packed codes slices, the same frame over
+    /// a compressed blob does not. An encoding that answers <see langword="true"/> asks its children
+    /// through <see cref="ArrayDecodeContext.ChildDecodesRange"/>. The flat layout reader decodes a
+    /// chunk larger than its window in windows when the root answers yes, and whole otherwise.
+    /// </remarks>
+    public virtual bool DecodesRange(ArrayDecodeContext context, in ArrayNode node) => false;
+
+    /// <summary>
+    /// Decodes the rows <c>[start, start + count)</c> of this node, producing a canonical node of
+    /// <paramref name="count"/> rows.
+    /// </summary>
+    /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
+    /// <param name="node">The serialized node.</param>
+    /// <param name="dtype">The DType this node must produce.</param>
+    /// <param name="length">The row count the whole node would produce, which bounds the range.</param>
+    /// <param name="start">The first row of the range.</param>
+    /// <param name="count">How many rows, at least one.</param>
+    /// <returns>The canonical node's index in <c>context.Canonical</c>.</returns>
+    /// <remarks>
+    /// Called only where <see cref="DecodesRange"/> answered <see langword="true"/> for the node,
+    /// and expected to touch the range alone: what it produces must equal the same range sliced
+    /// out of <see cref="Decode"/>, dtype, validity and values alike. The default refuses, since an
+    /// encoding that decodes whole and slices would give the reader the memory cost it is asking
+    /// this method to avoid.
+    /// </remarks>
+    /// <exception cref="NotSupportedException">The encoding does not decode ranges.</exception>
+    public virtual int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count) =>
+        throw new NotSupportedException(
+            $"{System.Text.Encoding.UTF8.GetString(IdUtf8)} does not decode a range of its rows; ask DecodesRange first.");
+
+    /// <summary>
     /// Whether <see cref="DecodeSelected"/> is overridden, i.e. whether this encoding can produce
     /// the wanted rows without materializing the whole node.
     /// </summary>

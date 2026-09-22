@@ -34,7 +34,37 @@ internal sealed class StructDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, 0, length, ranged: false);
+    }
 
+    /// <summary>Every child of the node decodes a range, the validity child included.</summary>
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        for (int i = 0; i < node.ChildCount; i++)
+        {
+            if (!context.ChildDecodesRange(in node, i))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>The same range of every field, under the same projection rules as the whole.</summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, start, count, ranged: true);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count, bool ranged)
+    {
         EncodingMetadata.RequireEmpty(node.Metadata, Id);
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         CanonicalSupport.RequireKind(dtype, DTypeKind.Struct, Id);
@@ -53,7 +83,7 @@ internal sealed class StructDecoder : ArrayDecoder
         else if (childCount == fieldCount + 1)
         {
             fieldBase = 1;
-            validity = DecodeLeadingValidity(context, in node, length);
+            validity = DecodeLeadingValidity(context, in node, length, start, count, ranged);
         }
         else
         {
@@ -74,7 +104,7 @@ internal sealed class StructDecoder : ArrayDecoder
 
         if (Narrows(in projection, fieldCount))
         {
-            return Project(context, in node, dtype, length, validity, fieldBase, in projection);
+            return Project(context, in node, dtype, length, validity, fieldBase, in projection, start, count, ranged);
         }
 
         Span<int> stack = stackalloc int[StackFields];
@@ -84,10 +114,12 @@ internal sealed class StructDecoder : ArrayDecoder
             Span<int> indices = fields.Span;
             for (int i = 0; i < fieldCount; i++)
             {
-                indices[i] = context.DecodeChild(in node, fieldBase + i, dtype.GetField(i), length);
+                indices[i] = ranged
+                    ? context.DecodeChildRange(in node, fieldBase + i, dtype.GetField(i), length, start, count)
+                    : context.DecodeChild(in node, fieldBase + i, dtype.GetField(i), length);
             }
 
-            return context.Canonical.AddStruct(dtype, length, validity, indices);
+            return context.Canonical.AddStruct(dtype, count, validity, indices);
         }
         finally
         {
@@ -140,10 +172,13 @@ internal sealed class StructDecoder : ArrayDecoder
     /// <param name="validity">The struct's validity, already decoded.</param>
     /// <param name="fieldBase">The serialized index of field zero.</param>
     /// <param name="projection">The fields to keep.</param>
+    /// <param name="start">The first row of the range, when <paramref name="ranged"/>.</param>
+    /// <param name="count">The rows produced: the range's, or the whole length.</param>
+    /// <param name="ranged">Whether a range of the fields is decoded rather than the whole.</param>
     /// <returns>The canonical struct, holding only those fields.</returns>
     private static int Project(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Validity validity,
-        int fieldBase, in Layouts.FieldMask projection)
+        int fieldBase, in Layouts.FieldMask projection, int start, int count, bool ranged)
     {
         int fieldCount = dtype.FieldCount;
         int selected = 0;
@@ -172,7 +207,9 @@ internal sealed class StructDecoder : ArrayDecoder
                     continue;
                 }
 
-                int child = context.DecodeChild(in node, fieldBase + i, dtype.GetField(i), length);
+                int child = ranged
+                    ? context.DecodeChildRange(in node, fieldBase + i, dtype.GetField(i), length, start, count)
+                    : context.DecodeChild(in node, fieldBase + i, dtype.GetField(i), length);
                 childSpan[next] = child;
                 nameSpan[next] = context.Types.InternName(dtype.GetFieldNameUtf8(i));
 
@@ -185,7 +222,7 @@ internal sealed class StructDecoder : ArrayDecoder
 
             context.Scan.FieldsHonoured = true;
             DType narrowed = context.Types.Struct(nameSpan, typeSpan, dtype.Nullability);
-            return context.Canonical.AddStruct(narrowed, length, validity, childSpan);
+            return context.Canonical.AddStruct(narrowed, count, validity, childSpan);
         }
         finally
         {
@@ -201,10 +238,12 @@ internal sealed class StructDecoder : ArrayDecoder
     /// never a bitmap fast path.
     /// </summary>
     private static Validity DecodeLeadingValidity(
-        ArrayDecodeContext context, in ArrayNode node, int length)
+        ArrayDecodeContext context, in ArrayNode node, int length, int start, int count, bool ranged)
     {
         DType boolType = context.Types.Bool(Nullability.NonNullable);
-        int decoded = context.DecodeChild(in node, 0, boolType, length);
+        int decoded = ranged
+            ? context.DecodeChildRange(in node, 0, boolType, length, start, count)
+            : context.DecodeChild(in node, 0, boolType, length);
 
         CanonicalNode bits = context.Canonical.GetNode(decoded);
         if (bits.Kind != CanonicalKind.Bool)
@@ -212,18 +251,18 @@ internal sealed class StructDecoder : ArrayDecoder
             throw new VortexFormatException($"A {Id} validity child decoded to {bits.Kind}, not Bool.");
         }
 
-        if (bits.Length != length)
+        if (bits.Length != count)
         {
             throw new VortexFormatException(
-                $"A {Id} validity child of {bits.Length} rows cannot describe an array of {length}.");
+                $"A {Id} validity child of {bits.Length} rows cannot describe an array of {count}.");
         }
 
-        if (length == 0)
+        if (count == 0)
         {
             return Validity.AllValid;
         }
 
-        return ArrayDecodeContext.ClassifyValidityBits(bits.Bits.Span, bits.BitOffset, length) switch
+        return ArrayDecodeContext.ClassifyValidityBits(bits.Bits.Span, bits.BitOffset, count) switch
         {
             ValidityBitmapShape.AllClear => Validity.AllInvalid,
             ValidityBitmapShape.AllSet => Validity.AllValid,

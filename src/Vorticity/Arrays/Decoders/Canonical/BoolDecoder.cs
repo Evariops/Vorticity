@@ -48,4 +48,31 @@ internal sealed class BoolDecoder : ArrayDecoder
         VortexBuffer bits = node.GetBuffer(0);
         return context.Canonical.AddBool(dtype, length, validity, bits, (int)metadata.Offset);
     }
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.ValidityDecodesRange(in node, 0);
+    }
+
+    /// <summary>
+    /// The same bitmap from the byte the range starts in, at the bit offset the range leaves within
+    /// that byte: no bit moves, whatever the range.
+    /// </summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        BoolMetadata metadata = BoolMetadata.Read(node.Metadata);
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
+        CanonicalSupport.RequireKind(dtype, DTypeKind.Bool, Id);
+
+        Validity validity = context.DecodeValidityRange(in node, 0, dtype.Nullability, length, start, count);
+        int first = (int)metadata.Offset + start;
+        VortexBuffer bits = node.GetBuffer(0).Slice(first >> 3);
+        return context.Canonical.AddBool(dtype, count, validity, bits, first & 7);
+    }
 }

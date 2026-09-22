@@ -35,4 +35,21 @@ internal sealed class NullDecoder : ArrayDecoder
 
         return context.Canonical.AddNull(dtype, length);
     }
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node) => true;
+
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        EncodingMetadata.RequireEmpty(node.Metadata, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 0, Id);
+        ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
+        CanonicalSupport.RequireKind(dtype, DTypeKind.Null, Id);
+
+        return context.Canonical.AddNull(dtype, count);
+    }
 }

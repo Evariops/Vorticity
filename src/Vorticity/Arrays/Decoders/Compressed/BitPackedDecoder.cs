@@ -119,7 +119,36 @@ internal sealed class BitPackedDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, 0, length);
+    }
 
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        BitPackedMetadata metadata = BitPackedMetadata.Read(node.Metadata);
+        int validityChildIndex = metadata.HasPatches
+            ? (metadata.Patches.HasChunkOffsets ? 3 : 2)
+            : 0;
+        return context.ValidityDecodesRange(in node, validityChildIndex);
+    }
+
+    /// <summary>
+    /// Unpacks the blocks the range touches and no other, the partial first and last ones through
+    /// a scratch block; the patches are decoded whole, as they are small, and applied where they
+    /// fall inside the range.
+    /// </summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, start, count);
+    }
+
+    private static int Core(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
 
         BitPackedMetadata metadata = BitPackedMetadata.Read(node.Metadata);
@@ -154,7 +183,7 @@ internal sealed class BitPackedDecoder : ArrayDecoder
             node.ChildCount, validityChildIndex, validityChildIndex + 1, Id);
 
         int width = ptype.ByteWidth();
-        int total = ArrayDecodeContext.CheckedMultiply(length, width, "BitPacked values");
+        int total = ArrayDecodeContext.CheckedMultiply(count, width, "BitPacked values");
 
         VortexBuffer output = VortexBuffer.Empty;
         Span<byte> destination = default;
@@ -163,20 +192,22 @@ internal sealed class BitPackedDecoder : ArrayDecoder
             // Uninitialized: Unpack writes all `total` bytes, including at bit width 0 where it
             // clears the span itself rather than inheriting a cleared one. Patches only overwrite.
             output = CompressedValues.AllocateUninitialized(context, total, width, Id, out destination);
-            Unpack(packed.Span, bitWidth, offset, length, width, destination);
+            Unpack(packed.Span, bitWidth, offset + start, count, width, destination);
         }
 
         // Patches are decoded and applied before the validity child only because the validity child
         // sits after them; the order of the two operations is otherwise independent.
         if (metadata.HasPatches)
         {
-            ApplyPatches(context, in node, dtype, length, in metadata, width, destination);
+            ApplyPatches(context, in node, dtype, length, in metadata, width, destination, start, count);
         }
 
-        Validity validity = context.DecodeValidity(
-            in node, validityChildIndex, dtype.Nullability, length);
+        bool whole = start == 0 && count == length;
+        Validity validity = whole
+            ? context.DecodeValidity(in node, validityChildIndex, dtype.Nullability, length)
+            : context.DecodeValidityRange(in node, validityChildIndex, dtype.Nullability, length, start, count);
 
-        return context.Canonical.AddPrimitive(dtype, length, validity, ptype, output);
+        return context.Canonical.AddPrimitive(dtype, count, validity, ptype, output);
     }
 
     /// <summary>Extracts the wanted rows one at a time.</summary>
@@ -419,7 +450,9 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         int length,
         in BitPackedMetadata metadata,
         int width,
-        Span<byte> destination)
+        Span<byte> destination,
+        int start,
+        int count)
     {
         PatchesMetadata patchesMetadata = metadata.Patches;
         int patchCount = ArrayDecodeContext.CheckedLength(
@@ -473,10 +506,16 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         }
 
         ReadOnlySpan<byte> source = values.Values.Span;
+        int end = start + count;
         for (int i = 0; i < patches.Count; i++)
         {
             int position = patches.GetPosition(i);
-            source.Slice(i * width, width).CopyTo(destination.Slice(position * width, width));
+            if (position < start || position >= end)
+            {
+                continue;
+            }
+
+            source.Slice(i * width, width).CopyTo(destination.Slice((position - start) * width, width));
         }
     }
 }
