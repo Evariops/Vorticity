@@ -145,6 +145,13 @@ internal sealed class SegmentRequestSet : IDisposable
         return slot;
     }
 
+    /// <summary>The slot <c>(<paramref name="offset"/>, <paramref name="length"/>)</c> was registered in, or -1.</summary>
+    /// <param name="offset">The segment's offset in the file.</param>
+    /// <param name="length">Its length.</param>
+    /// <returns>The slot, found without a walk over the others.</returns>
+    internal int IndexOf(ulong offset, uint length) =>
+        Find(new SegmentSpec(offset, length, 0, 0, 0), HashOf(offset, length));
+
     /// <summary>The spec registered in <paramref name="slot"/>. Available before the read.</summary>
     /// <param name="slot">A slot returned by <see cref="Add"/>.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="slot"/> is not a live slot.</exception>

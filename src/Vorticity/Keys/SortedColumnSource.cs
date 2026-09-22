@@ -67,9 +67,10 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// <param name="file">The open file.</param>
     /// <param name="path">The column, <c>.</c>-separated for a nested field.</param>
     /// <param name="cancellationToken">Cancels the zone-map read.</param>
+    /// <param name="known">The column's zone map, when a pruning pass already read it; null to read it.</param>
     /// <returns>The source, or null with the reason it is not available.</returns>
     internal static async ValueTask<(SortedColumnSource? Source, string? Reason)> OpenAsync(
-        VortexFile file, string path, CancellationToken cancellationToken)
+        VortexFile file, string path, CancellationToken cancellationToken, ZoneColumn? known = null)
     {
         DType schema = file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
@@ -134,10 +135,15 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         // reads one, so a file without one for this column is refused rather than scanned.
         FieldExpr field = Expr.Field(path);
         LayoutTree tree = file.LayoutTree;
-        ZonePruningPlan.PruningPlan plan = await ZonePruningPlan
-            .PlanAsync(file, tree, Expr.IsNotNull(field), cancellationToken)
-            .ConfigureAwait(false);
-        ZoneColumn? zones = plan.Zones?.Column(path);
+        ZoneColumn? zones = known;
+        if (zones is null)
+        {
+            ZonePruningPlan.PruningPlan plan = await ZonePruningPlan
+                .PlanAsync(file, tree, Expr.IsNotNull(field), cancellationToken)
+                .ConfigureAwait(false);
+            zones = plan.Zones?.Column(path);
+        }
+
         if (zones is null || zones.ZoneLength <= 0)
         {
             return (null, "the column carries no zone map, so a seek would have to decode the whole column");

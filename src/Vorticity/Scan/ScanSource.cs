@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Keys;
 using Vorticity.Layouts;
@@ -33,6 +34,15 @@ internal sealed record ScanSpec
 
     /// <summary>Whether the decoders may deliver dictionary and run-end columns in their encoded form, for a consumer that reads it.</summary>
     internal bool KeepEncodings { get; init; }
+
+    /// <summary>
+    /// Whether <see cref="Live"/> is the filter's mask of live blocks, refined already: the ranges of
+    /// one aggregation share one read of the structures instead of each reading them again.
+    /// </summary>
+    internal bool Pruned { get; init; }
+
+    /// <summary>The mask of live blocks when <see cref="Pruned"/>, or null when no structure prunes anything.</summary>
+    internal BlockMask? Live { get; init; }
 }
 
 /// <summary>
@@ -167,6 +177,11 @@ internal sealed class FileScanSource : ScanSource
         int degree = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : Session.Options.MaxDegreeOfParallelism;
         builder.WithDegreeOfParallelism(Math.Max(degree, 1));
         builder.WithPrefetch(options.Prefetch).WithCompaction(options.Compact).WithEncodings(spec.KeepEncodings);
+        if (spec.Pruned)
+        {
+            builder.WithPruned(spec.Live);
+        }
+
         return builder;
     }
 }

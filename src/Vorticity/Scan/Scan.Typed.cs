@@ -351,6 +351,7 @@ public sealed partial class Scan<TRecord>
 
         /// <summary>Moves to the next batch, releasing the current one.</summary>
         /// <returns>Whether there is one.</returns>
+        [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
         public async ValueTask<bool> MoveNextAsync()
         {
             if (await _inner.MoveNextAsync().ConfigureAwait(false))

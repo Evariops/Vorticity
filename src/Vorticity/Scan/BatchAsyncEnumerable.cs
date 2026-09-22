@@ -227,6 +227,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly int _maxBatchRows;
     private readonly CancellationToken _token;
     private readonly Lane[] _lanes;
+    private readonly ScanSegments _segments;
 
     private SplitCursor _cursor;
 
@@ -270,6 +271,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _maxBatchRows = (int)Math.Min(plan.MaxRows, int.MaxValue);
         _token = cancellationToken;
         _cursor = plan.CreateCursor(reverse);
+        _segments = new ScanSegments(degree);
 
         _lanes = new Lane[degree];
         for (int i = 0; i < degree; i++)
@@ -330,24 +332,30 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         Lane lane = _lanes[0];
         _pending = split;
         _currentLane = lane;
+        lane.Sequence = _started++;
 
+        bool read;
         try
         {
-            // Phase 1: register. No I/O, no decoding, no allocation.
+            // Phase 1: register, and fill what the scan already holds. No I/O, no decoding, no
+            // allocation. Alone on its lane, the batch never waits for another's read.
             Register(lane.Context, split);
-            NoteRequests(lane.Context);
+            _segments.Claim(lane.Context.Segments, lane.Sequence, waiter: null);
+            read = NoteRequests(lane.Context);
         }
         catch
         {
+            _segments.Abandon(lane.Sequence);
             lane.Context.ResetBatch();
             throw;
         }
 
-        return ReadAndCompleteAsync(lane);
+        return ReadAndCompleteAsync(lane, read);
     }
 
     /// <summary>Issues and awaits the batch's one read, then builds the batch from what it brought.</summary>
     /// <param name="lane">The lane the batch is being built in.</param>
+    /// <param name="read">Whether the source has anything to read: nothing, when the scan held every segment.</param>
     /// <returns><see langword="true"/> when a batch was produced.</returns>
     /// <remarks>
     /// <para>
@@ -364,22 +372,21 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <c>await</c>.
     /// </para>
     /// </remarks>
-    private async ValueTask<bool> ReadAndCompleteAsync(Lane lane)
+    private async ValueTask<bool> ReadAndCompleteAsync(Lane lane, bool read)
     {
         try
         {
-            // Phase 2: exactly one coalesced read per batch, minus whatever the last batch of this
-            // lane already holds -- often all of it, because a segment spans every block of its
-            // chunk. Issued here rather than by the caller so that it is awaited where it is
-            // created: a ValueTask handed across a method boundary to be awaited later is one an
-            // exception path can drop unawaited.
-            lane.Kept.Prepare(lane.Context.Segments);
-            await _source.ReadManyAsync(lane.Context.Segments, _token).ConfigureAwait(false);
-            lane.Kept.Adopt(lane.Context.Segments);
+            // Phase 2: exactly one coalesced read per batch, minus whatever the scan already holds
+            // -- often all of it, because a segment spans every block of its chunk, and then the
+            // source is not called at all. Issued here rather than by the caller so that it is
+            // awaited where it is created: a ValueTask handed across a method boundary to be
+            // awaited later is one an exception path can drop unawaited.
+            await ReadAsync(lane.Context.Segments, read).ConfigureAwait(false);
+            _segments.Publish(lane.Context.Segments, lane.Sequence);
         }
         catch
         {
-            lane.Kept.Clear();
+            _segments.Abandon(lane.Sequence);
             // Both ways a read can fail land here -- throwing inline, which a memory-mapped source
             // does, and completing faulted, which every async one does -- and CompleteBatch resets
             // in its own catch. Without this one the failed split's registrations stay
@@ -399,6 +406,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             throw;
         }
 
+        _segments.Release(lane.Sequence);
         return CompleteBatch();
     }
 
@@ -462,10 +470,24 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         SplitExecution.Register(context, _tree, in _mask, rows);
 
     /// <summary>
-    /// Adds what the batch just registered to the scan's sink: the distinct segments and their
-    /// bytes, counted at the asking -- a caching source may serve some without a read.
+    /// Adds what the batch is about to ask of the source to the scan's sink: the segments it
+    /// registered that the scan does not hold, and their bytes, counted at the asking -- a session
+    /// cache may serve some without a read.
     /// </summary>
-    private void NoteRequests(ScanContext context) => ScanMetrics.Note(_metrics, context.Segments);
+    /// <returns>Whether there is anything to ask.</returns>
+    private bool NoteRequests(ScanContext context) => ScanMetrics.Note(_metrics, context.Segments);
+
+    /// <summary>Reads what the scan does not hold, or completes the set when it holds everything.</summary>
+    private ValueTask ReadAsync(SegmentRequestSet segments, bool read)
+    {
+        if (read)
+        {
+            return _source.ReadManyAsync(segments, _token);
+        }
+
+        segments.Complete();
+        return default;
+    }
 
     private bool CompleteBatch()
     {
@@ -849,6 +871,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _pending = lane.Rows;
         _currentLane = lane;
 
+        // Every batch before this one has taken its own reference to what it needed.
+        _segments.Release(lane.Sequence);
+
         try
         {
             _token.ThrowIfCancellationRequested();
@@ -879,6 +904,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
             Lane lane = _lanes[(int)(_started % lanes)];
             lane.Rows = split;
+            lane.Sequence = _started;
             lane.Start(this);
             _started++;
         }
@@ -916,13 +942,20 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         ScanContext context = lane.Context;
         RowRange rows = lane.Rows;
+        long batch = lane.Sequence;
         try
         {
             Register(context, rows);
-            NoteRequests(context);
-            lane.Kept.Prepare(context.Segments);
-            await _source.ReadManyAsync(context.Segments, _token).ConfigureAwait(false);
-            lane.Kept.Adopt(context.Segments);
+
+            // A segment another lane is reading is waited for rather than read twice; once it is
+            // in, the claim fills it and the batch reads only what it claimed.
+            while (_segments.Claim(context.Segments, batch, lane))
+            {
+                await lane.ReadByOthersAsync().ConfigureAwait(false);
+            }
+
+            await ReadAsync(context.Segments, NoteRequests(context)).ConfigureAwait(false);
+            _segments.Publish(context.Segments, batch);
             if (!_compact && !_filterProven)
             {
                 return ExecuteSelected(lane, rows);
@@ -933,7 +966,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         catch
         {
-            lane.Kept.Clear();
+            _segments.Abandon(batch);
             context.ResetBatch();
             throw;
         }
@@ -993,12 +1026,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         for (int i = 0; i < _lanes.Length; i++)
         {
             _lanes[i].Stop();
-
-            // The kept segments first: they hold a reference of their own, and the context's
-            // disposal is what gives the batch's back.
-            _lanes[i].Kept.Clear();
             _lanes[i].Context.Dispose();
         }
+
+        // Once no lane runs: the held segments carry references of their own.
+        _segments.Dispose();
     }
 
     /// <summary>One decode flow: its own <see cref="ScanContext"/>, never shared.</summary>
@@ -1008,7 +1040,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// on the thread pool. So a split allocates nothing, where a <c>Task.Run</c> per split would
     /// allocate a task and its promise, and a split that suspends rents its state machine.
     /// </remarks>
-    private sealed class Lane : IValueTaskSource<bool>, IValueTaskSource<int>
+    private sealed class Lane : SegmentWaiter, IValueTaskSource<bool>, IValueTaskSource<int>
     {
         private ManualResetValueTaskSourceCore<bool> _go = new() { RunContinuationsAsynchronously = true };
         private ManualResetValueTaskSourceCore<int> _done = new() { RunContinuationsAsynchronously = true };
@@ -1018,13 +1050,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         internal ScanContext Context { get; }
 
-        /// <summary>
-        /// The segments this lane's last batch read, kept for its next one. A field rather than a
-        /// property: it is a struct, and a property would hand out copies of it.
-        /// </summary>
-        internal KeptSegments Kept;
-
         internal RowRange Rows { get; set; }
+
+        /// <summary>The number of the split in <see cref="Rows"/> among the splits the scan started, in the order it walks them.</summary>
+        internal long Sequence { get; set; }
 
         /// <summary>Whether a split was started on this lane and its result not yet taken.</summary>
         internal bool Running { get; set; }

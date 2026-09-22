@@ -40,9 +40,53 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         _rows = rows ?? new RowRange(0, inner.File.RowCount);
     }
 
+    /// <summary>Whether <see cref="Live"/> is the filter's mask, refined already by the caller, so that no structure is read again.</summary>
+    internal bool Refined { get; init; }
+
+    /// <summary>The refined mask when <see cref="Refined"/>, or null when no structure prunes anything.</summary>
+    internal BlockMask? Live { get; init; }
+
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         CancellationToken cancellationToken = default) =>
-        new Enumerator(_inner, _filter, _prune, _indexes, _rows, cancellationToken);
+        new Enumerator(this, cancellationToken);
+
+    /// <summary>
+    /// Whether an exact source could prove rows worth reading: not when the pruning left no block,
+    /// nor once the zone maps alone prove more rows than a batch over the live blocks, since the
+    /// source then declines anyway, and asking it would read a data segment for nothing.
+    /// </summary>
+    /// <param name="plan">The scan's splits.</param>
+    /// <param name="cap">The rows of a batch, past which an exact source declines.</param>
+    /// <param name="zones">The zone maps the pruning read, or null.</param>
+    /// <param name="live">The blocks the pruning left, or null for all.</param>
+    internal static bool MayFitBatch(SplitPlan plan, long cap, ZonePruner? zones, BlockMask? live)
+    {
+        if (live is { IsEmpty: true })
+        {
+            return false;
+        }
+
+        if (zones is null)
+        {
+            return true;
+        }
+
+        long proven = 0;
+        SplitCursor cursor = plan.CreateCursor();
+        while (cursor.TryNext(out RowRange split))
+        {
+            if ((live is null || live.AnyLive(split)) && zones.TryCount(split, out long count))
+            {
+                proven += count;
+                if (proven > cap)
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
 
     private sealed class Enumerator : IAsyncEnumerator<RecordBatch>
     {
@@ -51,18 +95,20 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         private readonly bool _prune;
         private readonly bool _indexes;
         private readonly RowRange _rows;
+        private readonly bool _refined;
+        private readonly BlockMask? _live;
         private readonly CancellationToken _token;
         private IAsyncEnumerator<RecordBatch>? _inner;
 
-        internal Enumerator(
-            BatchAsyncEnumerable source, VortexExpr? filter, bool prune, bool indexes, RowRange rows,
-            CancellationToken token)
+        internal Enumerator(FilteredBatches owner, CancellationToken token)
         {
-            _source = source;
-            _filter = filter;
-            _prune = prune;
-            _indexes = indexes;
-            _rows = rows;
+            _source = owner._inner;
+            _filter = owner._filter;
+            _prune = owner._prune;
+            _indexes = owner._indexes;
+            _rows = owner._rows;
+            _refined = owner.Refined;
+            _live = owner.Live;
             _token = token;
         }
 
@@ -70,15 +116,18 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         /// The rows an exact source proves the filter selects, when there is one and they fit a
         /// batch: the scan then reads them and evaluates nothing.
         /// </summary>
-        private async ValueTask<RowSelection?> ProvenAsync()
+        /// <param name="zones">The zone maps the pruning read, handed to the source so that it does not read them again.</param>
+        /// <param name="live">The blocks the pruning left.</param>
+        private async ValueTask<RowSelection?> ProvenAsync(ZonePruner? zones, BlockMask? live)
         {
-            if (!_prune || _filter is null || _source.HasTake)
+            if (!_prune || _filter is null || _source.HasTake
+                || !MayFitBatch(_source.Plan, SplitPlan.NaturalBatchRows(_source.Tree), zones, live))
             {
                 return null;
             }
 
             ExactCover? cover = await ExactCover
-                .TryCreateAsync(_source.File, _filter, _indexes, _token)
+                .TryCreateAsync(_source.File, _filter, _indexes, _token, zones)
                 .ConfigureAwait(false);
             if (cover is null)
             {
@@ -103,24 +152,24 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
 
         public async ValueTask<bool> MoveNextAsync()
         {
-            // An exact index gathers the rows it proved, which a scan delivering whole blocks does not want.
-            if (_inner is null && _source.Compact && await ProvenAsync().ConfigureAwait(false) is { } proven)
-            {
-                _inner = _source.GetAsyncEnumerator(live: null, proven, _token);
-            }
-
             if (_inner is null)
             {
                 // One read of every zone map the filter can use, before the first batch, and one
                 // mask of live blocks refined from it. Both stay in memory for the rest of the
                 // scan; every split asks the mask, never the zone maps.
-                BlockMask? live = _prune && _filter is not null
-                    ? await ZonePruningPlan
-                        .RefineAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics, _indexes)
-                        .ConfigureAwait(false)
-                    : null;
+                ZonePruningPlan.PruningPlan pruning = _refined
+                    ? new ZonePruningPlan.PruningPlan(_live, null)
+                    : _prune && _filter is not null
+                        ? await ZonePruningPlan
+                            .PlanAsync(_source.File, _source.Tree, _filter, _token, steps: null, _source.Metrics, _indexes)
+                            .ConfigureAwait(false)
+                        : default;
 
-                _inner = _source.GetAsyncEnumerator(live, _token);
+                // An exact index gathers the rows it proved, which a scan delivering whole blocks
+                // does not want.
+                _inner = _source.Compact && await ProvenAsync(pruning.Zones, pruning.Live).ConfigureAwait(false) is { } proven
+                    ? _source.GetAsyncEnumerator(live: null, proven, _token)
+                    : _source.GetAsyncEnumerator(pruning.Live, _token);
             }
 
             while (await _inner.MoveNextAsync().ConfigureAwait(false))

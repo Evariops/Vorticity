@@ -202,12 +202,7 @@ internal static class ZonePruningPlan
 
         // Counted at the asking, like a batch's requests: the distinct zone-map segments and their
         // bytes, whatever the source then does about them.
-        int segments = context.Segments.Count;
-        long bytes = 0;
-        for (int i = 0; i < segments; i++)
-        {
-            bytes += context.Segments.GetSpec(i).Length;
-        }
+        int segments = Scanning.ScanMetrics.Unread(context.Segments, out long bytes);
 
         await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
 

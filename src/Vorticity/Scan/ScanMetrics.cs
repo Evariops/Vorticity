@@ -20,8 +20,8 @@ internal sealed class ScanMetrics
     private long _windowSplits;
 
     /// <summary>
-    /// Segments the scan asked its source for, one per batch and per distinct segment the batch
-    /// registered. A source that caches may serve some without a read; this counts the asking.
+    /// Segments the scan asked its source for: those a batch registered and the scan did not
+    /// already hold. A session cache may serve some without a read; this counts the asking.
     /// </summary>
     public long SegmentRequests => Interlocked.Read(ref _segmentRequests);
 
@@ -67,41 +67,45 @@ internal sealed class ScanMetrics
     }
 
     /// <summary>
-    /// Adds what a split just registered: the distinct segments and their bytes, counted at the
-    /// asking -- a caching source may serve some without a read.
+    /// The slots of a set the source is about to be asked for: registered, not filled by what the
+    /// scan holds, and not empty, since an empty segment is filled when it is registered.
     /// </summary>
-    /// <param name="segments">The request set, after registration and before the read.</param>
-    internal void AddRequests(IO.SegmentRequestSet segments)
+    /// <param name="segments">The request set, registered and not yet read.</param>
+    /// <param name="bytes">Their bytes.</param>
+    /// <returns>How many.</returns>
+    internal static int Unread(IO.SegmentRequestSet segments, out long bytes)
     {
-        long bytes = 0;
+        int count = 0;
+        bytes = 0;
         for (int i = 0; i < segments.Count; i++)
         {
-            bytes += segments.GetSpec(i).Length;
+            if (!segments.IsFilled(i))
+            {
+                count++;
+                bytes += segments.GetSpec(i).Length;
+            }
         }
 
-        AddRequests(segments.Count, bytes);
+        return count;
     }
 
     /// <summary>
-    /// Adds what a split registered to the scan's sink, when there is one, and to the process's
-    /// counters, when a listener is attached; nothing is walked when neither asks.
+    /// Adds what a split is about to ask of the source to the scan's sink, when there is one, and to
+    /// the process's counters, when a listener is attached.
     /// </summary>
     /// <param name="metrics">The scan's sink, or null.</param>
-    /// <param name="segments">The request set, after registration.</param>
-    internal static void Note(ScanMetrics? metrics, IO.SegmentRequestSet segments)
+    /// <param name="segments">The request set, registered, filled with what the scan holds, and not yet read.</param>
+    /// <returns>Whether there is anything to ask: when not, the set is complete already and the source is not called.</returns>
+    internal static bool Note(ScanMetrics? metrics, IO.SegmentRequestSet segments)
     {
-        if (metrics is null && !Diagnostics.VortexEventSource.On)
+        int count = Unread(segments, out long bytes);
+        if (count == 0)
         {
-            return;
+            return false;
         }
 
-        long bytes = 0;
-        for (int i = 0; i < segments.Count; i++)
-        {
-            bytes += segments.GetSpec(i).Length;
-        }
-
-        Note(metrics, segments.Count, bytes);
+        Note(metrics, count, bytes);
+        return true;
     }
 
     /// <summary>Adds counted requests to the sink and to the process's counters.</summary>

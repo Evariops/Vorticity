@@ -66,8 +66,9 @@ internal sealed class ExactCover : IAsyncDisposable
     /// <param name="filter">The scan's predicate.</param>
     /// <param name="indexes">Whether the index directory may serve.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <param name="zones">The zone maps a pruning pass already read for the filter, or null to read the column's.</param>
     internal static async ValueTask<ExactCover?> TryCreateAsync(
-        VortexFile file, VortexExpr filter, bool indexes, CancellationToken cancellationToken)
+        VortexFile file, VortexExpr filter, bool indexes, CancellationToken cancellationToken, Compute.ZonePruner? zones = null)
     {
         string? path = null;
         if (!OneColumn(filter, ref path) || path is null)
@@ -76,7 +77,7 @@ internal sealed class ExactCover : IAsyncDisposable
         }
 
         (KeySource? source, KeySourceKind kind) =
-            await KeyCursorBuilder.OpenSourceAsync(file, path, indexes, cancellationToken).ConfigureAwait(false);
+            await KeyCursorBuilder.OpenSourceAsync(file, path, indexes, cancellationToken, zones?.Column(path)).ConfigureAwait(false);
         if (source is null)
         {
             return null;

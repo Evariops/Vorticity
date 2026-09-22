@@ -76,6 +76,18 @@ internal sealed class ScanBuilder
         return this;
     }
 
+    private bool _pruned;
+    private BlockMask? _live;
+
+    /// <summary>Hands the scan the filter's mask of live blocks, refined already, so that it reads no structure to refine it again.</summary>
+    /// <param name="live">The mask, or null when no structure prunes anything.</param>
+    internal ScanBuilder WithPruned(BlockMask? live)
+    {
+        _pruned = true;
+        _live = live;
+        return this;
+    }
+
     internal ScanBuilder(VortexFile file)
     {
         ArgumentNullException.ThrowIfNull(file);
@@ -512,7 +524,7 @@ internal sealed class ScanBuilder
         // all it holds still produces a batch, but one gathered down to nothing must not.
         return _filter is null && _take is null
             ? batches
-            : new FilteredBatches(batches, _filter, _prune, _indexes, rows);
+            : new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live };
     }
 
     /// <summary>Hands the scan a sink it adds its counters to as it runs.</summary>
@@ -605,13 +617,9 @@ internal sealed class ScanBuilder
             }
 
             // The data segments of the live splits, plus what consulting each structure cost:
-            // the same asking the metrics count, so that plan and outcome are one quantity.
-            int toRead = segments.Count;
-            long bytes = 0;
-            for (int i = 0; i < segments.Count; i++)
-            {
-                bytes += segments.GetSpec(i).Length;
-            }
+            // the same asking the metrics count, so that plan and outcome are one quantity. A
+            // segment the scan holds is asked for once, so the distinct ones are what it asks for.
+            int toRead = ScanMetrics.Unread(segments, out long bytes);
 
             for (int i = 0; i < steps.Count; i++)
             {

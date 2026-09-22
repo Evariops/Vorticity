@@ -154,19 +154,20 @@ internal sealed class KeyCursorBuilder
     /// <param name="path">The column.</param>
     /// <param name="indexes">Whether the scan may use the index directory: without it only the sorted column serves.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <param name="zones">The column's zone map, when a pruning pass already read it; null to read it.</param>
     /// <remarks>
     /// A scan asks this on every filtered execution, so a file that cannot have a source answers
     /// before anything is allocated: no statistics saying the column is sorted, and no index
     /// directory the scan may use.
     /// </remarks>
     internal static async ValueTask<(KeySource? Source, KeySourceKind Kind)> OpenSourceAsync(
-        VortexFile file, string path, bool indexes, CancellationToken cancellationToken)
+        VortexFile file, string path, bool indexes, CancellationToken cancellationToken, Compute.ZoneColumn? zones = null)
     {
         bool runs = indexes && file.HasIndexDirectory;
         if (StatedSorted(file, path))
         {
             (SortedColumnSource? column, _) =
-                await SortedColumnSource.OpenAsync(file, path, cancellationToken).ConfigureAwait(false);
+                await SortedColumnSource.OpenAsync(file, path, cancellationToken, zones).ConfigureAwait(false);
             if (column is not null)
             {
                 return (new SortedColumnWalker(column), KeySourceKind.SortedColumn);

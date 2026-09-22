@@ -349,6 +349,16 @@ internal static class AggregationEngine
                 partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted);
             }
 
+            // One read of the zone maps and indexes for every range, as a single scan would make,
+            // rather than one per range.
+            if (pass.Filter is { } filter && pass.Options.Pruning && source is FileScanSource file)
+            {
+                BlockMask? live = await ZonePruningPlan
+                    .RefineAsync(file.File, file.File.LayoutTree, filter, cancellationToken, steps: null, metrics, pass.Options.UseIndexes)
+                    .ConfigureAwait(false);
+                pass = pass with { Pruned = true, Live = live };
+            }
+
             await RunParallelAsync(source, pass, metrics, partitions, ranges, cancellationToken).ConfigureAwait(false);
         }
 

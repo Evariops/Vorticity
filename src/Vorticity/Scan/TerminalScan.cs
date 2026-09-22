@@ -122,6 +122,8 @@ internal sealed class TerminalScan
         using ScanContext context = new ScanContext(_file);
         context.LiveBlocks = live;
         context.Metrics = _metrics;
+        using ScanSegments held = new ScanSegments(1);
+        Decodes decodes = new Decodes(held);
 
         // One evaluation window for the whole count, sized for the largest split the plan
         // produces: rented once, so a block costs no allocation.
@@ -152,7 +154,7 @@ internal sealed class TerminalScan
                 {
                     Diagnostics.VortexEventSource.Counted(0, blocks);
                     cancellationToken.ThrowIfCancellationRequested();
-                    total += await DecodeAndCountAsync(context, split, states, cancellationToken)
+                    total += await DecodeAndCountAsync(context, decodes, split, states, cancellationToken)
                         .ConfigureAwait(false);
                 }
 
@@ -251,14 +253,11 @@ internal sealed class TerminalScan
 
     /// <summary>The third tier: one decode, one evaluation, one count, no copy.</summary>
     private async ValueTask<long> DecodeAndCountAsync(
-        ScanContext context, RowRange split, byte[] states, CancellationToken cancellationToken)
+        ScanContext context, Decodes decodes, RowRange split, byte[] states, CancellationToken cancellationToken)
     {
         try
         {
-            SplitExecution.Register(context, _tree, in _mask, split);
-            ScanMetrics.Note(_metrics, context.Segments);
-            await _file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
-            int root = SplitExecution.Execute(context, _tree, in _mask, split, _take);
+            int root = await ReadAndExecuteAsync(context, decodes, split, cancellationToken).ConfigureAwait(false);
             return CountTrue(context, root, states);
         }
         finally
@@ -266,6 +265,47 @@ internal sealed class TerminalScan
             // The split is counted and its arenas are free for the next one: the memory bound.
             context.ResetBatch();
         }
+    }
+
+    /// <summary>
+    /// Reads a split, the segments an earlier split read already served from what the terminal
+    /// holds, and executes it.
+    /// </summary>
+    private async ValueTask<int> ReadAndExecuteAsync(
+        ScanContext context, Decodes decodes, RowRange split, CancellationToken cancellationToken)
+    {
+        long batch = decodes.Next++;
+        SplitExecution.Register(context, _tree, in _mask, split);
+        decodes.Held.Claim(context.Segments, batch, waiter: null);
+        try
+        {
+            if (ScanMetrics.Note(_metrics, context.Segments))
+            {
+                await _file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                context.Segments.Complete();
+            }
+        }
+        catch
+        {
+            decodes.Held.Abandon(batch);
+            throw;
+        }
+
+        decodes.Held.Publish(context.Segments, batch);
+        decodes.Held.Release(batch);
+        return SplitExecution.Execute(context, _tree, in _mask, split, _take);
+    }
+
+    /// <summary>What the decodes of one terminal share: the segments held between splits.</summary>
+    private sealed class Decodes(ScanSegments held)
+    {
+        internal ScanSegments Held { get; } = held;
+
+        /// <summary>The number of the next split decoded.</summary>
+        internal long Next;
     }
 
     private long CountTrue(ScanContext context, int root, byte[] states)
@@ -440,6 +480,8 @@ internal sealed class TerminalScan
         BlockMask scope = new BlockMask(_tree.Root.RowCount, SplitPlan.NaturalBatchRows(_tree));
         context.LiveBlocks = scope;
         context.Metrics = _metrics;
+        using ScanSegments held = new ScanSegments(1);
+        Decodes decodes = new Decodes(held);
         int capacity = (int)Math.Min(plan.MaxRows, int.MaxValue);
         byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 1));
         int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(capacity, 1));
@@ -452,7 +494,7 @@ internal sealed class TerminalScan
                     cancellationToken.ThrowIfCancellationRequested();
                     scope.KeepOnly(undecided[i]);
                     FilterLiteral found = await DecodeExtremeAsync(
-                        context, undecided[i], field, wantMin, states, indices, cancellationToken)
+                        context, decodes, undecided[i], field, wantMin, states, indices, cancellationToken)
                         .ConfigureAwait(false);
                     Keep(ref best, found, wantMin);
                 }
@@ -474,7 +516,7 @@ internal sealed class TerminalScan
                     cancellationToken.ThrowIfCancellationRequested();
                     scope.KeepOnly(candidates[i].Split);
                     FilterLiteral found = await DecodeExtremeAsync(
-                        context, candidates[i].Split, field, wantMin, states, indices, cancellationToken)
+                        context, decodes, candidates[i].Split, field, wantMin, states, indices, cancellationToken)
                         .ConfigureAwait(false);
                     Keep(ref best, found, wantMin);
                 }
@@ -576,15 +618,12 @@ internal sealed class TerminalScan
 
     /// <summary>The decode resolution over one split: the filter's rows, the extreme among them.</summary>
     private async ValueTask<FilterLiteral> DecodeExtremeAsync(
-        ScanContext context, RowRange split, FieldExpr field, bool wantMin, byte[] states, int[] indices,
+        ScanContext context, Decodes decodes, RowRange split, FieldExpr field, bool wantMin, byte[] states, int[] indices,
         CancellationToken cancellationToken)
     {
         try
         {
-            SplitExecution.Register(context, _tree, in _mask, split);
-            ScanMetrics.Note(_metrics, context.Segments);
-            await _file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
-            int root = SplitExecution.Execute(context, _tree, in _mask, split, _take);
+            int root = await ReadAndExecuteAsync(context, decodes, split, cancellationToken).ConfigureAwait(false);
             return Extreme(context, root, field, wantMin, states, indices);
         }
         finally
