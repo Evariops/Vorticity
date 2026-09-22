@@ -144,12 +144,12 @@ public sealed class PathAllocationTests
     /// is so that an unrelated framework change of a few dozen bytes does not turn every axis red
     /// at once while saying nothing about this library.
     ///
-    /// THESE DO NOT EQUAL THE BENCHMARK'S FIGURES, and the gap is not a defect to reconcile. Each
-    /// axis here reads 275-400 bytes above what MemoryDiagnoser reports for the same work, because
-    /// the async state machine and the delegate call of the measuring wrapper are inside this
-    /// measurement and outside that one. What matters for a ratchet is that the overhead is
-    /// constant, which it is: the number moves when the path moves and at no other time. Compare a
-    /// run of this test with another run of this test, never with the recorded benchmark figures.
+    /// These need not equal the benchmark's figures, and a gap is not a defect to reconcile: the
+    /// measuring wrapper is inside this measurement and outside that one. The corpus path is outside
+    /// both, since the benchmarks resolve it in their setup and <see cref="Measure"/> is handed it
+    /// resolved. What matters for a ratchet is that the overhead is constant, which it is: the
+    /// number moves when the path moves and at no other time. Compare a run of this test with
+    /// another run of this test, never with the recorded benchmark figures.
     /// </remarks>
     /// <seealso cref="AllocationCollection"/>
     /// <remarks>
@@ -162,7 +162,7 @@ public sealed class PathAllocationTests
     /// </remarks>
     private static readonly (string Axis, string File, long Ceiling, Func<string, ValueTask<long>> Path)[] Axes =
     [
-        ("open, footer only", File, 15_360, FooterOnly),
+        ("open, footer only", File, 15_008, FooterOnly),
         // `VortexFile` holds one reference to the lazily parsed `LayoutTree` that every scan of
         // an open file shares instead of re-deriving: eight bytes once per OPEN, against a
         // layout-tree parse once per `ExecuteAsync`. This axis opens the file and reads one batch,
@@ -196,16 +196,16 @@ public sealed class PathAllocationTests
         //
         // A batch carries its session, its public schema, the rows a filter kept when it is
         // delivered whole, and whether it owns its arena: 40 bytes more on every batch.
-        ("open, first batch", File, 134_320, FirstBatch),
-        ("full scan", File, 194_016, FullScan),
-        ("projected scan, 1 of 5 columns", File, 137_184, ProjectedScan),
+        ("open, first batch", File, 133_968, FirstBatch),
+        ("full scan", File, 193_664, FullScan),
+        ("projected scan, 1 of 5 columns", File, 136_832, ProjectedScan),
         // A take or a filter goes through the filtered delivery, whose enumerable and enumerator hold
         // one more field each: 16 bytes a scan.
-        ("take 64 rows from 64 splits", File, 195_104, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 194_752, ScatteredTake),
         // The filter's field references hold one more field each, and the zone column the pruning
         // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
         // context that reads the zone map.
-        ("selective filter, pruning on", File, 142_440, PrunedFilter),
+        ("selective filter, pruning on", File, 142_088, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -218,7 +218,7 @@ public sealed class PathAllocationTests
         // grows with the number of zones. Keep `ZoneColumn.Zones` a range rather than an iterator,
         // and that context's arenas sized for what they hold rather than for a batch: either one
         // undone costs more than the whole gap that remains.
-        ("selective filter, pruning off", File, 138_264, UnprunedFilter),
+        ("selective filter, pruning off", File, 137_912, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
@@ -226,17 +226,17 @@ public sealed class PathAllocationTests
         // This ceiling also carries the read contract's per-scan state -- the mask of live blocks
         // and the metrics sink, a reference each on the enumerable, the enumerator and the lane's
         // context -- and the headroom the neighbouring axes have.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 28_200, FullScan),
-        ("scan, vortex.pco", "encodings/pco", 29_640, FullScan),
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 27_880, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 29_368, FullScan),
         // A node's frames go through one decoder per node, reset between frames, rather than the
         // one-shot `ZstandardDecoder.TryDecompress`, which builds and tears down a native
         // decompression context per call: this ceiling pays for one managed decoder per scan so
         // that the scan does not pay for a native context per frame.
-        ("scan, vortex.zstd", "encodings/zstd", 28_200, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 27_928, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
-        ("scan, vortex.map", "encodings/map", 28_648, FullScan),
-        ("scan, vortex.variant", "encodings/variant", 28_112, FullScan),
+        ("scan, vortex.map", "encodings/map", 28_376, FullScan),
+        ("scan, vortex.variant", "encodings/variant", 27_824, FullScan),
     ];
 
     [Fact]
@@ -254,7 +254,7 @@ public sealed class PathAllocationTests
         List<string> over = [];
         foreach ((string axis, string file, long ceiling, Func<string, ValueTask<long>> path) in Axes)
         {
-            long floor = Floor(path, file);
+            long floor = Floor(path, Corpus.Path(file));
             long headroom = ceiling - floor;
             report.Append("    ")
                 .Append(axis.PadRight(32))
@@ -308,8 +308,9 @@ public sealed class PathAllocationTests
     {
         Decoders.EnsureRegistered();
 
-        foreach ((string axis, string file, _, Func<string, ValueTask<long>> path) in Axes)
+        foreach ((string axis, string id, _, Func<string, ValueTask<long>> path) in Axes)
         {
+            string file = Corpus.Path(id);
             for (int i = 0; i < Warmup; i++)
             {
                 Complete(path(file));
@@ -355,6 +356,14 @@ public sealed class PathAllocationTests
         return floor;
     }
 
+    /// <summary>What one run of <paramref name="path"/> over <paramref name="file"/> allocates.</summary>
+    /// <remarks>
+    /// <paramref name="file"/> is the corpus file's absolute path, resolved by the caller before
+    /// anything is measured, as the write ratchet resolves its own. The string is as long as the
+    /// checkout's location, so a path built inside the measurement would charge the axis two bytes
+    /// for every character of the directory the repository is cloned in, and a ceiling met in one
+    /// clone would be missed in a deeper one.
+    /// </remarks>
     private static long Measure(Func<string, ValueTask<long>> path, string file)
     {
         long before = GC.GetAllocatedBytesForCurrentThread();
@@ -382,15 +391,15 @@ public sealed class PathAllocationTests
         return work.Result;
     }
 
-    private static async ValueTask<long> FooterOnly(string id)
+    private static async ValueTask<long> FooterOnly(string path)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         return file.RowCount;
     }
 
-    private static async ValueTask<long> FirstBatch(string id)
+    private static async ValueTask<long> FirstBatch(string path)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -400,9 +409,9 @@ public sealed class PathAllocationTests
         return 0;
     }
 
-    private static async ValueTask<long> FullScan(string id)
+    private static async ValueTask<long> FullScan(string path)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -413,9 +422,9 @@ public sealed class PathAllocationTests
         return rows;
     }
 
-    private static async ValueTask<long> ProjectedScan(string id)
+    private static async ValueTask<long> ProjectedScan(string path)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().Project("monotone").ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -426,7 +435,7 @@ public sealed class PathAllocationTests
         return rows;
     }
 
-    private static async ValueTask<long> ScatteredTake(string id)
+    private static async ValueTask<long> ScatteredTake(string path)
     {
         // One row from each of the file's 64 splits of 1024, the take axis of `--ratio-check`'s shape.
         long[] indices = new long[64];
@@ -435,7 +444,7 @@ public sealed class PathAllocationTests
             indices[i] = (i * 1024L) + 511;
         }
 
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().Take(indices).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -447,13 +456,13 @@ public sealed class PathAllocationTests
     }
 
     /// <summary>A narrow band of the sorted column: ~100 rows of 65 536, pruning's own case.</summary>
-    private static async ValueTask<long> PrunedFilter(string id)
+    private static async ValueTask<long> PrunedFilter(string path)
     {
-        return await Band(id, pruning: true);
+        return await Band(path, pruning: true);
     }
 
     /// <summary>The same band with pruning off: every split decoded, then masked.</summary>
-    private static ValueTask<long> UnprunedFilter(string id) => Band(id, pruning: false);
+    private static ValueTask<long> UnprunedFilter(string path) => Band(path, pruning: false);
 
     private static async ValueTask<long> Band(string path, bool pruning)
     {
@@ -461,8 +470,7 @@ public sealed class PathAllocationTests
             Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_000L))),
             Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(1_003_300L))));
 
-        await using VortexFile opened = await VortexFile.OpenAsync(
-            Corpus.Path(path), CancellationToken.None);
+        await using VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None);
         long rows = 0;
         await foreach (RecordBatch batch in opened.ScanBuilder()
             .Project("monotone")

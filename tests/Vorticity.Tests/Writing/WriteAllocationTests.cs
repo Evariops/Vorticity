@@ -381,7 +381,7 @@ public sealed class WriteAllocationTests
     /// over-count - and the class runs alone, so there is nothing else to over-count.
     ///
     /// The READ half is inside the measurement and cannot be subtracted without a second harness.
-    /// PathAllocationTests prices it: 193 760 B for a full scan of the largest file here. The
+    /// PathAllocationTests prices it: 193 408 B for a full scan of the largest file here. The
     /// figures below are therefore an upper bound on what writing costs, which is the honest
     /// direction for a ceiling.
     /// </remarks>
