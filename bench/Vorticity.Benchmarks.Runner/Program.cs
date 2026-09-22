@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Globalization;
 using System.Threading.Tasks;
 
@@ -28,10 +29,15 @@ internal static class Program
             return 2;
         }
 
+        // The action is timed from inside the process, once it is up: what the report compares is
+        // the work, and the process start is a property of the build that the parent times apart.
+        long started = Stopwatch.GetTimestamp();
         long delivered = await scenario(args[2]).ConfigureAwait(false);
+        long workMicros = (long)(Stopwatch.GetElapsedTime(started).TotalMilliseconds * 1000);
         (long cpuMs, long rssBytes) = ProcessCost.Read();
         Console.WriteLine(string.Create(
-            CultureInfo.InvariantCulture, $"rows={delivered} cpu_ms={cpuMs} rss_bytes={rssBytes}"));
+            CultureInfo.InvariantCulture,
+            $"rows={delivered} work_us={workMicros} cpu_ms={cpuMs} rss_bytes={rssBytes}"));
         return 0;
     }
 }

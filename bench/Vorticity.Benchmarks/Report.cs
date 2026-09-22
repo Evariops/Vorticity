@@ -99,10 +99,14 @@ internal static class Report
             return 2;
         }
 
+        // The action is timed from inside the process, once it is up, as the runner and the
+        // reference time theirs.
+        long started = Stopwatch.GetTimestamp();
         long delivered = await scenario(args[2]).ConfigureAwait(false);
+        long workMicros = (long)(Stopwatch.GetElapsedTime(started).TotalMilliseconds * 1000);
         (long cpuMs, long rssBytes) = Vorticity.Bench.Scenarios.ProcessCost.Read();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"rows={delivered} cpu_ms={cpuMs} rss_bytes={rssBytes}"));
+            $"rows={delivered} work_us={workMicros} cpu_ms={cpuMs} rss_bytes={rssBytes}"));
         return 0;
     }
 
@@ -200,6 +204,7 @@ internal static class Report
         (string Exe, string[] Args) command, int runs)
     {
         List<double> wall = [];
+        List<double> work = [];
         List<double> cpu = [];
         List<double> rss = [];
         long rows = -1;
@@ -253,13 +258,22 @@ internal static class Report
                 continue;
             }
 
+            long workMicros = Value(output, "work_us=");
+            if (workMicros < 0)
+            {
+                // A side that does not time its own action cannot be compared on it, and a wall
+                // clock in its place would be a different measurement under the same heading.
+                return (null, "the process reported no time for its action");
+            }
+
             wall.Add(watch.Elapsed.TotalMilliseconds);
+            work.Add(workMicros / 1000.0);
             rows = Value(output, "rows=");
             cpu.Add(Value(output, "cpu_ms="));
             rss.Add(Value(output, "rss_bytes="));
         }
 
-        return (new Measurement(rows, Spread.Of(wall), Spread.Of(cpu), Spread.Of(rss)), null);
+        return (new Measurement(rows, Spread.Of(wall), Spread.Of(work), Spread.Of(cpu), Spread.Of(rss)), null);
     }
 
     private static long Value(string output, string key)
@@ -426,7 +440,12 @@ internal static class Report
         }
     }
 
-    private sealed record Measurement(long Rows, Spread WallMs, Spread CpuMs, Spread RssBytes);
+    /// <param name="Rows">Rows the process rendered.</param>
+    /// <param name="WallMs">The whole process, from the parent's clock.</param>
+    /// <param name="WorkMs">The action alone, from the process's own clock, once it was up.</param>
+    /// <param name="CpuMs">Processor time of the process.</param>
+    /// <param name="RssBytes">Peak resident set of the process.</param>
+    private sealed record Measurement(long Rows, Spread WallMs, Spread WorkMs, Spread CpuMs, Spread RssBytes);
 
     /// <param name="Rows">The fixture's row count.</param>
     /// <param name="Bytes">The fixture's size.</param>
@@ -445,20 +464,29 @@ internal static class Report
         text.AppendLine(Header(runs));
         text.AppendLine();
         text.AppendLine("rows       scenario       ours AOT, ms (low-high)  ours JIT, ms (low-high)  " +
-            "rust, ms (low-high)  ratio   ours MiB  rust MiB  rows out");
+            "rust, ms (low-high)     ratio   ours MiB  rust MiB  rows out   process: AOT / JIT / rust, ms");
         foreach (Row row in table)
         {
             bool asked = row.Scenario.Reference is not null;
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"{row.Rows,-10:N0} {row.Scenario.Name,-14} {Wall(row.Aot),-24} {Wall(row.Jit),-24} " +
-                $"{Wall(row.Theirs, asked),-20} " +
+                $"{row.Rows,-10:N0} {row.Scenario.Name,-14} {Work(row.Aot),-24} {Work(row.Jit),-24} " +
+                $"{Work(row.Theirs, asked),-23} " +
                 $"{Ratio(row),-7} {Side(row.Aot, m => m.RssBytes.Median / (1024 * 1024)),8}  " +
                 $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024), asked: asked),8}  " +
-                $"{(row.Aot is null ? "refused" : row.Aot.Rows.ToString("N0", CultureInfo.InvariantCulture)),10}"));
+                $"{(row.Aot is null ? "refused" : row.Aot.Rows.ToString("N0", CultureInfo.InvariantCulture)),10}   " +
+                $"{Side(row.Aot, m => m.WallMs.Median)} / {Side(row.Jit, m => m.WallMs.Median)} / " +
+                $"{Side(row.Theirs, m => m.WallMs.Median, asked: asked)}"));
         }
 
         return text.ToString();
     }
+
+    /// <summary>The action's time inside the process, median with the spread the runs showed.</summary>
+    private static string Work(Measurement? measurement, bool asked = true) =>
+        measurement is null
+            ? Absent(asked)
+            : string.Create(CultureInfo.InvariantCulture,
+                $"{measurement.WorkMs.Median:F1} ({measurement.WorkMs.Low:F1}-{measurement.WorkMs.High:F1})");
 
     private static string Side(
         Measurement? measurement, Func<Measurement, double> of, string unit = "", bool asked = true) =>
@@ -498,14 +526,16 @@ internal static class Report
         text.AppendLine();
         text.AppendLine("Eight scenarios, at 2^20 rows and at ten times that, on a table of four columns: a");
         text.AppendLine("monotone `i64`, an `f64`, a short `utf8` and a nullable `bool`. **Each side runs in its");
-        text.AppendLine("own process**, once per run, and the run is timed from outside — so what you see is");
-        text.AppendLine("what a command costs, including starting, opening the file and exiting.");
+        text.AppendLine("own process**, once per run, and **times the action from its own clock**, once the");
+        text.AppendLine("process is up: opening the file, doing the work, rendering the rows. The figures are that");
+        text.AppendLine("time. Starting the process is measured too, from the parent's clock, and reported apart:");
+        text.AppendLine("it is a property of the build, not of the work.");
         text.AppendLine();
         text.AppendLine("Our side runs twice. **AOT** is the same code published as Native AOT: a native binary,");
-        text.AppendLine("like the reference's, and the one the ratio is taken against, because it is the only");
-        text.AppendLine("pairing where both processes pay the same fixed costs. **JIT** is the framework-dependent");
-        text.AppendLine("build under `dotnet`, which starts the runtime and compiles the code as it goes: what a");
-        text.AppendLine("`dotnet run` costs, and what a long-running process pays once.");
+        text.AppendLine("like the reference's, and the one the ratio is taken against. **JIT** is the");
+        text.AppendLine("framework-dependent build under `dotnet`, in which the action compiles its own code as it");
+        text.AppendLine("goes: what the first call costs in a fresh `dotnet` process, and what a long-running");
+        text.AppendLine("process pays once.");
         text.AppendLine();
         text.AppendLine("Peak resident memory and processor time are each side's own `getrusage`, and the wall");
         text.AppendLine("clock is the parent's. Both sides render the same rows, and the harness fails rather");
@@ -536,8 +566,8 @@ internal static class Report
             {
                 bool asked = row.Scenario.Reference is not null;
                 text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                    $"| `{row.Scenario.Name}` | {row.Scenario.What} | {Wall(row.Aot)} | {Wall(row.Jit)} | " +
-                    $"{Wall(row.Theirs, asked)} | {Ratio(row)} | " +
+                    $"| `{row.Scenario.Name}` | {row.Scenario.What} | {Work(row.Aot)} | {Work(row.Jit)} | " +
+                    $"{Work(row.Theirs, asked)} | {Ratio(row)} | " +
                     $"{Side(row.Aot, m => m.RssBytes.Median / (1024 * 1024), " MiB")} | " +
                     $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024), " MiB", asked)} |"));
             }
@@ -564,18 +594,19 @@ internal static class Report
             r => r.Scenario.Name == "open" && r.Aot is not null && r.Theirs is not null);
         if (floor is { Aot: { } ourFloor, Theirs: { } theirFloor })
         {
-            text.AppendLine("**Start with the floor.** The `open` row is a process that opens the file and reads");
+            // The process start is the whole process less the action it timed itself, on the row
+            // whose action is the smallest.
+            text.AppendLine("**What the table leaves out.** Starting the process, up to the point where it begins");
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"no rows: {ourFloor.WallMs.Median:F0} ms for the native build against {theirFloor.WallMs.Median:F0} ms. Both are a native"));
-            text.AppendLine("binary starting, and a process that does nothing at all costs about as much on this");
-            text.AppendLine("machine. Subtract it from every other row to see what the work cost.");
+                $"its action, costs {ourFloor.WallMs.Median - ourFloor.WorkMs.Median:F0} ms for the native build and " +
+                $"{theirFloor.WallMs.Median - theirFloor.WorkMs.Median:F0} ms for the reference on this machine, most of it"));
+            text.AppendLine("the operating system starting any binary at all.");
             if (floor.Jit is { } jitFloor)
             {
                 text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                    $"The JIT column's floor is {jitFloor.WallMs.Median:F0} ms: the managed runtime starting and compiling"));
-                text.AppendLine("the code an open touches, whatever the file holds. Every row of that column carries it,");
-                text.AppendLine("plus the compilation of whatever else the scenario touches, and a long-running process");
-                text.AppendLine("pays it once.");
+                    $"The JIT build's start is {jitFloor.WallMs.Median - jitFloor.WorkMs.Median:F0} ms, the managed runtime coming up; what its"));
+                text.AppendLine("column then shows is the action compiling its own code as it runs, which is why an");
+                text.AppendLine("`open` that takes the native build a fraction of a millisecond takes it tens.");
             }
 
             text.AppendLine();
@@ -589,17 +620,31 @@ internal static class Report
                 $"**Where we stand.** Of {compared.Count} compared scenarios, the best is `{best.Scenario.Name}`"));
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                 $"at {best.Rows:N0} rows ({Ratio(best)}) and the worst is `{worst.Scenario.Name}` at {worst.Rows:N0} rows"));
-            text.AppendLine("(" + Ratio(worst) + "). A ratio above 1.00x means the native build took less wall time");
-            text.AppendLine("than the reference.");
+            text.AppendLine("(" + Ratio(worst) + "). A ratio above 1.00x means the native build's action took less time");
+            text.AppendLine("than the reference's.");
             text.AppendLine();
 
-            double ourPeak = compared.Max(r => r.Aot!.RssBytes.Median) / (1024 * 1024);
-            double theirPeak = compared.Max(r => r.Theirs!.RssBytes.Median) / (1024 * 1024);
-            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"**Memory.** Our worst peak here is {ourPeak:F0} MiB against {theirPeak:F0} MiB. We decode a chunk whole and"));
-            text.AppendLine("hand each batch a window of it, where the reference decodes a split of at most a hundred");
-            text.AppendLine("thousand rows at a time; on a file whose chunks hold half a million rows, that is the");
-            text.AppendLine("difference, and it is the file's chunking rather than its size that sets it.");
+            Row? scan = compared.Where(r => r.Scenario.Name == "scan").MaxBy(r => r.Rows);
+            if (scan is not null)
+            {
+                text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                    $"**Memory.** On the full scan at {scan.Rows:N0} rows our peak is " +
+                    $"{scan.Aot!.RssBytes.Median / (1024 * 1024):F0} MiB against " +
+                    $"{scan.Theirs!.RssBytes.Median / (1024 * 1024):F0} MiB. We decode a chunk whole and"));
+                text.AppendLine("hand each batch a window of it, where the reference decodes a split of at most a hundred");
+                text.AppendLine("thousand rows at a time; on a file whose chunks hold half a million rows, that is the");
+                text.AppendLine("difference, and it is the file's chunking rather than its size that sets it.");
+            }
+
+            Row? theirWorst = compared.MaxBy(r => r.Theirs!.RssBytes.Median);
+            if (theirWorst is not null && theirWorst.Theirs!.RssBytes.Median > theirWorst.Aot!.RssBytes.Median)
+            {
+                text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                    $"The reference's own worst is `{theirWorst.Scenario.Name}` at {theirWorst.Rows:N0} rows, " +
+                    $"{theirWorst.Theirs.RssBytes.Median / (1024 * 1024):F0} MiB against our " +
+                    $"{theirWorst.Aot.RssBytes.Median / (1024 * 1024):F0}."));
+            }
+
             text.AppendLine();
         }
 
@@ -639,11 +684,11 @@ internal static class Report
 
         text.AppendLine("## What this does not measure");
         text.AppendLine();
-        text.AppendLine("* **Steady state.** Every row includes a cold start: the process, a page cache warmed only");
-        text.AppendLine("  by the discarded run before it, and in the JIT column the runtime and the first tier of");
-        text.AppendLine("  the just-in-time compiler. The per-encoding ratios in `bench/README.md` measure the other");
-        text.AppendLine("  thing — the same code after warm-up, in one process — and they are the place to look for");
-        text.AppendLine("  what a decoder costs.");
+        text.AppendLine("* **Steady state.** Every figure is a first and only action in a fresh process: a page cache");
+        text.AppendLine("  warmed only by the discarded run before it, thread pools starting, and in the JIT column");
+        text.AppendLine("  the code compiling as it runs. The per-encoding ratios in `bench/README.md` measure the");
+        text.AppendLine("  other thing — the same code after warm-up, in one process — and they are the place to");
+        text.AppendLine("  look for what a decoder costs.");
         text.AppendLine("* **Threading.** Both sides are single-threaded here, which is what makes a ratio a ratio.");
         text.AppendLine("* **Your data.** One table of four columns, written by us, is not every file. A column the");
         text.AppendLine("  compressor likes less, or a filter a zone map cannot prune, moves these numbers more");
@@ -653,16 +698,16 @@ internal static class Report
     }
 
     private static double RatioOf(Row row) =>
-        row.Theirs is null || row.Aot is null || row.Aot.WallMs.Median <= 0
+        row.Theirs is null || row.Aot is null || row.Aot.WorkMs.Median <= 0
             ? 0
-            : row.Theirs.WallMs.Median / row.Aot.WallMs.Median;
+            : row.Theirs.WorkMs.Median / row.Aot.WorkMs.Median;
 
-    /// <summary>The reference's wall time over our native build's: above 1.00x, we took less.</summary>
+    /// <summary>The reference's action time over our native build's: above 1.00x, we took less.</summary>
     private static string Ratio(Row row) =>
-        row.Theirs is null || row.Aot is null || row.Aot.WallMs.Median <= 0
+        row.Theirs is null || row.Aot is null || row.Aot.WorkMs.Median <= 0
             ? "n/a"
             : string.Create(CultureInfo.InvariantCulture,
-                $"{row.Theirs.WallMs.Median / row.Aot.WallMs.Median:F2}x");
+                $"{row.Theirs.WorkMs.Median / row.Aot.WorkMs.Median:F2}x");
 
     private static string First(string message)
     {
@@ -675,7 +720,8 @@ internal static class Report
         string.Create(CultureInfo.InvariantCulture,
             $"{runs} runs of each scenario, each in its own process, the median reported with the " +
             $"lowest and highest beside it; one discarded run before them.\n" +
-            $"Ratio is the reference's wall time over our Native AOT build's: above 1.00x, we took less.\n" +
+            $"Figures are the action's time inside the process, from its own clock; the process start is reported apart.\n" +
+            $"Ratio is the reference's time over our Native AOT build's: above 1.00x, we took less.\n" +
             $"machine: {Processor()} ({RuntimeInformation.OSArchitecture}), " +
             $"{Environment.ProcessorCount} processors, {RuntimeInformation.OSDescription}\n" +
             $"runtime: {RuntimeInformation.FrameworkDescription}, as Native AOT and on the JIT; " +

@@ -17,7 +17,7 @@ fn main() -> ExitCode {
         eprintln!("  take <file> <count> <stride> read count rows, one every stride");
         eprintln!("  write <file>                 read it and encode it back out");
         eprintln!("  open <file>                  open it and read nothing");
-        eprintln!("prints `rows=<n>` and exits 0, or a reason and exits 1.");
+        eprintln!("prints `rows=<n> work_us=<action time inside the process>` and exits 0, or a reason and exits 1.");
         return ExitCode::from(2);
     }
 
@@ -32,6 +32,9 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
+    // The action is timed from inside the process, once it is up: what the report compares is the
+    // work, and the process start is a property of the binary that the parent times apart.
+    let started = std::time::Instant::now();
     let rows = match scenario {
         // The canonicalizing scans, not the counting ones: our reader materializes every column it
         // delivers, so a scan that counts rows off metadata is not the same work.
@@ -67,13 +70,14 @@ fn main() -> ExitCode {
         }
     };
 
+    let work_us = started.elapsed().as_micros();
     if rows < 0 {
         eprintln!("{scenario}: the reader returned {rows}");
         return ExitCode::FAILURE;
     }
 
     let (cpu_ms, rss_bytes) = cost();
-    println!("rows={rows} cpu_ms={cpu_ms} rss_bytes={rss_bytes}");
+    println!("rows={rows} work_us={work_us} cpu_ms={cpu_ms} rss_bytes={rss_bytes}");
     ExitCode::SUCCESS
 }
 
