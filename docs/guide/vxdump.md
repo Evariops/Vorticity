@@ -171,7 +171,7 @@ version, and does nothing to a file that is whole. See [append-and-repair.md](ap
 | | |
 |---|---|
 | 0 | it worked |
-| 2 | no file was given, or the expression did not parse or does not fit the file's columns |
+| 2 | no file was given, an option is unknown, or the expression did not parse or does not fit the file's columns |
 | 3 | the file needs a component this build does not have: `unsupported array: … 'vortex.alz'` |
 | 4 | the file is malformed: `malformed: Malformed file: the EOF marker's magic is 0x00000000, expected 'VTXF'.` |
 | 5 | the file could not be read: `io: Could not find file '…/missing.vortex'.` |

@@ -48,7 +48,11 @@ internal static class Program
             return await RepairAsync(path).ConfigureAwait(false);
         }
 
-        Sections sections = Sections.Parse(args.AsSpan(1));
+        if (Sections.Parse(args.AsSpan(1)) is not { } sections)
+        {
+            return 2;
+        }
+
         try
         {
             ImmutableArray<IndexFragment>.Builder fragments = ImmutableArray.CreateBuilder<IndexFragment>();
@@ -411,7 +415,8 @@ internal static class Program
         bool Schema, bool Encodings, bool Layout, bool Segments, bool Stats, bool Scan,
         bool Indexes, string? Explain, IReadOnlyList<string> Fragments, bool Verify)
     {
-        internal static Sections Parse(ReadOnlySpan<string> args)
+        /// <summary>The sections asked for, or null, the option named on stderr, for an option vxdump does not know.</summary>
+        internal static Sections? Parse(ReadOnlySpan<string> args)
         {
             bool schema = false, encodings = false, layout = false, segments = false, stats = false;
             bool scan = false, indexes = false, verify = false, any = false;
@@ -432,7 +437,9 @@ internal static class Program
                     case "--stats": stats = any = true; break;
                     case "--scan": scan = any = true; break;
                     case "--all": schema = encodings = layout = segments = stats = any = true; break;
-                    default: Console.Error.WriteLine($"vxdump: unknown option '{args[i]}'"); break;
+                    default:
+                        Console.Error.WriteLine($"vxdump: unknown option '{args[i]}'; --help lists them");
+                        return null;
                 }
             }
 
