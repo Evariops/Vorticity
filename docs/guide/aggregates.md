@@ -10,7 +10,7 @@ Scan<Reading> recent = file.Scan<Reading>().Where(r => r.Day >= 900);
 ```
 
 ```
-AggAsync, four answers             2.0 ms  min 10.1, max 49.9, 100000 rows, 8 cities; 14 blocks decoded
+AggAsync, four answers             2.3 ms  min 10.1, max 49.9, 100000 rows, 8 cities; 1 blocks decoded
 ```
 
 ## Several answers in one pass
@@ -20,7 +20,8 @@ computed in a single pass over the rows the scan keeps. The members are `Count()
 `CountDistinct`, `Sum`, `Min`, `Max`, `Avg` and `Aggregate`, each over a column named as in a
 filter. Like a filter, the lambda runs once and describes the work; nothing is evaluated per row in
 your code. Here the `Where` let the zone maps skip 109 blocks, and the four answers came from the
-14 left.
+14 left, of which one had a column brought to the canonical form; the others were read as runs and
+dictionaries.
 
 For one answer there are the sinks of the scan itself: `CountAsync`, `AnyAsync`, `MinAsync`,
 `MaxAsync`, `SumAsync`, `AvgAsync`, `CountDistinctAsync` and `AggregateAsync`. An aggregate runs
@@ -124,16 +125,18 @@ what makes the parallel run correct. `T` is the column's storage primitive, exac
 What the encoded steps are worth, against `CanonicalWelford<T>`, the same fold with `Step` only:
 
 ```
-Welford(Celsius), encoded          7.7 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
-Welford(Celsius), canonical        7.7 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
-Welford(Day), encoded              0.9 ms  1000000 values, mean 499.5000, variance 83333.3333, 123 blocks decoded
-Welford(Day), canonical            7.2 ms  1000000 values, mean 499.5000, variance 83333.3333, 123 blocks decoded
+Welford(Celsius), encoded          7.5 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
+Welford(Celsius), canonical        7.3 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
+Welford(Day), encoded              1.0 ms  1000000 values, mean 499.5000, variance 83333.3333, 1 blocks decoded
+Welford(Day), canonical            5.0 ms  1000000 values, mean 499.5000, variance 83333.3333, 123 blocks decoded
 ```
 
-`Day` is stored as runs: `StepRunEnd` sees 1 121 runs instead of a million values, eight times
+`Day` is stored as runs: `StepRunEnd` sees 1 121 runs instead of a million values, five times
 faster. `Celsius` is a dictionary whose distinct values include the null, and such a block is
 handed to `Step` decoded, so the two are equal ([encoded-forms.md](encoded-forms.md)).
-`BlocksDecoded` counts the blocks the scan read, whatever form it read them in.
+`BlocksDecoded` counts the blocks where a column reached the canonical form: every block of
+`Celsius`, and of `Day` only the one block the reader delivers canonical, the other 122 going to
+`StepRunEnd` as runs.
 
 ## On more cores
 
@@ -143,14 +146,14 @@ await using VortexFile shared = await parallel.OpenAsync(path);
 ```
 
 ```
-GroupBy(City, Day), degree 1      71.2 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
-GroupBy(City, Day), degree 14     16.4 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
-Welford(Celsius), degree 14        1.4 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
+GroupBy(City, Day), degree 1      40.3 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
+GroupBy(City, Day), degree 14     11.5 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
+Welford(Celsius), degree 14        1.6 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
 ```
 
 Parallelism is the session's, 1 by default: a library does not take a host's cores without being
 asked. With it, chunks aggregate concurrently, one state per group per chunk, and `Merge` joins
-them: the same answers, 4.3 times faster for the composite group by on 14 cores, 5.5 times for the
+them: the same answers, 3.5 times faster for the composite group by on 14 cores, 4.7 times for the
 Welford fold. `ScanOptions.DegreeOfParallelism` overrides the session for one scan
 ([threads.md](threads.md)).
 

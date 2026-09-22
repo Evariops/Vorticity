@@ -110,17 +110,19 @@ It is one line, it treats a null key as a group of its own, and it takes the ses
 ([aggregates.md](aggregates.md)). Measured against the loops above:
 
 ```
-City by run, by hand        8 groups,   15.8 ms
-GroupBy(r => r.City)        8 groups,   50.1 ms
-  8 of 8 cities agree, Paris 3659129.4; the GroupBy decoded 123 blocks
-Referrer by code, by hand  14 groups,    1.3 ms
-GroupBy(v => v.Referrer)   14 groups,    0.8 ms
+City by run, by hand        8 groups,   16.3 ms
+GroupBy(r => r.City)        8 groups,   49.9 ms
+  8 of 8 cities agree, Paris 3659129.4; the GroupBy decoded 1 blocks
+Referrer by code, by hand  14 groups,    1.4 ms
+GroupBy(v => v.Referrer)   14 groups,    0.9 ms
   14 of 14 groups agree, null referrers 25000; the GroupBy decoded 13 blocks
 ```
 
 Both give the same answers. On the dictionary key the operator wins; on the run-end key, runs of
 seven rows, the loop by hand won by a factor of three in this run. Write the loop when a
-measurement says so, not before.
+measurement says so, not before. "Decoded" counts the blocks where a column reached the canonical
+form: the one block of readings whose `Celsius` arrives canonical, and all 13 of the visits, whose
+`DurationMs` always does.
 
 ## Watch out
 

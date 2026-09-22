@@ -62,8 +62,8 @@ The locating kinds, measured on the same rows:
 ```
 Postings on Status, SortedRuns on Score, budget 3000 per mille: 7140709 bytes, 1853905 of them indexes
   Status == 301: 16 rows; 16 of 49 blocks and 3461108 bytes with the indexes (… locating index pruned 33 reading 1184 bytes), 49 blocks and 5270804 bytes without
-  Score == a value that exists: 1 rows; 1 of 49 blocks and 550460 bytes with the indexes (… locating index pruned 48 reading 333200 bytes), 49 blocks and 5270804 bytes without
-  Score between 1000 and 1100: 38 rows; 49 of 49 blocks and 5270804 bytes with the indexes (…), 49 blocks and 5270804 bytes without
+  Score == a value that exists: 1 rows; 1 of 49 blocks and 550460 bytes with the indexes (… locating index pruned 48 reading 333200 bytes, sorted runs pruned 0 reading 0 bytes), 49 blocks and 5270804 bytes without
+  Score between 1000 and 1100: 38 rows; 36 of 49 blocks and 5270804 bytes with the indexes (… sorted runs pruned 13 reading 0 bytes), 49 blocks and 5270804 bytes without
   a key cursor on Score: the first key at or after 1000 is 1001, at row 280415; 382 rows hold a smaller one
 ```
 
@@ -71,8 +71,10 @@ Postings on four statuses take 1 184 bytes and find the sixteen rows of a rare o
 1.85 MB, a third of the data: they list every row. They prune an equality, and they are what lets
 `Scan<Hit>().Keys(r => r.Score)` open a cursor over a column that is not sorted; without them
 `OpenAsync` throws `VortexUnsupportedException` naming the index to build
-([keys-in-order.md](keys-in-order.md)). A range filter is not pruned by them: `Between` read every
-block.
+([keys-in-order.md](keys-in-order.md)). They prune a range filter too: `Between` kept the 36 blocks
+that hold its 38 rows. The bytes did not drop, since every segment holds one of those blocks, and
+the step reports 0 bytes because sorted runs are read through the index's own source and the
+file's run cache, which the plan does not count.
 
 An index can also be added to a file already written, in place:
 
