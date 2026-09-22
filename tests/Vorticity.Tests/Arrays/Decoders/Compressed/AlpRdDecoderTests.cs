@@ -135,6 +135,51 @@ public sealed class AlpRdDecoderTests
     }
 
     [Fact]
+    public void ARangeDecodesAsTheWholeArraySliced()
+    {
+        // Patches at the first row, the last, and on both sides of the ranges' edges: a range must
+        // hold exactly the patches of its own rows, rebased to its first.
+        int[] exceptions = [0, 5, 17, 18, 40, 63];
+        double[] originals = new double[64];
+        for (int i = 0; i < originals.Length; i++)
+        {
+            originals[i] = Array.IndexOf(exceptions, i) >= 0 ? 1e300 * (i + 1) : 1.0 + (i * 1e-9);
+        }
+
+        ulong shared = BitConverter.DoubleToUInt64Bits(1.0) >> RightBitWidth;
+        byte[] codes = new byte[originals.Length * sizeof(ushort)];
+        uint[] positions = new uint[exceptions.Length];
+        ushort[] highs = new ushort[exceptions.Length];
+        for (int p = 0; p < exceptions.Length; p++)
+        {
+            positions[p] = (uint)exceptions[p];
+            highs[p] = (ushort)(BitConverter.DoubleToUInt64Bits(originals[exceptions[p]]) >> RightBitWidth);
+        }
+
+        TestNode root = new TestNode("vortex.alprd")
+            .WithMetadata(TestMetadata.AlpRd(
+                RightBitWidth, PType.U16, PatchesMetadata.Create((ulong)exceptions.Length, 0, PType.U32), (uint)shared))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(0))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(1))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(2))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(3));
+
+        using DecodeHarness harness = DecodeHarness.Load(
+            root, codes, RightParts(originals), TestBuffers.UInt32(positions), TestBuffers.UInt16(highs));
+        DType f64 = harness.Types.Primitive(PType.F64, Nullability.NonNullable);
+        ArrayNode node = harness.Scan.Nodes.Root;
+        Assert.True(harness.Scan.Decode.DecodesRange(in node));
+        Assert.Equal(originals, Values(harness.Node(harness.DecodeRoot(f64, originals.Length)), originals.Length));
+
+        foreach ((int start, int count) in new[] { (0, 64), (0, 1), (5, 1), (4, 13), (17, 24), (41, 23), (63, 1), (19, 21) })
+        {
+            CanonicalNode range = harness.Node(
+                harness.Scan.Decode.DecodeRootRange(in node, f64, originals.Length, start, count, keepEncoding: false));
+            Assert.Equal(originals.AsSpan(start, count).ToArray(), Values(range, count));
+        }
+    }
+
+    [Fact]
     public void ValidityComesFromTheLeftPartsChild()
     {
         byte[] codes = TestBuffers.UInt16(0, 0, 0);

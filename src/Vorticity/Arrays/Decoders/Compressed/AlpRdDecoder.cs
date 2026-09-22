@@ -61,7 +61,27 @@ internal sealed class AlpRdDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start: 0, count: length);
+    }
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.ChildCount >= 2 && context.ChildDecodesRange(in node, 0) && context.ChildDecodesRange(in node, 1);
+    }
+
+    /// <summary>
+    /// The two children's range, combined, with the patches of the range applied: the patch set is
+    /// read whole for each range, as ALP reads its own, since a patch index is a position in the
+    /// node's row space.
+    /// </summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
     }
 
     /// <summary>
@@ -86,13 +106,14 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, selective: true, start: 0, count: wanted.Length);
     }
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start, int count)
     {
+        bool ranged = !selective && (start != 0 || count != length);
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         if (dtype.Kind != DTypeKind.Primitive || dtype.PType is not (PType.F32 or PType.F64))
         {
@@ -138,13 +159,16 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         ArrayDecodeContext.RequireChildCount(node.ChildCount, expectedChildren, Id);
 
         // The children live in this node's row space -- one row each per row here -- so a selection
-        // reaches them unchanged, and whether they can honour it positionally is their business.
-        int produced = selective ? wanted.Length : length;
+        // or a range reaches them unchanged, and whether they can honour it positionally is their
+        // business.
+        int produced = selective ? wanted.Length : count;
 
         DType leftType = context.Types.Primitive(leftPType, dtype.Nullability);
         int leftIndex = selective
             ? context.DecodeChildSelected(in node, 0, leftType, length, wanted)
-            : context.DecodeChild(in node, 0, leftType, length);
+            : ranged
+                ? context.DecodeChildRange(in node, 0, leftType, length, start, count)
+                : context.DecodeChild(in node, 0, leftType, length);
         CanonicalNode left = CanonicalSupport.RequirePrimitiveChild(
             context, leftIndex, leftPType, produced, Id + " left_parts");
 
@@ -152,7 +176,9 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         DType rightType = context.Types.Primitive(rightPType, Nullability.NonNullable);
         int rightIndex = selective
             ? context.DecodeChildSelected(in node, 1, rightType, length, wanted)
-            : context.DecodeChild(in node, 1, rightType, length);
+            : ranged
+                ? context.DecodeChildRange(in node, 1, rightType, length, start, count)
+                : context.DecodeChild(in node, 1, rightType, length);
         CanonicalNode right = CanonicalSupport.RequirePrimitiveChild(
             context, rightIndex, rightPType, produced, Id + " right_parts");
 
@@ -167,13 +193,13 @@ internal sealed class AlpRdDecoder : ArrayDecoder
 
         Combine(
             left.Values.Span, leftPType, right.Values.Span, destination, produced,
-            dictionary[..dictionaryLength], (int)metadata.RightBitWidth, isSingle, wanted);
+            dictionary[..dictionaryLength], (int)metadata.RightBitWidth, isSingle, wanted, start);
 
         if (metadata.HasPatches)
         {
             ApplyLeftPartPatches(
                 context, in node, length, in metadata, leftPType, right.Values.Span, destination,
-                (int)metadata.RightBitWidth, isSingle, wanted, selective);
+                (int)metadata.RightBitWidth, isSingle, wanted, selective, start, produced);
         }
 
         return context.Canonical.AddPrimitive(dtype, produced, left.Validity, dtype.PType, output);
@@ -192,7 +218,8 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         ReadOnlySpan<uint> dictionary,
         int rightBitWidth,
         bool isSingle,
-        ReadOnlySpan<int> wanted)
+        ReadOnlySpan<int> wanted,
+        int start)
     {
         // The physical type of the left parts and the output width are properties of the node, so
         // they are resolved once here rather than asked about on every row; the loop body is then a
@@ -200,16 +227,16 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         switch (leftPType)
         {
             case PType.U8:
-                CombineCodes<byte>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted);
+                CombineCodes<byte>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted, start);
                 break;
             case PType.U16:
-                CombineCodes<ushort>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted);
+                CombineCodes<ushort>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted, start);
                 break;
             case PType.U32:
-                CombineCodes<uint>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted);
+                CombineCodes<uint>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted, start);
                 break;
             default:
-                CombineCodes<ulong>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted);
+                CombineCodes<ulong>(left, right, destination, length, dictionary, rightBitWidth, isSingle, wanted, start);
                 break;
         }
     }
@@ -222,7 +249,8 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         ReadOnlySpan<uint> dictionary,
         int rightBitWidth,
         bool isSingle,
-        ReadOnlySpan<int> wanted)
+        ReadOnlySpan<int> wanted,
+        int start)
         where TCode : unmanaged
     {
         ReadOnlySpan<TCode> codes = MemoryMarshal.Cast<byte, TCode>(left)[..length];
@@ -251,7 +279,7 @@ internal sealed class AlpRdDecoder : ArrayDecoder
                 uint code = Widen(codes[i]);
                 if (code >= (uint)dictionary.Length)
                 {
-                    ThrowCode(Row(i, wanted), code, dictionary.Length);
+                    ThrowCode(Row(i, wanted, start), code, dictionary.Length);
                 }
 
                 target[i] = unchecked(shifted[(int)code] | low[i]);
@@ -273,7 +301,7 @@ internal sealed class AlpRdDecoder : ArrayDecoder
             uint code = Widen(codes[i]);
             if (code >= (uint)dictionary.Length)
             {
-                ThrowCode(Row(i, wanted), code, dictionary.Length);
+                ThrowCode(Row(i, wanted, start), code, dictionary.Length);
             }
 
             output[i] = unchecked(wideShifted[(int)code] | wide[i]);
@@ -281,14 +309,15 @@ internal sealed class AlpRdDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// The row a combine index names in the file, which after a selective decode is not the index.
+    /// The row a combine index names in the file, which after a selective or a ranged decode is not
+    /// the index.
     /// </summary>
     /// <remarks>
     /// Only ever called on the way to a throw, so the indirection costs nothing and buys a message
     /// that points at the row the reader can go and look at.
     /// </remarks>
-    private static int Row(int index, ReadOnlySpan<int> wanted) =>
-        wanted.IsEmpty ? index : wanted[index];
+    private static int Row(int index, ReadOnlySpan<int> wanted, int start) =>
+        wanted.IsEmpty ? start + index : wanted[index];
 
     /// <summary>Widens one left-parts code, saturating so an over-large one is refused.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -350,20 +379,29 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         int rightBitWidth,
         bool isSingle,
         ReadOnlySpan<int> wanted,
-        bool selective)
+        bool selective,
+        int start,
+        int produced)
     {
         PatchesMetadata patchesMetadata = metadata.Patches;
         int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, $"{Id} patch count");
 
+        // Anything short of the whole array reads the whole patch set, so it is decoded once for
+        // every visit of the node -- every window of a scan, every batch of a take -- as ALP's is.
+        bool whole = !selective && start == 0 && produced == length;
         DType indicesType = context.Types.Primitive(
             patchesMetadata.IndicesPType, Nullability.NonNullable);
-        int indicesIndex = context.DecodeChild(in node, 2, indicesType, patchCount);
+        int indicesIndex = whole
+            ? context.DecodeChild(in node, 2, indicesType, patchCount)
+            : context.DecodeWholeChild(in node, 2, indicesType, patchCount);
 
         // Patch values are left parts at the left child's own physical type, always non-nullable.
         // They are raw high bits, not dictionary codes, which is why they are not bounds-checked
         // against the dictionary.
         DType valuesType = context.Types.Primitive(leftPType, Nullability.NonNullable);
-        int valuesIndex = context.DecodeChild(in node, 3, valuesType, patchCount);
+        int valuesIndex = whole
+            ? context.DecodeChild(in node, 3, valuesType, patchCount)
+            : context.DecodeWholeChild(in node, 3, valuesType, patchCount);
 
         // No reader carries patch chunk offsets for this encoding, so a node declaring them
         // describes a shape nothing can honour.
@@ -395,13 +433,21 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         //
         // Both lists ascend, so one walk finds the intersection. `at` is where the patched row
         // landed in the selection, which is also where its right part is: the right child was
-        // decoded selectively, so it holds the wanted rows in the same order.
+        // decoded selectively, so it holds the wanted rows in the same order. A range holds the
+        // patches of its own rows, rebased to its first, and the walk starts at the first of them.
         ReadOnlySpan<byte> source = values.Values.Span;
         int at = 0;
-        for (int i = 0; i < patches.Count; i++)
+        int first = 0;
+        if (!selective && start != 0)
+        {
+            first = Patches.Find(in patches, start, 0);
+            first = first < 0 ? ~first : first;
+        }
+
+        for (int i = first; i < patches.Count; i++)
         {
             int position = patches.GetPosition(i);
-            int target = position;
+            int target;
 
             if (selective)
             {
@@ -421,6 +467,15 @@ internal sealed class AlpRdDecoder : ArrayDecoder
                 }
 
                 target = at;
+            }
+            else
+            {
+                if (position >= start + produced)
+                {
+                    return;
+                }
+
+                target = position - start;
             }
 
             ulong high = CompressedValues.ReadUnsigned(source, leftPType, i);
