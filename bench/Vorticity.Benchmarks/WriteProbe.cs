@@ -1,4 +1,4 @@
-// The write decomposition probe, which lived outside the repository until now.
+// The write decomposition probe.
 //
 // WHAT IT IS FOR, and why it is not a BenchmarkDotNet class. The write axis measures one number per
 // file -- read, then write, through the public API -- and that number is a sum of three costs that

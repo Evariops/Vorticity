@@ -77,8 +77,9 @@ internal static class CorpusManifest
 
     private static string FindRoot([CallerFilePath] string callerFilePath = "")
     {
-        // Two independent starting points so the corpus is found both from the real test project's
-        // output directory and from a check project whose bin/ is outside the repo.
+        // Two independent starting points so the corpus is found both from the test project's
+        // output directory and from a project built outside the repository, whose output is not
+        // under it.
         string?[] starts = [System.IO.Path.GetDirectoryName(callerFilePath), AppContext.BaseDirectory];
         foreach (string? start in starts)
         {
