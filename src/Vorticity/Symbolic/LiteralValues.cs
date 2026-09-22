@@ -31,15 +31,7 @@ internal static class LiteralValues
             ClrKind.Signed or ClrKind.Unsigned or ClrKind.Float => Numeric(literal, core),
             ClrKind.String => Encoding.UTF8.GetString(literal.BytesValue),
             ClrKind.Binary => new ReadOnlyMemory<byte>(literal.BytesValue.ToArray()),
-            ClrKind.DateOnly => DateOnly.FromDayNumber((int)(TemporalUnits.UnixEpochDayNumber
-                + (column.Unit == TimeUnit.Milliseconds ? Math.Floor(Stored(literal) / 86_400_000d) : Stored(literal)))),
-            ClrKind.TimeOnly => new TimeOnly(TemporalUnits.ToTicks(Stored(literal), column.Unit ?? TimeUnit.Microseconds)),
-            ClrKind.DateTime => new DateTime(
-                TemporalUnits.UnixEpochTicks + TemporalUnits.ToTicks(Stored(literal), column.Unit ?? TimeUnit.Microseconds),
-                column.TimeZone is null ? DateTimeKind.Unspecified : DateTimeKind.Utc),
-            ClrKind.DateTimeOffset => TimeZoneInfo.ConvertTime(
-                new DateTimeOffset(TemporalUnits.UnixEpochTicks + TemporalUnits.ToTicks(Stored(literal), column.Unit ?? TimeUnit.Microseconds), TimeSpan.Zero),
-                column.ZoneInfo),
+            ClrKind.DateOnly or ClrKind.TimeOnly or ClrKind.DateTime or ClrKind.DateTimeOffset => Temporal(literal, column, shape.Kind),
             ClrKind.Guid => new Guid(literal.BytesValue, bigEndian: true),
             ClrKind.Decimal => Decimal(literal, column),
             ClrKind.VortexDecimal => Wide(literal, column),
@@ -79,6 +71,27 @@ internal static class LiteralValues
 
     private static long Stored(FilterLiteral literal) =>
         literal.Kind == FilterLiteralKind.Unsigned ? (long)literal.UnsignedValue : literal.SignedValue;
+
+    /// <summary>A stored temporal value as its .NET value; a value outside the .NET type's range is a claim the file cannot make.</summary>
+    private static object Temporal(FilterLiteral literal, VortexType column, ClrKind kind)
+    {
+        long stored = Stored(literal);
+        TimeUnit unit = column.Unit ?? TimeUnit.Microseconds;
+        switch (kind)
+        {
+            case ClrKind.DateOnly when TemporalUnits.TryDate(column.Unit == TimeUnit.Milliseconds ? TemporalUnits.FloorDiv(stored, TemporalUnits.MillisecondsPerDay) : stored, out DateOnly date):
+                return date;
+            case ClrKind.TimeOnly when TemporalUnits.TryTime(stored, unit, out TimeOnly time):
+                return time;
+            case ClrKind.DateTime when TemporalUnits.TryInstant(stored, unit, out long ticks):
+                return new DateTime(ticks, column.TimeZone is null ? DateTimeKind.Unspecified : DateTimeKind.Utc);
+            case ClrKind.DateTimeOffset when TemporalUnits.TryInstant(stored, unit, out long ticks)
+                && TemporalUnits.TryZoned(ticks, column.ZoneInfo, out DateTimeOffset zoned):
+                return zoned;
+            default:
+                throw new VortexFormatException($"The value {stored} of a column of {column} is outside what a {kind} holds.");
+        }
+    }
 
     private static object Numeric(FilterLiteral literal, Type core)
     {

@@ -311,6 +311,20 @@ public ref struct FilterHandler
                 _ = ToolPaths.ExactDecimal(target, value);
                 _values.Add(FilterLiteral.From(value is decimal d ? d.ToString(CultureInfo.InvariantCulture) : value.ToString()!));
             }
+            else if (shape.Kind is ClrKind.TimeOnly or ClrKind.DateTime or ClrKind.DateTimeOffset
+                && column.Type.ExtensionId is ExtensionIds.Time or ExtensionIds.Timestamp)
+            {
+                // As round-trip text, to every tick: which stored value it meets depends on the
+                // operator it is compared with, and the check of the whole filter knows that one.
+                _values.Add(FilterLiteral.From(value switch
+                {
+                    TimeOnly time => time.ToString("O", CultureInfo.InvariantCulture),
+                    DateTime instant => (column.Type.TimeZone is not null && instant.Kind == DateTimeKind.Local
+                        ? instant.ToUniversalTime()
+                        : DateTime.SpecifyKind(instant, instant.Kind == DateTimeKind.Utc ? DateTimeKind.Utc : DateTimeKind.Unspecified)).ToString("O", CultureInfo.InvariantCulture),
+                    _ => ((DateTimeOffset)(object)value).ToString("O", CultureInfo.InvariantCulture),
+                }));
+            }
             else
             {
                 _values.Add(SymLowering.Literal(target, shape, value));

@@ -13,6 +13,12 @@ internal static class SymLowering
 {
     internal const string NoArithmetic = "Vortex does not push arithmetic down. Compute it on the columns after the scan.";
 
+    /// <summary>Where a value falls among a column's stored values; see <see cref="Place"/>.</summary>
+    /// <param name="Floor">The stored value at or below it, when <paramref name="Beyond"/> is 0.</param>
+    /// <param name="Exact">Whether it is that value.</param>
+    /// <param name="Beyond">1 above every value the column can store, -1 below every one, 0 among them.</param>
+    internal readonly record struct Placement(FilterLiteral Floor, bool Exact, int Beyond);
+
     internal static Predicate Compare<T>(ColumnSym column, ComparisonOp op, T value)
     {
         if (value is null)
@@ -31,8 +37,72 @@ internal static class SymLowering
             return CompareDecimal(column, op, value);
         }
 
-        return new Predicate(new ComparisonExpr(column.Field, op, Literal(column, shape, value)));
+        return CompareAt(column, op, Place(column, shape, value));
     }
+
+    /// <summary>
+    /// A comparison with a value placed among the column's stored values: against the value itself
+    /// when the column stores it, and otherwise, since it lies strictly between two stored values
+    /// or beyond every one, against the neighbour on the right side of it.
+    /// </summary>
+    internal static Predicate CompareAt(ColumnSym column, ComparisonOp op, Placement at)
+    {
+        if (at.Exact && at.Beyond == 0)
+        {
+            return new Predicate(new ComparisonExpr(column.Field, op, at.Floor));
+        }
+
+        Predicate valid = new Predicate(new NullCheckExpr(column.Field, isNull: false));
+        if (at.Beyond != 0)
+        {
+            bool holds = op == ComparisonOp.NotEqual
+                || (at.Beyond > 0 ? op is ComparisonOp.Less or ComparisonOp.LessOrEqual : op is ComparisonOp.Greater or ComparisonOp.GreaterOrEqual);
+            return holds ? valid : Predicate.None;
+        }
+
+        return op switch
+        {
+            ComparisonOp.Equal => Predicate.None,
+            ComparisonOp.NotEqual => valid,
+            ComparisonOp.Less or ComparisonOp.LessOrEqual => new Predicate(new ComparisonExpr(column.Field, ComparisonOp.LessOrEqual, at.Floor)),
+            _ => new Predicate(new ComparisonExpr(column.Field, ComparisonOp.Greater, at.Floor)),
+        };
+    }
+
+    /// <summary>
+    /// Where a value falls among the values a column stores: the stored value at or below it, and
+    /// whether it is that value. A time or an instant finer than the column's unit falls between
+    /// two, and one past what the column's integers reach falls beyond them all.
+    /// </summary>
+    internal static Placement Place<T>(ColumnSym column, ClrShape shape, T value)
+    {
+        object boxed = value!;
+        return shape.Kind is ClrKind.TimeOnly or ClrKind.DateTime or ClrKind.DateTimeOffset
+            && column.Type.ExtensionId is ExtensionIds.Time or ExtensionIds.Timestamp
+            ? PlaceInstant(column.Type, shape.Kind, boxed)
+            : new Placement(Literal(column, shape, value), true, 0);
+    }
+
+    private static Placement PlaceInstant(VortexType type, ClrKind kind, object boxed)
+    {
+        Int128 ticks = kind switch
+        {
+            ClrKind.TimeOnly => ((TimeOnly)boxed).Ticks,
+            ClrKind.DateTime => (Int128)Utc(type, (DateTime)boxed).Ticks - TemporalUnits.UnixEpochTicks,
+            _ => (Int128)((DateTimeOffset)boxed).UtcTicks - TemporalUnits.UnixEpochTicks,
+        };
+        (Int128 floor, bool exact) = TemporalUnits.FromTicks(ticks, type.Unit ?? TimeUnit.Microseconds);
+        if (floor > long.MaxValue || (floor == long.MaxValue && !exact))
+        {
+            return new Placement(default, false, 1);
+        }
+
+        return floor < long.MinValue ? new Placement(default, false, -1) : new Placement(FilterLiteral.From((long)floor), exact, 0);
+    }
+
+    /// <summary>An instant as the column stores it: a local time made universal for a column with a zone, taken as it reads for a naive one.</summary>
+    private static DateTime Utc(VortexType type, DateTime instant) =>
+        type.TimeZone is not null && instant.Kind == DateTimeKind.Local ? instant.ToUniversalTime() : instant;
 
     internal static Predicate Compare(ColumnSym left, ComparisonOp op, ColumnSym right)
     {
@@ -65,7 +135,12 @@ internal static class SymLowering
                 continue;
             }
 
-            literals.Add(Literal(column, shape, value));
+            // A value the column cannot store matches no row, so it leaves the list.
+            Placement at = Place(column, shape, value);
+            if (at.Exact && at.Beyond == 0)
+            {
+                literals.Add(at.Floor);
+            }
         }
 
         return literals.Count == 0 ? Predicate.None : new Predicate(Expr.In(column.Field, [.. literals]));
@@ -96,7 +171,8 @@ internal static class SymLowering
 
         VortexType element = list.Type.ElementType ?? throw new VortexSchemaException($"'{list.Field.Path}' is not a list.");
         ColumnSym elementColumn = new ColumnSym(list.Field, element, list.Extensions, null, -1, list.FieldPath);
-        return new Predicate(Expr.ListContains(list.Field, Literal(elementColumn, ClrShape.For<T>.Value, value)));
+        Placement at = Place(elementColumn, ClrShape.For<T>.Value, value);
+        return at.Exact && at.Beyond == 0 ? new Predicate(Expr.ListContains(list.Field, at.Floor)) : Predicate.None;
     }
 
     /// <summary>The literal of <paramref name="value"/> in the storage units of <paramref name="column"/>.</summary>
@@ -131,21 +207,13 @@ internal static class SymLowering
                 return FilterLiteral.From(type.Unit == TimeUnit.Milliseconds ? days * 86_400_000L : days);
             }
 
-            case ClrKind.TimeOnly:
-                return FilterLiteral.From(TemporalUnits.FromTicks(((TimeOnly)boxed).Ticks, type.Unit ?? TimeUnit.Microseconds));
-            case ClrKind.DateTime:
+            case ClrKind.TimeOnly or ClrKind.DateTime or ClrKind.DateTimeOffset:
             {
-                DateTime instant = (DateTime)boxed;
-                if (type.TimeZone is not null && instant.Kind == DateTimeKind.Local)
-                {
-                    instant = instant.ToUniversalTime();
-                }
-
-                return FilterLiteral.From(TemporalUnits.FromTicks(instant.Ticks - TemporalUnits.UnixEpochTicks, type.Unit ?? TimeUnit.Microseconds));
+                Placement at = PlaceInstant(type, shape.Kind, boxed);
+                return at.Exact && at.Beyond == 0
+                    ? at.Floor
+                    : throw new VortexSchemaException($"{boxed} is not a value of '{column.Field.Path}', of {type}: its unit holds no such instant.");
             }
-
-            case ClrKind.DateTimeOffset:
-                return FilterLiteral.From(TemporalUnits.FromTicks(((DateTimeOffset)boxed).UtcTicks - TemporalUnits.UnixEpochTicks, type.Unit ?? TimeUnit.Microseconds));
             case ClrKind.Guid:
             {
                 Span<byte> bytes = stackalloc byte[16];

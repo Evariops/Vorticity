@@ -314,23 +314,34 @@ internal static class Temporal
     internal static DateOnly Date(CanonicalArena arena, int node, VortexType type, int index)
     {
         long stored = ColumnData.Int64(arena, node, index);
-        long days = type.Unit == TimeUnit.Milliseconds ? Math.DivRem(stored, 86_400_000L, out long rem) - (rem < 0 ? 1 : 0) : stored;
-        return DateOnly.FromDayNumber((int)(TemporalUnits.UnixEpochDayNumber + days));
+        long days = type.Unit == TimeUnit.Milliseconds ? TemporalUnits.FloorDiv(stored, TemporalUnits.MillisecondsPerDay) : stored;
+        return TemporalUnits.TryDate(days, out DateOnly date) ? date : OutOfRange<DateOnly>(index, stored, type);
     }
 
-    internal static TimeOnly Time(CanonicalArena arena, int node, VortexType type, int index) =>
-        new TimeOnly(TemporalUnits.ToTicks(ColumnData.Int64(arena, node, index), type.Unit ?? TimeUnit.Microseconds));
+    internal static TimeOnly Time(CanonicalArena arena, int node, VortexType type, int index)
+    {
+        long stored = ColumnData.Int64(arena, node, index);
+        return TemporalUnits.TryTime(stored, type.Unit ?? TimeUnit.Microseconds, out TimeOnly time) ? time : OutOfRange<TimeOnly>(index, stored, type);
+    }
 
-    internal static DateTime Timestamp(CanonicalArena arena, int node, VortexType type, int index) =>
-        new DateTime(
-            TemporalUnits.UnixEpochTicks + TemporalUnits.ToTicks(ColumnData.Int64(arena, node, index), type.Unit ?? TimeUnit.Microseconds),
-            type.TimeZone is null ? DateTimeKind.Unspecified : DateTimeKind.Utc);
+    internal static DateTime Timestamp(CanonicalArena arena, int node, VortexType type, int index)
+    {
+        long stored = ColumnData.Int64(arena, node, index);
+        return TemporalUnits.TryInstant(stored, type.Unit ?? TimeUnit.Microseconds, out long ticks)
+            ? new DateTime(ticks, type.TimeZone is null ? DateTimeKind.Unspecified : DateTimeKind.Utc)
+            : OutOfRange<DateTime>(index, stored, type);
+    }
 
     internal static DateTimeOffset Zoned(CanonicalArena arena, int node, VortexType type, int index)
     {
-        DateTimeOffset utc = new DateTimeOffset(
-            TemporalUnits.UnixEpochTicks + TemporalUnits.ToTicks(ColumnData.Int64(arena, node, index), type.Unit ?? TimeUnit.Microseconds),
-            TimeSpan.Zero);
-        return TimeZoneInfo.ConvertTime(utc, type.ZoneInfo);
+        long stored = ColumnData.Int64(arena, node, index);
+        return TemporalUnits.TryInstant(stored, type.Unit ?? TimeUnit.Microseconds, out long ticks)
+            && TemporalUnits.TryZoned(ticks, type.ZoneInfo, out DateTimeOffset value)
+            ? value
+            : OutOfRange<DateTimeOffset>(index, stored, type);
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static T OutOfRange<T>(int index, long stored, VortexType type) =>
+        Columns.ColumnsThrow.Format<T>($"Row {index} stores {stored} in a column of {type}, which is outside what a {typeof(T).Name} holds.");
 }

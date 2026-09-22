@@ -134,8 +134,31 @@ namespace Vorticity
         /// <param name="op">Exact, at or after, after, at or before, before.</param>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>Whether an entry satisfies it.</returns>
-        public ValueTask<bool> SeekAsync(TKey key, SeekOp op, CancellationToken cancellationToken = default) =>
-            MoveAsync(_walker.SeekAsync(Literal(key), op, cancellationToken));
+        public ValueTask<bool> SeekAsync(TKey key, SeekOp op, CancellationToken cancellationToken = default)
+        {
+            SymLowering.Placement at = Place(key);
+            if (at.Exact && at.Beyond == 0)
+            {
+                return MoveAsync(_walker.SeekAsync(at.Floor, op, cancellationToken));
+            }
+
+            // No entry holds the key: it lies between two stored keys, or beyond them all, so an
+            // ordering seeks the neighbour on its side, and a seek that has none, an exact one
+            // included, seeks past the largest key a column can store, which leaves the cursor
+            // unpositioned as any seek that finds nothing does.
+            bool forward = op is SeekOp.AtOrAfter or SeekOp.After;
+            if (op == SeekOp.Exact || (at.Beyond > 0 && forward) || (at.Beyond < 0 && !forward))
+            {
+                return MoveAsync(_walker.SeekAsync(FilterLiteral.From(long.MaxValue), SeekOp.After, cancellationToken));
+            }
+
+            if (at.Beyond != 0)
+            {
+                return MoveAsync(at.Beyond > 0 ? _walker.SeekLastAsync(cancellationToken) : _walker.SeekFirstAsync(cancellationToken));
+            }
+
+            return MoveAsync(_walker.SeekAsync(at.Floor, forward ? SeekOp.After : SeekOp.AtOrBefore, cancellationToken));
+        }
 
         /// <summary>Positions on the entry of rank <paramref name="rank"/>, counting from zero in key order.</summary>
         /// <param name="rank">The rank.</param>
@@ -167,7 +190,19 @@ namespace Vorticity
         /// <param name="key">The key.</param>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>The rank.</returns>
-        public ValueTask<long> RankAsync(TKey key, CancellationToken cancellationToken = default) => _walker.RankAsync(Literal(key), cancellationToken);
+        public ValueTask<long> RankAsync(TKey key, CancellationToken cancellationToken = default)
+        {
+            // A key no entry holds ranks as the smallest stored key above it, and one beyond every
+            // stored key ranks as the far end on its side.
+            SymLowering.Placement at = Place(key);
+            return at switch
+            {
+                { Beyond: < 0 } => ValueTask.FromResult(0L),
+                { Beyond: > 0 } => _walker.RankAsync(FilterLiteral.From(long.MaxValue), cancellationToken),
+                { Exact: true } => _walker.RankAsync(at.Floor, cancellationToken),
+                _ => _walker.RankAsync(FilterLiteral.From(at.Floor.SignedValue + 1), cancellationToken),
+            };
+        }
 
         /// <summary>How many entries share the current key; the position does not move.</summary>
         /// <param name="cancellationToken">Cancels the reads.</param>
@@ -201,14 +236,14 @@ namespace Vorticity
         /// <returns>A task that completes when it is released.</returns>
         public ValueTask DisposeAsync() => _walker.DisposeAsync();
 
-        private FilterLiteral Literal(TKey key)
+        private SymLowering.Placement Place(TKey key)
         {
             if (key is null)
             {
                 throw new ArgumentNullException(nameof(key), "A cursor seeks a key, never a null.");
             }
 
-            return SymLowering.Literal(_column, ClrShape.For<TKey>.Value, key);
+            return SymLowering.Place(_column, ClrShape.For<TKey>.Value, key);
         }
     }
 }

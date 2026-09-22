@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Numerics;
 using System.Text;
@@ -225,8 +226,12 @@ internal static class ToolPaths
                     $"'{field.Path}' is a column of {type} and the filter compares it with {Describe(literal)} that is not a decimal number.");
             }
 
-            Predicate lowered = SymLowering.CompareDecimal(new ColumnSym(field, Storage(type), null, null, -1, []), op, mantissa, scale);
-            return lowered.Node ?? (lowered.IsNone ? Expr.And(new NullCheckExpr(field, isNull: true), new NullCheckExpr(field, isNull: false)) : new NullCheckExpr(field, isNull: false));
+            return Expression(field, SymLowering.CompareDecimal(new ColumnSym(field, Storage(type), null, null, -1, []), op, mantissa, scale));
+        }
+
+        if (TryInstant(field, type, literal, out ColumnSym? column, out SymLowering.Placement at))
+        {
+            return Expression(field, SymLowering.CompareAt(column, op, at));
         }
 
         if (!Convert(field, type, literal, op, out FilterLiteral converted, out _))
@@ -236,6 +241,44 @@ internal static class ToolPaths
         }
 
         return new ComparisonExpr(field, op, converted);
+    }
+
+    /// <summary>A lowered predicate as an expression: one that holds for no row, or for every row with a value, spelled on the field.</summary>
+    private static VortexExpr Expression(FieldExpr field, Predicate lowered) =>
+        lowered.Node ?? (lowered.IsNone
+            ? Expr.And(new NullCheckExpr(field, isNull: true), new NullCheckExpr(field, isNull: false))
+            : new NullCheckExpr(field, isNull: false));
+
+    /// <summary>
+    /// A text time or instant compared with a time or timestamp column, placed among the stored
+    /// values: text finer than the column's unit falls between two of them, and compares against
+    /// the neighbour on its side rather than a truncated value.
+    /// </summary>
+    private static bool TryInstant(FieldExpr field, VortexType type, FilterLiteral literal, [NotNullWhen(true)] out ColumnSym? column, out SymLowering.Placement at)
+    {
+        column = null;
+        at = default;
+        if (literal.Kind != FilterLiteralKind.Bytes || type.Kind != VortexTypeKind.Extension)
+        {
+            return false;
+        }
+
+        string text = Encoding.UTF8.GetString(literal.BytesValue);
+        ColumnSym target = new ColumnSym(field, type, null, null, -1, []);
+        switch (type.ExtensionId)
+        {
+            case ExtensionIds.Time when TimeOnly.TryParse(text, CultureInfo.InvariantCulture, out TimeOnly time):
+                at = SymLowering.Place(target, ClrShape.For<TimeOnly>.Value, time);
+                break;
+            case ExtensionIds.Timestamp when DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset instant):
+                at = SymLowering.Place(target, ClrShape.For<DateTimeOffset>.Value, instant);
+                break;
+            default:
+                return false;
+        }
+
+        column = target;
+        return true;
     }
 
     /// <summary>A literal in the column's domain: a text date made storage units, a text uuid made bytes; false when the two cannot compare.</summary>
@@ -252,12 +295,6 @@ internal static class ToolPaths
             {
                 case ExtensionIds.Date when DateOnly.TryParse(text, CultureInfo.InvariantCulture, out DateOnly date):
                     converted = SymLowering.Literal(column, ClrShape.For<DateOnly>.Value, date);
-                    return true;
-                case ExtensionIds.Time when TimeOnly.TryParse(text, CultureInfo.InvariantCulture, out TimeOnly time):
-                    converted = SymLowering.Literal(column, ClrShape.For<TimeOnly>.Value, time);
-                    return true;
-                case ExtensionIds.Timestamp when DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset instant):
-                    converted = SymLowering.Literal(column, ClrShape.For<DateTimeOffset>.Value, instant);
                     return true;
                 case ExtensionIds.Uuid when Guid.TryParse(text, out Guid uuid):
                     converted = SymLowering.Literal(column, ClrShape.For<Guid>.Value, uuid);

@@ -293,6 +293,7 @@ internal static class TemporalUnits
 {
     internal const long UnixEpochTicks = 621_355_968_000_000_000;
     internal const int UnixEpochDayNumber = 719_162;
+    internal const long MillisecondsPerDay = 86_400_000;
 
     /// <summary>Ticks (100 ns) in one <paramref name="unit"/>, or 0 for nanoseconds, which are finer than a tick.</summary>
     internal static long TicksPer(TimeUnit unit) => unit switch
@@ -304,11 +305,95 @@ internal static class TemporalUnits
         _ => 0,
     };
 
+    /// <summary>Floor division: <c>/</c> truncates toward zero, which moves an instant before the epoch toward the future.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static long ToTicks(long value, TimeUnit unit) =>
-        unit == TimeUnit.Nanoseconds ? value / 100 : value * TicksPer(unit);
+    internal static long FloorDiv(long value, long divisor)
+    {
+        long quotient = Math.DivRem(value, divisor, out long remainder);
+        return remainder < 0 ? quotient - 1 : quotient;
+    }
 
+    /// <summary>
+    /// <paramref name="value"/>, counted in <paramref name="unit"/>, as 100 ns ticks: a nanosecond count
+    /// floors to the start of its tick, and false when the count overflows the ticks.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static long FromTicks(long ticks, TimeUnit unit) =>
-        unit == TimeUnit.Nanoseconds ? ticks * 100 : ticks / TicksPer(unit);
+    internal static bool TryToTicks(long value, TimeUnit unit, out long ticks)
+    {
+        if (unit == TimeUnit.Nanoseconds)
+        {
+            ticks = FloorDiv(value, 100);
+            return true;
+        }
+
+        long high = Math.BigMul(value, TicksPer(unit), out long low);
+        ticks = low;
+        return high == low >> 63;
+    }
+
+    /// <summary>A tick count as a count of <paramref name="unit"/>: the count at or below it, and whether it is that count exactly.</summary>
+    internal static (Int128 Floor, bool Exact) FromTicks(Int128 ticks, TimeUnit unit)
+    {
+        if (unit == TimeUnit.Nanoseconds)
+        {
+            return (ticks * 100, true);
+        }
+
+        (Int128 quotient, Int128 remainder) = Int128.DivRem(ticks, TicksPer(unit));
+        return remainder < 0 ? (quotient - 1, false) : (quotient, remainder == 0);
+    }
+
+    /// <summary>A day count from the epoch as a date; false outside <see cref="DateOnly"/>'s range.</summary>
+    internal static bool TryDate(long days, out DateOnly date)
+    {
+        if (days < -UnixEpochDayNumber || days > DateOnly.MaxValue.DayNumber - UnixEpochDayNumber)
+        {
+            date = default;
+            return false;
+        }
+
+        date = DateOnly.FromDayNumber((int)(days + UnixEpochDayNumber));
+        return true;
+    }
+
+    /// <summary>A stored time of day as a <see cref="TimeOnly"/>; false unless it lies in <c>[0, 24h)</c>.</summary>
+    internal static bool TryTime(long stored, TimeUnit unit, out TimeOnly time)
+    {
+        if (!TryToTicks(stored, unit, out long ticks) || (ulong)ticks >= TimeSpan.TicksPerDay)
+        {
+            time = default;
+            return false;
+        }
+
+        time = new TimeOnly(ticks);
+        return true;
+    }
+
+    /// <summary>A stored instant as UTC ticks; false outside <see cref="DateTime"/>'s range.</summary>
+    internal static bool TryInstant(long stored, TimeUnit unit, out long utcTicks)
+    {
+        if (!TryToTicks(stored, unit, out long ticks) || ticks < -UnixEpochTicks || ticks > DateTime.MaxValue.Ticks - UnixEpochTicks)
+        {
+            utcTicks = 0;
+            return false;
+        }
+
+        utcTicks = UnixEpochTicks + ticks;
+        return true;
+    }
+
+    /// <summary>UTC ticks seen in <paramref name="zone"/>; false when the local time falls outside <see cref="DateTime"/>'s range.</summary>
+    internal static bool TryZoned(long utcTicks, TimeZoneInfo zone, out DateTimeOffset value)
+    {
+        TimeSpan offset = zone.GetUtcOffset(new DateTime(utcTicks, DateTimeKind.Utc));
+        long local = utcTicks + offset.Ticks;
+        if (local < 0 || local > DateTime.MaxValue.Ticks)
+        {
+            value = default;
+            return false;
+        }
+
+        value = new DateTimeOffset(local, offset);
+        return true;
+    }
 }
