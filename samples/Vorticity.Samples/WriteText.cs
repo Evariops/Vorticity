@@ -45,6 +45,12 @@ internal static partial class WriteText
             int written = Encoding.UTF8.GetBytes(longText, dst);
             b.Note.Commit(written);
 
+            b.StartedAt.Append(now.AddMinutes(4));
+            b.City.Append("Nantes"u8);
+            Span<byte> iso = b.Note.GetSpan(10);
+            DateOnly.FromDateTime(now).TryFormat(iso, out int length, "O");   // a format of your choosing, in place
+            b.Note.Commit(length);
+
             try
             {
                 b.City.Append([0xC3, 0x28]);
