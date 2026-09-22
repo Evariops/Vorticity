@@ -332,6 +332,6 @@ public sealed class SegmentCoalescerTests
 
         Assert.Equal(1 << 20, SegmentReadOptions.Default.CoalesceGapBytes);
         Assert.Equal(16 << 20, SegmentReadOptions.Default.MaxCoalescedReadBytes);
-        Assert.Equal(8 << 20, SegmentReadOptions.Default.MaxPooledBytes);
+        Assert.Equal(32 << 20, SegmentReadOptions.Default.MaxPooledBytes);
     }
 }

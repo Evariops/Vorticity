@@ -43,11 +43,22 @@ internal sealed class AlignedBufferPool
     /// </summary>
     /// <remarks>
     /// Retention is bounded in bytes rather than in blocks, because bytes are what it costs. A
-    /// flat count across classes spanning 4 kB to 8 MB means the same number buys 256 kB at the
-    /// bottom and 512 MB at the top, so any count large enough to help the small classes is
+    /// flat count across classes spanning 4 kB to 32 MB means the same number buys 256 kB at the
+    /// bottom and 2 GB at the top, so any count large enough to help the small classes is
     /// reckless in the large ones. This budget buys depth exactly where blocks are cheap.
     /// </remarks>
     private const int RetentionBudget = 256 * 1024;
+
+    /// <summary>The block size above which a class keeps <see cref="LargeRetentionBudget"/> at most.</summary>
+    private const int LargeBlockSize = 8 * 1024 * 1024;
+
+    /// <summary>
+    /// Bytes a class of blocks above <see cref="LargeBlockSize"/> may retain. A segment that size is
+    /// a whole column chunk, which a scan reads once per column and gives back before the next, so
+    /// a couple of parked blocks serve it; the floor that suits the small classes would park
+    /// hundreds of megabytes here.
+    /// </summary>
+    private const long LargeRetentionBudget = 64L * 1024 * 1024;
 
     /// <summary>Largest permissible <c>maxPooledLength</c>: keeps every rounded size an int.</summary>
     private const int MaxPoolableLength = 1 << 30;
@@ -55,7 +66,7 @@ internal sealed class AlignedBufferPool
     private readonly Bucket[] _buckets;
 
     /// <summary>Blocks to retain in the class serving <paramref name="blockSize"/>.</summary>
-    /// <param name="floor">The pool's base count, never reduced.</param>
+    /// <param name="floor">The pool's base count, never reduced below <see cref="LargeBlockSize"/>.</param>
     /// <param name="blockSize">The class's block size in bytes.</param>
     /// <remarks>
     /// Past the retained set every return is dropped and the next rent has to allocate, so the
@@ -63,10 +74,15 @@ internal sealed class AlignedBufferPool
     /// read whose peak concurrent demand in the small classes exceeds the retained count allocates
     /// on nearly every segment, while a full scan that stays under it allocates nothing. Depth
     /// only helps where demand is bursty and blocks are small, which is what the budget expresses:
-    /// deepest at 4 kB, halving each class up, and never below <paramref name="floor"/>.
+    /// deepest at 4 kB, halving each class up, and never below <paramref name="floor"/>. Above
+    /// <see cref="LargeBlockSize"/> the count comes from <see cref="LargeRetentionBudget"/> instead:
+    /// a block that large is not a burst, and allocating it fresh costs a page fault per page it
+    /// is read into.
     /// </remarks>
     private static int RetainedFor(int floor, int blockSize)
-        => Math.Max(floor, Math.Min(64, RetentionBudget / blockSize));
+        => blockSize > LargeBlockSize
+            ? (int)Math.Max(1, LargeRetentionBudget / blockSize)
+            : Math.Max(floor, Math.Min(64, RetentionBudget / blockSize));
 
     /// <summary>Creates a pool.</summary>
     /// <param name="maxPooledLength">
@@ -127,7 +143,7 @@ internal sealed class AlignedBufferPool
 
     /// <summary>The process-wide pool used by the default segment sources.</summary>
     public static AlignedBufferPool Shared { get; }
-        = new AlignedBufferPool(8 * 1024 * 1024, 8, graded: true);
+        = new AlignedBufferPool(32 * 1024 * 1024, 8, graded: true);
 
     /// <summary>Requests longer than this bypass the pool. A power of two.</summary>
     public int MaxPooledLength { get; }

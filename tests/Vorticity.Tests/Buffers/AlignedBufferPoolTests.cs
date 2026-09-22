@@ -481,6 +481,28 @@ public sealed class AlignedBufferPoolTests
     }
 
     [Fact]
+    public void The_shared_pool_parks_a_chunk_sized_block_and_keeps_sixty_four_mebibytes_of_them_at_most()
+    {
+        const int large = 32 * 1024 * 1024;
+        Assert.True(AlignedBufferPool.Shared.MaxPooledLength >= large);
+
+        NativeSegmentOwner[] rented = new NativeSegmentOwner[3];
+        for (int i = 0; i < rented.Length; i++)
+        {
+            rented[i] = AlignedBufferPool.Shared.Rent(large, 64);
+        }
+
+        int before = AlignedBufferPool.Shared.ParkedCount(large);
+        foreach (NativeSegmentOwner owner in rented)
+        {
+            AlignedBufferPool.Shared.Return(owner);
+        }
+
+        // Two blocks of 32 MiB is the budget; the third return is freed rather than parked.
+        Assert.Equal(Math.Min(2, before + rented.Length), AlignedBufferPool.Shared.ParkedCount(large));
+    }
+
+    [Fact]
     public void Concurrent_renters_never_receive_the_same_block()
     {
         AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 4);
