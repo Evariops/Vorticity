@@ -327,23 +327,43 @@ internal static class ArrayBlobWriter
         int width = ptype.ByteWidth();
         int length = node.Length;
 
-        byte[] packed = Pack(
-            arena, node, plan, ptype, length, out int[] patchIndices, out ulong[] patchValues);
+        // The packed bytes are the pool's and go into the blob as a rental, queued before they are
+        // written so that the blob's `finally` hands them back whatever happens next. The patches
+        // are rented at the count the chooser priced and handed back once their buffers hold them.
+        int packedBytes = PackedBytes(length, plan.BitWidth);
+        byte[] packed = ArrayPool<byte>.Shared.Rent(packedBytes);
         Span<ushort> packedBuffer = stackalloc ushort[1];
-        packedBuffer[0] = (ushort)Add(blob, new PendingBuffer(packed, Exponent(width)));
+        packedBuffer[0] = (ushort)Add(blob, new PendingBuffer(packed, packedBytes, Exponent(width), rented: true));
 
+        int exceptions = checked((int)plan.Exceptions);
+        int[] patchIndices = exceptions == 0 ? [] : ArrayPool<int>.Shared.Rent(exceptions);
+        ulong[] patchValues = exceptions == 0 ? [] : ArrayPool<ulong>.Shared.Rent(exceptions);
         Span<int> children = stackalloc int[3];
         int childCount = 0;
         PatchesMetadata patches = default;
-        bool patched = patchIndices.Length > 0;
-        if (patched)
+        bool patched = exceptions > 0;
+        try
         {
-            PType indicesPType = FsstPlan.IndexPType(length);
-            patches = PatchesMetadata.Create((ulong)patchIndices.Length, 0, indicesPType);
-            children[0] = WriteIndexArray(blob, encodings, patchIndices, indicesPType);
-            children[1] = WriteRawPrimitive(
-                blob, encodings, LittleEndian(patchValues, width), ToUnsigned(ptype));
-            childCount = 2;
+            Pack(
+                arena, node, plan, ptype, length, packed.AsSpan(0, packedBytes),
+                patchIndices.AsSpan(0, exceptions), patchValues.AsSpan(0, exceptions));
+            if (patched)
+            {
+                PType indicesPType = FsstPlan.IndexPType(length);
+                patches = PatchesMetadata.Create((ulong)exceptions, 0, indicesPType);
+                children[0] = WriteIndexArray(blob, encodings, patchIndices.AsSpan(0, exceptions), indicesPType);
+                children[1] = WriteRawPrimitive(
+                    blob, encodings, LittleEndian(patchValues.AsSpan(0, exceptions), width));
+                childCount = 2;
+            }
+        }
+        finally
+        {
+            if (patched)
+            {
+                ArrayPool<int>.Shared.Return(patchIndices);
+                ArrayPool<ulong>.Shared.Return(patchValues);
+            }
         }
 
         childCount += Validity(blob, arena, node, encodings, children[childCount..]);
@@ -362,10 +382,14 @@ internal static class ArrayBlobWriter
                 wrapper, []);
     }
 
-    /// <summary>The patch values, truncated to the element width and written little-endian.</summary>
-    private static byte[] LittleEndian(ulong[] values, int width)
+    /// <summary>
+    /// The patch values, truncated to the element width and written little-endian, in a rental the
+    /// blob hands back.
+    /// </summary>
+    private static PendingBuffer LittleEndian(ReadOnlySpan<ulong> values, int width)
     {
-        byte[] bytes = new byte[values.Length * width];
+        int length = values.Length * width;
+        byte[] bytes = ArrayPool<byte>.Shared.Rent(length);
         for (int i = 0; i < values.Length; i++)
         {
             Span<byte> destination = bytes.AsSpan(i * width, width);
@@ -386,7 +410,7 @@ internal static class ArrayBlobWriter
             }
         }
 
-        return bytes;
+        return new PendingBuffer(bytes, length, Exponent(width), rented: true);
     }
 
     /// <summary>
@@ -405,8 +429,28 @@ internal static class ArrayBlobWriter
     internal static (int[] Indices, ulong[] Values) Patches(
         CanonicalArena arena, CanonicalNode node, BitPackPlan plan)
     {
-        Pack(arena, node, plan, node.PType, node.Length, out int[] indices, out ulong[] values);
+        int exceptions = checked((int)plan.Exceptions);
+        int[] indices = new int[exceptions];
+        ulong[] values = new ulong[exceptions];
+        int bytes = PackedBytes(node.Length, plan.BitWidth);
+        byte[] packed = ArrayPool<byte>.Shared.Rent(bytes);
+        try
+        {
+            Pack(arena, node, plan, node.PType, node.Length, packed.AsSpan(0, bytes), indices, values);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(packed);
+        }
+
         return (indices, values);
+    }
+
+    /// <summary>The bytes <paramref name="length"/> rows take packed at <paramref name="bitWidth"/> bits: whole blocks.</summary>
+    private static int PackedBytes(int length, int bitWidth)
+    {
+        int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
+        return checked((int)((long)blocks * FastLanes.BlockByteLength(bitWidth)));
     }
 
     /// <summary>Applies the transform and bit-packs, one block at a time.</summary>
@@ -415,37 +459,41 @@ internal static class ArrayBlobWriter
     /// patch child puts the value back. Writing a zero there instead would cost a branch per row
     /// to produce bytes nothing reads.
     /// </remarks>
-    private static byte[] Pack(
+    /// <param name="arena">The arena holding the column.</param>
+    /// <param name="node">The integer column chunk.</param>
+    /// <param name="plan">Its plan: the transform, the width, the exceptions counted.</param>
+    /// <param name="ptype">The column's element type.</param>
+    /// <param name="length">Its rows.</param>
+    /// <param name="destination">
+    /// Exactly <see cref="PackedBytes"/> bytes. It is not cleared first, and need not be:
+    /// <c>PackBlock</c> clears its own destination before it ORs into it, so every byte would be
+    /// written twice and zeroed once for nothing -- and zeroing is a large share of what a
+    /// bit-packed or dictionary-coded write spends.
+    /// </param>
+    /// <param name="patchIndices">The rows the exceptions are at, exactly as many as the plan counted.</param>
+    /// <param name="patchValues">Their values in the encoded domain, as many.</param>
+    private static void Pack(
         CanonicalArena arena, CanonicalNode node, BitPackPlan plan, PType ptype, int length,
-        out int[] patchIndices, out ulong[] patchValues)
+        Span<byte> destination, Span<int> patchIndices, Span<ulong> patchValues)
     {
         // The patches are found here rather than by a walk of their own: every row is transformed
         // below anyway, and an exception is a transformed value that does not fit the width. The
-        // chooser counted them from its histogram, which sizes the arrays; the loop fills them; a
+        // chooser counted them from its histogram, which sizes the spans; the loop fills them; a
         // count that disagrees is an exception rather than a short array padded with row 0 in
         // silence.
-        int exceptions = checked((int)plan.Exceptions);
-        patchIndices = exceptions == 0 ? [] : new int[exceptions];
-        patchValues = exceptions == 0 ? [] : new ulong[exceptions];
+        int exceptions = patchIndices.Length;
         int found = 0;
 
         int bitWidth = plan.BitWidth;
         int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
 
-        // Uninitialized, because `PackBlock` clears its own destination before it ORs into it, so
-        // every byte returned here would be written twice and zeroed once for nothing -- and
-        // zeroing is a large share of what a bit-packed or dictionary-coded write spends. The two
-        // early returns below are the empty array in both cases -- `BlockByteLength(0)` is 0, and
-        // `length == 0` gives no blocks -- so nothing is ever returned unwritten.
-        byte[] destination = GC.AllocateUninitializedArray<byte>(
-            checked((int)((long)blocks * FastLanes.BlockByteLength(bitWidth))));
         // Width zero still walks: a column packed at zero bits is a constant with exceptions, and
         // the exceptions are exactly what the loop below has to find. Only an empty column has
         // nothing to look at. The packed bytes are empty either way -- `BlockByteLength(0)` is 0 --
         // and the pack itself is skipped block by block below.
         if (length == 0)
         {
-            return destination;
+            return;
         }
 
         ReadOnlySpan<byte> values = node.Values.Span;
@@ -503,7 +551,7 @@ internal static class ArrayBlobWriter
 
                 if (blockBytes > 0)
                 {
-                    PackInto(wide, narrow, bitWidth, ptype, destination.AsSpan(b * blockBytes, blockBytes));
+                    PackInto(wide, narrow, bitWidth, ptype, destination.Slice(b * blockBytes, blockBytes));
                 }
             }
         }
@@ -522,8 +570,6 @@ internal static class ArrayBlobWriter
                 $"The width histogram counted {exceptions} values above {bitWidth} bits and the " +
                 $"pack found {found}.");
         }
-
-        return destination;
     }
 
     /// <summary>
@@ -587,7 +633,7 @@ internal static class ArrayBlobWriter
     /// </remarks>
     /// <returns>The patches found so far, this block's included.</returns>
     private static int FindPatches(
-        ReadOnlySpan<ulong> block, ulong limit, int start, int[] indices, ulong[] values, int found)
+        ReadOnlySpan<ulong> block, ulong limit, int start, Span<int> indices, Span<ulong> values, int found)
     {
         const int Step = 8;
         if (!Vector128.IsHardwareAccelerated)
@@ -618,7 +664,7 @@ internal static class ArrayBlobWriter
 
     /// <summary>The scalar walk: every value at or above the limit, in order.</summary>
     private static int CollectPatches(
-        ReadOnlySpan<ulong> block, ulong limit, int start, int[] indices, ulong[] values, int found)
+        ReadOnlySpan<ulong> block, ulong limit, int start, Span<int> indices, Span<ulong> values, int found)
     {
         for (int i = 0; i < block.Length; i++)
         {
@@ -833,25 +879,35 @@ internal static class ArrayBlobWriter
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         FsstSymbols table = plan.Table;
-        byte[] symbols = new byte[table.Count * 8];
-        byte[] symbolLengths = new byte[table.Count];
+        int symbolBytes = table.Count * 8;
+        byte[] symbols = ArrayPool<byte>.Shared.Rent(symbolBytes);
+        int symbolBuffer = Add(blob, new PendingBuffer(symbols, symbolBytes, Exponent(8), rented: true));
+        byte[] symbolLengths = ArrayPool<byte>.Shared.Rent(table.Count);
+        int lengthBuffer = Add(blob, new PendingBuffer(symbolLengths, table.Count, 0, rented: true));
         for (int i = 0; i < table.Count; i++)
         {
             BinaryPrimitives.WriteUInt64LittleEndian(symbols.AsSpan(i * 8), table.SymbolBits(i));
             symbolLengths[i] = table.SymbolLength(i);
         }
 
-        int symbolBuffer = Add(blob, new PendingBuffer(symbols, Exponent(8)));
-        int lengthBuffer = Add(blob, new PendingBuffer(symbolLengths, 0));
-        // No copy: `FsstPlan` keeps a code array of exactly `CodeLength` bytes, so the buffer goes
-        // straight into the blob.
-        int codeBuffer = Add(blob, new PendingBuffer(plan.Codes, 0));
-
-        PType lengthsPType = FsstPlan.IndexPType(FsstPlan.MaxOf(plan.Lengths));
-        PType offsetsPType = FsstPlan.IndexPType(plan.CodeLength);
-
-        int uncompressed = WriteIndexArray(blob, encodings, plan.Lengths, lengthsPType);
-        int offsets = WriteIndexArray(blob, encodings, plan.Offsets, offsetsPType);
+        // No copy: the code stream's rental passes from the plan to the blob, which hands it back
+        // once laid out. The row tables are copied at their widths, and the plan gives them back.
+        int codeBuffer = Add(blob, new PendingBuffer(plan.TakeCodes(), plan.CodeLength, 0, rented: true));
+        PType lengthsPType;
+        PType offsetsPType;
+        int uncompressed;
+        int offsets;
+        try
+        {
+            lengthsPType = FsstPlan.IndexPType(FsstPlan.MaxOf(plan.Lengths));
+            offsetsPType = FsstPlan.IndexPType(plan.CodeLength);
+            uncompressed = WriteIndexArray(blob, encodings, plan.Lengths, lengthsPType);
+            offsets = WriteIndexArray(blob, encodings, plan.Offsets, offsetsPType);
+        }
+        finally
+        {
+            plan.Release();
+        }
 
         Span<int> children = stackalloc int[3];
         children[0] = uncompressed;
@@ -959,30 +1015,42 @@ internal static class ArrayBlobWriter
             plan.Encoded.Length, plan.EncodedPType.ByteWidth(), out Span<byte> destination);
         plan.Encoded.CopyTo(destination);
 
-        // The integers live in the arena from here on, so the pool can have its array back. Every
-        // float column is priced with ALP, and one that loses now costs the pool a rental instead
-        // of the heap a column.
-        plan.Release();
+        // The integers live in the arena from here on, so the pool can have its array back before
+        // writing them rents anything. Every float column is priced with ALP, and one that loses
+        // now costs the pool a rental instead of the heap a column.
+        plan.ReleaseEncoded();
         int encodedNode = arena.AddPrimitive(
             encodedType, rows, node.Validity, plan.EncodedPType, encodedBuffer);
 
         Span<int> children = stackalloc int[3];
-        children[0] = WriteCompressed(blob, arena, encodedNode, encodings);
         int childCount = 1;
-
+        int patchCount = plan.PatchCount;
         PatchesMetadata patches = default;
-        if (plan.PatchIndices.Length > 0)
+        try
         {
-            PType indicesPType = FsstPlan.IndexPType(rows);
-            patches = PatchesMetadata.Create((ulong)plan.PatchIndices.Length, 0, indicesPType);
-            children[1] = WriteIndexArray(blob, encodings, plan.PatchIndices, indicesPType);
-            children[2] = WriteRawPrimitive(blob, encodings, plan.PatchValues, node.DType.PType);
-            childCount = 3;
+            children[0] = WriteCompressed(blob, arena, encodedNode, encodings);
+            if (patchCount > 0)
+            {
+                // The indices are copied at their width, the values go into the blob as they are:
+                // their rental passes to it, and the blob hands it back once laid out.
+                PType indicesPType = FsstPlan.IndexPType(rows);
+                patches = PatchesMetadata.Create((ulong)patchCount, 0, indicesPType);
+                children[1] = WriteIndexArray(blob, encodings, plan.PatchIndices, indicesPType);
+                (byte[] values, int length) = plan.TakePatchValues();
+                children[2] = WriteRawPrimitive(
+                    blob, encodings,
+                    new PendingBuffer(values, length, Exponent(node.DType.PType.ByteWidth()), rented: true));
+                childCount = 3;
+            }
+        }
+        finally
+        {
+            plan.Release();
         }
 
         return Node(
             blob, encodings, "vortex.alp"u8,
-            AlpBytes(blob, plan.ExponentE, plan.ExponentF, plan.PatchIndices.Length > 0, patches),
+            AlpBytes(blob, plan.ExponentE, plan.ExponentF, patchCount > 0, patches),
             children[..childCount], []);
     }
 
@@ -1068,11 +1136,13 @@ internal static class ArrayBlobWriter
     }
 
     /// <summary>Writes raw little-endian bytes as a non-nullable primitive node.</summary>
-    private static int WriteRawPrimitive(
-        Workspace blob, EncodingDictionary encodings, byte[] bytes, PType ptype)
+    /// <param name="blob">The workspace.</param>
+    /// <param name="encodings">The file's encodings.</param>
+    /// <param name="values">The bytes, aligned to their element width; a rental passes to the blob.</param>
+    private static int WriteRawPrimitive(Workspace blob, EncodingDictionary encodings, PendingBuffer values)
     {
         Span<ushort> indices = stackalloc ushort[1];
-        indices[0] = (ushort)Add(blob, new PendingBuffer(bytes, Exponent(ptype.ByteWidth())));
+        indices[0] = (ushort)Add(blob, values);
         return Node(blob, encodings, "vortex.primitive"u8, default, [], indices);
     }
 
@@ -1242,29 +1312,18 @@ internal static class ArrayBlobWriter
         }
     }
 
+    /// <summary>Writes indices at <paramref name="ptype"/>'s width as a raw primitive node, in a rental the blob hands back.</summary>
     private static int WriteIndexArray(
-        Workspace blob, EncodingDictionary encodings, int[] values, PType ptype)
+        Workspace blob, EncodingDictionary encodings, ReadOnlySpan<int> values, PType ptype)
     {
         int width = ptype.ByteWidth();
-        byte[] bytes = new byte[values.Length * width];
-        for (int i = 0; i < values.Length; i++)
-        {
-            switch (width)
-            {
-                case 1:
-                    bytes[i] = (byte)values[i];
-                    break;
-                case 2:
-                    BinaryPrimitives.WriteUInt16LittleEndian(bytes.AsSpan(i * 2), (ushort)values[i]);
-                    break;
-                default:
-                    BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(i * 4), (uint)values[i]);
-                    break;
-            }
-        }
-
+        int length = values.Length * width;
+        byte[] bytes = ArrayPool<byte>.Shared.Rent(length);
         Span<ushort> indices = stackalloc ushort[1];
-        indices[0] = (ushort)Add(blob, new PendingBuffer(bytes, Exponent(width)));
+        indices[0] = (ushort)Add(blob, new PendingBuffer(bytes, length, Exponent(width), rented: true));
+
+        // Every byte of the slice, which is what makes the rental's leftovers safe to leave.
+        WriteIndices(values, width, bytes.AsSpan(0, length));
         return Node(blob, encodings, "vortex.primitive"u8, default, [], indices);
     }
 
@@ -1520,38 +1579,46 @@ internal static class ArrayBlobWriter
             return false;
         }
 
-        // Uninitialized and written once. `heapBytes` is the sum of the valid values' lengths, so
-        // the loop below fills exactly this array; zeroing it first and then copying it out again
-        // would roughly double what writing a string column allocates.
-        byte[] heap = GC.AllocateUninitializedArray<byte>(Math.Max((int)heapBytes, 1));
-        int[] offsets = GC.AllocateUninitializedArray<int>(rows + 1);
-        int written = 0;
-        for (int i = 0; i < rows; i++)
-        {
-            offsets[i] = written;
-            if (!mask.IsValid(i))
-            {
-                // A null row is zero-length: offsets stay monotone and the reader never looks at
-                // the bytes, because validity already told it not to.
-                continue;
-            }
-
-            ReadOnlySpan<byte> value = ViewBytes(node, i);
-            value.CopyTo(heap.AsSpan(written));
-            written += value.Length;
-        }
-
-        offsets[rows] = written;
-
-        int heapBuffer = Add(blob, new PendingBuffer(heap, written, 0, rented: false));
-
-        Span<int> children = stackalloc int[2];
+        // Rented, and written once without being cleared first. `heapBytes` is the sum of the valid
+        // values' lengths, so the loop below fills exactly that many bytes of the heap, which goes
+        // into the blob as a rental queued before the loop so that the blob's `finally` hands it
+        // back. The offsets are copied into the arena at their own width and go back at once.
+        int heapLength = (int)heapBytes;
+        byte[] heap = ArrayPool<byte>.Shared.Rent(heapLength);
+        int heapBuffer = Add(blob, new PendingBuffer(heap, heapLength, 0, rented: true));
         int width = offsetsPType.ByteWidth();
         VortexBuffer offsetBuffer = arena.AllocateUninitialized(
-            offsets.Length * width, width, out Span<byte> offsetBytes);
-        WriteIndices(offsets, width, offsetBytes);
+            (rows + 1) * width, width, out Span<byte> offsetBytes);
+        int[] offsets = ArrayPool<int>.Shared.Rent(rows + 1);
+        try
+        {
+            int written = 0;
+            for (int i = 0; i < rows; i++)
+            {
+                offsets[i] = written;
+                if (!mask.IsValid(i))
+                {
+                    // A null row is zero-length: offsets stay monotone and the reader never looks
+                    // at the bytes, because validity already told it not to.
+                    continue;
+                }
+
+                ReadOnlySpan<byte> value = ViewBytes(node, i);
+                value.CopyTo(heap.AsSpan(written));
+                written += value.Length;
+            }
+
+            offsets[rows] = written;
+            WriteIndices(offsets.AsSpan(0, rows + 1), width, offsetBytes);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(offsets);
+        }
+
+        Span<int> children = stackalloc int[2];
         children[0] = WriteIndexBuffer(
-            blob, arena, node.DType.Arena, offsetBuffer, offsetsPType, offsets.Length, encodings);
+            blob, arena, node.DType.Arena, offsetBuffer, offsetsPType, rows + 1, encodings);
         int count = 1 + Validity(blob, arena, node, encodings, children[1..]);
 
         Span<ushort> indices = stackalloc ushort[1];

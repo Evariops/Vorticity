@@ -14,32 +14,77 @@ namespace Vorticity.Writing;
 /// </summary>
 internal sealed class FsstPlan
 {
+    private byte[] _codes;
+    private int[] _offsets;
+    private int[] _lengths;
+    private readonly int _rows;
+
     private FsstPlan(
-        FsstSymbols table, byte[] codes, int codeLength, int[] offsets, int[] lengths, long encodedSize)
+        FsstSymbols table, byte[] codes, int codeLength, int[] offsets, int[] lengths, int rows,
+        long encodedSize)
     {
         Table = table;
-        Codes = codes;
+        _codes = codes;
         CodeLength = codeLength;
-        Offsets = offsets;
-        Lengths = lengths;
+        _offsets = offsets;
+        _lengths = lengths;
+        _rows = rows;
         EncodedSize = encodedSize;
     }
 
     internal FsstSymbols Table { get; }
 
-    /// <summary>The concatenated code stream; only the first <see cref="CodeLength"/> bytes are live.</summary>
-    internal byte[] Codes { get; }
-
+    /// <summary>Bytes of the concatenated code stream.</summary>
     internal int CodeLength { get; }
 
     /// <summary>Where each row's codes begin, plus a final total: <c>rows + 1</c> entries.</summary>
-    internal int[] Offsets { get; }
+    internal ReadOnlySpan<int> Offsets => _offsets.Length == 0 ? [] : _offsets.AsSpan(0, _rows + 1);
 
     /// <summary>Each row's decoded length; the row boundaries live on the decoded side.</summary>
-    internal int[] Lengths { get; }
+    internal ReadOnlySpan<int> Lengths => _lengths.Length == 0 ? [] : _lengths.AsSpan(0, _rows);
 
     /// <summary>Total bytes this encoding will occupy, table and children included.</summary>
     internal long EncodedSize { get; }
+
+    /// <summary>
+    /// The code stream's rental, whose first <see cref="CodeLength"/> bytes are the stream. It
+    /// passes to the caller: the plan forgets it, and <see cref="Release"/> no longer hands it back.
+    /// </summary>
+    internal byte[] TakeCodes()
+    {
+        byte[] codes = _codes;
+        _codes = [];
+        return codes;
+    }
+
+    /// <summary>Hands back every rental the plan still holds: the code stream, the row tables.</summary>
+    /// <remarks>
+    /// Called by the writer once the row tables are in its buffers, and by the chooser for a plan
+    /// nothing will write. Safe twice.
+    /// </remarks>
+    internal void Release()
+    {
+        byte[] codes = _codes;
+        int[] offsets = _offsets;
+        int[] lengths = _lengths;
+        _codes = [];
+        _offsets = [];
+        _lengths = [];
+        if (codes.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(codes);
+        }
+
+        if (offsets.Length > 0)
+        {
+            ArrayPool<int>.Shared.Return(offsets);
+        }
+
+        if (lengths.Length > 0)
+        {
+            ArrayPool<int>.Shared.Return(lengths);
+        }
+    }
 
     /// <summary>
     /// Trains a table on the column and compresses it, or returns null when FSST does not pay.
@@ -80,14 +125,17 @@ internal sealed class FsstPlan
             return null;
         }
 
-        // Everything transient is rented: the values live in native arena buffers and have to be
-        // copied to be trained on, and the heap, row table and code stream are all garbage the
-        // moment this column is priced against zstd and loses.
+        // Everything is rented: the values live in native arena buffers and have to be copied to be
+        // trained on, and the heap, row tables and code stream are all garbage the moment this
+        // column is priced against zstd and loses. A plan that wins keeps the row tables and the
+        // code stream, and hands them back once the writer has them.
         int heapBytes = Math.Max((int)plain, 1);
         byte[] heap = ArrayPool<byte>.Shared.Rent(heapBytes);
         int[] starts = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
-        int[] lengths = new int[rows];
+        int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
         byte[]? codes = null;
+        int[]? offsets = null;
+        bool kept = false;
         try
         {
             int at = 0;
@@ -109,7 +157,7 @@ internal sealed class FsstPlan
             }
 
             FsstSymbols? table = FsstSymbols.Train(
-                heap.AsSpan(0, heapBytes), starts.AsSpan(0, rows), lengths);
+                heap.AsSpan(0, heapBytes), starts.AsSpan(0, rows), lengths.AsSpan(0, rows));
             if (table is null)
             {
                 return null;
@@ -117,7 +165,7 @@ internal sealed class FsstPlan
 
             // An escape costs two bytes, so the worst case is twice the input.
             codes = ArrayPool<byte>.Shared.Rent((int)Math.Max(plain * 2, 1));
-            int[] offsets = new int[rows + 1];
+            offsets = ArrayPool<int>.Shared.Rent(rows + 1);
             int written = 0;
 
             for (int i = 0; i < rows; i++)
@@ -135,20 +183,34 @@ internal sealed class FsstPlan
             offsets[rows] = written;
 
             long encoded = ((long)table.Count * (FsstSymbols.MaxSymbolLength + 1)) + written
-                + ((long)rows * Width(MaxOf(lengths)))
+                + ((long)rows * Width(MaxOf(lengths.AsSpan(0, rows))))
                 + ((long)(rows + 1) * Width(written));
+            if (encoded > sizeCeiling)
+            {
+                return null;
+            }
 
-            // The rental is sized for the worst case, so the kept array is an exact copy of what is
-            // live rather than the rest of the rental carried into the writer.
-            return encoded <= sizeCeiling
-                ? new FsstPlan(table, codes.AsSpan(0, written).ToArray(), written, offsets, lengths, encoded)
-                : null;
+            // The code stream stays in its worst-case rental rather than being copied out: the
+            // writer hands the rental to the blob as it is, and the blob gives it back once laid out.
+            FsstPlan plan = new FsstPlan(table, codes, written, offsets, lengths, rows, encoded);
+            kept = true;
+            return plan;
         }
         finally
         {
-            if (codes is not null)
+            if (!kept)
             {
-                ArrayPool<byte>.Shared.Return(codes);
+                if (codes is not null)
+                {
+                    ArrayPool<byte>.Shared.Return(codes);
+                }
+
+                if (offsets is not null)
+                {
+                    ArrayPool<int>.Shared.Return(offsets);
+                }
+
+                ArrayPool<int>.Shared.Return(lengths);
             }
 
             ArrayPool<int>.Shared.Return(starts);
@@ -166,7 +228,7 @@ internal sealed class FsstPlan
     };
 
     /// <summary>The largest value in <paramref name="values"/>, or zero.</summary>
-    internal static long MaxOf(int[] values)
+    internal static long MaxOf(ReadOnlySpan<int> values)
     {
         long maximum = 0;
         for (int i = 0; i < values.Length; i++)

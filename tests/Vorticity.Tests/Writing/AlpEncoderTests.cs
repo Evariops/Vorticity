@@ -53,7 +53,7 @@ public sealed class AlpEncoderTests
         AlpPlan? plan = AlpPlan.TryBuild(fixture.Arena, node, values.Length * sizeof(double));
 
         Assert.NotNull(plan);
-        Assert.Empty(plan.PatchIndices);
+        Assert.True(plan.PatchIndices.IsEmpty);
         Assert.True(
             plan.EncodedSize * 4 < values.Length * sizeof(double),
             $"{plan.EncodedSize} bytes estimated for {values.Length * sizeof(double)} plain");
@@ -123,7 +123,7 @@ public sealed class AlpEncoderTests
         AlpPlan? plan = AlpPlan.TryBuild(fixture.Arena, node, values.Length * sizeof(double));
 
         Assert.NotNull(plan);
-        Assert.Empty(plan.PatchIndices);
+        Assert.True(plan.PatchIndices.IsEmpty);
     }
 
     [Fact]
@@ -214,7 +214,7 @@ public sealed class AlpEncoderTests
             expected[patched] = fill ?? 0;
         }
 
-        Assert.Equal(expectedPatches, wide.PatchIndices);
+        Assert.Equal(expectedPatches, wide.PatchIndices.ToArray());
         Assert.Equal(expected, MemoryMarshal.Cast<byte, long>(wide.Encoded).ToArray());
 
         AlpPlan? narrow = AlpPlan.TryBuild(fixture.Arena, SingleNode(fixture, singles), length * sizeof(float) * 4L);
@@ -244,7 +244,7 @@ public sealed class AlpEncoderTests
             expectedNarrow[patched] = fillNarrow ?? 0;
         }
 
-        Assert.Equal(expectedPatches, narrow.PatchIndices);
+        Assert.Equal(expectedPatches, narrow.PatchIndices.ToArray());
         Assert.Equal(expectedNarrow, MemoryMarshal.Cast<byte, int>(narrow.Encoded).ToArray());
     }
 

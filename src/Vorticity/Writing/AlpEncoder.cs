@@ -1,6 +1,5 @@
 using System;
 using System.Buffers;
-using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
@@ -23,18 +22,23 @@ namespace Vorticity.Writing;
 internal sealed class AlpPlan
 {
     private byte[] _encoded;
+    private int[] _patchIndices;
+    private byte[] _patchValues;
+    private readonly int _patchWidth;
 
     private AlpPlan(
         byte exponentE, byte exponentF, byte[] encoded, int encodedLength, PType encodedPType,
-        int[] patchIndices, byte[] patchValues, long encodedSize)
+        int[] patchIndices, byte[] patchValues, int patchCount, int patchWidth, long encodedSize)
     {
         ExponentE = exponentE;
         ExponentF = exponentF;
         _encoded = encoded;
         EncodedLength = encodedLength;
         EncodedPType = encodedPType;
-        PatchIndices = patchIndices;
-        PatchValues = patchValues;
+        _patchIndices = patchIndices;
+        _patchValues = patchValues;
+        PatchCount = patchCount;
+        _patchWidth = patchWidth;
         EncodedSize = encodedSize;
     }
 
@@ -54,22 +58,28 @@ internal sealed class AlpPlan
     internal PType EncodedPType { get; }
 
     /// <summary>The rows that could not be represented, ascending.</summary>
-    internal int[] PatchIndices { get; }
+    internal ReadOnlySpan<int> PatchIndices => _patchIndices.AsSpan(0, PatchCount);
 
-    /// <summary>Their original values, at the column's own float width.</summary>
-    internal byte[] PatchValues { get; }
+    /// <summary>
+    /// Their original values, at the column's own float width; empty once
+    /// <see cref="TakePatchValues"/> has handed them on.
+    /// </summary>
+    internal ReadOnlySpan<byte> PatchValues =>
+        _patchValues.Length == 0 ? [] : _patchValues.AsSpan(0, PatchCount * _patchWidth);
+
+    /// <summary>How many rows are patches.</summary>
+    internal int PatchCount { get; private set; }
 
     /// <summary>The estimated size of this encoding once the integers are bit-packed.</summary>
     internal long EncodedSize { get; }
 
     /// <summary>Hands the integers back to the pool, once they live somewhere else.</summary>
     /// <remarks>
-    /// Called where the plan stops being needed: by the encoder once it has laid the integers in
-    /// the arena, and by the chooser for a plan nothing will write. Safe twice — the second call
-    /// has nothing to give back — and a plan that has released reads as empty rather than as
-    /// whatever the next renter wrote.
+    /// Called by the encoder as soon as it has laid the integers in the arena, before it writes
+    /// them, so that the pool can serve the rentals that writing makes. Safe twice, and a plan
+    /// that has released reads as empty rather than as whatever the next renter wrote.
     /// </remarks>
-    internal void Release()
+    internal void ReleaseEncoded()
     {
         byte[] encoded = _encoded;
         _encoded = [];
@@ -77,6 +87,42 @@ internal sealed class AlpPlan
         if (encoded.Length > 0)
         {
             ArrayPool<byte>.Shared.Return(encoded);
+        }
+    }
+
+    /// <summary>
+    /// The patch values' rental and the bytes of it that are values. They pass to the caller: the
+    /// plan forgets them, and <see cref="Release"/> no longer hands them back.
+    /// </summary>
+    internal (byte[] Values, int Length) TakePatchValues()
+    {
+        byte[] values = _patchValues;
+        int length = values.Length == 0 ? 0 : PatchCount * _patchWidth;
+        _patchValues = [];
+        return (values, length);
+    }
+
+    /// <summary>Hands back every rental the plan still holds: the integers, the patches.</summary>
+    /// <remarks>
+    /// Called where the plan stops being needed: by the encoder once it has written the node, and
+    /// by the chooser for a plan nothing will write. Safe twice.
+    /// </remarks>
+    internal void Release()
+    {
+        ReleaseEncoded();
+        int[] indices = _patchIndices;
+        byte[] values = _patchValues;
+        _patchIndices = [];
+        _patchValues = [];
+        PatchCount = 0;
+        if (indices.Length > 0)
+        {
+            ArrayPool<int>.Shared.Return(indices);
+        }
+
+        if (values.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(values);
         }
     }
 
@@ -190,12 +236,11 @@ internal sealed class AlpPlan
             return null;
         }
 
-        byte[] patchBytes = new byte[patchCount * sizeof(double)];
-        MemoryMarshal.Cast<double, byte>(patches.AsSpan(0, patchCount)).CopyTo(patchBytes);
-
         AlpPlan plan = new AlpPlan(
             (byte)e, (byte)f, encodedBytes, encodedLength, PType.I64,
-            indices.AsSpan(0, patchCount).ToArray(), patchBytes, size);
+            RentedCopy(indices.AsSpan(0, patchCount)),
+            RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
+            patchCount, sizeof(double), size);
         kept = true;
         return plan;
         }
@@ -268,12 +313,11 @@ internal sealed class AlpPlan
             return null;
         }
 
-        byte[] patchBytes = new byte[patchCount * sizeof(float)];
-        MemoryMarshal.Cast<float, byte>(patches.AsSpan(0, patchCount)).CopyTo(patchBytes);
-
         AlpPlan plan = new AlpPlan(
             (byte)e, (byte)f, encodedBytes, encodedLength, PType.I32,
-            indices.AsSpan(0, patchCount).ToArray(), patchBytes, size);
+            RentedCopy(indices.AsSpan(0, patchCount)),
+            RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
+            patchCount, sizeof(float), size);
         kept = true;
         return plan;
         }
@@ -286,6 +330,23 @@ internal sealed class AlpPlan
                 ArrayPool<byte>.Shared.Return(encodedBytes);
             }
         }
+    }
+
+    /// <summary>
+    /// The patches a plan keeps, copied out of the worst-case rentals into rentals of their own
+    /// size, so that a plan holds what it has rather than a row's worth per row until it is
+    /// written; the empty array when there are none.
+    /// </summary>
+    private static T[] RentedCopy<T>(ReadOnlySpan<T> patches)
+    {
+        if (patches.IsEmpty)
+        {
+            return [];
+        }
+
+        T[] copy = ArrayPool<T>.Shared.Rent(patches.Length);
+        patches.CopyTo(copy);
+        return copy;
     }
 
     /// <summary>
@@ -500,7 +561,8 @@ internal sealed class AlpPlan
     private static (int E, int F) BestExponentsDouble(
         ReadOnlySpan<double> values, ValidityMask mask, int rows)
     {
-        double[] sample = SampleDouble(values, mask, rows);
+        Span<double> taken = stackalloc double[SampleSize];
+        ReadOnlySpan<double> sample = taken[..Sample(values, mask, rows, taken)];
         int bestE = 0;
         int bestF = 0;
         long best = EstimateSampleDouble(sample, 0, 0);
@@ -525,7 +587,8 @@ internal sealed class AlpPlan
     private static (int E, int F) BestExponentsSingle(
         ReadOnlySpan<float> values, ValidityMask mask, int rows)
     {
-        float[] sample = SampleSingle(values, mask, rows);
+        Span<float> taken = stackalloc float[SampleSize];
+        ReadOnlySpan<float> sample = taken[..Sample(values, mask, rows, taken)];
         int bestE = 0;
         int bestF = 0;
         long best = EstimateSampleSingle(sample, 0, 0);
@@ -547,7 +610,7 @@ internal sealed class AlpPlan
         return (bestE, bestF);
     }
 
-    private static long EstimateSampleDouble(double[] sample, int e, int f)
+    private static long EstimateSampleDouble(ReadOnlySpan<double> sample, int e, int f)
     {
         if (sample.Length == 0)
         {
@@ -579,7 +642,7 @@ internal sealed class AlpPlan
         return SampleCost(sample.Length, patches, min, max, sizeof(double));
     }
 
-    private static long EstimateSampleSingle(float[] sample, int e, int f)
+    private static long EstimateSampleSingle(ReadOnlySpan<float> sample, int e, int f)
     {
         if (sample.Length == 0)
         {
@@ -627,54 +690,36 @@ internal sealed class AlpPlan
     /// Samples in runs rather than at a stride: adjacent values share a magnitude and a number of
     /// significant digits, and a stride would see one value from each run and miss that entirely.
     /// </summary>
-    private static double[] SampleDouble(ReadOnlySpan<double> values, ValidityMask mask, int rows)
+    /// <returns>The valid values taken, at the head of <paramref name="sample"/>.</returns>
+    private static int Sample<T>(ReadOnlySpan<T> values, ValidityMask mask, int rows, Span<T> sample)
     {
-        List<double> sample = new List<double>(SampleSize);
-        foreach (int index in SampleIndices(rows))
-        {
-            if (mask.IsValid(index))
-            {
-                sample.Add(values[index]);
-            }
-        }
-
-        return [.. sample];
-    }
-
-    private static float[] SampleSingle(ReadOnlySpan<float> values, ValidityMask mask, int rows)
-    {
-        List<float> sample = new List<float>(SampleSize);
-        foreach (int index in SampleIndices(rows))
-        {
-            if (mask.IsValid(index))
-            {
-                sample.Add(values[index]);
-            }
-        }
-
-        return [.. sample];
-    }
-
-    private static IEnumerable<int> SampleIndices(int rows)
-    {
+        int taken = 0;
         if (rows <= SampleSize)
         {
             for (int i = 0; i < rows; i++)
             {
-                yield return i;
+                if (mask.IsValid(i))
+                {
+                    sample[taken++] = values[i];
+                }
             }
 
-            yield break;
+            return taken;
         }
 
         int blocks = SampleSize / SampleBlock;
         for (int b = 0; b < blocks; b++)
         {
-            long start = (long)b * (rows - SampleBlock) / Math.Max(blocks - 1, 1);
-            for (int i = 0; i < SampleBlock; i++)
+            int start = (int)((long)b * (rows - SampleBlock) / Math.Max(blocks - 1, 1));
+            for (int i = start; i < start + SampleBlock; i++)
             {
-                yield return (int)start + i;
+                if (mask.IsValid(i))
+                {
+                    sample[taken++] = values[i];
+                }
             }
         }
+
+        return taken;
     }
 }

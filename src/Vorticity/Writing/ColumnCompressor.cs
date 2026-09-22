@@ -699,11 +699,12 @@ internal static class ColumnCompressor
                 probe.Report(nodeIndex, (plan.FromMemory ? "memory " : "") + chosen, expected);
             }
 
-            // The reference plan is thrown away, and a zstd frame, a set of ALP integers or a row
-            // of dictionary codes among its candidates is holding a pooled buffer that nothing
-            // will write.
+            // The reference plan is thrown away, and a zstd frame, ALP's integers and patches, an
+            // FSST code stream and row tables or a row of dictionary codes among its candidates is
+            // holding a pooled buffer that nothing will write.
             reference.Zstd?.Release();
             reference.Alp?.Release();
+            reference.Fsst?.Release();
             reference.ReleaseCodes();
         }
 
