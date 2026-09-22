@@ -105,8 +105,8 @@ celsius: source None
   OpenAsync: VortexUnsupportedException: Unsupported Vortex component: index 'vorticity.sorted.runs.v1'.
   'Celsius' has no key source (SortedColumn: the file statistics say the column is not sorted; ...).
   A cursor over an unindexed column would have to hold the column to sort it, which this library
-  refuses. Write the file with IndexPolicy.SortedRuns for that column, or add the index after the
-  fact with VortexFileIndexer.
+  refuses. Write the file with IndexPolicy.SortedRuns for that column, or add it to the written
+  file with VortexFileIndexer.AppendIndexesAsync.
 ```
 
 `Distinct()` on the builder asks for one stop per key instead of one per entry. A postings index or

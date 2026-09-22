@@ -72,10 +72,19 @@ appended in bulk (`Append(ReadOnlySpan<Guid>)`, `Append(ReadOnlySpan<DateTime>)`
 through `GetSpan` and the rest row by row:
 
 ```
-100000 visits column by column: 2129876 bytes, best of three 41 ms
-the same visits as rows: 2129876 bytes, best of three 27 ms
+100000 visits column by column: 2129876 bytes, best of three 30 ms
+  Id: Canonical x13
+  StartedAt: Sequence x13
+  DurationMs: Sequence x12, BitPacked
+  Referrer: Dictionary x13
+  Pages: BitPacked x13
+  Origin: {Country: Dictionary, City: Dictionary} x13
+the same visits as rows: 2129876 bytes, best of three 18 ms
 read back: 100000 visits, 100000 lists holding 200000 pages, 9091 origins without a city, 2129876 bytes
 ```
+
+The report reads each chunk's encoding from what was written: a list by its elements, a timestamp
+or a uuid by its storage, and a nested record field by field.
 
 The rows won here, and the reason is worth knowing: the generated `WriteRows` fills one column at a
 time over the whole span, while the sample's loop appends the referrer, the list and both origin
@@ -85,9 +94,10 @@ fields of a row before moving to the next. Filling one column at a time is what 
 
 * **A list left open makes `WriteAsync` throw** `VortexSchemaException`: *…: a list of list(i32) is
   open. Complete every row before writing it.*
-* **The report does not see inside nested columns.** `report.Columns` gives the scheme chosen for a
-  top-level column, and reports `None` for a list, a struct, a uuid or a timestamp even when what
-  they hold is encoded. `vxdump --layout` shows the encodings of the leaves ([vxdump.md](vxdump.md)).
+* **A hint on a timestamp or a uuid column does not reach its storage.** The hint pins the
+  extension, and the chooser still picks the storage's encoding: a `Canonical` hint on `StartedAt`
+  is still reported `Sequence`. `vxdump --layout` shows the whole encoding tree
+  ([vxdump.md](vxdump.md)).
 * **A list of records cannot be written**: the generator refuses such a member with VX1005, since
   no typed column reads it back ([records.md](records.md)).
 * `StartedAt.Append(DateTime)` converts a local time for a UTC column; `Id.Append(Guid)` stores the

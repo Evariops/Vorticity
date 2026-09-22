@@ -26,7 +26,7 @@ await using (VortexFileWriter writer = session.CreateWriter(path, schema))
 ```
 
 ```
-100000 rows, 226508 bytes; id Sequence x13; payload Zstd x13; origin None x13
+100000 rows, 226508 bytes; id Sequence x13; payload Zstd x13; origin {country: Dictionary} x13
 schema struct{id: i64, payload: binary?, origin: struct{country: utf8}}
 read back by name: ids summing to 104999950000, 33334 null payloads, 2666523 payload bytes
 ```
@@ -59,12 +59,11 @@ Reading such a file back uses the same names: `file.Scan("id", "payload")` yield
 * **Names match exactly.** `Column<T>(name)` compares ordinally, and a name the schema does not have
   throws: *The builder has no column 'identifier'; its schema is struct{…}.* A record binds with a
   case-insensitive fallback; the untyped builder does not.
-* **The nullable binary builder is smaller than the others.** `ColumnBuilder<ReadOnlyMemory<byte>?>`
-  offers `Append(bytes)` and `AppendNull()`; `GetSpan` and `Commit` exist on the non-nullable binary
-  builder and on every text builder.
-* The report's `origin: None` is the struct column's own scheme: the report does not look inside a
-  struct, and `vxdump --layout` shows how its fields were written
-  ([write-lists-and-records.md](write-lists-and-records.md)).
+* **A binary value can be written in place.** `ColumnBuilder<ReadOnlyMemory<byte>?>` offers
+  `GetSpan(n)` and `Commit(length)` beside `Append(bytes)`, and `AppendNull()` or
+  `AppendNulls(count)` for the rows without a payload, as the text builders do.
+* The report reads a struct column field by field, `{country: Dictionary}`, the way it reads a list
+  by its elements ([write-lists-and-records.md](write-lists-and-records.md)).
 * The mapping between types and .NET types is [07-dotnet-mapping.md](../design/07-dotnet-mapping.md).
 
 ## Run it

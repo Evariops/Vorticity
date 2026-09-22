@@ -13,7 +13,7 @@ await using (VortexFileWriter appender = await session.AppendAsync(path))
 
 ```
 appended 8192 rows to 16384: resumed at 16384, the file now holds 24576
-appended 5000 rows to 20000: resumed at 16384, RowCount 21384 after the write, the file now holds 25000
+appended 5000 rows to 20000: resumed at 16384, RowCount 25000 after the write, the file now holds 25000
 ```
 
 ## Where an append resumes
@@ -26,8 +26,9 @@ the rewrite starts:
   count;
 * a file that does not, 20 000 rows here, has its last chunk read and written again with the new
   rows: `RowCount` is 16 384, where that chunk starts. The 3 616 rows of the old tail are the file's
-  already; you do not write them again, and they are not counted again either, so `RowCount` after
-  writing 5 000 rows is 21 384 while the file holds 25 000. `report.RowCount` is the file's total.
+  already and you do not write them again; the writer counts them back in at the first write,
+  flush or completion, so `RowCount` after writing 5 000 rows is 25 000, what the file holds, and
+  so is `report.RowCount`.
 
 ## What an append costs
 

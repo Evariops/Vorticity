@@ -74,6 +74,25 @@ Postings on four statuses take 1 184 bytes and find the sixteen rows of a rare o
 ([keys-in-order.md](keys-in-order.md)). A range filter is not pruned by them: `Between` read every
 block.
 
+An index can also be added to a file already written, in place:
+
+```csharp
+IReadOnlyList<IndexWriteReport> added = await VortexFileIndexer.AppendIndexesAsync(
+    later, IndexPolicy.None.SortedRuns(Hit.ColumnNames.Score).WithBudgetPerMille(3_000), ct);
+```
+
+```
+  added afterwards: vorticity.sorted.runs.v1 Built, 1850040 bytes; the file grew from 5286740 to 7145223 bytes; the cursor finds 1001 at row 280415
+```
+
+The data stays where it is; the file's tail is written again with the index regions after the last
+chunk, and the file takes a new identity. The index is the one the write would have built, 1 850 040
+bytes, and the file grew by 1 858 483: the directory and the tail written again are the difference.
+`VortexFileIndexer.BuildFragmentAsync`
+builds the same index into an `IndexFragment` instead and leaves the file untouched: a reader passes
+it with `VortexOpenOptions.IndexFragments`, which is how an index reaches a file that cannot be
+rewritten.
+
 A composite key names its encoder, from the row-encoding package:
 
 ```csharp
@@ -141,9 +160,12 @@ checksum, reading each once; it is a tool's check, and a scan does not run it.
 
 ## Watch out
 
-* **An index is written with the file.** The surface has no call that adds one to a file already
-  written: write it again with the policy ([copy-a-file.md](copy-a-file.md)). The message of a key
-  cursor refused for want of an index mentions `VortexFileIndexer`, which offers no public method.
+* **`AppendIndexesAsync` rewrites the tail even when every index is abandoned**, and the file takes
+  a new identity all the same. A `required` index it cannot build throws `VortexException` before
+  anything reaches the file.
+* **A fragment built by `BuildFragmentAsync` records no hash of the file**, so `VerifyIndexesAsync`
+  and `vxdump --verify` cannot tell that it still matches; it is bound to the file by its identity,
+  or, for a file written by another library, by its length and last write time.
 * **A name the schema does not have throws at `CreateWriter`**: *The index policy names 'Referrer',
   which is no column of the schema struct{…}.*
 * **The composite keys of a file share one encoder**: `ForKey` refuses a second encoder of another

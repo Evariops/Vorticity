@@ -57,7 +57,7 @@ column of every batch to its plain form with `Canonical()`:
 | `Auto` | 1 522 396 | 68 ms | 10 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
 | `Fastest` | 1 522 396 | 52 ms | 8 ms | the same |
 | `Smallest` | 1 290 036 | 80 ms | 8 ms | `Day` and `City` zstd, `Celsius` ALP |
-| `None` | 20 848 260 | 60 ms | 5 ms | none |
+| `None` | 20 848 260 | 60 ms | 5 ms | every column `Canonical`, the plain form |
 
 Encoding is what makes the file fourteen times smaller than its plain form. `Auto` prices each
 column's size and decode speed together; `Fastest` spends less time choosing and builds no index,
@@ -77,7 +77,7 @@ at a time, the rest left to the chooser:
 | `Celsius` as `Alp` | 1 605 660 | ALP |
 | `Celsius` as `Zstd` | 499 132 | zstd (ALP on the 576-row tail) |
 | `Celsius` as `BitPacked` | 1 522 396 | a dictionary: bit-packing does not apply to floats |
-| `Celsius` as `Canonical` | 8 476 100 | none |
+| `Celsius` as `Canonical` | 8 476 100 | `Canonical`, the plain form |
 | `Celsius` as `Canonical`, under `Smallest` | 1 290 036 | ALP |
 
 A hint is a preference, and the report is where you find out whether it held:

@@ -70,7 +70,10 @@ for the segment seam. Everything else in the assembly is internal.
   (`GetSpan` and `Advance`), appended to one value or one bitmap at a time, with lists and nested
   records. `WriteAsync` takes the builder, a span or a stream of records, the columns of a scan, a
   `BatchView` or a `RecordBatch`; `FlushAsync` seals whole blocks into a chunk; `CompleteAsync`
-  returns a `WriteReport`; `Abandon` gives the file up.
+  returns a `WriteReport`, which says what each chunk of each column was written as;
+  `Abandon` gives the file up. `VortexFileIndexer.AppendIndexesAsync` adds indexes to a file
+  already written, and `BuildFragmentAsync` builds them into an `IndexFragment` a reader passes at
+  open, leaving the file untouched.
 * **Options, plans, reports, diagnostics.** `VortexOpenOptions`, `VortexWriteOptions` and
   `ScanOptions` are records with `init` properties, beside `CompressionProfile`, `EncodingHint`,
   `VortexTornTailPolicy` and `IndexPolicy` (`Bloom`, `NgramBloom`, `Postings`, `SortedRuns`,

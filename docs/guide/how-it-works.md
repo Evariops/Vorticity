@@ -27,7 +27,7 @@ await using VortexFile file = await VortexFile.OpenAsync(path);
 ```
 written: 1000000 rows in blocks of 8192, 50 chunks of 32768, 8192, 16384, 576 rows; 1564708 bytes: data 1548084, statistics 200, zone maps 8264, indexes 0, footer 8160
   Day: RunEnd, Sequence
-  Celsius: Dict, Alp
+  Celsius: Dictionary, Alp
   City: RunEnd
 opened: struct{Day: i32, Celsius: f64?, City: utf8}, 1000000 rows, 1564708 bytes, 153 segments, edition core2026.08.0
 layout: vortex.struct of vortex.zoned(123 zones of 8192), vortex.zoned(123 zones of 8192), vortex.zoned(123 zones of 8192)

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -90,6 +91,21 @@ internal static partial class Indexes
             {
                 Console.WriteLine($"  the same cursor without the index: {e.Kind} {e.ComponentId}: {e.Message}");
             }
+        }
+
+        // The index added to the file written without one, in place: the data stays, the tail is
+        // written again with the index regions, and the file takes a new identity.
+        string later = Demo.Path("indexes-later.vortex");
+        System.IO.File.Copy(plain, later, overwrite: true);
+        long before = new FileInfo(later).Length;
+        IReadOnlyList<IndexWriteReport> added = await VortexFileIndexer.AppendIndexesAsync(
+            later, IndexPolicy.None.SortedRuns(Hit.ColumnNames.Score).WithBudgetPerMille(3_000), ct);
+        await using (VortexFile file = await VortexFile.OpenAsync(later))
+        {
+            await using KeyCursor<int> cursor = await file.Scan<Hit>().Keys(r => r.Score).OpenAsync(ct);
+            await cursor.SeekAsync(1_000, SeekOp.AtOrAfter, ct);
+            Console.WriteLine($"  added afterwards: {added[0].Kind} {added[0].Outcome}, {added[0].Bytes} bytes; the file grew from {before} to {file.Length} bytes; " +
+                $"the cursor finds {cursor.Key} at row {cursor.Row}");
         }
 
         Console.WriteLine();

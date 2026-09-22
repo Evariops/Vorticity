@@ -67,7 +67,7 @@ per-chunk encodings:
   data 1548084, statistics 200, zone maps 8264, indexes 0, footer 8160
   chunk rows: 32768 x24, 8192 x24, 16384, 576
   Day: RunEnd x49, Sequence
-  Celsius: Dict x49, Alp
+  Celsius: Dictionary x49, Alp
   City: RunEnd x50
 read back: 1000000 rows, 1564708 bytes on disk, mean 30.0000 °C
 ```
