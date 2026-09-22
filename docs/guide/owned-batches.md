@@ -98,10 +98,10 @@ twenty rounds:
 
 | | time | managed allocation |
 |---|---|---|
-| borrowed columns, typed scan | 12.9 ms | 108 KiB |
-| borrowed columns, tool scan | 6.4 ms | 174 KiB |
-| `ToBatchesAsync` | 7.9 ms | 1 364 KiB |
-| `ToOwned()` on every borrowed batch | 13.8 ms | 1 382 KiB |
+| borrowed columns, typed scan | 7.7 ms | 85 KiB |
+| borrowed columns, tool scan | 6.2 ms | 82 KiB |
+| `ToBatchesAsync` | 6.6 ms | 1 158 KiB |
+| `ToOwned()` on every borrowed batch | 8.3 ms | 1 158 KiB |
 
 Two things differ between these rows, the copy and the form of the columns:
 
@@ -109,12 +109,13 @@ Two things differ between these rows, the copy and the form of the columns:
   run-end, `Celsius` dictionary. Reading `Values` or a text length decodes them in your loop
   ([encoded-forms.md](encoded-forms.md)). `ToBatchesAsync` and the tool scan decode them in the
   scan, and deliver them canonical.
-* So the tool scan against `ToBatchesAsync` is the copy alone: **1.5 ms, 23 % of the canonical
-  scan** in this run, and between a fifth and a third across runs.
+* So the tool scan against `ToBatchesAsync` is the copy alone: **0.4 ms, 6 % of the canonical
+  scan** in this run; timings this short move from run to run.
 
 `ToOwned()` copies what it is given as it is, the encoded form included, which is why it adds little
-to the typed scan's own cost. An owned batch allocates about 10 KiB of managed memory beyond the
-scan's own, the `RecordBatch` and its bookkeeping; its buffers come from the pool.
+to the typed scan's own cost. An owned batch allocates about 9 KiB of managed memory beyond the
+scan's own, the `RecordBatch` and its bookkeeping; its buffers come from the pool. A borrowed batch
+allocates nothing.
 
 ## Watch out
 

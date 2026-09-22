@@ -66,13 +66,14 @@ Measured on the demonstration file, 1 564 708 bytes:
 | no filter | 123 of 123 | 150 | 1 540 608 | 1 000 000 |
 | `Day >= 900` | 14 of 123 | 22 | 165 424 | 100 000 |
 | `Celsius > 45` | 123 of 123 | 151 | 1 543 716 | 122 500 |
-| `Day >= 5000` | 0 of 123 | 1 | 2 124 | 0 |
+| `Day >= 5000` | 0 of 123 | 0 | 0 | 0 |
 
 The rows are in `Day` order, so 109 blocks are provably outside `Day >= 900`: a tenth of the reading
 for a tenth of the rows. `Celsius` walks its whole range inside every block, so no block can be
 excluded, and the predicate costs one request more than no filter: the 3 108 bytes of zone maps read
-to find that out. `Day >= 5000` lies above the file's own maximum, and `MayMatch` says so; the run
-still consults the zone maps, one request of 2 124 bytes, as its plan reports, and decodes nothing.
+to find that out. `Day >= 5000` lies above the file's own maximum, and `MayMatch` says so: the file
+statistics are in memory once the file is open, so the plan and the run read nothing at all, and
+count every block pruned by the file statistics.
 
 ## Three levels
 

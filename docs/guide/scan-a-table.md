@@ -107,8 +107,8 @@ the column. [aggregates.md](aggregates.md) has the rest of the operators.
   request, [open-a-file.md](open-a-file.md) shows what a `SegmentCache` on the session saves.
 * **Memory.** One batch is decoded ahead of the one you hold (`ScanOptions.Prefetch`, 1 by
   default), in buffers that alternate rather than accumulate.
-* **Allocations.** A whole scan allocated 103 312 bytes over 123 batches and 117 648 bytes over
-  245: about 90 KB to start a scan, then about 120 bytes per batch, counted process-wide with
+* **Allocations.** A whole scan allocated 87 480 bytes over 123 batches and the same 87 480 bytes
+  over 245: about 87 KB to start a scan, then nothing per batch, counted process-wide with
   `GC.GetTotalAllocatedBytes`, so the thread that decodes ahead is included.
 
 ## Watch out
