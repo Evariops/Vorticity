@@ -213,44 +213,34 @@ public sealed class WriteAllocationTests
     private const int WideRows = 64;
 
     /// <summary>
-    /// What one more column adds, in bytes: the ceiling that says the cost is a STATE and not a
-    /// scratch. The writer's block scratch is ~130 KiB and measured here is **19 484 B**, a
-    /// seventh of it, so the claim holds with room; the ceiling is set just above the measurement
+    /// What one more column adds, in bytes: the ceiling that says the cost is a state and not a
+    /// scratch. The writer's block scratch is ~130 KiB and measured here is **13 878 B**, about a
+    /// tenth of it, so the claim holds with room; the ceiling is set just above the measurement
     /// as a ratchet, not as a target.
     /// </summary>
     /// <remarks>
-    /// THE BREAKDOWN, measured the same way at 64 and at 512 rows a column, because a
-    /// number this size deserves to be named rather than merely bounded:
-    /// <list type="bullet">
-    /// <item>13 366 B is the writer's own per-column state, and it does not move with the rows —
-    /// identical at 64 and at 512, which is the shape claim this axis exists to make;</item>
-    /// <item>+5 806 B when `Auto` is on: the index writer's per-column arrays and the Bloom builder
-    /// it abandons at the first block;</item>
-    /// <item>+312 B for the compressor.</item>
-    /// </list>
-    /// A thousand columns therefore cost about 19 MB to write once, against 130 KiB of scratch.
+    /// Under the default, which writes no index, that is the writer's own per-column state and
+    /// the compressor's, and it does not move with the rows, which is the shape claim this axis
+    /// exists to make. `IndexPolicy.Auto` adds to it the index writer's per-column arrays and the
+    /// Bloom builder it abandons at the first block. A thousand columns therefore cost about 14 MB
+    /// to write once, against 130 KiB of scratch.
     /// </remarks>
-    private const double PerColumnCeiling = 22_000.0;
+    private const double PerColumnCeiling = 14_500.0;
 
-    /// <summary>The wide schema's own ratchet, in bytes. Measured at 19 003 288 B.</summary>
-    private const long WideCeiling = 20_000_000;
+    /// <summary>The wide schema's own ratchet, in bytes. Measured at 13 899 136 B.</summary>
+    private const long WideCeiling = 14_500_000;
 
     /// <summary>
     /// The schema axis: a schema of a thousand columns costs a thousand small states and one
     /// scratch, not a thousand scratches.
     /// </summary>
     /// <remarks>
-    /// MARGINAL, NOT TOTAL, because the claim is about the shape of the cost rather than its size.
+    /// Marginal, not total, because the claim is about the shape of the cost rather than its size.
     /// A per-file ceiling on a thousand columns would pass the day it was set whatever the shape,
     /// so this measures a hundred columns and a thousand of the same rows and divides the
     /// difference by the nine hundred: that number is what one column costs, and it is compared to
     /// what one scratch costs. Sixty-four rows a column, so that a column's data (512 bytes) does
-    /// not drown its state.
-    /// <para>
-    /// `Auto` is on, as everywhere else in this file, so each column also carries the index
-    /// writer's per-column state and the Bloom builder it abandons at the first block. That is part
-    /// of what a column costs and belongs inside the ceiling.
-    /// </para>
+    /// not drown its state. The write takes the default options, as everywhere else in this file.
     /// </remarks>
     [Fact]
     public async Task AThousandColumnsCostAThousandStatesAndOneScratch()
