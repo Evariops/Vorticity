@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -193,7 +194,7 @@ internal static class ArrayBlobWriter
         {
             nodeIndex = Materialize(arena, nodeIndex);
             plan = ColumnCompressor.Choose(
-                arena, nodeIndex, encodings.Target, in summary, cascade, stats);
+                arena, nodeIndex, encodings.Target, in summary, cascade, stats, blob);
         }
 
         // The bytes the plan actually produced, handed back to the column for its plan memory:
@@ -2017,9 +2018,16 @@ internal static class ArrayBlobWriter
 
         private BufferSpec[] _specs = [];
         private ProtoWriter _metadata;
+        private ZstandardEncoder? _zstd;
 
         /// <summary>The builder, cleared by each blob as it starts.</summary>
         internal FlatBufferBuilder Builder { get; } = new FlatBufferBuilder();
+
+        /// <summary>
+        /// The encoder every zstd trial of the file compresses in, created with the first: its
+        /// native context is a megabyte, made once rather than once per trial.
+        /// </summary>
+        internal ZstandardEncoder Zstd => _zstd ??= new ZstandardEncoder();
 
         /// <summary>The buffers the blob being written has queued, in order.</summary>
         internal List<PendingBuffer> Buffers => _buffers;
@@ -2054,11 +2062,13 @@ internal static class ArrayBlobWriter
             return _specs.AsSpan(0, count);
         }
 
-        /// <summary>Hands the builder's and the metadata writer's rentals back.</summary>
+        /// <summary>Hands the builder's and the metadata writer's rentals back, and frees the zstd context.</summary>
         public void Dispose()
         {
             Builder.Dispose();
             _metadata.Dispose();
+            _zstd?.Dispose();
+            _zstd = null;
         }
     }
 }

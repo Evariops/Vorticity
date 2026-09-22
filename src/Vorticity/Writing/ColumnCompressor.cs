@@ -661,10 +661,15 @@ internal static class ColumnCompressor
     /// the bit-width histograms, the distinct table and its codes buffer. Absent means the same
     /// thing it means everywhere else here: measure it yourself.
     /// </param>
+    /// <param name="workspace">
+    /// The writer's blob workspace, whose zstd encoder a trial compresses in so that the native
+    /// context is made once per writer rather than once per trial; absent, a trial makes its own.
+    /// </param>
     /// <returns>The plan; <see cref="ColumnPlan.Canonical"/> when nothing wins.</returns>
     internal static ColumnPlan Choose(
         CanonicalArena arena, int nodeIndex, VortexEdition target = EditionRegistry.Newest,
-        in BlockStats stats = default, Cascade cascade = default, ChunkStats chunk = default)
+        in BlockStats stats = default, Cascade cascade = default, ChunkStats chunk = default,
+        ArrayBlobWriter.Workspace? workspace = null)
     {
         // The chooser by formulas is the one whose plan is returned. It decides under the run-end
         // rule this writer applies -- run-end wins outright inside its ratio -- because that rule is
@@ -675,7 +680,7 @@ internal static class ColumnCompressor
         bool sizeFirst = chunk.SizeFirst;
         ColumnPlan plan = ChooseByFormula(
             arena, nodeIndex, target, in stats, cascade, chunk,
-            runEndCompetes: sizeFirst || (probe is not null && probe.RunEndCompetes), sizeFirst);
+            runEndCompetes: sizeFirst || (probe is not null && probe.RunEndCompetes), workspace, sizeFirst);
 
         // The oracle: when a test has installed a probe, the other chooser runs on the same chunk
         // with the same inputs and the two decisions are compared plan against plan, with the
@@ -683,7 +688,7 @@ internal static class ColumnCompressor
         // write and nowhere else, so two tests writing at once cannot see each other's chunks.
         if (probe is not null)
         {
-            ColumnPlan reference = ChooseToday(arena, nodeIndex, target, in stats, cascade, chunk);
+            ColumnPlan reference = ChooseToday(arena, nodeIndex, target, in stats, cascade, chunk, workspace);
             // A plan memory produced is marked as such: the reference prices every candidate on
             // every chunk, so where memory skipped that and reached another verdict the two differ
             // by design, and the test counts those apart from real disagreements.
@@ -722,7 +727,7 @@ internal static class ColumnCompressor
     /// <summary>The chooser by order: candidates in a fixed order, the first that wins returns.</summary>
     private static ColumnPlan ChooseToday(
         CanonicalArena arena, int nodeIndex, VortexEdition target, in BlockStats stats,
-        Cascade cascade, ChunkStats chunk)
+        Cascade cascade, ChunkStats chunk, ArrayBlobWriter.Workspace? workspace)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
@@ -871,7 +876,7 @@ internal static class ColumnCompressor
             return ColumnPlan.ForBitPacking(packed);
         }
 
-        return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild);
+        return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace);
     }
 
     /// <summary>
@@ -894,9 +899,10 @@ internal static class ColumnCompressor
     /// construction and its trial cheap, so the guard has nothing to guard
     /// (<see cref="Cascade.IsValuesChild"/>).
     /// </param>
+    /// <param name="workspace">The writer's blob workspace, for the zstd trial's encoder; null for one of its own.</param>
     private static ColumnPlan Trials(
         CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget,
-        bool gatesOff = false)
+        bool gatesOff, ArrayBlobWriter.Workspace? workspace)
     {
         // Every ceiling below is derived from this one.
         long plain = budget;
@@ -929,12 +935,12 @@ internal static class ColumnCompressor
         //
         // What keeps it affordable in the other direction is the size gate: columns below it are
         // exactly the ones where the absolute saving cannot repay either pass.
-        ZstdPlan? zstd = null;
+        ZstdPlan? frame = null;
         if (node.Kind is CanonicalKind.VarBinView or CanonicalKind.Primitive
             && Allows(target, "vortex.zstd")
             && (gatesOff || DataBytes(node) >= ZstdMinimumBytes))
         {
-            zstd = ZstdPlan.TryBuild(arena, nodeIndex, plain);
+            frame = ZstdPlan.TryBuild(arena, nodeIndex, plain, workspace);
         }
 
         FsstPlan? fsst = null;
@@ -955,9 +961,9 @@ internal static class ColumnCompressor
             // flooring, which is exact because `encoded` is an integer. The two together are the
             // condition under which FSST takes the column when it is priced first.
             long ceiling = plain * 9 / 10;
-            if (zstd is not null)
+            if (frame is not null)
             {
-                ceiling = Math.Min(ceiling, zstd.FrameLength * 10L / 9);
+                ceiling = Math.Min(ceiling, frame.FrameLength * 10L / 9);
             }
 
             fsst = FsstPlan.TryBuild(arena, nodeIndex, ceiling);
@@ -966,13 +972,13 @@ internal static class ColumnCompressor
         if (fsst is not null)
         {
             // The zstd plan lost, and it is holding a pooled buffer that nothing will write.
-            zstd?.Release();
+            frame?.Release();
             return ColumnPlan.ForFsst(fsst) with { PredictedBytes = fsst.EncodedSize };
         }
 
-        if (zstd is not null)
+        if (frame is not null)
         {
-            return ColumnPlan.ForZstd(zstd) with { PredictedBytes = zstd.FrameLength };
+            return ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.FrameLength };
         }
 
         return ColumnPlan.Canonical with { PredictedBytes = plain };
@@ -1265,6 +1271,7 @@ internal static class ColumnCompressor
     /// <param name="cascade">What the parent knows about this child.</param>
     /// <param name="chunk">The cursor the statistics came from.</param>
     /// <param name="runEndCompetes">Whether run-end is priced against the others or wins outright.</param>
+    /// <param name="workspace">The writer's blob workspace, for the zstd trial's encoder; null for one of its own.</param>
     /// <param name="sizeFirst">
     /// Whether the column goes to its smallest encoding whatever it costs to decode: no remembered
     /// plan stands in for the pricing, and the trials are offered the column under the best exact
@@ -1272,7 +1279,8 @@ internal static class ColumnCompressor
     /// </param>
     private static ColumnPlan ChooseByFormula(
         CanonicalArena arena, int nodeIndex, VortexEdition target, in BlockStats stats,
-        Cascade cascade, ChunkStats chunk, bool runEndCompetes, bool sizeFirst = false)
+        Cascade cascade, ChunkStats chunk, bool runEndCompetes, ArrayBlobWriter.Workspace? workspace,
+        bool sizeFirst = false)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
@@ -1334,7 +1342,7 @@ internal static class ColumnCompressor
         if (!sizeFirst && measured && chunk.Memory is { WithinTolerance: true } memory)
         {
             ColumnPlan remembered = Reprice(
-                memory.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain);
+                memory.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain, workspace);
             if (remembered.Scheme == memory.Scheme)
             {
                 return remembered with { FromMemory = true };
@@ -1406,7 +1414,7 @@ internal static class ColumnCompressor
             if (dictionary.Scheme != ColumnScheme.None)
             {
                 if (sizeFirst && dictionary.PredictedBytes > 0
-                    && Trials(arena, nodeIndex, node, target, dictionary.PredictedBytes, cascade.IsValuesChild) is { Scheme: not ColumnScheme.None } smaller)
+                    && Trials(arena, nodeIndex, node, target, dictionary.PredictedBytes, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } smaller)
                 {
                     dictionary.ReleaseCodes();
                     return smaller;
@@ -1422,7 +1430,7 @@ internal static class ColumnCompressor
         // a trial is offered only the columns no exactly priced scheme took, under the plain
         // column's bytes as its ceiling. Size first is the one profile that wants exactly that.
         if (sizeFirst && bestScheme != ColumnScheme.None
-            && Trials(arena, nodeIndex, node, target, best, cascade.IsValuesChild) is { Scheme: not ColumnScheme.None } trial)
+            && Trials(arena, nodeIndex, node, target, best, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } trial)
         {
             walkedRuns.ReleaseCodes();
             return trial;
@@ -1437,7 +1445,7 @@ internal static class ColumnCompressor
                 return ColumnPlan.ForBitPacking(packed!) with { PredictedBytes = packed!.BufferBytes };
 
             default:
-                return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild);
+                return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace);
         }
     }
 
@@ -1503,7 +1511,8 @@ internal static class ColumnCompressor
     /// </remarks>
     private static ColumnPlan Reprice(
         ColumnScheme scheme, CanonicalArena arena, int nodeIndex, CanonicalNode node,
-        VortexEdition target, in BlockStats stats, Cascade cascade, ChunkStats chunk, long plain)
+        VortexEdition target, in BlockStats stats, Cascade cascade, ChunkStats chunk, long plain,
+        ArrayBlobWriter.Workspace? workspace)
     {
         int length = node.Length;
         switch (scheme)
@@ -1569,14 +1578,14 @@ internal static class ColumnCompressor
                     : ColumnPlan.Canonical;
 
             default:
-                return TrialOf(scheme, arena, nodeIndex, node, target, plain);
+                return TrialOf(scheme, arena, nodeIndex, node, target, plain, workspace);
         }
     }
 
     /// <summary>One of the three trials alone, under the plain column's bytes.</summary>
     private static ColumnPlan TrialOf(
         ColumnScheme scheme, CanonicalArena arena, int nodeIndex, CanonicalNode node,
-        VortexEdition target, long plain)
+        VortexEdition target, long plain, ArrayBlobWriter.Workspace? workspace)
     {
         switch (scheme)
         {
@@ -1602,10 +1611,10 @@ internal static class ColumnCompressor
                     return ColumnPlan.Canonical;
                 }
 
-                ZstdPlan? zstd = ZstdPlan.TryBuild(arena, nodeIndex, plain);
-                return zstd is null
+                ZstdPlan? frame = ZstdPlan.TryBuild(arena, nodeIndex, plain, workspace);
+                return frame is null
                     ? ColumnPlan.Canonical
-                    : ColumnPlan.ForZstd(zstd) with { PredictedBytes = zstd.FrameLength };
+                    : ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.FrameLength };
             }
 
             case ColumnScheme.Fsst:

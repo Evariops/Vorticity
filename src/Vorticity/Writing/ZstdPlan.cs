@@ -47,12 +47,20 @@ internal sealed class ZstdPlan
     /// <see langword="null"/> unless the frame beats <paramref name="canonicalSize"/> by a margin
     /// wide enough to justify the decompression pass every read then pays.
     /// </summary>
-    internal static ZstdPlan? TryBuild(CanonicalArena arena, int nodeIndex, long canonicalSize)
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="nodeIndex">The column chunk.</param>
+    /// <param name="canonicalSize">The bytes the frame has to beat.</param>
+    /// <param name="workspace">
+    /// The writer's blob workspace, whose encoder the frame is compressed in; null to compress with
+    /// a context of the call's own.
+    /// </param>
+    internal static ZstdPlan? TryBuild(
+        CanonicalArena arena, int nodeIndex, long canonicalSize, ArrayBlobWriter.Workspace? workspace = null)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         if (node.Kind == CanonicalKind.Primitive)
         {
-            return TryBuildPrimitive(arena, node, canonicalSize);
+            return TryBuildPrimitive(arena, node, canonicalSize, workspace);
         }
 
         if (node.Kind != CanonicalKind.VarBinView)
@@ -113,11 +121,7 @@ internal sealed class ZstdPlan
             offset += value.Length;
         }
 
-        // The one-shot builds a native compression context per call; that is one per column per
-        // chunk, each followed by compressing a whole column, so pooling the context would buy
-        // nothing here.
-        if (!ZstandardEncoder.TryCompress(
-                stream.AsSpan(0, (int)streamBytes), destination, out int written) || written <= 0)
+        if (!TryCompress(workspace, stream.AsSpan(0, (int)streamBytes), destination, out int written))
         {
             return null;
         }
@@ -148,7 +152,8 @@ internal sealed class ZstdPlan
     /// A primitive column: the stored stream is the valid values back to back, with no length
     /// prefixes, since the decoder scatters them using the fixed width alone.
     /// </summary>
-    private static ZstdPlan? TryBuildPrimitive(CanonicalArena arena, CanonicalNode node, long canonicalSize)
+    private static ZstdPlan? TryBuildPrimitive(
+        CanonicalArena arena, CanonicalNode node, long canonicalSize, ArrayBlobWriter.Workspace? workspace)
     {
         int width = node.PType.ByteWidth();
         if (width == 0)
@@ -194,7 +199,7 @@ internal sealed class ZstdPlan
             ReadOnlySpan<byte> input = stream is null
                 ? source[..streamBytes]
                 : stream.AsSpan(0, streamBytes);
-            if (!ZstandardEncoder.TryCompress(input, destination, out int written) || written <= 0)
+            if (!TryCompress(workspace, input, destination, out int written))
             {
                 return null;
             }
@@ -222,6 +227,31 @@ internal sealed class ZstdPlan
                 ArrayPool<byte>.Shared.Return(destination);
             }
         }
+    }
+
+    /// <summary>
+    /// One frame of <paramref name="input"/> into <paramref name="destination"/>, which holds the
+    /// worst case.
+    /// </summary>
+    /// <remarks>
+    /// A zstd compression context is a megabyte of native memory, and the one-shot makes and frees
+    /// one per call: a trial per column per chunk, most of which lose. The workspace's encoder keeps
+    /// one for the whole file, created by the first trial. The frame is the same either way: the
+    /// input is whole and the room is the worst case, so the frame is written by the one call that
+    /// ends it, with the content size in its header, exactly as the one-shot writes it.
+    /// </remarks>
+    private static bool TryCompress(
+        ArrayBlobWriter.Workspace? workspace, ReadOnlySpan<byte> input, Span<byte> destination, out int written)
+    {
+        if (workspace is null)
+        {
+            return ZstandardEncoder.TryCompress(input, destination, out written) && written > 0;
+        }
+
+        ZstandardEncoder encoder = workspace.Zstd;
+        encoder.Reset();
+        OperationStatus status = encoder.Compress(input, destination, out int consumed, out written, isFinalBlock: true);
+        return status == OperationStatus.Done && consumed == input.Length && written > 0;
     }
 
     /// <summary>On a primitive column, keep zstd only when it saves at least a quarter.</summary>
