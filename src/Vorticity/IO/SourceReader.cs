@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -10,9 +11,15 @@ namespace Vorticity.IO;
 
 /// <summary>
 /// The engine's view of a caller's <see cref="ISegmentSource"/>: every lease becomes a segment
-/// owner, kept as it came when it is one pinned, aligned block and copied into an aligned block
-/// otherwise.
+/// owner, kept as it came when it is one aligned block of memory the garbage collector does not
+/// move, and copied into an aligned block otherwise.
 /// </summary>
+/// <remarks>
+/// A lease over a managed array is copied rather than pinned. A segment lives as long as the scan
+/// holds it, across the batches of its chunk and, behind a session cache, past the scan, and an
+/// array pinned for that long fragments the heap it sits in; a copy into the pool costs the segment
+/// once and lets the caller's array go back at once.
+/// </remarks>
 internal sealed class SourceReader : ISegmentReader
 {
     private readonly ISegmentSource _source;
@@ -148,7 +155,7 @@ internal sealed class SourceReader : ISegmentReader
             SegmentIo.ThrowTruncatedRead(offset, length, (int)Math.Min(taken.Bytes.Length, int.MaxValue));
         }
 
-        if (taken.IsContiguous)
+        if (taken.IsContiguous && !MemoryMarshal.TryGetArray(taken.Memory, out ArraySegment<byte> _))
         {
             MemoryHandle pin = taken.Memory.Pin();
             if (((nuint)pin.Pointer & (nuint)(alignment - 1)) == 0)

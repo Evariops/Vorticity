@@ -18,6 +18,7 @@ namespace Vorticity;
 /// </remarks>
 public sealed class AlignedMemoryPool : MemoryPool<byte>
 {
+    private readonly int _alignment = VortexLimits.MaxAlignment;
     private long _outstanding;
 
     internal AlignedMemoryPool(AlignedBufferPool inner)
@@ -26,7 +27,7 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
     }
 
     /// <summary>A pool with its own retention budget.</summary>
-    /// <param name="alignment">The alignment every block honours; a power of two up to 64.</param>
+    /// <param name="alignment">The alignment every block <see cref="Rent"/> hands out honours; a power of two up to 64.</param>
     /// <param name="maxRetainedBytes">The most bytes the pool keeps parked for reuse, across every size class.</param>
     /// <exception cref="ArgumentOutOfRangeException">The alignment is not a power of two up to 64, or the budget is negative.</exception>
     public AlignedMemoryPool(int alignment = 64, long maxRetainedBytes = 256L * 1024 * 1024)
@@ -36,6 +37,7 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
             throw new ArgumentOutOfRangeException(nameof(alignment), alignment, $"A power of two up to {VortexLimits.MaxAlignment}.");
         }
 
+        _alignment = alignment;
         Inner = new AlignedBufferPool(maxRetainedBytes);
     }
 
@@ -51,13 +53,13 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
     /// <inheritdoc/>
     public override int MaxBufferSize => int.MaxValue - VortexLimits.MaxAlignment;
 
-    /// <summary>Rents a block of at least <paramref name="minBufferSize"/> bytes, 64-byte aligned and not zeroed.</summary>
+    /// <summary>Rents a block of at least <paramref name="minBufferSize"/> bytes, aligned as the pool was made and not zeroed.</summary>
     /// <param name="minBufferSize">The size wanted; -1 for 4 KiB.</param>
     /// <returns>The block; disposing it returns it to the pool.</returns>
     public override IMemoryOwner<byte> Rent(int minBufferSize = -1)
     {
         int length = minBufferSize < 0 ? 4096 : minBufferSize;
-        NativeSegmentOwner block = Inner.Rent(length, VortexLimits.MaxAlignment);
+        NativeSegmentOwner block = Inner.Rent(length, _alignment);
         Interlocked.Add(ref _outstanding, length);
         GC.AddMemoryPressure(Math.Max(length, 1));
         return new Lease(this, block, length);

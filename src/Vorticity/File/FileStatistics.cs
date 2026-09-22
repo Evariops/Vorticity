@@ -250,19 +250,19 @@ public readonly struct FieldStatistics
     /// <summary>The column's exact minimum among its non-null values, as <typeparamref name="T"/>.</summary>
     /// <typeparam name="T">A .NET type the column maps to.</typeparam>
     /// <param name="value">The minimum.</param>
-    /// <returns>Whether the file records it exactly; a bound is not reported.</returns>
+    /// <returns>Whether the file records it exactly and <typeparamref name="T"/> reads the column; a bound is not reported.</returns>
     public bool TryGetMin<T>(out T value) => TryRead(HasMin && _minPrecision == StatPrecision.Exact, _min, FieldType, out value);
 
     /// <summary>The column's exact maximum among its non-null values, as <typeparamref name="T"/>.</summary>
     /// <typeparam name="T">A .NET type the column maps to.</typeparam>
     /// <param name="value">The maximum.</param>
-    /// <returns>Whether the file records it exactly; a bound is not reported.</returns>
+    /// <returns>Whether the file records it exactly and <typeparamref name="T"/> reads the column; a bound is not reported.</returns>
     public bool TryGetMax<T>(out T value) => TryRead(HasMax && _maxPrecision == StatPrecision.Exact, _max, FieldType, out value);
 
-    /// <summary>The sum of the column's non-null values, at the widened type the file stores it: <c>long</c> for a signed integer, <c>ulong</c> for an unsigned one, <c>double</c> for a float, <c>decimal</c> for a decimal.</summary>
+    /// <summary>The sum of the column's non-null values, at the widened type the file stores it: <c>long</c> for a signed integer, <c>ulong</c> for an unsigned one, <c>double</c> for a float, <c>decimal</c> for a decimal of at most 28 digits and <c>VortexDecimal</c> for a wider one.</summary>
     /// <typeparam name="T">The sum's .NET type.</typeparam>
     /// <param name="value">The sum.</param>
-    /// <returns>Whether the file records it; an overflowed sum is not.</returns>
+    /// <returns>Whether the file records it and <typeparamref name="T"/> reads the widened type; an overflowed sum is not recorded.</returns>
     public bool TryGetSum<T>(out T value) => TryRead(HasSum, _sum, SumType, out value);
 
     /// <summary>The number of null values of the column.</summary>
@@ -283,9 +283,12 @@ public readonly struct FieldStatistics
             return false;
         }
 
+        // A type that does not read the statistic is a false, not a throw: the sum of a decimal
+        // column is stored wider than the column, and a caller asking for it as the column's own
+        // type is asking a question the file answers no to.
         if (!ClrFit.Fits(ClrShape.For<T>.Value, type.NonNullable, null, out _) && !ClrFit.Fits(ClrShape.For<T>.Value, type, null, out _))
         {
-            throw new VortexSchemaException($"The statistic is of a column of {type}, which {ClrFit.Name(typeof(T))} does not map to.");
+            return false;
         }
 
         value = LiteralValues.ToValue<T>(literal, type)!;
