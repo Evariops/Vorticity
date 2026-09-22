@@ -30,7 +30,7 @@ Verified on 2026-09-15 against `vortex-data/vortex` `develop` and the 0.86.1 cra
 | upstream | state | what we take | what we do differently |
 |---|---|---|---|
 | Bloom aggregate `vortex.bloom_filter.sbbf` ([PR #9398](https://github.com/vortex-data/vortex/pull/9398), 0.86.0) | shipped, **marked unstable** ([PR #9753](https://github.com/vortex-data/vortex/pull/9753)): hash function, block layout and salt order may change; **no edition declares it**; must not be persisted | the split-block Bloom filter (SBBF) structure, one filter per block of rows, XxHash3-64, an equality probe as a scalar function | size chosen from the block's exact distinct count instead of a fixed 256 blocks; coarser resolutions as generations; stored **outside** the zone map (§3); Parquet's xxHash64 only as an explicit variant |
-| Skip index write interface ([PR #9413](https://github.com/vortex-data/vortex/pull/9413)) | open, review required, interface under debate | `with_field_zoned_options` as the shape of a per-column declaration; a `SkipIndex` bundle = summary + probe + rewrite rule | a per-column `IndexPolicy` on `VortexWriteOptions`, `Auto` by default (§5.5); the rewrite rule is a pruner in the scan's block-mask chain, not a plugin |
+| Skip index write interface ([PR #9413](https://github.com/vortex-data/vortex/pull/9413)) | open, review required, interface under debate | `with_field_zoned_options` as the shape of a per-column declaration; a `SkipIndex` bundle = summary + probe + rewrite rule | a per-column `IndexPolicy` on `VortexWriteOptions`, `None` by default and `Auto` on request (§5.5); the rewrite rule is a pruner in the scan's block-mask chain, not a plugin |
 | Epic #8900 Skipping Indexes, tracking #8901 | Proposed | the definition, the "safely ignored" guarantee, the granularity question | we answer the granularity question with block-aligned indexes at `k × zone_len` (§4.3) |
 | Epic #8948 Locating Indexes, tracking #9024 (`vortex.indexed`) | Proposed, no code | the orientation argument (range-keyed vs value-keyed), `IndexExactness` Exact / Superset, `RowLocator` Rows / Blocks, "an index is an ordinary array tree" | not a wrapper layout: a wrapper layout is unreadable to old readers, and upstream says so themselves. Ours is out-of-tree (§3) and moves in-tree when `vortex.indexed` freezes (§9); and every payload is a **run**, so an append never rewrites what exists (§4.2) |
 | Epic #7939 Multi-resolution zone maps | Phase 1 in progress | fine min/max at 8 192 rows, coarse Bloom at a multiple of it, cheap maps evaluated before expensive ones | same, as generations of `k` blocks (§4.3, §5.1) |
@@ -359,7 +359,8 @@ Four departures from the text above, each deliberate:
   with their dtype in `payload_dtype`.
 
 The probe is `Indexes/BloomPruner`, after the zone maps in the block-mask chain, one coalesced
-read per level, coarsest first; `ScanBuilder.WithIndexes(false)` turns it off. It hashes a
+read per level, coarsest first; `ScanBuilder.WithIndexes(false)`, `ScanOptions.UseIndexes = false`
+on the public surface ([12-index-reads.md](12-index-reads.md) §1), turns it off. It hashes a
 literal only when it converts exactly into the column's type (an integer past 2⁵³ from a double,
 a non-integral float, an out-of-range integer: no claim), asks for both zeros when the literal is
 a zero, and asks for nothing on a NaN. A payload that is not the `u32` array its entry declares
@@ -432,7 +433,12 @@ for **multi-file** pruning: `VortexFile.MayMatch(expr)` reads it with the footer
 and skips a file before opening a scan. An append does not extend it (filters do not merge); it
 adds a second file-level generation over the appended blocks, and a rewrite rebuilds one.
 
-### 5.5 Policy: `Auto` by default
+### 5.5 Policy: `Auto`, on request
+
+*Amended by [14-public-api.md](14-public-api.md) §7:* the default of `VortexWriteOptions.Indexes`
+is `IndexPolicy.None`, and a caller asks for `IndexPolicy.Auto` or names its indexes: a file
+written with the defaults carries no index. What follows describes `Auto` when it is chosen;
+`WriteProfile` and `WritePolicy` are `CompressionProfile` and `IndexPolicy` on that surface.
 
 `IndexPolicy` per column: `None`, `Bloom(fpp, resolutions)`, `NgramBloom(...)`, `Postings`,
 `SortedRuns`, or **`Auto`, the default**. `Auto` starts every cheap builder at block 0 and
@@ -635,7 +641,7 @@ null is not an entry, as a null is in no index.
 The scan contract is [11-write-strategy.md](11-write-strategy.md) §6: every structure refines a
 block mask, cheapest first, and a partially live split becomes a row selection so that only its
 live blocks are decoded; an `Exact` index covering the whole predicate delivers its rows as that
-selection. `ScanBuilder.WithIndexes(false)` turns the chain off; the equivalence test of
+selection. `ScanBuilder.WithIndexes(false)` (`ScanOptions.UseIndexes = false`) turns the chain off; the equivalence test of
 [08-semantics.md](08-semantics.md) §1 — the same query with indexes on and off returns the same
 rows — is the acceptance test for every kind, on written and appended files, and the fuzzer feeds
 it forged payloads to prove that a lying index can only slow a scan down.
@@ -650,7 +656,7 @@ and nothing else — `Eq`, `In`, comparisons, `IsNull`, `And`, `Or`, `Not` exist
 ### 7.1 API
 
 `VortexWriteOptions.Indexes`: a `WritePolicy` — per column path an `IndexPolicy`, `Auto` where
-unset — serialized into the directory so that `VortexFileWriter.Append(path)` reuses it without
+unset; `IndexPolicy.None` by default since [14-public-api.md](14-public-api.md) §7 (§5.5) — serialized into the directory so that `VortexFileWriter.Append(path)` reuses it without
 being told. `WriteProfile.Fastest` disables everything. `CompleteAsync` returns the `WriteReport`
 of [11-write-strategy.md](11-write-strategy.md) §7.3, which names every index built and every
 one abandoned with its reason.
@@ -1145,6 +1151,25 @@ throughput corpus, taking the best of three writes.
 | `dict.probe` as a kind (§5.3) | **a kind, and now read by the pruner** | The entry is 61 bytes on `table_mixed` and 59 on the corpus's `dict`, and it is what lets a reader find the dictionary chunks without opening one layout — the `Dictionary` key source already did. Deriving it per chunk would cost a layout read to learn what one directory message says. §5.3 says what it now costs to use. |
 | A Bloom over `(a, b)` pairs (§6.5) | **refused** | Three reasons, in order: the core has no encoder on the read side and cannot take one from `Vorticity.RowEncoding` without depending on it; a tuple's cardinality is the product of its columns', so the filter lands exactly in the regime the first row of this table rejects; and `WritePolicy.ForKey(paths, IndexPolicy.SortedRuns)` answers the same question exactly, per block, with fences. |
 
+**The file's budget, and the index a write must not lose.** An abandoned index leaves **no bytes**
+in the file, because the budget is decided before the filters and runs are written, never after: at
+every flush that would write payloads between chunks, and once more over the whole file before the
+last of them go out. The share is judged once the data passes 1 MiB; below that the payloads are
+held, not judged, since a share of a few kilobytes would refuse an index the full file affords. The
+budget drops only an index that has written nothing yet, so an index whose payloads are already in
+the file is kept even past the budget rather than left behind as dead weight, and what an abandoned
+index would have cost is never counted against the ones that survive it. The budget is
+`IndexPolicy.WithBudgetPerMille`, 100 by default.
+
+An index the caller marks `required` — `Bloom(column, required: true)` and every kind beside it —
+is never dropped by the budget to make room: the optional indexes give way first. What is left over
+the budget once they have is the required indexes' own excess, and a required index is not kept past
+it: `required` **fails the write**. When a required index was abandoned, by its builder or by that
+excess, `CompleteAsync` throws `VortexException` naming the index and the reason, before the zone
+maps, the directory and the footer are written, and the file is not completed; the writer then
+abandons it on disposal. The flag is stored in the directory, column field 11, so an append that
+reuses the stored policy keeps the requirement.
+
 Decided (2026-09-15): XxHash3-64 is `System.IO.Hashing.XxHash3` taken as the **package** — the
 first-party implementation in `dotnet/runtime` (MIT; `XxHash64` from the same package for the
 Parquet variant). It ships as a NuGet package and is in no version of the shared framework
@@ -1259,8 +1284,9 @@ S3's `VersionId` ⤳ with the S3 client. 8.1.5 — `VortexDataset.AppendAsync`, 
 8.1.12 — the six decisions, each resolved by 13 §13.I.
 
 **§11, each question.** The `Auto` thresholds — decided at step 33 (20 ‰, `min_distinct` 8). The
-file's index budget, which the question also names — `IndexBudgetPerMille` = 100 since 12a, **a
-product default, not a calibration**: how much of a file a caller trades for pruning is a
+file's index budget, which the question also names — `IndexPolicy.WithBudgetPerMille`, 100 by
+default, decided before any payload is written so that an abandoned index leaves no bytes, and
+failing the write for a `required` index it cannot keep; **a product default, not a calibration**: how much of a file a caller trades for pruning is a
 storage-against-reads choice per deployment. `dict.probe` as a kind — decided at step 33, read by the
 pruner. A multi-column Bloom — refused at step 33; `ForKey(…, SortedRuns)` answers the question. A
 public probe — answered by 12 §5.1. The default `k` — the tree fan-out, 16, a format version rather

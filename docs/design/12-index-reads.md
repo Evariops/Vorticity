@@ -30,6 +30,15 @@ Four constraints, in order:
 
 ## 1. The inventory, and what the read path answers today
 
+*Amended by [14-public-api.md](14-public-api.md) §5:* `ScanBuilder` is now the internal engine
+behind the public `Scan<TRecord>` and the tool `Scan`, and the names this document uses are that
+engine's. On the public surface: `InKeyOrder(path, descending)` is `OrderBy(r => r.Key,
+descending)`; `Take(indices)` is `Rows(params ReadOnlySpan<long>)`; `WithIndexes(false)`,
+`WithPruning(false)`, `WithMaxBatchRows(n)` and `WithDegreeOfParallelism(n)` are `ScanOptions`'
+`UseIndexes`, `Pruning`, `BatchRows` and `DegreeOfParallelism`; `ExecuteAsync` is `await foreach`
+or `ToBatchesAsync`; `file.Keys(path)` is `Scan<TRecord>().Keys(r => r.Key)` (§8). The composite
+`InKeyOrder(paths)` has no public form ([14-public-api.md](14-public-api.md) §5.7).
+
 Verified 2026-09-15 on the working tree of `perf/src-audit`. The read surface is `ScanBuilder` —
 `Project`, `Rows`, `Where`, `Take`, `WithPruning`, `WithMaxBatchRows`, `WithDegreeOfParallelism`,
 `ExecuteAsync` (`Scan/ScanBuilder.cs:59-279`) — and one terminal, an `IAsyncEnumerable<RecordBatch>`
@@ -147,32 +156,31 @@ column is not an oracle: some encoding kernels answer `true` for a column that i
 ## 4. The cursor
 
 ```csharp
-public sealed class KeyCursor : IAsyncDisposable
+public sealed class KeyCursor<TKey> : IAsyncDisposable
 {
     public bool IsValid { get; }                       // positioned on an entry
     public bool HasRows { get; }                       // false for a Distinct() cursor over a key-only source
-    public FilterLiteralKind KeyKind { get; }          // the column's comparison domain
-    public FilterLiteral Key { get; }                  // the entry's key; copies a byte key (§4.3)
-    public ReadOnlySpan<byte> KeyBytes { get; }        // a byte key, borrowed until the next positioning call
+    public TKey Key { get; }                           // the entry's key, in the column's own .NET type
     public long Row { get; }                           // the entry's file row; throws when !HasRows
-    public long? EntryCount { get; }                   // the source's entries, when known without a walk
 
-    public ValueTask<bool> SeekAsync(FilterLiteral key, SeekOp op, CancellationToken ct = default);
+    public ValueTask<bool> SeekAsync(TKey key, SeekOp op, CancellationToken ct = default);
     public ValueTask<bool> SeekFirstAsync(CancellationToken ct = default);
     public ValueTask<bool> SeekLastAsync(CancellationToken ct = default);
     public ValueTask<bool> NextAsync(CancellationToken ct = default);
     public ValueTask<bool> PrevAsync(CancellationToken ct = default);
     public ValueTask<bool> NextKeyAsync(CancellationToken ct = default);    // the next distinct key: a skip scan
     public ValueTask<bool> PrevKeyAsync(CancellationToken ct = default);
-    public ValueTask<long> RankAsync(FilterLiteral key, CancellationToken ct = default);
+    public ValueTask<long> RankAsync(TKey key, CancellationToken ct = default);
     public ValueTask<bool> SeekRankAsync(long rank, CancellationToken ct = default);
     public ValueTask<long> KeyCountAsync(CancellationToken ct = default);   // entries sharing the current key
-
-    public static int Compare(FilterLiteral left, FilterLiteral right);      // the key order of §4.4
 }
 
 public enum SeekOp : byte { Exact, AtOrAfter, After, AtOrBefore, Before }
 ```
+
+`file.Scan<TRecord>().Keys(r => r.Column)` builds it, `TKey` inferred from the member (§8.1). The
+order of `TKey` is the file's order for the dtype, §4.4's, and the cursor offers no comparator of
+its own: keys arrive in that order, and a consumer compares keys it obtained from cursors.
 
 Every positioning method is asynchronous because it may read a run segment or a zone the file has
 not loaded yet; inside a loaded run a step completes synchronously and a `ValueTask` costs nothing
@@ -197,9 +205,9 @@ operators are defined on that order:
 `SeekFirstAsync` and `SeekLastAsync` are `min` and `max`. `Exact` on a key with duplicates lands
 on its **lowest row**, `AtOrBefore` on its highest. A range `[a, b)` is `AtOrAfter(a)` then `Next`
 while `Key < b`; `(a, b]` is `After(a)` while `Key ≤ b`; a range with no upper bound walks until
-`IsValid` is false. A seek with a literal of the wrong domain — a string on an integer column —
-throws `ArgumentException` at the call, as a filter does at evaluation; a `Null` literal throws
-too, since no entry has a null key.
+`IsValid` is false. A seek key is a `TKey`, the column's own type, so a key of the wrong domain —
+a string on an integer column — does not compile, as a typed filter does not; a null key throws
+`ArgumentNullException` at the call, since no entry has a null key.
 
 Under the merge a seek is: keep the runs whose `[min, max]` (the run's `options`, 10 §4.2) can
 hold the answer, position each by binary search, build the heap. `r` runs cost `r` binary
@@ -221,22 +229,22 @@ it is documented rather than optimised.
 
 ### 4.3 Keys and rows
 
-`Key` is a `FilterLiteral` in the column's comparison domain — the same union a filter's constants
-use, so a key read from a cursor goes straight back into `SeekAsync`, into `Expr.Literal`, or into
-a comparison with the kernels' own rules. For a fixed-width key it is a 16-byte struct and costs
-nothing. For a **byte key** — utf8, binary, a composite key — `Key` copies the bytes, because a
-`FilterLiteral` owns its array, and `KeyBytes` lends them: valid until the next positioning call,
-the rule 07 §4 states for a batch's spans. A cursor's steady-state step allocates nothing when the
-consumer reads `KeyBytes`, and `ScanAllocationTests` pins it (§11).
+`Key` is a `TKey`, the column's own .NET type under 07's mapping — the type the record's member
+has, so a key read from a cursor goes straight back into `SeekAsync`, into a filter
+(`Where(r => r.Column >= key)`), or into a comparison. Under the surface the source still walks the
+column's comparison domain, a `FilterLiteral` of 16 bytes for a fixed-width key, and `Key`
+converts the current entry's key each time it is read: today through a box, so every read of `Key`
+allocates, a fixed-width key included, and a text key becomes a `string`. A cursor's steady-state
+step, which reads no key, allocates nothing, and `ScanAllocationTests` pins it (§11).
 
-`Row` is the entry's file row, the coordinate `ScanBuilder.Take` and `Rows` accept, which is how a
-cursor's answer becomes rows: collect a window of rows, take them; §6 does exactly that for the
-consumer. `HasRows` is false for a `Distinct()` cursor served by a `Postings` or `Dictionary`
-source, and `Row` throws `InvalidOperationException` there.
+`Row` is the entry's file row, the coordinate a scan's `Rows` accepts, which is how a cursor's
+answer becomes rows: collect a window of rows, take them; §6 does exactly that for the consumer.
+`HasRows` is false for a `Distinct()` cursor served by a `Postings` or `Dictionary` source, and
+`Row` throws `InvalidOperationException` there.
 
-`EntryCount` is the number of entries in the source: the column's non-null rows for `SortedRuns`
-(the sum of the runs' `entry_count`, a directory field this document adds to 10 §4.1 so that
-`Explain` has it without reading a payload) and `RowCount − null_count` for a `SortedColumn` whose
+`KeyPlan.EntryCount` is the number of entries in the source: the column's non-null rows for
+`SortedRuns` (the sum of the runs' `entry_count`, a directory field this document adds to 10 §4.1
+so that `ExplainAsync` has it without reading a payload) and `RowCount − null_count` for a `SortedColumn` whose
 null count is known; null when it is not known without a walk.
 
 **As delivered (step 11b, the `SortedColumn` source).** The entries are the rows
@@ -249,7 +257,7 @@ contiguous run, so §4.2's re-seek charge stays owed by the source that will owe
 the zone bounds in memory for the first zone that may hold the key, decodes that one zone and
 bisects inside it; an `Inexact` bound only widens, so a zone it over-includes yields nothing and
 the search moves on, which costs a decode and never an answer. The two orders of §4.4 are kept
-apart by making the comparator a property of the SOURCE: `KeyCursor.Compare` is the total order,
+apart by making the comparator a property of the SOURCE: the runs are walked in the total order,
 and a sorted column is walked in the IEEE order its `is_sorted` was computed in, where `−0.0` and
 `+0.0` are one key and no NaN can occur, a float column holding one not being `is_sorted` at all.
 `Distinct()` is honoured by `NextKeyAsync` rather than by a source of its own until step 15.
@@ -273,8 +281,11 @@ here:
 
 Within one key, entries are in **row order**. That makes a walk deterministic, a `Distinct()`
 cursor's `Row` the key's first occurrence, and the reverse walk the exact reverse.
-`KeyCursor.Compare` exposes this order, so a consumer merging two cursors (§8.2) does not write a
-comparator that disagrees with it.
+The cursor does not expose this order as a comparator: its keys arrive in it, typed by the column,
+and a consumer merging two cursors (§8.2) compares the keys it obtained with the order of their
+.NET type where that is the file's — numeric for an integer, ordinal for text whose values stay in
+the Basic Multilingual Plane, since UTF-16 and UTF-8 order differ past it — and otherwise follows
+the table above.
 
 ### 4.5 Rank, select, and the count of a key
 
@@ -319,6 +330,12 @@ one-row column per value and call the batch encoder, which is how the test prove
 the index key are the same bytes. `RowKeyEncoder(params RowSortField[])` is the writer's encoder;
 one field applies to every column of every key. A key column may be nested (`"person.address.city"`):
 its entry carries the field-index path, and a row whose tuple crosses a null struct is no entry.
+
+**On the public surface.** `Scan<TRecord>.Keys` takes one column, so the composite cursor above has
+no public form: `file.Keys(paths)` is internal, the engine's, and a dataset's clustering key is what
+walks it. A composite index is still written through `IndexPolicy.ForKey` with an `IKeyEncoder`, and
+`RowEncoder.EncodeKey<TKey>` still produces one tuple's bytes, from a record whose members are the
+key columns, with the same bytes the batch encoder produces.
 
 ---
 
@@ -645,126 +662,125 @@ does.
 
 ### 8.1 Listing
 
+The consumer surface is the typed scan of [14-public-api.md](14-public-api.md) §5, and this is its
+index-reading part.
+
 | where | member | answers |
 |---|---|---|
-| `VortexFile` | `MayMatch(VortexExpr)` (10 §5.4) | might this file hold a match: file statistics and the file-level Bloom, no scan |
-| `VortexFile` | `Indexes` (10 §7) | what the file carries, for tooling |
-| `VortexFile` | `Keys(string path)`, `Keys(params string[] paths)` — an extension method, as `Scan()` is, so that file-open does not depend on the read path | a `KeyCursorBuilder` |
-| `KeyCursorBuilder` | `Distinct()` | keys once each; admits the key-only sources |
-| `KeyCursorBuilder` | `WithSource(KeySourceKind)` | forces a source, for tests and for a caller who measured; refuses when it is absent |
-| `KeyCursorBuilder` | `Explain()` → `KeyPlan` | the source chosen, its runs, `EntryCount`, and why the others were not chosen |
-| `KeyCursorBuilder` | `OpenAsync(ct)` → `KeyCursor` | §4 |
-| `ScanBuilder` | `Where`, `Project`, `Rows`, `Take`, `WithMaxBatchRows`, `WithPruning`, `WithDegreeOfParallelism`, `ExecuteAsync` | unchanged |
-| `ScanBuilder` | `WithIndexes(bool)` (10 §6.6) | the index chain on or off: the equivalence switch |
-| `ScanBuilder` | `InKeyOrder(string path, bool descending = false)` | §6 |
-| `ScanBuilder` | `AnyAsync(ct)`, `CountAsync(ct)`, `MinAsync(path, ct)`, `MaxAsync(path, ct)` | §5 |
-| `ScanBuilder` | `Explain()` → `ScanPlan` (11 §6.4) | splits, blocks pruned per structure, rows an exact index selected, the count tier each block would take, the order source and its runs |
-| `ScanMetrics` (11 §6.4) | after execution | the same, measured; plus windows and splits per window under `InKeyOrder` |
-| `Expr` | `StartsWith`, `Contains`, `Like` | §7 |
-| `Vorticity.RowEncoding` | `RowEncoder.EncodeKey(values, fields)` | the seek key of a composite cursor (§4.6) |
+| `VortexFile` | `MayMatch<TRecord>(r => …)` (10 §5.4) | might this file hold a match: the file statistics, synchronously, no read |
+| `VortexFile` | `GetIndexesAsync()` (10 §7) | what the file carries, for tooling |
+| `Scan<TRecord>` | `Keys(r => r.Column)` — refused on a scan with `Where` or `Rows`, since a cursor walks the whole column | a `KeyCursorBuilder<TKey>`, `TKey` inferred from the member |
+| `KeyCursorBuilder<TKey>` | `Distinct()` | keys once each; admits the key-only sources |
+| `KeyCursorBuilder<TKey>` | `ExplainAsync(ct)` → `KeyPlan` | the source chosen, its runs, `EntryCount`, and why the others were not chosen (`KeySourceRejection`) |
+| `KeyCursorBuilder<TKey>` | `OpenAsync(ct)` → `KeyCursor<TKey>` | §4 |
+| `Scan<TRecord>` | `Where`, `Rows`, `With(ScanOptions)`, `await foreach` | the scan itself |
+| `ScanOptions` | `UseIndexes` (10 §6.6), `Pruning` | the index chain on or off: the equivalence switch |
+| `Scan<TRecord>` | `OrderBy(r => r.Column, descending)` | §6 |
+| `Scan<TRecord>` | `AnyAsync(ct)`, `CountAsync(ct)`, `MinAsync(r => r.Column, ct)`, `MaxAsync(r => r.Column, ct)` | §5, the extremes in the column's type |
+| `Scan<TRecord>` | `ExplainAsync(ct)` → `ScanPlan` (11 §6.4) | blocks, blocks pruned per structure, segments and bytes, the count tier (`CountPlan`), the order source and its runs (`OrderPlan`) |
+| `Scan<TRecord>` | `Statistics` → `ScanStatistics` (11 §6.4) | the same, measured |
+| `Sym<string>` / `Sym<ReadOnlyMemory<T>>` | `StartsWith`, `Contains`, `Like` / `Contains` | §7 |
 | `EventSource` `Vorticity` (09 §5) | `index-runs-read`, `cursor-seeks`, `cursor-steps`, `count-blocks-proven`, `count-blocks-decoded` | whether an index earns its bytes, in production |
 
-**As delivered (step 18).** `ScanBuilder.ExplainAsync` fills `RowsSelectedByIndex` (the exact
-cover's rows when they fit a batch and the scan is not narrowed by `Rows` or `Take`), a `Count` plan
-(`CountPlan`: whether an exact cover answers and its count, then the splits the mask prunes, the
-zone maps prove and the decode is left with — the three tiers `CountAsync` takes, decided by the same
-predicates) and, under `InKeyOrder`, an `Order` plan (`OrderPlan`: the source, its runs, the runs the
-range reaches — found by selecting the two end keys of each slice and probing every run —, its
-entries and the entries the range admits, which bounds the rows the windows gather). `ScanMetrics`
-has `Windows` and `WindowSplits` since step 14. The `EventSource` is 09 §5's as-delivered note;
-`vxdump --explain` prints the plan and the count tiers.
+The tool path, `Scan(columns)`, has the same `Where`, `Rows`, `With`, `CountAsync`, `AnyAsync` and
+`ExplainAsync`, and no cursor: a key is typed or it is not walked.
 
-**As delivered (step 27): `VortexFile.Indexes`.**
+**As delivered (step 18).** `ExplainAsync` fills a `Count` plan (`CountPlan`: whether an exact
+cover answers and its count, then the splits the mask prunes, the zone maps prove and the decode is
+left with — the three tiers `CountAsync` takes, decided by the same predicates) and, under
+`OrderBy`, an `Order` plan (`OrderPlan`: the source, the runs the range reaches — found by selecting
+the two end keys of each slice and probing every run —, the entries the range admits, which bounds
+the rows the windows gather, and the direction). The rows an exact cover selects and the windows of
+a key-ordered scan stay in the engine's own explanation and counters, which the tests read. The
+`EventSource` is 09 §5's as-delivered note; `vxdump --explain` prints the plan and the count tiers.
+
+**As delivered (step 27): `VortexFile.GetIndexesAsync`.**
 - **What it returns.** A list of `VortexIndexInfo`, one per index the reader kept: kind, column (a
   dotted path, or a composite key's columns in parentheses), block length, runs, blocks covered,
   entries, the bytes of the regions the directory lists, and a `VortexIndexLayout` (`None`,
   `Listed`, `FencePages`, `FilterTree`). The layout says whether more lies below the listed bytes.
-- **When.** It is `null` until the directory has been read — by a scan, by
-  `ReadIndexesAsync`, or at the open under `VortexOpenOptions.PreloadIndexes` — and costs no
-  request after.
+- **When.** Its first call reads the directory unless a scan already has; the directory usually
+  lies inside the tail the open read, and after that it costs no request.
 - **Where it shows.** `vxdump --indexes` prints it.
 
 Not on the surface, on purpose: a `KeyRange` type (`Where` says it, §6); a `Probe(column, value)`
 (`AnyAsync` is it, §5.1); a `DistinctAsync` returning a list (§5.4); a key-ordered `Take` (the
-window inside `InKeyOrder` is the only reorder, §6); a `Sort` (constraint 2). Each would be a
-second way to say something one member already says, or a way to buffer a file.
+window inside `OrderBy` is the only reorder, §6); a `Sort` (constraint 2); a forced key source, a
+borrowed key's bytes and a `Compare` on the cursor (§4.4: the keys arrive typed and in order). Each
+would be a second way to say something one member already says, or a way to buffer a file. A
+cursor over a composite key is not on the surface either (§4.6).
 
 ### 8.2 Worked examples
 
 ```csharp
+[VortexRecord] public partial record struct Event(long Id, DateTime Ts, string Status, int DurationMs);
+[VortexRecord] public partial record struct IdAndTs(long Id, DateTime Ts);
+
 await using VortexFile file = await VortexFile.OpenAsync(path, ct);
-FieldExpr id = Expr.Field("id");
-FieldExpr ts = Expr.Field("ts");
-LiteralExpr fortyTwo = Expr.Literal(FilterLiteral.From(42L));
 
 // Point lookup: rows, exact, the predicate not re-evaluated under an Exact cover.
-await foreach (RecordBatch b in file.Scan().Where(Expr.Eq(id, fortyTwo)).ExecuteAsync()) { /* ... */ }
+await foreach (var (id, ts, status, duration) in file.Scan<Event>().Where(e => e.Id == 42L)) { /* ... */ }
 
 // Membership: no rows.
-bool present = await file.Scan().Where(Expr.Eq(id, fortyTwo)).AnyAsync(ct);
+bool present = await file.Scan<Event>().Where(e => e.Id == 42L).AnyAsync(ct);
 
 // Count pushed into the structures: exact cover, then full-block proofs, then a count-only decode.
-long since = await file.Scan().Where(Expr.Ge(ts, Expr.Literal(FilterLiteral.From(t0)))).CountAsync(ct);
+long since = await file.Scan<Event>().Where(e => e.Ts >= t0).CountAsync(ct);
 
 // Successor and predecessor.
-await using KeyCursor c = await file.Keys("ts").OpenAsync(ct);
-if (await c.SeekAsync(FilterLiteral.From(t), SeekOp.After, ct))  { long row = c.Row; FilterLiteral next = c.Key; }
-if (await c.SeekAsync(FilterLiteral.From(t), SeekOp.Before, ct)) { /* the predecessor */ }
+await using KeyCursor<DateTime> c = await file.Scan<Event>().Keys(e => e.Ts).OpenAsync(ct);
+if (await c.SeekAsync(t, SeekOp.After, ct))  { long row = c.Row; DateTime next = c.Key; }
+if (await c.SeekAsync(t, SeekOp.Before, ct)) { /* the predecessor */ }
 
 // A range in key order with an early exit: the windows past the break are never read.
-await foreach (RecordBatch b in file.Scan()
-    .Project("id", "ts")
-    .Where(Expr.And(Expr.Ge(ts, Expr.Literal(FilterLiteral.From(t0))),
-                    Expr.Lt(ts, Expr.Literal(FilterLiteral.From(t1)))))
-    .InKeyOrder("ts")
-    .WithMaxBatchRows(1024)
-    .ExecuteAsync())
+await foreach (var (id, ts) in file.Scan<IdAndTs>()
+    .Where(e => e.Ts >= t0 && e.Ts < t1)
+    .OrderBy(e => e.Ts)
+    .With(new ScanOptions { BatchRows = 1024 }))
 { /* ... */ if (enough) { break; } }
 
-// A prefix on a composite key: bytes from the row-encoding package, a bytewise walk in core.
-byte[] fr = RowEncoder.EncodeKey([FilterLiteral.From("FR")], [RowSortField.Ascending]);
-await using KeyCursor k = await file.Keys("country", "city").OpenAsync(ct);
-for (bool ok = await k.SeekAsync(FilterLiteral.From(fr), SeekOp.AtOrAfter, ct);
-     ok && k.KeyBytes.StartsWith(fr);
-     ok = await k.NextAsync(ct))
-{ /* k.Row */ }
-
 // Distinct values in order from the postings keys: no data segment read.
-await using KeyCursor d = await file.Keys("status").Distinct().OpenAsync(ct);
-for (bool ok = await d.SeekFirstAsync(ct); ok; ok = await d.NextAsync(ct)) { /* d.KeyBytes */ }
+await using KeyCursor<string> d = await file.Scan<Event>().Keys(e => e.Status).Distinct().OpenAsync(ct);
+for (bool ok = await d.SeekFirstAsync(ct); ok; ok = await d.NextAsync(ct)) { /* d.Key */ }
 
 // Group counts from a row cursor: one seek per group, one rank difference per count.
-await using KeyCursor g = await file.Keys("status").OpenAsync(ct);
+await using KeyCursor<string> g = await file.Scan<Event>().Keys(e => e.Status).OpenAsync(ct);
 for (bool ok = await g.SeekFirstAsync(ct); ok; ok = await g.NextKeyAsync(ct))
 {
     Report(g.Key, await g.KeyCountAsync(ct));
 }
 
-// A merge join of two files on id: two cursors, advance the smaller.
-await using KeyCursor l = await left.Keys("id").OpenAsync(ct);
-await using KeyCursor r = await right.Keys("id").OpenAsync(ct);
+// A merge join of two files on id: two cursors, advance the smaller. A long's own order is the
+// file's order for an i64 key (§4.4), so the keys compare as they are.
+await using KeyCursor<long> l = await left.Scan<Event>().Keys(e => e.Id).OpenAsync(ct);
+await using KeyCursor<long> r = await right.Scan<Event>().Keys(e => e.Id).OpenAsync(ct);
 bool lo = await l.SeekFirstAsync(ct), ro = await r.SeekFirstAsync(ct);
 while (lo && ro)
 {
-    int cmp = KeyCursor.Compare(l.Key, r.Key);
+    int cmp = l.Key.CompareTo(r.Key);
     if (cmp < 0)      { lo = await l.NextKeyAsync(ct); }
     else if (cmp > 0) { ro = await r.NextKeyAsync(ct); }
     else              { /* join the two groups by Row */ lo = await l.NextKeyAsync(ct); ro = await r.NextKeyAsync(ct); }
 }
 ```
 
+The group counts are also one call that needs no key source at all,
+`file.Scan<Event>().GroupBy(e => e.Status).AggAsync(g => (g.Key, g.Count()))`, grouped by code on a
+dictionary column; the cursor form is the one that stops early or walks a range of keys.
+
 ### 8.3 Contracts
 
-- **Thread-safety** (09 §1 gains three rows): `KeyCursorBuilder` and `KeyCursor` are not
-  thread-safe, like `ScanBuilder`; the run cache on `VortexFile` is thread-safe, like the layout
+- **Thread-safety** (09 §1 gains three rows): `KeyCursorBuilder<TKey>` and `KeyCursor<TKey>` are
+  not thread-safe, like the scan; the run cache on `VortexFile` is thread-safe, like the layout
   tree; `KeyPlan` and `ScanPlan` are immutable records.
-- **Lifetime**: `KeyBytes` is valid until the next positioning call. A cursor over a
+- **Lifetime**: a key read from `Key` is the caller's, a value like any other. A cursor over a
   `SortedColumn` holds a `ScanContext` for its zone decodes and returns it on `DisposeAsync`; a
   cursor over runs holds references into the run cache and releases them.
 - **Cancellation**: honoured at every positioning call, before and after its read, never inside a
   binary search — the granularity 03 §1 fixes for the batch, applied to the step.
-- **Errors**: a literal of the wrong domain is `ArgumentException`; no source is
-  `VortexUnsupportedException(kind, "index")` naming the policy; a forged run is
+- **Errors**: a key of the wrong domain does not compile, and a null key is
+  `ArgumentNullException`; no source is `VortexUnsupportedException` of kind
+  `ComponentKind.Index` naming what the writer would have to build; a forged run is
   `VortexFormatException` for every Class I field (row positions below `RowCount`, segments inside
   the file, 10 §4.1) and an ignored entry for the rest (10 §4.1: an unusable entry never fails the
   file — a cursor opened on an ignored entry gets the next source, or the refusal).

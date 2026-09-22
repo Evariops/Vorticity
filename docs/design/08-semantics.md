@@ -70,6 +70,19 @@ Predicates evaluate over `{true, false, unknown}`, SQL-style:
 * `ListContains(list, v)` (step 28b) is `unknown` on a null list and under a null `v`; a null
   element matches nothing and leaves the row `false` ([12-index-reads.md](12-index-reads.md) §7).
 
+A literal of a type the column cannot compare to is **not a silent non-match**: it is refused
+before a row is read. On the typed path it does not compile, because `Sym<T>` compares only with a
+`T` or with another column of the same `T`. On the tool path `Where` throws
+`VortexSchemaException` naming the column, its type and the literal, and a hole of an interpolated
+filter throws as it is appended; two columns compared with each other must be of the same type, or
+`Where` throws the same exception. What looks like a mismatch and is a conversion: text compared
+with a date, time, timestamp, uuid or decimal column is parsed in the column's type, and refused
+when it does not parse; a number compared with a decimal column is scaled exactly from its digits,
+and a value the column's scale cannot hold makes an equality false rather than rounding into a
+match. On the typed path a comparison with `null` is nullity, never `unknown`: `== null` is
+`IS NULL`, `!= null` is `IS NOT NULL`, an ordering against `null` matches nothing, and a `null` among
+the values of `In` is ignored.
+
 Pruning consequence: a zone where `null_count == row_count` can be skipped for any predicate that
 is not satisfiable by nulls — that is, anything except `IS NULL` and expressions reducible to it.
 This is one of the highest-value pruning rules in practice and it depends entirely on the 3VL
@@ -87,7 +100,7 @@ only fail when the component is actually required.**
 | Situation | Behavior |
 |---|---|
 | Unknown array encoding in a column that is not projected | scan succeeds |
-| Unknown array encoding in a projected column | `VortexUnsupportedException(id, "array")` |
+| Unknown array encoding in a projected column | `VortexUnsupportedException(id, ComponentKind.Array)` |
 | Unknown layout encoding on a subtree never visited | scan succeeds |
 | Unknown layout encoding on the path to projected data | throws |
 | Unknown extension dtype in the schema | schema exposes it as opaque; throws only if that field is read |
@@ -98,9 +111,10 @@ layouts and dtypes is what lets a reader keep working when upstream freezes a ne
 the default writer starts emitting a new ID in *one* column of a fifty-column file. An
 open-time hard failure would make that file entirely unreadable for no reason.
 
-`AllowUnknownComponents` therefore describes an *inspection* mode (unknown nodes are preserved as
-inert and can be listed by `vxdump`), not the switch that makes lazy resolution happen. Lazy
-resolution is the default and unconditional behavior.
+Lazy resolution is the default and unconditional behavior, and there is no option to switch it:
+an `AllowUnknownComponents` flag, once planned as an inspection mode, is not offered, because the
+inspection it would have given is always there. `VortexFile.ArrayEncodings` and `LayoutEncodings`
+list what the footer declares, each with `Supported`, and `vxdump` prints them.
 
 Every such exception must name the component ID and kind, because that is exactly the input the
 upstream troubleshooting procedure requires ("which edition, which minimum library version").

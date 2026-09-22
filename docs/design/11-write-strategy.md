@@ -720,6 +720,22 @@ conjuncts on the key allow, the mask skips the entries of dead blocks, and the s
 row selection above — registered, read and executed per split the window touches, then permuted
 into key order. The mask is built the same way and consulted per entry instead of per split.
 
+Two more promises close the contract, both on the public scan of
+[14-public-api.md](14-public-api.md):
+
+- **One lease per segment per scan.** The live splits register their segments into one request set,
+  the source reads each distinct segment once, in as few requests as the coalescing allows, and
+  every block of that segment decodes from the one lease it came back in. The session's
+  `SegmentCache` adds reuse across scans; it is not what makes a single scan read each byte once.
+  So `ScanStatistics.Requests` is the plan's distinct segments, and `BytesRequested` is the plan's
+  `BytesToRead` within the coalescing gap.
+- **A selection instead of a compaction.** A filtered batch is compacted to its survivors by
+  default. With `ScanOptions.Compact = false` the scan delivers each live block whole, with the
+  `Selection` of the rows that passed, and copies nothing: a filter that keeps half of every block
+  then costs no copy at all. A take by row index with no filter is delivered that way whatever
+  `Compact` says, the rows asked for being the selection. Either way `StartRow` is the block's first
+  file row, and row `i` of an uncompacted batch is `StartRow + i`.
+
 ### 6.2 Granularity, honestly
 
 I/O is per segment, and a segment is a chunk of 16 to 32 blocks in the default shape. A block
@@ -735,38 +751,42 @@ why the zone map's `zone_len` stays 8 192 whatever the chunk shape.
 - **Lazy, cached loading**: the directory and the runs are read on the first `Where`, only for
   the blocks the mask still holds live, and cached on the `VortexFile`, which is shared between
   scans and therefore thread-safe ([09-contracts.md](09-contracts.md) §1).
-  `VortexOpenOptions.PreloadIndexes` exists for object stores where a lazy read is a round trip.
-  *Delivered at step 27.* It reads the directory, or opens the sidecar, before the open returns.
+  An open that preloads the directory, for object stores where a lazy read is a round trip, is an
+  internal option of the open; the public `VortexOpenOptions` leaves it out, and
+  `VortexFile.GetIndexesAsync` reads the directory on demand.
+  *Delivered at step 27.* It reads the directory before the open returns.
   The directory usually lies inside the tail the open already read, and then preloading costs no
   request; a test counts it. The runs stay lazy: their regions are read by the first query that
   needs them, and the fence roots are in the directory anyway.
-- **File-level pruning**: `VortexFile.MayMatch(expr)` answers from the footer's file statistics
-  and the file-level Bloom generation without reading a data segment; an engine over many files
-  calls it before opening a scan.
+- **File-level pruning**: `VortexFile.MayMatch<TRecord>(predicate)` answers from the footer's file
+  statistics without reading a segment, synchronously; an engine over many files calls it before
+  opening a scan. The file-level Bloom generation, which takes a read, answers in the scan's plan:
+  `ExplainAsync().MayMatch` is false when the statistics or those filters prove the scan empty.
   **As delivered (step 39b), the door for the engine that has no file.** A caller holding an
   engine's own cache of bounds — 13 §4.2's dataset node is exactly that — asks the same question
-  through `Vorticity.Scan.ColumnSummary` and `SummaryPruner`, and `MayMatch` is now that call
-  with the file's own statistics. One implementation of 08 §1, two callers: the second
+  through the internal `ColumnSummary` and `SummaryPruner`, which the dataset package reaches, and
+  `MayMatch` is that call with the file's own statistics. One implementation of 08 §1, two callers: the second
   implementation this would otherwise have grown is the one that could disagree about the only
   rule whose failure silently loses rows.
 
 ### 6.4 Explain
 
-`ScanBuilder.Explain()` returns the plan without executing it: splits in the file, blocks pruned
-by each structure, rows selected by exact indexes, bytes to read against the file's size.
-`ScanMetrics` reports the same after execution. Nothing of the kind exists today (`Diagnostics/`
-holds exceptions and limits), and without it nobody can tell whether an index earns its bytes.
+A scan's `ExplainAsync()` returns the plan without executing it: blocks in the scan and blocks
+live, blocks pruned by each structure, segments and bytes to read. The scan's `Statistics` report
+the same after execution. Nothing of the kind exists today (`Diagnostics/` holds exceptions and
+limits), and without it nobody can tell whether an index earns its bytes.
 
-**As delivered (step 8d).** `ScanBuilder.ExplainAsync()` returns a `ScanPlan`: it is the same
-planning the scan does before its first batch — the split plan, the mask refined by every
-structure (the zone maps are read for that, as the scan reads them), the live splits registered
-into one request set so segments are distinct and bytes counted once — and nothing is decoded.
-Each `PruningStep` carries **what the structure pruned and what consulting it cost** (segments and
-bytes), the two numbers this section asks for; the plan's totals are the live splits' data plus
-that cost, and `FileMayMatch` is §6.3's answer. `WithMetrics(ScanMetrics)` hands the scan a sink
-the caller owns; the pruning pass, the flat reader and the enumerator add to it what they ask,
-materialize and produce, so that plan and measurement are one quantity: on the corpus's zoned file
-the sink's requests equal the segment source's, exactly.
+**As delivered (step 8d).** `ExplainAsync()` returns a `ScanPlan`: it is the same planning the scan
+does before its first batch — the split plan, the mask refined by every structure (the zone maps
+are read for that, as the scan reads them), the live splits registered into one request set so
+segments are distinct and bytes counted once — and nothing is decoded. Each `PruningStep` carries
+**what the structure pruned and what consulting it cost** (segments and bytes), the two numbers
+this section asks for; the plan's totals are the live splits' data plus that cost, and `MayMatch`
+is §6.3's answer. Each scan counts into a sink of its own as it runs — the pruning pass, the flat
+reader and the enumerator add to it what they ask, materialize and produce — and once its sink has
+run, `Statistics` reads it back as a `ScanStatistics`, so that plan and measurement are one
+quantity: on the corpus's zoned file the scan's requests equal the segment source's, exactly. The
+same counts feed the process-wide `Vorticity` meter.
 
 ---
 
@@ -778,6 +798,9 @@ the sink's requests equal the segment source's, exactly.
   and gains `Indexes` (a `WritePolicy`: per column path an `IndexPolicy`, default **`Auto`**) and
   `Profile` (`Default`, `Fastest` = no indexes, no bounded string stats, nothing beyond the zone
   map).
+- *Amended by [14-public-api.md](14-public-api.md) §7:* `VortexWriteOptions.Indexes` is
+  `IndexPolicy.None` by default and `Auto` is asked for ([10-indexes.md](10-indexes.md) §5.5). The
+  reasoning below is why `Auto` exists; it no longer makes `Auto` the default.
 - **`Auto` is the default** because a Vortex file without pruning structures is what nobody wants
   and the writer already pays the pass. `Auto` starts every cheap builder and **abandons** those
   the statistics disqualify or the budget refuses: a Bloom on a sorted column (min/max already
@@ -812,6 +835,10 @@ the sink's requests equal the segment source's, exactly.
 
 ### 7.2 Reading
 
+- *Amended by [14-public-api.md](14-public-api.md) §5 and §7:* the names below are the internal
+  engine's; [12-index-reads.md](12-index-reads.md) §1 maps them to the public surface, where the
+  plan is `ExplainAsync`, the metrics are `ScanStatistics` and the meter, and the switches are
+  `ScanOptions.UseIndexes` and `Pruning`.
 - `Scan().Where(expr)` uses every structure the file carries with no further call;
   `WithIndexes(false)` and `WithPruning(false)` exist for debugging and for the equivalence tests.
 - `VortexFile.MayMatch(expr)`, `VortexFile.Indexes` (an enumeration for tooling), `Explain()`,

@@ -5,9 +5,9 @@
 | Constraint | Consequence |
 |---|---|
 | **Zero third-party dependency** | FlatBuffers and Protobuf hand-written. No `Google.FlatBuffers`, no `protobuf-net`, no `Apache.Arrow`. BCL, plus **one first-party package**: `System.IO.Hashing` (`dotnet/runtime`, MIT, not carried by the shared framework), for the XxHash3-64 of the write path and the Bloom filters — decided 2026-09-15, [10-indexes.md](10-indexes.md) §11. Nothing else. |
-| **Zero allocation** | No LINQ, no `foreach` over interfaces, no capturing closures, no boxing, no `params`. Aligned native buffers, `ArrayPool` for transients, `ref struct` readers. |
+| **Zero allocation** | No LINQ, no `foreach` over interfaces, no capturing closures, no boxing, no `params` array: `params ReadOnlySpan<T>` only, which allocates nothing. Aligned native buffers, `ArrayPool` for transients, `ref struct` readers. |
 | **SIMD** | `System.Runtime.Intrinsics` with `Vector512`/`Vector256`/`Vector128` paths and a scalar fallback. `Vector<T>` only where width is irrelevant. |
-| **Async only** | `ValueTask<T>` throughout, `IAsyncEnumerable<T>` for scans, `ConfigureAwait(false)` systematically. No blocking public API. The rule governs the I/O and scan surface; pure in-memory CPU work with nothing to await (row encoding, decode kernels) stays synchronous rather than wrapping itself in a fake task. |
+| **Async only** | `ValueTask<T>` throughout, `ConfigureAwait(false)` systematically. No blocking public API, and no synchronous twin of an asynchronous one: a scan is consumed with `await foreach` over every source, a writer is fed with `WriteAsync`, and the I/O seam reads only asynchronously. A source whose reads complete at once, a mapped file or bytes in memory, pays for a completed `ValueTask`, not for a second path. Pure in-memory CPU work with nothing to await stays synchronous rather than wrapping itself in a fake task: filling a builder, row encoding, decode kernels, and `CreateWriter`, which only opens a handle. |
 
 **TFM: `net11.0`.** Single target. The SDK (11.0.100-rc.1) is installed locally, so this builds
 and tests today.
@@ -42,10 +42,11 @@ and the benchmark host. The core instead avoids culture-sensitive APIs by constr
 ### Cancellation
 
 `CancellationToken` is taken where cancellation is meaningful and actually actionable: file open,
-segment I/O, and scan enumeration (`IAsyncEnumerable<T>.GetAsyncEnumerator` via
-`[EnumeratorCancellation]`). It is **not** threaded through pure decode/compute kernels — those
-are short, CPU-bound and allocation-free, and a token check per kernel would cost more than it
-buys. Cancellation granularity is the batch, not the instruction.
+segment I/O, scan enumeration (the scan's own `GetAsyncEnumerator(ct)`, and the token of
+`ToBatchesAsync` and `ToRecordsAsync`, which `[EnumeratorCancellation]` joins to
+`WithCancellation`), every answer a scan computes, and every write. It is **not** threaded through
+pure decode/compute kernels — those are short, CPU-bound and allocation-free, and a token check per
+kernel would cost more than it buys. Cancellation granularity is the batch, not the instruction.
 
 ## 2. Layout
 
@@ -60,14 +61,27 @@ src/
     Types/                        # DType, PType, Nullability, Scalar, ScalarValue
     Arrays/                       # ArrayRef + one decoder per encoding
     Layouts/                      # Flat, Chunked, Struct, Zoned, Stats, Dict
-    File/                         # Postscript, Footer, open path, ISegmentSource
+    File/                         # Postscript, Footer, open path, VortexFile
+    IO/                           # ISegmentSource and the file, mapped and memory sources
     Compute/                      # SIMD kernels, masks, filter, take, canonicalization
     Expressions/                  # filter expressions + pruning derivation
-    Writing/                      # writer, layout strategies, compressor
+    Writing/                      # writer, builders, layout strategies, compressor
+    Session/                      # VortexSession: pool, segment cache, read bound, parallelism
+    Schema/                       # VortexSchema, VortexField, VortexType
+    Records/                      # IVortexRecord binding, the .NET mapping of 07
+    Symbolic/                     # Probe, Sym<T>, Predicate: the typed filter algebra
+    Scan/                         # Scan<TRecord>, the tool Scan, plans, lanes
+    Columns/                      # Columns<TRecord>, Column<T>, BatchView, RecordBatch
+    Aggregation/                  # aggregates and group by on the encoded form
+    Keys/                         # the key cursor and its sources
+    Indexes/                      # index directory, builders, pruners
+    Editions/                     # the edition registry
+    Diagnostics/                  # exceptions, limits, the meter and activity source
   Vorticity.RowEncoding/        # SEPARATE 0.x package: byte-sortable row encoder, no I/O,
                                   # synchronous. Separate because the upstream format is
                                   # experimental (09-contracts.md §3), not because it is optional.
-  Vorticity.Arrow/              # OPTIONAL, depends on Apache.Arrow — outside the core
+  Vorticity.Dataset/            # SEPARATE experimental package: many objects on a store, one table
+  Vorticity.Generators/         # the [VortexRecord] generator and the VX analyzers
 tests/
   Vorticity.Tests/              # xunit v3 — unit + property tests
   Vorticity.Conformance/        # xunit v3 — Rust cross-tests (golden + differential)
@@ -81,10 +95,16 @@ tools/
 
 ## 3. Object model
 
+This section is the engine's object model: the buffers, types, arenas and nodes a scan and a write
+run on. None of it is public. Every type a caller can name, the shape of each call and what it
+costs belong to [14-public-api.md](14-public-api.md), which supersedes the public API this section
+used to sketch and builds its surface over this model without exposing it: the arenas are built
+once at open and at `CreateWriter` and never appear.
+
 ### 3.1 Buffers
 
 ```csharp
-public readonly struct VortexBuffer   // non-owning view over an aligned segment
+internal readonly struct VortexBuffer   // non-owning view over an aligned segment
 {
     public ReadOnlySpan<byte> Span { get; }
     public int Alignment { get; }      // 1 << alignment_exponent
@@ -106,7 +126,7 @@ hashing, allocation-free.
 ### 3.3 Arrays
 
 ```csharp
-public abstract class VortexArray          // tree node: light, immutable, shared
+internal abstract class VortexArray        // tree node: light, immutable, shared
 {
     public DType DType { get; }
     public int Length { get; }
@@ -125,7 +145,7 @@ pool on `Dispose`. This mirrors the format itself, where `ArrayNode.children` an
 already indices rather than pointers.
 
 ```csharp
-public readonly ref struct ArrayNode          // a view into the batch's node arena
+internal readonly ref struct ArrayNode        // a view into the batch's node arena
 {
     public DType DType { get; }
     public int Length { get; }
@@ -143,74 +163,94 @@ index, not a string lookup.
 PType dispatch: constrained generics (`where T : unmanaged, INumberBase<T>`) with per-type JIT
 specialization — no enum `switch` inside inner loops.
 
-### 3.4 Public API (sketch)
+### 3.4 Public API
+
+The surface is [14-public-api.md](14-public-api.md)'s, and this is its shape over the model above:
 
 ```csharp
-await using var file = await VortexFile.OpenAsync(path, ct);          // or (Stream, ISegmentSource)
-DType schema = file.Schema;
+[VortexRecord] public partial record struct Reading(int Day, double? Celsius, string City);
+
+await using VortexFile file = await VortexFile.OpenAsync(path, ct);      // or session.OpenAsync(ISegmentSource)
+VortexSchema schema = file.Schema;
 long rows = file.RowCount;
 
-var scan = file.Scan()
-    .Project("id", "ts", "payload.size")     // projection, nested paths
-    .Where(Expr.Gt(Expr.Field("ts"), Expr.Literal(t0)))
-    .Rows(RowRange.FromLength(0, 1_000_000))   // long-based: the format counts rows in u64
-    .WithMaxBatchRows(8192);
+Scan<Reading> scan = file.Scan<Reading>()                                // the record is the projection
+    .Where(r => r.Day >= 900 && r.City == "Paris")                      // a lambda over symbols, run once: the plan
+    .Rows(RowRange.FromLength(0, 1_000_000))                             // long-based: the format counts rows in u64
+    .With(new ScanOptions { BatchRows = 8_192 });
 
-await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(ct))
+await foreach (var (day, celsius, city) in scan)
 {
-    ReadOnlySpan<long> ids = batch.Column<long>(0).Values;
+    ReadOnlySpan<int> days = day.Values;
     // ...
 }
 ```
 
-`RecordBatch` is `IDisposable`: it returns its buffers to the pool on disposal. The contract is
-explicit — **spans are valid until `Dispose`** — which is the price of zero-copy. See
-[07-dotnet-mapping.md](07-dotnet-mapping.md) for what each DType looks like at this boundary,
-including variable-width access, which is where the lifetime rule bites hardest.
+The batch of an `await foreach` is borrowed: `Columns<TRecord>` and `Column<T>` are `ref struct`s
+over the scan's arenas, valid until the next `MoveNextAsync`, and the compiler rather than a
+`Dispose` holds that lifetime, which is the price of zero-copy. A batch that must outlive its
+successor is asked for by `ToBatchesAsync()` or `ToOwned()`, which copy it once into pooled buffers
+of a `RecordBatch` the caller disposes. See [07-dotnet-mapping.md](07-dotnet-mapping.md) for what
+each DType looks like at this boundary, including variable-width access, which is where the
+lifetime rule bites hardest.
 
 Three points the API must pin down rather than leave to discovery:
 
 * `System.Range` is `int`-based and cannot address a file of 3 billion rows. Row ranges use a
   `RowRange(long start, long end)` of our own.
-* **Order of application is `Where` then `Project`.** The filter sees columns that are not
-  projected; they are read for filtering and discarded before the batch is produced.
+* **Order of application is `Where` then projection.** On the tool path the filter may name columns
+  `Scan(columns)` does not; they are read for filtering and discarded before the batch is produced.
+  On the typed path the filter speaks of the record's members, and the record is the projection.
 * Batch size derives from the file's zones (8192 by default) but is capped by
-  `WithMaxBatchRows` so a memory-constrained consumer is not at the writer's mercy. Exposing it
+  `ScanOptions.BatchRows` so a memory-constrained consumer is not at the writer's mercy. Exposing it
   costs a parameter now and a breaking change later.
 
 ### 3.5 I/O
 
+The public seam, in `Vorticity.IO` ([14-public-api.md](14-public-api.md) §8):
+
 ```csharp
-public interface ISegmentSource
+public interface ISegmentSource : IAsyncDisposable
 {
-    ValueTask<VortexBuffer> ReadAsync(SegmentSpec spec, CancellationToken ct);
-    ValueTask ReadManyAsync(ReadOnlySpan<SegmentSpec> specs, Span<VortexBuffer> dst, CancellationToken ct);
+    long Length { get; }
+    ValueTask<SegmentLease> ReadAsync(SegmentRange range, CancellationToken ct);
+    ValueTask ReadAsync(ReadOnlyMemory<SegmentRange> ranges, Memory<SegmentLease> leases, CancellationToken ct);
 }
 ```
 
-`ReadManyAsync` is the real entry point: the reader registers every segment of a split before
+The batch overload is the real entry point: the reader registers every segment of a split before
 reading, which allows **coalescing** nearby ranges (tunable threshold, ~1 MiB) and parallelizing.
-This makes or breaks performance on object storage.
+This makes or breaks performance on object storage. A scan requests each segment at most once, and
+every block of a segment decodes from its one lease. There is no synchronous read: a source whose
+reads complete at once returns a completed `ValueTask`.
 
-Two built-in implementations, **both local-file** — `RandomAccess` takes a `SafeFileHandle`, so it
-is not an object-storage path:
+Three built-in implementations, **all local** — `RandomAccess` takes a `SafeFileHandle`, so it is
+not an object-storage path:
 
-* `MemoryMappedSegmentSource` — zero-copy, alignment guaranteed by the writer's padding.
-* `RandomAccessSegmentSource` — `RandomAccess.ReadAsync` with vectored reads into aligned native
-  buffers.
+* `MemoryMappedSegmentSource` — zero-copy, alignment guaranteed by the writer's padding; what a path
+  opens with.
+* `FileSegmentSource` — `RandomAccess.ReadAsync` with vectored reads into aligned native buffers.
+* `MemorySegmentSource` — bytes the caller already holds, never copied.
 
 Object storage is deliberately *not* in the core: an HTTP source would break zero-dependency and
 belongs to the layer above. That makes `ISegmentSource` a seam an external implementer must be
 able to satisfy without asking us questions, so its contract is specified, not implied:
 
-* **Partial failure**: `ReadManyAsync` is all-or-nothing. If any range fails, it throws and
-  releases every buffer it had already acquired. Retry policy belongs to the source, not the
-  reader.
-* **Ownership**: returned buffers are owned by the source until the batch that requested them is
-  disposed. A caching source therefore refcounts; the reader never frees what it did not allocate.
-* **Cache**: optional, source-side. Eviction policy and memory budget are the source's business;
-  the reader assumes nothing about hit rates and never requires a segment to still be cached.
-* **Cancellation**: a cancelled `ReadManyAsync` leaves the cache in a consistent state — either a
+* **Partial failure**: the batch `ReadAsync` is all-or-nothing. If any range fails, it throws and
+  releases every lease it had already acquired, so none is left to dispose. Retry policy belongs to
+  the source, not the reader.
+* **Ownership**: a `SegmentLease` holds its bytes, one block or a `ReadOnlySequence<byte>` of the
+  pieces a response arrived in, until the reader disposes it, which releases the owner the source
+  named. A caching source therefore refcounts; the reader never frees what it did not allocate.
+* **Cache**: the session's `SegmentCache` keeps the segments of a source that does I/O across
+  scans, one budget for every file of the session; a mapped file or bytes in memory have nothing to
+  cache and bypass it. A source may cache too. Eviction policy and memory budget are each cache's
+  business; the reader assumes nothing about hit rates and never requires a segment to still be
+  cached.
+* **Concurrency**: the reads in flight to sources that do I/O are bounded per session by
+  `MaxConcurrentReads`, a `SemaphoreSlim`; a source is shared by the scans of a session and must be
+  thread-safe.
+* **Cancellation**: a cancelled read leaves a source's cache in a consistent state — either a
   segment is fully present or absent, never partially populated.
 
 A reference `HttpRangeSegmentSource` with injectable latency ships **in the test project**, not in
@@ -268,20 +308,27 @@ enumerator is therefore hand-written over `ManualResetValueTaskSourceCore<bool>`
 
 ### 3.8 Write sink
 
-The reader has `ISegmentSource`; the writer needs its symmetric seam, and the format makes it
-unusually simple:
+The reader has `ISegmentSource`; the writer's symmetric seam is a `PipeWriter`, and the format
+makes it unusually simple. `CreateWriter(path)` builds one over `File.OpenHandle`,
+`PipeWriter.Create(stream)` covers a `Stream`, and an object store provides its own. Inside, the
+writer writes through a forward-only sink over that pipe:
 
 ```csharp
-public interface ISegmentSink
+internal interface ISegmentSink
 {
     ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken ct);   // strictly sequential
+    ValueTask FlushAsync(CancellationToken ct);                              // the pipe's flush: its backpressure
     long Position { get; }
 }
 ```
 
 **Single-pass, forward-only, no seeking.** Segments, then metadata FlatBuffers, then postscript,
 then the EOF marker — the format is designed for exactly this order, which is what makes S3
-multipart upload trivial in the layer above. A `Stream` adapter covers the local case.
+multipart upload trivial in the layer above: a `PipeWriter` that flushes a part per threshold, and
+nothing in the writer knows. Bytes reach the pipe's buffer as they are encoded and leave it only at
+`FlushAsync` and `CompleteAsync`, so a sink that applies backpressure slows the producer rather than
+growing a buffer. A writer that gives its file up completes the caller's pipe with an error, so that
+whatever it feeds knows the bytes are not a file.
 
 Two consequences to write down before someone implements them the slow way:
 
@@ -308,12 +355,16 @@ Enforced in CI, not merely documented:
 
 * Hot path: return codes / `TryXxx`, no exceptions.
 * Public boundary: `VortexFormatException` (malformed file),
-  `VortexUnsupportedException(string componentId, string kind)` — the latter must **always** name
-  the unknown component's ID and kind, because that is precisely the information upstream
-  documentation requires to diagnose it ("which edition, which minimum version").
-* An `AllowUnknownComponents` option mirroring upstream `allow_unknown`: unknown components are
-  preserved as inert nodes (useful for inspection and copying), and an unknown aggregate disables
-  the corresponding pruning instead of failing the read.
+  `VortexUnsupportedException(string componentId, ComponentKind kind)` — the latter must **always**
+  name the unknown component's ID and kind, because that is precisely the information upstream
+  documentation requires to diagnose it ("which edition, which minimum version"). `ComponentKind`
+  is `Array`, `Layout`, `DType`, `Aggregate`, `Compression`, `Encryption`, `Index` or `Feature`
+  ([14-public-api.md](14-public-api.md) §7).
+* No `AllowUnknownComponents` option: an unknown component fails only the read that needs it, and
+  an unknown aggregate disables the corresponding pruning, both unconditionally
+  ([08-semantics.md](08-semantics.md) §4). `VortexFile.ArrayEncodings` and `LayoutEncodings` list
+  what a footer declares, each with `Supported`, which is the inspection an option would have
+  offered.
 
 ## 6. Parser safety
 

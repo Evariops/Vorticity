@@ -86,8 +86,9 @@ object**, no orphan page after a crash, and one `PutIfAbsent` per commit. §13.M
 this replaces.
 
 `<inverted version>` is `10²⁰ − 1 − version`, twenty digits: the **newest commit sorts first**, so
-one `List(prefix: "commit/", max: 1)` returns it with no hint and no probe (§8.3). There is no
-mutable object anywhere in the layout.
+the first key of `ListAsync("commit/", startAfter: null)` is it, with no hint and no probe (§8.3).
+The listing asks the store for its pages as the enumeration advances, so a reader that stops at the
+first key pays for one page. There is no mutable object anywhere in the layout.
 
 A single existing Vortex file becomes a dataset of one leaf: one commit object, no copy. A file
 this writer produces alone, outside any dataset, stays what it is today.
@@ -971,8 +972,11 @@ The fragments and commit objects of §3 will carry the same per-region checksum 
 ### 8.1 A commit is one conditional creation
 
 A writer reads the latest commit `N`, writes its data objects under fresh `uid` keys, then creates
-`commit/<inverted N+1>`, header, pages and fragments in one object, with `PutIfAbsent`. On a file
-system: temporary file, flush, create the final name without overwriting, flush the directory.
+`commit/<inverted N+1>`, header, pages and fragments in one object, with `PutIfAbsentAsync`: the
+object is streamed to the store from a `PipeReader` whose length is given up front, which lets a
+store choose between one request and a multipart upload, and content that ends before that length
+or runs past it creates nothing. On a file system: temporary file, flush, create the final name
+without overwriting, flush the directory.
 Put-if-absent linearises commits; no lease, no lock, no external service. Under latency a commit
 is **three dependent requests**: the `List`, the read of `N`'s header, the creation; the data
 objects were uploaded before, in parallel, and cost the commit nothing.
@@ -1049,8 +1053,9 @@ Two decisions the prose did not settle:
 
 ### 8.3 Finding the latest version in one request
 
-Commit keys sort newest first (§3), so `List("commit/", max: 1)` is the whole discovery. It needs a
-strongly consistent listing, which S3 has had since 2020 and which §11 requires of any store. A
+Commit keys sort newest first (§3), so the first key `ListAsync("commit/", startAfter: null)` yields
+is the whole discovery: the enumeration is disposed there, and the store has asked for one page. It
+needs a strongly consistent listing, which S3 has had since 2020 and which §11 requires of any store. A
 reader that wants read-your-writes is handed the version by the writer. There is no hint object and
 there is no probe loop; there is no mutable object at all.
 
@@ -1275,19 +1280,27 @@ as `VortexDataset.VerifyAsync(since?)`, is offline. It reports every problem by 
 
 | operation | used by |
 |---|---|
-| `GetRange(key, offset, length) → bytes + token` | every read; the reader's `ISegmentSource` over a data object is an adapter on it, with 03 §3.5's coalescing |
-| `Head(key) → size + token` | open |
-| `PutIfAbsent(key, bytes) → created \| exists` | every write: data objects, commit objects |
-| `Delete(key)` | vacuum |
-| `List(prefix, startAfter, max) → keys` | one call at open (§8.3); vacuum |
+| `GetRangeAsync(key, offset, length) → bytes + token` | every read; the reader's `ISegmentSource` over a data object is an adapter on it, with 03 §3.5's coalescing |
+| `HeadAsync(key) → size + token + creation time` | open; vacuum's age |
+| `PutIfAbsentAsync(key, PipeReader content, long length) → created \| exists` | every write: data objects, commit objects |
+| `DeleteAsync(keys)` | vacuum, a batch at a time |
+| `ListAsync(prefix, startAfter) → IAsyncEnumerable<string>` | one page at open (§8.3); vacuum |
 
-Requirements a store must document: atomic `PutIfAbsent`; a strongly consistent `List`; a token
-that changes whenever the bytes under a key change; ranged `GetRange` on objects of any size. What
-a store library should do and this library never will: retries, hedged requests, connection
-pooling, credentials. Three implementations ship here: the file system, an in-memory store with
-injectable latency, failures and crashes for the tests, and a **counting** decorator for §9.2 that
-also records the critical path. Data objects are written through the store by a forward-only
-`ISegmentSink` adapter (03 §3.8), which is what lets the S3 library use a multipart upload.
+Requirements a store must document: atomic `PutIfAbsentAsync`; a strongly consistent listing; a
+token that changes whenever the bytes under a key change; ranged `GetRangeAsync` on objects of any
+size. Three shapes are the seam's and not the store's to change. A put **streams**: the store reads
+the content from the `PipeReader` as it sends it, so an object need not fit in memory, and the
+length given up front lets it choose between one request and a multipart upload; content that ends
+before that length or runs past it creates nothing, and the store completes the reader whatever the
+outcome. A delete takes **a batch of keys** and reports nothing: an absent key is not an error, since
+a store cannot say which keys existed, and a store whose service caps a batch splits it. A listing
+**pages by itself**: the store asks for its next page as the enumeration advances, so a caller that
+stops at the first key pays for one page, and one that walks the prefix pays for every page and no
+more. What a store library should do and this library never will: retries, hedged requests,
+connection pooling, credentials. Three implementations ship here: the file system, an in-memory
+store with injectable latency, failures and crashes for the tests, and a **counting** decorator for
+§9.2 that also records the critical path. A data object is written by an internal sink that holds
+the object and creates it with one streamed `PutIfAbsentAsync` when the draft commits.
 
 **As delivered (step 35).** `Vorticity.Dataset`, a 0.x package that references the core and that
 the core knows nothing about. `IObjectStore` is the five operations above; `ObjectRange` carries a
@@ -1754,9 +1767,9 @@ the one after it is the only one that can leave an orphan or a duplicate.
   double open impossible without a second map of opens in flight, and a scan consumes objects in
   order. What the spec's "in parallel" buys is covered for the tree by the prefetch window; for the
   objects it waits for a scan that reads more than one at once.
-- §11: `PutIfAbsentAsync` takes the whole object, so a multipart upload is out of reach of the
-  interface; `ObjectSegmentSink` buffers up to 1 GiB. The S3 library is not this one (§0); the
-  interface grows a streaming put when that library needs it.
+- §11: `PutIfAbsentAsync` streams from a `PipeReader` of known length, so a multipart upload is
+  within reach of the interface; the dataset's own `ObjectSegmentSink` still holds a data object
+  whole, up to 1 GiB, before its one put. The S3 library is not this one (§0).
 - Debt 3 of the plan: the `O(depth)` descent of a commit — four reads at a million objects, as
   measured above; a step of its own past ~10⁷ objects (IMPL-PLAN §1.59).
 

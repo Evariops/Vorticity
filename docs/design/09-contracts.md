@@ -8,15 +8,18 @@ site.
 
 | Type | Contract |
 |---|---|
+| `VortexSession` | **Thread-safe**, and meant to be shared by every request of a process; its options are frozen when `Create` returns, and `VortexSession.Default` is immutable. Disposing it while a file it opened is still open throws `InvalidOperationException` naming the file |
 | `VortexFile` | **Thread-safe.** Concurrent scans on one open file are supported and expected; the footer and layout tree are immutable after open |
 | `ISegmentSource` | Implementations **must** be thread-safe; the built-in ones are |
-| `Scan` / scan builder | Not thread-safe; build on one thread, then enumerate. Its one static member, `ScanBuilder.DefaultDegreeOfParallelism` (§2), **is** thread-safe: reads and writes are volatile, and a builder racing a write gets one value or the other, never a torn one |
-| `IAsyncEnumerator<RecordBatch>` | Single consumer, as the language requires |
-| `RecordBatch` | **Affine to its consumer.** Not thread-safe, and disposal must happen on the consuming flow. Its spans die with it |
+| `Scan<TRecord>` / `Scan` | **Single-use, one thread.** Every composition call returns the same builder; build on one thread, then run one sink. A second sink throws `InvalidOperationException`. `ExplainAsync` may be asked before the sink |
+| The scan's enumerator | Single consumer, as the language requires |
+| `Columns<TRecord>` / `Column<T>` / `BatchView` | **Affine to the enumeration body**, enforced by the compiler: `ref struct`s valid until the next `MoveNextAsync` or `DisposeAsync`, which cannot be stored, captured or carried across an `await`. The one escape the compiler does not see, a span copied into a variable declared outside the loop, is analyzer VX1001's |
+| `RecordBatch` | **Affine to its consumer.** Not thread-safe; it may be handed to another thread, a channel for instance, and disposed there. Its spans die with it |
 | Decoders / kernels | Pure functions over borrowed memory; no shared mutable state |
-| `KeyCursorBuilder` / `KeyCursor` | Not thread-safe, like the scan builder (docs/design/12-index-reads.md §8.3) |
+| `KeyCursorBuilder<TKey>` / `KeyCursor<TKey>` | Not thread-safe, like the scan (docs/design/12-index-reads.md §8.3) |
 | The run cache on `VortexFile` | **Thread-safe**, like the layout tree; a load happens outside its lock, and the first insert wins a race |
-| `KeyPlan` / `ScanPlan` / `CountPlan` / `OrderPlan` | Immutable records |
+| `KeyPlan` / `ScanPlan` / `CountPlan` / `OrderPlan` / `ScanStatistics` / `WriteReport` | Immutable records |
+| `ColumnsBuilder` / `ColumnBuilder<T>` | **One thread.** The builder a writer hands out is its own, reused after every `WriteAsync` |
 | `VortexFileWriter` (including an append) / `VortexFileIndexer` | One writer per file; an append is not atomic, and `VortexFileRepair` truncates a torn one |
 
 ## 2. Parallelism
@@ -26,16 +29,19 @@ interpretable at equal threading. The 1.0 model:
 
 * **Sequential decode by default.** A library must not appropriate the host's thread pool without
   consent; a server running 200 concurrent requests does not want each scan fanning out.
-* **Opt-in chunk parallelism**: `scan.WithDegreeOfParallelism(n)` decodes independent chunks
-  concurrently. Splits are already the unit of independence in the format.
-* **Consent can be given once, for the process**: `ScanBuilder.DefaultDegreeOfParallelism` is the
-  degree every builder made after it starts from, for a host that decides its threading at start-up
-  rather than at each of a hundred call sites. It is **1** unless set, so a caller who touches
-  neither sees the sequential default; `WithDegreeOfParallelism` overrides it for one scan, and the
-  per-call value always wins. A builder reads it once, when constructed, so setting it disturbs no
-  builder already made and no enumeration already running.
-* I/O concurrency is separate and always on: `ReadManyAsync` issues overlapping reads regardless
-  of decode parallelism, because latency hiding is the whole point on object storage.
+* **Consent is given on the session, once**: `VortexSessionOptions.MaxDegreeOfParallelism` is the
+  degree every scan of the session starts from, decoding and aggregating independent chunks
+  concurrently, for a host that decides its threading at start-up rather than at each of a hundred
+  call sites. Splits are already the unit of independence in the format. It is **1** unless set, and
+  `VortexSession.Default` is immutable, so a caller who configures nothing sees the sequential
+  default. There is no process-wide mutable static: two sessions in one process keep two degrees.
+* **Per scan, the call wins**: `ScanOptions.DegreeOfParallelism` overrides the session's degree for
+  one scan; 0 takes the session's.
+* I/O concurrency is separate and always on: the batch `ReadAsync` of the seam issues overlapping
+  reads regardless of decode parallelism, because latency hiding is the whole point on object
+  storage. It is bounded per session by `VortexSessionOptions.MaxConcurrentReads`, 16 by default,
+  across every scan of every file: a `SemaphoreSlim`, and no package. A mapped file and bytes in
+  memory have no reads to bound.
 
 Benchmark rule ([05-benchmarks.md](05-benchmarks.md)): both implementations pinned to the same
 thread count, ratios reported at 1 thread **and** at N threads. The Rust harness's threading
@@ -55,6 +61,14 @@ version has two axes (our API, and the format we understand):
 | Changing the lifetime contract of batch-borrowed spans | **major** |
 | Changing default write edition | **major** — it changes who can read our output |
 | Row encoding byte layout following upstream | **not applicable** — see below |
+
+The default write edition is `VortexEditions.Default`, and it is not the newest edition by
+definition: it is the edition the most deployed Rust reader accepts, chosen per release and named
+in the release notes, beside the minimum Rust version that reads it
+(`VortexEditions.MinimumRustVersion`). A writer that wants another passes
+`VortexWriteOptions.TargetEdition`. The first release sets it to `core2026.08.3`, read by Vortex Rust
+from 0.85.0: the first edition that carries `vortex.uuid`, without which a `Guid` column cannot be
+written, and equal to `VortexEditions.Newest` today, which the next edition will change.
 
 **Row encoding ships as a separate package**, `Vorticity.RowEncoding`, versioned `0.x`. The
 reason is structural: upstream marks that format experimental and reserves the right to change its
@@ -117,6 +131,26 @@ totals are `Interlocked` longs, so a step still allocates nothing. `segments-rea
 belong to the I/O and codec layers these specs did not change, and stay this section's to-do. A
 listener that asks for counters passes `EventCounterIntervalSec` as a whole number: the runtime
 parses it in the current culture.
+
+*Amended by [14-public-api.md](14-public-api.md) §7:* the public observability is a `Meter` and an
+`ActivitySource`, both named `VortexDiagnostics.MeterName` / `ActivitySourceName`, `Vorticity`,
+which OpenTelemetry and `dotnet-counters` read without an adapter. The meter's counters, each added
+on its own so that a listener enabling one pays for that one:
+
+| Instrument | Diagnoses |
+|---|---|
+| `vortex.scan.rows` | rows delivered |
+| `vortex.scan.requests`, `vortex.scan.bytes_requested` | what the scans asked their sources for — read amplification, against the plan's `BytesToRead` |
+| `vortex.scan.blocks_decoded`, `vortex.scan.blocks_pruned` | whether pruning works at all |
+| `vortex.cache.hits`, `vortex.cache.misses` | whether the session's segment cache is doing anything |
+| `vortex.write.bytes` | bytes the writers handed their sinks |
+
+A scan is one activity, `vortex.scan.typed` or `vortex.scan.tool`, tagged when it ends with what it
+did: `vortex.rows`, `vortex.batches`, `vortex.requests`, `vortex.bytes_requested`,
+`vortex.blocks_decoded`, `vortex.blocks_pruned`. A write is one activity, `vortex.write`, tagged
+`vortex.rows`, `vortex.bytes` and `vortex.completed`, with an error status when it is abandoned. The
+figures of one query are `ScanStatistics`, read after the fact. The `EventSource` above stays, with
+the index counters of 12 §8.1, which the meter does not repeat.
 
 ## 6. Licensing and attribution
 
