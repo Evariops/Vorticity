@@ -9,10 +9,10 @@ Every example is a program in [samples/Vorticity.Samples](../../samples/Vorticit
 compiled by the build and run by the page's name:
 
 ```
-dotnet run --project samples/Vorticity.Samples -- filter-rows
+dotnet run -c Release --project samples/Vorticity.Samples -- filter-rows
 ```
 
-With no argument it runs every case. The numbers a page quotes come from that run, over two
+With no argument it runs every case. The numbers a page quotes come from a Release run, over two
 demonstration files it writes and deletes when it ends: a million readings and a hundred thousand
 visits, of these three records.
 
