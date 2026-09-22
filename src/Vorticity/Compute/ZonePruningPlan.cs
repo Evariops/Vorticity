@@ -167,25 +167,21 @@ internal static class ZonePruningPlan
         VortexFile file, LayoutTree tree, VortexExpr filter, Scanning.ScanMetrics? metrics,
         CancellationToken cancellationToken)
     {
-        List<string> paths = [];
-        filter.CollectFields(paths);
-        if (paths.Count == 0)
+        // The filter's own field references, whose paths are already split and encoded; a filter
+        // names a handful of columns, so a repeated one is found by looking back.
+        List<FieldExpr> fields = [];
+        Scanning.ScanBuilder.FieldsOf(filter, fields);
+        if (fields.Count == 0)
         {
             return (null, 0, 0);
         }
 
         List<Candidate> candidates = [];
-        HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
-        for (int i = 0; i < paths.Count; i++)
+        for (int i = 0; i < fields.Count; i++)
         {
-            if (!seen.Add(paths[i]))
+            if (!NamedBefore(fields, i) && TryLocate(tree, fields[i], out LayoutNode node, out ZoneMap map))
             {
-                continue;
-            }
-
-            if (TryLocate(tree, paths[i], out LayoutNode node, out ZoneMap map))
-            {
-                candidates.Add(new Candidate(Expr.Field(paths[i]), node, map));
+                candidates.Add(new Candidate(fields[i], node, map));
             }
         }
 
@@ -247,12 +243,12 @@ internal static class ZonePruningPlan
     /// scalar bound out of one would be reading a different statistic than the filter is asking
     /// about.
     /// </remarks>
-    private static bool TryLocate(LayoutTree tree, string path, out LayoutNode node, out ZoneMap map)
+    private static bool TryLocate(LayoutTree tree, FieldExpr path, out LayoutNode node, out ZoneMap map)
     {
         node = tree.Root;
         map = default;
 
-        string[] segments = path.Split('.');
+        byte[][] segments = path.SegmentsUtf8;
         for (int i = 0; i < segments.Length; i++)
         {
             // Descend through any zoned or chunked wrapper to the struct that has the field.
@@ -262,7 +258,7 @@ internal static class ZonePruningPlan
             }
 
             DType dtype = node.DType;
-            int field = dtype.IndexOfField(System.Text.Encoding.UTF8.GetBytes(segments[i]));
+            int field = dtype.IndexOfField(segments[i]);
             if (field < 0)
             {
                 return false;
@@ -282,6 +278,20 @@ internal static class ZonePruningPlan
                node.ChildCount == 2 &&
                node.TryGetZoneMap(out map) &&
                map.IsPruningAvailable;
+    }
+
+    /// <summary>Whether a field before <paramref name="index"/> names the same path.</summary>
+    private static bool NamedBefore(List<FieldExpr> fields, int index)
+    {
+        for (int i = 0; i < index; i++)
+        {
+            if (string.Equals(fields[i].Path, fields[index].Path, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>Walks past zoned wrappers until a struct layout is reached.</summary>

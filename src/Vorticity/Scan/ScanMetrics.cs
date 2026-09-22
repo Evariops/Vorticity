@@ -59,6 +59,15 @@ internal sealed class ScanMetrics
     /// </summary>
     public long WindowSplits => Interlocked.Read(ref _windowSplits);
 
+    private long _splitsProven;
+
+    /// <summary>
+    /// Splits the zone maps proved the filter selects whole, delivered without evaluating it.
+    /// </summary>
+    public long SplitsProven => Interlocked.Read(ref _splitsProven);
+
+    internal void AddSplitProven() => Interlocked.Increment(ref _splitsProven);
+
     internal void AddWindow(int splits)
     {
         Interlocked.Increment(ref _windows);

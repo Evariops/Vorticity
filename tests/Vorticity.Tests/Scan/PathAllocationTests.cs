@@ -209,7 +209,12 @@ public sealed class PathAllocationTests
         // The filter's field references hold one more field each, and the zone column the pruning
         // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
         // context that reads the zone map.
-        ("selective filter, pruning on", File, 142_152, PrunedFilter),
+        //
+        // The evaluator holds the zone maps the pruning read, so that a split they prove whole is
+        // not evaluated: 8 bytes a filtered scan. A field reference encodes its path without
+        // splitting it into strings, and the pruning locates the filter's own references rather
+        // than building new ones, which more than pays for it on both axes.
+        ("selective filter, pruning on", File, 141_712, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -222,7 +227,7 @@ public sealed class PathAllocationTests
         // grows with the number of zones. Keep `ZoneColumn.Zones` a range rather than an iterator,
         // and that context's arenas sized for what they hold rather than for a batch: either one
         // undone costs more than the whole gap that remains.
-        ("selective filter, pruning off", File, 138_040, UnprunedFilter),
+        ("selective filter, pruning off", File, 137_984, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here

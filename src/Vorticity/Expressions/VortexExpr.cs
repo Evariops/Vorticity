@@ -93,12 +93,15 @@ internal sealed class FieldExpr : VortexExpr
 
         // Split and encode once, here, because resolving the path happens per batch and
         // DType.IndexOfField takes UTF-8: doing it there would put a string split and an encode on
-        // a code path that must not allocate at all.
-        string[] parts = path.Split('.');
-        SegmentsUtf8 = new byte[parts.Length][];
-        for (int i = 0; i < parts.Length; i++)
+        // a code path that must not allocate at all. Each segment is encoded straight out of the
+        // path, so the reference costs its encoded names and their array and no string besides.
+        ReadOnlySpan<char> rest = path;
+        SegmentsUtf8 = new byte[rest.Count('.') + 1][];
+        for (int i = 0; i < SegmentsUtf8.Length; i++)
         {
-            SegmentsUtf8[i] = System.Text.Encoding.UTF8.GetBytes(parts[i]);
+            int dot = rest.IndexOf('.');
+            SegmentsUtf8[i] = Utf8(dot < 0 ? rest : rest[..dot]);
+            rest = dot < 0 ? default : rest[(dot + 1)..];
         }
     }
 
@@ -111,8 +114,21 @@ internal sealed class FieldExpr : VortexExpr
         SegmentsUtf8 = new byte[segments.Length][];
         for (int i = 0; i < segments.Length; i++)
         {
-            SegmentsUtf8[i] = System.Text.Encoding.UTF8.GetBytes(segments[i]);
+            SegmentsUtf8[i] = Utf8(segments[i]);
         }
+    }
+
+    /// <summary>A field name as UTF-8; the empty name shares the empty array.</summary>
+    private static byte[] Utf8(ReadOnlySpan<char> name)
+    {
+        if (name.IsEmpty)
+        {
+            return [];
+        }
+
+        byte[] bytes = new byte[System.Text.Encoding.UTF8.GetByteCount(name)];
+        System.Text.Encoding.UTF8.GetBytes(name, bytes);
+        return bytes;
     }
 
     /// <summary>The names, one per struct level, when the reference was built from them; null for a parsed path.</summary>

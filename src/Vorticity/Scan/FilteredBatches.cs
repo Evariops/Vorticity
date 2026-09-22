@@ -173,7 +173,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
                 // does not want.
                 _inner = _source.Compact && await ProvenAsync(pruning).ConfigureAwait(false) is { } proven
                     ? _source.GetAsyncEnumerator(live: null, proven, _token)
-                    : _source.GetAsyncEnumerator(pruning.Live, _token);
+                    : _source.GetAsyncEnumerator(pruning.Live, _token, pruning.Zones);
             }
 
             while (await _inner.MoveNextAsync().ConfigureAwait(false))

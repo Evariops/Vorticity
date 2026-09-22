@@ -158,11 +158,13 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// <summary>Starts a scan that reads only the splits <paramref name="live"/> keeps.</summary>
     /// <param name="live">The mask of live blocks the pruning pass refined, or null for every block.</param>
     /// <param name="cancellationToken">Cancels at batch boundaries.</param>
+    /// <param name="zones">The zone maps that pass read, which prove some splits whole; or null.</param>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
-        BlockMask? live, CancellationToken cancellationToken) =>
+        BlockMask? live, CancellationToken cancellationToken, ZonePruner? zones = null) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live, _metrics,
-            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes, reuseBatches: ReuseBatches);
+            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes, reuseBatches: ReuseBatches,
+            zones: zones);
 
     /// <summary>
     /// Starts a scan whose filter an exact index has already answered: it reads exactly the rows
@@ -279,7 +281,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         bool compact = true,
         bool keepEncodings = false,
         bool sinkDecodes = false,
-        bool reuseBatches = false)
+        bool reuseBatches = false,
+        ZonePruner? zones = null)
     {
         _compact = compact;
         _filterProven = filterProven;
@@ -293,7 +296,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _mask = read.RootMask;
         _keep = keep.RootMask;
         _schema = schema;
-        _evaluator = filter is null ? null : new FilterEvaluator(filter);
+        _evaluator = filter is null ? null : new FilterEvaluator(filter) { Zones = zones };
         _maxBatchRows = (int)Math.Min(plan.MaxRows, int.MaxValue);
         _token = cancellationToken;
         _cursor = plan.CreateCursor(reverse);
@@ -571,7 +574,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             {
                 root = ExecuteWithTake(lane.Context, _pending, out bool proven);
                 lane.ReadRoot = root;
-                root = ApplyFilter(lane, root, proven);
+                root = ApplyFilter(lane, root, proven || ZoneProven(_pending));
             }
 
             RecordBatch batch = Deliver(lane, root, _pending.Start);
@@ -744,6 +747,21 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>
+    /// Whether the zone maps proved the filter selects every row of <paramref name="split"/>, which
+    /// the scan then delivers without evaluating it.
+    /// </summary>
+    private bool ZoneProven(RowRange split)
+    {
+        if (_evaluator?.Zones is not ZonePruner zones || !zones.MustMatch(split))
+        {
+            return false;
+        }
+
+        _metrics?.AddSplitProven();
+        return true;
+    }
+
+    /// <summary>
     /// Runs the filter over a decoded batch and drops both the rejected rows and the columns only
     /// the filter needed.
     /// </summary>
@@ -821,7 +839,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         int root = SplitExecution.Execute(context, _tree, in _mask, split, null);
         lane.ReadRoot = root;
         int rows = context.Canonical.GetNode(root).Length;
-        if (_take is null && _evaluator is null)
+        bool proven = ZoneProven(split);
+        if (_take is null && (_evaluator is null || proven))
         {
             return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
         }
@@ -831,7 +850,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         try
         {
             Span<byte> window = states.AsSpan(0, rows);
-            if (_evaluator is not null)
+            if (_evaluator is not null && !proven)
             {
                 _evaluator.Evaluate(context.Canonical, root, rows, window);
             }
@@ -1033,7 +1052,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
             int root = ExecuteWithTake(context, rows, out bool proven);
             lane.ReadRoot = root;
-            return ApplyFilter(lane, root, proven);
+            return ApplyFilter(lane, root, proven || ZoneProven(rows));
         }
         catch
         {

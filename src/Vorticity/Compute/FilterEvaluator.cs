@@ -65,6 +65,13 @@ internal sealed class FilterEvaluator
         _filter = filter;
     }
 
+    /// <summary>
+    /// The zone maps the scan's pruning read, when it read any: a split whose every row they prove
+    /// the filter selects is delivered without evaluating it. Held here rather than on the scan so
+    /// that only a filtered scan carries the reference.
+    /// </summary>
+    internal ZonePruner? Zones { get; init; }
+
     /// <summary>The expression this evaluator answers.</summary>
     internal VortexExpr Filter => _filter;
 

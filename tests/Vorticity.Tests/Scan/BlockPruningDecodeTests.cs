@@ -111,6 +111,79 @@ public sealed class BlockPruningDecodeTests
     }
 
     /// <summary>
+    /// The splits whose every row the zone maps put inside the band are delivered without the
+    /// filter being evaluated there, and the scan returns the rows an unpruned scan returns.
+    /// </summary>
+    [Fact]
+    public async Task TheSplitsTheZoneMapsProveAreNotEvaluated()
+    {
+        Decoders.EnsureRegistered();
+
+        const long low = 10_000;
+        const long high = 60_000;
+        const int rows = 12 * 8_192;
+        string path = Write(12, 8_192, 65_536);
+        try
+        {
+            VortexExpr band = Expr.And(
+                Expr.Ge(Expr.Field("v"), Expr.Literal(FilterLiteral.From(low))),
+                Expr.Lt(Expr.Field("v"), Expr.Literal(FilterLiteral.From(high))));
+
+            // A split is a block here, and a block is proven when its least and greatest values
+            // both lie inside the band.
+            int proven = 0;
+            for (long start = 0; start < rows; start += Block)
+            {
+                long least = long.MaxValue;
+                long greatest = long.MinValue;
+                for (long row = start; row < Math.Min(start + Block, rows); row++)
+                {
+                    least = Math.Min(least, row + (row % 3));
+                    greatest = Math.Max(greatest, row + (row % 3));
+                }
+
+                proven += least >= low && greatest < high ? 1 : 0;
+            }
+
+            ScanMetrics pruned = new ScanMetrics();
+            ScanMetrics unpruned = new ScanMetrics();
+            List<long> kept = await Collect(path, band, prune: true, pruned);
+            List<long> all = await Collect(path, band, prune: false, unpruned);
+
+            Assert.NotEmpty(kept);
+            Assert.Equal(all, kept);
+            Assert.True(proven > 40, "the band should cover dozens of whole blocks, not " + proven);
+            Assert.Equal(proven, pruned.SplitsProven);
+            Assert.Equal(0, unpruned.SplitsProven);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(path))
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+    }
+
+    private static async Task<List<long>> Collect(string path, VortexExpr filter, bool prune, ScanMetrics metrics)
+    {
+        List<long> values = [];
+        byte[] name = System.Text.Encoding.UTF8.GetBytes("v");
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).WithPruning(prune).WithMetrics(metrics)
+            .ExecuteAsync().WithCancellation(CancellationToken.None))
+        {
+            VortexColumn view = batch.Column(name);
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                values.Add(view.AsPrimitive<long>().Values[row]);
+            }
+        }
+
+        return values;
+    }
+
+    /// <summary>
     /// A column whose layout is a bare flat node, read in partial batches under a mask, answers as
     /// an unpruned scan does.
     /// </summary>
