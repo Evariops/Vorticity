@@ -41,7 +41,17 @@ namespace Vorticity.Benchmarks;
 /// </remarks>
 internal static class Report
 {
-    private static readonly int[] Sizes = [1_000_000, 10_000_000];
+    /// <summary>
+    /// The fixture sizes: 2^20 rows and ten times that, so that every row block of 8 192 is full.
+    /// A round million leaves a partial block at the end of the file, which the writer encodes on
+    /// its own terms, and a bare zstd over doubles is what it picked for one of them: a shape the
+    /// reference reads but its writer cannot re-encode, which took the write scenario out of the
+    /// comparison at one size and not the other.
+    /// </summary>
+    private static readonly int[] Sizes = [1 << 20, 10 << 20];
+
+    /// <summary>Rows per batch the fixture is written in: 64 full row blocks.</summary>
+    private const int FixtureBatch = 64 * 8192;
 
     /// <summary>One scenario: what the reference is asked, when it can be asked.</summary>
     /// <param name="Name">The scenario, as <see cref="Set.ForReport"/> knows it.</param>
@@ -344,10 +354,9 @@ internal static class Report
 
         string[] labels = ["alpha", "beta", "gamma", "delta", "epsilon"];
         await using VortexFileWriter writer = VortexFileWriter.Create(path, schema);
-        const int batch = 500_000;
-        for (int start = 0; start < rows; start += batch)
+        for (int start = 0; start < rows; start += FixtureBatch)
         {
-            int count = Math.Min(batch, rows - start);
+            int count = Math.Min(FixtureBatch, rows - start);
             CanonicalArena arena = new CanonicalArena();
             try
             {
@@ -487,7 +496,7 @@ internal static class Report
         text.AppendLine();
         text.AppendLine("## What is measured");
         text.AppendLine();
-        text.AppendLine("Eight scenarios, at a million rows and at ten million, on a table of four columns: a");
+        text.AppendLine("Eight scenarios, at 2^20 rows and at ten times that, on a table of four columns: a");
         text.AppendLine("monotone `i64`, an `f64`, a short `utf8` and a nullable `bool`. **Each side runs in its");
         text.AppendLine("own process**, once per run, and the run is timed from outside — so what you see is");
         text.AppendLine("what a command costs, including starting, opening the file and exiting.");
