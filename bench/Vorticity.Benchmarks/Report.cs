@@ -631,11 +631,14 @@ internal static class Report
                     $"**Memory.** On the full scan at {scan.Rows:N0} rows our peak is " +
                     $"{scan.Aot!.RssBytes.Median / (1024 * 1024):F0} MiB against " +
                     $"{scan.Theirs!.RssBytes.Median / (1024 * 1024):F0} MiB. We decode a chunk in windows of"));
-                text.AppendLine("65 536 rows where its encoding can decode a range of its rows, and whole where it cannot,");
-                text.AppendLine("a dictionary of many values or a compressed blob among them; the reference decodes a split");
-                text.AppendLine("of at most a hundred thousand rows at a time. On a file whose chunks hold half a million");
-                text.AppendLine("rows, the chunks held whole are the difference, and it is the file's encodings and");
-                text.AppendLine("chunking rather than its size that set it.");
+                text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                    $"{Vorticity.Layouts.FlatLayoutReader.WindowRows:N0} rows where its encoding can decode a range of its rows, with a"));
+                text.AppendLine("dictionary's values decoded once for every window of its chunk, and whole where it cannot,");
+                text.AppendLine("a compressed blob among them, or where its decode is only views onto the segment; the");
+                text.AppendLine("reference decodes a split of at most a hundred thousand rows at a time. Every column of this");
+                text.AppendLine("file is read in windows or as views, so the difference lies in what each reader holds at");
+                text.AppendLine("once, its windows, the dictionaries' values and the segments read ahead, rather than in a");
+                text.AppendLine("chunk held whole.");
             }
 
             Row? theirWorst = compared.MaxBy(r => r.Theirs!.RssBytes.Median);
