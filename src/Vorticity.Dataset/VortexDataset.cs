@@ -340,7 +340,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>Removes data objects of the version this handle holds, in one commit.</summary>
     /// <param name="objects">Objects from <see cref="ObjectsAsync"/>.</param>
     /// <param name="cancellationToken">Cancels the commit.</param>
-    /// <returns>The version created, and whether the removal applied.</returns>
+    /// <returns>The version created, and whether the removal applied; the latest version, unchanged, when it did not.</returns>
     /// <remarks>The objects stay in the store, readable by older versions, until vacuum deletes them.</remarks>
     public ValueTask<ReplaceResult> RemoveAsync(IReadOnlyList<DataObject> objects, CancellationToken cancellationToken = default) =>
         ReplaceAsync(objects, [], cancellationToken);
@@ -353,8 +353,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="added">Drafts whose rows are written; each is completed and put before the commit.</param>
     /// <param name="cancellationToken">Cancels the puts and the commit.</param>
     /// <returns>
-    /// The version created, and <see cref="OperationOutcome.Abandoned"/> when an object to remove was
-    /// already gone from the version the commit landed on, in which case nothing changed.
+    /// The version created, or <see cref="OperationOutcome.Abandoned"/> and the latest version when
+    /// an object to remove was already gone from it, in which case no version is created and the
+    /// added objects are left for vacuum.
     /// </returns>
     /// <remarks>
     /// The added objects land in level 0, from where compaction moves them. Without a clustering key

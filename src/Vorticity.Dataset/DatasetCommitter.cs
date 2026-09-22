@@ -35,7 +35,7 @@ internal sealed record CommitOptions
 }
 
 /// <summary>What a commit did.</summary>
-/// <param name="Version">The version created.</param>
+/// <param name="Version">The version created, or the latest one when no operation applied and nothing was created.</param>
 /// <param name="Key">Its commit object's key.</param>
 /// <param name="Levels">The trees that version names, one per level.</param>
 /// <param name="Outcomes">What each operation decided, in the caller's order.</param>
@@ -129,6 +129,13 @@ internal static class DatasetCommitter
                 {
                     outcomes[at] = repack.Moved > 0 ? OperationOutcome.Applied : OperationOutcome.AlreadyThere;
                 }
+            }
+
+            // A batch in which nothing applied would publish a copy of its parent under a new
+            // number; it publishes nothing, and names the version it was decided against.
+            if (operations.Count > 0 && commit is not null && !outcomes.Contains(OperationOutcome.Applied))
+            {
+                return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages);
             }
 
             CommitHeader header = template with

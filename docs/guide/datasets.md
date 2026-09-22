@@ -129,14 +129,15 @@ await using (ObjectDraft rewritten = dataset.StartObject())
 ```
 replaced data/105f82c00740450db287b1cfeb010818.vortex by the rows with a temperature: version 6, Applied, 129000 rows
 removed the import: version 7, Applied, 109000 rows, 3 objects
-removing it again: Abandoned, version 8
+removing it again: Abandoned, version 7
 ```
 
 `ReplaceAsync(removed, added)` swaps objects in one commit: a reader sees the old ones or the new
 ones, never both and never neither. `RemoveAsync(objects)` is the same with nothing added. Both
 take `DataObject`s from `ObjectsAsync()`. The removed objects stay in the store, readable by the
 versions that name them, until vacuum deletes them. Removing an object the version no longer
-holds is `Abandoned`: nothing changes but the version number.
+holds is `Abandoned`: no version is created, the result names the latest one, and the objects a
+replace would have added are left for vacuum.
 
 ## Watch out
 

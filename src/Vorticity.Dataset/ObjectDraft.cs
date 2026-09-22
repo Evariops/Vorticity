@@ -109,7 +109,7 @@ public sealed record DataObject
 /// <summary>What a replacement or a removal did.</summary>
 public sealed record ReplaceResult
 {
-    /// <summary>The version the commit created, or the one the handle already held when there was nothing to commit.</summary>
+    /// <summary>The version the commit created; the one the handle already held when there was nothing to commit, and the latest one when the commit was abandoned.</summary>
     public ulong Version { get; init; }
 
     /// <summary>
