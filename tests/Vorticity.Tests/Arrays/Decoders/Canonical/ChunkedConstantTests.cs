@@ -281,7 +281,7 @@ public sealed class ChunkedConstantTests
     [InlineData((byte)4, 4, DecimalStorageType.I32)]
     [InlineData((byte)4, 16, DecimalStorageType.I128)]
     [InlineData((byte)18, 32, DecimalStorageType.I256)]
-    public void AConstantDecimalKeepsItsStorageThroughTheForm(
+    internal void AConstantDecimalKeepsItsStorageThroughTheForm(
         byte precision, int scalarWidth, DecimalStorageType expected)
     {
         byte[] value = new byte[scalarWidth];
@@ -425,7 +425,7 @@ public sealed class ChunkedConstantTests
     [InlineData((byte)4, 8, DecimalStorageType.I64)]
     [InlineData((byte)4, 16, DecimalStorageType.I128)]
     [InlineData((byte)2, 32, DecimalStorageType.I256)]
-    public void AConstantDecimalKeepsAScalarWiderThanItsPrecision(
+    internal void AConstantDecimalKeepsAScalarWiderThanItsPrecision(
         byte precision, int scalarWidth, DecimalStorageType expected)
     {
         byte[] value = new byte[scalarWidth];

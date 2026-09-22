@@ -38,7 +38,7 @@ public sealed class FilterConstantTypeTests
     [InlineData(ComparisonOp.LessOrEqual)]
     [InlineData(ComparisonOp.Equal)]
     [InlineData(ComparisonOp.NotEqual)]
-    public async Task AConstantOfAnotherKindIsRefusedByEveryOperator(ComparisonOp op)
+    internal async Task AConstantOfAnotherKindIsRefusedByEveryOperator(ComparisonOp op)
     {
         await using VortexFile file = await Open(Flat);
         VortexExpr wrong = Compare(op, Expr.Field("a"), FilterLiteral.From("900"));

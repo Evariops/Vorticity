@@ -59,7 +59,7 @@ public sealed class CorpusMetadataTests
     [InlineData("CAM=", DecimalStorageType.I64)]
     [InlineData("CAQ=", DecimalStorageType.I128)]
     [InlineData("CAU=", DecimalStorageType.I256)]   // types/decimal40_10_nonnull_r1
-    public void DecimalCorpus(string base64, DecimalStorageType expected)
+    internal void DecimalCorpus(string base64, DecimalStorageType expected)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         DecimalMetadata value = DecimalMetadata.Read(metadata);
@@ -75,7 +75,7 @@ public sealed class CorpusMetadataTests
     [InlineData("CAUQAhgAIAA=", 5u, PType.U32, false, false)]  // encodings/dict
     [InlineData("CMgBGAAgAA==", 200u, PType.U8, false, false)] // encodings/dict_u8_codes
     [InlineData("CIkBGAAgAQ==", 137u, PType.U8, false, true)]  // types/utf8_nonnull_r1025
-    public void DictCorpus(string base64, uint valuesLength, PType codes, bool nullableCodes, bool allReferenced)
+    internal void DictCorpus(string base64, uint valuesLength, PType codes, bool nullableCodes, bool allReferenced)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         DictMetadata value = DictMetadata.Read(metadata);
@@ -95,7 +95,7 @@ public sealed class CorpusMetadataTests
     [InlineData("EAY=", 0UL, PType.I32)]          // encodings/list_r1
     [InlineData("CKwFEAE=", 684UL, PType.U16)]    // types/struct_nested_deep_nonnull_r1025
     [InlineData("", 0UL, PType.U8)]               // types/list_i32_nullable_r1
-    public void ListCorpus(string base64, ulong elementsLength, PType offsets)
+    internal void ListCorpus(string base64, ulong elementsLength, PType offsets)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         ListMetadata value = ListMetadata.Read(metadata);
@@ -109,7 +109,7 @@ public sealed class CorpusMetadataTests
     [InlineData("CIAMEAMYAw==", 1536UL, PType.U64, PType.U64)]  // encodings/listview_r1025
     [InlineData("EAMYAw==", 0UL, PType.U64, PType.U64)]         // encodings/map_r1
     [InlineData("CP8fEAMYAw==", 4095UL, PType.U64, PType.U64)]  // encodings/map
-    public void ListViewCorpus(string base64, ulong elementsLength, PType offsets, PType sizes)
+    internal void ListViewCorpus(string base64, ulong elementsLength, PType offsets, PType sizes)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         ListViewMetadata value = ListViewMetadata.Read(metadata);
@@ -123,7 +123,7 @@ public sealed class CorpusMetadataTests
     [InlineData("CAI=", PType.U32)]   // encodings/parquet_variant_r1025
     [InlineData("CAE=", PType.U16)]   // types/binary_nonnull_r1024
     [InlineData("", PType.U8)]        // types/binary_nonnull_r8193
-    public void VarBinCorpus(string base64, PType offsets)
+    internal void VarBinCorpus(string base64, PType offsets)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         VarBinMetadata value = VarBinMetadata.Read(metadata);
@@ -138,7 +138,7 @@ public sealed class CorpusMetadataTests
     [InlineData("CAEQQA==", PType.U16, 64UL)]  // encodings/runend
     [InlineData("EAE=", PType.U8, 1UL)]        // encodings/runend_r1
     [InlineData("EAM=", PType.U8, 3UL)]        // distributions/huge_string_r16
-    public void RunEndCorpus(string base64, PType ends, ulong runs)
+    internal void RunEndCorpus(string base64, PType ends, ulong runs)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         RunEndMetadata value = RunEndMetadata.Read(metadata);
@@ -188,7 +188,7 @@ public sealed class CorpusMetadataTests
     [InlineData("CIACEIAgGAEgBCgD", 256UL, 4096UL, PType.U16, 4UL, PType.U64)] // encodings/fastlanes_rle
     [InlineData("CEAQgAgYASABKAM=", 64UL, 1024UL, PType.U16, 1UL, PType.U64)]  // encodings/fastlanes_rle_r1023
     [InlineData("CEEQgBAYASACKAM=", 65UL, 2048UL, PType.U16, 2UL, PType.U64)]  // encodings/fastlanes_rle_r1025
-    public void RleCorpus(
+    internal void RleCorpus(
         string base64, ulong values, ulong indices, PType indicesPType, ulong offsetsLength, PType offsetsPType)
     {
         byte[] metadata = Convert.FromBase64String(base64);
@@ -209,7 +209,7 @@ public sealed class CorpusMetadataTests
     [InlineData("CgQIDxgD", 15UL, PType.U64)]  // encodings/sparse_r1023
     [InlineData("CgQIEBgD", 16UL, PType.U64)]  // encodings/sparse_r1025
     [InlineData("CgQIYhgB", 98UL, PType.U16)]  // containers/zoned_many_zones_nulls
-    public void SparseCorpus(string base64, ulong patchCount, PType indices)
+    internal void SparseCorpus(string base64, ulong patchCount, PType indices)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         SparseMetadata value = SparseMetadata.Read(metadata);
@@ -299,7 +299,7 @@ public sealed class CorpusMetadataTests
     [InlineData("CDAQARoC438gAQ==", 48u, 1u, PType.U16)]    // encodings/alprd_r1
     [InlineData("CDMQAhoE/A/9DyAB", 51u, 2u, PType.U16)]    // encodings/alprd
     [InlineData("CDQQAhoE/gf/ByAB", 52u, 2u, PType.U16)]    // distributions/denormal_heavy_f64_r8193
-    public void AlpRdCorpus(string base64, uint rightBitWidth, uint dictionaryLength, PType leftParts)
+    internal void AlpRdCorpus(string base64, uint rightBitWidth, uint dictionaryLength, PType leftParts)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         Assert.Equal((int)dictionaryLength, AlpRdMetadata.CountDictionaryEntries(metadata));
@@ -323,7 +323,7 @@ public sealed class CorpusMetadataTests
     [InlineData("EAE=", PType.U8, PType.U16)]       // types/map_utf8_i64_nonnull_r8191
     [InlineData("", PType.U8, PType.U8)]            // types/struct_flat_nonnull_r8193
     [InlineData("EAI=", PType.U8, PType.U32)]       // distributions/high_cardinality_utf8_r8193
-    public void FsstCorpus(string base64, PType lengths, PType offsets)
+    internal void FsstCorpus(string base64, PType lengths, PType offsets)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         FsstMetadata value = FsstMetadata.Read(metadata);
@@ -336,7 +336,7 @@ public sealed class CorpusMetadataTests
     [InlineData("CAIYvAIg9RAoAjABOAI=", PType.U32, 316u, 2165UL)]   // encodings/onpair_r1023
     [InlineData("CAIYgAIgESgCMAE4Ag==", PType.U32, 256u, 17UL)]     // encodings/onpair_r1
     [InlineData("GPECINoRKAEwATgB", PType.U8, 369u, 2266UL)]        // types/utf8_nonnull_r1025
-    public void OnPairCorpus(string base64, PType lengths, uint dictionarySize, ulong codesLength)
+    internal void OnPairCorpus(string base64, PType lengths, uint dictionarySize, ulong codesLength)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         OnPairMetadata value = OnPairMetadata.Read(metadata);
@@ -351,7 +351,7 @@ public sealed class CorpusMetadataTests
     [Theory]
     [InlineData("CAcQBhgG", PType.I64, PType.I32, PType.I32)]  // encodings/datetimeparts
     [InlineData("CAEQAhgB", PType.U16, PType.U32, PType.U16)]  // types/timestamp_ms_nullable_r8193
-    public void DateTimePartsCorpus(string base64, PType days, PType seconds, PType subseconds)
+    internal void DateTimePartsCorpus(string base64, PType days, PType seconds, PType subseconds)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         DateTimePartsMetadata value = DateTimePartsMetadata.Read(metadata);
@@ -365,7 +365,7 @@ public sealed class CorpusMetadataTests
     [InlineData("CAc=", PType.I64)]  // encodings/decimal_byte_parts_r1
     [InlineData("CAY=", PType.I32)]  // types/decimal9_2_nonnull_r8191
     [InlineData("CAU=", PType.I16)]  // types/decimal4_2_nonnull_r8192
-    public void DecimalBytePartsCorpus(string base64, PType zerothChild)
+    internal void DecimalBytePartsCorpus(string base64, PType zerothChild)
     {
         byte[] metadata = Convert.FromBase64String(base64);
         DecimalBytePartsMetadata value = DecimalBytePartsMetadata.Read(metadata);

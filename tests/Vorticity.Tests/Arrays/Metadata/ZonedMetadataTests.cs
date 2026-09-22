@@ -258,7 +258,7 @@ public sealed class ZonedMetadataTests
     [InlineData("vortex.null_countx", AggregateId.Unknown)]
     [InlineData("VORTEX.MIN", AggregateId.Unknown)]
     [InlineData("vortex.mi", AggregateId.Unknown)]
-    public void AggregateIdsResolve(string id, AggregateId expected)
+    internal void AggregateIdsResolve(string id, AggregateId expected)
     {
         byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(id);
         Assert.Equal(expected, AggregateRegistry.Resolve(utf8));

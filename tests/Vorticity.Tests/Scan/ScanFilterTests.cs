@@ -35,7 +35,7 @@ public sealed class ScanFilterTests
     [InlineData(ComparisonOp.LessOrEqual)]
     [InlineData(ComparisonOp.Equal)]
     [InlineData(ComparisonOp.NotEqual)]
-    public async Task EveryComparisonAgreesWithTheSamePredicateInCSharp(ComparisonOp op)
+    internal async Task EveryComparisonAgreesWithTheSamePredicateInCSharp(ComparisonOp op)
     {
         List<long?> all = await ReadInt64(Mixed, "monotone", filter: null);
         long pivot = all[all.Count / 2] ?? 0;

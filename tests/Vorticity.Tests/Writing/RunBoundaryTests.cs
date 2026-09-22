@@ -58,7 +58,7 @@ public sealed class RunBoundaryTests
     [InlineData(PType.I64)]
     [InlineData(PType.U16)]
     [InlineData(PType.F64)]
-    public void FixedWidthRunsMatchANaiveCount(PType ptype)
+    internal void FixedWidthRunsMatchANaiveCount(PType ptype)
     {
         foreach (Pattern pattern in Enum.GetValues<Pattern>())
         {

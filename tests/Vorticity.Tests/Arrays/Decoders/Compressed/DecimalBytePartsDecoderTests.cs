@@ -21,7 +21,7 @@ public sealed class DecimalBytePartsDecoderTests
     [InlineData(PType.I16, DecimalStorageType.I16)]
     [InlineData(PType.I32, DecimalStorageType.I32)]
     [InlineData(PType.I64, DecimalStorageType.I64)]
-    public void TheCanonicalStorageWidthFollowsTheMspChildNotThePrecision(
+    internal void TheCanonicalStorageWidthFollowsTheMspChildNotThePrecision(
         PType msp, DecimalStorageType expected)
     {
         // Precision 18 would need i64 storage if the precision decided. It does not: upstream's

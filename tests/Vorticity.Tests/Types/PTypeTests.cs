@@ -21,7 +21,7 @@ public sealed class PTypeTests
     [InlineData(PType.F16, 2)]
     [InlineData(PType.F32, 4)]
     [InlineData(PType.F64, 8)]
-    public void ByteWidthCoversEveryDefinedTag(PType ptype, int expected) =>
+    internal void ByteWidthCoversEveryDefinedTag(PType ptype, int expected) =>
         Assert.Equal(expected, ptype.ByteWidth());
 
     [Theory]
@@ -36,7 +36,7 @@ public sealed class PTypeTests
     [InlineData(PType.F16, "f16")]
     [InlineData(PType.F32, "f32")]
     [InlineData(PType.F64, "f64")]
-    public void NameCoversEveryDefinedTag(PType ptype, string expected) =>
+    internal void NameCoversEveryDefinedTag(PType ptype, string expected) =>
         Assert.Equal(expected, ptype.Name());
 
     [Theory]

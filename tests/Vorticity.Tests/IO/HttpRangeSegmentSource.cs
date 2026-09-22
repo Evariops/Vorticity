@@ -1,10 +1,3 @@
-// A reference HttpRangeSegmentSource with injectable latency ships in the test project, not in the
-// core. It costs nothing in dependencies and it is the executable proof that the seam holds.
-//
-// It is written the way an external implementer would have to write it: PUBLIC API ONLY. Nothing
-// here touches an internal member of Vorticity, and no rule it obeys was learned anywhere but
-// from the XML documentation on ISegmentSource and SegmentRequestSet. If this file needs an
-// internal, the seam is under-specified.
 using System;
 using System.Buffers;
 using System.Threading;
@@ -21,6 +14,11 @@ namespace Vorticity.Tests.IO;
 /// </summary>
 /// <remarks>
 /// <para>
+/// A reference out-of-core reader, kept out of the core. It obeys no rule beyond the documentation
+/// of <see cref="ISegmentReader"/> and <see cref="SegmentRequestSet"/>, so passing the suite the
+/// built-in readers pass shows that documentation is enough to implement the reader seam.
+/// </para>
+/// <para>
 /// The object-storage shape, and it differs from the local ones on purpose. A response body is a
 /// stream, so segmentation happens during the copy off the socket: this source stages a coalesced
 /// run in a pooled managed array and copies each segment into its own aligned buffer. That is the
@@ -30,7 +28,7 @@ namespace Vorticity.Tests.IO;
 /// </para>
 /// <para>Thread-safe: it holds no mutable state beyond two counters.</para>
 /// </remarks>
-public sealed class HttpRangeSegmentSource : ISegmentReader
+internal sealed class HttpRangeSegmentSource : ISegmentReader
 {
     private readonly IRangeTransport _transport;
     private readonly SegmentReadOptions _options;
@@ -148,8 +146,8 @@ public sealed class HttpRangeSegmentSource : ISegmentReader
                 Validate(in sorted[i], Length, out _, out _);
             }
 
-            // SegmentCoalescer is public precisely so an implementer need not re-derive the
-            // 64-byte rounding rule; it also re-validates every spec it is handed.
+            // The shared coalescer, so the 64-byte rounding rule is not re-derived here; it also
+            // re-validates every spec it is handed.
             int runCount = SegmentCoalescer.Plan(sorted.AsSpan(0, pending), runs.AsSpan(0, pending), _options);
 
             for (int r = 0; r < runCount; r++)
@@ -287,7 +285,7 @@ public sealed class HttpRangeSegmentSource : ISegmentReader
     }
 
     /// <summary>
-    /// Everything an implementer must check before forming an address, using only public API.
+    /// Everything an implementer must check before forming an address.
     /// </summary>
     private static void Validate(in SegmentSpec spec, long fileLength, out long offset, out int length)
     {

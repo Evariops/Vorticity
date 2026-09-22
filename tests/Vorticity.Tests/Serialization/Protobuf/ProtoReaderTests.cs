@@ -363,7 +363,7 @@ public sealed class ProtoReaderTests
     [Theory]
     [InlineData(ProtoWireType.StartGroup)]
     [InlineData(ProtoWireType.EndGroup)]
-    public void SkipField_rejects_groups(ProtoWireType wireType)
+    internal void SkipField_rejects_groups(ProtoWireType wireType)
     {
         Assert.Throws<VortexFormatException>(() =>
         {
@@ -376,7 +376,7 @@ public sealed class ProtoReaderTests
     [InlineData((ProtoWireType)6)]
     [InlineData((ProtoWireType)7)]
     [InlineData((ProtoWireType)255)]
-    public void SkipField_rejects_an_undefined_wire_type(ProtoWireType wireType)
+    internal void SkipField_rejects_an_undefined_wire_type(ProtoWireType wireType)
     {
         Assert.Throws<VortexFormatException>(() =>
         {

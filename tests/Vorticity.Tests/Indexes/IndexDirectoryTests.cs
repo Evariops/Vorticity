@@ -156,22 +156,26 @@ public sealed class IndexDirectoryTests
         Assert.Equal(IndexKinds.DictProbe, kept.Kind);
     }
 
-    public static TheoryData<string, IndexRun[]> UnsoundRuns() => new()
-    {
-        { "overlapping", [new IndexRun(0, 4, [Seg(0)], []), new IndexRun(3, 2, [Seg(64)], [])] },
-        { "out of order", [new IndexRun(4, 1, [Seg(0)], []), new IndexRun(0, 1, [Seg(64)], [])] },
-        { "empty run", [new IndexRun(0, 0, [Seg(0)], [])] },
-        { "no payload", [new IndexRun(0, 1, [], [])] },
-        { "past the data", [new IndexRun(0, 1, [new IndexSegment(DataEnd - 8, 16, 0)], [])] },
-        { "wrapping", [new IndexRun(0, 1, [new IndexSegment(ulong.MaxValue - 2, 16, 0)], [])] },
-        { "alignment", [new IndexRun(0, 1, [new IndexSegment(0, 16, 40)], [])] },
-        { "dtype count", [new IndexRun(0, 1, [Seg(0), Seg(64)], [[1]])] },
-    };
+    private static readonly (string Label, IndexRun[] Runs)[] Unsound =
+    [
+        ("overlapping", [new IndexRun(0, 4, [Seg(0)], []), new IndexRun(3, 2, [Seg(64)], [])]),
+        ("out of order", [new IndexRun(4, 1, [Seg(0)], []), new IndexRun(0, 1, [Seg(64)], [])]),
+        ("empty run", [new IndexRun(0, 0, [Seg(0)], [])]),
+        ("no payload", [new IndexRun(0, 1, [], [])]),
+        ("past the data", [new IndexRun(0, 1, [new IndexSegment(DataEnd - 8, 16, 0)], [])]),
+        ("wrapping", [new IndexRun(0, 1, [new IndexSegment(ulong.MaxValue - 2, 16, 0)], [])]),
+        ("alignment", [new IndexRun(0, 1, [new IndexSegment(0, 16, 40)], [])]),
+        ("dtype count", [new IndexRun(0, 1, [Seg(0), Seg(64)], [[1]])]),
+    ];
+
+    // The runs are internal, so the theory is keyed by label and looks its runs up.
+    public static TheoryData<string> UnsoundRuns() => [.. Array.ConvertAll(Unsound, c => c.Label)];
 
     [Theory]
     [MemberData(nameof(UnsoundRuns))]
-    public void AnUnsoundRunCostsItsEntryAlone(string label, IndexRun[] runs)
+    public void AnUnsoundRunCostsItsEntryAlone(string label)
     {
+        IndexRun[] runs = Array.Find(Unsound, c => c.Label == label).Runs;
         IndexEntry bad = new IndexEntry(IndexKinds.BloomSbbf, [0u], 1_024, [], runs);
         byte[] bytes = new IndexDirectory(Rows, 0, WritePolicy.Auto, [bad, Probe(0, 1)]).ToBytes();
 

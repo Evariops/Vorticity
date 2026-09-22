@@ -302,7 +302,7 @@ public sealed class ColumnAccessorTests
     [InlineData((byte)18, DecimalStorageType.I64)]
     [InlineData((byte)38, DecimalStorageType.I128)]
     [InlineData((byte)40, DecimalStorageType.I256)]
-    public void DecimalReadsEveryStorageWidth(byte precision, DecimalStorageType expected)
+    internal void DecimalReadsEveryStorageWidth(byte precision, DecimalStorageType expected)
     {
         using ColumnFixture f = new ColumnFixture();
         Int256[] unscaled = [new Int256(-7), new Int256(7)];

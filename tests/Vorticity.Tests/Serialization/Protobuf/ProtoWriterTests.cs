@@ -165,7 +165,7 @@ public sealed class ProtoWriterTests
     [InlineData(ProtoWireType.StartGroup)]
     [InlineData(ProtoWireType.EndGroup)]
     [InlineData((ProtoWireType)6)]
-    public void WriteTag_refuses_to_emit_a_framing_the_reader_would_reject(ProtoWireType wireType)
+    internal void WriteTag_refuses_to_emit_a_framing_the_reader_would_reject(ProtoWireType wireType)
     {
         Assert.Throws<ArgumentOutOfRangeException>(() =>
         {

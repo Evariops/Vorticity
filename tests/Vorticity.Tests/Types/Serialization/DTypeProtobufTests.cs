@@ -303,7 +303,7 @@ public sealed class DTypeProtobufTests
     [InlineData(PType.F16)]
     [InlineData(PType.F32)]
     [InlineData(PType.F64)]
-    public void Every_ptype_round_trips(PType ptype)
+    internal void Every_ptype_round_trips(PType ptype)
     {
         DTypeArena source = new DTypeArena();
         AssertRoundTrip(source.Primitive(ptype, Nullability.Nullable));

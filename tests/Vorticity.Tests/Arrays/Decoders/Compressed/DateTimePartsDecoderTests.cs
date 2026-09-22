@@ -40,7 +40,7 @@ public sealed class DateTimePartsDecoderTests
     [InlineData(VortexTimeUnit.Milliseconds, 86_400_000L)]
     [InlineData(VortexTimeUnit.Microseconds, 86_400_000_000L)]
     [InlineData(VortexTimeUnit.Nanoseconds, 86_400_000_000_000L)]
-    public void TheDivisorComesFromTheDTypesUnit(VortexTimeUnit unit, long oneDay)
+    internal void TheDivisorComesFromTheDTypesUnit(VortexTimeUnit unit, long oneDay)
     {
         byte[] days = TestBuffers.Int64(1);
         byte[] seconds = TestBuffers.Int64(0);

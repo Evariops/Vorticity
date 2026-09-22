@@ -36,7 +36,7 @@ public sealed class BitPackedWidthTests
     [InlineData(PType.I16)]
     [InlineData(PType.U32)]
     [InlineData(PType.I64)]
-    public async Task AColumnOfEveryNarrowWidthReadsBackWhatWasWritten(PType ptype)
+    internal async Task AColumnOfEveryNarrowWidthReadsBackWhatWasWritten(PType ptype)
     {
         Decoders.EnsureRegistered();
 
@@ -166,7 +166,7 @@ public sealed class BitPackedWidthTests
     [InlineData(PType.I8, false)]
     [InlineData(PType.U16, true)]
     [InlineData(PType.I64, true)]
-    public async Task ANarrowColumnWithOutliersReadsBackWhatWasWritten(PType ptype, bool nullable)
+    internal async Task ANarrowColumnWithOutliersReadsBackWhatWasWritten(PType ptype, bool nullable)
     {
         Decoders.EnsureRegistered();
 

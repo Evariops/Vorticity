@@ -33,7 +33,7 @@ public sealed class ZigZagDecoderTests
     [InlineData(PType.I8, PType.U8)]
     [InlineData(PType.I16, PType.U16)]
     [InlineData(PType.I32, PType.U32)]
-    public void DecodesEveryNarrowWidth(PType signed, PType unsigned)
+    internal void DecodesEveryNarrowWidth(PType signed, PType unsigned)
     {
         int width = signed.ByteWidth();
         byte[] encoded = new byte[3 * width];

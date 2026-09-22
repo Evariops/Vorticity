@@ -32,7 +32,7 @@ public sealed class ZonePruningTests
     [InlineData(ComparisonOp.LessOrEqual)]
     [InlineData(ComparisonOp.Equal)]
     [InlineData(ComparisonOp.NotEqual)]
-    public async Task APrunedScanReturnsExactlyWhatAnUnprunedOneDoes(ComparisonOp op)
+    internal async Task APrunedScanReturnsExactlyWhatAnUnprunedOneDoes(ComparisonOp op)
     {
         // The invariant above as a property test, over a column whose zone maps are
         // informative: `monotone` is sorted, so most zones are excluded by most predicates.

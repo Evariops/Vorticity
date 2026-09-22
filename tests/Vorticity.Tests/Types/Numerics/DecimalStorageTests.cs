@@ -23,7 +23,7 @@ public sealed class DecimalStorageTests
     [InlineData(38, DecimalStorageType.I128)]
     [InlineData(39, DecimalStorageType.I256)]
     [InlineData(76, DecimalStorageType.I256)]
-    public void BoundaryPairs(int precision, DecimalStorageType expected) =>
+    internal void BoundaryPairs(int precision, DecimalStorageType expected) =>
         Assert.Equal(expected, DecimalStorage.ForPrecision((byte)precision));
 
     [Fact]
@@ -56,7 +56,7 @@ public sealed class DecimalStorageTests
     [InlineData(DecimalStorageType.I64, 8)]
     [InlineData(DecimalStorageType.I128, 16)]
     [InlineData(DecimalStorageType.I256, 32)]
-    public void ByteWidths(DecimalStorageType storage, int expected) =>
+    internal void ByteWidths(DecimalStorageType storage, int expected) =>
         Assert.Equal(expected, DecimalStorage.ByteWidth(storage));
 
     [Theory]
@@ -87,7 +87,7 @@ public sealed class DecimalStorageTests
     [Theory]
     [InlineData(0u, DecimalStorageType.I8)]
     [InlineData(5u, DecimalStorageType.I256)]
-    public void WireValuesInRangeNarrow(uint raw, DecimalStorageType expected)
+    internal void WireValuesInRangeNarrow(uint raw, DecimalStorageType expected)
     {
         Assert.True(DecimalStorage.IsDefinedWireValue(raw, out DecimalStorageType storage));
         Assert.Equal(expected, storage);
@@ -119,7 +119,7 @@ public sealed class DecimalStorageTests
     [InlineData(DecimalStorageType.I64)]
     [InlineData(DecimalStorageType.I128)]
     [InlineData(DecimalStorageType.I256)]
-    public void FromByteWidthInvertsByteWidth(DecimalStorageType storage) =>
+    internal void FromByteWidthInvertsByteWidth(DecimalStorageType storage) =>
         Assert.Equal(storage, DecimalStorage.FromByteWidth(DecimalStorage.ByteWidth(storage)));
 
     [Theory]

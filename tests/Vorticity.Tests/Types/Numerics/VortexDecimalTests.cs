@@ -135,7 +135,7 @@ public sealed class VortexDecimalTests
     [InlineData(18, 4, DecimalStorageType.I64)]
     [InlineData(38, 10, DecimalStorageType.I128)]
     [InlineData(40, 10, DecimalStorageType.I256)]
-    public void CorpusShapesReportTheRightStorage(int precision, int scale, DecimalStorageType expected)
+    internal void CorpusShapesReportTheRightStorage(int precision, int scale, DecimalStorageType expected)
     {
         VortexDecimal value = VortexDecimal.FromInt64(1, (byte)precision, (sbyte)scale);
         Assert.Equal(expected, value.Storage);

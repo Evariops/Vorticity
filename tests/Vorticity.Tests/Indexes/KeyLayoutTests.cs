@@ -13,16 +13,19 @@ namespace Vorticity.Tests.Indexes;
 
 public sealed class KeyLayoutTests
 {
-    public static TheoryData<PType> PTypes() =>
+    // PType is internal, so the theories take its name and parse it.
+    public static TheoryData<string> PTypes() =>
     [
-        PType.I8, PType.I16, PType.I32, PType.I64, PType.U8, PType.U16, PType.U32, PType.U64,
-        PType.F16, PType.F32, PType.F64,
+        nameof(PType.I8), nameof(PType.I16), nameof(PType.I32), nameof(PType.I64),
+        nameof(PType.U8), nameof(PType.U16), nameof(PType.U32), nameof(PType.U64),
+        nameof(PType.F16), nameof(PType.F32), nameof(PType.F64),
     ];
 
     [Theory]
     [MemberData(nameof(PTypes))]
-    public void TheByteOrderIsTheTotalOrder(PType ptype)
+    public void TheByteOrderIsTheTotalOrder(string name)
     {
+        PType ptype = Enum.Parse<PType>(name);
         DTypeArena types = new DTypeArena();
         Assert.True(KeyLayout.TryOf(types.Primitive(ptype, Nullability.NonNullable), out KeyLayout layout));
         Random random = new Random(7 + (int)ptype);
@@ -66,36 +69,37 @@ public sealed class KeyLayoutTests
         Assert.False(KeyLayout.TryOf(types.Struct(Array.Empty<string>(), [], Nullability.NonNullable), out _));
     }
 
-    public static TheoryData<PType, string, bool> Encodings() => new()
+    public static TheoryData<string, string, bool> Encodings() => new()
     {
-        { PType.I8, "s:127", true },
-        { PType.I8, "s:128", false },
-        { PType.I8, "s:-128", true },
-        { PType.I8, "s:-129", false },
-        { PType.U8, "s:-1", false },
-        { PType.U8, "u:255", true },
-        { PType.U8, "u:256", false },
-        { PType.I64, "u:9223372036854775808", false },
-        { PType.U64, "u:18446744073709551615", true },
-        { PType.I32, "f:5", true },
-        { PType.I32, "f:5.5", false },
-        { PType.I64, "f:9007199254740992", false },
-        { PType.I64, "f:9007199254740991", true },
-        { PType.U32, "f:-1", false },
-        { PType.F32, "f:0.1", false },
-        { PType.F32, "f:0.5", true },
-        { PType.F32, "s:16777217", false },
-        { PType.F64, "s:16777217", true },
-        { PType.F16, "f:65504", true },
-        { PType.F16, "f:0.1", false },
-        { PType.F64, "f:NaN", false },
-        { PType.I32, "b:x", false },
+        { nameof(PType.I8), "s:127", true },
+        { nameof(PType.I8), "s:128", false },
+        { nameof(PType.I8), "s:-128", true },
+        { nameof(PType.I8), "s:-129", false },
+        { nameof(PType.U8), "s:-1", false },
+        { nameof(PType.U8), "u:255", true },
+        { nameof(PType.U8), "u:256", false },
+        { nameof(PType.I64), "u:9223372036854775808", false },
+        { nameof(PType.U64), "u:18446744073709551615", true },
+        { nameof(PType.I32), "f:5", true },
+        { nameof(PType.I32), "f:5.5", false },
+        { nameof(PType.I64), "f:9007199254740992", false },
+        { nameof(PType.I64), "f:9007199254740991", true },
+        { nameof(PType.U32), "f:-1", false },
+        { nameof(PType.F32), "f:0.1", false },
+        { nameof(PType.F32), "f:0.5", true },
+        { nameof(PType.F32), "s:16777217", false },
+        { nameof(PType.F64), "s:16777217", true },
+        { nameof(PType.F16), "f:65504", true },
+        { nameof(PType.F16), "f:0.1", false },
+        { nameof(PType.F64), "f:NaN", false },
+        { nameof(PType.I32), "b:x", false },
     };
 
     [Theory]
     [MemberData(nameof(Encodings))]
-    public void ALiteralBecomesAKeyOnlyWhenTheConversionIsExact(PType ptype, string literal, bool encodes)
+    public void ALiteralBecomesAKeyOnlyWhenTheConversionIsExact(string name, string literal, bool encodes)
     {
+        PType ptype = Enum.Parse<PType>(name);
         DTypeArena types = new DTypeArena();
         Assert.True(KeyLayout.TryOf(types.Primitive(ptype, Nullability.NonNullable), out KeyLayout layout));
         Span<byte> scratch = stackalloc byte[8];
@@ -111,7 +115,7 @@ public sealed class KeyLayoutTests
     [InlineData(PType.F16)]
     [InlineData(PType.F32)]
     [InlineData(PType.F64)]
-    public void AFloatZeroAsksForBothZeros(PType ptype)
+    internal void AFloatZeroAsksForBothZeros(PType ptype)
     {
         DTypeArena types = new DTypeArena();
         Assert.True(KeyLayout.TryOf(types.Primitive(ptype, Nullability.NonNullable), out KeyLayout layout));

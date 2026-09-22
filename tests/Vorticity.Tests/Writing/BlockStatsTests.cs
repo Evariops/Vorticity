@@ -159,7 +159,7 @@ public sealed class BlockStatsTests
     [InlineData(PType.F32, false)]
     [InlineData(PType.F64, true)]
     [InlineData(PType.F64, false)]
-    public void SignedZerosAndNaNsAreHandledInTheLanes(PType ptype, bool negativeFirst)
+    internal void SignedZerosAndNaNsAreHandledInTheLanes(PType ptype, bool negativeFirst)
     {
         const int length = 67;
         for (int negative = 0; negative < 8; negative++)
@@ -261,7 +261,7 @@ public sealed class BlockStatsTests
     [InlineData(PType.I64)]
     [InlineData(PType.F32)]
     [InlineData(PType.F64)]
-    public void OrderFlagsMatchTheScalarRuleWhereverTheEventFalls(PType ptype)
+    internal void OrderFlagsMatchTheScalarRuleWhereverTheEventFalls(PType ptype)
     {
         const int length = 70;
         string[] events = ptype.IsFloat() ? ["none", "descent", "nan", "nan-then-descent"] : ["none", "descent"];
@@ -330,7 +330,7 @@ public sealed class BlockStatsTests
     [InlineData(PType.U32, 3)]
     [InlineData(PType.U32, 1_024)]
     [InlineData(PType.I16, 513)]
-    public void WidthHistogramsMatchACountByHand(PType ptype, int length)
+    internal void WidthHistogramsMatchACountByHand(PType ptype, int length)
     {
         uint state = 12345;
         CanonicalArena arena = new CanonicalArena();

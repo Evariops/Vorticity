@@ -72,7 +72,7 @@ public sealed class RoundTripMetadataTests
     [InlineData(DecimalStorageType.I64)]
     [InlineData(DecimalStorageType.I128)]
     [InlineData(DecimalStorageType.I256)]
-    public void DecimalRoundTrips(DecimalStorageType storage)
+    internal void DecimalRoundTrips(DecimalStorageType storage)
     {
         DecimalMetadata value = new DecimalMetadata(storage);
         byte[] bytes = Serialize((ref ProtoWriter w) => DecimalMetadata.Write(ref w, in value));

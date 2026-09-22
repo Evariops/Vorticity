@@ -44,7 +44,7 @@ public sealed class EncodingRegistryTests
     [InlineData("vortex.onpair", ArrayEncodingId.OnPair)]
     [InlineData("vortex.variant", ArrayEncodingId.Variant)]
     [InlineData("vortex.parquet.variant", ArrayEncodingId.ParquetVariant)]
-    public void EveryImplementedArrayIdResolves(string id, ArrayEncodingId expected)
+    internal void EveryImplementedArrayIdResolves(string id, ArrayEncodingId expected)
     {
         Assert.Equal(expected, EncodingRegistry.ResolveArray(Encoding.UTF8.GetBytes(id)));
     }
@@ -103,7 +103,7 @@ public sealed class EncodingRegistryTests
     [InlineData("vortex.dict", LayoutEncodingId.Dict)]
     [InlineData("vortex.zoned", LayoutEncodingId.Zoned)]
     [InlineData("vortex.stats", LayoutEncodingId.Stats)]
-    public void EveryImplementedLayoutIdResolves(string id, LayoutEncodingId expected)
+    internal void EveryImplementedLayoutIdResolves(string id, LayoutEncodingId expected)
     {
         Assert.Equal(expected, EncodingRegistry.ResolveLayout(Encoding.UTF8.GetBytes(id)));
     }

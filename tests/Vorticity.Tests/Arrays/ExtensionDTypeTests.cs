@@ -17,7 +17,7 @@ public sealed class ExtensionDTypeTests
     [InlineData("vortex.time", ExtensionKind.Time)]
     [InlineData("vortex.timestamp", ExtensionKind.Timestamp)]
     [InlineData("vortex.uuid", ExtensionKind.Uuid)]
-    public void TheFourCoreIdsResolve(string id, ExtensionKind expected)
+    internal void TheFourCoreIdsResolve(string id, ExtensionKind expected)
     {
         Assert.Equal(expected, ExtensionDTypeRegistry.Resolve(System.Text.Encoding.UTF8.GetBytes(id)));
     }
@@ -118,7 +118,7 @@ public sealed class ExtensionDTypeTests
     [InlineData(2, PType.I32)]  // ms
     [InlineData(1, PType.I64)]  // us
     [InlineData(0, PType.I64)]  // ns
-    public void TimeStorageWidthFollowsTheUnit(byte unit, PType expected)
+    internal void TimeStorageWidthFollowsTheUnit(byte unit, PType expected)
     {
         DType storage = _types.Primitive(expected, Nullability.NonNullable);
         Assert.Equal((VortexTimeUnit)unit, ExtensionDTypeRegistry.ReadTimeUnit([unit], storage));

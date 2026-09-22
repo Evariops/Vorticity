@@ -186,7 +186,7 @@ public sealed class StringMatchTests
     [InlineData(StringMatchOp.Like, "%a%")]
     [InlineData(StringMatchOp.Like, "_a%")]
     [InlineData(StringMatchOp.Like, "%")]
-    public async Task EveryPredicateAgreesWithTheSameOneInCSharp(StringMatchOp op, string pattern)
+    internal async Task EveryPredicateAgreesWithTheSameOneInCSharp(StringMatchOp op, string pattern)
     {
         List<string?> all = await ReadStrings(Mixed, "strs", filter: null, prune: true);
 

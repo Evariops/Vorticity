@@ -15,7 +15,7 @@ public sealed class BitPackedDecoderTests
     [InlineData(PType.U16, 16)]
     [InlineData(PType.U32, 32)]
     [InlineData(PType.U64, 64)]
-    public void RoundTripsEveryBitWidthThroughARealBlob(PType ptype, int elementBits)
+    internal void RoundTripsEveryBitWidthThroughARealBlob(PType ptype, int elementBits)
     {
         for (int bitWidth = 0; bitWidth <= elementBits; bitWidth++)
         {

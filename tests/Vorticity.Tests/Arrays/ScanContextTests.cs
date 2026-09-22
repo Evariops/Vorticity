@@ -75,7 +75,7 @@ public sealed class ScanContextTests
     public void ANullEncodingIdIsACallerError()
     {
         Assert.Throws<ArgumentNullException>(() => new ScanContext([null!]));
-        Assert.Throws<ArgumentNullException>(() => new ScanContext((Vorticity.File.VortexFile)null!));
+        Assert.Throws<ArgumentNullException>(() => new ScanContext((VortexFile)null!));
     }
 
     [Fact]
@@ -153,7 +153,7 @@ public sealed class ScanContextTests
     [Theory]
     [InlineData(Nullability.NonNullable, ValidityKind.NonNullable)]
     [InlineData(Nullability.Nullable, ValidityKind.AllValid)]
-    public void AnAbsentValidityChildFollowsTheInheritedNullability(
+    internal void AnAbsentValidityChildFollowsTheInheritedNullability(
         Nullability nullability,
         ValidityKind expected)
     {

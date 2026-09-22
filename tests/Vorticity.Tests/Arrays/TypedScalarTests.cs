@@ -58,7 +58,7 @@ public sealed class TypedScalarTests
     [InlineData(PType.U8, 256L, false)]
     [InlineData(PType.U8, -1L, false)]
     [InlineData(PType.U64, -1L, false)]
-    public void Int64ValueIsRangeCheckedAgainstThePType(PType ptype, long value, bool legal)
+    internal void Int64ValueIsRangeCheckedAgainstThePType(PType ptype, long value, bool legal)
     {
         byte[] message = ScalarProtobuf.SerializeValue(_store.Int64(value));
         DType dtype = _types.Primitive(ptype, Nullability.NonNullable);
@@ -88,7 +88,7 @@ public sealed class TypedScalarTests
     [InlineData(PType.I8, 128UL, false)]
     [InlineData(PType.I64, (ulong)long.MaxValue, true)]
     [InlineData(PType.U64, ulong.MaxValue, true)]
-    public void UInt64ValueAcceptsSignedPTypesForBackwardCompatibility(PType ptype, ulong value, bool legal)
+    internal void UInt64ValueAcceptsSignedPTypesForBackwardCompatibility(PType ptype, ulong value, bool legal)
     {
         byte[] message = ScalarProtobuf.SerializeValue(_store.UInt64(value));
         DType dtype = _types.Primitive(ptype, Nullability.NonNullable);
@@ -114,7 +114,7 @@ public sealed class TypedScalarTests
     [Theory]
     [InlineData(PType.F32)]
     [InlineData(PType.F64)]
-    public void UInt64ValueAgainstF32OrF64IsAnError(PType ptype)
+    internal void UInt64ValueAgainstF32OrF64IsAnError(PType ptype)
     {
         byte[] message = ScalarProtobuf.SerializeValue(_store.UInt64(1));
         Assert.Throws<VortexFormatException>(
@@ -404,7 +404,7 @@ public sealed class TypedScalarTests
     [InlineData(PType.I16, 2)]
     [InlineData(PType.I32, 4)]
     [InlineData(PType.I64, 8)]
-    public void WriteToFillsTheWholeDestinationWithRepeatedCopies(PType ptype, int width)
+    internal void WriteToFillsTheWholeDestinationWithRepeatedCopies(PType ptype, int width)
     {
         byte[] message = ScalarProtobuf.SerializeValue(_store.Int64(1));
         TypedScalar scalar = Read(message, _types.Primitive(ptype, Nullability.NonNullable));

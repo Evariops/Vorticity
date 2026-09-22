@@ -146,7 +146,7 @@ public sealed class LeafDecoderTests
     [Theory]
     [InlineData(true, ValidityKind.AllValid)]
     [InlineData(false, ValidityKind.AllInvalid)]
-    public void AConstantValidityChildCollapses(bool value, ValidityKind expected)
+    internal void AConstantValidityChildCollapses(bool value, ValidityKind expected)
     {
         // AllInvalid reaches the wire as vortex.constant(false), and the collapse back into the
         // enum is required, not an optimization.

@@ -85,7 +85,7 @@ public sealed class CanonicalArenaTests
     [InlineData(PType.F16)]
     [InlineData(PType.F32)]
     [InlineData(PType.F64)]
-    public void APrimitiveNodeNeedsExactlyLengthTimesWidthBytes(PType ptype)
+    internal void APrimitiveNodeNeedsExactlyLengthTimesWidthBytes(PType ptype)
     {
         CanonicalArena arena = new CanonicalArena();
         DType dtype = _types.Primitive(ptype, Nullability.NonNullable);
@@ -121,7 +121,7 @@ public sealed class CanonicalArenaTests
     [InlineData(DecimalStorageType.I64, 8)]
     [InlineData(DecimalStorageType.I128, 16)]
     [InlineData(DecimalStorageType.I256, 32)]
-    public void ADecimalNodeNeedsExactlyLengthTimesItsStorageWidth(DecimalStorageType storage, int width)
+    internal void ADecimalNodeNeedsExactlyLengthTimesItsStorageWidth(DecimalStorageType storage, int width)
     {
         CanonicalArena arena = new CanonicalArena();
         DType dtype = _types.Decimal(40, 10, Nullability.NonNullable);

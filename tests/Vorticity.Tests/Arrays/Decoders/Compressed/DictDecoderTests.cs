@@ -50,7 +50,7 @@ public sealed class DictDecoderTests
     [InlineData(null, Nullability.NonNullable, Nullability.NonNullable)]
     [InlineData(false, Nullability.NonNullable, Nullability.NonNullable)]
     [InlineData(true, Nullability.NonNullable, Nullability.Nullable)]
-    public void IsNullableCodesDecidesTheCodesChildDType(
+    internal void IsNullableCodesDecidesTheCodesChildDType(
         bool? isNullableCodes, Nullability arrayNullability, Nullability expectedCodesNullability)
     {
         // Absent is a back-compat fallback to the ARRAY's nullability and is not

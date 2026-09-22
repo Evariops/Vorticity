@@ -60,7 +60,7 @@ public sealed class ExtensionColumnTests
     [InlineData(VortexTimeUnit.Milliseconds, PType.I32, 3661_000L)]
     [InlineData(VortexTimeUnit.Microseconds, PType.I64, 3661_000_000L)]
     [InlineData(VortexTimeUnit.Nanoseconds, PType.I64, 3661_000_000_000L)]
-    public void TimeReadsEveryLegalUnitStoragePair(VortexTimeUnit unit, PType storage, long value)
+    internal void TimeReadsEveryLegalUnitStoragePair(VortexTimeUnit unit, PType storage, long value)
     {
         using ColumnFixture f = new ColumnFixture();
         RecordBatch batch = TimeColumn(f, unit, storage, [0L, value]);

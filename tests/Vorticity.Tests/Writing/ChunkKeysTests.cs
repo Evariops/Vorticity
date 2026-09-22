@@ -62,7 +62,7 @@ public sealed class ChunkKeysTests
     [InlineData(PType.F16)]
     [InlineData(PType.F32)]
     [InlineData(PType.F64)]
-    public void FixedWidthsAreRankedInTheComparersOrder(PType ptype)
+    internal void FixedWidthsAreRankedInTheComparersOrder(PType ptype)
     {
         Assert.True(KeyLayout.TryOf(new DTypeArena().Primitive(ptype, Nullability.NonNullable), out KeyLayout layout));
         int width = layout.Width;

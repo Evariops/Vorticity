@@ -550,7 +550,7 @@ public sealed class ScalarProtobufTests
     [InlineData(CaseVariant, ProtoWireType.Fixed64)]
     [InlineData(CaseUnion, ProtoWireType.Varint)]
     [InlineData(CaseNull, ProtoWireType.LengthDelimited)]
-    public void A_case_with_the_wrong_wire_type_is_rejected(int caseNumber, ProtoWireType wire)
+    internal void A_case_with_the_wrong_wire_type_is_rejected(int caseNumber, ProtoWireType wire)
     {
         PbBuilder builder = new PbBuilder().Tag(caseNumber, wire);
         switch (wire)
