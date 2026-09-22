@@ -12,6 +12,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -51,6 +52,7 @@ public sealed class RunMergeTests
     [Fact]
     public async Task HundredsOfChunksWriteOneRunPerEntryAndALookupReadsOneSegment()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         int rows = Block * 300;
         (byte[] bytes, WriteReport report) = await WriteAsync(rows);
@@ -59,7 +61,7 @@ public sealed class RunMergeTests
         Assert.Equal(1, report.Index("s", IndexKinds.PostingsBlocks)!.Runs);
 
         await using VortexFile file = await OpenAsync(bytes);
-        IndexDirectory directory = (await file.ReadIndexDirectoryAsync())!;
+        IndexDirectory directory = (await file.ReadIndexDirectoryAsync(ct))!;
         foreach (IndexEntry entry in directory.Entries)
         {
             IndexRun run = Assert.Single(entry.Runs);
@@ -75,10 +77,10 @@ public sealed class RunMergeTests
         // its rows, whatever the number of chunks.
         long probe = K(12_345);
         VortexExpr equal = Expr.Eq(Expr.Field("k"), Expr.Literal(FilterLiteral.From(probe)));
-        ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync(ct);
         PruningStep locating = Assert.Single(plan.Pruning, step => step.Structure == "locating index");
         Assert.Equal(3, locating.SegmentsRead);
-        Assert.Equal(await OracleCountAsync(file, equal), await file.ScanBuilder().Where(equal).CountAsync());
+        Assert.Equal(await OracleCountAsync(file, equal), await file.ScanBuilder().Where(equal).CountAsync(ct));
 
         VortexExpr text = Expr.Eq(Expr.Field("s"), Expr.Literal(FilterLiteral.From(S(4_242))));
         Assert.Equal(await OracleCountAsync(file, text), await CountRowsAsync(file, text, indexes: true));
@@ -93,7 +95,7 @@ public sealed class RunMergeTests
         Assert.Equal(2, report.Index("k", IndexKinds.SortedRuns)!.Runs);
 
         await using VortexFile file = await OpenAsync(bytes);
-        IndexDirectory directory = (await file.ReadIndexDirectoryAsync())!;
+        IndexDirectory directory = (await file.ReadIndexDirectoryAsync(TestContext.Current.CancellationToken))!;
         foreach (IndexEntry entry in directory.Entries)
         {
             Assert.Equal(2, entry.Runs.Count);
@@ -141,12 +143,13 @@ public sealed class RunMergeTests
     [Fact]
     public async Task RowsSpanningMoreThan32BitsAreWrittenAndReadAt64Bits()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         int rows = Block * 40;
         (byte[] bytes, _) = await WriteAsync(rows, wideRowsAbove: Block * 3);
 
         await using VortexFile file = await OpenAsync(bytes);
-        IndexEntry entry = (await file.ReadIndexDirectoryAsync())!.Entries.Single(e => e.Kind == IndexKinds.SortedRuns);
+        IndexEntry entry = (await file.ReadIndexDirectoryAsync(ct))!.Entries.Single(e => e.Kind == IndexKinds.SortedRuns);
         IndexRun run = Assert.Single(entry.Runs);
         Assert.True(KeyRunOptions.WideRows(run, 1));
 
@@ -154,7 +157,7 @@ public sealed class RunMergeTests
         VortexExpr range = Expr.And(
             Expr.Ge(Expr.Field("k"), Expr.Literal(FilterLiteral.From(20_000L))),
             Expr.Lt(Expr.Field("k"), Expr.Literal(FilterLiteral.From(20_400L))));
-        Assert.Equal(await OracleCountAsync(file, range), await file.ScanBuilder().Where(range).CountAsync());
+        Assert.Equal(await OracleCountAsync(file, range), await file.ScanBuilder().Where(range).CountAsync(ct));
         VortexExpr equal = Expr.Eq(Expr.Field("k"), Expr.Literal(FilterLiteral.From(K(7_777))));
         Assert.Equal(await OracleCountAsync(file, equal), await CountRowsAsync(file, equal, indexes: true));
     }
@@ -164,13 +167,14 @@ public sealed class RunMergeTests
     {
         // An append that would pass K runs reads the old tail back and merges it into its
         // own run. Every piece ends inside a block, so every version has a last chunk of its own.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-kruns-{Guid.NewGuid():N}.vortex");
         try
         {
             int rows = 1_000;
             (byte[] first, _) = await WriteAsync(rows);
-            await System.IO.File.WriteAllBytesAsync(path, first);
+            await System.IO.File.WriteAllBytesAsync(path, first, ct);
             int merges = 0;
             for (int append = 0; append < 12; append++)
             {
@@ -185,15 +189,15 @@ public sealed class RunMergeTests
                     WritePolicy = Policy,
                     IndexBudgetPerMille = 1_000_000,
                 };
-                await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, options))
+                await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, options, ct))
                 {
                     await FeedAsync(writer, rows, rows + added);
-                    await writer.CompleteAsync();
+                    await writer.CompleteAsync(ct);
                 }
 
                 rows += added;
-                await using VortexFile file = await VortexFile.OpenAsync(path);
-                IndexDirectory directory = (await file.ReadIndexDirectoryAsync())!;
+                await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+                IndexDirectory directory = (await file.ReadIndexDirectoryAsync(ct))!;
                 Assert.Equal(2, directory.Entries.Count);
                 int blocks = (rows + Block - 1) / Block;
                 foreach (IndexEntry entry in directory.Entries)

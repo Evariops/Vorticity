@@ -67,6 +67,7 @@ public sealed class LocatingIndexTests
     {
         // A run per chunk is how the builders work, one run per entry is what
         // they write. The rows are a whole number of blocks, so no chunk keeps a run of its own.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
         int chunks = written.Report.ChunkRows.Length;
@@ -86,7 +87,7 @@ public sealed class LocatingIndexTests
         IndexWriteReport flag = Assert.IsType<IndexWriteReport>(written.Report.Index("flag", IndexKinds.PostingsBlocks));
         Assert.Equal(IndexOutcome.Abandoned, flag.Outcome);
 
-        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync(ct));
         Assert.Equal(5, directory.Entries.Count);
         foreach (IndexEntry entry in directory.Entries)
         {
@@ -108,7 +109,7 @@ public sealed class LocatingIndexTests
                 ulong inSegments = 0;
                 for (long s = 0; s < table.SegmentCount; s++)
                 {
-                    inSegments += (await table.GetAsync(written.File.IndexSourceOf(run), s, default)).Bounds.Entries;
+                    inSegments += (await table.GetAsync(written.File.IndexSourceOf(run), s, ct)).Bounds.Entries;
                 }
 
                 Assert.Equal(run.EntryCount, inSegments);
@@ -183,13 +184,14 @@ public sealed class LocatingIndexTests
     [MemberData(nameof(Filters))]
     public async Task AScanReturnsTheSameRowsWithTheIndexesOnAndOff(string text)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
         VortexExpr filter = Parse(text);
 
         long expected = Oracle(text);
-        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).CountAsync());
-        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).CountAsync(ct));
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync(ct));
 
         List<string> on = await Materialize(written.File.ScanBuilder().Where(filter));
         List<string> off = await Materialize(written.File.ScanBuilder().Where(filter).WithIndexes(false));
@@ -208,7 +210,7 @@ public sealed class LocatingIndexTests
         string value = present.ToString(CultureInfo.InvariantCulture);
         string text = column == "key" ? "key = " + value : "name = u" + value;
 
-        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse(text)).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse(text)).ExplainAsync(TestContext.Current.CancellationToken);
         PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
         PruningStep locating = Assert.Single(plan.Pruning, step => step.Structure == "locating index");
         Assert.Equal(0, zones.BlocksPruned);
@@ -223,18 +225,19 @@ public sealed class LocatingIndexTests
     [Fact]
     public async Task AValueEverywhereKillsNothingAndAValueNowhereKillsEverything()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
 
-        ScanExplanation everywhere = await written.File.ScanBuilder().Where(Parse("status = held")).ExplainAsync();
+        ScanExplanation everywhere = await written.File.ScanBuilder().Where(Parse("status = held")).ExplainAsync(ct);
         Assert.Equal(HoldingBlocks(row => Status(row) == "held"), everywhere.LiveBlocks);
 
-        ScanExplanation nowhere = await written.File.ScanBuilder().Where(Parse("status = nope")).ExplainAsync();
+        ScanExplanation nowhere = await written.File.ScanBuilder().Where(Parse("status = nope")).ExplainAsync(ct);
         Assert.Equal(0, nowhere.LiveBlocks);
 
         // A key past every block's maximum is the zone map's to kill, and the index is never asked:
         // cheapest first, and the chain stops at an empty mask.
-        ScanExplanation outOfRange = await written.File.ScanBuilder().Where(Parse("opt = 5000")).ExplainAsync();
+        ScanExplanation outOfRange = await written.File.ScanBuilder().Where(Parse("opt = 5000")).ExplainAsync(ct);
         Assert.Equal(0, outOfRange.LiveBlocks);
         Assert.DoesNotContain(outOfRange.Pruning, step => step.Structure == "locating index");
     }
@@ -248,7 +251,7 @@ public sealed class LocatingIndexTests
         // Row 5·1024+3 holds -0.0, row 9·1024+7 holds +0.0, and many rows hold key % 5000 == 0.
         foreach (string text in new[] { "price = 0.0f", "price = -0.0f" })
         {
-            ScanExplanation plan = await written.File.ScanBuilder().Where(Parse(text)).ExplainAsync();
+            ScanExplanation plan = await written.File.ScanBuilder().Where(Parse(text)).ExplainAsync(TestContext.Current.CancellationToken);
             Assert.Equal(HoldingBlocks(row => Price(row) == 0.0), plan.LiveBlocks);
             Assert.True(plan.LiveBlocks < Blocks);
         }
@@ -265,19 +268,20 @@ public sealed class LocatingIndexTests
 
         int present = Key(40_000);
         string text = string.Create(CultureInfo.InvariantCulture, $"name = u{present}");
-        Assert.Equal(Oracle(text), await written.File.ScanBuilder().Where(Parse(text)).CountAsync());
+        Assert.Equal(Oracle(text), await written.File.ScanBuilder().Where(Parse(text)).CountAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public async Task AMalformedRunCostsPruningAndNeverRows()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] bytes;
         List<IndexSegment> keySegments = [];
         await using (Written written = await Written.CreateAsync(Policy()))
         {
             bytes = System.IO.File.ReadAllBytes(written.Path);
-            IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+            IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync(ct));
             foreach (IndexEntry entry in directory.Entries)
             {
                 foreach (IndexRun run in entry.Runs)
@@ -295,13 +299,13 @@ public sealed class LocatingIndexTests
         }
 
         string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-locating-forged-{Guid.NewGuid():N}.vortex");
-        await System.IO.File.WriteAllBytesAsync(path, bytes);
+        await System.IO.File.WriteAllBytesAsync(path, bytes, ct);
         try
         {
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             foreach (string text in FilterTexts())
             {
-                Assert.Equal(Oracle(text), await file.ScanBuilder().Where(Parse(text)).CountAsync());
+                Assert.Equal(Oracle(text), await file.ScanBuilder().Where(Parse(text)).CountAsync(ct));
             }
         }
         finally

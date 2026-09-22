@@ -60,6 +60,7 @@ public sealed class BloomIndexTests
     [Fact]
     public async Task TheWriterBuildsEveryResolutionAndTheReportSaysSo()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
 
@@ -84,7 +85,7 @@ public sealed class BloomIndexTests
         Assert.Contains("distinct", small.Reason, StringComparison.Ordinal);
 
         // One entry per column, one run, one root: nothing in the directory grows with the blocks.
-        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync(ct));
         Assert.Equal(3, directory.Entries.Count);
         foreach (IndexEntry entry in directory.Entries)
         {
@@ -149,14 +150,15 @@ public sealed class BloomIndexTests
     [MemberData(nameof(Filters))]
     public async Task AScanReturnsTheSameRowsWithTheIndexesOnAndOff(string text)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
         VortexExpr filter = Parse(text);
 
         long expected = Oracle(text);
-        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).CountAsync());
-        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
-        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithPruning(false).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).CountAsync(ct));
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync(ct));
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithPruning(false).CountAsync(ct));
 
         List<string> on = await Materialize(written.File.ScanBuilder().Where(filter));
         List<string> off = await Materialize(written.File.ScanBuilder().Where(filter).WithIndexes(false));
@@ -167,11 +169,12 @@ public sealed class BloomIndexTests
     [Fact]
     public async Task TheFilterPrunesWhatTheZoneMapCannot()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
         int present = Key(40_000);
 
-        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync(ct);
         Assert.Equal(Blocks, plan.Blocks);
         PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
@@ -183,7 +186,7 @@ public sealed class BloomIndexTests
         Assert.Equal(Blocks - bloom.BlocksPruned, plan.LiveBlocks);
         Assert.True(bloom.SegmentsRead > 0);
 
-        ScanExplanation off = await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithIndexes(false).ExplainAsync();
+        ScanExplanation off = await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithIndexes(false).ExplainAsync(ct);
         Assert.Equal(Blocks, off.LiveBlocks);
         Assert.DoesNotContain(off.Pruning, step => step.Structure == "bloom filter");
     }
@@ -191,9 +194,10 @@ public sealed class BloomIndexTests
     [Fact]
     public async Task AValueAbsentFromTheFileStopsAtTheFileFilter()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy(), textBounds: false);
-        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse("name = nope")).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse("name = nope")).ExplainAsync(ct);
 
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
         Assert.True(plan.LiveBlocks == 0, string.Join("; ", plan.Pruning));
@@ -217,35 +221,37 @@ public sealed class BloomIndexTests
     {
         // An engine skips a file before opening a scan. The statistics cannot say anything
         // about `name = nope`; the file-level filter can.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
         int present = Key(40_000);
 
         Assert.True(written.File.MayMatch(Parse("name = nope")));
-        Assert.False(await written.File.MayMatchAsync(Parse("name = nope")));
-        Assert.True(await written.File.MayMatchAsync(Parse(string.Create(CultureInfo.InvariantCulture, $"name = u{present}"))));
-        Assert.False(await written.File.MayMatchAsync(Parse("name = nope and key < 50000")));
-        Assert.True(await written.File.MayMatchAsync(Parse("key != 5")));
+        Assert.False(await written.File.MayMatchAsync(Parse("name = nope"), ct));
+        Assert.True(await written.File.MayMatchAsync(Parse(string.Create(CultureInfo.InvariantCulture, $"name = u{present}")), ct));
+        Assert.False(await written.File.MayMatchAsync(Parse("name = nope and key < 50000"), ct));
+        Assert.True(await written.File.MayMatchAsync(Parse("key != 5"), ct));
 
         // With two resolutions the root is built under the node ceiling, and answers as well; with
         // one, there is no node filter, and the async answer is the statistics' answer.
         await using Written two = await Written.CreateAsync(Policy(resolutions: 2));
-        Assert.False(await two.File.MayMatchAsync(Parse("name = nope")));
+        Assert.False(await two.File.MayMatchAsync(Parse("name = nope"), ct));
         await using Written one = await Written.CreateAsync(Policy(resolutions: 1));
-        Assert.True(await one.File.MayMatchAsync(Parse("name = nope")));
+        Assert.True(await one.File.MayMatchAsync(Parse("name = nope"), ct));
     }
 
     [Fact]
     public async Task TwoResolutionsDescendTheTree()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy(resolutions: 2));
         int present = Key(40_000);
 
-        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync(ct));
         Assert.Equal(3, directory.Entries.Count);
 
-        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Parse($"key = {present}")).ExplainAsync(ct);
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
 
         // The root; the four generation nodes, one region; then the leaves of each generation still
@@ -260,12 +266,13 @@ public sealed class BloomIndexTests
     {
         // A lying index can only slow a scan down. A payload that does not decode to the
         // array its entry declares is ignored for the blocks it covers.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] bytes;
         await using (Written written = await Written.CreateAsync(Policy(resolutions: 1)))
         {
             bytes = System.IO.File.ReadAllBytes(written.Path);
-            IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+            IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync(ct));
             foreach (IndexEntry entry in directory.Entries)
             {
                 foreach (IndexRun run in entry.Runs)
@@ -279,15 +286,15 @@ public sealed class BloomIndexTests
         }
 
         string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-bloom-forged-{Guid.NewGuid():N}.vortex");
-        await System.IO.File.WriteAllBytesAsync(path, bytes);
+        await System.IO.File.WriteAllBytesAsync(path, bytes, ct);
         try
         {
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             int present = Key(40_000);
             VortexExpr filter = Parse($"key = {present}");
-            Assert.Equal(Oracle($"key = {present}"), await file.ScanBuilder().Where(filter).CountAsync());
+            Assert.Equal(Oracle($"key = {present}"), await file.ScanBuilder().Where(filter).CountAsync(ct));
 
-            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
             PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
             Assert.Equal(0, bloom.BlocksPruned);
         }
@@ -300,17 +307,18 @@ public sealed class BloomIndexTests
     [Fact]
     public async Task TheBudgetAbandonsAFilterThatOutweighsTheData()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy(), budgetPerMille: 1);
         IndexWriteReport key = Assert.IsType<IndexWriteReport>(written.Report.Index("key", IndexKinds.BloomSbbf));
         Assert.Equal(IndexOutcome.Abandoned, key.Outcome);
         Assert.Contains("budget", key.Reason, StringComparison.Ordinal);
 
-        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync(ct));
         Assert.Empty(directory.Entries);
 
         int present = Key(40_000);
-        Assert.Equal(Oracle($"key = {present}"), await written.File.ScanBuilder().Where(Parse($"key = {present}")).CountAsync());
+        Assert.Equal(Oracle($"key = {present}"), await written.File.ScanBuilder().Where(Parse($"key = {present}")).CountAsync(ct));
     }
 
     /// <summary>
@@ -343,7 +351,7 @@ public sealed class BloomIndexTests
         try
         {
             await VortexFileIndexer.AppendIndexesAsync(
-                appended, Policy(), new VortexWriteOptions { IndexBudgetPerMille = 1 });
+                appended, Policy(), new VortexWriteOptions { IndexBudgetPerMille = 1 }, TestContext.Current.CancellationToken);
             Assert.InRange(new System.IO.FileInfo(appended).Length - none.Length, 0, 4_096);
         }
         finally
@@ -360,6 +368,7 @@ public sealed class BloomIndexTests
         // and on a narrow table it is intrinsically comparable in size to the column it indexes,
         // so no file is ever large enough to bring it under a share of the data. `AsRequired`
         // says so, and the optional filters around it are still the first thing the budget takes.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         WritePolicy policy = Policy().For("key", IndexSpec.Bloom(resolutions: 3).AsRequired());
         await using Written written = await Written.CreateAsync(policy, budgetPerMille: 1);
@@ -371,7 +380,7 @@ public sealed class BloomIndexTests
         Assert.Contains("budget", name.Reason, StringComparison.Ordinal);
 
         // "key" is field 0, and it is the only column left with an entry.
-        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync(ct));
         Assert.NotEmpty(directory.Entries);
         foreach (IndexEntry entry in directory.Entries)
         {
@@ -380,7 +389,7 @@ public sealed class BloomIndexTests
 
         // And the answer is the answer either way, which is the only thing an index may not change.
         int present = Key(40_000);
-        Assert.Equal(Oracle($"key = {present}"), await written.File.ScanBuilder().Where(Parse($"key = {present}")).CountAsync());
+        Assert.Equal(Oracle($"key = {present}"), await written.File.ScanBuilder().Where(Parse($"key = {present}")).CountAsync(ct));
     }
 
     [Fact]
@@ -404,11 +413,12 @@ public sealed class BloomIndexTests
         // An append reuses the directory's policy rather than being told one again, so a
         // requirement that did not survive the round trip would hold for the first write and
         // quietly stop holding for every one after it.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         WritePolicy policy = Policy().For("key", IndexSpec.Bloom(resolutions: 3).AsRequired());
         await using Written written = await Written.CreateAsync(policy);
 
-        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync(ct));
         Assert.True(directory.Policy.Of("key").Required);
         Assert.False(directory.Policy.Of("name").Required);
 
@@ -425,6 +435,7 @@ public sealed class BloomIndexTests
     [Fact]
     public async Task AnUnindexedScanReadsNoIndexSegment()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy());
         int present = Key(40_000);
@@ -432,8 +443,8 @@ public sealed class BloomIndexTests
         ScanMetrics on = new ScanMetrics();
         ScanMetrics off = new ScanMetrics();
         Assert.Equal(
-            await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(on).CountAsync(),
-            await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(off).WithIndexes(false).CountAsync());
+            await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(on).CountAsync(ct),
+            await written.File.ScanBuilder().Where(Parse($"key = {present}")).WithMetrics(off).WithIndexes(false).CountAsync(ct));
 
         // With the filters, a handful of filter segments against a full decode of every block.
         Assert.True(on.ValuesDecoded < off.ValuesDecoded / 8, $"{on.ValuesDecoded} decoded against {off.ValuesDecoded}");

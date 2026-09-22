@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -46,15 +47,16 @@ public sealed class DictionaryProbeTests
     [Fact]
     public async Task AValueNoChunkHoldsPrunesEveryBlock()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string path = await WriteAsync();
         try
         {
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             VortexExpr filter = Expr.Eq(Expr.Field("label"), Expr.Literal(FilterLiteral.From("mmm-999")));
-            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
 
             Assert.Equal(0, plan.LiveBlocks);
-            Assert.Equal(0, await file.ScanBuilder().Where(filter).CountAsync());
+            Assert.Equal(0, await file.ScanBuilder().Where(filter).CountAsync(ct));
             Assert.Contains(plan.Pruning, step => step.Structure == "locating index" && step.BlocksPruned == plan.Blocks);
         }
         finally
@@ -66,12 +68,13 @@ public sealed class DictionaryProbeTests
     [Fact]
     public async Task AValueOfOneChunkLeavesThatChunkAndKillsTheRest()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string path = await WriteAsync();
         try
         {
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             VortexExpr filter = Expr.Eq(Expr.Field("label"), Expr.Literal(FilterLiteral.From("mmm-003")));
-            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
 
             // The zone map cannot help: every chunk's bounds are "aaa" and "zzz".
             Assert.All(plan.Pruning.Where(s => s.Structure == "zone map"), s => Assert.Equal(0, s.BlocksPruned));
@@ -91,15 +94,16 @@ public sealed class DictionaryProbeTests
     [Fact]
     public async Task AValueEveryChunkHoldsPrunesNothingAndAnswersTheSame()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string path = await WriteAsync();
         try
         {
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             VortexExpr filter = Expr.Eq(Expr.Field("label"), Expr.Literal(FilterLiteral.From("aaa")));
-            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
 
             Assert.Equal(plan.Blocks, plan.LiveBlocks);
-            Assert.Equal(Rows / 4, await file.ScanBuilder().Where(filter).CountAsync());
+            Assert.Equal(Rows / 4, await file.ScanBuilder().Where(filter).CountAsync(ct));
         }
         finally
         {
@@ -110,19 +114,20 @@ public sealed class DictionaryProbeTests
     [Fact]
     public async Task AnInIsAbsentOnlyWhenNoChunkHoldsAnyOfItsValues()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string path = await WriteAsync();
         try
         {
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             FilterLiteral[] absent = [.. new[] { "mmm-900", "mmm-901", "mmm-902" }.Select(FilterLiteral.From)];
-            ScanExplanation none = await file.ScanBuilder().Where(Expr.In(Expr.Field("label"), absent)).ExplainAsync();
+            ScanExplanation none = await file.ScanBuilder().Where(Expr.In(Expr.Field("label"), absent)).ExplainAsync(ct);
             Assert.Equal(0, none.LiveBlocks);
 
             FilterLiteral[] one = [.. new[] { "mmm-900", "mmm-004", "mmm-902" }.Select(FilterLiteral.From)];
             VortexExpr filter = Expr.In(Expr.Field("label"), one);
-            ScanExplanation some = await file.ScanBuilder().Where(filter).ExplainAsync();
+            ScanExplanation some = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
             Assert.InRange(some.LiveBlocks, 1, some.Blocks - 1);
-            Assert.Equal(Group / 2, await file.ScanBuilder().Where(filter).CountAsync());
+            Assert.Equal(Group / 2, await file.ScanBuilder().Where(filter).CountAsync(ct));
         }
         finally
         {
@@ -135,15 +140,16 @@ public sealed class DictionaryProbeTests
     {
         // `other` is every row's own string: the chooser never dictionaries it, so the probe has no
         // entry for it and the filter falls through to the scan -- with the right answer.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string path = await WriteAsync();
         try
         {
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             VortexExpr filter = Expr.Eq(Expr.Field("other"), Expr.Literal(FilterLiteral.From("other-00000000")));
-            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
 
             Assert.DoesNotContain(plan.Pruning, step => step.Structure == "locating index" && step.BlocksPruned > 0);
-            Assert.Equal(1, await file.ScanBuilder().Where(filter).CountAsync());
+            Assert.Equal(1, await file.ScanBuilder().Where(filter).CountAsync(ct));
         }
         finally
         {
@@ -155,6 +161,7 @@ public sealed class DictionaryProbeTests
     public async Task TheTwoZerosOfAFloatAreOneValueToProbeFor()
     {
         // A dictionary holds -0.0; a filter asking for 0.0 must not be told the chunk lacks it.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         DTypeArena types = new DTypeArena();
         CanonicalArena arena = new CanonicalArena();
         DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
@@ -180,20 +187,20 @@ public sealed class DictionaryProbeTests
             await using (VortexFileWriter writer = VortexFileWriter.Create(path, schema, Options(["key"])))
             {
                 using RecordBatch batch = new RecordBatch(arena, root, 0);
-                await writer.WriteAsync(batch);
-                await writer.CompleteAsync();
+                await writer.WriteAsync(batch, ct);
+                await writer.CompleteAsync(ct);
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             VortexExpr filter = Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(0.0)));
-            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+            ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
 
             Assert.Equal(plan.Blocks, plan.LiveBlocks);
-            Assert.Equal(Rows / 4, await file.ScanBuilder().Where(filter).CountAsync());
+            Assert.Equal(Rows / 4, await file.ScanBuilder().Where(filter).CountAsync(ct));
 
             // And a float no chunk holds is still pruned away.
             VortexExpr missing = Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(7.5)));
-            Assert.Equal(0, (await file.ScanBuilder().Where(missing).ExplainAsync()).LiveBlocks);
+            Assert.Equal(0, (await file.ScanBuilder().Where(missing).ExplainAsync(ct)).LiveBlocks);
         }
         finally
         {

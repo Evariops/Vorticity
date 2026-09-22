@@ -56,16 +56,17 @@ public sealed class ReadBudgetTests
     [Fact]
     public async Task TheCountingSourceCountsRoundsRangesAndBytes()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         byte[] bytes = new byte[10_000];
         CountingSegmentSource source = new CountingSegmentSource(new MemorySegmentSource(bytes));
-        using (SegmentOwner one = await source.ReadAsync(new SegmentSpec(0, 100, 0, 0, 0), default))
-        using (SegmentOwner two = await source.ReadRangeAsync(100, 50, 1, default))
+        using (SegmentOwner one = await source.ReadAsync(new SegmentSpec(0, 100, 0, 0, 0), ct))
+        using (SegmentOwner two = await source.ReadRangeAsync(100, 50, 1, ct))
         using (SegmentRequestSet set = new SegmentRequestSet(3))
         {
             set.Add(new SegmentSpec(200, 10, 0, 0, 0));
             set.Add(new SegmentSpec(300, 20, 0, 0, 0));
             set.Add(new SegmentSpec(400, 30, 0, 0, 0));
-            await source.ReadManyAsync(set, default);
+            await source.ReadManyAsync(set, ct);
         }
 
         Assert.Equal((3L, 5L, 210L), (source.Requests, source.Ranges, source.Bytes));
@@ -77,16 +78,17 @@ public sealed class ReadBudgetTests
     [Fact]
     public async Task IndexesAreDescribedWithoutARequestAndPreloadedFromTheTail()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         using Sparse file = await Sparse.WriteAsync(gapBytes: 0);
 
         // Before the directory is read, there is nothing to describe; after, a list, and no request.
         CountingSegmentSource lazySource = new CountingSegmentSource(MemoryMappedSegmentSource.Open(file.Path));
-        await using (VortexFile lazy = await VortexFile.OpenAsync(lazySource, VortexOpenOptions.Default))
+        await using (VortexFile lazy = await VortexFile.OpenAsync(lazySource, VortexOpenOptions.Default, ct))
         {
             long atOpen = lazySource.Requests;
             Assert.Null(lazy.Indexes);
-            IReadOnlyList<VortexIndexInfo> read = await lazy.ReadIndexesAsync();
+            IReadOnlyList<VortexIndexInfo> read = await lazy.ReadIndexesAsync(ct);
             Assert.Equal(atOpen, lazySource.Requests);
             Assert.Equal(read, lazy.Indexes);
 
@@ -101,12 +103,12 @@ public sealed class ReadBudgetTests
         // Preloaded: the list is there at the open, and the open cost no more.
         CountingSegmentSource preloadedSource = new CountingSegmentSource(MemoryMappedSegmentSource.Open(file.Path));
         await using VortexFile preloaded = await VortexFile.OpenAsync(
-            preloadedSource, new VortexOpenOptions { PreloadIndexes = true });
+            preloadedSource, new VortexOpenOptions { PreloadIndexes = true }, ct);
         Assert.NotNull(preloaded.Indexes);
         Assert.Equal(lazySource.Requests, preloadedSource.Requests);
 
         // A file without indexes describes an empty list.
-        await using VortexFile bare = await VortexFile.OpenAsync(Corpus.Path("encodings/primitive"), new VortexOpenOptions { PreloadIndexes = true });
+        await using VortexFile bare = await VortexFile.OpenAsync(Corpus.Path("encodings/primitive"), new VortexOpenOptions { PreloadIndexes = true }, ct);
         Assert.NotNull(bare.Indexes);
         Assert.Empty(bare.Indexes!);
     }
@@ -118,6 +120,7 @@ public sealed class ReadBudgetTests
         // offsets as varints, so a page is the same size in both files only when those offsets take
         // as many bytes: the index regions come after every gap, between 2^28 and 2^35 in both --
         // five bytes each -- and are small enough to get no gap of their own.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         using Sparse small = await Sparse.WriteAsync(gapBytes: 48L << 20);
         using Sparse large = await Sparse.WriteAsync(gapBytes: 480L << 20);
@@ -145,9 +148,10 @@ public sealed class ReadBudgetTests
         {
             string plain = (at == 0 ? small : large).Plain;
             IndexFragment fragment;
-            await using (VortexFile unindexed = await VortexFile.OpenAsync(plain))
+            await using (VortexFile unindexed = await VortexFile.OpenAsync(plain, ct))
             {
-                fragment = await VortexFileIndexer.BuildFragmentAsync(unindexed, Policy, new RowRange(0, unindexed.RowCount));
+                fragment = await VortexFileIndexer.BuildFragmentAsync(
+                    unindexed, Policy, new RowRange(0, unindexed.RowCount), cancellationToken: ct);
             }
 
             fragmented[at] = await LookupAsync(plain, 77_777, fragment.Bytes);

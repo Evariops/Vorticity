@@ -93,6 +93,7 @@ public sealed class TrigramIndexTests
     [MemberData(nameof(Policies))]
     public async Task TheWriterBuildsTheTrigramIndex(string kind, bool fold)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy(kind, fold));
         string name = kind == "bloom" ? IndexKinds.BloomNgram3 : IndexKinds.PostingsNgram3;
@@ -104,7 +105,7 @@ public sealed class TrigramIndexTests
         Assert.Equal(IndexOutcome.Abandoned, number.Outcome);
         Assert.Contains("text", number.Reason, StringComparison.Ordinal);
 
-        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync());
+        IndexDirectory directory = Assert.IsType<IndexDirectory>(await written.File.ReadIndexDirectoryAsync(ct));
         Assert.All(directory.Entries, entry => Assert.Equal(name, entry.Kind));
     }
 
@@ -112,21 +113,22 @@ public sealed class TrigramIndexTests
     [MemberData(nameof(Cases))]
     public async Task AStringPredicateReturnsTheSameRowsWithTheIndexOnAndOff(string kind, bool fold, int predicate)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy(kind, fold));
         (string label, StringMatchOp op, string pattern) = Predicates[predicate];
         VortexExpr filter = Build(op, pattern);
 
         long expected = Oracle(op, pattern);
-        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).CountAsync());
-        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync());
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).CountAsync(ct));
+        Assert.Equal(expected, await written.File.ScanBuilder().Where(filter).WithIndexes(false).CountAsync(ct));
         Assert.Equal(
             await Materialize(written.File.ScanBuilder().Where(filter).WithIndexes(false)),
             await Materialize(written.File.ScanBuilder().Where(filter)));
 
         // And the index never keeps fewer blocks than hold a match, and the postings keep exactly
         // the blocks holding every required trigram.
-        ScanExplanation plan = await written.File.ScanBuilder().Where(filter).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(filter).ExplainAsync(ct);
         int holding = Holding(row => Matches(op, pattern, Url(row)));
         Assert.True(plan.LiveBlocks >= holding, $"{label}: {plan.LiveBlocks} live, {holding} hold a match");
         if (kind == "postings")
@@ -141,9 +143,10 @@ public sealed class TrigramIndexTests
     [MemberData(nameof(Policies))]
     public async Task ASubstringInOneWordPrunesTheOtherBlocks(string kind, bool fold)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy(kind, fold));
-        ScanExplanation plan = await written.File.ScanBuilder().Where(Build(StringMatchOp.Contains, "papaya")).ExplainAsync();
+        ScanExplanation plan = await written.File.ScanBuilder().Where(Build(StringMatchOp.Contains, "papaya")).ExplainAsync(ct);
 
         // Two blocks hold `papaya`; a 1 % filter lets through a stray block now and then.
         Assert.Equal(0, Assert.Single(plan.Pruning, step => step.Structure == "zone map").BlocksPruned);
@@ -155,16 +158,17 @@ public sealed class TrigramIndexTests
     {
         // `Zebra` folded is `zebra`; a folded index holds it wherever `Zebra` is, so it prunes the
         // same blocks -- and a folded `zebra` is present too, which the scan then rejects row by row.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(Policy("postings", fold: true));
-        ScanExplanation upper = await written.File.ScanBuilder().Where(Build(StringMatchOp.Contains, "Zebra")).ExplainAsync();
-        ScanExplanation lower = await written.File.ScanBuilder().Where(Build(StringMatchOp.Contains, "zebra")).ExplainAsync();
+        ScanExplanation upper = await written.File.ScanBuilder().Where(Build(StringMatchOp.Contains, "Zebra")).ExplainAsync(ct);
+        ScanExplanation lower = await written.File.ScanBuilder().Where(Build(StringMatchOp.Contains, "zebra")).ExplainAsync(ct);
         Assert.Equal(2, upper.LiveBlocks);
         Assert.Equal(2, lower.LiveBlocks);
-        Assert.Equal(0, await written.File.ScanBuilder().Where(Build(StringMatchOp.Contains, "zebra")).CountAsync());
+        Assert.Equal(0, await written.File.ScanBuilder().Where(Build(StringMatchOp.Contains, "zebra")).CountAsync(ct));
 
         await using Written exact = await Written.CreateAsync(Policy("postings", fold: false));
-        ScanExplanation sensitive = await exact.File.ScanBuilder().Where(Build(StringMatchOp.Contains, "zebra")).ExplainAsync();
+        ScanExplanation sensitive = await exact.File.ScanBuilder().Where(Build(StringMatchOp.Contains, "zebra")).ExplainAsync(ct);
         Assert.Equal(0, sensitive.LiveBlocks);
     }
 

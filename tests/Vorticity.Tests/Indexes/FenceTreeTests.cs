@@ -15,6 +15,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -181,6 +182,7 @@ public sealed class FenceTreeTests
     {
         // Every page takes two fences whatever their size, so every level halves: 40, 20, 10, 5,
         // 3, then a root of 2.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         FenceShape shape = new FenceShape(InlineFences: 2, PageBytes: 512);
         List<KeySegment> bounds = [];
         List<IndexSegment[]> regions = [];
@@ -200,8 +202,8 @@ public sealed class FenceTreeTests
             foreach (byte[] key in (byte[][])[LongKey(s, 'a'), LongKey(s, 'm'), LongKey(s, '~')])
             {
                 Assert.True(FenceTable.TryOpen(run.Run, KeyRunOptions.SortedStride, Bytes, out FenceTable? table, out string? reason), reason);
-                long expected = await oracle.LowerBoundAsync(run.Source, new Probe(Bytes, key), default);
-                Assert.Equal(expected, await table!.LowerBoundAsync(run.Source, new Probe(Bytes, key), default));
+                long expected = await oracle.LowerBoundAsync(run.Source, new Probe(Bytes, key), ct);
+                Assert.Equal(expected, await table!.LowerBoundAsync(run.Source, new Probe(Bytes, key), ct));
                 Assert.True(table.PagesRead <= 5);
             }
         }
@@ -212,6 +214,7 @@ public sealed class FenceTreeTests
     [Fact]
     public async Task ALongRunInPagesReadsAsTheSameRunInline()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         int rows = Block * 40;
         Guid identity = Guid.NewGuid();
@@ -220,8 +223,8 @@ public sealed class FenceTreeTests
 
         await using VortexFile file = await OpenAsync(paged);
         await using VortexFile oracle = await OpenAsync(inline);
-        IndexDirectory directory = (await file.ReadIndexDirectoryAsync())!;
-        IndexDirectory inlineDirectory = (await oracle.ReadIndexDirectoryAsync())!;
+        IndexDirectory directory = (await file.ReadIndexDirectoryAsync(ct))!;
+        IndexDirectory inlineDirectory = (await oracle.ReadIndexDirectoryAsync(ct))!;
         Assert.Equal(2, directory.Entries.Count);
         int depth = 0;
         foreach (IndexEntry entry in directory.Entries)
@@ -252,12 +255,12 @@ public sealed class FenceTreeTests
             Assert.Equal(expected.WideRows, table.WideRows);
             for (long s = 0; s < table.SegmentCount; s++)
             {
-                Fence got = await table.GetAsync(file.IndexSourceOf(run), s, default);
-                Fence want = await expected.GetAsync(oracle.IndexSourceOf(inlineRun), s, default);
+                Fence got = await table.GetAsync(file.IndexSourceOf(run), s, ct);
+                Fence want = await expected.GetAsync(oracle.IndexSourceOf(inlineRun), s, ct);
                 Assert.Equal((want.Index, want.Start), (got.Index, got.Start));
                 AssertSame(want.Bounds, got.Bounds);
                 Assert.Equal(want.Regions, got.Regions);
-                Assert.Equal(s, (await table.OfPositionAsync(file.IndexSourceOf(run), got.Start, default)).Index);
+                Assert.Equal(s, (await table.OfPositionAsync(file.IndexSourceOf(run), got.Start, ct)).Index);
             }
         }
 
@@ -301,18 +304,19 @@ public sealed class FenceTreeTests
     [Fact]
     public async Task TheDefaultShapePagesARunPastSixtyFourSegmentsAndALookupReadsOnePage()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         int rows = Block * 40;
         (byte[] bytes, _) = await WriteAsync(rows, FenceShape.Default);
         await using VortexFile file = await OpenAsync(bytes);
-        IndexEntry entry = (await file.ReadIndexDirectoryAsync())!.Entries.Single(e => e.Kind == IndexKinds.SortedRuns);
+        IndexEntry entry = (await file.ReadIndexDirectoryAsync(ct))!.Entries.Single(e => e.Kind == IndexKinds.SortedRuns);
         IndexRun run = Assert.Single(entry.Runs);
         Assert.True(KeyRunOptions.TryParsePagedRun(run.OptionBytes, KeyRunOptions.SortedStride, Signed, out FencePage? root, out _));
         Assert.Equal(1, root!.Level);
         Assert.All(run.Payload, page => Assert.InRange(page.Length, 1U, (uint)FenceShape.Default.PageBytes));
 
         // 64 segments or fewer stay inline: the postings run of 64 segments.
-        IndexEntry postings = (await file.ReadIndexDirectoryAsync())!.Entries.Single(e => e.Kind == IndexKinds.PostingsBlocks);
+        IndexEntry postings = (await file.ReadIndexDirectoryAsync(ct))!.Entries.Single(e => e.Kind == IndexKinds.PostingsBlocks);
         Assert.True(KeyRunOptions.TryParseRun(Assert.Single(postings.Runs).OptionBytes, out List<KeySegment> segments));
         Assert.Equal(64, segments.Count);
 
@@ -346,27 +350,28 @@ public sealed class FenceTreeTests
     [Fact]
     public async Task AnAppendMergesAPagedRunBackAndKeepsTheOthersPaged()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-fences-{Guid.NewGuid():N}.vortex");
         try
         {
             int rows = 1_000;
             (byte[] first, _) = await WriteAsync(rows, Deep);
-            await System.IO.File.WriteAllBytesAsync(path, first);
+            await System.IO.File.WriteAllBytesAsync(path, first, ct);
             int paged = 0;
             for (int append = 0; append < 7; append++)
             {
                 int added = 900 + (append * 53);
                 VortexWriteOptions options = Options(Deep, null);
-                await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, options))
+                await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, options, ct))
                 {
                     await FeedAsync(writer, rows, rows + added);
-                    await writer.CompleteAsync();
+                    await writer.CompleteAsync(ct);
                 }
 
                 rows += added;
-                await using VortexFile file = await VortexFile.OpenAsync(path);
-                IndexDirectory directory = (await file.ReadIndexDirectoryAsync())!;
+                await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+                IndexDirectory directory = (await file.ReadIndexDirectoryAsync(ct))!;
                 IndexEntry entry = directory.Entries.Single(e => e.Kind == IndexKinds.SortedRuns);
                 Assert.InRange(entry.Runs.Count, 1, KeyIndexBuilder.MaxRuns);
                 long entries = 0;

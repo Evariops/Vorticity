@@ -22,6 +22,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -65,13 +66,14 @@ public sealed class IndexFragmentTests
     [Fact]
     public async Task AFragmentOverABlockRangePrunesItsBlocksAndNoOther()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] data = await WriteAsync(Guid.NewGuid(), WritePolicy.None);
         IndexFragment fragment = await FragmentAsync(data, Runs("id"), Middle);
         Assert.Equal(IndexOutcome.Built, Assert.Single(fragment.Reports).Outcome);
 
         await using VortexFile file = await OpenAsync(data, fragment.Bytes);
-        IndexDirectory? directory = await file.ReadIndexDirectoryAsync();
+        IndexDirectory? directory = await file.ReadIndexDirectoryAsync(ct);
         Assert.True(directory is not null, string.Join("; ", file.IndexFragmentRefusals));
         Assert.Null(Assert.Single(file.IndexFragmentRefusals));
         IndexRun run = Assert.Single(Assert.Single(directory!.Entries).Runs);
@@ -79,13 +81,13 @@ public sealed class IndexFragmentTests
 
         // A key no row holds: the eight blocks of the range are proven empty, and only them.
         VortexExpr absent = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(AbsentId())));
-        ScanExplanation plan = await file.ScanBuilder().Where(absent).ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Where(absent).ExplainAsync(ct);
         Assert.Equal(0, Pruned(plan, "zone map"));
         Assert.Equal(8, Pruned(plan, "locating index"));
         Assert.True(
             plan.LiveBlocks == Blocks - 8,
             $"{plan.LiveBlocks} of {plan.Blocks} blocks live, expected {Blocks - 8}: {string.Join("; ", plan.Pruning)}");
-        Assert.Equal(0, await file.ScanBuilder().Where(absent).CountAsync());
+        Assert.Equal(0, await file.ScanBuilder().Where(absent).CountAsync(ct));
 
         // Keys the range holds, found where they are: builders fed a range without its first block
         // would have filed them under the wrong blocks, and these lookups would come back empty.
@@ -93,7 +95,7 @@ public sealed class IndexFragmentTests
         for (int row = (int)Middle.Start; row < Middle.End; row += 509)
         {
             VortexExpr present = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(row))));
-            Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync());
+            Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync(ct));
             Assert.Equal(
                 await CountAsync(plain.ScanBuilder().Where(present).WithIndexes(false)),
                 await CountAsync(file.ScanBuilder().Where(present)));
@@ -105,23 +107,24 @@ public sealed class IndexFragmentTests
     {
         // The filters of a range are numbered from the range's first block. A Bloom tree has no
         // check that would notice otherwise: every key of the range, looked up, must be found.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] data = await WriteAsync(Guid.NewGuid(), WritePolicy.None);
         IndexFragment fragment = await FragmentAsync(
             data, WritePolicy.None.For("id", IndexSpec.Bloom(falsePositivePpm: 100)), Middle);
 
         await using VortexFile file = await OpenAsync(data, fragment.Bytes);
-        IndexRun run = Assert.Single(Assert.Single((await file.ReadIndexDirectoryAsync())!.Entries).Runs);
+        IndexRun run = Assert.Single(Assert.Single((await file.ReadIndexDirectoryAsync(ct))!.Entries).Runs);
         Assert.Equal((4UL, 8U), (run.FirstBlock, run.BlockCount));
 
         for (int row = (int)Middle.Start; row < Middle.End; row += 97)
         {
             VortexExpr present = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(row))));
-            Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync());
+            Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync(ct));
         }
 
         VortexExpr absent = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(AbsentId())));
-        Assert.Equal(8, Pruned(await file.ScanBuilder().Where(absent).ExplainAsync(), "bloom filter"));
+        Assert.Equal(8, Pruned(await file.ScanBuilder().Where(absent).ExplainAsync(ct), "bloom filter"));
     }
 
     [Fact]
@@ -129,13 +132,14 @@ public sealed class IndexFragmentTests
     {
         // The file indexes `id` itself; a fragment adds a Bloom filter on `tag`. Both answer, each
         // from its own bytes and its own encoding table.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] data = await WriteAsync(Guid.NewGuid(), Runs("id"));
         IndexFragment fragment = await FragmentAsync(
             data, WritePolicy.None.For("tag", IndexSpec.Bloom(falsePositivePpm: 100)), new RowRange(0, Rows));
 
         await using VortexFile file = await OpenAsync(data, fragment.Bytes);
-        IndexDirectory directory = (await file.ReadIndexDirectoryAsync())!;
+        IndexDirectory directory = (await file.ReadIndexDirectoryAsync(ct))!;
         Assert.Null(Assert.Single(file.IndexFragmentRefusals));
         Assert.Equal(2, directory.Entries.Count);
         Assert.Equal(0, directory.Entries[0].Runs[0].Origin);
@@ -145,11 +149,11 @@ public sealed class IndexFragmentTests
         // not: the last block's tags start at 1 368, so the zone map takes it first, and the filter
         // takes the nineteen others.
         VortexExpr noTag = Expr.Eq(Expr.Field("tag"), Expr.Literal(FilterLiteral.From(1L)));
-        ScanExplanation plan = await file.ScanBuilder().Where(noTag).ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Where(noTag).ExplainAsync(ct);
         Assert.Equal(1, Pruned(plan, "zone map"));
         Assert.Equal(Blocks - 1, Pruned(plan, "bloom filter"));
         Assert.Equal(0, plan.LiveBlocks);
-        Assert.Equal(0, await file.ScanBuilder().Where(noTag).CountAsync());
+        Assert.Equal(0, await file.ScanBuilder().Where(noTag).CountAsync(ct));
 
         // The file's own run still walks every key, in order.
         List<long> expected = [];
@@ -177,6 +181,7 @@ public sealed class IndexFragmentTests
         // An exact source waits for full coverage. One fragment over the first half is a
         // pruner's and not a cursor's; with the second half the two join into one entry, and the
         // walk crosses from one fragment's run into the other's.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] data = await WriteAsync(Guid.NewGuid(), WritePolicy.None);
         RowRange first = new RowRange(0, 10 * BlockRows);
@@ -187,12 +192,12 @@ public sealed class IndexFragmentTests
         await using (VortexFile half = await OpenAsync(data, head.Bytes))
         {
             VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
-                async () => await half.Keys("id").OpenAsync());
+                async () => await half.Keys("id").OpenAsync(ct));
             Assert.Contains("cover 10 of the file's 20 blocks", refused.Message, StringComparison.Ordinal);
         }
 
         await using VortexFile file = await OpenAsync(data, head.Bytes, tail.Bytes);
-        IndexEntry entry = Assert.Single((await file.ReadIndexDirectoryAsync())!.Entries);
+        IndexEntry entry = Assert.Single((await file.ReadIndexDirectoryAsync(ct))!.Entries);
         Assert.Equal(2, entry.Runs.Count);
         Assert.Equal((0UL, 1), (entry.Runs[0].FirstBlock, entry.Runs[0].Origin));
         Assert.Equal((10UL, 2), (entry.Runs[1].FirstBlock, entry.Runs[1].Origin));
@@ -223,6 +228,7 @@ public sealed class IndexFragmentTests
     public async Task AFragmentOfAnotherVersionOfTheFileIsRefusedWithItsReason()
     {
         // The same rows written twice are two versions: a fragment of one is not the other's.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] indexed = await WriteAsync(Guid.NewGuid(), WritePolicy.None);
         byte[] other = await WriteAsync(Guid.NewGuid(), WritePolicy.None);
@@ -230,14 +236,14 @@ public sealed class IndexFragmentTests
         IndexFragment fragment = await FragmentAsync(indexed, Runs("id"), new RowRange(0, Rows));
 
         await using VortexFile file = await OpenAsync(other, fragment.Bytes);
-        Assert.Null(await file.ReadIndexDirectoryAsync());
+        Assert.Null(await file.ReadIndexDirectoryAsync(ct));
         string refusal = Assert.Single(file.IndexFragmentRefusals)!;
         Assert.Contains("the fragment indexes the version", refusal, StringComparison.Ordinal);
         Assert.Contains("stale", refusal, StringComparison.Ordinal);
 
         // A hint refused is a scan without the hint.
         VortexExpr present = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(7))));
-        Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync());
+        Assert.Equal(1, await file.ScanBuilder().Where(present).CountAsync(ct));
     }
 
     [Fact]
@@ -248,7 +254,7 @@ public sealed class IndexFragmentTests
         IndexFragment fragment = await FragmentAsync(data, Runs("id"), Middle);
 
         await using VortexFile file = await OpenAsync(data, fragment.Bytes);
-        IndexEntry entry = Assert.Single((await file.ReadIndexDirectoryAsync())!.Entries);
+        IndexEntry entry = Assert.Single((await file.ReadIndexDirectoryAsync(TestContext.Current.CancellationToken))!.Entries);
         Assert.All(entry.Runs, run => Assert.Equal(0, run.Origin));
         Assert.Contains("is the file's own already", Assert.Single(file.IndexFragmentRefusals), StringComparison.Ordinal);
     }
@@ -263,7 +269,7 @@ public sealed class IndexFragmentTests
         IndexFragment late = await FragmentAsync(data, Runs("id"), new RowRange(8 * BlockRows, Rows));
 
         await using VortexFile file = await OpenAsync(data, early.Bytes, late.Bytes);
-        IndexEntry entry = Assert.Single((await file.ReadIndexDirectoryAsync())!.Entries);
+        IndexEntry entry = Assert.Single((await file.ReadIndexDirectoryAsync(TestContext.Current.CancellationToken))!.Entries);
         IndexRun run = Assert.Single(entry.Runs);
         Assert.Equal((0UL, 12U, 1), (run.FirstBlock, run.BlockCount, run.Origin));
         Assert.Null(file.IndexFragmentRefusals[0]);
@@ -273,19 +279,22 @@ public sealed class IndexFragmentTests
     [Fact]
     public async Task AFragmentIsWholeBlocksBoundToItsFile()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         byte[] data = await WriteAsync(Guid.NewGuid(), WritePolicy.None);
         await using (VortexFile file = await OpenAsync(data))
         {
             // A block cut in two would be claimed by two fragments or by none.
             await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-                async () => await VortexFileIndexer.BuildFragmentAsync(file, Runs("id"), new RowRange(100, 5_000)));
+                async () => await VortexFileIndexer.BuildFragmentAsync(
+                    file, Runs("id"), new RowRange(100, 5_000), cancellationToken: ct));
             await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-                async () => await VortexFileIndexer.BuildFragmentAsync(file, Runs("id"), new RowRange(0, Rows + BlockRows)));
+                async () => await VortexFileIndexer.BuildFragmentAsync(
+                    file, Runs("id"), new RowRange(0, Rows + BlockRows), cancellationToken: ct));
 
             // The end of the file ends a block, whatever its length.
             IndexFragment last = await VortexFileIndexer.BuildFragmentAsync(
-                file, Runs("id"), new RowRange(19 * BlockRows, Rows), options: Build);
+                file, Runs("id"), new RowRange(19 * BlockRows, Rows), options: Build, cancellationToken: ct);
             Assert.Equal(IndexOutcome.Built, Assert.Single(last.Reports).Outcome);
         }
 
@@ -299,14 +308,15 @@ public sealed class IndexFragmentTests
         await using VortexFile unbound = await OpenAsync(anonymous);
         Assert.Null(unbound.StoredIdentity);
         await Assert.ThrowsAsync<ArgumentException>(
-            async () => await VortexFileIndexer.BuildFragmentAsync(unbound, Runs("id"), new RowRange(0, Rows)));
+            async () => await VortexFileIndexer.BuildFragmentAsync(
+                unbound, Runs("id"), new RowRange(0, Rows), cancellationToken: ct));
 
         // With a token it is built; a reader that has no token of its own to compare -- one given
         // bytes rather than a path -- refuses it and says so.
         IndexFragment tokened = await VortexFileIndexer.BuildFragmentAsync(
-            unbound, Runs("id"), new RowRange(0, Rows), storeToken: "store:v1", options: Build);
+            unbound, Runs("id"), new RowRange(0, Rows), storeToken: "store:v1", options: Build, cancellationToken: ct);
         await using VortexFile reader = await OpenAsync(anonymous, tokened.Bytes);
-        Assert.Null(await reader.ReadIndexDirectoryAsync());
+        Assert.Null(await reader.ReadIndexDirectoryAsync(ct));
         Assert.Contains("store token", Assert.Single(reader.IndexFragmentRefusals), StringComparison.Ordinal);
     }
 

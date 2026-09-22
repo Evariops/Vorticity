@@ -133,7 +133,7 @@ public sealed class BloomTreeTests
         Decoders.EnsureRegistered();
         (byte[] bytes, WriteReport report) = await WriteAsync(blocks * Block, Policy());
         await using VortexFile file = await OpenAsync(bytes);
-        IndexRun run = Assert.Single(Assert.Single((await file.ReadIndexDirectoryAsync())!.Entries).Runs);
+        IndexRun run = Assert.Single(Assert.Single((await file.ReadIndexDirectoryAsync(TestContext.Current.CancellationToken))!.Entries).Runs);
         Assert.Equal((0UL, (uint)blocks), (run.FirstBlock, run.BlockCount));
 
         List<Walked> nodes = await WalkAsync(file, run);
@@ -173,6 +173,7 @@ public sealed class BloomTreeTests
     [Fact]
     public async Task APointProbeReadsOneRegionALevelAndAnAbsentValueTheRootAlone()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         int blocks = 4_096;
         (byte[] bytes, _) = await WriteAsync(blocks * Block, Policy());
@@ -182,23 +183,23 @@ public sealed class BloomTreeTests
         // one that holds the key, then its sixteen leaves.
         foreach (int row in (int[])[0, 12_345, (blocks * Block) - 1])
         {
-            ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync();
+            ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(ct);
             PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
             Assert.Equal(4, bloom.SegmentsRead);
             Assert.Equal(1, plan.LiveBlocks);
             Assert.Equal(1, await CountAsync(file, Equal(K(row)), indexes: true));
         }
 
-        ScanExplanation absent = await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync();
+        ScanExplanation absent = await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync(ct);
         Assert.Equal(1, Assert.Single(absent.Pruning, step => step.Structure == "bloom filter").SegmentsRead);
         Assert.Equal(0, absent.LiveBlocks);
         Assert.True(file.MayMatch(Equal(Absent)));
-        Assert.False(await file.MayMatchAsync(Equal(Absent)));
-        Assert.True(await file.MayMatchAsync(Equal(K(7))));
+        Assert.False(await file.MayMatchAsync(Equal(Absent), ct));
+        Assert.True(await file.MayMatchAsync(Equal(K(7)), ct));
 
         // Three keys far apart: the descent is as wide as the output, never wider.
         VortexExpr three = Expr.In(Expr.Field("k"), [FilterLiteral.From(K(3)), FilterLiteral.From(K(9_000)), FilterLiteral.From(K(30_000))]);
-        ScanExplanation wide = await file.ScanBuilder().Where(three).ExplainAsync();
+        ScanExplanation wide = await file.ScanBuilder().Where(three).ExplainAsync(ct);
         Assert.InRange(Assert.Single(wide.Pruning, step => step.Structure == "bloom filter").SegmentsRead, 4, 1 + 1 + 3 + 3);
         Assert.Equal(3, wide.LiveBlocks);
         Assert.Equal(3, await CountAsync(file, three, indexes: true));
@@ -207,6 +208,7 @@ public sealed class BloomTreeTests
     [Fact]
     public async Task ANodePastItsCeilingHasNoFilterAndTheProbeGoesThroughIt()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         int blocks = 4_096;
 
@@ -215,12 +217,12 @@ public sealed class BloomTreeTests
         (byte[] bytes, WriteReport report) = await WriteAsync(blocks * Block, Policy(maxBlocks: 64));
         Assert.Equal(blocks / 16, report.Index("k", IndexKinds.BloomSbbf)!.Generations);
         await using VortexFile file = await OpenAsync(bytes);
-        IndexRun run = Assert.Single(Assert.Single((await file.ReadIndexDirectoryAsync())!.Entries).Runs);
+        IndexRun run = Assert.Single(Assert.Single((await file.ReadIndexDirectoryAsync(ct))!.Entries).Runs);
         List<Walked> nodes = await WalkAsync(file, run);
         Assert.All(nodes, n => Assert.Equal(n.Node.Level == 1, n.Node.FilterBlocks > 0));
 
         // The root, the level-2 nodes, all sixteen groups of generations, one generation's leaves.
-        ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(12_345))).ExplainAsync();
+        ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(12_345))).ExplainAsync(ct);
         Assert.Equal(1 + 1 + 16 + 1, Assert.Single(plan.Pruning, step => step.Structure == "bloom filter").SegmentsRead);
         Assert.Equal(1, plan.LiveBlocks);
         Assert.Equal(1, await CountAsync(file, Equal(K(12_345)), indexes: true));
@@ -230,7 +232,7 @@ public sealed class BloomTreeTests
         Assert.Equal(0, one.Index("k", IndexKinds.BloomSbbf)!.Generations);
         await using VortexFile flat = await OpenAsync(leavesOnly);
         Assert.Equal(1, await CountAsync(flat, Equal(K(100)), indexes: true));
-        Assert.True(await flat.MayMatchAsync(Equal(Absent)));
+        Assert.True(await flat.MayMatchAsync(Equal(Absent), ct));
     }
 
     [Fact]
@@ -239,6 +241,7 @@ public sealed class BloomTreeTests
         // Under Auto, a column whose first generation passes a node's capacity is given up. Wide
         // unique strings keep a block filter under Auto's share, and fourteen blocks of them hold
         // more values than a node of 4 096 blocks holds at 1 %.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DType schema = Types.Struct(["s"], [Types.Utf8(Nullability.NonNullable)], Nullability.NonNullable);
         const int rowsPerBlock = 8_192;
@@ -261,11 +264,11 @@ public sealed class BloomTreeTests
                     int column = WideStrings(arena, schema.GetField(0), block * rowsPerBlock, rowsPerBlock);
                     using RecordBatch batch = new RecordBatch(
                         arena, arena.AddStruct(schema, rowsPerBlock, Validity.NonNullable, [column]), block * rowsPerBlock);
-                    await writer.WriteAsync(batch);
+                    await writer.WriteAsync(batch, ct);
                     arena.Reset();
                 }
 
-                report = await writer.CompleteAsync();
+                report = await writer.CompleteAsync(ct);
             }
 
             IndexWriteReport bloom = Assert.IsType<IndexWriteReport>(report.Index("s", IndexKinds.BloomSbbf));
@@ -288,6 +291,7 @@ public sealed class BloomTreeTests
     [Fact]
     public async Task AnAppendCutsTheOldTreeAndProbesBoth()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-bloomtree-{Guid.NewGuid():N}.vortex");
         try
@@ -296,20 +300,20 @@ public sealed class BloomTreeTests
             // and which the tree before it must not answer for.
             int rows = (300 * Block) + 5;
             (byte[] first, _) = await WriteAsync(rows, Policy());
-            await System.IO.File.WriteAllBytesAsync(path, first);
+            await System.IO.File.WriteAllBytesAsync(path, first, ct);
             for (int append = 0; append < 3; append++)
             {
                 int added = (70 * Block) + 2;
-                await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, Options(Policy())))
+                await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, Options(Policy()), ct))
                 {
                     await FeedAsync(writer, rows, rows + added);
-                    await writer.CompleteAsync();
+                    await writer.CompleteAsync(ct);
                 }
 
                 int boundary = rows / Block;
                 rows += added;
-                await using VortexFile file = await VortexFile.OpenAsync(path);
-                IndexEntry entry = Assert.Single((await file.ReadIndexDirectoryAsync())!.Entries);
+                await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+                IndexEntry entry = Assert.Single((await file.ReadIndexDirectoryAsync(ct))!.Entries);
                 Assert.Equal(append + 2, entry.Runs.Count);
                 IndexRun cut = entry.Runs[^2];
                 Assert.Equal((ulong)boundary, cut.EndBlock);
@@ -321,11 +325,11 @@ public sealed class BloomTreeTests
                 foreach (int row in (int[])[0, (boundary * Block) - 1, boundary * Block, (boundary * Block) + 4, rows - 1])
                 {
                     Assert.Equal(1, await CountAsync(file, Equal(K(row)), indexes: true));
-                    ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync();
+                    ScanExplanation plan = await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(ct);
                     Assert.Equal(1, plan.LiveBlocks);
                 }
 
-                Assert.Equal(0, (await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync()).LiveBlocks);
+                Assert.Equal(0, (await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync(ct)).LiveBlocks);
             }
         }
         finally
@@ -338,6 +342,7 @@ public sealed class BloomTreeTests
     public async Task ATornRegionClaimsNothingBeneathIt()
     {
         // Two hundred blocks: a root of level 2, whose children are the one group of generations.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         int blocks = 200;
         (byte[] original, _) = await WriteAsync(blocks * Block, Policy());
@@ -352,12 +357,12 @@ public sealed class BloomTreeTests
         byte[] torn = (byte[])original.Clone();
         torn[(int)generations.Offset + ((int)generations.Length / 3)] ^= 0x40;
         await using VortexFile opened = await OpenAsync(torn);
-        ScanExplanation plan = await opened.ScanBuilder().Where(Equal(K(1_000))).ExplainAsync();
+        ScanExplanation plan = await opened.ScanBuilder().Where(Equal(K(1_000))).ExplainAsync(ct);
         Assert.Equal(0, Assert.Single(plan.Pruning, step => step.Structure == "bloom filter").BlocksPruned);
         Assert.Equal(1, await CountAsync(opened, Equal(K(1_000)), indexes: true));
 
         // A value absent from the file is still refused by the root, which is intact.
-        Assert.Equal(0, (await opened.ScanBuilder().Where(Equal(Absent)).ExplainAsync()).LiveBlocks);
+        Assert.Equal(0, (await opened.ScanBuilder().Where(Equal(Absent)).ExplainAsync(ct)).LiveBlocks);
     }
 
     [Fact]
@@ -387,7 +392,7 @@ public sealed class BloomTreeTests
             await using VortexFile file = await OpenAsync(bytes);
             int row = random.Next(blocks * Block);
             Assert.Equal(1, await CountAsync(file, Equal(K(row)), indexes: true));
-            pruned += (await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync()).LiveBlocks < blocks ? 1 : 0;
+            pruned += (await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(TestContext.Current.CancellationToken)).LiveBlocks < blocks ? 1 : 0;
         }
 
         // Most mutations leave the probe's path alone, and those still prune.
@@ -404,7 +409,7 @@ public sealed class BloomTreeTests
         {
             (byte[] bytes, _) = await WriteAsync(blocks * Block, Policy());
             await using VortexFile file = await OpenAsync(bytes);
-            sizes[at++] = (await file.ReadIndexDirectoryAsync())!.ToBytes().Length;
+            sizes[at++] = (await file.ReadIndexDirectoryAsync(TestContext.Current.CancellationToken))!.ToBytes().Length;
         }
 
         // A varint or two of the root's size and the run's blocks, nothing else.

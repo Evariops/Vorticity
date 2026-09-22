@@ -115,13 +115,14 @@ public sealed class ListBloomTests
     [Fact]
     public async Task TheWriterBuildsAFilterOverTheElements()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         ListShape shape = ListShapes.Build("list_i64", Rows);
         string path = await WriteAsync(shape, Policy);
         try
         {
-            await using VortexFile file = await VortexFile.OpenAsync(path);
-            VortexIndexInfo info = Assert.Single(await file.ReadIndexesAsync());
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            VortexIndexInfo info = Assert.Single(await file.ReadIndexesAsync(ct));
             Assert.Equal(("items", IndexKinds.BloomSbbf, VortexIndexLayout.FilterTree), (info.Column, info.Kind, info.Layout));
             Assert.Equal((long)Block, info.BlockLength);
         }
@@ -144,6 +145,7 @@ public sealed class ListBloomTests
     [MemberData(nameof(Values))]
     public async Task AScanAnswersTheSameWithTheFiltersAsWithout(string what, long value)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         ListShape shape = ListShapes.Build("list_i64", Rows);
         string indexed = await WriteAsync(shape, Policy);
@@ -153,25 +155,25 @@ public sealed class ListBloomTests
             VortexExpr filter = Expr.ListContains(Expr.Field("items"), FilterLiteral.From(value));
             List<string> expected = Matching(shape, filter);
             Assert.Equal(what.StartsWith("in ", StringComparison.Ordinal), expected.Count > 0);
-            await using VortexFile withFilters = await VortexFile.OpenAsync(indexed);
-            await using VortexFile without = await VortexFile.OpenAsync(plain);
+            await using VortexFile withFilters = await VortexFile.OpenAsync(indexed, ct);
+            await using VortexFile without = await VortexFile.OpenAsync(plain, ct);
             Assert.Equal(expected, await RowsAsync(withFilters, filter));
             Assert.Equal(expected, await RowsAsync(without, filter));
-            Assert.Equal(expected.Count, await withFilters.ScanBuilder().Where(filter).CountAsync());
+            Assert.Equal(expected.Count, await withFilters.ScanBuilder().Where(filter).CountAsync(ct));
 
             // What the filters proved: every block but those that hold the value.
-            ScanExplanation plan = await withFilters.ScanBuilder().Where(filter).ExplainAsync();
+            ScanExplanation plan = await withFilters.ScanBuilder().Where(filter).ExplainAsync(ct);
             int holding = BlocksHolding(shape, value);
             Assert.True(plan.LiveBlocks <= Math.Max(holding, 0) + FalsePositives(plan.Blocks), $"{what}: {plan.LiveBlocks} live of {plan.Blocks}, {holding} holding");
             PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
             Assert.True(bloom.BlocksPruned > 0, what);
 
             // An equality on the list column is not the same question, and the filter claims nothing.
-            ScanExplanation equality = await withFilters.ScanBuilder().Where(Expr.Eq(Expr.Field("items"), Expr.Literal(FilterLiteral.From(value)))).ExplainAsync();
+            ScanExplanation equality = await withFilters.ScanBuilder().Where(Expr.Eq(Expr.Field("items"), Expr.Literal(FilterLiteral.From(value)))).ExplainAsync(ct);
             Assert.DoesNotContain(equality.Pruning, step => step.Structure == "bloom filter" && step.BlocksPruned > 0);
 
             // The file-level filter answers for the whole file.
-            Assert.Equal(expected.Count > 0 || holding > 0, await withFilters.MayMatchAsync(filter));
+            Assert.Equal(expected.Count > 0 || holding > 0, await withFilters.MayMatchAsync(filter, ct));
         }
         finally
         {
@@ -184,6 +186,7 @@ public sealed class ListBloomTests
     public async Task AListUnderANullStructNamesNothing()
     {
         // `person.tags`: "ghost" is only ever in the tags of a null person.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         const int rows = 4 * Block;
         DTypeArena types = new DTypeArena();
@@ -227,22 +230,22 @@ public sealed class ListBloomTests
             await using (VortexFileWriter writer = VortexFileWriter.Create(path, schema, options))
             {
                 using RecordBatch batch = new RecordBatch(arena, root, 0);
-                await writer.WriteAsync(batch);
-                WriteReport report = await writer.CompleteAsync();
+                await writer.WriteAsync(batch, ct);
+                WriteReport report = await writer.CompleteAsync(ct);
                 IndexWriteReport built = Assert.IsType<IndexWriteReport>(report.Index("person.tags", IndexKinds.BloomSbbf));
                 Assert.True(built.Outcome == IndexOutcome.Built, built.Reason);
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             VortexExpr ghost = Expr.ListContains(Expr.Field("person.tags"), FilterLiteral.From("ghost"));
-            Assert.Equal(0, await file.ScanBuilder().Where(ghost).CountAsync());
-            ScanExplanation plan = await file.ScanBuilder().Where(ghost).ExplainAsync();
+            Assert.Equal(0, await file.ScanBuilder().Where(ghost).CountAsync(ct));
+            ScanExplanation plan = await file.ScanBuilder().Where(ghost).ExplainAsync(ct);
             Assert.Equal(0, plan.LiveBlocks);
 
             VortexExpr tag = Expr.ListContains(Expr.Field("person.tags"), FilterLiteral.From("tag-5"));
             Assert.Equal(
                 Enumerable.Range(0, rows).Count(row => valid[row] && row % 97 == 5),
-                await file.ScanBuilder().Where(tag).CountAsync());
+                await file.ScanBuilder().Where(tag).CountAsync(ct));
         }
         finally
         {
@@ -266,6 +269,7 @@ public sealed class ListBloomTests
     [Fact]
     public async Task AutoWeighsAListLikeAnyOtherColumn()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         ListShape shape = ListShapes.Build("list_utf8", Rows);
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-listbloom-{Guid.NewGuid():N}.vortex");
@@ -275,10 +279,10 @@ public sealed class ListBloomTests
                 path, shape.Schema, new VortexWriteOptions { RowBlockSize = Block, Identity = Pinned, WritePolicy = WritePolicy.Auto });
             using (RecordBatch batch = new RecordBatch(shape.Arena, shape.Root, 0))
             {
-                await writer.WriteAsync(batch);
+                await writer.WriteAsync(batch, ct);
             }
 
-            WriteReport report = await writer.CompleteAsync();
+            WriteReport report = await writer.CompleteAsync(ct);
             IndexWriteReport items = Assert.IsType<IndexWriteReport>(report.Index("items", IndexKinds.BloomSbbf));
             Assert.True(
                 items.Outcome == IndexOutcome.Built || items.Reason!.StartsWith("Auto gave it up", StringComparison.Ordinal),
@@ -293,6 +297,7 @@ public sealed class ListBloomTests
     [Fact]
     public async Task AnIndexAddedLaterAnswersAsTheOneWrittenWithTheData()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         ListShape shape = ListShapes.Build("list_i64", Rows);
         string later = await WriteAsync(shape, WritePolicy.None);
@@ -300,14 +305,14 @@ public sealed class ListBloomTests
         try
         {
             IReadOnlyList<IndexWriteReport> reports = await VortexFileIndexer.AppendIndexesAsync(
-                later, Policy, new VortexWriteOptions { IndexBudgetPerMille = Unbounded });
+                later, Policy, new VortexWriteOptions { IndexBudgetPerMille = Unbounded }, ct);
             Assert.Contains(reports, r => r.Column == "items" && r.Outcome == IndexOutcome.Built);
 
             VortexExpr filter = Expr.ListContains(Expr.Field("items"), FilterLiteral.From(Element(12_345)));
-            await using VortexFile a = await VortexFile.OpenAsync(later);
-            await using VortexFile b = await VortexFile.OpenAsync(written);
-            ScanExplanation planA = await a.ScanBuilder().Where(filter).ExplainAsync();
-            ScanExplanation planB = await b.ScanBuilder().Where(filter).ExplainAsync();
+            await using VortexFile a = await VortexFile.OpenAsync(later, ct);
+            await using VortexFile b = await VortexFile.OpenAsync(written, ct);
+            ScanExplanation planA = await a.ScanBuilder().Where(filter).ExplainAsync(ct);
+            ScanExplanation planB = await b.ScanBuilder().Where(filter).ExplainAsync(ct);
             Assert.Equal(planB.LiveBlocks, planA.LiveBlocks);
             Assert.Equal(await RowsAsync(b, filter), await RowsAsync(a, filter));
         }
@@ -323,6 +328,7 @@ public sealed class ListBloomTests
     {
         // The first block's lists are all null; the zone map's null count proves it holds no row
         // for the predicate and none for its negation.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         List<long?[]?> rows = [];
         for (int row = 0; row < 3 * Block; row++)
@@ -338,22 +344,22 @@ public sealed class ListBloomTests
                 path, batch.Schema, new VortexWriteOptions { RowBlockSize = Block, Identity = Pinned, WritePolicy = WritePolicy.None }))
             {
                 using RecordBatch record = new RecordBatch(batch.Arena, batch.Root, 0);
-                await writer.WriteAsync(record);
-                await writer.CompleteAsync();
+                await writer.WriteAsync(record, ct);
+                await writer.CompleteAsync(ct);
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             VortexExpr contains = Expr.ListContains(Expr.Field("items"), FilterLiteral.From(Block + 5L));
             foreach (VortexExpr filter in new[] { contains, Expr.Not(contains) })
             {
-                ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync();
+                ScanExplanation plan = await file.ScanBuilder().Where(filter).ExplainAsync(ct);
                 PruningStep zones = Assert.Single(plan.Pruning, step => step.Structure == "zone map");
                 Assert.Equal(1, zones.BlocksPruned);
             }
 
             // Rows 516 and 517 hold 517; the null lists are neither.
-            Assert.Equal(2, await file.ScanBuilder().Where(contains).CountAsync());
-            Assert.Equal((2 * Block) - 2, await file.ScanBuilder().Where(Expr.Not(contains)).CountAsync());
+            Assert.Equal(2, await file.ScanBuilder().Where(contains).CountAsync(ct));
+            Assert.Equal((2 * Block) - 2, await file.ScanBuilder().Where(Expr.Not(contains)).CountAsync(ct));
         }
         finally
         {

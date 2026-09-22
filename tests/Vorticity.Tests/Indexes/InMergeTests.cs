@@ -11,6 +11,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -46,6 +47,7 @@ public sealed class InMergeTests
     [MemberData(nameof(Shapes))]
     public async Task AnInListAnswersTheRowsWhateverItsLength(int literals, int stride)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = await WriteAsync();
         try
@@ -67,8 +69,8 @@ public sealed class InMergeTests
             HashSet<long> set = [.. wanted];
             List<long> expected = [.. Enumerable.Range(0, Rows).Select(Key).Where(set.Contains)];
 
-            await using VortexFile file = await VortexFile.OpenAsync(path);
-            Assert.Equal(expected.Count, await file.ScanBuilder().Where(filter).CountAsync());
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            Assert.Equal(expected.Count, await file.ScanBuilder().Where(filter).CountAsync(ct));
             Assert.Equal(expected, await KeysAsync(file, filter));
 
             // The same answer with the indexes out of the way.
@@ -83,6 +85,7 @@ public sealed class InMergeTests
     [Fact]
     public async Task TheTwoZerosOfAFloatKeyAreOneAnswer()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         CanonicalArena arena = new CanonicalArena();
@@ -109,11 +112,11 @@ public sealed class InMergeTests
             await using (VortexFileWriter writer = VortexFileWriter.Create(path, schema, Options()))
             {
                 using RecordBatch batch = new RecordBatch(arena, root, 0);
-                await writer.WriteAsync(batch);
-                await writer.CompleteAsync();
+                await writer.WriteAsync(batch, ct);
+                await writer.CompleteAsync(ct);
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             VortexExpr zero = Expr.In(Expr.Field("key"), FilterLiteral.From(0.0), FilterLiteral.From(1.5));
             // Row 1 holds 1.5; rows 17 and 2 000 hold the two zeros, which one literal asks for.
             List<double> selected = [];
