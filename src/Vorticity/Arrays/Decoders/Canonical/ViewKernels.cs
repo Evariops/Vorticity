@@ -464,43 +464,8 @@ internal static class ViewKernels
         if (wanted.IsEmpty)
         {
             // The dense loop is its own loop: `selective` is loop-invariant, and testing it per row
-            // would add a branch and a bounds check on a path that has no selection at all. The two
-            // spans are addressed by reference for the same reason: slicing them per row is a check
-            // and a span construction, handed to a method that takes the reference of each
-            // immediately.
-            //
-            // The remaining per-row check is the one that is not redundant: `size` comes from the
-            // file, and the sum of the sizes is what the caller allocated the heap from, so a row
-            // running past the end means the two disagree and the file is malformed.
-            ReadOnlySpan<TLen> dense = typed[..count];
-            ref byte heapRef = ref MemoryMarshal.GetReference(heap);
-            ref byte viewRef = ref MemoryMarshal.GetReference(views);
-            int heapLength = heap.Length;
-
-            for (int i = 0; i < count; i++)
-            {
-                int size = (int)Widen(dense[i]);
-                if ((uint)size > (uint)(heapLength - offset))
-                {
-                    ThrowRowPastHeap(i, offset, size, heapLength);
-                }
-
-                ref byte value = ref Unsafe.Add(ref heapRef, offset);
-
-                // The whole heap is already known valid, so a row is valid exactly when it starts
-                // on a code-point boundary. The last row ends at the heap's end, which is a
-                // boundary by construction, so only the starts are tested.
-                if (requireUtf8 && size != 0 && (value & 0xC0) == 0x80)
-                {
-                    ThrowInvalidRow(i);
-                }
-
-                referenced |= CanonicalSupport.WriteView(
-                    ref Unsafe.Add(ref viewRef, i * ViewSize), ref value, size, 0, offset);
-                offset += size;
-            }
-
-            return referenced;
+            // would add a branch and a bounds check on a path that has no selection at all.
+            return DenseFromLengths(typed[..count], heap, views, requireUtf8);
         }
 
         for (int i = 0; i < count; i++)
@@ -525,6 +490,173 @@ internal static class ViewKernels
         throw new VortexFormatException(
             $"Row {row} spans [{offset}, {(long)offset + size}) of a {heapLength}-byte decoded " +
             "heap; the row lengths and the heap disagree.");
+
+    /// <summary>
+    /// The dense arm of <see cref="FromLengths{TLen}"/>: every row, its length from
+    /// <paramref name="lengths"/>, its bytes the next ones of the heap.
+    /// </summary>
+    /// <returns><see langword="true"/> when any view references the heap rather than inlining.</returns>
+    /// <remarks>
+    /// <para>
+    /// The loop calls nothing, so that what it holds stays in registers: a call in it, even one
+    /// only an error takes, has every row store and reload its state around it. A row that runs
+    /// past the heap, or does not start on a character of a UTF-8 heap, ends the loop instead,
+    /// and is reported after it.
+    /// </para>
+    /// <para>
+    /// A row is checked against the heap because its length comes from the file: the sum of the
+    /// lengths is what the caller allocated the heap from, so a row running past the end means the
+    /// two disagree. The whole heap is already known valid UTF-8, so a row is valid exactly when it
+    /// starts on a code-point boundary; the last row ends at the heap's end, a boundary by
+    /// construction, so only the starts are tested.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool DenseFromLengths<TLen>(
+        ReadOnlySpan<TLen> lengths, ReadOnlySpan<byte> heap, Span<byte> views, bool requireUtf8)
+        where TLen : unmanaged
+    {
+        ref byte heapRef = ref MemoryMarshal.GetReference(heap);
+        ref byte viewRef = ref MemoryMarshal.GetReference(views);
+        int heapLength = heap.Length;
+        int count = lengths.Length;
+        bool referenced = false;
+        int offset = 0;
+        int i = 0;
+        for (; i < count; i++)
+        {
+            int size = (int)Widen(lengths[i]);
+            if ((uint)size > (uint)(heapLength - offset)
+                || !Place(ref Unsafe.Add(ref viewRef, i * ViewSize), ref heapRef, offset, size, heapLength, requireUtf8))
+            {
+                break;
+            }
+
+            referenced |= size > Inline;
+            offset += size;
+        }
+
+        if (i < count)
+        {
+            int size = (int)Widen(lengths[i]);
+            if ((uint)size > (uint)(heapLength - offset))
+            {
+                ThrowRowPastHeap(i, offset, size, heapLength);
+            }
+
+            ThrowInvalidRow(i);
+        }
+
+        return referenced;
+    }
+
+    /// <summary>
+    /// The dense arm of <see cref="FromOffsets{TOff}"/>: every row valid, and a UTF-8 heap already
+    /// checked whole, so that a row's only check is that it starts on a character.
+    /// </summary>
+    /// <remarks>
+    /// Calls nothing, for <see cref="DenseFromLengths{TLen}"/>'s reason: a row out of the heap, or
+    /// off a character, ends the loop and is reported after it. The offsets come from the file, and
+    /// the check that a row lies inside the heap is what keeps their ascending and in-heap
+    /// properties, established elsewhere, from being load-bearing here.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void DenseFromOffsets<TOff>(
+        ReadOnlySpan<TOff> offsets, ReadOnlySpan<byte> heap, Span<byte> views, int count, bool requireUtf8)
+        where TOff : unmanaged
+    {
+        ref byte heapRef = ref MemoryMarshal.GetReference(heap);
+        ref byte viewRef = ref MemoryMarshal.GetReference(views);
+        int heapLength = heap.Length;
+        int start = (int)Widen(offsets[0]);
+        int i = 0;
+        for (; i < count; i++)
+        {
+            int end = (int)Widen(offsets[i + 1]);
+            int size = end - start;
+            if ((uint)start > (uint)heapLength
+                || (uint)size > (uint)(heapLength - start)
+                || !Place(ref Unsafe.Add(ref viewRef, i * ViewSize), ref heapRef, start, size, heapLength, requireUtf8))
+            {
+                break;
+            }
+
+            start = end;
+        }
+
+        if (i < count)
+        {
+            int size = (int)Widen(offsets[i + 1]) - start;
+            if ((uint)start > (uint)heapLength || (uint)size > (uint)(heapLength - start))
+            {
+                ThrowRowPastHeap(i, start, size, heapLength);
+            }
+
+            ThrowInvalidRow(i);
+        }
+    }
+
+    /// <summary>
+    /// Writes the view of the <paramref name="size"/> bytes at <paramref name="offset"/> of a heap
+    /// they lie inside; false, and nothing written, when a UTF-8 row starts off a character.
+    /// </summary>
+    /// <remarks>
+    /// A value too long to inline is its length, its first four bytes and its offset. One short
+    /// enough, with twelve bytes of heap from its start, is read as two words whatever its size and
+    /// masked down to it, where gathering exactly its bytes branches on the size three ways. The
+    /// branch left, inline or not, is the one a column predicts: its values are mostly one or the
+    /// other. A short value nearer the heap's end than twelve bytes is gathered byte-exact by
+    /// <see cref="CanonicalSupport.WriteView(ref byte, ref byte, int, int, int)"/>, since the two
+    /// words would read past the heap.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool Place(
+        ref byte view, ref byte heap, int offset, int size, int heapLength, bool requireUtf8)
+    {
+        ref byte value = ref Unsafe.Add(ref heap, offset);
+        if (requireUtf8 && size != 0 && (value & 0xC0) == 0x80)
+        {
+            return false;
+        }
+
+        if (size > Inline)
+        {
+            Unsafe.WriteUnaligned(ref view, (uint)size | ((ulong)Unsafe.ReadUnaligned<uint>(ref value) << 32));
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), (ulong)(uint)offset << 32);
+            return true;
+        }
+
+        if (heapLength - offset < Inline)
+        {
+            CanonicalSupport.WriteView(ref view, ref value, size, 0, offset);
+            return true;
+        }
+
+        ulong low = Unsafe.ReadUnaligned<ulong>(ref value) & InlineLowMasks[size];
+        ulong high = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref value, sizeof(ulong))) & (ulong)InlineHighMasks[size];
+        Unsafe.WriteUnaligned(ref view, (uint)size | (low << 32));
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), (low >> 32) | (high << 32));
+        return true;
+    }
+
+    /// <summary>
+    /// Per size up to <see cref="Inline"/>, the bits of a value's first eight bytes that are the
+    /// value's.
+    /// </summary>
+    private static ReadOnlySpan<ulong> InlineLowMasks =>
+    [
+        0x0000_0000_0000_0000, 0x0000_0000_0000_00FF, 0x0000_0000_0000_FFFF, 0x0000_0000_00FF_FFFF,
+        0x0000_0000_FFFF_FFFF, 0x0000_00FF_FFFF_FFFF, 0x0000_FFFF_FFFF_FFFF, 0x00FF_FFFF_FFFF_FFFF,
+        0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF,
+        0xFFFF_FFFF_FFFF_FFFF,
+    ];
+
+    /// <summary>Per size up to <see cref="Inline"/>, the bits of a value's ninth to twelfth bytes that are the value's.</summary>
+    private static ReadOnlySpan<uint> InlineHighMasks =>
+    [
+        0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000, 0x0000_0000,
+        0x0000_0000, 0x0000_0000, 0x0000_00FF, 0x0000_FFFF, 0x00FF_FFFF, 0xFFFF_FFFF,
+    ];
 
     /// <summary>
     /// Cuts <paramref name="heap"/> into views by <c>offsets[i]..offsets[i + 1]</c>.
@@ -695,6 +827,13 @@ internal static class ViewKernels
         // being load-bearing here.
         ReadOnlySpan<TOff> typed = MemoryMarshal.Cast<byte, TOff>(offsets)[..(count + 1)];
         bool allValid = mask.AllValid;
+        if (allValid)
+        {
+            // Every row valid means a UTF-8 heap was checked whole, so a start check is all a row needs.
+            DenseFromOffsets(typed, heap, views, count, requireUtf8);
+            return;
+        }
+
         int start = (int)Widen(typed[0]);
 
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
