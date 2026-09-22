@@ -25,9 +25,10 @@ namespace Vorticity.Tests.Scan;
 /// that ignored the number entirely would pass every one of them.
 /// </para>
 /// <para>
-/// What is counted is overlapping <c>ReadManyAsync</c> calls. Each lane issues exactly one per
-/// batch and waits for it, so the number of reads in flight is the number of lanes at work, and
-/// the source is the only place both are visible. The source holds each read open briefly so that
+/// What is counted is overlapping <c>ReadManyAsync</c> calls. A scan reads each segment once, so a
+/// batch reads only what no earlier batch holds; over a file of one chunk per batch that is one
+/// read per batch, each lane waits for its own, and the number of reads in flight is the number of
+/// lanes at work. The source is the only place both are visible. The source holds each read open briefly so that
 /// an overlap which exists has time to be seen; without that the lanes would have to be unlucky to
 /// be caught together, and the test would pass by missing them.
 /// </para>
@@ -35,8 +36,9 @@ namespace Vorticity.Tests.Scan;
 [Collection(nameof(AllocationCollection))]
 public sealed class DegreeOfParallelismTests
 {
-    private const string Multi = "distributions/high_cardinality_i64_r8193";
-    private const int BatchRows = 500;
+    // Sixty-four chunks of 1 024 rows, and a batch per chunk.
+    private const string Multi = "containers/zoned_many_zones_nulls";
+    private const int BatchRows = 1024;
 
     [Theory]
     [InlineData(1)]

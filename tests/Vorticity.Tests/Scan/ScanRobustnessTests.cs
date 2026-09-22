@@ -166,8 +166,11 @@ public sealed class ScanRobustnessTests
     public async Task AFailingReadPropagatesAndReleasesEverything()
     {
         Decoders.EnsureRegistered();
+        // Four chunks of 1 024 rows: a batch of 1 000 rows needs a chunk no earlier batch read, so
+        // the third batch makes the third read, while the chunk the second batch still holds must
+        // be released all the same.
         FailAfterSource source = new FailAfterSource(
-            MemoryMappedSegmentSource.Open(Corpus.Path("distributions/high_cardinality_i64_r8193")), 2);
+            MemoryMappedSegmentSource.Open(Corpus.Path("containers/chunked_layout_rowblock1024")), 2);
         await using VortexFile file = await VortexFile.OpenAsync(
             source, new VortexOpenOptions(), CancellationToken.None);
 

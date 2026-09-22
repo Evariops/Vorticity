@@ -12,6 +12,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -125,7 +126,7 @@ public sealed class ScanIoTests
     }
 
     [Fact]
-    public async Task ExactlyOneReadManyPerBatch()
+    public async Task AtMostOneReadManyPerBatchAndEachSegmentOnce()
     {
         Decoders.EnsureRegistered();
 
@@ -136,15 +137,16 @@ public sealed class ScanIoTests
 
         source.ResetCounters();
 
+        // A batch reads, in one request, only the segments no earlier batch of the scan holds.
         int batches = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync())
         {
             batches++;
-            Assert.Equal(batches, source.ReadManyCalls);
+            Assert.InRange(source.ReadManyCalls, 1, batches);
         }
 
         Assert.True(batches >= 9);
-        Assert.Equal(batches, source.ReadManyCalls);
+        AssertEachRequestedOnce(source);
 
         // The scan uses the batched entry point only: no single reads, no range reads, no length
         // probes after open.
@@ -158,7 +160,7 @@ public sealed class ScanIoTests
     [InlineData("containers/chunked_stream_3")]
     [InlineData("types/date_days_nullable_r8193")]
     [InlineData("distributions/long_runs_i32_r8193")]
-    public async Task OneReadManyPerBatchAcrossLayoutShapes(string entry)
+    public async Task AtMostOneReadManyPerBatchAcrossLayoutShapes(string entry)
     {
         Decoders.EnsureRegistered();
 
@@ -175,7 +177,15 @@ public sealed class ScanIoTests
             batches++;
         }
 
-        Assert.Equal(batches, source.ReadManyCalls);
+        Assert.InRange(source.ReadManyCalls, 1, batches);
+        AssertEachRequestedOnce(source);
+    }
+
+    /// <summary>A scan asks its source for each segment once, whatever its batches share.</summary>
+    private static void AssertEachRequestedOnce(RecordingSegmentSource source)
+    {
+        List<(ulong Offset, uint Length)> asked = [.. source.Requested.Select(spec => (spec.Offset, spec.Length))];
+        Assert.Equal(asked.Count, asked.Distinct().Count());
     }
 
     private static async Task<HashSet<uint>> RequestedFor(string entry, int[]? fields)

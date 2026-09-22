@@ -82,7 +82,9 @@ public sealed class IndexFragmentTests
         ScanExplanation plan = await file.ScanBuilder().Where(absent).ExplainAsync();
         Assert.Equal(0, Pruned(plan, "zone map"));
         Assert.Equal(8, Pruned(plan, "locating index"));
-        Assert.Equal(Blocks - 8, plan.LiveBlocks);
+        Assert.True(
+            plan.LiveBlocks == Blocks - 8,
+            $"{plan.LiveBlocks} of {plan.Blocks} blocks live, expected {Blocks - 8}: {string.Join("; ", plan.Pruning)}");
         Assert.Equal(0, await file.ScanBuilder().Where(absent).CountAsync());
 
         // Keys the range holds, found where they are: builders fed a range without its first block
