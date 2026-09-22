@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Experimental, like Vorticity.RowEncoding and for a related reason: docs/design/13-dataset.md
-       describes a format this repository is the first to write, and §15 still lists decisions left
-       open. The core knows nothing of this package; this package references the core, and the row
-       encoding too, which is the order a clustering key is kept in (§4.1). -->
+  <!-- Experimental, like Vorticity.RowEncoding and for a related reason: the dataset's format is
+       one this repository is the first to write, with decisions still open. The core knows nothing
+       of this package; this package references the core, and the row encoding too, which is the
+       order a clustering key is kept in. -->
   <PropertyGroup>
     <RootNamespace>Vorticity.Dataset</RootNamespace>
     <AssemblyName>Vorticity.Dataset</AssemblyName>
@@ -14,9 +14,8 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
   </PropertyGroup>
 
-  <!-- The core, and the row encoding a clustering key is ordered by (docs/design/13-dataset.md §4.1: "the
-       row-encoded (min, max) of the clustering key"). Both are the reference direction this package
-       already had: the core knows nothing of either. -->
+  <!-- The core, and the row encoding a clustering key is ordered by: an object's summary holds the
+       row-encoded minimum and maximum of its clustering key. The core knows nothing of either. -->
   <ItemGroup>
     <ProjectReference Include="../Vorticity/Vorticity.csproj" />
     <ProjectReference Include="../Vorticity.RowEncoding/Vorticity.RowEncoding.csproj" />

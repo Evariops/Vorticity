@@ -10,9 +10,8 @@
     <PackageVersion Include="Microsoft.VisualStudio.Threading.Analyzers" Version="17.14.15" />
     <!-- The compiler API the generator and the analyzers build against: the oldest compiler they load into. -->
     <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="4.14.0" />
-    <!-- The one first-party runtime dependency docs/design/03-architecture.md §1 admits: XxHash3-64 for
-         the write path's distinct table and, later, the Bloom filters. dotnet/runtime, MIT, not
-         carried by the shared framework. Decided 2026-09-15, docs/design/10-indexes.md §11. -->
+    <!-- The one runtime dependency, first-party: XxHash3-64 for the write path's distinct table and
+         the Bloom filters. dotnet/runtime, MIT, not carried by the shared framework. -->
     <PackageVersion Include="System.IO.Hashing" Version="10.0.5" />
   </ItemGroup>
 </Project>

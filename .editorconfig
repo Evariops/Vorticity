@@ -116,12 +116,12 @@ dotnet_diagnostic.CA1835.severity = error
 # the `_` arm IS the answer -- "this width has no kernel", "this encoding is not compressed" --
 # and where naming twenty members would say less than the one arm does.
 #
-# On CanonicalKind it is the opposite, and PERF-AUDIT-v2.md §2.4bis is why. These five files each
-# carry THE exhaustive switch over the nine kinds, and each of their `default:`/`_` arms was not a
-# throw but the LAST KIND'S ARM: a tenth kind would have been filtered, re-wrapped, sliced,
-# concatenated and WRITTEN as an extension or a struct, with no build error and no exception --
-# and on ArrayBlobWriter that is a coherent file carrying the wrong array, which byte-exact
-# WrittenSizeTests cannot catch because the bytes agree with themselves.
+# On CanonicalKind it is the opposite. These five files each carry the exhaustive switch over the
+# nine kinds, and a `default:`/`_` arm there would be the last kind's arm rather than a throw: a
+# tenth kind would be filtered, re-wrapped, sliced, concatenated and written as an extension or a
+# struct, with no build error and no exception -- and on ArrayBlobWriter that is a coherent file
+# carrying the wrong array, which byte-exact WrittenSizeTests cannot catch because the bytes agree
+# with themselves.
 #
 # WHY NOT THE COMPILER. The audit expected CS8509. It does not apply: an enum switch expression
 # that names every member and drops `_` is CS8524 instead -- the UNNAMED values are uncovered --

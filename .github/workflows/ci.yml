@@ -18,8 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # docs/design/05-benchmarks.md §1: every kernel has a NEON path by contract, so the arm64 leg is
-        # not optional - without it that contract is untested.
+        # Every kernel has a NEON path by contract, so the arm64 leg is not optional - without it
+        # that contract is untested.
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
@@ -37,9 +37,9 @@ jobs:
       - name: Test
         run: dotnet test Vorticity.slnx --no-build -c Release
 
-      # docs/design/03-architecture.md §4, invariant 4: every SIMD kernel has a scalar fallback, and the
-      # fallback is only real if it is exercised. Running the whole suite with intrinsics disabled
-      # is the cheapest way to keep that honest as kernels land.
+      # Every SIMD kernel has a scalar fallback, and the fallback is only real if it is exercised.
+      # Running the whole suite with intrinsics disabled is the cheapest way to keep that honest as
+      # kernels land.
       - name: Test (intrinsics disabled)
         run: dotnet test Vorticity.slnx --no-build -c Release
         env:
@@ -61,9 +61,9 @@ jobs:
         with:
           global-json-file: global.json
 
-      # docs/design/03-architecture.md §4, invariant 5. A library cannot prove it is AOT-clean; an
-      # executable that opens a file and walks its layout tree can, because a reflection-shaped
-      # mistake is a trim warning at publish or a failure at run. TreatWarningsAsErrors is on, so
+      # A library cannot prove it is AOT-clean; an executable that opens a file and walks its
+      # layout tree can, because a reflection-shaped mistake is a trim warning at publish or a
+      # failure at run. TreatWarningsAsErrors is on, so
       # an IL2xxx or IL3xxx warning fails this step rather than being scrolled past.
       - name: Publish vxdump as Native AOT
         run: dotnet publish tools/vxdump -c Release -r linux-x64
@@ -123,9 +123,9 @@ jobs:
         with:
           global-json-file: global.json
 
-      # docs/design/04-conformance.md §5 wants the long campaign nightly rather than per-commit, and the
-      # per-commit half already runs as FuzzSmokeTests. This is the middle: enough mutations to be
-      # worth the minute, with a FIXED SEED so a finding is reproducible from the log alone. The
+      # The long campaign belongs to a nightly run rather than to each commit, and the per-commit
+      # half already runs as FuzzSmokeTests. This is the middle: enough mutations to be worth the
+      # minute, with a fixed seed so a finding is reproducible from the log alone. The
       # program exits non-zero on a finding and warns when too few mutations got past the open
       # path -- a campaign that died in the postscript every time has proved nothing.
       - name: Fuzz the parser
@@ -149,8 +149,8 @@ jobs:
           global-json-file: global.json
       - uses: dtolnay/rust-toolchain@stable
 
-      # Criterion 2 of docs/design/01-scope.md §4, and the only check that can catch a writer and a reader
-      # agreeing on the same mistake. The .NET step SKIPS when the variable is unset, so this job
+      # The reference reading what we write is the only check that can catch a writer and a reader
+      # agreeing on the same mistake. The .NET step skips when the variable is unset, so this job
       # sets it explicitly rather than relying on a default.
       - name: Write the corpus with Vorticity
         run: dotnet test Vorticity.slnx -c Release --filter-method '*WritesTheCorpusOutForTheRustCrossCheck*'
@@ -169,8 +169,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # A change here is a format change, not a dependency bump: it must be reviewed against
-      # docs/design/90-registry.md and the conformance corpus regenerated. This job reports drift on a
+      # A change here is a format change, not a dependency bump: it must be reviewed against the
+      # component registry and the conformance corpus regenerated. This job reports drift on a
       # schedule-friendly path without blocking unrelated PRs.
       - name: Re-vendor and diff
         continue-on-error: true

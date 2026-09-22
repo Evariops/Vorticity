@@ -21,12 +21,11 @@
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />
   </ItemGroup>
 
-  <!-- THE ONE RUNTIME DEPENDENCY, and docs/design/03-architecture.md §1 names it by name: XxHash3-64 for
-       the write path's distinct table and the Bloom filters of docs/design/10-indexes.md. It is
-       first-party (dotnet/runtime, MIT) but is not carried by the shared framework, so it has to
-       be referenced. The alternative was porting it, which would be our own hash to maintain
-       against upstream's; the alternative to THAT was keeping FNV-1a byte-at-a-time, which cost
-       a fifth to a half of every string column's write. Decided 2026-09-15. -->
+  <!-- The one runtime dependency: XxHash3-64 for the write path's distinct table and the Bloom
+       filters. It is first-party (dotnet/runtime, MIT) but is not carried by the shared framework,
+       so it has to be referenced. Porting it would make it our own hash to maintain against
+       upstream's, and FNV-1a byte-at-a-time costs a fifth to a half of every string column's
+       write. -->
   <ItemGroup>
     <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>

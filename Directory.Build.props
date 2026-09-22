@@ -8,10 +8,9 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <WarningsNotAsErrors>NU1902;NU1903</WarningsNotAsErrors>
-    <!-- IDE rules run in the build ONLY for what .editorconfig raises to `error`; every other IDE
+    <!-- IDE rules run in the build only for what .editorconfig raises to `error`; every other IDE
          diagnostic defaults to `silent` and stays invisible. Turned on for IDE0072, which is the
-         only thing that fails the build when a CanonicalKind is added and a switch forgets it
-         (PERF-AUDIT-v2.md §2.4bis). -->
+         only thing that fails the build when a CanonicalKind is added and a switch forgets it. -->
     <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <Deterministic>true</Deterministic>
@@ -19,7 +18,8 @@
   </PropertyGroup>
 
   <!-- Library-only properties. InvariantGlobalization is an application property and is set on
-       the executable projects (vxdump, benchmarks), never here - see docs/design/09-contracts.md §7. -->
+       the executable projects (vxdump, benchmarks), never here: it has no effect on a class
+       library, which avoids culture-sensitive APIs by construction instead. -->
   <PropertyGroup Condition="'$(OutputType)' != 'Exe'">
     <IsAotCompatible>true</IsAotCompatible>
     <IsTrimmable>true</IsTrimmable>
