@@ -249,7 +249,7 @@ internal static class ArrayBlobWriter
 
         if (plan.Scheme == ColumnScheme.BitPacked)
         {
-            return WriteBitPacked(blob, arena, nodeIndex, plan.BitPack!, encodings);
+            return WriteBitPacked(blob, arena, nodeIndex, plan.BitPack.GetValueOrDefault(), encodings);
         }
 
         if (plan.Scheme == ColumnScheme.Fsst)
@@ -269,7 +269,7 @@ internal static class ArrayBlobWriter
 
         if (plan.Scheme == ColumnScheme.Sequence)
         {
-            return WriteSequence(blob, arena, nodeIndex, plan.Sequence!, encodings);
+            return WriteSequence(blob, arena, nodeIndex, plan.Sequence.GetValueOrDefault(), encodings);
         }
 
         // The values child comes from the table when the table chose the plan: the entries laid out
@@ -319,7 +319,7 @@ internal static class ArrayBlobWriter
         Workspace blob,
         CanonicalArena arena,
         int nodeIndex,
-        BitPackPlan plan,
+        in BitPackPlan plan,
         EncodingDictionary encodings)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
@@ -427,7 +427,7 @@ internal static class ArrayBlobWriter
     /// <param name="node">The integer column chunk.</param>
     /// <param name="plan">Its bit-packing plan.</param>
     internal static (int[] Indices, ulong[] Values) Patches(
-        CanonicalArena arena, CanonicalNode node, BitPackPlan plan)
+        CanonicalArena arena, CanonicalNode node, in BitPackPlan plan)
     {
         int exceptions = checked((int)plan.Exceptions);
         int[] indices = new int[exceptions];
@@ -473,7 +473,7 @@ internal static class ArrayBlobWriter
     /// <param name="patchIndices">The rows the exceptions are at, exactly as many as the plan counted.</param>
     /// <param name="patchValues">Their values in the encoded domain, as many.</param>
     private static void Pack(
-        CanonicalArena arena, CanonicalNode node, BitPackPlan plan, PType ptype, int length,
+        CanonicalArena arena, CanonicalNode node, in BitPackPlan plan, PType ptype, int length,
         Span<byte> destination, Span<int> patchIndices, Span<ulong> patchValues)
     {
         // The patches are found here rather than by a walk of their own: every row is transformed
@@ -592,7 +592,7 @@ internal static class ArrayBlobWriter
     /// <param name="wide">The block's transformed values.</param>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void TransformValid(
-        ReadOnlySpan<byte> values, PType ptype, int start, int count, BitPackPlan plan,
+        ReadOnlySpan<byte> values, PType ptype, int start, int count, in BitPackPlan plan,
         int elementBits, Span<ulong> wide)
     {
         int done = TransformLanes(values, ptype.ByteWidth(), start, count, plan.Transform, plan.Reference, wide);
@@ -610,7 +610,7 @@ internal static class ArrayBlobWriter
     /// whole block for the widths the lanes do not serve.
     /// </summary>
     private static void TransformRows<T>(
-        ReadOnlySpan<byte> values, int done, int start, int count, BitPackPlan plan,
+        ReadOnlySpan<byte> values, int done, int start, int count, in BitPackPlan plan,
         int elementBits, Span<ulong> wide)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
@@ -689,7 +689,7 @@ internal static class ArrayBlobWriter
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void TransformMasked(
         ReadOnlySpan<byte> values, in ValidityMask mask, PType ptype, int start, int count,
-        BitPackPlan plan, int elementBits, Span<ulong> wide)
+        in BitPackPlan plan, int elementBits, Span<ulong> wide)
     {
         for (int i = 0; i < count; i++)
         {

@@ -34,9 +34,10 @@ public sealed class SequencePlanTests
 
         ColumnPlan plan = ColumnCompressor.Choose(fixture.Arena, node);
         Assert.Equal(ColumnScheme.Sequence, plan.Scheme);
-        Assert.Equal(1_641_600_000_000UL, plan.Sequence!.BaseBits);
-        Assert.Equal((Int128)86_400_000L, plan.Sequence.Step);
-        Assert.False(plan.Sequence.StepIsUnsigned);
+        SequencePlan sequence = Assert.NotNull(plan.Sequence);
+        Assert.Equal(1_641_600_000_000UL, sequence.BaseBits);
+        Assert.Equal((Int128)86_400_000L, sequence.Step);
+        Assert.False(sequence.StepIsUnsigned);
     }
 
     /// <summary>
@@ -56,8 +57,9 @@ public sealed class SequencePlanTests
 
         ColumnPlan plan = ColumnCompressor.Choose(fixture.Arena, node);
         Assert.Equal(ColumnScheme.Sequence, plan.Scheme);
-        Assert.Equal((Int128)(-3), plan.Sequence!.Step);
-        Assert.False(plan.Sequence.StepIsUnsigned);
+        SequencePlan sequence = Assert.NotNull(plan.Sequence);
+        Assert.Equal((Int128)(-3), sequence.Step);
+        Assert.False(sequence.StepIsUnsigned);
     }
 
     /// <summary>
@@ -160,7 +162,7 @@ public sealed class SequencePlanTests
         ColumnPlan plan = ColumnCompressor.Choose(fixture.Arena, node);
         Assert.Equal(ColumnScheme.Sequence, plan.Scheme);
 
-        byte[] metadata = ArrayBlobWriter.SequenceMetadataBytesForTests(plan.Sequence!, PType.I32);
+        byte[] metadata = ArrayBlobWriter.SequenceMetadataBytesForTests(Assert.NotNull(plan.Sequence), PType.I32);
         Assert.Equal(Convert.FromHexString("0a02180012021802"), metadata);
     }
 }

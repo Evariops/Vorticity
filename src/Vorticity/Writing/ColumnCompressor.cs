@@ -202,10 +202,9 @@ internal readonly struct ColumnPlan
         ColumnScheme.Dict =>
             $"dict entries={Gather.Length} rows={Rows} codes={Fingerprint(Codes.AsSpan(0, Rows)):x} " +
             $"first={Fingerprint(Gather):x}",
-        ColumnScheme.BitPacked =>
-            $"bitpacked {BitPack!.Transform} reference={BitPack.Reference} width={BitPack.BitWidth} " +
-            $"patches={BitPack.Exceptions} cost={BitPack.Cost}",
-        ColumnScheme.Sequence => $"sequence base={Sequence!.BaseBits} step={Sequence.Step}",
+        ColumnScheme.BitPacked => Describe(BitPack.GetValueOrDefault()),
+        ColumnScheme.Sequence =>
+            $"sequence base={Sequence.GetValueOrDefault().BaseBits} step={Sequence.GetValueOrDefault().Step}",
         ColumnScheme.Fsst => $"fsst size={Fsst!.EncodedSize}",
         ColumnScheme.Zstd => $"zstd frame={Zstd!.FrameLength}",
         ColumnScheme.Alp =>
@@ -213,6 +212,10 @@ internal readonly struct ColumnPlan
             $"patches={Alp.PatchIndices.Length}",
         _ => Scheme.ToString(),
     };
+
+    private static string Describe(in BitPackPlan packed) =>
+        $"bitpacked {packed.Transform} reference={packed.Reference} width={packed.BitWidth} " +
+        $"patches={packed.Exceptions} cost={packed.Cost}";
 
     /// <summary>An order-sensitive 64-bit hash of an index array.</summary>
     private static ulong Fingerprint(ReadOnlySpan<int> values)
@@ -578,8 +581,7 @@ internal static class ColumnCompressor
         if (dtype.Kind == DTypeKind.Primitive && dtype.PType.IsInteger()
             && !(measured && stats.DeltaKnown && stats.DeltaBroken))
         {
-            SequencePlan? sequence = SequencePlan.OfConstant(node);
-            if (sequence is not null)
+            if (SequencePlan.OfConstant(node) is { } sequence)
             {
                 return ColumnPlan.ForSequence(sequence) with { PredictedBytes = 0 };
             }
@@ -752,8 +754,7 @@ internal static class ColumnCompressor
             bool knownSteps = measured && stats.DeltaKnown;
             if (!knownSteps || !stats.DeltaBroken)
             {
-                SequencePlan? sequence = SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps);
-                if (sequence is not null)
+                if (SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps) is { } sequence)
                 {
                     return ColumnPlan.ForSequence(sequence);
                 }
@@ -833,8 +834,7 @@ internal static class ColumnCompressor
                 ingested: haveWidths ? ingested : default);
         }
 
-        if (packed is not null && packed.Transform == BitPackTransform.Frame
-            && !Allows(target, "fastlanes.for"))
+        if (packed is { Transform: BitPackTransform.Frame } && !Allows(target, "fastlanes.for"))
         {
             packed = null;
         }
@@ -859,7 +859,7 @@ internal static class ColumnCompressor
         // stays as the fallback for a cursor that cannot serve -- a child a scheme produced, a chunk
         // the table abandoned -- and the writer counts every such fallback through the same
         // predicate, so it cannot go quiet.
-        long budget = packed is null ? plain : Math.Min(plain, packed.Cost);
+        long budget = packed is { } bitPacking ? Math.Min(plain, bitPacking.Cost) : plain;
         ColumnPlan dictionary = ColumnPlan.Canonical;
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
@@ -872,9 +872,9 @@ internal static class ColumnCompressor
             return dictionary;
         }
 
-        if (packed is not null)
+        if (packed is { } winner)
         {
-            return ColumnPlan.ForBitPacking(packed);
+            return ColumnPlan.ForBitPacking(winner);
         }
 
         return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace);
@@ -1388,15 +1388,14 @@ internal static class ColumnCompressor
                 ingested: haveWidths ? ingested : default);
         }
 
-        if (packed is not null && packed.Transform == BitPackTransform.Frame
-            && !Allows(target, "fastlanes.for"))
+        if (packed is { Transform: BitPackTransform.Frame } && !Allows(target, "fastlanes.for"))
         {
             packed = null;
         }
 
-        if (packed is not null && packed.Cost < best)
+        if (packed is { } bitPacking && bitPacking.Cost < best)
         {
-            best = packed.Cost;
+            best = bitPacking.Cost;
             bestScheme = ColumnScheme.BitPacked;
         }
 
@@ -1443,7 +1442,8 @@ internal static class ColumnCompressor
                 return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns, runEndCost);
 
             case ColumnScheme.BitPacked:
-                return ColumnPlan.ForBitPacking(packed!) with { PredictedBytes = packed!.BufferBytes };
+                BitPackPlan chosen = packed.GetValueOrDefault();
+                return ColumnPlan.ForBitPacking(chosen) with { PredictedBytes = chosen.BufferBytes };
 
             default:
                 return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace);
@@ -1491,12 +1491,11 @@ internal static class ColumnCompressor
             return ColumnPlan.Canonical;
         }
 
-        SequencePlan? sequence = SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps);
         // A progression writes no buffer -- the base and the step go in the metadata -- so the
         // prediction plan memory checks is zero, and holds exactly when the encoder wrote none.
-        return sequence is null
-            ? ColumnPlan.Canonical
-            : ColumnPlan.ForSequence(sequence) with { PredictedBytes = 0 };
+        return SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps) is { } sequence
+            ? ColumnPlan.ForSequence(sequence) with { PredictedBytes = 0 }
+            : ColumnPlan.Canonical;
     }
 
     /// <summary>
@@ -1559,11 +1558,10 @@ internal static class ColumnCompressor
                     chunk.NoteWidthsServed();
                 }
 
-                BitPackPlan? packed = BitPackPlan.TryBuild(
-                    arena, node, zigzag: Allows(target, "vortex.zigzag"),
-                    reference: cascade.Reference ?? Reference(node, in stats),
-                    ingested: haveWidths ? ingested : default);
-                if (packed is null
+                if (BitPackPlan.TryBuild(
+                        arena, node, zigzag: Allows(target, "vortex.zigzag"),
+                        reference: cascade.Reference ?? Reference(node, in stats),
+                        ingested: haveWidths ? ingested : default) is not { } packed
                     || (packed.Transform == BitPackTransform.Frame && !Allows(target, "fastlanes.for")))
                 {
                     return ColumnPlan.Canonical;

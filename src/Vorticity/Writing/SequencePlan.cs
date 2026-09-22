@@ -11,7 +11,8 @@ namespace Vorticity.Writing;
 /// both in its metadata and has no children, so there is nowhere for a validity bitmap to live and a
 /// column with a null row cannot be one.
 /// </summary>
-internal sealed class SequencePlan
+/// <remarks>A value, not an object: one is priced per integer column per chunk, and it holds nothing to share.</remarks>
+internal readonly struct SequencePlan
 {
     private SequencePlan(ulong baseBits, Int128 step)
     {

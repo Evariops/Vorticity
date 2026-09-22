@@ -27,7 +27,8 @@ internal enum BitPackTransform : byte
 /// outlying low value widens every other row, while zigzag lets magnitude rather than position
 /// decide and loses on columns with a huge offset but a narrow span.
 /// </summary>
-internal sealed class BitPackPlan
+/// <remarks>A value, not an object: one is priced per integer column per chunk, and it holds nothing to share.</remarks>
+internal readonly struct BitPackPlan
 {
     /// <summary>
     /// What a frame-of-reference or zigzag node costs beyond its packed bytes: one more array

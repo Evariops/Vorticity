@@ -48,8 +48,7 @@ public sealed class BitPackPlanTests
         using ColumnFixture fixture = new ColumnFixture();
         int node = fixture.Int64Node(values, Validity.NonNullable);
 
-        BitPackPlan? plan = Plan(fixture, node);
-        Assert.NotNull(plan);
+        BitPackPlan plan = Assert.NotNull(Plan(fixture, node));
         Assert.Equal(BitPackTransform.ZigZag, plan.Transform);
         Assert.Equal(2L, plan.Exceptions);
 
@@ -87,8 +86,7 @@ public sealed class BitPackPlanTests
         using ColumnFixture fixture = new ColumnFixture();
         int node = fixture.Int64Node(values, fixture.BitmapValidity(valid), Nullability.Nullable);
 
-        BitPackPlan? plan = Plan(fixture, node);
-        Assert.NotNull(plan);
+        BitPackPlan plan = Assert.NotNull(Plan(fixture, node));
         Assert.Equal(0L, plan.Exceptions);
         Assert.Equal(BitPackTransform.Frame, plan.Transform);
         Assert.InRange(plan.BitWidth, 1, 8);
@@ -116,8 +114,7 @@ public sealed class BitPackPlanTests
         using ColumnFixture fixture = new ColumnFixture();
         int node = fixture.Int64Node(values, Validity.NonNullable);
 
-        BitPackPlan? plan = Plan(fixture, node);
-        Assert.NotNull(plan);
+        BitPackPlan plan = Assert.NotNull(Plan(fixture, node));
         Assert.Equal(BitPackTransform.Frame, plan.Transform);
         Assert.Equal(0L, plan.Exceptions);
         Assert.Equal(12, plan.BitWidth);
@@ -143,8 +140,7 @@ public sealed class BitPackPlanTests
         using ColumnFixture fixture = new ColumnFixture();
         int node = fixture.Int64Node(values, Validity.NonNullable);
 
-        BitPackPlan? plan = Plan(fixture, node);
-        if (plan is not null)
+        if (Plan(fixture, node) is { } plan)
         {
             Assert.True(
                 plan.Exceptions * 10 < values.Length,
@@ -175,8 +171,7 @@ public sealed class BitPackPlanTests
         using ColumnFixture fixture = new ColumnFixture();
         int node = fixture.Int64Node(values, Validity.NonNullable);
 
-        BitPackPlan? plan = Plan(fixture, node);
-        Assert.NotNull(plan);
+        BitPackPlan plan = Assert.NotNull(Plan(fixture, node));
         Assert.Equal(BitPackTransform.Frame, plan.Transform);
         Assert.Equal(1L, plan.Exceptions);
         (int[] indices, ulong[] patched) =
@@ -216,8 +211,7 @@ public sealed class BitPackPlanTests
         int node = elementBits == 32
             ? fixture.Int32Node(Array.ConvertAll(values, v => (int)v), Validity.NonNullable)
             : fixture.Int64Node(values, Validity.NonNullable);
-        BitPackPlan? plan = Plan(fixture, node);
-        Assert.NotNull(plan);
+        BitPackPlan plan = Assert.NotNull(Plan(fixture, node));
         Assert.Equal(signed ? BitPackTransform.ZigZag : BitPackTransform.Frame, plan.Transform);
 
         ulong mask = elementBits == 64 ? ulong.MaxValue : uint.MaxValue;
