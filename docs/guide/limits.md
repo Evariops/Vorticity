@@ -106,7 +106,7 @@ A file may name an encoding, a layout or a type this build does not implement. I
 and the refusal comes when a block needs the component:
 
 ```csharp
-await using VortexFile file = await VortexSession.Default.OpenAsync(patched, new VortexOpenOptions { AllowUnknownComponents = allow });
+await using VortexFile file = await VortexSession.Default.OpenAsync(patched);
 string unsupported = string.Join(", ", file.ArrayEncodings.Where(c => !c.Supported).Select(c => c.Id));
 long rows = 0;
 await foreach (BatchView batch in file.Scan("Day", "City"))
@@ -116,14 +116,14 @@ await foreach (BatchView batch in file.Scan("Day", "City"))
 ```
 
 ```
-AllowUnknownComponents=False: opened, not supported: vortex.alz; Day and City read 1000000 rows; Scan<Reading> throws Array vortex.alz
-AllowUnknownComponents=True: opened, not supported: vortex.alz; Day and City read 1000000 rows; Scan<Reading> throws Array vortex.alz
+opened, not supported: vortex.alz; Day and City read 1000000 rows; Scan<Reading> throws Array vortex.alz
 ```
 
 The sample renames the encoding of the `Celsius` column in a copy of the file, so this build no
 longer knows it. The columns that do not use it read in full; the scan that needs it throws
-`VortexUnsupportedException` naming the kind and the id, at its first block. The behaviour is the
-same whichever value `AllowUnknownComponents` has. `file.ArrayEncodings` and
+`VortexUnsupportedException` naming the kind and the id, at its first block. The open cannot refuse
+earlier: a footer may list encodings no chunk uses, and which ones a chunk uses is known only when
+its bytes are read. `file.ArrayEncodings` and
 `file.LayoutEncodings` list what the footer declares, each with `Supported`, so a caller can ask
 before scanning.
 

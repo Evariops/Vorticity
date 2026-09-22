@@ -121,7 +121,7 @@ InitialReadSize 256 KiB: 1 request, 262144 bytes
 | `Length` | probed | skips asking the source for its length |
 | `Schema` | the file's | a schema for a file written without one, or to skip reading the embedded one |
 | `TornTail` | `ReadPrevious` | `Refuse` throws on a torn tail instead of opening the version before it |
-| `VerifyStatistics`, `AllowUnknownComponents`, `MaxDecompressedSize` | off, off, 256 MiB | how much the open trusts the bytes ([limits.md](limits.md)) |
+| `VerifyStatistics`, `MaxDecompressedSize` | off, 256 MiB | how much the open trusts the bytes ([limits.md](limits.md)) |
 | `IndexFragments` | none | indexes built for this file elsewhere ([indexes.md](indexes.md)) |
 
 ## What a scan then reads

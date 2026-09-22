@@ -70,9 +70,6 @@ public sealed record VortexOpenOptions
     /// <summary>Whether a statistic is checked against what is decoded rather than trusted; a statistic is a claim.</summary>
     public bool VerifyStatistics { get; init; }
 
-    /// <summary>Whether an encoding or layout this library does not implement is refused only when a scan needs it, rather than at open.</summary>
-    public bool AllowUnknownComponents { get; init; }
-
     /// <summary>The schema of a file written without one, or to skip reading the one it embeds; it wins over the file's.</summary>
     public VortexSchema? Schema { get; init; }
 
@@ -121,7 +118,6 @@ public sealed record VortexOpenOptions
         {
             MaxDecompressedSize = MaxDecompressedSize,
             VerifyStatistics = VerifyStatistics,
-            AllowUnknownComponents = AllowUnknownComponents,
             IndexCacheBytes = IndexCacheBytes,
             IndexFragments = Fragments(IndexFragments),
         };

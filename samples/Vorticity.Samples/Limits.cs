@@ -56,28 +56,24 @@ internal static class Limits
         string patched = Demo.Path("unknown-encoding.vortex");
         await System.IO.File.WriteAllBytesAsync(patched, bytes);
 
-        foreach (bool allow in new[] { false, true })
+        await using VortexFile file = await VortexSession.Default.OpenAsync(patched);
+        string unsupported = string.Join(", ", file.ArrayEncodings.Where(c => !c.Supported).Select(c => c.Id));
+        long rows = 0;
+        await foreach (BatchView batch in file.Scan("Day", "City"))
         {
-            await using VortexFile file = await VortexSession.Default.OpenAsync(patched, new VortexOpenOptions { AllowUnknownComponents = allow });
-            string unsupported = string.Join(", ", file.ArrayEncodings.Where(c => !c.Supported).Select(c => c.Id));
-            long rows = 0;
-            await foreach (BatchView batch in file.Scan("Day", "City"))
-            {
-                rows += batch.RowCount;
-            }
+            rows += batch.RowCount;
+        }
 
-            try
+        try
+        {
+            await foreach (Columns<Reading> batch in file.Scan<Reading>())
             {
-                await foreach (Columns<Reading> batch in file.Scan<Reading>())
-                {
-                    _ = batch.RowCount;
-                }
+                _ = batch.RowCount;
             }
-            catch (VortexUnsupportedException e)
-            {
-                Console.WriteLine($"AllowUnknownComponents={allow}: opened, not supported: {unsupported}; Day and City read {rows} rows; " +
-                    $"Scan<Reading> throws {e.Kind} {e.ComponentId}");
-            }
+        }
+        catch (VortexUnsupportedException e)
+        {
+            Console.WriteLine($"opened, not supported: {unsupported}; Day and City read {rows} rows; Scan<Reading> throws {e.Kind} {e.ComponentId}");
         }
     }
 

@@ -102,9 +102,8 @@ contains, and the report says what it chose.
 * **The default is chosen per release**, and changing it is a major version change for this library,
   because it changes who can read the output. Set `TargetEdition` when that matters to you.
 * **An edition constrains the writer, not the reader.** This library reads everything from the floor
-  upwards, and refuses a component it does not know with `VortexUnsupportedException` naming it.
-  `VortexOpenOptions.AllowUnknownComponents` postpones that refusal until the component is needed
-  ([open-a-file.md](open-a-file.md)).
+  upwards, and refuses a component it does not know with `VortexUnsupportedException` naming it,
+  when a scan first needs it ([limits.md](limits.md)).
 * A schema may name an extension registered on the session: it belongs to no edition, and a reader
   needs the same registration.
 * [90-registry.md](../design/90-registry.md) lists every component and the edition that brought it.
