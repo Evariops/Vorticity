@@ -605,7 +605,7 @@ internal sealed class ScanBuilder
         // it has one, for the rows it proves, unless the zone maps already show they cannot fit a
         // batch. When they fit, the scan reads the splits holding them and nothing else.
         (RowSelection? proven, string? structure, ScanMetrics? probe) =
-            await ProbeAsync(rows, natural, plan, pruning.Zones, live, cancellationToken).ConfigureAwait(false);
+            await ProbeAsync(rows, natural, plan, pruning, cancellationToken).ConfigureAwait(false);
 
         // Counted over the splits the scan's rows touch, as the scan counts what it decodes and
         // prunes: a range or a take covers the blocks it reaches, not the file's, and a block is
@@ -688,7 +688,7 @@ internal sealed class ScanBuilder
             CountExplanation? count = null;
             if (_filter is not null)
             {
-                (bool exact, long covered) = await ExactAsync(cancellationToken).ConfigureAwait(false);
+                (bool exact, long covered) = await ExactAsync(pruning.Zones, cancellationToken).ConfigureAwait(false);
                 count = new CountExplanation(exact, covered, splitsPruned, splitsProven, zoneLiveSplits - splitsProven);
             }
 
@@ -751,11 +751,12 @@ internal sealed class ScanBuilder
     /// the rows it proves when they fit a batch, the structure that answered, and what asking cost.
     /// </summary>
     private async System.Threading.Tasks.ValueTask<(RowSelection? Proven, string? Structure, ScanMetrics? Cost)> ProbeAsync(
-        RowRange rows, long natural, SplitPlan plan, Compute.ZonePruner? zones, Compute.BlockMask? live,
+        RowRange rows, long natural, SplitPlan plan, Compute.ZonePruningPlan.PruningPlan pruning,
         System.Threading.CancellationToken cancellationToken)
     {
-        if (_orderPath is not null || !_compact || !_prune || _filter is null || _take is not null
-            || !FilteredBatches.MayFitBatch(plan, natural, zones, live))
+        Compute.ZonePruner? zones = pruning.Zones;
+        if (_orderPath is not null || !_compact || !_prune || _filter is null || _take is not null || pruning.Located
+            || !FilteredBatches.MayFitBatch(plan, natural, zones, pruning.Live))
         {
             return (null, null, null);
         }
@@ -784,8 +785,10 @@ internal sealed class ScanBuilder
     }
 
     /// <summary>Whether an exact source covers the filter, and its count.</summary>
+    /// <param name="zones">The zone maps the plan read already, handed on so that they are not read again.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
     private async System.Threading.Tasks.ValueTask<(bool Exact, long Count)> ExactAsync(
-        System.Threading.CancellationToken cancellationToken)
+        Compute.ZonePruner? zones, System.Threading.CancellationToken cancellationToken)
     {
         if ((_tiers & TerminalTiers.ExactCover) == 0 || !_prune || _filter is null)
         {
@@ -793,7 +796,7 @@ internal sealed class ScanBuilder
         }
 
         Keys.ExactCover? cover = await Keys.ExactCover
-            .TryCreateAsync(_file, _filter, _indexes, cancellationToken)
+            .TryCreateAsync(_file, _filter, _indexes, cancellationToken, zones)
             .ConfigureAwait(false);
         if (cover is null)
         {

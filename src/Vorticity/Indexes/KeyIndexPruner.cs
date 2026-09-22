@@ -42,6 +42,23 @@ internal sealed class KeyIndexPruner
     /// <summary>Segments read to consult the runs.</summary>
     internal int Segments { get; private set; }
 
+    /// <summary>Whether a column it consults is sorted runs, the entry that also serves as an exact cover.</summary>
+    internal bool LocatesRows
+    {
+        get
+        {
+            foreach (Column column in _columns.Values)
+            {
+                if (column.Rows)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     /// <summary>Their bytes.</summary>
     internal long Bytes { get; private set; }
 
@@ -557,6 +574,9 @@ internal sealed class KeyIndexPruner
 
         /// <summary>One segment's matches: per literal, the entries equal to its key.</summary>
         private readonly List<(int Literal, int Low, int High)> _matches = [];
+
+        /// <summary>Whether the runs place each key at its rows, as sorted runs do, rather than at its blocks.</summary>
+        internal bool Rows => _rows;
 
         internal Column(
             bool rows, KeyLayout layout, DType storage, List<Run> runs, List<FilterLiteral> literals, int blocks, bool fold)

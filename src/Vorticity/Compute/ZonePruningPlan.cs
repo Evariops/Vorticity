@@ -56,7 +56,12 @@ internal static class ZonePruningPlan
     /// <summary>The mask, and the structures that refined it -- which a count asks again, per block.</summary>
     /// <param name="Live">The mask of live blocks, or null when no structure can prune anything.</param>
     /// <param name="Zones">The zone-map pruner, or null when no column has a usable map.</param>
-    internal readonly record struct PruningPlan(BlockMask? Live, ZonePruner? Zones);
+    /// <param name="Located">
+    /// Whether sorted runs refined the mask as a locating index. The exact cover would consult the
+    /// same runs again, through another reader, for rows the mask already confines to the blocks
+    /// that hold them, so a scan does not ask it.
+    /// </param>
+    internal readonly record struct PruningPlan(BlockMask? Live, ZonePruner? Zones, bool Located = false);
 
     /// <summary>
     /// <see cref="RefineAsync"/>, keeping the structures beside the mask: a terminal operation
@@ -119,6 +124,7 @@ internal static class ZonePruningPlan
         }
 
         // The locating indexes last: a positive answer, and the dearest to consult.
+        bool located = false;
         if (locating is not null && !live.IsEmpty)
         {
             before = Counted(live, scope);
@@ -126,10 +132,11 @@ internal static class ZonePruningPlan
             Scanning.ScanMetrics.Note(metrics, locating.Segments, locating.Bytes);
             Diagnostics.VortexEventSource.RunsRead(locating.Segments);
             steps?.Add(new PruningStep("locating index", before - Counted(live, scope), locating.Segments, locating.Bytes));
+            located = locating.LocatesRows;
         }
 
         Diagnostics.VortexEventSource.Pruned(live.BlockCount - live.LiveCount, live.BlockCount);
-        return new PruningPlan(live, zones);
+        return new PruningPlan(live, zones, located);
     }
 
     /// <summary>The live blocks of <paramref name="live"/>, among those of <paramref name="scope"/> when there is one.</summary>

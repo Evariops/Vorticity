@@ -117,12 +117,12 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         /// The rows an exact source proves the filter selects, when there is one and they fit a
         /// batch: the scan then reads them and evaluates nothing.
         /// </summary>
-        /// <param name="zones">The zone maps the pruning read, handed to the source so that it does not read them again.</param>
-        /// <param name="live">The blocks the pruning left.</param>
-        private async ValueTask<RowSelection?> ProvenAsync(ZonePruner? zones, BlockMask? live)
+        /// <param name="pruning">What the pruning read and left: its zone maps, handed to the source so that it does not read them again, and its blocks.</param>
+        private async ValueTask<RowSelection?> ProvenAsync(ZonePruningPlan.PruningPlan pruning)
         {
-            if (!_prune || _filter is null || _source.HasTake
-                || !MayFitBatch(_source.Plan, SplitPlan.NaturalBatchRows(_source.Tree), zones, live))
+            ZonePruner? zones = pruning.Zones;
+            if (!_prune || _filter is null || _source.HasTake || pruning.Located
+                || !MayFitBatch(_source.Plan, SplitPlan.NaturalBatchRows(_source.Tree), zones, pruning.Live))
             {
                 return null;
             }
@@ -171,7 +171,7 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
 
                 // An exact index gathers the rows it proved, which a scan delivering whole blocks
                 // does not want.
-                _inner = _source.Compact && await ProvenAsync(pruning.Zones, pruning.Live).ConfigureAwait(false) is { } proven
+                _inner = _source.Compact && await ProvenAsync(pruning).ConfigureAwait(false) is { } proven
                     ? _source.GetAsyncEnumerator(live: null, proven, _token)
                     : _source.GetAsyncEnumerator(pruning.Live, _token);
             }
