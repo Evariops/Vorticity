@@ -574,10 +574,12 @@ internal sealed class ScanBuilder
         Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
 
+        // Each structure is credited with the blocks it pruned among those the scan's rows reach, so
+        // that the blocks, the live ones and what each structure pruned add up.
         List<PruningStep> steps = [];
         Compute.ZonePruningPlan.PruningPlan pruning = _filter is not null && _prune
             ? await Compute.ZonePruningPlan
-                .PlanAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes)
+                .PlanAsync(_file, tree, _filter, cancellationToken, steps, metrics: null, _indexes, Scope(tree, rows, natural))
                 .ConfigureAwait(false)
             : default;
         Compute.BlockMask? live = pruning.Live;
@@ -592,7 +594,8 @@ internal sealed class ScanBuilder
             await ProbeAsync(rows, natural, plan, pruning.Zones, live, cancellationToken).ConfigureAwait(false);
 
         // Counted over the splits the scan's rows touch, as the scan counts what it decodes and
-        // prunes: a range or a take covers the blocks it reaches, not the file's.
+        // prunes: a range or a take covers the blocks it reaches, not the file's, and a block is
+        // live by its own verdict, not by that of a split it shares with a live block.
         long blockRows = live?.BlockRows ?? natural;
         BlockTally touched = new BlockTally(blockRows);
         BlockTally zoned = new BlockTally(blockRows);
@@ -620,6 +623,7 @@ internal sealed class ScanBuilder
                 }
 
                 blocks += touched.Add(split, _take);
+                zoneLiveBlocks += zoned.Add(split, _take, live);
                 if (live is not null && !live.AnyLive(split))
                 {
                     splitsPruned++;
@@ -627,7 +631,6 @@ internal sealed class ScanBuilder
                 }
 
                 zoneLiveSplits++;
-                zoneLiveBlocks += zoned.Add(split, _take);
                 if (zones is not null && Proves(zones, split))
                 {
                     splitsProven++;
@@ -638,8 +641,9 @@ internal sealed class ScanBuilder
                     continue;
                 }
 
+                // The rows an exact index proved are read without the mask, as the scan reads them.
                 liveSplits++;
-                liveBlocks += survived.Add(split, proven ?? _take);
+                liveBlocks += proven is null ? survived.Add(split, _take, live) : survived.Add(split, _take, proven: proven);
                 reader.RegisterSegments(in root, split, in mask, segments);
             }
 
@@ -699,6 +703,33 @@ internal sealed class ScanBuilder
 
         Compute.RangeVerdict verdict = zones.Verdict(split);
         return verdict.IsAllTrue || verdict.IsNoneTrue;
+    }
+
+    /// <summary>
+    /// The blocks the scan's rows reach, as a mask over blocks of the natural size: those the range
+    /// overlaps, or those holding a taken row; null when the scan covers the whole file.
+    /// </summary>
+    private BlockMask? Scope(LayoutTree tree, RowRange rows, long natural)
+    {
+        if (!_rowsSet && _take is null)
+        {
+            return null;
+        }
+
+        BlockMask scope = new BlockMask(tree.Root.RowCount, natural);
+        scope.KeepOnly(rows);
+        if (_take is not null)
+        {
+            for (int block = 0; block < scope.BlockCount; block++)
+            {
+                if (scope.IsLive(block) && !_take.Touches(scope.BlockRange(block)))
+                {
+                    scope.Kill(block);
+                }
+            }
+        }
+
+        return scope;
     }
 
     /// <summary>

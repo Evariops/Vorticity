@@ -69,9 +69,14 @@ internal static class ZonePruningPlan
     /// <param name="steps">Receives what each structure pruned, for <c>Explain</c>; null when nobody asks.</param>
     /// <param name="metrics">The scan's sink, to which the reads made here are added; null when nobody asks.</param>
     /// <param name="indexes">Whether the file's index directory takes part.</param>
+    /// <param name="scope">
+    /// The blocks the scan's rows reach, over blocks of the natural batch size, when they are not
+    /// the whole file: a step counts only the blocks it pruned among them.
+    /// </param>
     internal static async ValueTask<PruningPlan> PlanAsync(
         VortexFile file, LayoutTree tree, VortexExpr filter, CancellationToken cancellationToken,
-        List<PruningStep>? steps = null, Scanning.ScanMetrics? metrics = null, bool indexes = true)
+        List<PruningStep>? steps = null, Scanning.ScanMetrics? metrics = null, bool indexes = true,
+        BlockMask? scope = null)
     {
         (ZonePruner? zones, int segments, long bytes) =
             await BuildCountedAsync(file, tree, filter, metrics, cancellationToken).ConfigureAwait(false);
@@ -93,7 +98,7 @@ internal static class ZonePruningPlan
         }
 
         BlockMask live = new BlockMask(tree.Root.RowCount, blockRows);
-        int before = live.LiveCount;
+        int before = Counted(live, scope);
         if (zones is not null)
         {
             zones.Refine(live);
@@ -101,31 +106,35 @@ internal static class ZonePruningPlan
             // that were live when it ran and are not afterwards -- so a later structure is
             // credited only with what the earlier ones left it -- against the segments read for
             // it.
-            steps?.Add(new PruningStep("zone map", before - live.LiveCount, segments, bytes));
+            steps?.Add(new PruningStep("zone map", before - Counted(live, scope), segments, bytes));
         }
 
         if (blooms is not null && !live.IsEmpty)
         {
-            before = live.LiveCount;
+            before = Counted(live, scope);
             await blooms.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
             Scanning.ScanMetrics.Note(metrics, blooms.Segments, blooms.Bytes);
             Diagnostics.VortexEventSource.RunsRead(blooms.Segments);
-            steps?.Add(new PruningStep("bloom filter", before - live.LiveCount, blooms.Segments, blooms.Bytes));
+            steps?.Add(new PruningStep("bloom filter", before - Counted(live, scope), blooms.Segments, blooms.Bytes));
         }
 
         // The locating indexes last: a positive answer, and the dearest to consult.
         if (locating is not null && !live.IsEmpty)
         {
-            before = live.LiveCount;
+            before = Counted(live, scope);
             await locating.RefineAsync(file, live, cancellationToken).ConfigureAwait(false);
             Scanning.ScanMetrics.Note(metrics, locating.Segments, locating.Bytes);
             Diagnostics.VortexEventSource.RunsRead(locating.Segments);
-            steps?.Add(new PruningStep("locating index", before - live.LiveCount, locating.Segments, locating.Bytes));
+            steps?.Add(new PruningStep("locating index", before - Counted(live, scope), locating.Segments, locating.Bytes));
         }
 
         Diagnostics.VortexEventSource.Pruned(live.BlockCount - live.LiveCount, live.BlockCount);
         return new PruningPlan(live, zones);
     }
+
+    /// <summary>The live blocks of <paramref name="live"/>, among those of <paramref name="scope"/> when there is one.</summary>
+    private static int Counted(BlockMask live, BlockMask? scope) =>
+        scope is null ? live.LiveCount : live.LiveCountWithin(scope);
 
     /// <summary>
     /// Decodes the zone maps of every column <paramref name="filter"/> reads.

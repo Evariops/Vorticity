@@ -70,6 +70,20 @@ internal sealed class BlockMask
     /// <summary>Whether nothing is left to read.</summary>
     internal bool IsEmpty => LiveCount == 0;
 
+    /// <summary>How many blocks are live both here and in <paramref name="scope"/>.</summary>
+    /// <param name="scope">A mask over the same blocks, live where a scan's rows reach.</param>
+    internal int LiveCountWithin(BlockMask scope)
+    {
+        int live = 0;
+        int words = Math.Min(_bits.Length, scope._bits.Length);
+        for (int i = 0; i < words; i++)
+        {
+            live += BitOperations.PopCount(_bits[i] & scope._bits[i]);
+        }
+
+        return live;
+    }
+
     /// <summary>Whether block <paramref name="block"/> may still hold a matching row.</summary>
     /// <param name="block">A block index below <see cref="BlockCount"/>.</param>
     internal bool IsLive(int block) =>

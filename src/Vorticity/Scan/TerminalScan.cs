@@ -123,7 +123,7 @@ internal sealed class TerminalScan
         context.LiveBlocks = live;
         context.Metrics = _metrics;
         using ScanSegments held = new ScanSegments(1);
-        Decodes decodes = new Decodes(held, blockRows);
+        Decodes decodes = new Decodes(held, blockRows, live);
 
         // One evaluation window for the whole count, sized for the largest split the plan
         // produces: rented once, so a block costs no allocation.
@@ -139,9 +139,9 @@ internal sealed class TerminalScan
                     continue;
                 }
 
+                _metrics?.AddBlocksPruned(decodes.Pruned.Add(split, _take, live, alive: false));
                 if (live is not null && !live.AnyLive(split))
                 {
-                    _metrics?.AddBlocksPruned(decodes.Pruned.Add(split, _take));
                     continue;
                 }
 
@@ -300,16 +300,21 @@ internal sealed class TerminalScan
         int root = SplitExecution.Execute(context, _tree, in _mask, split, _take);
         if (_metrics is not null && ScanMetrics.Decoded(context.Canonical, root))
         {
-            _metrics.AddBlocksDecoded(decodes.Decoded.Add(split, _take));
+            _metrics.AddBlocksDecoded(decodes.Decoded.Add(split, _take, decodes.Live));
         }
 
         return root;
     }
 
     /// <summary>What the decodes of one terminal share: the segments held between splits, and the blocks counted.</summary>
-    private sealed class Decodes(ScanSegments held, long blockRows)
+    /// <param name="held">The segments held between splits.</param>
+    /// <param name="blockRows">The rows of a block of <paramref name="live"/>.</param>
+    /// <param name="live">The filter's mask of live blocks, which says which blocks of a split count as decoded; null for all.</param>
+    private sealed class Decodes(ScanSegments held, long blockRows, BlockMask? live)
     {
         internal ScanSegments Held { get; } = held;
+
+        internal BlockMask? Live { get; } = live;
 
         /// <summary>The number of the next split decoded.</summary>
         internal long Next;
@@ -448,9 +453,9 @@ internal sealed class TerminalScan
                 continue;
             }
 
+            _metrics?.AddBlocksPruned(pruned.Add(split, _take, live, alive: false));
             if (live is not null && !live.AnyLive(split))
             {
-                _metrics?.AddBlocksPruned(pruned.Add(split, _take));
                 continue;
             }
 
@@ -494,7 +499,7 @@ internal sealed class TerminalScan
         context.LiveBlocks = scope;
         context.Metrics = _metrics;
         using ScanSegments held = new ScanSegments(1);
-        Decodes decodes = new Decodes(held, scope.BlockRows);
+        Decodes decodes = new Decodes(held, live?.BlockRows ?? scope.BlockRows, live);
         int capacity = (int)Math.Min(plan.MaxRows, int.MaxValue);
         byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 1));
         int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(capacity, 1));

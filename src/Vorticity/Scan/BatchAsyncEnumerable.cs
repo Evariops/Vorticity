@@ -471,30 +471,37 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             {
                 if (_filterProven)
                 {
-                    NotePruned(split, wanted: null);
+                    NotePruned(split);
                 }
 
                 continue;
             }
 
+            // The dead blocks of a split that is read are pruned too: their rows are decoded only
+            // because the split runs into them.
+            NotePruned(split);
             if (_live is null || _live.AnyLive(split))
             {
                 return true;
             }
-
-            NotePruned(split, _take);
         }
 
         return false;
     }
 
-    private void NotePruned(RowRange split, RowSelection? wanted)
+    private void NotePruned(RowRange split)
     {
         if (_metrics is not null)
         {
-            _metrics.AddBlocksPruned(_prunedBlocks.Add(split, wanted));
+            _metrics.AddBlocksPruned(_prunedBlocks.Add(split, Wanted, _live, Proven, alive: false));
         }
     }
+
+    /// <summary>The rows a caller's take asks for, or null; not the rows an exact index proved.</summary>
+    private RowSelection? Wanted => _filterProven ? null : _take;
+
+    /// <summary>The rows an exact index proved the filter selects, or null.</summary>
+    private RowSelection? Proven => _filterProven ? _take : null;
 
     private void Register(ScanContext context, RowRange rows) =>
         SplitExecution.Register(context, _tree, in _mask, rows);
@@ -1077,7 +1084,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return;
         }
 
-        _metrics.AddBlocksDecoded(_decodedBlocks.Add(_pending, _take));
+        _metrics.AddBlocksDecoded(_decodedBlocks.Add(_pending, Wanted, _live, Proven));
     }
 
     private void DisposeLanes()

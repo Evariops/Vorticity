@@ -230,21 +230,26 @@ internal struct BlockTally
     }
 
     /// <summary>
-    /// The blocks of <paramref name="split"/> that hold a row of <paramref name="wanted"/>, and were
-    /// not already counted; every block of it when every row is wanted.
+    /// The blocks of <paramref name="split"/> that hold a row of <paramref name="wanted"/>, every
+    /// block of it when every row is wanted, whose own liveness is <paramref name="alive"/>, and that
+    /// were not already counted.
     /// </summary>
     /// <param name="split">The next split of the walk.</param>
     /// <param name="wanted">The rows a take asks for, or null.</param>
+    /// <param name="live">The mask of live blocks, over blocks of this tally's size, or null when every block is live.</param>
+    /// <param name="proven">The rows an exact index proved, or null: a block holding none of them is not live.</param>
+    /// <param name="alive">Whether to count the live blocks, or the dead ones.</param>
     /// <returns>How many.</returns>
     /// <remarks>
-    /// A split follows the chunks rather than the blocks, so one a take reaches can run into a block
-    /// that holds none of its rows; that block is decoded in passing, and is not one the rows touch.
+    /// A split follows the chunks rather than the blocks, so it can run into a block the scan does not
+    /// want or a structure proved empty. That block's rows are decoded in passing; it is not one the
+    /// rows touch, nor a live one, and each block is counted by its own verdict, not its split's.
     /// </remarks>
-    internal long Add(RowRange split, RowSelection? wanted)
+    internal long Add(RowRange split, RowSelection? wanted, Compute.BlockMask? live = null, RowSelection? proven = null, bool alive = true)
     {
-        if (wanted is null || split.IsEmpty)
+        if (split.IsEmpty)
         {
-            return Add(split);
+            return 0;
         }
 
         long counted = 0;
@@ -252,7 +257,14 @@ internal struct BlockTally
         {
             RowRange part = new RowRange(
                 Math.Max(split.Start, block * _blockRows), Math.Min(split.End, (block + 1) * _blockRows));
-            if (wanted.Touches(part))
+            if (wanted is not null && !wanted.Touches(part))
+            {
+                continue;
+            }
+
+            bool isLive = (live is null || live.IsLive((int)(part.Start / live.BlockRows)))
+                && (proven is null || proven.Touches(part));
+            if (isLive == alive)
             {
                 counted += Add(part);
             }
