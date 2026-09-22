@@ -140,7 +140,7 @@ internal sealed class KeyCursorBuilder
                 (_composite is not null
                     ? "IndexPolicy.ForKey over these columns with a key encoder"
                     : _distinct ? "IndexPolicy.Postings for that column" : "IndexPolicy.SortedRuns for that column") +
-                ", or add the index after the fact with VortexFileIndexer.");
+                ", or add it to the written file with VortexFileIndexer.AppendIndexesAsync.");
         }
 
         return new KeyCursor(choice.Source, _distinct);

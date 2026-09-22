@@ -23,11 +23,123 @@ namespace Vorticity;
 /// An index fragment — runs, a directory bound to the file, a trailer — and what building it did.
 /// Every offset in it counts from its first byte, so it may be stored anywhere.
 /// </summary>
+/// <param name="Bytes">The fragment, whole; a reader takes it through <see cref="VortexOpenOptions.IndexFragments"/>.</param>
+/// <param name="Reports">What became of every index the policy asked for.</param>
 public sealed record IndexFragment(ReadOnlyMemory<byte> Bytes, IReadOnlyList<IndexWriteReport> Reports);
 
 /// <summary>Builds indexes over a file that already exists; no data byte moves.</summary>
+/// <remarks>
+/// The rows are read back and go through the builders as they would have on the write. The policy
+/// is the writer's, with its budget, its key encoder and its <c>required</c> indexes, the budget
+/// measured against the file's own bytes.
+/// </remarks>
 public static class VortexFileIndexer
 {
+    /// <summary>
+    /// Indexes the file at <paramref name="path"/> under <paramref name="policy"/> and appends the
+    /// runs behind it, with a new index directory, footer and postscript over the same data.
+    /// </summary>
+    /// <param name="path">A file this library wrote, or one of the same shape: a struct of chunked flat columns.</param>
+    /// <param name="policy">
+    /// What to build. An index the file already has is kept, unless one of the same kind on the same
+    /// column is built, which replaces it.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the read and the writes.</param>
+    /// <returns>What became of every index the policy asked for, built or abandoned with its reason.</returns>
+    /// <remarks>
+    /// The runs are built beside the file and copied behind it only once they are whole, so a
+    /// failure leaves the file as it was. The file takes a new identity: an index fragment built
+    /// for the old bytes does not describe the new ones.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="ArgumentException">The policy names a column the file does not have.</exception>
+    /// <exception cref="VortexException">An index the policy marked required was not built; the file is left as it was.</exception>
+    /// <exception cref="VortexFormatException">The file is malformed, or has a torn tail.</exception>
+    /// <exception cref="VortexUnsupportedException">The file's layout is not one this library can index.</exception>
+    /// <exception cref="IOException">The file changed while it was being indexed, or could not be written.</exception>
+    public static ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(
+        string path, IndexPolicy policy, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(policy);
+        return AppendCoreAsync(path, policy.ToWritePolicy(), OptionsOf(policy), policy, cancellationToken);
+    }
+
+    /// <summary>
+    /// Indexes the rows <paramref name="rows"/> of the file at <paramref name="path"/> under
+    /// <paramref name="policy"/> into a fragment, leaving the file untouched.
+    /// </summary>
+    /// <param name="path">The file, read and never written.</param>
+    /// <param name="policy">What to build.</param>
+    /// <param name="rows">
+    /// The rows to index, whole blocks: from a block boundary to a block boundary, or to the file's
+    /// end; null for the whole file.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The fragment, and what became of every index the policy asked for.</returns>
+    /// <remarks>
+    /// A reader adds the fragment to the file's own indexes with
+    /// <see cref="VortexOpenOptions.IndexFragments"/>. It is bound to the file by the file's
+    /// identity, or, for a file written without one, by its length and last write time, taken now
+    /// and compared again at each open. A fragment over a range covers only the blocks of that
+    /// range, so a key cursor refuses its entries until fragments cover the whole file.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="ArgumentException">The policy names a column the file does not have.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="rows"/> is empty, past the file, or not whole blocks.</exception>
+    /// <exception cref="VortexException">An index the policy marked required was not built.</exception>
+    /// <exception cref="VortexFormatException">The file is malformed, or has a torn tail.</exception>
+    /// <exception cref="VortexUnsupportedException">The file's layout is not one this library can index.</exception>
+    public static async ValueTask<IndexFragment> BuildFragmentAsync(
+        string path, IndexPolicy policy, RowRange? rows = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        ArgumentNullException.ThrowIfNull(policy);
+        VortexFile file = await VortexFile.OpenAsync(path, cancellationToken).ConfigureAwait(false);
+        await using (file.ConfigureAwait(false))
+        {
+            string? token = file.StoredIdentity is null ? IndexContainer.TokenOf(path) : null;
+            return await FragmentCoreAsync(
+                file, policy.ToWritePolicy(), rows ?? new RowRange(0, file.RowCount), token, null, OptionsOf(policy), policy,
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Indexes the rows <paramref name="rows"/> of an open file under <paramref name="policy"/> into
+    /// a fragment, bound to the file by its identity.
+    /// </summary>
+    /// <param name="file">The file, open; it is read, never written, and stays open.</param>
+    /// <param name="policy">What to build.</param>
+    /// <param name="rows">
+    /// The rows to index, whole blocks: from a block boundary to a block boundary, or to the file's
+    /// end; null for the whole file.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    /// <returns>The fragment, and what became of every index the policy asked for.</returns>
+    /// <remarks>
+    /// As <see cref="BuildFragmentAsync(string, IndexPolicy, RowRange?, CancellationToken)"/>, for a
+    /// file whose bytes come from anywhere: the store, a cache, memory.
+    /// </remarks>
+    /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// The file carries no identity to bind the fragment to, or the policy names a column the file
+    /// does not have.
+    /// </exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="rows"/> is empty, past the file, or not whole blocks.</exception>
+    /// <exception cref="VortexException">An index the policy marked required was not built.</exception>
+    /// <exception cref="VortexFormatException">The file opened at a version before a torn tail.</exception>
+    /// <exception cref="VortexUnsupportedException">The file's layout is not one this library can index.</exception>
+    public static ValueTask<IndexFragment> BuildFragmentAsync(
+        VortexFile file, IndexPolicy policy, RowRange? rows = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        ArgumentNullException.ThrowIfNull(policy);
+        return FragmentCoreAsync(
+            file, policy.ToWritePolicy(), rows ?? new RowRange(0, file.RowCount), null, null, OptionsOf(policy), policy,
+            cancellationToken);
+    }
+
     /// <summary>
     /// Indexes <paramref name="path"/> under <paramref name="policy"/> and appends the runs, with a
     /// new directory, footer and postscript over the same data segments.
@@ -37,11 +149,45 @@ public static class VortexFileIndexer
     /// <param name="options">The budget, the key encoder and the block length when the file has no zone map; null for the defaults.</param>
     /// <param name="cancellationToken">Cancels the read and the writes.</param>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this can index.</exception>
-    internal static async ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(
+    internal static ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(
         string path, WritePolicy policy, VortexWriteOptions? options = null, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(policy);
+        return AppendCoreAsync(path, policy, options, null, cancellationToken);
+    }
+
+    /// <summary>Why a file's shape keeps it from being indexed after it was written.</summary>
+    private static VortexUnsupportedException Refused(string why) =>
+        new VortexUnsupportedException(
+            "index",
+            ComponentKind.Feature,
+            $"This file cannot be indexed after it was written: {why}. Write it again with the index in its policy.");
+
+    /// <summary>What the public members build under: the policy's budget and key encoder, and the defaults.</summary>
+    private static VortexWriteOptions OptionsOf(IndexPolicy policy) => VortexWriteOptions.Default with { Indexes = policy };
+
+    /// <summary>Refuses a policy naming a column <paramref name="schema"/> does not have, as <c>CreateWriter</c> does.</summary>
+    private static void RequireColumns(DType schema, IndexPolicy? declared)
+    {
+        if (declared is null)
+        {
+            return;
+        }
+
+        foreach (string column in declared.Paths)
+        {
+            if (!VortexFileWriter.Names(schema, schema.Kind == DTypeKind.Struct, column))
+            {
+                throw new ArgumentException(
+                    $"The index policy names '{column}', which is no column of the file's schema {schema}.", "policy");
+            }
+        }
+    }
+
+    private static async ValueTask<IReadOnlyList<IndexWriteReport>> AppendCoreAsync(
+        string path, WritePolicy policy, VortexWriteOptions? options, IndexPolicy? declared, CancellationToken cancellationToken)
+    {
         string scratch = path + ".indexing-" + Guid.NewGuid().ToString("N");
         IReadOnlyList<IndexWriteReport> reports;
         long length;
@@ -51,6 +197,7 @@ public static class VortexFileIndexer
             await using (file.ConfigureAwait(false))
             {
                 VortexFileRepair.ThrowIfTorn(path, file, "An index");
+                RequireColumns(file.DType, declared);
                 length = file.FileLength;
                 FileStream tail = new FileStream(scratch, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 StreamSegmentSink sink = new StreamSegmentSink(tail, ownsStream: true, length);
@@ -106,7 +253,7 @@ public static class VortexFileIndexer
     /// <summary>
     /// Indexes the rows <paramref name="rows"/> of <paramref name="file"/> under
     /// <paramref name="policy"/> into a fragment, leaving the file untouched; a reader adds it to
-    /// the file's own index with <see cref="VortexReadOptions.IndexFragments"/>.
+    /// the file's own index with <see cref="VortexOpenOptions.IndexFragments"/>.
     /// </summary>
     /// <param name="file">The file, open. It is read, never written.</param>
     /// <param name="policy">What to build.</param>
@@ -122,7 +269,9 @@ public static class VortexFileIndexer
     /// The XXH3-128 of the file's bytes when the caller knows it, recorded for verification; null to
     /// record none. No reader computes it.
     /// </param>
-    /// <param name="options">As for <see cref="AppendIndexesAsync"/>.</param>
+    /// <param name="options">
+    /// As for <see cref="AppendIndexesAsync(string, WritePolicy, VortexWriteOptions?, CancellationToken)"/>.
+    /// </param>
     /// <param name="cancellationToken">Cancels the read.</param>
     /// <remarks>
     /// A fragment over a range covers only the blocks of that range, so a key source refuses the
@@ -130,10 +279,11 @@ public static class VortexFileIndexer
     /// rather than the rows, and is written whole or not at all.
     /// </remarks>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
+    /// <exception cref="ArgumentException">The file has no identity and no store token was given.</exception>
     /// <exception cref="ArgumentOutOfRangeException">The range is empty, past the file, or not whole blocks.</exception>
-    /// <exception cref="InvalidOperationException">The file has no identity and no store token was given.</exception>
+    /// <exception cref="VortexException">An index the policy marked required was not built.</exception>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this can index.</exception>
-    internal static async ValueTask<IndexFragment> BuildFragmentAsync(
+    internal static ValueTask<IndexFragment> BuildFragmentAsync(
         VortexFile file,
         WritePolicy policy,
         RowRange rows,
@@ -144,14 +294,24 @@ public static class VortexFileIndexer
     {
         ArgumentNullException.ThrowIfNull(file);
         ArgumentNullException.ThrowIfNull(policy);
+        return FragmentCoreAsync(file, policy, rows, storeToken, contentHash, options, null, cancellationToken);
+    }
+
+    private static async ValueTask<IndexFragment> FragmentCoreAsync(
+        VortexFile file, WritePolicy policy, RowRange rows, string? storeToken, UInt128? contentHash,
+        VortexWriteOptions? options, IndexPolicy? declared, CancellationToken cancellationToken)
+    {
         VortexFileRepair.ThrowIfTorn("The file", file, "A fragment");
         if (file.StoredIdentity is null && storeToken is null)
         {
-            throw new InvalidOperationException(
-                "A fragment is bound to its file by the file's identity, or by the store's token for a file " +
-                "written without one (13 §7): this file has no identity, and no token was given.");
+            throw new ArgumentException(
+                "A fragment is bound to its file by the file's identity, or, for a file written without one, by " +
+                "its store's token: this file has no identity, and no token was given. Build the fragment from " +
+                "the file's path, which gives one.",
+                nameof(file));
         }
 
+        RequireColumns(file.DType, declared);
         MemoryStream bytes = new MemoryStream();
         StreamSegmentSink sink = new StreamSegmentSink(bytes);
         await using (sink.ConfigureAwait(false))
@@ -190,18 +350,18 @@ public static class VortexFileIndexer
         DType schema = file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
         {
-            throw VortexFileWriter.AppendPlan.Refused("its root is not a struct of columns");
+            throw Refused("its root is not a struct of columns");
         }
 
         int fields = schema.FieldCount;
         LayoutTree tree = file.LayoutTree;
-        (List<(LayoutNode Flat, long Start)> chunks, long zoneLength) = VortexFileWriter.AppendPlan.ColumnChunks(tree, 0);
+        (List<(LayoutNode Flat, long Start)> chunks, long zoneLength) = VortexFileWriter.AppendPlan.ColumnChunks(tree, 0, Refused);
         for (int field = 1; field < fields; field++)
         {
-            (List<(LayoutNode Flat, long Start)> other, long length) = VortexFileWriter.AppendPlan.ColumnChunks(tree, field);
+            (List<(LayoutNode Flat, long Start)> other, long length) = VortexFileWriter.AppendPlan.ColumnChunks(tree, field, Refused);
             if (!VortexFileWriter.AppendPlan.SameChunks(chunks, other) || (length != 0 && zoneLength != 0 && length != zoneLength))
             {
-                throw VortexFileWriter.AppendPlan.Refused("its columns are not chunked alike");
+                throw Refused("its columns are not chunked alike");
             }
 
             zoneLength = Math.Max(zoneLength, length);
@@ -212,7 +372,7 @@ public static class VortexFileIndexer
             : options?.RowBlockSize ?? VortexWriteOptions.Default.RowBlockSize ?? 0;
         if (blockRows <= 0)
         {
-            throw VortexFileWriter.AppendPlan.Refused("it has no block length: no zone map, and no RowBlockSize to take one from");
+            throw Refused("it has no block length: no zone map, and none given to take one from");
         }
 
         long rows = file.RowCount;
@@ -220,7 +380,7 @@ public static class VortexFileIndexer
         {
             if (chunks[c].Start % blockRows != 0)
             {
-                throw VortexFileWriter.AppendPlan.Refused($"its chunk at row {chunks[c].Start} does not start a block of {blockRows}");
+                throw Refused($"its chunk at row {chunks[c].Start} does not start a block of {blockRows}");
             }
         }
 
@@ -346,6 +506,12 @@ public static class VortexFileIndexer
             indexes.SettleBudget(file.FileLength);
             await FlushAsync(indexes, sink, encodings, cancellationToken).ConfigureAwait(false);
             indexes.Close(columns, chunkRows, blockRows, file.FileLength);
+            if (indexes.MissingRequired() is { } missing)
+            {
+                throw new VortexException(
+                    $"The {missing.Kind} index on '{missing.Column}' is required and was not built: {missing.Reason}. The file is left as it was.");
+            }
+
             await indexes.WriteFencePagesAsync(sink, cancellationToken).ConfigureAwait(false);
             return indexes;
         }
@@ -530,7 +696,7 @@ public static class VortexFileIndexer
             if (view.Layout.Compression != CompressionScheme.None
                 || (view.HasStatistics && view.Statistics.Compression != CompressionScheme.None))
             {
-                throw VortexFileWriter.AppendPlan.Refused("its layout or statistics segment is compressed");
+                throw Refused("its layout or statistics segment is compressed");
             }
 
             SegmentSpec layout = view.Layout.ToSegmentSpec();

@@ -475,7 +475,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>Whether <paramref name="path"/> is a column: a top-level name, a dotted path through structs, or the empty path of a file whose root is not a struct.</summary>
-    private static bool Names(DType schema, bool tabular, string path) =>
+    internal static bool Names(DType schema, bool tabular, string path) =>
         tabular ? IndexWriter.TryResolve(schema, tabular, path, out _, out _, out _) : path.Length == 0;
 
     /// <summary>

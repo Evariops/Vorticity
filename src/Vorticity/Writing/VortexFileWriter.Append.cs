@@ -729,12 +729,17 @@ public sealed partial class VortexFileWriter
         }
 
         /// <summary>A column's flat chunks with their first rows, and its zone length (0 when unzoned).</summary>
-        internal static (List<(LayoutNode Flat, long Start)> Chunks, long ZoneLength) ColumnChunks(LayoutTree tree, int field)
+        /// <param name="tree">The file's layout.</param>
+        /// <param name="field">The column.</param>
+        /// <param name="refuse">What a shape this cannot continue throws; an append's refusal when null.</param>
+        internal static (List<(LayoutNode Flat, long Start)> Chunks, long ZoneLength) ColumnChunks(
+            LayoutTree tree, int field, Func<string, VortexUnsupportedException>? refuse = null)
         {
+            refuse ??= Refused;
             LayoutNode root = tree.Root;
             if (root.Encoding != LayoutEncodingId.Struct || field + (root.DType.IsNullable ? 1 : 0) >= root.ChildCount)
             {
-                throw Refused("its root layout is not a struct of columns");
+                throw refuse("its root layout is not a struct of columns");
             }
 
             LayoutNode node = root.GetChild(field + (root.DType.IsNullable ? 1 : 0));
@@ -756,7 +761,7 @@ public sealed partial class VortexFileWriter
 
             if (node.Encoding != LayoutEncodingId.Chunked)
             {
-                throw Refused($"column {field} is a {node.EncodingIdText} layout, not chunks of flat segments");
+                throw refuse($"column {field} is a {node.EncodingIdText} layout, not chunks of flat segments");
             }
 
             ReadOnlySpan<long> offsets = node.ChunkOffsets;
@@ -766,7 +771,7 @@ public sealed partial class VortexFileWriter
                 LayoutNode chunk = node.GetChild(i);
                 if (chunk.Encoding != LayoutEncodingId.Flat || chunk.Segments.Length != 1)
                 {
-                    throw Refused($"a chunk of column {field} is a {chunk.EncodingIdText} layout, not one flat segment");
+                    throw refuse($"a chunk of column {field} is a {chunk.EncodingIdText} layout, not one flat segment");
                 }
 
                 chunks.Add((chunk, offsets[i]));

@@ -27,8 +27,9 @@ public enum IndexKind : byte
 /// <summary>The indexes a writer builds, column by column, within a budget.</summary>
 /// <remarks>
 /// Immutable: every method returns a new policy. An index marked <c>required</c> that the writer
-/// cannot build within the budget makes <c>CompleteAsync</c> throw; one that is not required and is
-/// abandoned leaves no bytes in the file. An unknown column throws at <c>CreateWriter</c>.
+/// cannot build within the budget makes <c>CompleteAsync</c> throw, as it makes a
+/// <see cref="VortexFileIndexer"/> call throw; one that is not required and is abandoned leaves no
+/// bytes in the file. An unknown column throws at <c>CreateWriter</c>, or at the indexer's call.
 /// </remarks>
 public sealed class IndexPolicy
 {
