@@ -56,6 +56,13 @@ internal sealed class BoolDecoder : ArrayDecoder
         return context.ValidityDecodesRange(in node, 0);
     }
 
+    /// <inheritdoc/>
+    public override bool MaterializesNothing(ArrayDecodeContext context, in ArrayNode node, DType dtype)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.ValidityMaterializesNothing(in node, 0);
+    }
+
     /// <summary>
     /// The same bitmap from the byte the range starts in, at the bit offset the range leaves within
     /// that byte: no bit moves, whatever the range.

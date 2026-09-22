@@ -84,7 +84,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         // is carried in the row argument's coordinate space rather than in absolute file rows.
         if (context.HasSelection)
         {
-            return ExecuteSelected(in node, in fields, context, total, length);
+            return ExecuteSelected(in node, rows, in fields, context, total, length);
         }
 
         // Dead blocks in this node are handled a level up and not here: this library wraps every
@@ -138,6 +138,14 @@ internal sealed class FlatLayoutReader : LayoutReader
             return CanonicalSlice.SliceAcross(states, context.Canonical, said, (int)rows.Start, length);
         }
 
+        // A chunk a batch before this one decoded whole is sliced: the one lookup a batch of a chunk
+        // whose decode is a set of views pays.
+        if (Windowed(context, total) && context.TryPeekRetained(key, out CanonicalArena whole, out int wholeNode))
+        {
+            return Narrowed(
+                CanonicalSlice.SliceAcross(whole, context.Canonical, wholeNode, (int)rows.Start, length), in fields, context);
+        }
+
         // A chunk larger than a window is decoded a window at a time when its encoding can decode a
         // range of its rows, so that what a scan holds decoded at once is a window of each column
         // and not a chunk of each: a chunk of half a million rows is many megabytes a column, and
@@ -145,8 +153,8 @@ internal sealed class FlatLayoutReader : LayoutReader
         // stays in the second-level cache from its decode to its last batch.
         ArrayNode root = default;
         bool loaded = false;
-        if (total > WindowRows &&
-            TryWindow(in node, rows, in fields, context, total, length, key, ref root, ref loaded, out int windowed))
+        if (Windowed(context, total) &&
+            TryWindow(in node, rows, in fields, context, total, length, ref root, ref loaded, out int windowed))
         {
             return windowed;
         }
@@ -178,15 +186,16 @@ internal sealed class FlatLayoutReader : LayoutReader
     }
 
     /// <summary>
-    /// Rows a window of a chunk holds: eight batches of the default size, and per column at most
-    /// half a megabyte of fixed-width values or a megabyte of string views, which a core's share of
-    /// the second-level cache holds for the few batches between a window's decode and its last use.
+    /// The most rows a window of a chunk holds: sixteen batches of the default size, a megabyte of
+    /// fixed-width values or two of string views per column, about what the reference decodes at
+    /// once. A window pays a parse of the chunk's blob and of its encodings' metadata, so a smaller
+    /// one makes a cheap encoding pay that parse more often than the memory it saves is worth.
     /// </summary>
-    internal const int WindowRows = 1 << 16;
+    internal const int WindowRows = 1 << 17;
 
     /// <summary>
-    /// Serves the batch out of the window of the chunk that holds it, decoding the window on its
-    /// first batch, when the chunk's encoding can decode a range of its rows.
+    /// Serves the batch out of the window the scan's plan put it in, decoding the window on its
+    /// first batch, when the chunk's encoding decodes a range of its rows and materializes them.
     /// </summary>
     /// <param name="node">The flat layout node.</param>
     /// <param name="rows">The batch's rows, in the node's space.</param>
@@ -194,122 +203,139 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// <param name="context">The scan context.</param>
     /// <param name="total">The node's row count.</param>
     /// <param name="length">The batch's row count.</param>
-    /// <param name="chunkKey">The whole chunk's retention key.</param>
     /// <param name="root">Receives the parsed root when this had to load it, for the caller to reuse.</param>
     /// <param name="loaded">Whether <paramref name="root"/> was loaded.</param>
     /// <param name="result">The batch's node, when served.</param>
     /// <returns><see langword="false"/> when the chunk is to be decoded whole.</returns>
     /// <remarks>
-    /// A window is retained under a key of its own and evicted as a chunk is, once no later batch
-    /// borrows it: the batches walk the chunk in order, so a window is dead eight batches after it
-    /// was decoded. The whole chunk is looked for first, because a batch before this one may have
-    /// found the root unable to decode a range and retained the chunk whole, and a chunk retained
-    /// twice would be the memory this method exists to save.
+    /// A window is whole batches, as many as fit in <see cref="WindowRows"/>: the plan cuts a span
+    /// into batches of one size but the last, and groups them, so no batch straddles two windows
+    /// and every batch of a window, the last included, is given the same one. A window is retained
+    /// under a key of its own and evicted as a chunk is, once no later batch borrows it; a window
+    /// of a single batch is not retained at all, the batch decoding its own rows.
     /// </remarks>
     private bool TryWindow(
         in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, int total, int length,
-        long chunkKey, ref ArrayNode root, ref bool loaded, out int result)
+        ref ArrayNode root, ref bool loaded, out int result)
     {
         result = -1;
-        int first = (int)(rows.Start / WindowRows);
-        int last = (int)((rows.Start + length - 1) / WindowRows);
-
-        // A batch longer than a window, which only a batch size above the window makes, takes the
-        // whole chunk; one that straddles two windows, which a batch size that does not divide the
-        // window makes, is the two windows' parts joined.
-        if (last > first + 1 ||
-            !TryAcquireWindow(in node, in fields, context, total, first, chunkKey, mayDecode: true,
-                ref root, ref loaded, out CanonicalArena head, out int headNode))
+        if (!WindowOf(context, rows, length, total, out int windowStart, out int windowLength))
         {
             return false;
         }
 
-        int headStart = first * WindowRows;
-        int into = (int)(rows.Start - headStart);
-        if (last == first)
+        int into = (int)(rows.Start - windowStart);
+        long? key = windowLength > length ? ScanContext.WindowKey(node.Segments[0], windowStart) : null;
+        if (key is long found &&
+            context.TryPeekRetained(found, out CanonicalArena hit, out int hitNode) &&
+            Holds(hit, hitNode, into + length))
         {
-            result = Narrowed(CanonicalSlice.SliceAcross(head, context.Canonical, headNode, into, length), in fields, context);
+            result = Narrowed(CanonicalSlice.SliceAcross(hit, context.Canonical, hitNode, into, length), in fields, context);
             return true;
         }
 
-        if (!TryAcquireWindow(in node, in fields, context, total, last, chunkKey, mayDecode: true,
-                ref root, ref loaded, out CanonicalArena tail, out int tailNode))
+        if (!Ranged(in node, context, ref root, ref loaded))
         {
             return false;
         }
 
-        int headPart = Math.Min(WindowRows, total - headStart) - into;
-        Span<int> parts = stackalloc int[2];
-        parts[0] = CanonicalSlice.SliceAcross(head, context.Canonical, headNode, into, headPart);
-        parts[1] = CanonicalSlice.SliceAcross(tail, context.Canonical, tailNode, 0, length - headPart);
-        Types.DType dtype = context.Canonical.GetNode(parts[0]).DType;
-        result = Narrowed(
-            Arrays.Decoders.Canonical.CanonicalConcat.Concat(context.Decode, dtype, length, parts), in fields, context);
+        if (key is long claimed &&
+            TryAcquireWindow(in root, in node, in fields, context, total, windowStart, windowLength, claimed, out CanonicalArena held, out int window) &&
+            Holds(held, window, into + length))
+        {
+            result = Narrowed(CanonicalSlice.SliceAcross(held, context.Canonical, window, into, length), in fields, context);
+            return true;
+        }
+
+        // A window of this one batch, or one a window of another shape already holds the key of: the
+        // batch's rows are decoded as a range of their own, into the batch, and retained by nothing.
+        result = Narrowed(DecodedDirect(in root, in node, in fields, context, total, (int)rows.Start, length), in fields, context);
         return true;
     }
 
     /// <summary>
-    /// The window <paramref name="index"/> of the chunk, retained: found, or decoded now when
-    /// <paramref name="mayDecode"/> and the chunk's encoding can decode a range of its rows.
+    /// Whether the scan grouped the batch in flight into a window smaller than this node, which is
+    /// when a window saves anything: a window holding the whole chunk is the chunk decoded whole.
     /// </summary>
-    /// <param name="node">The flat layout node.</param>
-    /// <param name="fields">The projection.</param>
-    /// <param name="context">The scan context.</param>
+    private static bool Windowed(ScanContext context, int total) =>
+        context.WindowSpan > 0 && context.WindowSpan < total;
+
+    /// <summary>
+    /// The window of this node the batch in flight belongs to, in the node's row space, when the
+    /// scan grouped its batches into windows and the window lies inside the node.
+    /// </summary>
+    /// <param name="context">The scan context, carrying the window the scan's plan gave the batch.</param>
+    /// <param name="rows">The batch's rows, in the node's space.</param>
+    /// <param name="length">The batch's row count.</param>
     /// <param name="total">The node's row count.</param>
-    /// <param name="index">The window's position in the chunk.</param>
-    /// <param name="chunkKey">The whole chunk's retention key.</param>
-    /// <param name="mayDecode">Whether a window not yet retained may be decoded, which parses the blob.</param>
-    /// <param name="root">Receives the parsed root when this had to load it, for the caller to reuse.</param>
-    /// <param name="loaded">Whether <paramref name="root"/> holds the parsed root.</param>
-    /// <param name="arena">The arena holding the window.</param>
-    /// <param name="nodeIndex">The window's node in <paramref name="arena"/>.</param>
-    /// <returns><see langword="false"/> when the window is not to be had: the chunk is retained whole, or its encoding decodes no range.</returns>
-    /// <remarks>
-    /// The whole chunk is looked for before the blob is parsed, because a batch before this one
-    /// may have found the root unable to decode a range and retained the chunk whole, and a chunk
-    /// retained twice would be the memory the windows exist to save. The O(n) checks a node's
-    /// side tables need are remembered from one window to the next under the node's check scope:
-    /// they are facts about the node, and every window of it is the same node.
-    /// </remarks>
-    private bool TryAcquireWindow(
-        in LayoutNode node, in FieldMask fields, ScanContext context, int total, int index, long chunkKey,
-        bool mayDecode, ref ArrayNode root, ref bool loaded, out CanonicalArena arena, out int nodeIndex)
+    /// <param name="windowStart">The window's first row, in the node's space.</param>
+    /// <param name="windowLength">The window's row count.</param>
+    /// <returns><see langword="false"/> when no window was given, or the one given does not fit this node's rows.</returns>
+    private static bool WindowOf(
+        ScanContext context, RowRange rows, int length, int total, out int windowStart, out int windowLength)
     {
-        arena = null!;
-        nodeIndex = -1;
-        if (ScanContext.WindowKey(node.Segments[0], index) is not long key)
-        {
-            return false;
-        }
+        windowLength = context.WindowSpan;
+        long start = rows.Start - context.WindowLead;
+        windowStart = (int)Math.Max(start, 0);
+        return windowLength > 0 && start >= 0 && context.WindowLead + (long)length <= windowLength &&
+            start + windowLength <= total;
+    }
 
-        if (context.TryPeekRetained(key, out arena, out nodeIndex))
-        {
-            return true;
-        }
-
-        if (!mayDecode || context.TryPeekRetained(chunkKey, out _, out _))
-        {
-            return false;
-        }
-
+    /// <summary>
+    /// Whether the chunk's root decodes a range of its rows and materializes them, parsing the blob
+    /// first when no one has: a chunk whose decode is a set of views onto the segment holds nothing
+    /// a window would not, and a window of it would parse the blob once per window for no saving.
+    /// </summary>
+    private bool Ranged(in LayoutNode node, ScanContext context, ref ArrayNode root, ref bool loaded)
+    {
         if (!loaded)
         {
             root = LoadRoot(in node, context);
             loaded = true;
         }
 
-        if (!context.Decode.DecodesRange(in root))
-        {
-            return false;
-        }
+        return context.Decode.DecodesRange(in root) && !context.Decode.MaterializesNothing(in root, node.DType);
+    }
 
+    /// <summary>Whether a retained window holds the rows up to <paramref name="end"/> of it.</summary>
+    /// <remarks>
+    /// A window's key names where it starts and not how long it is, so this is what makes a window
+    /// found under a batch's key the rows the batch wants: every batch of a scan is handed its
+    /// window by the one plan, and a reader running a child over rows in another space may land on
+    /// a window cut for other rows, which is then left alone rather than sliced past its end.
+    /// </remarks>
+    private static bool Holds(CanonicalArena arena, int nodeIndex, int end) =>
+        arena.GetNode(nodeIndex).Length >= end;
+
+    /// <summary>
+    /// The window of the chunk starting at <paramref name="windowStart"/>, retained: found under
+    /// <paramref name="key"/>, or decoded now into the arena that retains it.
+    /// </summary>
+    /// <param name="root">The chunk's parsed root.</param>
+    /// <param name="node">The flat layout node.</param>
+    /// <param name="fields">The projection.</param>
+    /// <param name="context">The scan context.</param>
+    /// <param name="total">The node's row count.</param>
+    /// <param name="windowStart">The window's first row.</param>
+    /// <param name="windowLength">The window's row count.</param>
+    /// <param name="key">The window's retention key.</param>
+    /// <param name="arena">The arena holding the window.</param>
+    /// <param name="nodeIndex">The window's node in <paramref name="arena"/>.</param>
+    /// <returns>Always <see langword="true"/>: another context decoding the window is waited for.</returns>
+    /// <remarks>
+    /// The O(n) checks a node's side tables need are remembered from one window to the next under
+    /// the node's check scope: they are facts about the node, and every window of it is the same
+    /// node.
+    /// </remarks>
+    private static bool TryAcquireWindow(
+        in ArrayNode root, in LayoutNode node, in FieldMask fields, ScanContext context, int total,
+        int windowStart, int windowLength, long key, out CanonicalArena arena, out int nodeIndex)
+    {
         if (context.TryGetRetained(key, out arena, out nodeIndex))
         {
             return true;
         }
 
-        int windowStart = index * WindowRows;
-        int windowLength = Math.Min(WindowRows, total - windowStart);
         Decoded(context, windowLength);
         arena = context.BeginRetainedDecode();
         nodeIndex = -1;
@@ -328,92 +354,108 @@ internal sealed class FlatLayoutReader : LayoutReader
     }
 
     /// <summary>
-    /// Gathers <see cref="ScanContext.Selection"/> out of the window of the chunk it falls in, or
-    /// the two windows it straddles, each retained: found, or decoded now when
-    /// <paramref name="mayDecode"/> and the chunk's encoding can decode a range of its rows.
+    /// Decodes rows <c>[start, start + count)</c> of this node into the batch, retained by nothing,
+    /// under the node's check scope so that its checks and shared children serve every batch.
+    /// </summary>
+    private static int DecodedDirect(
+        in ArrayNode root, in LayoutNode node, in FieldMask fields, ScanContext context, int total, int start, int count)
+    {
+        Decoded(context, count);
+        uint? outer = context.Decode.BeginNodeCheckScope(node.Segments[0]);
+        try
+        {
+            return DecodedRange(in root, in node, in fields, context, total, start, count);
+        }
+        finally
+        {
+            context.Decode.EndNodeCheckScope(outer);
+        }
+    }
+
+    /// <summary>
+    /// Gathers <see cref="ScanContext.Selection"/> out of the window the scan's plan put the batch
+    /// in, found retained or, when <paramref name="mayDecode"/>, decoded now; or, for a selection
+    /// too sparse to pay for a window, out of the range it spans, decoded for it alone.
     /// </summary>
     /// <param name="node">The flat layout node.</param>
+    /// <param name="rows">The batch's rows, in the node's space; the selection lies inside them.</param>
     /// <param name="fields">The projection.</param>
     /// <param name="context">The scan context, carrying the selection in the node's space.</param>
     /// <param name="total">The node's row count.</param>
-    /// <param name="chunkKey">The whole chunk's retention key.</param>
-    /// <param name="mayDecode">Whether a window not yet retained may be decoded, which parses the blob.</param>
+    /// <param name="length">The batch's row count.</param>
+    /// <param name="mayDecode">Whether anything not yet retained may be decoded, which parses the blob.</param>
     /// <param name="root">Receives the parsed root when this had to load it, for the caller to reuse.</param>
     /// <param name="loaded">Whether <paramref name="root"/> holds the parsed root.</param>
     /// <param name="result">The gathered node, when served.</param>
-    /// <returns><see langword="false"/> when the selection is empty, spans more than two windows, or a window is not to be had.</returns>
+    /// <returns><see langword="false"/> when the selection is empty, no window was given, or the chunk is not to be read in ranges.</returns>
+    /// <remarks>
+    /// A selection spanning at least half its batch is the rows of a pruned or filtered scan, which
+    /// the next batches of the window want too, so the window is decoded and kept; a sparser one is
+    /// a take, which wants a few rows of each batch, and the range it spans is all it decodes.
+    /// </remarks>
     private bool TryWindowSelected(
-        in LayoutNode node, in FieldMask fields, ScanContext context, int total, long chunkKey, bool mayDecode,
-        ref ArrayNode root, ref bool loaded, out int result)
+        in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, int total, int length,
+        bool mayDecode, ref ArrayNode root, ref bool loaded, out int result)
     {
         result = -1;
         ReadOnlySpan<int> selection = context.Selection;
-        if (selection.Length == 0)
+        if (selection.Length == 0 || !WindowOf(context, rows, length, total, out int windowStart, out int windowLength))
         {
             return false;
         }
 
-        int first = selection[0] / WindowRows;
-        int last = selection[^1] / WindowRows;
-        if (last > first + 1 ||
-            !TryAcquireWindow(in node, in fields, context, total, first, chunkKey, mayDecode,
-                ref root, ref loaded, out CanonicalArena head, out int headNode))
+        int end = selection[^1] - windowStart + 1;
+        long? key = windowLength > length ? ScanContext.WindowKey(node.Segments[0], windowStart) : null;
+        if (key is long found &&
+            context.TryPeekRetained(found, out CanonicalArena hit, out int hitNode) &&
+            Holds(hit, hitNode, end))
         {
-            return false;
-        }
-
-        int headStart = first * WindowRows;
-        if (last == first)
-        {
-            int taken = GatherWindow(head, headNode, context, headStart, Math.Min(WindowRows, total - headStart), selection);
-            result = Narrowed(taken, in fields, context);
+            result = Narrowed(GatherRebased(context, WholeOf(hit, hitNode, context), windowStart, selection), in fields, context);
             return true;
         }
 
-        if (!TryAcquireWindow(in node, in fields, context, total, last, chunkKey, mayDecode,
-                ref root, ref loaded, out CanonicalArena tail, out int tailNode))
+        if (!mayDecode || !Ranged(in node, context, ref root, ref loaded))
         {
             return false;
         }
 
-        int boundary = last * WindowRows;
-        int split = 0;
-        while (split < selection.Length && selection[split] < boundary)
+        int from = selection[0];
+        int spanned = selection[^1] + 1 - from;
+        if (key is long claimed && 2L * spanned >= length &&
+            TryAcquireWindow(in root, in node, in fields, context, total, windowStart, windowLength, claimed, out CanonicalArena held, out int window) &&
+            Holds(held, window, end))
         {
-            split++;
+            result = Narrowed(GatherRebased(context, WholeOf(held, window, context), windowStart, selection), in fields, context);
+            return true;
         }
 
-        Span<int> parts = stackalloc int[2];
-        parts[0] = GatherWindow(head, headNode, context, headStart, boundary - headStart, selection[..split]);
-        parts[1] = GatherWindow(tail, tailNode, context, boundary, Math.Min(WindowRows, total - boundary), selection[split..]);
-        Types.DType dtype = context.Canonical.GetNode(parts[0]).DType;
+        int decoded = DecodedDirect(in root, in node, in fields, context, total, from, spanned);
         result = Narrowed(
-            Arrays.Decoders.Canonical.CanonicalConcat.Concat(context.Decode, dtype, selection.Length, parts),
-            in fields, context);
+            spanned == selection.Length ? decoded : GatherRebased(context, decoded, from, selection), in fields, context);
         return true;
     }
 
-    /// <summary>Gathers <paramref name="selection"/> out of a retained window of the chunk.</summary>
+    /// <summary>The whole of a retained window, as records in the batch's arena viewing the retained storage.</summary>
+    private static int WholeOf(CanonicalArena held, int retained, ScanContext context) =>
+        CanonicalSlice.SliceAcross(held, context.Canonical, retained, 0, held.GetNode(retained).Length);
+
+    /// <summary>Gathers <paramref name="selection"/>, in the chunk's space, out of a node whose first row is <paramref name="origin"/>.</summary>
     /// <remarks>
-    /// The selection is in the chunk's space and the window starts where it starts, so the indices
-    /// move by the window's start before the gather: a batch's selection is a few thousand rows,
-    /// rebased into a rented buffer.
+    /// The indices move by the node's start before the gather: a batch's selection is a few thousand
+    /// rows, rebased into a rented buffer.
     /// </remarks>
-    private static int GatherWindow(
-        CanonicalArena held, int retained, ScanContext context, int windowStart, int windowLength,
-        ReadOnlySpan<int> selection)
+    private static int GatherRebased(ScanContext context, int nodeIndex, int origin, ReadOnlySpan<int> selection)
     {
-        int whole = CanonicalSlice.SliceAcross(held, context.Canonical, retained, 0, windowLength);
         int[] rented = System.Buffers.ArrayPool<int>.Shared.Rent(selection.Length);
         try
         {
             Span<int> rebased = rented.AsSpan(0, selection.Length);
             for (int i = 0; i < selection.Length; i++)
             {
-                rebased[i] = selection[i] - windowStart;
+                rebased[i] = selection[i] - origin;
             }
 
-            return Compute.CanonicalFilter.Apply(context.Canonical, whole, rebased);
+            return Compute.CanonicalFilter.Apply(context.Canonical, nodeIndex, rebased);
         }
         finally
         {
@@ -467,7 +509,7 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// </para>
     /// </remarks>
     private int ExecuteSelected(
-        in LayoutNode node, in FieldMask fields, ScanContext context, int total, int length)
+        in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, int total, int length)
     {
         // Nothing to retain when this call is served the whole node, which is the same argument the
         // whole-node batch above makes: no second call will come for the rest of it, so an entry
@@ -503,13 +545,13 @@ internal sealed class FlatLayoutReader : LayoutReader
                 return Gather(hit, hitNode, in fields, context, total);
             }
 
-            // The windows the selection falls in, when a batch of this chunk has already decoded
-            // them: gathering out of a decoded window beats every route below, the specialized one
+            // The window the batch falls in, when a batch of this chunk has already decoded it:
+            // gathering out of a decoded window beats every route below, the specialized one
             // included, and looking costs a lookup.
             ArrayNode chunkRoot = default;
             bool loaded = false;
-            if (total > WindowRows &&
-                TryWindowSelected(in node, in fields, context, total, key, mayDecode: false, ref chunkRoot, ref loaded, out int gathered))
+            if (Windowed(context, total) &&
+                TryWindowSelected(in node, rows, in fields, context, total, length, mayDecode: false, ref chunkRoot, ref loaded, out int gathered))
             {
                 return gathered;
             }
@@ -524,9 +566,9 @@ internal sealed class FlatLayoutReader : LayoutReader
                     .SelectsWithoutFullDecode)
             {
                 // Where the whole chunk would be decoded to gather a few rows out of it, a window of
-                // it is decoded instead when the encoding can, and retained as the chunk would be.
-                if (total > WindowRows &&
-                    TryWindowSelected(in node, in fields, context, total, key, mayDecode: true, ref chunkRoot, ref loaded, out gathered))
+                // it, or the range the selection spans, is decoded instead when the encoding can.
+                if (Windowed(context, total) &&
+                    TryWindowSelected(in node, rows, in fields, context, total, length, mayDecode: true, ref chunkRoot, ref loaded, out gathered))
                 {
                     return gathered;
                 }

@@ -467,6 +467,25 @@ internal sealed class ScanContext : IDisposable
     /// </remarks>
     internal long Batch { get; set; }
 
+    /// <summary>
+    /// How many rows of the batch in flight's window precede it, when the scan grouped its batches
+    /// into windows; see <see cref="WindowSpan"/>.
+    /// </summary>
+    internal int WindowLead { get; set; }
+
+    /// <summary>
+    /// How many rows the batch in flight's window holds, or zero when the scan driving this context
+    /// did not group its batches: a flat reader decodes a chunk larger than a batch one window at
+    /// a time, and a chunk whole when no window was given.
+    /// </summary>
+    /// <remarks>
+    /// In the batch's row space: a reader that runs a child over the batch's rows translated, as a
+    /// chunked one does, leaves it as it is, and a window a reader finds under its start row is used
+    /// only when it holds the rows asked for, so a child read in another row space is never handed
+    /// another window's rows.
+    /// </remarks>
+    internal int WindowSpan { get; set; }
+
     /// <summary>The table of retained chunks, created at the first claim; a context running alone reads a few columns.</summary>
     private RetainedChunks Retained => _retained ??= new RetainedChunks(columns: 3, lanes: 1);
 
@@ -668,20 +687,21 @@ internal sealed class ScanContext : IDisposable
     internal static long LayoutKey(int layoutNodeIndex) => (1L << 32) | (uint)layoutNodeIndex;
 
     /// <summary>
-    /// The retention key for one window of a flat layout's chunk, the <paramref name="windowIndex"/>th
-    /// run of the reader's window length; <see langword="null"/> when the pair cannot be named.
+    /// The retention key for the window of a flat layout's chunk that starts at row
+    /// <paramref name="windowStart"/>; <see langword="null"/> when the pair cannot be named.
     /// </summary>
     /// <remarks>
-    /// A namespace of its own under bit 61, apart from the whole chunk under the bare segment id
+    /// A namespace of its own under bit 60, apart from the whole chunk under the bare segment id
     /// and from the shared children under bit 62: a chunk decoded whole and a window of the same
     /// chunk are different entries with different lifetimes, and a lookup that confused them would
-    /// hand a batch a node of the wrong length.
+    /// hand a batch a node of the wrong length. The key names where a window starts and not how long
+    /// it is, so a reader that finds one checks that it holds its rows before it slices.
     /// </remarks>
     /// <param name="segmentId">The chunk's segment.</param>
-    /// <param name="windowIndex">The window's position in the chunk.</param>
-    internal static long? WindowKey(uint segmentId, int windowIndex) =>
-        segmentId < (1u << 31) && windowIndex >= 0 && windowIndex < (1 << 20)
-            ? (1L << 61) | ((long)segmentId << 20) | (uint)windowIndex
+    /// <param name="windowStart">The window's first row, in the chunk's space.</param>
+    internal static long? WindowKey(uint segmentId, int windowStart) =>
+        segmentId < (1u << 29) && windowStart >= 0
+            ? (1L << 60) | ((long)segmentId << 31) | (uint)windowStart
             : null;
 
     /// <summary>
@@ -876,6 +896,8 @@ internal sealed class ScanContext : IDisposable
 
         PredicateAtNode = false;
         PredicateAnswered = false;
+        WindowLead = 0;
+        WindowSpan = 0;
         Segments.Release();
         Nodes.Reset();
         _batchCanonical.Reset();

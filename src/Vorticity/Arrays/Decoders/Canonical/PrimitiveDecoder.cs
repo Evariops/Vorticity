@@ -53,6 +53,13 @@ internal sealed class PrimitiveDecoder : ArrayDecoder
         return context.ValidityDecodesRange(in node, 0);
     }
 
+    /// <inheritdoc/>
+    public override bool MaterializesNothing(ArrayDecodeContext context, in ArrayNode node, DType dtype)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.ValidityMaterializesNothing(in node, 0);
+    }
+
     /// <summary>A window onto the values buffer: no byte moves, whatever the range.</summary>
     /// <inheritdoc/>
     public override int DecodeRange(

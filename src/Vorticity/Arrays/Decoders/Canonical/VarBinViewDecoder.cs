@@ -46,6 +46,13 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
         return context.ValidityDecodesRange(in node, 0);
     }
 
+    /// <inheritdoc/>
+    public override bool MaterializesNothing(ArrayDecodeContext context, in ArrayNode node, DType dtype)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return context.ValidityMaterializesNothing(in node, 0);
+    }
+
     /// <summary>
     /// The range's views over the whole data buffers: the views are sixteen bytes a row and the
     /// data they point into is shared by every row, so a range is a window onto the views and

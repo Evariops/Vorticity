@@ -47,6 +47,40 @@ internal sealed class ConstantDecoder : ArrayDecoder
     /// <inheritdoc/>
     public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node) => true;
 
+    /// <summary>
+    /// A constant decodes to one value whatever its length, except as a list, whose offsets and
+    /// sizes are one per row, and in a struct holding one.
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool MaterializesNothing(ArrayDecodeContext context, in ArrayNode node, DType dtype) =>
+        OneValue(dtype);
+
+    private static bool OneValue(DType dtype)
+    {
+        switch (dtype.Kind)
+        {
+            case DTypeKind.List:
+            case DTypeKind.FixedSizeList:
+            case DTypeKind.Map:
+            case DTypeKind.Union:
+                return false;
+            case DTypeKind.Struct:
+                for (int i = 0; i < dtype.FieldCount; i++)
+                {
+                    if (!OneValue(dtype.GetField(i)))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            case DTypeKind.Extension:
+                return OneValue(dtype.StorageType);
+            default:
+                return true;
+        }
+    }
+
     /// <summary>Every row is the same value, so a range only changes how many are built.</summary>
     /// <inheritdoc/>
     public override int DecodeRange(

@@ -200,6 +200,29 @@ internal sealed class ArrayDecodeContext
     internal bool DecodesRange(in ArrayNode node) =>
         ArrayDecoderTable.Require(_scan, node.Encoding, node.EncodingSpecIndex).DecodesRange(this, in node);
 
+    /// <summary>Whether <paramref name="node"/>'s decode materializes nothing proportional to its rows, children included.</summary>
+    /// <param name="node">The node.</param>
+    /// <param name="dtype">The DType it decodes to.</param>
+    internal bool MaterializesNothing(in ArrayNode node, DType dtype) =>
+        ArrayDecoderTable.Require(_scan, node.Encoding, node.EncodingSpecIndex).MaterializesNothing(this, in node, dtype);
+
+    /// <summary>Whether child <paramref name="childIndex"/> of <paramref name="node"/> materializes nothing proportional to its rows.</summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's DType.</param>
+    public bool ChildMaterializesNothing(in ArrayNode node, int childIndex, DType childDType)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        return MaterializesNothing(in child, childDType);
+    }
+
+    /// <summary>Whether a validity child at <paramref name="validityChildIndex"/>, when there is one, materializes nothing.</summary>
+    /// <param name="node">The array node.</param>
+    /// <param name="validityChildIndex">Where the validity child sits, when present.</param>
+    public bool ValidityMaterializesNothing(in ArrayNode node, int validityChildIndex) =>
+        node.ChildCount <= validityChildIndex ||
+        ChildMaterializesNothing(in node, validityChildIndex, Types.Bool(Nullability.NonNullable));
+
     /// <summary>Whether child <paramref name="childIndex"/> of <paramref name="node"/> decodes a range of its rows.</summary>
     /// <param name="node">The parent node.</param>
     /// <param name="childIndex">0-based child position.</param>

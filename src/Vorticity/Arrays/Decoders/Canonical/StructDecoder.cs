@@ -53,6 +53,29 @@ internal sealed class StructDecoder : ArrayDecoder
         return true;
     }
 
+    /// <summary>No child of the node materializes anything, the validity child included.</summary>
+    /// <inheritdoc/>
+    public override bool MaterializesNothing(ArrayDecodeContext context, in ArrayNode node, DType dtype)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        int fieldCount = dtype.FieldCount;
+        int fieldBase = node.ChildCount - fieldCount;
+        if (fieldBase is not (0 or 1) || (fieldBase == 1 && !context.ValidityMaterializesNothing(in node, 0)))
+        {
+            return false;
+        }
+
+        for (int i = 0; i < fieldCount; i++)
+        {
+            if (!context.ChildMaterializesNothing(in node, fieldBase + i, dtype.GetField(i)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /// <summary>The same range of every field, under the same projection rules as the whole.</summary>
     /// <inheritdoc/>
     public override int DecodeRange(

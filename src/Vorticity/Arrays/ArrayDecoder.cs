@@ -92,6 +92,21 @@ internal abstract class ArrayDecoder
     public virtual bool DecodesRange(ArrayDecodeContext context, in ArrayNode node) => false;
 
     /// <summary>
+    /// Whether this node's decode materializes nothing proportional to its rows: views onto its own
+    /// buffers, or a single value, its children alike.
+    /// </summary>
+    /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
+    /// <param name="node">The serialized node.</param>
+    /// <param name="dtype">The DType the node decodes to.</param>
+    /// <remarks>
+    /// The flat layout reader decodes a chunk in windows to bound what it holds decoded at once, and
+    /// a chunk whose decode materializes nothing holds the segment's bytes and a few records: a
+    /// window of it would save no memory and cost a parse of the blob per window. Such a chunk is
+    /// decoded whole, which for it means recording the views once.
+    /// </remarks>
+    public virtual bool MaterializesNothing(ArrayDecodeContext context, in ArrayNode node, DType dtype) => false;
+
+    /// <summary>
     /// Decodes the rows <c>[start, start + count)</c> of this node, producing a canonical node of
     /// <paramref name="count"/> rows.
     /// </summary>

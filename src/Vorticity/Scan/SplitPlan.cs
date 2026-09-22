@@ -34,12 +34,14 @@ internal sealed class SplitPlan
     private readonly long[] _boundaries;
     private readonly int _count;
     private readonly long _maxRows;
+    private readonly int _windowRows;
 
-    private SplitPlan(long[] boundaries, int count, long maxRows)
+    private SplitPlan(long[] boundaries, int count, long maxRows, int windowRows)
     {
         _boundaries = boundaries;
         _count = count;
         _maxRows = maxRows;
+        _windowRows = windowRows;
     }
 
     /// <summary>The cap every split honours.</summary>
@@ -77,11 +79,14 @@ internal sealed class SplitPlan
     /// <param name="rows">The rows the scan wants, in root coordinates.</param>
     /// <param name="mask">The projection.</param>
     /// <param name="maxRows">The batch-size cap; must be positive.</param>
+    /// <param name="windowRows">The most rows a window of whole splits holds: see <see cref="WindowOf"/>.</param>
     /// <returns>The plan.</returns>
-    internal static SplitPlan Compute(LayoutTree tree, RowRange rows, in FieldMask mask, long maxRows)
+    internal static SplitPlan Compute(
+        LayoutTree tree, RowRange rows, in FieldMask mask, long maxRows, int windowRows = FlatLayoutReader.WindowRows)
     {
         ArgumentNullException.ThrowIfNull(tree);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxRows);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(windowRows);
 
         BoundaryList list = new BoundaryList();
         if (!rows.IsEmpty)
@@ -101,7 +106,7 @@ internal sealed class SplitPlan
         }
 
         int count = list.Finish();
-        return new SplitPlan(list.Items, count, maxRows);
+        return new SplitPlan(list.Items, count, maxRows, windowRows);
     }
 
     /// <summary>A fresh cursor over this plan's splits.</summary>
@@ -144,6 +149,45 @@ internal sealed class SplitPlan
         long size = SplitCursor.SubSize(end - start, _maxRows);
         long first = start + ((row - start) / size * size);
         return new RowRange(first, Math.Min(first + size, end));
+    }
+
+    /// <summary>
+    /// The window of whole splits holding the split that starts at <paramref name="row"/>: as many
+    /// consecutive splits of its span as fit in the plan's window rows, starting at a multiple of
+    /// that many.
+    /// </summary>
+    /// <param name="row">The first row of a split this plan cut.</param>
+    /// <param name="lead">How many rows of the window precede the split.</param>
+    /// <param name="span">How many rows the window holds; the split alone when it is as wide as a window.</param>
+    /// <remarks>
+    /// A span is cut into splits of one size but the last, so windows counted in splits rather than
+    /// in rows hold whole splits whatever that size: a batch never straddles two windows, and the
+    /// last split of a span, short as it may be, falls in the window its predecessors made.
+    /// </remarks>
+    internal void WindowOf(long row, out int lead, out int span)
+    {
+        int low = 0;
+        int high = _count - 2;
+        while (low < high)
+        {
+            int mid = (low + high + 1) >>> 1;
+            if (_boundaries[mid] <= row)
+            {
+                low = mid;
+            }
+            else
+            {
+                high = mid - 1;
+            }
+        }
+
+        long start = _boundaries[low];
+        long end = _boundaries[low + 1];
+        long size = SplitCursor.SubSize(end - start, _maxRows);
+        long window = Math.Max(1, _windowRows / size) * size;
+        long first = start + ((row - start) / window * window);
+        lead = (int)(row - first);
+        span = (int)Math.Min(window, end - first);
     }
 
     private static void Walk(
@@ -357,6 +401,9 @@ internal struct SplitCursor
     /// <param name="range">The split's rows, in root coordinates.</param>
     /// <returns>Whether a split was produced.</returns>
     internal bool TryNext(out RowRange range) => _reverse ? TryPrevious(out range) : TryForward(out range);
+
+    /// <summary>The plan this cursor walks.</summary>
+    internal readonly SplitPlan Plan => _plan;
 
     /// <summary>
     /// The spans last first, and each span's sub-divisions last first, which is the forward walk

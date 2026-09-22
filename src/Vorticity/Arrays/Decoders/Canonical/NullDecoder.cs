@@ -40,6 +40,9 @@ internal sealed class NullDecoder : ArrayDecoder
     public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node) => true;
 
     /// <inheritdoc/>
+    public override bool MaterializesNothing(ArrayDecodeContext context, in ArrayNode node, DType dtype) => true;
+
+    /// <inheritdoc/>
     public override int DecodeRange(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
     {

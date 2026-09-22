@@ -371,6 +371,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _currentLane = lane;
         lane.Sequence = _started++;
         lane.Context.Batch = lane.Sequence;
+        SplitExecution.Window(lane.Context, _cursor.Plan, split);
 
         bool read;
         try
@@ -1010,6 +1011,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         RowRange rows = lane.Rows;
         long batch = lane.Sequence;
         context.Batch = batch;
+        SplitExecution.Window(context, _cursor.Plan, rows);
         try
         {
             Register(context, rows);

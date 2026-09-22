@@ -27,7 +27,7 @@ public sealed class WindowedChunkTests
     [MemberData(nameof(Prefetch))]
     public async Task AChunkLargerThanAWindowReadsBackRowForRowAndDecodesEachValueOnce(int prefetch)
     {
-        Assert.True(Rows > 4 * FlatLayoutReader.WindowRows, "the table must span several windows");
+        Assert.True(Rows > 2 * FlatLayoutReader.WindowRows, "the table must span several windows");
         string path = await WriteAsync();
         try
         {

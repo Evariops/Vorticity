@@ -22,6 +22,20 @@ namespace Vorticity.Scanning;
 /// </remarks>
 internal static class SplitExecution
 {
+    /// <summary>
+    /// Tells the context which window of whole splits <paramref name="split"/> belongs to, so a
+    /// chunk larger than a batch is decoded one window at a time rather than whole.
+    /// </summary>
+    /// <param name="context">The context about to execute the split.</param>
+    /// <param name="plan">The plan that cut the split.</param>
+    /// <param name="split">The split, in root coordinates.</param>
+    internal static void Window(ScanContext context, SplitPlan plan, RowRange split)
+    {
+        plan.WindowOf(split.Start, out int lead, out int span);
+        context.WindowLead = lead;
+        context.WindowSpan = span;
+    }
+
     /// <summary>Phase 1: registers the split's segments. No I/O, no decoding, no allocation.</summary>
     /// <param name="context">The lane's context, whose request set receives the segments.</param>
     /// <param name="tree">The file's layout tree.</param>

@@ -40,6 +40,7 @@ internal sealed class ScanBuilder
     private RowRange _rows;
     private bool _rowsSet;
     private int _maxBatchRows;
+    private int _windowRows = FlatLayoutReader.WindowRows;
     private int _degree = Volatile.Read(ref s_defaultDegree);
     private ScanMetrics? _metrics;
     private TerminalTiers _tiers = TerminalTiers.All;
@@ -212,6 +213,24 @@ internal sealed class ScanBuilder
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxRows);
         _maxBatchRows = maxRows;
+        return this;
+    }
+
+    /// <summary>
+    /// Sets the most rows a window of a chunk holds, <see cref="FlatLayoutReader.WindowRows"/> by
+    /// default: a chunk larger than a window is decoded a window of whole batches at a time.
+    /// </summary>
+    /// <param name="rows">The most rows a window holds.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// A window changes what the scan holds decoded at once and never what it returns, so a small
+    /// one is how a file of small chunks reaches the range decode of every encoding it carries.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="rows"/> is not positive.</exception>
+    internal ScanBuilder WithWindowRows(int rows)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(rows);
+        _windowRows = rows;
         return this;
     }
 
@@ -515,7 +534,7 @@ internal sealed class ScanBuilder
         // Filter first, projection second: the scan reads the union so the filter has its columns,
         // and the enumerator trims back down to `keep` once the filter has decided.
         Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
-        SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
+        SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
         BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
             _file, tree, read, keep, plan, _degree, _filter, _take, _metrics)
@@ -586,7 +605,7 @@ internal sealed class ScanBuilder
 
         Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
         Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
-        SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
+        SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
         // Each structure is credited with the blocks it pruned among those the scan's rows reach, so
         // that the blocks, the live ones and what each structure pruned add up.
@@ -1079,7 +1098,7 @@ internal sealed class ScanBuilder
         VortexExpr isNull = Expr.IsNull(Expr.Field(_orderPath!));
         VortexExpr filter = _filter is null ? isNull : Expr.And(isNull, _filter);
         Projection read = Union(keep, [.. _filterPaths ?? [], Expr.Field(_orderPath!)]);
-        SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap);
+        SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
         return _descending
             ? ReversedAsync(tree, rows, read, keep, plan, filter, cap)
             : new FilteredBatches(
