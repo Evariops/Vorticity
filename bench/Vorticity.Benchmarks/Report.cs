@@ -420,8 +420,8 @@ internal static class Report
     /// <summary>What an open costs on its own: the footer, and no row read.</summary>
     private static async Task<long> FooterOnlyAsync(string path)
     {
-        await using Vorticity.File.VortexFile file =
-            await Vorticity.File.VortexFile.OpenAsync(path).ConfigureAwait(false);
+        await using Vorticity.VortexFile file =
+            await Vorticity.VortexFile.OpenAsync(path).ConfigureAwait(false);
         return file.RowCount;
     }
 
@@ -435,10 +435,10 @@ internal static class Report
             await using VortexFileWriter appender =
                 await VortexFileWriter.AppendAsync(copy).ConfigureAwait(false);
             long start = appender.RowCount;
-            await using Vorticity.File.VortexFile source =
-                await Vorticity.File.VortexFile.OpenAsync(path).ConfigureAwait(false);
+            await using Vorticity.VortexFile source =
+                await Vorticity.VortexFile.OpenAsync(path).ConfigureAwait(false);
             long written = 0;
-            await foreach (RecordBatch batch in source.Scan()
+            await foreach (RecordBatch batch in source.ScanBuilder()
                 .Rows(new RowRange(0, rows)).ExecuteAsync().ConfigureAwait(false))
             {
                 using (batch)

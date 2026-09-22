@@ -19,6 +19,7 @@
     <InternalsVisibleTo Include="Vorticity.Tests" />
     <InternalsVisibleTo Include="Vorticity.Conformance" />
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />
+    <InternalsVisibleTo Include="Vorticity.Benchmarks.Scenarios" />
   </ItemGroup>
 
   <!-- The one runtime dependency: XxHash3-64 for the write path's distinct table and the Bloom

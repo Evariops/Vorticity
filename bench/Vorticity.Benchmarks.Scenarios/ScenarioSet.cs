@@ -74,9 +74,9 @@ public static class ScenarioSet
         "filtered" => p => FilteredScan(p, BandLow, NarrowBand),
         "filtered-pruned" => FilteredPruned,
         "write" => ReadAndWrite,
-        "write-bloom" => p => ReadAndWriteIndexed(p, IndexPolicy.Bloom()),
-        "write-postings" => p => ReadAndWriteIndexed(p, IndexPolicy.Postings),
-        "write-sorted-runs" => p => ReadAndWriteIndexed(p, IndexPolicy.SortedRuns),
+        "write-bloom" => p => ReadAndWriteIndexed(p, IndexSpec.Bloom()),
+        "write-postings" => p => ReadAndWriteIndexed(p, IndexSpec.Postings),
+        "write-sorted-runs" => p => ReadAndWriteIndexed(p, IndexSpec.SortedRuns),
         "lookup-sorted-runs" => LookupSortedRuns,
         "prune-in" => PruneIn,
         _ => null,
@@ -176,7 +176,7 @@ public static class ScenarioSet
         System.IO.MemoryStream written = new System.IO.MemoryStream();
         VortexWriteOptions options = new VortexWriteOptions
         {
-            WritePolicy = WritePolicy.None.For(column, IndexPolicy.SortedRuns),
+            WritePolicy = WritePolicy.None.For(column, IndexSpec.SortedRuns),
             IndexBudgetPerMille = 1_000_000,
             DataBlockTargetBytes = 64 << 10,
         };
@@ -506,7 +506,7 @@ public static class ScenarioSet
     /// <param name="path">The file.</param>
     /// <param name="index">The index every column gets.</param>
     /// <remarks>The budget is lifted: the axis times the builder, not whether its index pays.</remarks>
-    public static Task<long> ReadAndWriteIndexed(string path, IndexPolicy index) =>
+    internal static Task<long> ReadAndWriteIndexed(string path, IndexSpec index) =>
         ReadAndWrite(
             path,
             new VortexWriteOptions { WritePolicy = WritePolicy.None.WithDefault(index), IndexBudgetPerMille = 1_000_000 });

@@ -1100,7 +1100,7 @@ internal static class RatioCheck
         Vorticity.Types.DType i64 = types.Primitive(Vorticity.Types.PType.I64, Vorticity.Types.Nullability.NonNullable);
         Vorticity.Types.DType schema = types.Struct(
             [SortedField, ShuffledField, "payload"], [i64, i64, i64], Vorticity.Types.Nullability.NonNullable);
-        Vorticity.Writing.VortexWriteOptions options = new Vorticity.Writing.VortexWriteOptions
+        Vorticity.VortexWriteOptions options = new Vorticity.VortexWriteOptions
         {
             RowBlockSize = (int)TakeStride,
             DataBlockTargetBytes = null,
@@ -1108,11 +1108,11 @@ internal static class RatioCheck
             // Runs of a permutation are as large as the columns they index, which the default
             // budget refuses; the axis is about reading the index, not about whether it pays.
             IndexBudgetPerMille = 1_000_000,
-            Indexes = Vorticity.Indexes.WritePolicy.None.For(ShuffledField, Vorticity.Indexes.IndexSpec.SortedRuns),
+            WritePolicy = Vorticity.Indexes.WritePolicy.None.For(ShuffledField, Vorticity.Indexes.IndexSpec.SortedRuns),
         };
 
-        await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(path, schema, options);
+        await using Vorticity.VortexFileWriter writer =
+            Vorticity.VortexFileWriter.Create(path, schema, options);
         const int batch = 8_192;
         for (int start = 0; start < KeyOrderRows; start += batch)
         {
@@ -1226,7 +1226,7 @@ internal static class RatioCheck
         temporary.Add(dict);
         await WriteStringFileAsync(
             fsst,
-            Vorticity.Writing.VortexEncodingHint.Fsst,
+            Vorticity.EncodingHint.Fsst,
             // SCRAMBLED, not ascending, and the axis's name depends on it. A column whose values ascend
             // is a sorted column, and a scan answers an equality over one by seeking it: the rows
             // are proved before anything is read and there is no predicate left to evaluate. This
@@ -1239,7 +1239,7 @@ internal static class RatioCheck
             .ConfigureAwait(false);
         await WriteStringFileAsync(
             dict,
-            Vorticity.Writing.VortexEncodingHint.Dictionary,
+            Vorticity.EncodingHint.Dictionary,
             row => string.Create(CultureInfo.InvariantCulture, $"label-{row % 16:D2}"))
             .ConfigureAwait(false);
 
@@ -1278,22 +1278,22 @@ internal static class RatioCheck
     /// <param name="hint">The encoding the column is pinned to.</param>
     /// <param name="value">The value of a row, by row number.</param>
     private static async Task WriteStringFileAsync(
-        string path, Vorticity.Writing.VortexEncodingHint hint, Func<int, string> value)
+        string path, Vorticity.EncodingHint hint, Func<int, string> value)
     {
         Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
         Vorticity.Types.DType utf8 = types.Utf8(Vorticity.Types.Nullability.NonNullable);
         Vorticity.Types.DType schema = types.Struct(
             [StringField], [utf8], Vorticity.Types.Nullability.NonNullable);
-        Vorticity.Writing.VortexWriteOptions options = new Vorticity.Writing.VortexWriteOptions
+        Vorticity.VortexWriteOptions options = new Vorticity.VortexWriteOptions
         {
-            EncodingHints = new Dictionary<string, Vorticity.Writing.VortexEncodingHint>
+            EncodingHints = new Dictionary<string, Vorticity.EncodingHint>
             {
                 [StringField] = hint,
             },
         };
 
-        await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(path, schema, options);
+        await using Vorticity.VortexFileWriter writer =
+            Vorticity.VortexFileWriter.Create(path, schema, options);
         const int batch = 8_192;
         for (int start = 0; start < StringRows; start += batch)
         {
@@ -1454,9 +1454,9 @@ internal static class RatioCheck
         // THE SAME COLUMN UNDER TWO ENCODINGS, which is what makes the pair readable: a thousand
         // values in runs of sixty-four bit-pack to ten bits just as well as they run-end, so the
         // two axes differ in how the column is stored and in nothing else.
-        await WriteRunEndFileAsync(runs, Vorticity.Writing.VortexEncodingHint.RunEnd)
+        await WriteRunEndFileAsync(runs, Vorticity.EncodingHint.RunEnd)
             .ConfigureAwait(false);
-        await WriteRunEndFileAsync(packed, Vorticity.Writing.VortexEncodingHint.BitPacked)
+        await WriteRunEndFileAsync(packed, Vorticity.EncodingHint.BitPacked)
             .ConfigureAwait(false);
 
         List<Axis> axes =
@@ -1483,7 +1483,7 @@ internal static class RatioCheck
     /// <param name="path">Where to write.</param>
     /// <param name="hint">The encoding the column is pinned to.</param>
     private static async Task WriteRunEndFileAsync(
-        string path, Vorticity.Writing.VortexEncodingHint hint)
+        string path, Vorticity.EncodingHint hint)
     {
         Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
         // i64 and not i32: the reference's filtered scan takes its bounds as i64 and refuses a
@@ -1492,16 +1492,16 @@ internal static class RatioCheck
             Vorticity.Types.PType.I64, Vorticity.Types.Nullability.NonNullable);
         Vorticity.Types.DType schema = types.Struct(
             [RunEndField], [i64], Vorticity.Types.Nullability.NonNullable);
-        Vorticity.Writing.VortexWriteOptions options = new Vorticity.Writing.VortexWriteOptions
+        Vorticity.VortexWriteOptions options = new Vorticity.VortexWriteOptions
         {
-            EncodingHints = new Dictionary<string, Vorticity.Writing.VortexEncodingHint>
+            EncodingHints = new Dictionary<string, Vorticity.EncodingHint>
             {
                 [RunEndField] = hint,
             },
         };
 
-        await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(path, schema, options);
+        await using Vorticity.VortexFileWriter writer =
+            Vorticity.VortexFileWriter.Create(path, schema, options);
         const int batch = 8_192;
         for (int start = 0; start < RunEndRows; start += batch)
         {
@@ -1596,21 +1596,21 @@ internal static class RatioCheck
             return;
         }
 
-        Vorticity.Writing.VortexWriteOptions options = new Vorticity.Writing.VortexWriteOptions
+        Vorticity.VortexWriteOptions options = new Vorticity.VortexWriteOptions
         {
-            TargetEdition = edition ?? Vorticity.Writing.VortexWriteOptions.Default.TargetEdition,
-            RowBlockSize = rowBlock ?? Vorticity.Writing.VortexWriteOptions.Default.RowBlockSize,
+            TargetEdition = edition ?? Vorticity.VortexWriteOptions.Default.TargetEdition,
+            RowBlockSize = rowBlock ?? Vorticity.VortexWriteOptions.Default.RowBlockSize,
             DataBlockTargetBytes = dataBlockBytes switch
             {
-                null => Vorticity.Writing.VortexWriteOptions.Default.DataBlockTargetBytes,
+                null => Vorticity.VortexWriteOptions.Default.DataBlockTargetBytes,
                 Off => null,
                 long bytes => bytes,
             },
         };
 
         await using VortexFile file = await VortexFile.OpenAsync(source, CancellationToken.None);
-        await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(destination, file.DType, options);
+        await using Vorticity.VortexFileWriter writer =
+            Vorticity.VortexFileWriter.Create(destination, file.DType, options);
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -1627,8 +1627,8 @@ internal static class RatioCheck
     private static async Task Rewrite(string source, string destination)
     {
         await using VortexFile file = await VortexFile.OpenAsync(source, CancellationToken.None);
-        await using Vorticity.Writing.VortexFileWriter writer =
-            Vorticity.Writing.VortexFileWriter.Create(destination, file.DType);
+        await using Vorticity.VortexFileWriter writer =
+            Vorticity.VortexFileWriter.Create(destination, file.DType);
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {

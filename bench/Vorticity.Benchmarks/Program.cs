@@ -132,8 +132,8 @@ internal static class Program
                 return 2;
             }
 
-            Vorticity.Editions.VortexEdition? edition =
-                args.Length > 3 && Enum.TryParse(args[3], out Vorticity.Editions.VortexEdition e)
+            Vorticity.VortexEdition? edition =
+                args.Length > 3 && Enum.TryParse(args[3], out Vorticity.VortexEdition e)
                     ? e
                     : null;
 

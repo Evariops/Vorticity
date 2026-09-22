@@ -88,7 +88,7 @@ public class MergeProbes
     private static async Task<long> WalkAsync(VortexDataset dataset)
     {
         long rows = 0;
-        await foreach (RecordBatch batch in dataset.Scan().InKeyOrder("key").ExecuteAsync()
+        await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("key").ExecuteAsync()
             .WithCancellation(CancellationToken.None).ConfigureAwait(false))
         {
             rows += batch.RowCount;

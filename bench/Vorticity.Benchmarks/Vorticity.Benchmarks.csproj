@@ -24,6 +24,11 @@
     <EnableAotAnalyzer>false</EnableAotAnalyzer>
     <EnableTrimAnalyzer>false</EnableTrimAnalyzer>
     <EnableSingleFileAnalyzer>false</EnableSingleFileAnalyzer>
+
+    <!-- The central Microsoft.CodeAnalysis.CSharp is the oldest compiler the generator loads into,
+         and pinning it here would downgrade the one BenchmarkDotNet builds its harness with. This
+         host references no generator, so its transitive versions are its packages' own. -->
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
 
   <ItemGroup>
