@@ -63,7 +63,7 @@ The report is the only place that says what was chosen. The sample prints it, gr
 per-chunk encodings:
 
 ```
-1000000 rows in blocks of 8192, 50 chunks, 1564708 bytes, in 237 ms
+1000000 rows in blocks of 8192, 50 chunks, 1564708 bytes, in 245 ms
   data 1548084, statistics 200, zone maps 8264, indexes 0, footer 8160
   chunk rows: 32768 x24, 8192 x24, 16384, 576
   Day: RunEnd x49, Sequence
@@ -86,7 +86,7 @@ asked for: none here, since the default is `IndexPolicy.None` ([indexes.md](inde
 
 ## What it costs
 
-The million rows took 237 ms in this run, first-use compilation included, and 1.56 MB on disk. The
+The million rows took 245 ms in this run, first-use compilation included, and 1.56 MB on disk. The
 same rows stored without encoding take 20.8 MB ([writer-options.md](writer-options.md)). The
 columns are encoded on the thread that calls `WriteAsync`. The builder holds up to a chunk's worth
 of rows, about 1 MiB by default, before whole blocks are encoded and released.

@@ -72,14 +72,14 @@ appended in bulk (`Append(ReadOnlySpan<Guid>)`, `Append(ReadOnlySpan<DateTime>)`
 through `GetSpan` and the rest row by row:
 
 ```
-100000 visits column by column: 2129876 bytes, best of three 30 ms
+100000 visits column by column: 2129876 bytes, best of three 29 ms
   Id: Canonical x13
   StartedAt: Sequence x13
   DurationMs: Sequence x12, BitPacked
   Referrer: Dictionary x13
   Pages: BitPacked x13
   Origin: {Country: Dictionary, City: Dictionary} x13
-the same visits as rows: 2129876 bytes, best of three 18 ms
+the same visits as rows: 2129876 bytes, best of three 17 ms
 read back: 100000 visits, 100000 lists holding 200000 pages, 9091 origins without a city, 2129876 bytes
 ```
 

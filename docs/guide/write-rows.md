@@ -32,9 +32,9 @@ that yields the same rows and awaits every ten thousand, as a source reading pag
 ## What it costs
 
 ```
-a span of 1000000 rows: 1522396 bytes, best of three 112 ms
+a span of 1000000 rows: 1522396 bytes, best of three 110 ms
   chunk rows: 32768 x30, 16384, 576
-a stream of 1000000 rows: 1564708 bytes, best of three 136 ms
+a stream of 1000000 rows: 1564708 bytes, best of three 171 ms
   chunk rows: 32768 x24, 8192 x24, 16384, 576
 ```
 

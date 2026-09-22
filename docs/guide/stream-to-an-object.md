@@ -30,7 +30,7 @@ and spends 2 ms on each. `Reading.Schema` is the record's schema, and `WriteAsyn
 record to it as it would to a file.
 
 ```
-through a Pipe: 1603156 bytes in 25 parts of up to 65536 bytes; 61 flushes waited 54 ms for the upload in all
+through a Pipe: 1603156 bytes in 25 parts of up to 65536 bytes; 61 flushes waited 52 ms for the upload in all
 read back from the uploaded bytes: 1000000 rows, mean 30.0000
 through PipeWriter.Create(stream): 1522396 bytes, 1000000 rows
 ```
@@ -41,7 +41,7 @@ through PipeWriter.Create(stream): 1522396 bytes, 1000000 rows
   chunks into the `PipeWriter` without flushing it; `FlushAsync` calls the pipe's own `FlushAsync`,
   which returns once the reader has taken enough bytes to bring the pipe under its pause threshold.
   A slow destination therefore slows the producer instead of growing a buffer: here 61 flushes
-  waited 54 ms in all, about what the 25 parts took to upload.
+  waited 52 ms in all, about what the 25 parts took to upload.
 * **`CompleteAsync` completes the pipe** once the footer is in it, which is how the reader knows the
   file is whole. Do not complete it yourself.
 * **Any `PipeWriter` will do.** `PipeWriter.Create(stream)` covers a `Stream`, a `FileStream` or a

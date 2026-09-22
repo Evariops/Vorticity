@@ -49,10 +49,10 @@ Measured on the demonstration file, a million rows, warmed, the best of five pas
 | | time | allocated |
 |---|---|---|
 | every row as a `Reading` | 28 ms | 35 MiB |
-| the same values as columns, `await foreach` | 10 ms | 111 KiB |
-| the ten hottest, sorted on the client | 161 ms | 148 MiB |
-| `MaxAsync(r => r.Celsius)` | 0.002 ms | 2 280 bytes, no request, no block decoded |
-| `MaxAsync`, then `Where(r => r.Celsius >= max).ToRecordsAsync()` | 10 ms | 528 KiB, 2 500 rows |
+| the same values as columns, `await foreach` | 11 ms | 108 KiB |
+| the ten hottest, sorted on the client | 163 ms | 148 MiB |
+| `MaxAsync(r => r.Celsius)` | 0.003 ms | 2 304 bytes, no request, no block decoded |
+| `MaxAsync`, then `Where(r => r.Celsius >= max).ToRecordsAsync()` | 10 ms | 532 KiB, 2 500 rows |
 
 A row costs a field copy, and an allocation per row for every `string`, list or nested class member:
 here the 35 MiB are the million `City` strings. The columns cost neither, because a text column is

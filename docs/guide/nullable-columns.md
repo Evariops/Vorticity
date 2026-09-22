@@ -71,10 +71,10 @@ for (int i = 0; i < celsius.Length; i++)
 What each costs on the demonstration file, where one temperature in fifty is missing:
 
 ```
-by the words                         8.6 ms  sum 29400000.0; 0 batches all valid, 0 words all valid, 15625 words with a null
-by the words, nulls filtered out    13.6 ms  sum 29400000.0; 123 batches all valid, 0 words all valid, 0 words with a null
-per element                         14.3 ms  sum 29400000.0
-SumAsync                             4.6 ms  sum 29400000.0
+by the words                         9.3 ms  sum 29400000.0; 0 batches all valid, 0 words all valid, 15625 words with a null
+by the words, nulls filtered out    13.5 ms  sum 29400000.0; 123 batches all valid, 0 words all valid, 0 words with a null
+per element                         13.9 ms  sum 29400000.0
+SumAsync                             5.2 ms  sum 29400000.0
 ```
 
 A null every fifty rows puts one in every word of 64, so the two fast paths never fire here and the

@@ -61,7 +61,7 @@ a view.
 The sample times the appends alone, a million per form, on a column of city names and numbers:
 
 ```
-per value, 1000000 appends: UTF-8 bytes 6.2 ns, a string 8.8 ns, an int formatted 7.5 ns
+per value, 1000000 appends: UTF-8 bytes 6.1 ns, a string 8.9 ns, an int formatted 7.7 ns
 ```
 
 Keeping the names as UTF-8 byte arrays saves the transcoding, about 30 % of the append here.

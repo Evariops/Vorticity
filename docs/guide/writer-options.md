@@ -54,10 +54,10 @@ column of every batch to its plain form with `Canonical()`:
 
 | profile | bytes | written in | decoded in | encodings |
 |---|---|---|---|---|
-| `Auto` | 1 522 396 | 68 ms | 10 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
-| `Fastest` | 1 522 396 | 52 ms | 8 ms | the same |
-| `Smallest` | 1 290 036 | 80 ms | 8 ms | `Day` and `City` zstd, `Celsius` ALP |
-| `None` | 20 848 260 | 60 ms | 5 ms | every column `Canonical`, the plain form |
+| `Auto` | 1 522 396 | 56 ms | 9 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
+| `Fastest` | 1 522 396 | 36 ms | 8 ms | the same |
+| `Smallest` | 1 290 036 | 75 ms | 7 ms | `Day` and `City` zstd, `Celsius` ALP |
+| `None` | 20 848 260 | 45 ms | 3 ms | every column `Canonical`, the plain form |
 
 Encoding is what makes the file fourteen times smaller than its plain form. `Auto` prices each
 column's size and decode speed together; `Fastest` spends less time choosing and builds no index,

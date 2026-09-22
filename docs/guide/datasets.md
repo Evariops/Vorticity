@@ -19,7 +19,7 @@ await using (ObjectDraft draft = dataset.StartObject())
 
 ```
 created: version 1, 0 rows, clustered by Day
-appended data/105f82c00740450db287b1cfeb010818.vortex: version 2, 50000 rows
+appended data/4960f1bc51154336b9c12abaa641c39b.vortex: version 2, 50000 rows
 ```
 
 This is `Vorticity.Dataset`, a separate package, and it is **experimental**: the assembly is
@@ -67,8 +67,8 @@ ulong imported = await dataset.ImportAsync("imports/days-100-119.vortex");
 
 ```
 imported: version 4, 120000 rows, 3 objects, lag 0
-  data/105f82c00740450db287b1cfeb010818.vortex: level 0, rows 0 to 50000, 85147 bytes
-  data/5cebdf4102ce4a61b820785687021201.vortex: level 0, rows 50000 to 100000, 75803 bytes
+  data/4960f1bc51154336b9c12abaa641c39b.vortex: level 0, rows 0 to 50000, 85147 bytes
+  data/8f1d43cdfb9d4d4ab7a10cc02baf54cb.vortex: level 0, rows 50000 to 100000, 75803 bytes
   imports/days-100-119.vortex: level 0, rows 100000 to 120000, 37828 bytes
 ```
 
@@ -127,7 +127,7 @@ await using (ObjectDraft rewritten = dataset.StartObject())
 ```
 
 ```
-replaced data/105f82c00740450db287b1cfeb010818.vortex by the rows with a temperature: version 6, Applied, 129000 rows
+replaced data/4960f1bc51154336b9c12abaa641c39b.vortex by the rows with a temperature: version 6, Applied, 129000 rows
 removed the import: version 7, Applied, 109000 rows, 3 objects
 removing it again: Abandoned, version 7
 ```

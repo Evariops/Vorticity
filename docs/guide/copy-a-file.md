@@ -51,11 +51,11 @@ the record is the projection, so the scan reads two columns and the target has t
 
 ```
 source: 1000000 rows, 1564708 bytes
-a copy: 1000000 rows, 1506964 bytes, 25 chunks, in 29 ms
+a copy: 1000000 rows, 1506964 bytes, 25 chunks, in 25 ms
 re-encoded under Smallest: 1285228 bytes, in 48 ms; Day Zstd x25, Celsius Alp x25, City Zstd x25
-a filtered copy, Day >= 900: 100000 rows, 158148 bytes, in 8 ms
-a typed filtered copy, Day >= 900 and City == Paris: 12502 rows, 19932 bytes, in 14 ms
-a projected copy, Day and Celsius: 1000000 rows, 1159148 bytes, in 14 ms
+a filtered copy, Day >= 900: 100000 rows, 158148 bytes, in 2 ms
+a typed filtered copy, Day >= 900 and City == Paris: 12502 rows, 19932 bytes, in 1 ms
+a projected copy, Day and Celsius: 1000000 rows, 1159148 bytes, in 11 ms
 the projected copy reads back: struct{Day: i32, Celsius: f64?}, 1000000 rows, mean 30.0000
 ```
 
