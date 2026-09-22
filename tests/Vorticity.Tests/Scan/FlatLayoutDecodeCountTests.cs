@@ -24,6 +24,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
+using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
@@ -236,6 +237,59 @@ public sealed class FlatLayoutDecodeCountTests
         }
     }
 
+    /// <summary>
+    /// A narrow filter on a sorted column is answered by a search over the column's zones, and the
+    /// search and the rows it keeps decode the zones they land on, never a window or a chunk.
+    /// </summary>
+    /// <remarks>
+    /// The search loads one zone at a time through a context of its own, and the band's chunk has
+    /// dead blocks, so neither is read by a scan's batch in the plan's order: a zone given no window
+    /// decodes the chunk around it whole, and a live batch given the plan's window decodes rows of
+    /// dead blocks that no batch reads.
+    /// </remarks>
+    [Fact]
+    public async Task ANarrowFilterOnASortedColumnDecodesTheZonesItLandsOn()
+    {
+        const int SortedRows = 300_000;
+        const long Low = 200_000;
+        const long Width = 3_000;
+        string path = await WriteSortedAsync(SortedRows);
+        try
+        {
+            FlatLayoutReader.ValuesDecoded = 0;
+            long rows = 0;
+            VortexExpr band = Expr.And(
+                Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(Low))),
+                Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(Low + Width))));
+            await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
+            {
+                await foreach (RecordBatch batch in opened.ScanBuilder().Where(band).ExecuteAsync()
+                    .WithCancellation(CancellationToken.None))
+                {
+                    rows += batch.RowCount;
+                }
+            }
+
+            long decoded = FlatLayoutReader.ValuesDecoded;
+            Console.Out.Write(
+                "SORTED FILTER: " + rows.ToString(CultureInfo.InvariantCulture) + " rows kept of " +
+                SortedRows.ToString(CultureInfo.InvariantCulture) + " materialized " +
+                decoded.ToString(CultureInfo.InvariantCulture) + " values.\n");
+
+            Assert.Equal(Width, rows);
+            Assert.True(
+                decoded < FlatLayoutReader.WindowRows,
+                $"{decoded} values were decoded for a band of {Width} rows: a window or a chunk was decoded whole");
+        }
+        finally
+        {
+            if (System.IO.File.Exists(path))
+            {
+                System.IO.File.Delete(path);
+            }
+        }
+    }
+
     /// <summary>Writes one chunk of <paramref name="rows"/> two-element lists.</summary>
     /// <param name="rows">List rows in the single chunk.</param>
     private static string WriteOneListChunk(int rows)
@@ -322,6 +376,40 @@ public sealed class FlatLayoutDecodeCountTests
         using (RecordBatch batch = new RecordBatch(arena, root, 0))
         {
             WriteAsync(path, schema, batch).GetAwaiter().GetResult();
+        }
+
+        return path;
+    }
+
+    /// <summary>
+    /// Writes <paramref name="rows"/> ascending keys at the current edition, zone maps included,
+    /// with a block target far above the table so that the first chunk spans several windows.
+    /// </summary>
+    private static async Task<string> WriteSortedAsync(int rows)
+    {
+        DTypeArena types = new DTypeArena();
+        CanonicalArena arena = new CanonicalArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType schema = types.Struct(["key"], [i64], Nullability.NonNullable);
+
+        VortexBuffer values = arena.Allocate(rows * sizeof(long), sizeof(long), out Span<byte> destination);
+        Span<long> longs = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(destination);
+        for (int i = 0; i < rows; i++)
+        {
+            longs[i] = i;
+        }
+
+        int column = arena.AddPrimitive(i64, rows, Validity.NonNullable, PType.I64, values);
+        int root = arena.AddStruct(schema, rows, Validity.NonNullable, [column]);
+
+        string path = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"vorticity-sortedfilter-{Guid.NewGuid():N}.vortex");
+        VortexWriteOptions options = new VortexWriteOptions { DataBlockTargetBytes = 64 << 20 };
+        using (RecordBatch batch = new RecordBatch(arena, root, 0))
+        {
+            await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);
+            await writer.WriteAsync(batch, CancellationToken.None);
+            await writer.CompleteAsync(CancellationToken.None);
         }
 
         return path;

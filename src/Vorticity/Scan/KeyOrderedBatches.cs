@@ -590,6 +590,9 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             {
                 for (int i = from; i < to; i++)
                 {
+                    // The plan's window, as the batch enumerator gives it: a later window of the
+                    // key order that comes back to these splits finds the window still decoded.
+                    SplitExecution.Window(context, _scan.Plan, _splits[i]);
                     parts[i - from] = SplitExecution.Execute(context, tree, in _read, _splits[i], selection);
                 }
 

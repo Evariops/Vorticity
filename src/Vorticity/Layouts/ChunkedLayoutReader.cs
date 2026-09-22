@@ -143,8 +143,10 @@ internal sealed class ChunkedLayoutReader : LayoutReader
     /// boundaries.
     /// </para>
     /// <para>
-    /// An encoding that <c>SelectsWithoutFullDecode</c> then materializes these rows alone; one that
-    /// does not decodes the chunk once, retains it, and gathers this range out of it. Against the
+    /// An encoding that <c>SelectsWithoutFullDecode</c> then materializes these rows alone, and so
+    /// does one that decodes a range of its rows: the rows are their own window, because the window
+    /// the plan gave the batch may hold dead blocks, which no batch reads. Any other encoding
+    /// decodes the chunk once, retains it, and gathers this range out of it. Against the
     /// whole-chunk path the trade runs both ways: that path decodes the chunk again for every batch
     /// touching it, where this decodes it once, but it then copies rows the whole-chunk path would
     /// merely have sliced.
@@ -164,12 +166,18 @@ internal sealed class ChunkedLayoutReader : LayoutReader
             }
 
             (int[]? Buffer, int Count) saved = context.ExchangeSelection(range, length);
+            int lead = context.WindowLead;
+            int span = context.WindowSpan;
+            context.WindowLead = 0;
+            context.WindowSpan = length;
             try
             {
                 return ExecuteRowChild(in chunk, local, in fields, context);
             }
             finally
             {
+                context.WindowLead = lead;
+                context.WindowSpan = span;
                 context.ExchangeSelection(saved.Buffer, saved.Count);
             }
         }

@@ -123,7 +123,7 @@ internal sealed class TerminalScan
         context.LiveBlocks = live;
         context.Metrics = _metrics;
         using ScanSegments held = new ScanSegments(1);
-        Decodes decodes = new Decodes(held, blockRows, live);
+        Decodes decodes = new Decodes(plan, held, blockRows, live);
 
         // One evaluation window for the whole count, sized for the largest split the plan
         // produces: rented once, so a block costs no allocation.
@@ -276,6 +276,7 @@ internal sealed class TerminalScan
         ScanContext context, Decodes decodes, RowRange split, CancellationToken cancellationToken)
     {
         long batch = decodes.Next++;
+        SplitExecution.Window(context, decodes.Plan, split);
         SplitExecution.Register(context, _tree, in _mask, split);
         decodes.Held.Claim(context.Segments, batch, waiter: null);
         try
@@ -307,12 +308,15 @@ internal sealed class TerminalScan
         return root;
     }
 
-    /// <summary>What the decodes of one terminal share: the segments held between splits, and the blocks counted.</summary>
+    /// <summary>What the decodes of one terminal share: the plan, the segments held between splits, and the blocks counted.</summary>
+    /// <param name="plan">The plan that cut the splits, which says the window each belongs to.</param>
     /// <param name="held">The segments held between splits.</param>
     /// <param name="blockRows">The rows of a block of <paramref name="live"/>.</param>
     /// <param name="live">The filter's mask of live blocks, which says which blocks of a split count as decoded; null for all.</param>
-    private sealed class Decodes(ScanSegments held, long blockRows, BlockMask? live)
+    private sealed class Decodes(SplitPlan plan, ScanSegments held, long blockRows, BlockMask? live)
     {
+        internal SplitPlan Plan { get; } = plan;
+
         internal ScanSegments Held { get; } = held;
 
         internal BlockMask? Live { get; } = live;
@@ -500,7 +504,7 @@ internal sealed class TerminalScan
         context.LiveBlocks = scope;
         context.Metrics = _metrics;
         using ScanSegments held = new ScanSegments(1);
-        Decodes decodes = new Decodes(held, live?.BlockRows ?? scope.BlockRows, live);
+        Decodes decodes = new Decodes(plan, held, live?.BlockRows ?? scope.BlockRows, live);
         int capacity = (int)Math.Min(plan.MaxRows, int.MaxValue);
         byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(capacity, 1));
         int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(capacity, 1));

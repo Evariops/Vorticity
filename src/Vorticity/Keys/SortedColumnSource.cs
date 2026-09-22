@@ -423,13 +423,14 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         _loadedEnd = -1;
         _column = -1;
 
-        // A zone is a window of a chunk, and consecutive zones are windows of the same chunk: the
-        // segment is read once for the chunk and the chunk decoded once, whether the holder is
-        // this source's own or the scan's that walks it.
+        // A zone is a range of a chunk, and a search lands on zones that are rarely neighbours: the
+        // segment is read once for the chunk, whether the holder is this source's own or the
+        // scan's that walks it, and each zone decodes its own rows and nothing around them.
         ScanSegments held = _held ??= new ScanSegments(1);
         long ticket = held.NextTicket();
         _context.Batch = ticket;
         RowRange range = new RowRange(start, end);
+        SplitExecution.Alone(_context, range);
         SplitExecution.Register(_context, _tree, in _mask, range);
         held.Claim(_context.Segments, ticket, waiter: null);
         try
