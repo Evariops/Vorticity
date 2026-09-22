@@ -2,13 +2,14 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <RootNamespace>Vorticity.Tools.VxDump</RootNamespace>
-    <AssemblyName>vxdump</AssemblyName>
-    <Description>Inspects a Vortex file: schema, layout tree, encodings, segments and statistics.</Description>
+    <RootNamespace>Vorticity.Bench.Runner</RootNamespace>
+    <AssemblyName>Vorticity.Benchmarks.Runner</AssemblyName>
 
-    <!-- Application properties, which have no effect on a class library: a test publishes vxdump as
-         Native AOT and runs it over the corpus. -->
+    <!-- The report's scenarios as a native binary: the process the published page times on our
+         side, against the reference's own native binary. It depends on the scenarios and the
+         library alone, so that everything in it compiles ahead of time. -->
     <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
     <PublishAot>true</PublishAot>
     <PublishTrimmed>true</PublishTrimmed>
     <TrimMode>full</TrimMode>
@@ -24,7 +25,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
+    <ProjectReference Include="../Vorticity.Benchmarks.Scenarios/Vorticity.Benchmarks.Scenarios.csproj" />
   </ItemGroup>
 
 </Project>

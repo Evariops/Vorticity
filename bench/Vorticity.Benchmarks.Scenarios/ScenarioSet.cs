@@ -82,6 +82,82 @@ public static class ScenarioSet
         _ => null,
     };
 
+    /// <summary>Rows the published report's scattered take asks for.</summary>
+    public const long ReportTakeCount = 1_000;
+
+    /// <summary>The scenario names the published report runs, in the order of its table.</summary>
+    public static string[] ReportNames =>
+        ["open", "scan", "project", "filter-narrow", "filter-wide", "take", "write", "append"];
+
+    /// <summary>
+    /// The scenario <paramref name="name"/> names in the published report, on a fixture of
+    /// <paramref name="rows"/> rows.
+    /// </summary>
+    /// <param name="name">One of <see cref="ReportNames"/>.</param>
+    /// <param name="rows">The fixture's row count, which sizes the bands, the take and the append.</param>
+    /// <returns>The scenario, or <see langword="null"/> when the name is unknown.</returns>
+    /// <remarks>
+    /// One table for the two processes the report times on our side, the Native AOT runner and the
+    /// framework-dependent host: a scenario defined in one of them and copied into the other would
+    /// be two scenarios with one name.
+    /// </remarks>
+    public static Func<string, Task<long>>? ForReport(string name, long rows) => name switch
+    {
+        "open" => FooterOnly,
+        "scan" => ScanAll,
+        "project" => p => ScanProjectedField(p, Field),
+        "filter-narrow" => p => FilteredScan(p, BandLow, rows / 100),
+        "filter-wide" => p => FilteredScan(p, BandLow, rows / 2),
+        "take" => p => ScatteredTake(p, ReportTakeCount, rows / ReportTakeCount),
+        "write" => ReadAndWrite,
+        "append" => p => Append(p, rows / 10),
+        _ => null,
+    };
+
+    /// <summary>What an open costs on its own: the footer, and no row read.</summary>
+    /// <param name="path">The file.</param>
+    public static async Task<long> FooterOnly(string path)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        return file.RowCount;
+    }
+
+    /// <summary>
+    /// Appends the first <paramref name="rows"/> rows of the file to a copy of it, so the scenario
+    /// can run again on the same fixture.
+    /// </summary>
+    /// <param name="path">The file.</param>
+    /// <param name="rows">How many of its rows to append.</param>
+    public static async Task<long> Append(string path, long rows)
+    {
+        string copy = path + ".append";
+        System.IO.File.Copy(path, copy, overwrite: true);
+        try
+        {
+            await using VortexFileWriter appender =
+                await VortexFileWriter.AppendAsync(copy, options: null, CancellationToken.None);
+            long start = appender.RowCount;
+            await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
+            long written = 0;
+            await foreach (RecordBatch batch in source.ScanBuilder()
+                .Rows(new RowRange(0, rows)).ExecuteAsync().WithCancellation(CancellationToken.None))
+            {
+                using (batch)
+                {
+                    await appender.WriteAsync(batch, CancellationToken.None);
+                    written += batch.RowCount;
+                }
+            }
+
+            WriteReport report = await appender.CompleteAsync(CancellationToken.None);
+            return report.RowCount - start == 0 ? written : report.RowCount;
+        }
+        finally
+        {
+            System.IO.File.Delete(copy);
+        }
+    }
+
     /// <summary>
     /// Plans an <c>IN</c> of <see cref="LookupProbes"/> keys of the column against that same file:
     /// what the locating index costs to ANSWER a filter, where `lookup-sorted-runs` measures what

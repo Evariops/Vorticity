@@ -25,90 +25,74 @@ namespace Vorticity.Benchmarks;
 /// time, peak resident memory and processor time.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Why processes rather than the in-process ratios the rest of the bench uses: those three figures
 /// belong to a process. A loop that shares one with the other implementation can report neither a
 /// peak nor a total, and a reader deciding between two libraries wants what a run of each costs.
 /// The price is that the fixed cost of starting a runtime is inside every figure, which is why the
 /// table carries it as its own scenario rather than subtracting it silently.
+/// </para>
+/// <para>
+/// Our side runs twice: as the Native AOT runner, which is a native binary like the reference's
+/// and the one the ratio is taken against, and as this framework-dependent host, which is what a
+/// process that starts the runtime and compiles the scan as it goes costs. The two run the same
+/// scenario code; only the build differs.
+/// </para>
 /// </remarks>
 internal static class Report
 {
-    /// <summary>The column the filter and the projection read. An i64: the reference's predicate
-    /// builds an i64 literal and refuses a narrower column rather than coercing it.</summary>
-    private const string Field = "monotone";
-
-    /// <summary>The lower edge of both filter bands.</summary>
-    private const long BandLow = 1_000_000;
-
-    /// <summary>Rows a scattered take asks for.</summary>
-    private const long TakeCount = 1_000;
-
     private static readonly int[] Sizes = [1_000_000, 10_000_000];
 
-    /// <summary>One scenario: what each side is asked to do, and how the rows are compared.</summary>
-    private sealed record Scenario(
-        string Name,
-        string What,
-        Func<string, int, Task<long>> Ours,
-        Func<string, int, string[]>? Reference);
+    /// <summary>One scenario: what the reference is asked, when it can be asked.</summary>
+    /// <param name="Name">The scenario, as <see cref="Set.ForReport"/> knows it.</param>
+    /// <param name="What">What it does, for the table.</param>
+    /// <param name="Reference">The reference binary's arguments, or null when it has no such entry point.</param>
+    private sealed record Scenario(string Name, string What, Func<string, int, string[]>? Reference);
 
     private static readonly Scenario[] Scenarios =
     [
-        new("open", "open the file and read no rows",
-            (path, rows) => FooterOnlyAsync(path),
-            (path, rows) => ["open", path]),
-        new("scan", "read every column of every row",
-            (path, rows) => Set.ScanAll(path),
-            (path, rows) => ["scan", path]),
-        new("project", "read one column of four",
-            (path, rows) => Set.ScanProjectedField(path, Field),
-            (path, rows) => ["project", path, Field]),
+        new("open", "open the file and read no rows", (path, rows) => ["open", path]),
+        new("scan", "read every column of every row", (path, rows) => ["scan", path]),
+        new("project", "read one column of four", (path, rows) => ["project", path, Set.Field]),
         new("filter-narrow", "read the rows of a band holding about one in a hundred",
-            (path, rows) => Set.FilteredScan(path, BandLow, rows / 100),
-            (path, rows) => ["filter", path, Field, BandLow.ToString(CultureInfo.InvariantCulture),
+            (path, rows) => ["filter", path, Set.Field, Set.BandLow.ToString(CultureInfo.InvariantCulture),
                 (rows / 100).ToString(CultureInfo.InvariantCulture)]),
         new("filter-wide", "read the rows of a band holding about half",
-            (path, rows) => Set.FilteredScan(path, BandLow, rows / 2),
-            (path, rows) => ["filter", path, Field, BandLow.ToString(CultureInfo.InvariantCulture),
+            (path, rows) => ["filter", path, Set.Field, Set.BandLow.ToString(CultureInfo.InvariantCulture),
                 (rows / 2).ToString(CultureInfo.InvariantCulture)]),
         new("take", "take a thousand rows spread across the file",
-            (path, rows) => Set.ScatteredTake(path, TakeCount, rows / TakeCount),
-            (path, rows) => ["take", path, TakeCount.ToString(CultureInfo.InvariantCulture),
-                (rows / TakeCount).ToString(CultureInfo.InvariantCulture)]),
-        new("write", "read the file and encode it back out",
-            (path, rows) => Set.ReadAndWrite(path),
-            (path, rows) => ["write", path]),
-        new("append", "append a tenth of the rows to a copy of the file",
-            (path, rows) => AppendAsync(path, rows / 10),
-            null),
+            (path, rows) => ["take", path, Set.ReportTakeCount.ToString(CultureInfo.InvariantCulture),
+                (rows / Set.ReportTakeCount).ToString(CultureInfo.InvariantCulture)]),
+        new("write", "read the file and encode it back out", (path, rows) => ["write", path]),
+        new("append", "append a tenth of the rows to a copy of the file", null),
     ];
 
     /// <summary>Runs one scenario in this process and reports what it cost.</summary>
     internal static async Task<int> ScenarioAsync(string[] args)
     {
-        if (args.Length < 3)
+        if (args.Length < 4)
         {
             Console.Error.WriteLine("usage: --scenario <name> <file.vortex> <rows>");
             return 2;
         }
 
-        Scenario? scenario = Scenarios.FirstOrDefault(s => s.Name == args[1]);
+        if (!long.TryParse(args[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out long rows))
+        {
+            Console.Error.WriteLine($"'{args[3]}' is not a row count");
+            return 2;
+        }
+
+        Func<string, Task<long>>? scenario = Set.ForReport(args[1], rows);
         if (scenario is null)
         {
             Console.Error.WriteLine($"no scenario named '{args[1]}'");
             return 2;
         }
 
-        if (!int.TryParse(args[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out int rows))
-        {
-            Console.Error.WriteLine($"'{args[3]}' is not a row count");
-            return 2;
-        }
-
-        long delivered = await scenario.Ours(args[2], rows).ConfigureAwait(false);
-        Process self = Process.GetCurrentProcess();
+        long delivered = await scenario(args[2]).ConfigureAwait(false);
+        (long cpuMs, long rssBytes) = Vorticity.Bench.Scenarios.ProcessCost.Read();
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
-            $"rows={delivered} cpu_ms={self.TotalProcessorTime.TotalMilliseconds:F0} rss_bytes={PeakResident()}"));
+            $"rows={delivered} cpu_ms={cpuMs} rss_bytes={rssBytes}"));
         return 0;
     }
 
@@ -117,12 +101,21 @@ internal static class Report
     {
         int runs = Count(args, "--runs", 5);
         bool markdown = Array.IndexOf(args, "--markdown") >= 0;
-        string? reference = LocateReference();
+        string? reference = Locate(ReferencePath);
         if (reference is null)
         {
             Console.Error.WriteLine(
-                "The reference binary is missing: tools/vxbench-rs/target/release/vxbench. " +
+                $"The reference binary is missing: {ReferencePath}. " +
                 "Build it with: cd tools/vxbench-rs && cargo build --release");
+            return 1;
+        }
+
+        string? runner = Locate(RunnerPath);
+        if (runner is null)
+        {
+            Console.Error.WriteLine(
+                $"Our native runner is missing: {RunnerPath}. " +
+                "Build it with: dotnet publish -c Release bench/Vorticity.Benchmarks.Runner");
             return 1;
         }
 
@@ -145,24 +138,30 @@ internal static class Report
 
             foreach (Scenario scenario in Scenarios)
             {
-                (Measurement? ours, _) = await MeasureAsync(
-                    OurCommand(scenario.Name, path, rows), runs).ConfigureAwait(false);
+                string[] arguments = ["--scenario", scenario.Name, path, rows.ToString(CultureInfo.InvariantCulture)];
+                (Measurement? aot, _) = await MeasureAsync((runner, arguments), runs).ConfigureAwait(false);
+                (Measurement? jit, _) = await MeasureAsync(OurCommand(arguments), runs).ConfigureAwait(false);
                 (Measurement? theirs, string? refusal) = scenario.Reference is null
                     ? (null, null)
                     : await MeasureAsync(
                         (reference, scenario.Reference(path, rows)), runs).ConfigureAwait(false);
 
-                if (ours is { } mine && theirs is { } other && other.Rows != mine.Rows)
+                long? rendered = aot?.Rows ?? jit?.Rows;
+                foreach (Measurement? other in new[] { jit, theirs })
                 {
-                    disagreed = true;
-                    Console.Error.WriteLine(
-                        $"{scenario.Name} at {rows:N0}: we rendered {mine.Rows} rows and the " +
-                        $"reference {other.Rows}. A ratio between two different answers is not a ratio.");
+                    if (rendered is { } mine && other is not null && other.Rows != mine)
+                    {
+                        disagreed = true;
+                        Console.Error.WriteLine(
+                            $"{scenario.Name} at {rows:N0}: {mine} rows on one side and " +
+                            $"{other.Rows} on another. A ratio between two different answers is not a ratio.");
+                    }
                 }
 
-                table.Add(new Row(rows, bytes, scenario, ours, theirs, refusal));
+                table.Add(new Row(rows, bytes, scenario, aot, jit, theirs, refusal));
                 Console.Error.WriteLine($"  {scenario.Name}: " +
-                    (ours is null ? "refused" : $"{ours.WallMs.Median:F0} ms") + " against " +
+                    (aot is null ? "refused" : $"{aot.WallMs.Median:F0} ms native") + ", " +
+                    (jit is null ? "refused" : $"{jit.WallMs.Median:F0} ms on the JIT") + " against " +
                     (theirs is not null ? $"{theirs.WallMs.Median:F0} ms"
                         : scenario.Reference is null ? "no reference" : "a refusal"));
             }
@@ -273,10 +272,10 @@ internal static class Report
             : -1;
     }
 
-    private static (string Exe, string[] Args) OurCommand(string scenario, string path, int rows)
+    /// <summary>This host, framework-dependent, running one scenario: the JIT column.</summary>
+    private static (string Exe, string[] Args) OurCommand(string[] arguments)
     {
         string host = Environment.ProcessPath ?? "dotnet";
-        string[] arguments = ["--scenario", scenario, path, rows.ToString(CultureInfo.InvariantCulture)];
 
         // Under `dotnet run` the host is the muxer and the assembly has to be named; a published
         // executable takes the arguments directly.
@@ -285,10 +284,21 @@ internal static class Report
             : (host, arguments);
     }
 
-    private static string? LocateReference()
+    /// <summary>The reference binary, relative to the repository root.</summary>
+    private static string ReferencePath => Path.Combine(
+        "tools", "vxbench-rs", "target", "release", Executable("vxbench"));
+
+    /// <summary>Our Native AOT runner, where `dotnet publish -c Release` puts it, relative to the repository root.</summary>
+    private static string RunnerPath => Path.Combine(
+        "bench", "Vorticity.Benchmarks.Runner", "bin", "Release", "net11.0",
+        RuntimeInformation.RuntimeIdentifier, "publish", Executable("Vorticity.Benchmarks.Runner"));
+
+    private static string Executable(string name) =>
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? name + ".exe" : name;
+
+    /// <summary>The file at <paramref name="relative"/> under the nearest ancestor of this build that has it.</summary>
+    private static string? Locate(string relative)
     {
-        string name = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "vxbench.exe" : "vxbench";
-        string relative = Path.Combine("tools", "vxbench-rs", "target", "release", name);
         DirectoryInfo? directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {
@@ -303,31 +313,6 @@ internal static class Report
 
         return null;
     }
-
-    /// <summary>
-    /// The peak resident set of this process, in bytes. <c>ru_maxrss</c> is bytes on macOS and
-    /// kilobytes elsewhere, and sits at the same offset on both because the two timevals before it
-    /// are sixteen bytes either way.
-    /// </summary>
-    private static long PeakResident()
-    {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            return Process.GetCurrentProcess().PeakWorkingSet64;
-        }
-
-        byte[] usage = new byte[512];
-        if (GetRUsage(0, usage) != 0)
-        {
-            return -1;
-        }
-
-        long maxrss = BitConverter.ToInt64(usage, 32);
-        return RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? maxrss : maxrss * 1024;
-    }
-
-    [DllImport("libc", EntryPoint = "getrusage", SetLastError = true)]
-    private static extern int GetRUsage(int who, byte[] usage);
 
     private static int Count(string[] args, string flag, int fallback)
     {
@@ -348,7 +333,7 @@ internal static class Report
     {
         DTypeArena types = new DTypeArena();
         DType schema = types.Struct(
-            [Field, "value", "label", "flag"],
+            [Set.Field, "value", "label", "flag"],
             [
                 types.Primitive(PType.I64, Nullability.NonNullable),
                 types.Primitive(PType.F64, Nullability.NonNullable),
@@ -379,7 +364,7 @@ internal static class Report
                 for (int i = 0; i < count; i++)
                 {
                     int row = start + i;
-                    monotone[i] = BandLow + row;
+                    monotone[i] = Set.BandLow + row;
                     value[i] = (row * 7919L % 100_003) / 7.0;
                     Span<byte> view = viewBytes.Slice(i * 16, 16);
                     int length = Encoding.UTF8.GetBytes(labels[row % labels.Length], view[4..]);
@@ -417,46 +402,6 @@ internal static class Report
         await writer.CompleteAsync().ConfigureAwait(false);
     }
 
-    /// <summary>What an open costs on its own: the footer, and no row read.</summary>
-    private static async Task<long> FooterOnlyAsync(string path)
-    {
-        await using Vorticity.VortexFile file =
-            await Vorticity.VortexFile.OpenAsync(path).ConfigureAwait(false);
-        return file.RowCount;
-    }
-
-    /// <summary>Appends to a copy, so the scenario can run again on the same fixture.</summary>
-    private static async Task<long> AppendAsync(string path, int rows)
-    {
-        string copy = path + ".append";
-        System.IO.File.Copy(path, copy, overwrite: true);
-        try
-        {
-            await using VortexFileWriter appender =
-                await VortexFileWriter.AppendAsync(copy).ConfigureAwait(false);
-            long start = appender.RowCount;
-            await using Vorticity.VortexFile source =
-                await Vorticity.VortexFile.OpenAsync(path).ConfigureAwait(false);
-            long written = 0;
-            await foreach (RecordBatch batch in source.ScanBuilder()
-                .Rows(new RowRange(0, rows)).ExecuteAsync().ConfigureAwait(false))
-            {
-                using (batch)
-                {
-                    await appender.WriteAsync(batch).ConfigureAwait(false);
-                    written += batch.RowCount;
-                }
-            }
-
-            WriteReport report = await appender.CompleteAsync().ConfigureAwait(false);
-            return report.RowCount - start == 0 ? written : report.RowCount;
-        }
-        finally
-        {
-            System.IO.File.Delete(copy);
-        }
-    }
-
     private sealed record Spread(double Median, double Low, double High)
     {
         internal static Spread Of(List<double> values)
@@ -477,11 +422,12 @@ internal static class Report
     /// <param name="Rows">The fixture's row count.</param>
     /// <param name="Bytes">The fixture's size.</param>
     /// <param name="Scenario">What was asked of both sides.</param>
-    /// <param name="Ours">Our measurement, or null when we refused.</param>
+    /// <param name="Aot">Our Native AOT runner's measurement, or null when it refused.</param>
+    /// <param name="Jit">This framework-dependent host's measurement, or null when it refused.</param>
     /// <param name="Theirs">The reference's, or null when it refused or was not asked.</param>
     /// <param name="Refusal">What the reference said when it refused, so the page can quote it.</param>
     private sealed record Row(
-        int Rows, long Bytes, Scenario Scenario, Measurement? Ours, Measurement? Theirs,
+        int Rows, long Bytes, Scenario Scenario, Measurement? Aot, Measurement? Jit, Measurement? Theirs,
         string? Refusal);
 
     private static string Text(List<Row> table, int runs)
@@ -489,16 +435,17 @@ internal static class Report
         StringBuilder text = new StringBuilder();
         text.AppendLine(Header(runs));
         text.AppendLine();
-        text.AppendLine("rows       scenario       ours, ms (low-high)  rust, ms (low-high)  ratio   " +
-            "ours MiB  rust MiB  rows out");
+        text.AppendLine("rows       scenario       ours AOT, ms (low-high)  ours JIT, ms (low-high)  " +
+            "rust, ms (low-high)  ratio   ours MiB  rust MiB  rows out");
         foreach (Row row in table)
         {
             bool asked = row.Scenario.Reference is not null;
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"{row.Rows,-10:N0} {row.Scenario.Name,-14} {Wall(row.Ours),-20} {Wall(row.Theirs, asked),-20} " +
-                $"{Ratio(row),-7} {Side(row.Ours, m => m.RssBytes.Median / (1024 * 1024)),8}  " +
+                $"{row.Rows,-10:N0} {row.Scenario.Name,-14} {Wall(row.Aot),-24} {Wall(row.Jit),-24} " +
+                $"{Wall(row.Theirs, asked),-20} " +
+                $"{Ratio(row),-7} {Side(row.Aot, m => m.RssBytes.Median / (1024 * 1024)),8}  " +
                 $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024), asked: asked),8}  " +
-                $"{(row.Ours is null ? "refused" : row.Ours.Rows.ToString("N0", CultureInfo.InvariantCulture)),10}"));
+                $"{(row.Aot is null ? "refused" : row.Aot.Rows.ToString("N0", CultureInfo.InvariantCulture)),10}"));
         }
 
         return text.ToString();
@@ -543,7 +490,13 @@ internal static class Report
         text.AppendLine("Eight scenarios, at a million rows and at ten million, on a table of four columns: a");
         text.AppendLine("monotone `i64`, an `f64`, a short `utf8` and a nullable `bool`. **Each side runs in its");
         text.AppendLine("own process**, once per run, and the run is timed from outside — so what you see is");
-        text.AppendLine("what a command costs, including starting a runtime, opening the file and exiting.");
+        text.AppendLine("what a command costs, including starting, opening the file and exiting.");
+        text.AppendLine();
+        text.AppendLine("Our side runs twice. **AOT** is the same code published as Native AOT: a native binary,");
+        text.AppendLine("like the reference's, and the one the ratio is taken against, because it is the only");
+        text.AppendLine("pairing where both processes pay the same fixed costs. **JIT** is the framework-dependent");
+        text.AppendLine("build under `dotnet`, which starts the runtime and compiles the code as it goes: what a");
+        text.AppendLine("`dotnet run` costs, and what a long-running process pays once.");
         text.AppendLine();
         text.AppendLine("Peak resident memory and processor time are each side's own `getrusage`, and the wall");
         text.AppendLine("clock is the parent's. Both sides render the same rows, and the harness fails rather");
@@ -567,16 +520,16 @@ internal static class Report
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                 $"## {rows:N0} rows, {of[0].Bytes:N0} bytes"));
             text.AppendLine();
-            text.AppendLine("| scenario | what it does | ours, ms | Vortex Rust, ms | ratio | " +
-                "ours, peak | Rust, peak |");
-            text.AppendLine("|---|---|---|---|---|---|---|");
+            text.AppendLine("| scenario | what it does | ours AOT, ms | ours JIT, ms | Vortex Rust, ms | ratio | " +
+                "ours AOT, peak | Rust, peak |");
+            text.AppendLine("|---|---|---|---|---|---|---|---|");
             foreach (Row row in of)
             {
                 bool asked = row.Scenario.Reference is not null;
                 text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                    $"| `{row.Scenario.Name}` | {row.Scenario.What} | {Wall(row.Ours)} | " +
+                    $"| `{row.Scenario.Name}` | {row.Scenario.What} | {Wall(row.Aot)} | {Wall(row.Jit)} | " +
                     $"{Wall(row.Theirs, asked)} | {Ratio(row)} | " +
-                    $"{Side(row.Ours, m => m.RssBytes.Median / (1024 * 1024), " MiB")} | " +
+                    $"{Side(row.Aot, m => m.RssBytes.Median / (1024 * 1024), " MiB")} | " +
                     $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024), " MiB", asked)} |"));
             }
 
@@ -593,21 +546,29 @@ internal static class Report
     /// </summary>
     private static string Reading(List<Row> table)
     {
-        List<Row> compared = [.. table.Where(r => r.Ours is not null && r.Theirs is not null)];
+        List<Row> compared = [.. table.Where(r => r.Aot is not null && r.Theirs is not null)];
         StringBuilder text = new StringBuilder();
         text.AppendLine("## Reading it");
         text.AppendLine();
 
         Row? floor = table.FirstOrDefault(
-            r => r.Scenario.Name == "open" && r.Ours is not null && r.Theirs is not null);
-        if (floor is { Ours: { } ourFloor, Theirs: { } theirFloor })
+            r => r.Scenario.Name == "open" && r.Aot is not null && r.Theirs is not null);
+        if (floor is { Aot: { } ourFloor, Theirs: { } theirFloor })
         {
             text.AppendLine("**Start with the floor.** The `open` row is a process that opens the file and reads");
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"no rows: {ourFloor.WallMs.Median:F0} ms for us against {theirFloor.WallMs.Median:F0} ms. That difference is a managed runtime"));
-            text.AppendLine("starting, and it is the same whatever the file holds. Subtract it from every other row");
-            text.AppendLine("to see what the work cost — and remember that a long-running process pays it once,");
-            text.AppendLine("while this table pays it on every line.");
+                $"no rows: {ourFloor.WallMs.Median:F0} ms for the native build against {theirFloor.WallMs.Median:F0} ms. Both are a native"));
+            text.AppendLine("binary starting, and a process that does nothing at all costs about as much on this");
+            text.AppendLine("machine. Subtract it from every other row to see what the work cost.");
+            if (floor.Jit is { } jitFloor)
+            {
+                text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                    $"The JIT column's floor is {jitFloor.WallMs.Median:F0} ms: the managed runtime starting and compiling"));
+                text.AppendLine("the code an open touches, whatever the file holds. Every row of that column carries it,");
+                text.AppendLine("plus the compilation of whatever else the scenario touches, and a long-running process");
+                text.AppendLine("pays it once.");
+            }
+
             text.AppendLine();
         }
 
@@ -616,17 +577,20 @@ internal static class Report
             Row best = compared.MaxBy(RatioOf)!;
             Row worst = compared.MinBy(RatioOf)!;
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"**Where we stand.** Of {compared.Count} compared scenarios, the closest is `{best.Scenario.Name}`"));
+                $"**Where we stand.** Of {compared.Count} compared scenarios, the best is `{best.Scenario.Name}`"));
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"at {best.Rows:N0} rows ({Ratio(best)}) and the furthest is `{worst.Scenario.Name}` at {worst.Rows:N0} rows"));
-            text.AppendLine("(" + Ratio(worst) + "). A ratio above 1.00x would mean we took less wall time.");
+                $"at {best.Rows:N0} rows ({Ratio(best)}) and the worst is `{worst.Scenario.Name}` at {worst.Rows:N0} rows"));
+            text.AppendLine("(" + Ratio(worst) + "). A ratio above 1.00x means the native build took less wall time");
+            text.AppendLine("than the reference.");
             text.AppendLine();
 
-            double ourPeak = compared.Max(r => r.Ours!.RssBytes.Median) / (1024 * 1024);
+            double ourPeak = compared.Max(r => r.Aot!.RssBytes.Median) / (1024 * 1024);
             double theirPeak = compared.Max(r => r.Theirs!.RssBytes.Median) / (1024 * 1024);
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"**Memory.** Our worst peak here is {ourPeak:F0} MiB against {theirPeak:F0} MiB. A managed heap and"));
-            text.AppendLine("its runtime are most of that difference at these sizes.");
+                $"**Memory.** Our worst peak here is {ourPeak:F0} MiB against {theirPeak:F0} MiB. We decode a chunk whole and"));
+            text.AppendLine("hand each batch a window of it, where the reference decodes a split of at most a hundred");
+            text.AppendLine("thousand rows at a time; on a file whose chunks hold half a million rows, that is the");
+            text.AppendLine("difference, and it is the file's chunking rather than its size that sets it.");
             text.AppendLine();
         }
 
@@ -666,10 +630,11 @@ internal static class Report
 
         text.AppendLine("## What this does not measure");
         text.AppendLine();
-        text.AppendLine("* **Steady state.** Every row includes a cold start: the runtime, the first tier of the");
-        text.AppendLine("  just-in-time compiler, and a page cache warmed only by the discarded run before it. The");
-        text.AppendLine("  per-encoding ratios in `bench/README.md` measure the other thing — the same code after");
-        text.AppendLine("  warm-up, in one process — and they read very differently. Both are true.");
+        text.AppendLine("* **Steady state.** Every row includes a cold start: the process, a page cache warmed only");
+        text.AppendLine("  by the discarded run before it, and in the JIT column the runtime and the first tier of");
+        text.AppendLine("  the just-in-time compiler. The per-encoding ratios in `bench/README.md` measure the other");
+        text.AppendLine("  thing — the same code after warm-up, in one process — and they are the place to look for");
+        text.AppendLine("  what a decoder costs.");
         text.AppendLine("* **Threading.** Both sides are single-threaded here, which is what makes a ratio a ratio.");
         text.AppendLine("* **Your data.** One table of four columns, written by us, is not every file. A column the");
         text.AppendLine("  compressor likes less, or a filter a zone map cannot prune, moves these numbers more");
@@ -679,15 +644,16 @@ internal static class Report
     }
 
     private static double RatioOf(Row row) =>
-        row.Theirs is null || row.Ours is null || row.Ours.WallMs.Median <= 0
+        row.Theirs is null || row.Aot is null || row.Aot.WallMs.Median <= 0
             ? 0
-            : row.Theirs.WallMs.Median / row.Ours.WallMs.Median;
+            : row.Theirs.WallMs.Median / row.Aot.WallMs.Median;
 
+    /// <summary>The reference's wall time over our native build's: above 1.00x, we took less.</summary>
     private static string Ratio(Row row) =>
-        row.Theirs is null || row.Ours is null || row.Ours.WallMs.Median <= 0
+        row.Theirs is null || row.Aot is null || row.Aot.WallMs.Median <= 0
             ? "n/a"
             : string.Create(CultureInfo.InvariantCulture,
-                $"{row.Theirs.WallMs.Median / row.Ours.WallMs.Median:F2}x");
+                $"{row.Theirs.WallMs.Median / row.Aot.WallMs.Median:F2}x");
 
     private static string First(string message)
     {
@@ -700,10 +666,11 @@ internal static class Report
         string.Create(CultureInfo.InvariantCulture,
             $"{runs} runs of each scenario, each in its own process, the median reported with the " +
             $"lowest and highest beside it; one discarded run before them.\n" +
-            $"Ratio above 1.00x means this library took less wall time.\n" +
+            $"Ratio is the reference's wall time over our Native AOT build's: above 1.00x, we took less.\n" +
             $"machine: {Processor()} ({RuntimeInformation.OSArchitecture}), " +
             $"{Environment.ProcessorCount} processors, {RuntimeInformation.OSDescription}\n" +
-            $"runtime: {RuntimeInformation.FrameworkDescription}, reference: Vortex 0.86.1\n" +
+            $"runtime: {RuntimeInformation.FrameworkDescription}, as Native AOT and on the JIT; " +
+            $"reference: Vortex 0.86.1, cargo release with lto\n" +
             $"commit: {Commit()}\n" +
             $"date: {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC");
 

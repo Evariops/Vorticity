@@ -8,6 +8,7 @@
   <Folder Name="/bench/">
     <Project Path="bench/Vorticity.Benchmarks/Vorticity.Benchmarks.csproj" />
     <Project Path="bench/Vorticity.Benchmarks.Scenarios/Vorticity.Benchmarks.Scenarios.csproj" />
+    <Project Path="bench/Vorticity.Benchmarks.Runner/Vorticity.Benchmarks.Runner.csproj" />
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/Vorticity.Samples/Vorticity.Samples.csproj" />

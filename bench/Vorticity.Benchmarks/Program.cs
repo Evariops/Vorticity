@@ -429,8 +429,12 @@ internal static class Program
           --report                 the published comparison: eight high-level scenarios at a
                                      million rows and ten million, EACH SIDE IN ITS OWN PROCESS,
                                      reporting wall time, peak resident memory and rows rendered.
-                                     The reference is the vxbench binary rather than the cdylib,
-                                     because those figures belong to a process. ~4 min
+                                     Our side runs as the Native AOT runner, which the ratio is
+                                     taken against, and as this host on the JIT; the reference is
+                                     the vxbench binary rather than the cdylib, because those
+                                     figures belong to a process. Build the runner first:
+                                     dotnet publish -c Release bench/Vorticity.Benchmarks.Runner
+                                     ~6 min
                                      --runs N          runs per scenario, default 5, one more
                                                        discarded before them
                                      --markdown        the table as the guide's page
