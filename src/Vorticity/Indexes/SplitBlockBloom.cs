@@ -114,7 +114,7 @@ internal static class SplitBlockBloom
 
     /// <summary>
     /// The filter's words over little-endian bytes, which is how a payload stores them. The library
-    /// refuses a big-endian host at startup (<c>VortexRuntimeChecks</c>), so this is a cast.
+    /// refuses a big-endian host before it reads a file (<c>VortexRuntimeChecks</c>), so this is a cast.
     /// </summary>
     /// <param name="bytes">The payload; a trailing partial block is ignored.</param>
     /// <returns>The words.</returns>

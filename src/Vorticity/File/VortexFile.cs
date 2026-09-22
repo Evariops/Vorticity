@@ -264,6 +264,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     private static async ValueTask<VortexFile> OpenTailAsync(
         ISegmentReader source, VortexOpenOptions options, bool ownsSource, long fileLength, CancellationToken cancellationToken)
     {
+        VortexRuntimeChecks.Require();
         SegmentOwner? tail = null;
         try
         {

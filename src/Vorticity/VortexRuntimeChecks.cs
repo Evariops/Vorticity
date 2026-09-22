@@ -1,27 +1,40 @@
+using System;
 using System.Runtime.CompilerServices;
+using Vorticity.Serialization.Schemas;
 
 namespace Vorticity;
 
 /// <summary>
-/// Refuses to load on a big-endian host. The zero-copy design casts file buffers directly, which
-/// assumes a little-endian host, so failing at load is better than returning byte-swapped data.
+/// What the zero-copy design assumes of the host, checked where bytes enter or leave the library:
+/// a little-endian host, since file buffers are cast in place, and the sizes of the two inline
+/// structs the readers reinterpret, which are a wire contract. Each condition is a constant to the
+/// JIT, so a host that meets them pays nothing, and one that does not is refused before it can
+/// read byte-swapped or misaligned data.
 /// </summary>
 internal static class VortexRuntimeChecks
 {
-    // CA2255 warns that ModuleInitializer is meant for applications; here it is deliberate. The
-    // check must run before any caller can hand the library a buffer, and it is a single branch
-    // executed once.
-    [System.Diagnostics.CodeAnalysis.SuppressMessage(
-        "Usage", "CA2255:The 'ModuleInitializer' attribute should not be used in libraries",
-        Justification = "The endianness guard must run before a caller can hand the library a buffer.")]
-    [ModuleInitializer]
-    internal static void Initialize()
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void Require()
     {
-        if (!System.BitConverter.IsLittleEndian)
+        if (!BitConverter.IsLittleEndian || Unsafe.SizeOf<SegmentSpec>() != 16 || Unsafe.SizeOf<BufferSpec>() != 8)
         {
-            throw new System.PlatformNotSupportedException(
+            Refuse();
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Refuse()
+    {
+        if (!BitConverter.IsLittleEndian)
+        {
+            throw new PlatformNotSupportedException(
                 "Vorticity requires a little-endian host: the Vortex format is little-endian and " +
                 "the reader casts memory-mapped file buffers directly.");
         }
+
+        throw new PlatformNotSupportedException(
+            $"SegmentSpec must occupy exactly 16 bytes and BufferSpec 8, as the footer and array " +
+            $"flatbuffers lay them out, but this runtime lays them out in {Unsafe.SizeOf<SegmentSpec>()} " +
+            $"and {Unsafe.SizeOf<BufferSpec>()}.");
     }
 }

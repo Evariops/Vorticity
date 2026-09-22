@@ -1,5 +1,3 @@
-using System;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Vorticity.Serialization.Schemas;
@@ -96,34 +94,4 @@ internal enum StatPrecision : byte
 
     /// <summary>The statistic is the true value.</summary>
     Exact = 1,
-}
-
-/// <summary>
-/// Load-time verification of the two inline struct layouts the zero-copy readers reinterpret.
-/// </summary>
-internal static class SchemaLayoutChecks
-{
-    // CA2255 warns that ModuleInitializer is meant for applications. Here it is deliberate, exactly
-    // as in VortexRuntimeChecks: the sizes are a wire contract and every zero-copy reinterpretation
-    // in this file depends on them, so they are asserted once before any caller can hand us bytes.
-    [System.Diagnostics.CodeAnalysis.SuppressMessage(
-        "Usage", "CA2255:The 'ModuleInitializer' attribute should not be used in libraries",
-        Justification = "The struct sizes are a wire contract and every zero-copy reinterpretation here depends on them.")]
-    [ModuleInitializer]
-    internal static void Initialize()
-    {
-        if (Unsafe.SizeOf<SegmentSpec>() != 16)
-        {
-            throw new PlatformNotSupportedException(
-                $"SegmentSpec must occupy exactly 16 bytes (spec/flatbuffers/footer.fbs) but this " +
-                $"runtime lays it out in {Unsafe.SizeOf<SegmentSpec>()}.");
-        }
-
-        if (Unsafe.SizeOf<BufferSpec>() != 8)
-        {
-            throw new PlatformNotSupportedException(
-                $"BufferSpec must occupy exactly 8 bytes (spec/flatbuffers/array.fbs) but this " +
-                $"runtime lays it out in {Unsafe.SizeOf<BufferSpec>()}.");
-        }
-    }
 }

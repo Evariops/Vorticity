@@ -221,6 +221,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
         FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints)
     {
+        VortexRuntimeChecks.Require();
         _sink = sink;
         _meteredBytes = sink.Position;
         _activity = VortexTelemetry.StartWrite();
