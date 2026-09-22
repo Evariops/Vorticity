@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
 
@@ -192,6 +193,12 @@ internal static class BitmapKernels
             + BitOperations.PopCount((uint)(bits[lastByte] & (0xFF >> (8 - hi))));
 
         ReadOnlySpan<byte> middle = bits[(firstByte + 1)..lastByte];
+        if (AdvSimd.Arm64.IsSupported && middle.Length >= CountBlock)
+        {
+            total += CountBlocks(middle, out int counted);
+            middle = middle[counted..];
+        }
+
         ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(middle);
         for (int i = 0; i < words.Length; i++)
         {
@@ -204,6 +211,49 @@ internal static class BitmapKernels
         }
 
         return total;
+    }
+
+    /// <summary>Bytes <see cref="CountBlocks"/> counts at a time: four vectors.</summary>
+    private const int CountBlock = 4 * 16;
+
+    /// <summary>
+    /// The set bits of the whole <see cref="CountBlock"/>-byte blocks of <paramref name="bytes"/>,
+    /// and how many bytes those blocks are.
+    /// </summary>
+    /// <remarks>
+    /// On arm64 a scalar population count moves each word into a vector register and back; this
+    /// counts sixteen bytes to an instruction and folds the counts into halfword lanes, in four
+    /// accumulators so that no fold waits on the one before. A lane gains at most sixteen a block,
+    /// so the lanes are summed every 4 096 blocks, before one could overflow.
+    /// </remarks>
+    private static int CountBlocks(ReadOnlySpan<byte> bytes, out int counted)
+    {
+        ref byte start = ref MemoryMarshal.GetReference(bytes);
+        int blocks = bytes.Length / CountBlock;
+        long total = 0;
+        int block = 0;
+        while (block < blocks)
+        {
+            int stop = Math.Min(blocks, block + 4_096);
+            Vector128<ushort> a = Vector128<ushort>.Zero;
+            Vector128<ushort> b = Vector128<ushort>.Zero;
+            Vector128<ushort> c = Vector128<ushort>.Zero;
+            Vector128<ushort> d = Vector128<ushort>.Zero;
+            for (; block < stop; block++)
+            {
+                nuint at = (nuint)(block * CountBlock);
+                a = AdvSimd.AddPairwiseWideningAndAdd(a, AdvSimd.PopCount(Vector128.LoadUnsafe(ref start, at)));
+                b = AdvSimd.AddPairwiseWideningAndAdd(b, AdvSimd.PopCount(Vector128.LoadUnsafe(ref start, at + 16)));
+                c = AdvSimd.AddPairwiseWideningAndAdd(c, AdvSimd.PopCount(Vector128.LoadUnsafe(ref start, at + 32)));
+                d = AdvSimd.AddPairwiseWideningAndAdd(d, AdvSimd.PopCount(Vector128.LoadUnsafe(ref start, at + 48)));
+            }
+
+            total += AdvSimd.Arm64.AddAcrossWidening(a).ToScalar() + AdvSimd.Arm64.AddAcrossWidening(b).ToScalar()
+                + AdvSimd.Arm64.AddAcrossWidening(c).ToScalar() + AdvSimd.Arm64.AddAcrossWidening(d).ToScalar();
+        }
+
+        counted = blocks * CountBlock;
+        return (int)total;
     }
 
     /// <summary>

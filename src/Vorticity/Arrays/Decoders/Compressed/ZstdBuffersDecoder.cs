@@ -102,10 +102,10 @@ internal sealed class ZstdBuffersDecoder : ArrayDecoder
         // Decompressed into the canonical arena, which is the only writable memory a decoder may
         // have and is released with the batch.
         //
-        // One decoder reused across every buffer of the node: the one-shot form builds and tears
-        // down a native decompression context per call.
+        // The context's decoder, reused across every buffer of every node the scan meets: the
+        // one-shot form builds and tears down a native decompression context per call.
         int firstBuffer = -1;
-        using ZstandardDecoder reused = new ZstandardDecoder();
+        ZstandardDecoder reused = context.Scan.Zstd;
         for (int i = 0; i < buffers; i++)
         {
             long size = sizes[i];

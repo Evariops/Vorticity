@@ -286,7 +286,124 @@ public sealed class ZstdDecoderTests
         Assert.Equal([null, null], ReadNullableStrings(harness, node, 2));
     }
 
+    [Fact]
+    public void ARangeOfTextDecodesAsTheWholeArraySliced()
+    {
+        // Frames of four values over rows with nulls -- one in three, and a run of four -- so a
+        // range starts inside a frame, past nulls, or holds no value at all.
+        const int Rows = 40;
+        bool[] valid = new bool[Rows];
+        List<string> stored = [];
+        for (int row = 0; row < Rows; row++)
+        {
+            valid[row] = row % 3 != 1 && row is not (>= 24 and < 28);
+            if (valid[row])
+            {
+                stored.Add(row % 5 == 0 ? $"a value long enough to go out of line {row}" : $"v{row}");
+            }
+        }
+
+        (TestNode root, byte[][] buffers) = Framed(stored, valuesPerFrame: 4, validity: valid);
+        using DecodeHarness harness = DecodeHarness.Load(root, buffers);
+        DType utf8 = harness.Types.Utf8(Nullability.Nullable);
+        ArrayNode node = harness.Scan.Nodes.Root;
+        Assert.True(harness.Scan.Decode.DecodesRange(in node));
+
+        List<string?> whole = ReadNullableStrings(harness, harness.Node(harness.DecodeRoot(utf8, Rows)), Rows);
+        foreach ((int start, int count) in new[] { (0, Rows), (0, 1), (1, 5), (7, 9), (13, 1), (24, 4), (20, 20), (39, 1) })
+        {
+            CanonicalNode range = harness.Node(
+                harness.Scan.Decode.DecodeRootRange(in node, utf8, Rows, start, count, keepEncoding: false));
+            Assert.Equal(whole.GetRange(start, count), ReadNullableStrings(harness, range, count));
+        }
+    }
+
+    [Fact]
+    public void ARangeOfPrimitivesDecodesAsTheWholeArraySliced()
+    {
+        const int Rows = 30;
+        bool[] valid = new bool[Rows];
+        List<int> stored = [];
+        for (int row = 0; row < Rows; row++)
+        {
+            valid[row] = row % 4 != 2;
+            if (valid[row])
+            {
+                stored.Add(row * 1_000 + 7);
+            }
+        }
+
+        byte[][] frames = new byte[(stored.Count + 2) / 3][];
+        List<ZstdFrameMetadata> metadata = [];
+        for (int f = 0; f < frames.Length; f++)
+        {
+            int take = Math.Min(3, stored.Count - (f * 3));
+            byte[] raw = new byte[take * sizeof(int)];
+            for (int i = 0; i < take; i++)
+            {
+                BinaryPrimitives.WriteInt32LittleEndian(raw.AsSpan(i * sizeof(int)), stored[(f * 3) + i]);
+            }
+
+            frames[f] = Compress(raw);
+            metadata.Add(new ZstdFrameMetadata((ulong)raw.Length, (ulong)take));
+        }
+
+        TestNode root = new TestNode("vortex.zstd").WithMetadata(TestMetadata.Zstd(0, [.. metadata]));
+        for (int f = 0; f < frames.Length; f++)
+        {
+            root = root.WithBuffer(f);
+        }
+
+        root = root.WithChild(new TestNode("vortex.bool").WithBuffer(frames.Length));
+        using DecodeHarness harness = DecodeHarness.Load(root, [.. frames, TestBuffers.Bitmap(valid)]);
+        DType i32 = harness.Types.Primitive(PType.I32, Nullability.Nullable);
+        ArrayNode node = harness.Scan.Nodes.Root;
+
+        CanonicalNode whole = harness.Node(harness.DecodeRoot(i32, Rows));
+        foreach ((int start, int count) in new[] { (0, Rows), (2, 1), (3, 7), (11, 13), (29, 1) })
+        {
+            CanonicalNode range = harness.Node(
+                harness.Scan.Decode.DecodeRootRange(in node, i32, Rows, start, count, keepEncoding: false));
+            for (int i = 0; i < count; i++)
+            {
+                Assert.Equal(harness.IsValid(whole, start + i), harness.IsValid(range, i));
+                if (harness.IsValid(range, i))
+                {
+                    Assert.Equal(ReadInts(whole, Rows)[start + i], ReadInts(range, count)[i]);
+                }
+            }
+        }
+    }
+
     // ------------------------------------------------------------------------------- fixtures
+
+    /// <summary>
+    /// A zstd node over <paramref name="stored"/> -- the valid rows' values -- cut into frames of
+    /// <paramref name="valuesPerFrame"/>, with the validity child last.
+    /// </summary>
+    private static (TestNode Root, byte[][] Buffers) Framed(
+        List<string> stored, int valuesPerFrame, bool[] validity)
+    {
+        List<byte[]> buffers = [];
+        List<ZstdFrameMetadata> metadata = [];
+        for (int first = 0; first < stored.Count; first += valuesPerFrame)
+        {
+            string[] values = stored.GetRange(first, Math.Min(valuesPerFrame, stored.Count - first)).ToArray();
+            byte[] stream = ValueStream(values);
+            buffers.Add(Compress(stream));
+            metadata.Add(new ZstdFrameMetadata((ulong)stream.Length, (ulong)values.Length));
+        }
+
+        TestNode root = new TestNode("vortex.zstd").WithMetadata(TestMetadata.Zstd(0, [.. metadata]));
+        for (int b = 0; b < buffers.Count; b++)
+        {
+            root = root.WithBuffer(b);
+        }
+
+        root = root.WithChild(new TestNode("vortex.bool").WithBuffer(buffers.Count));
+        buffers.Add(TestBuffers.Bitmap(validity));
+        return (root, [.. buffers]);
+    }
 
     /// <summary>The `[u32 little-endian length][bytes]` stream the frames hold, uncompressed.</summary>
     private static byte[] ValueStream(params string[] values)

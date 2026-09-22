@@ -56,6 +56,33 @@ public sealed class BitmapKernelTests
     }
 
     [Fact]
+    public void CountSetCountsLongBitmapsAsTheirWordsDo()
+    {
+        // Long enough for whole blocks of the vector count, and past the point where its lanes are
+        // folded, at starts and lengths that leave ragged edges on both sides.
+        Random random = new Random(5);
+        byte[] bits = new byte[300_000];
+        random.NextBytes(bits);
+        foreach ((int start, int count) in new[]
+        {
+            (0, bits.Length * 8), (1, (bits.Length * 8) - 1), (3, 511), (7, 64 * 8 * 3), (13, 2_000_003),
+            (8, 262_144 * 8), (100_005, 1_234_567), (0, 64 * 8), (5, (64 * 8) + 3),
+        })
+        {
+            int expected = 0;
+            for (int i = 0; i < count; i++)
+            {
+                if (BitAt(bits, start + i))
+                {
+                    expected++;
+                }
+            }
+
+            Assert.Equal(expected, BitmapKernels.CountSet(bits, start, count));
+        }
+    }
+
+    [Fact]
     public void CountSetIsZeroForAnEmptyRange()
     {
         byte[] bits = Pattern(8, 1);

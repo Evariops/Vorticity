@@ -200,12 +200,15 @@ public sealed class PathAllocationTests
         // The chunks a scan decodes and holds across batches are one table for the scan, shared by
         // its lanes, where each lane held its own: the table, 56 bytes a scan, and an entry that
         // also names who decodes it and the next spare, 16 bytes a chunk.
+        //
+        // Every zstd frame a lane decompresses goes through one decoder its context builds once,
+        // where each chunk built and tore down its own: 41 KB less on a full scan and on the take.
         ("open, first batch", File, 133_968, FirstBatch),
-        ("full scan", File, 193_664, FullScan),
+        ("full scan", File, 152_712, FullScan),
         ("projected scan, 1 of 5 columns", File, 136_832, ProjectedScan),
         // A take or a filter goes through the filtered delivery, whose enumerable and enumerator hold
         // one more field each: 16 bytes a scan.
-        ("take 64 rows from 64 splits", File, 194_752, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 153_800, ScatteredTake),
         // The filter's field references hold one more field each, and the zone column the pruning
         // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
         // context that reads the zone map.
@@ -214,7 +217,11 @@ public sealed class PathAllocationTests
         // not evaluated: 8 bytes a filtered scan. A field reference encodes its path without
         // splitting it into strings, and the pruning locates the filter's own references rather
         // than building new ones, which more than pays for it on both axes.
-        ("selective filter, pruning on", File, 141_712, PrunedFilter),
+        //
+        // A context holds the zstd decoder it builds for its frames, whether or not it meets one: 8
+        // bytes for the lane's and 8 for the one the pruning reads the zone map through, which the
+        // 41 KB the full scan and the take no longer spend on decoders more than pay for.
+        ("selective filter, pruning on", File, 141_728, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -226,8 +233,9 @@ public sealed class PathAllocationTests
         // the plan builds to read the zone map, plus the zone decode itself, and no part of it
         // grows with the number of zones. Keep `ZoneColumn.Zones` a range rather than an iterator,
         // and that context's arenas sized for what they hold rather than for a batch: either one
-        // undone costs more than the whole gap that remains.
-        ("selective filter, pruning off", File, 137_984, UnprunedFilter),
+        // undone costs more than the whole gap that remains. The lane's context holds its zstd
+        // decoder's field, 8 bytes, as above.
+        ("selective filter, pruning off", File, 137_992, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
