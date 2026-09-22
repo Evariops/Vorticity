@@ -1286,9 +1286,9 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     /// <summary>
-    /// Releases the tail buffer and, unless <see cref="VortexOpenOptions.LeaveSourceOpen"/> was
-    /// set, disposes the segment source. Idempotent. Spans previously returned by
-    /// <see cref="SegmentSpecs"/> are invalid afterwards.
+    /// Releases the tail buffer and disposes the segment source the file owns, which is every
+    /// source handed to an open. Idempotent. A file of its session must be disposed before the
+    /// session is.
     /// </summary>
     /// <returns>A task that completes when the file is closed.</returns>
     public async ValueTask DisposeAsync()

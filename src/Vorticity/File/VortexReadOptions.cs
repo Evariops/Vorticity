@@ -62,13 +62,6 @@ internal sealed class VortexReadOptions
     public bool VerifyStatistics { get; init; }
 
     /// <summary>
-    /// Inspection mode: unknown components are preserved as inert nodes so a dump tool can list
-    /// them. It does <em>not</em> make lazy resolution happen — that is unconditional. Default
-    /// <see langword="false"/>.
-    /// </summary>
-    public bool AllowUnknownComponents { get; init; }
-
-    /// <summary>
     /// Index fragments built for this file, each one a whole container: the runs and the directory
     /// an indexer wrote for a block range of the file, bound to it by its identity. Empty by
     /// default.

@@ -248,8 +248,8 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 _source = source = runs ?? throw new VortexUnsupportedException(
                     IndexKinds.SortedRuns,
                     ComponentKind.Index,
-                    $"InKeyOrder(({string.Join(", ", composite)})) needs the composite key's sorted runs " +
-                    $"(WritePolicy.ForKey): {reason}.");
+                    $"A key-ordered read of ({string.Join(", ", composite)}) needs the composite key's sorted runs " +
+                    $"(IndexPolicy.ForKey): {reason}.");
                 _slices = await ExactCover.RangeAsync(null, source, _owner._path, _token).ConfigureAwait(false);
             }
             else
