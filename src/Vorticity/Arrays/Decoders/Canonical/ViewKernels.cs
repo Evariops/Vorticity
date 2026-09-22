@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -594,6 +595,49 @@ internal static class ViewKernels
 
             ThrowInvalidRow(i);
         }
+    }
+
+    /// <summary>
+    /// Cuts a stream of values each behind its little-endian <c>u32</c> length into
+    /// <paramref name="count"/> views, the lengths left in the heap and the views pointing past
+    /// them; the rows built, fewer when a length or a value runs past the stream.
+    /// </summary>
+    /// <remarks>
+    /// Calls nothing, for <see cref="DenseFromLengths{TLen}"/>'s reason; a row that runs past the
+    /// stream ends the loop, and the caller walks the rows again to say which.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal static int BuildFromPrefixed(ReadOnlySpan<byte> heap, Span<byte> views, int count)
+    {
+        ref byte heapRef = ref MemoryMarshal.GetReference(heap);
+        ref byte viewRef = ref MemoryMarshal.GetReference(views);
+        int heapLength = heap.Length;
+        int offset = 0;
+        int row = 0;
+        for (; row < count; row++)
+        {
+            if (offset > heapLength - sizeof(uint))
+            {
+                break;
+            }
+
+            uint size = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref heapRef, offset));
+            if (!BitConverter.IsLittleEndian)
+            {
+                size = BinaryPrimitives.ReverseEndianness(size);
+            }
+
+            int start = offset + sizeof(uint);
+            if (size > (uint)(heapLength - start))
+            {
+                break;
+            }
+
+            Place(ref Unsafe.Add(ref viewRef, row * ViewSize), ref heapRef, start, (int)size, heapLength, requireUtf8: false);
+            offset = start + (int)size;
+        }
+
+        return row;
     }
 
     /// <summary>

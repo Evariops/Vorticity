@@ -375,6 +375,67 @@ public sealed class ZstdDecoderTests
         }
     }
 
+    [Fact]
+    public void ValuesSpreadOverWholeWordsOfValidEmptyAndMixedRows()
+    {
+        // A word of valid rows, a word of nulls, then rows mixed, over a length that ends inside a
+        // word -- whole, and from an offset that puts every word astride two bytes of the bitmap.
+        const int Rows = 300;
+        bool[] valid = new bool[Rows];
+        List<int> stored = [];
+        for (int row = 0; row < Rows; row++)
+        {
+            valid[row] = row < 64 || (row >= 128 && row % 3 != 0);
+            if (valid[row])
+            {
+                stored.Add((row * 31) + 1);
+            }
+        }
+
+        // Three frames of a third of the values each, so that a range decodes from some of them.
+        byte[][] frames = new byte[3][];
+        ZstdFrameMetadata[] metadata = new ZstdFrameMetadata[3];
+        int third = (stored.Count + 2) / 3;
+        for (int f = 0; f < 3; f++)
+        {
+            int first = f * third;
+            int take = Math.Min(third, stored.Count - first);
+            byte[] raw = new byte[take * sizeof(int)];
+            for (int i = 0; i < take; i++)
+            {
+                BinaryPrimitives.WriteInt32LittleEndian(raw.AsSpan(i * sizeof(int)), stored[first + i]);
+            }
+
+            frames[f] = Compress(raw);
+            metadata[f] = new ZstdFrameMetadata((ulong)raw.Length, (ulong)take);
+        }
+
+        TestNode root = new TestNode("vortex.zstd")
+            .WithMetadata(TestMetadata.Zstd(0, metadata))
+            .WithBuffer(0)
+            .WithBuffer(1)
+            .WithBuffer(2)
+            .WithChild(new TestNode("vortex.bool").WithBuffer(3));
+        using DecodeHarness harness = DecodeHarness.Load(
+            root, frames[0], frames[1], frames[2], TestBuffers.Bitmap(valid));
+        DType i32 = harness.Types.Primitive(PType.I32, Nullability.Nullable);
+        ArrayNode node = harness.Scan.Nodes.Root;
+
+        foreach ((int start, int count) in new[] { (0, Rows), (5, Rows - 5), (61, 140) })
+        {
+            CanonicalNode decoded = harness.Node(start == 0
+                ? harness.DecodeRoot(i32, Rows)
+                : harness.Scan.Decode.DecodeRootRange(in node, i32, Rows, start, count, keepEncoding: false));
+            int[] values = ReadInts(decoded, count);
+            for (int i = 0; i < count; i++)
+            {
+                int row = start + i;
+                Assert.Equal(valid[row], harness.IsValid(decoded, i));
+                Assert.Equal(valid[row] ? (row * 31) + 1 : 0, values[i]);
+            }
+        }
+    }
+
     // ------------------------------------------------------------------------------- fixtures
 
     /// <summary>

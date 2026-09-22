@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Buffers.Binary;
 using System.IO.Compression;
@@ -470,18 +471,36 @@ internal sealed class ZstdDecoder : ArrayDecoder
 
     /// <summary>Spreads a dense run of <typeparamref name="T"/> over the mask's valid rows.</summary>
     /// <typeparam name="T">The value type, chosen from the byte width by the caller.</typeparam>
+    /// <remarks>
+    /// Sixty-four rows at a time: a word of valid rows is one copy of its values, a word of nulls is
+    /// nothing, since the destination is zeroed, and a mixed word walks its set bits. Asking the
+    /// mask row by row is a call and a switch a row, and was most of a nullable decode.
+    /// </remarks>
     private static void Expand<T>(
         ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length)
         where T : unmanaged
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(source);
         Span<T> rows = MemoryMarshal.Cast<byte, T>(destination);
+        ReadOnlySpan<byte> bits = mask.Bits;
+        int bitOffset = mask.BitOffset;
         int next = 0;
-        for (int row = 0; row < length; row++)
+        for (int row = 0; row < length; row += 64)
         {
-            if (mask.IsValid(row))
+            int span = Math.Min(64, length - row);
+            ulong full = BitWords.Mask(span);
+            ulong word = BitWords.Load(bits, bitOffset + row) & full;
+            if (word == full)
             {
-                rows[row] = values[next++];
+                values.Slice(next, span).CopyTo(rows.Slice(row, span));
+                next += span;
+                continue;
+            }
+
+            while (word != 0)
+            {
+                rows[row + BitOperations.TrailingZeroCount(word)] = values[next++];
+                word &= word - 1;
             }
         }
     }
@@ -543,6 +562,14 @@ internal sealed class ZstdDecoder : ArrayDecoder
         // shape of essentially every string column. When the sweep does find a high byte, whether
         // a genuinely non-ASCII value or one at least 128 bytes long, the per-row path below runs.
 
+        // Every row valid and no row to validate, the common shape: a loop that calls nothing. Should
+        // a prefix or a value run past the stream, it stops short, and the loop below walks the rows
+        // again to say which.
+        if (mask.AllValid && !requireUtf8 && ViewKernels.BuildFromPrefixed(heap, writable, length) == length)
+        {
+            return AttachHeap(context, dtype, length, validity, views, values);
+        }
+
         int offset = 0;
         int written = 0;
         for (int row = 0; row < length; row++)
@@ -592,7 +619,14 @@ internal sealed class ZstdDecoder : ArrayDecoder
                 "rows of this array.");
         }
 
-        if (heap.Length == 0)
+        return AttachHeap(context, dtype, length, validity, views, values);
+    }
+
+    /// <summary>The varbin view node over <paramref name="views"/>, with the heap as its one data buffer unless it is empty.</summary>
+    private static int AttachHeap(
+        ArrayDecodeContext context, DType dtype, int length, Validity validity, VortexBuffer views, VortexBuffer values)
+    {
+        if (values.Length == 0)
         {
             return context.Canonical.AddVarBinView(dtype, length, validity, views, default);
         }

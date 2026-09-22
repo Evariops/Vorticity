@@ -1,11 +1,12 @@
 using System;
 using System.Buffers.Binary;
 
-namespace Vorticity.Writing;
+namespace Vorticity.Arrays.Decoders.Canonical;
 
 /// <summary>
-/// Word-at-a-time reads over a bitmap that need not be byte aligned, shared by the ingest pass and
-/// the run-end scan. Both count run boundaries, and a whole word of them is one xor and a popcount
+/// Word-at-a-time reads over a bitmap that need not be byte aligned, shared by the writer's ingest
+/// pass and run-end scan, which count run boundaries, and by the decoders that spread values over
+/// valid rows: a whole word of rows is one xor and a popcount, or one test for all set or all clear,
 /// where reading bit by bit is a call and a shift per row.
 /// </summary>
 internal static class BitWords
