@@ -14,8 +14,8 @@ public sealed record ScanOptions
 
     /// <summary>
     /// The most rows a batch holds; 0 to let the scan decide: the file's block size when it
-    /// filters, orders or takes, and otherwise as many blocks as keep a batch of what it reads
-    /// within half of a core's share of the L2 cache. A value above that decision changes nothing.
+    /// filters, orders or takes, and otherwise as many blocks as a window of the scan holds, never
+    /// past the end of a chunk. A value above that decision changes nothing.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     public int BatchRows

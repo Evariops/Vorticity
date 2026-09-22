@@ -96,11 +96,10 @@ mean 30.00 degrees
 
 * **The rows became columns.** About 1.85 MB of values became a file of 158 508 bytes, because the
   writer chose an encoding per column and per chunk instead of storing what it was handed.
-* **The scan came back in batches, not rows**: 4 of them, each as many of the file's 8 192-row
-  blocks as fit what a core has of the L2 cache. `day`, `celsius` and `city` are `Column<T>` values
-  over the decoded batch. They are
-  borrowed: valid inside the loop body, and the compiler refuses to let one outlive it
-  ([scan-a-table.md](scan-a-table.md)).
+* **The scan came back in batches, not rows**: 4 of them, one per chunk the writer made of the
+  file's 8 192-row blocks. `day`, `celsius` and `city` are `Column<T>` values over the decoded
+  batch. They are borrowed: valid inside the loop body, and the compiler refuses to let one outlive
+  it ([scan-a-table.md](scan-a-table.md)).
 * **`AvgAsync` ran inside the scan.** No batch reached the caller; the nulls were skipped for you.
   An aggregate is an operator, not a loop you write ([aggregates.md](aggregates.md)).
 * **The filter is not a delegate.** The lambda given to `Where` runs once, when the scan is built,

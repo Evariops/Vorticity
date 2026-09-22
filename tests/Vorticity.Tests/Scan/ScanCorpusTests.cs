@@ -214,12 +214,11 @@ public sealed class ScanCorpusTests
     }
 
     [Fact]
-    public async Task TheDefaultBatchSizeFollowsWhatTheScanReads()
+    public async Task TheDefaultBatchSizeIsTheWindow()
     {
-        // The batch size derives from the file's zones and from what the scan reads: the zone
-        // length, grown while the projection's decoded rows fit the cache's budget. WithMaxBatchRows
-        // only ever makes it smaller, which is asserted below by raising the cap far above that
-        // and getting the same batching.
+        // The batch size of a scan that only reads derives from the file's zones: as many zone
+        // lengths as a window holds. WithMaxBatchRows only ever makes it smaller, which is asserted
+        // below by raising the cap far above that and getting the same batching.
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(
             Corpus.Path("distributions/high_cardinality_i64_r8193"), CancellationToken.None);
@@ -238,9 +237,7 @@ public sealed class ScanCorpusTests
 
         List<int> plain = await BatchSizes(file, 0);
         List<int> raised = await BatchSizes(file, int.MaxValue);
-        long batch = BatchBudget.Rows(
-            file.DType, Vorticity.Layouts.FieldMask.All, zoneLength,
-            Vorticity.Layouts.FlatLayoutReader.WindowRows, BatchBudget.Bytes);
+        long batch = Math.Max(1, Vorticity.Layouts.FlatLayoutReader.WindowRows / zoneLength) * zoneLength;
 
         Assert.Equal(plain, raised);
         for (int i = 0; i < plain.Count; i++)

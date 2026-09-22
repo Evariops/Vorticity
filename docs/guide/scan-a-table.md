@@ -38,11 +38,11 @@ declaration order; `_` skips a member. `Columns<Reading>` also carries `RowCount
 file row of its first row) and `Selection` ([selection.md](selection.md)).
 
 `celsius.Values` is a `ReadOnlySpan<double>` over the decoded buffer itself, 64-byte aligned, so
-reading a column copies nothing. A scan that only reads, like this one, sizes its batches by what
-it reads: as many of the file's 8 192-row blocks as keep a batch of its columns within half of what
-one core has of the L2 cache -- four on the machine these figures come from, and never past the
-end of a chunk: 50 batches for a million rows. A scan with a filter, an order or a take holds one
-block per batch. `ScanOptions.BatchRows` asks for smaller ones and never for more:
+reading a column copies nothing. A scan that only reads, like this one, delivers up to sixteen of
+the file's 8 192-row blocks per batch, the rows it decodes at once, and never goes past the end of
+a chunk: each chunk of this file is one batch, 50 for a million rows. A scan with a filter, an
+order or a take holds one block per batch. `ScanOptions.BatchRows` asks for smaller ones and never
+for more:
 
 ```csharp
 await foreach (Columns<Reading> columns in file.Scan<Reading>().With(new ScanOptions { BatchRows = 4_096 }))
@@ -110,7 +110,7 @@ the column. [aggregates.md](aggregates.md) has the rest of the operators.
   request, [open-a-file.md](open-a-file.md) shows what a `SegmentCache` on the session saves.
 * **Memory.** One batch is decoded ahead of the one you hold (`ScanOptions.Prefetch`, 1 by
   default), in buffers that alternate rather than accumulate.
-* **Allocations.** A whole scan allocated 46 224 bytes over its 50 batches, and 87 344 bytes over
+* **Allocations.** A whole scan allocated 46 240 bytes over its 50 batches, and 87 360 bytes over
   123 batches of a block as over 245 of half a block: a scan pays for its start and then nothing
   per batch, and less when each batch holds a whole chunk, which then need not stay decoded from
   one batch to the next. Counted process-wide with `GC.GetTotalAllocatedBytes`, so the thread
