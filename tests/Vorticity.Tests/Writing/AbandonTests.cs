@@ -48,6 +48,7 @@ public sealed class AbandonTests
     [Fact]
     public async Task AbandoningAFileThisWriterCreatedLeavesNothingBehind()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string path = TempPath();
         try
         {
@@ -56,8 +57,8 @@ public sealed class AbandonTests
                 await using VortexFileWriter writer = VortexFileWriter.Create(path, Schema, Options());
                 try
                 {
-                    await FeedAsync(writer, 0, 1_000);
-                    await FeedAsync(writer, 1_000, 2_000);
+                    await FeedAsync(writer, 0, 1_000, ct);
+                    await FeedAsync(writer, 1_000, 2_000, ct);
                     throw new InvalidOperationException("producer failed at batch 2");
                 }
                 catch
@@ -80,14 +81,15 @@ public sealed class AbandonTests
     {
         // A producer that failed half way leaves no file that looks whole: only CompleteAsync
         // completes, and the disposal that unwinds the failure abandons what was written.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string path = TempPath();
         try
         {
             await Assert.ThrowsAsync<InvalidOperationException>(async () =>
             {
                 await using VortexFileWriter writer = VortexFileWriter.Create(path, Schema, Options());
-                await FeedAsync(writer, 0, 1_000);
-                await FeedAsync(writer, 1_000, 2_000);
+                await FeedAsync(writer, 0, 1_000, ct);
+                await FeedAsync(writer, 1_000, 2_000, ct);
                 throw new InvalidOperationException("producer failed at batch 2");
             });
 
@@ -102,17 +104,18 @@ public sealed class AbandonTests
     [Fact]
     public async Task AbandoningIsIdempotentAndRefusesFurtherRows()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string path = TempPath();
         try
         {
             VortexFileWriter writer = VortexFileWriter.Create(path, Schema, Options());
             await using (writer.ConfigureAwait(false))
             {
-                await FeedAsync(writer, 0, 500);
+                await FeedAsync(writer, 0, 500, ct);
                 writer.Abandon();
                 writer.Abandon();
                 await Assert.ThrowsAsync<ObjectDisposedException>(
-                    async () => await FeedAsync(writer, 500, 600));
+                    async () => await FeedAsync(writer, 500, 600, ct));
             }
 
             Assert.False(System.IO.File.Exists(path));
@@ -128,21 +131,22 @@ public sealed class AbandonTests
     {
         // 5 000 rows over blocks of 1 024 leaves a part block, so the append re-opens the last
         // chunk: the case where completing instead of abandoning drops those rows for good.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string path = TempPath();
         try
         {
             await WriteAsync(path, 0, 5_000);
             List<string> before = await RowsOfAsync(path);
 
-            VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, Options());
+            VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, Options(), ct);
             await using (writer.ConfigureAwait(false))
             {
-                await FeedAsync(writer, 5_000, 5_700);
+                await FeedAsync(writer, 5_000, 5_700, ct);
                 writer.Abandon();
             }
 
             // The tail this leaves is the repairable kind, unlike a completed one.
-            await VortexFileRepair.RepairAsync(path);
+            await VortexFileRepair.RepairAsync(path, ct);
             Assert.Equal(before, await RowsOfAsync(path));
         }
         finally
@@ -180,7 +184,7 @@ public sealed class AbandonTests
                     CancellationToken.None));
 
             // Torn, which is the repairable kind, and repair takes it back to every original row.
-            await VortexFileRepair.RepairAsync(path);
+            await VortexFileRepair.RepairAsync(path, TestContext.Current.CancellationToken);
             Assert.Equal(before, await RowsOfAsync(path));
         }
         finally

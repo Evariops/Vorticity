@@ -44,7 +44,7 @@ public sealed class IndexWriteTests
         Assert.Empty(report.Indexes);
         await using VortexFile file = await OpenAsync(bytes);
         Assert.False(file.HasIndexDirectory);
-        Assert.Null(await file.ReadIndexDirectoryAsync());
+        Assert.Null(await file.ReadIndexDirectoryAsync(TestContext.Current.CancellationToken));
         Assert.Null(file.IndexDirectoryRefusal);
     }
 
@@ -88,7 +88,7 @@ public sealed class IndexWriteTests
 
         await using VortexFile file = await OpenAsync(bytes);
         Assert.True(file.HasIndexDirectory);
-        IndexDirectory? directory = await file.ReadIndexDirectoryAsync();
+        IndexDirectory? directory = await file.ReadIndexDirectoryAsync(TestContext.Current.CancellationToken);
         Assert.NotNull(directory);
         Assert.Null(file.IndexDirectoryRefusal);
         Assert.Equal((ulong)Rows, directory!.RowCount);
@@ -112,6 +112,7 @@ public sealed class IndexWriteTests
     [Fact]
     public async Task AnIndexedFileReadsExactlyAsItsUnindexedTwin()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         (byte[] plain, _) = await WriteAsync(Options());
         (byte[] indexed, _) = await WriteAsync(Options(WritePolicy.Auto));
@@ -123,8 +124,8 @@ public sealed class IndexWriteTests
         Assert.Equal(await Dump(a), await Dump(b));
 
         VortexExpr closed = Expr.Eq(Expr.Field("status"), Expr.Literal(FilterLiteral.From("closed")));
-        Assert.Equal(await a.ScanBuilder().Where(closed).CountAsync(), await b.ScanBuilder().Where(closed).CountAsync());
-        Assert.Equal(Rows / Statuses.Length, await b.ScanBuilder().Where(closed).CountAsync());
+        Assert.Equal(await a.ScanBuilder().Where(closed).CountAsync(ct), await b.ScanBuilder().Where(closed).CountAsync(ct));
+        Assert.Equal(Rows / Statuses.Length, await b.ScanBuilder().Where(closed).CountAsync(ct));
     }
 
     [Fact]
@@ -148,7 +149,7 @@ public sealed class IndexWriteTests
         // Asked and abandoned everywhere is not "never asked": the directory carries the policy an
         // append will need, and no entry.
         await using VortexFile file = await OpenAsync(bytes);
-        IndexDirectory? directory = await file.ReadIndexDirectoryAsync();
+        IndexDirectory? directory = await file.ReadIndexDirectoryAsync(TestContext.Current.CancellationToken);
         Assert.NotNull(directory);
         Assert.Empty(directory!.Entries);
         Assert.Equal(IndexPolicyKind.SortedRuns, directory.Policy.Of("id").Kind);

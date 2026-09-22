@@ -13,6 +13,7 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -73,7 +74,7 @@ public sealed class EncodingHintTests
             {
                 Assert.Equal(2_048, writer.PreferredBatchRows);
                 await fixture.WriteAsync(writer, batchRows);
-                await writer.CompleteAsync();
+                await writer.CompleteAsync(TestContext.Current.CancellationToken);
                 Assert.Equal(buffered, writer.Buffered);
             }
 
@@ -165,6 +166,7 @@ public sealed class EncodingHintTests
     [Fact]
     public async Task NoHintIsByteForByteTheWriteWithoutOne()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         Fixture fixture = new Fixture(Rows);
         (_, string plain) = await WriteAsync(fixture, hints: null);
@@ -173,9 +175,9 @@ public sealed class EncodingHintTests
             fixture, new Dictionary<string, EncodingHint> { ["dense"] = EncodingHint.Auto });
         try
         {
-            byte[] expected = await System.IO.File.ReadAllBytesAsync(plain);
-            Assert.Equal(expected, await System.IO.File.ReadAllBytesAsync(empty));
-            Assert.Equal(expected, await System.IO.File.ReadAllBytesAsync(auto));
+            byte[] expected = await System.IO.File.ReadAllBytesAsync(plain, ct);
+            Assert.Equal(expected, await System.IO.File.ReadAllBytesAsync(empty, ct));
+            Assert.Equal(expected, await System.IO.File.ReadAllBytesAsync(auto, ct));
         }
         finally
         {
@@ -203,6 +205,7 @@ public sealed class EncodingHintTests
     [Fact]
     public async Task AHintReachesANestedFieldAndTheOneColumnOfANonStructRoot()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         CanonicalArena arena = new CanonicalArena();
@@ -220,11 +223,11 @@ public sealed class EncodingHintTests
                 new Dictionary<string, EncodingHint> { ["outer.deep"] = EncodingHint.Zstd })))
             {
                 using RecordBatch batch = new RecordBatch(arena, root, 0);
-                await writer.WriteAsync(batch);
-                await writer.CompleteAsync();
+                await writer.WriteAsync(batch, ct);
+                await writer.CompleteAsync(ct);
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             Assert.Equal(Rows, file.RowCount);
 
             // The one column of a file whose root is not a struct answers to the empty path.
@@ -235,8 +238,8 @@ public sealed class EncodingHintTests
                     new Dictionary<string, EncodingHint> { [string.Empty] = EncodingHint.Zstd })))
                 {
                     using RecordBatch batch = new RecordBatch(arena, values, 0);
-                    await writer.WriteAsync(batch);
-                    WriteReport report = await writer.CompleteAsync();
+                    await writer.WriteAsync(batch, ct);
+                    WriteReport report = await writer.CompleteAsync(ct);
                     Assert.All(report.Columns[0].Encodings, scheme => Assert.Equal("Zstd", scheme));
                 }
             }

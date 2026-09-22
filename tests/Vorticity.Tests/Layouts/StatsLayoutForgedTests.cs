@@ -42,7 +42,7 @@ public sealed class StatsLayoutForgedTests
         string path = Path.Combine(directory, "forged_stats.vortex");
         try
         {
-            await System.IO.File.WriteAllBytesAsync(path, patched);
+            await System.IO.File.WriteAllBytesAsync(path, patched, TestContext.Current.CancellationToken);
 
             byte[] expected = await DigestAsync(LayoutCorpus.FullPath(LayoutCorpus.Find(SourceId)), expectStats: false);
             byte[] actual = await DigestAsync(path, expectStats: true);

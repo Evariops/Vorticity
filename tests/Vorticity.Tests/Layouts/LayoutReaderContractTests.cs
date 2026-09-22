@@ -73,7 +73,7 @@ public sealed class LayoutReaderContractTests
         reader.RegisterSegments(in root, rows, in all, context.Segments);
         int registered = context.Segments.Count;
 
-        await file.Segments.ReadManyAsync(context.Segments, default);
+        await file.Segments.ReadManyAsync(context.Segments, TestContext.Current.CancellationToken);
         reader.Execute(in root, rows, in all, context);
 
         // A new segment after Complete() would have thrown; this catches the subtler case of a

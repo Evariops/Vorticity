@@ -31,7 +31,7 @@ public sealed class LayoutCorpusReadTests
                 continue;
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(LayoutCorpus.FullPath(entry));
+            await using VortexFile file = await VortexFile.OpenAsync(LayoutCorpus.FullPath(entry), TestContext.Current.CancellationToken);
             LayoutTree tree = LayoutTree.Parse(file);
             using ScanContext context = new ScanContext(file);
 

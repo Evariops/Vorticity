@@ -5,6 +5,7 @@
 // executed, so neither its layout id nor the array encodings under it are ever resolved. Opening
 // the file, parsing its layout tree and reading its other columns all succeed.
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
@@ -37,7 +38,7 @@ public sealed class LazyResolutionTests
         Assert.True(HasUnknown(tree.Root), "the fixture no longer carries an unknown layout.");
 
         int root = await LayoutExecutor.ReadAsync(
-            file, tree, context, new RowRange(0, file.RowCount), FieldMask.Empty);
+            file, tree, context, new RowRange(0, file.RowCount), FieldMask.Empty, TestContext.Current.CancellationToken);
 
         CanonicalNode node = context.Canonical.GetNode(root);
         Assert.Equal(CanonicalKind.Struct, node.Kind);
@@ -73,7 +74,7 @@ public sealed class LazyResolutionTests
 
         VortexUnsupportedException error = await Assert.ThrowsAsync<VortexUnsupportedException>(
             async () => await LayoutExecutor.ReadAsync(
-                file, tree, context, new RowRange(0, file.RowCount), FieldMask.All));
+                file, tree, context, new RowRange(0, file.RowCount), FieldMask.All, TestContext.Current.CancellationToken));
 
         Assert.Equal("vortex.zzzzz", error.ComponentId);
         Assert.Equal(VortexComponentKind.Layout, error.Kind);
@@ -96,7 +97,8 @@ public sealed class LazyResolutionTests
         using ScanContext context = new ScanContext(file);
 
         FieldMask ints = new FieldMaskBuilder().IncludeField(0).Build();
-        int root = await LayoutExecutor.ReadAsync(file, tree, context, new RowRange(0, file.RowCount), ints);
+        int root = await LayoutExecutor.ReadAsync(
+            file, tree, context, new RowRange(0, file.RowCount), ints, TestContext.Current.CancellationToken);
 
         CanonicalNode node = context.Canonical.GetNode(root);
         Assert.Equal(CanonicalKind.Struct, node.Kind);
@@ -120,7 +122,7 @@ public sealed class LazyResolutionTests
 
         VortexUnsupportedException error = await Assert.ThrowsAsync<VortexUnsupportedException>(
             async () => await LayoutExecutor.ReadAsync(
-                file, tree, context, new RowRange(0, file.RowCount), strs));
+                file, tree, context, new RowRange(0, file.RowCount), strs, TestContext.Current.CancellationToken));
 
         Assert.Equal(VortexComponentKind.Array, error.Kind);
         Assert.Equal(ForgedId, error.ComponentId);
@@ -129,6 +131,7 @@ public sealed class LazyResolutionTests
     [Fact]
     public async Task AProjectedFieldReadsTheSameValuesAsTheWholeRead()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using VortexFile file = await LayoutExecutor.OpenAsync("containers/uncompressed_canonical");
         LayoutTree tree = LayoutTree.Parse(file);
         using ScanContext context = new ScanContext(file);
@@ -139,7 +142,7 @@ public sealed class LazyResolutionTests
         byte[] field1FromWhole;
         try
         {
-            int root = await LayoutExecutor.ReadAsync(file, tree, context, all, FieldMask.All);
+            int root = await LayoutExecutor.ReadAsync(file, tree, context, all, FieldMask.All, ct);
             CanonicalNode node = context.Canonical.GetNode(root);
             Assert.Equal(2, node.FieldCount);
             whole = CanonicalDigest.Of(context, node.GetFieldIndex(0));
@@ -155,7 +158,7 @@ public sealed class LazyResolutionTests
             try
             {
                 FieldMask mask = new FieldMaskBuilder().IncludeField(field).Build();
-                int root = await LayoutExecutor.ReadAsync(file, tree, context, all, mask);
+                int root = await LayoutExecutor.ReadAsync(file, tree, context, all, mask, ct);
                 CanonicalNode node = context.Canonical.GetNode(root);
 
                 Assert.Equal(1, node.FieldCount);
@@ -182,7 +185,7 @@ public sealed class LazyResolutionTests
         using ScanContext context = new ScanContext(file);
 
         int root = await LayoutExecutor.ReadAsync(
-            file, tree, context, new RowRange(0, file.RowCount), FieldMask.Empty);
+            file, tree, context, new RowRange(0, file.RowCount), FieldMask.Empty, TestContext.Current.CancellationToken);
 
         CanonicalNode node = context.Canonical.GetNode(root);
         Assert.Equal(file.RowCount, node.Length);

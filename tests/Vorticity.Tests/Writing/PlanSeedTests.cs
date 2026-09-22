@@ -48,7 +48,7 @@ public sealed class PlanSeedTests
             string path = TempPath();
             try
             {
-                await using VortexFile source = await VortexFile.OpenAsync(entry.Path);
+                await using VortexFile source = await VortexFile.OpenAsync(entry.Path, TestContext.Current.CancellationToken);
                 if (source.DType.Kind != DTypeKind.Struct || source.DType.FieldCount == 0)
                 {
                     continue;

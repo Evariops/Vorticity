@@ -104,7 +104,7 @@ public sealed class StringBoundsTests
         try
         {
             await WriteAsync(path, 0, Rows, Limit);
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
             await AssertZonesAsync(file, "u", utf8: true);
             await AssertZonesAsync(file, "b", utf8: false);
         }
@@ -122,7 +122,7 @@ public sealed class StringBoundsTests
         try
         {
             await WriteAsync(path, 0, Rows, 0);
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
             ZoneColumn? zones = await ZonesOf(file, "u");
             Assert.NotNull(zones);
             for (int z = 0; z < Blocks; z++)
@@ -157,7 +157,7 @@ public sealed class StringBoundsTests
         try
         {
             await WriteAsync(path, 0, Rows, Limit);
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
             List<string> pruned = await FilteredRows(file, filter, pruning: true);
             List<string> all = await FilteredRows(file, filter, pruning: false);
             Assert.NotEmpty(all);
@@ -176,19 +176,20 @@ public sealed class StringBoundsTests
     [Fact]
     public async Task AnAppendKeepsTheOldZonesBounds()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = TempPath();
         try
         {
             await WriteAsync(path, 0, 2_500, Limit);
             await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(
-                path, new VortexWriteOptions { StringBoundBytes = Limit }))
+                path, new VortexWriteOptions { StringBoundBytes = Limit }, ct))
             {
                 await FeedAsync(writer, 2_500, Rows);
-                await writer.CompleteAsync();
+                await writer.CompleteAsync(ct);
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             Assert.Equal(Rows, file.RowCount);
             await AssertZonesAsync(file, "u", utf8: true);
             await AssertZonesAsync(file, "b", utf8: false);
@@ -202,19 +203,20 @@ public sealed class StringBoundsTests
     [Fact]
     public async Task AnAppendOverZonesWithoutBoundsWritesNone()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = TempPath();
         try
         {
             await WriteAsync(path, 0, 2_500, 0);
             await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(
-                path, new VortexWriteOptions { StringBoundBytes = Limit }))
+                path, new VortexWriteOptions { StringBoundBytes = Limit }, ct))
             {
                 await FeedAsync(writer, 2_500, Rows);
-                await writer.CompleteAsync();
+                await writer.CompleteAsync(ct);
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             ZoneColumn? zones = await ZonesOf(file, "u");
             Assert.NotNull(zones);
             for (int z = 0; z < Blocks; z++)

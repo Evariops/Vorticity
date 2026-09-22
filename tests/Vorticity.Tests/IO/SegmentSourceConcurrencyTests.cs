@@ -64,7 +64,7 @@ public sealed class SegmentSourceConcurrencyTests
 
                     set.Release();
                 }
-            });
+            }, TestContext.Current.CancellationToken);
         }
 
         await Task.WhenAll(readers);
@@ -100,7 +100,7 @@ public sealed class SegmentSourceConcurrencyTests
                         owner.Release();
                     }
                 }
-            });
+            }, TestContext.Current.CancellationToken);
         }
 
         await Task.WhenAll(readers);

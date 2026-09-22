@@ -17,6 +17,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -90,6 +91,7 @@ public sealed class CorpusDecodeTests
     [InlineData("encodings/dict_nullable_values_nonnull_codes_r1023")]
     public async Task DecodesACorpusFileValueForValue(string entryId)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         string? root = Corpus.Root;
         Assert.SkipWhen(root is null, "the golden corpus is not on disk");
 
@@ -99,7 +101,7 @@ public sealed class CorpusDecodeTests
 
         TestDecoders.EnsureRegistered();
 
-        byte[] fileBytes = await System.IO.File.ReadAllBytesAsync(dataPath).ConfigureAwait(true);
+        byte[] fileBytes = await System.IO.File.ReadAllBytesAsync(dataPath, ct).ConfigureAwait(true);
 
         // 64-aligned, not merely pinned. The pinned object heap promises 8 bytes; the real segment
         // sources hand a decoder a 64-aligned base and the canonical decoders check
@@ -117,7 +119,7 @@ public sealed class CorpusDecodeTests
 
         fileBytes.CopyTo(pinned, pinnedOffset);
 
-        VortexFile file = await VortexFile.OpenAsync(dataPath).ConfigureAwait(true);
+        VortexFile file = await VortexFile.OpenAsync(dataPath, ct).ConfigureAwait(true);
         try
         {
             (int segmentIndex, long rowCount) = FlatLayoutOf(file);

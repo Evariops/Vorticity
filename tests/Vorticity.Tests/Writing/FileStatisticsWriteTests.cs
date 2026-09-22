@@ -129,12 +129,13 @@ public sealed class FileStatisticsWriteTests
     {
         // A whole-file min or max is answered from the file statistics, on a file this writer
         // produced: no segment read.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync(new VortexWriteOptions { RowBlockSize = Block });
 
         ScanMetrics metrics = new ScanMetrics();
-        FilterLiteral min = await written.File.ScanBuilder().WithMetrics(metrics).MinAsync("strict_i64");
-        FilterLiteral max = await written.File.ScanBuilder().WithMetrics(metrics).MaxAsync("dups_u32");
+        FilterLiteral min = await written.File.ScanBuilder().WithMetrics(metrics).MinAsync("strict_i64", ct);
+        FilterLiteral max = await written.File.ScanBuilder().WithMetrics(metrics).MaxAsync("dups_u32", ct);
 
         Assert.Equal(1_000L, min.SignedValue);
         Assert.Equal((ulong)((Rows - 1) / 7), max.UnsignedValue);

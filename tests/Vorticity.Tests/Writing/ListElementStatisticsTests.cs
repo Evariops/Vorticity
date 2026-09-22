@@ -264,6 +264,7 @@ public sealed class ListElementStatisticsTests
     {
         // One batch, one chunk: plan memory has no chunk to carry a plan into, so the summary and
         // the measurement must choose the same plans, byte for byte.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         ListShape shape = ListShapes.Build(name, Rows);
         Written summarized = await Write(shape, Rows, rowBlock: null, elementStatistics: true);
         Written measured = await Write(shape, Rows, rowBlock: null, elementStatistics: false);
@@ -273,8 +274,8 @@ public sealed class ListElementStatisticsTests
             Assert.True(summarized.Handed > 0);
             Assert.Equal(0, measured.Handed);
             Assert.Equal(
-                await System.IO.File.ReadAllBytesAsync(measured.Path),
-                await System.IO.File.ReadAllBytesAsync(summarized.Path));
+                await System.IO.File.ReadAllBytesAsync(measured.Path, ct),
+                await System.IO.File.ReadAllBytesAsync(summarized.Path, ct));
         }
         finally
         {
@@ -293,6 +294,7 @@ public sealed class ListElementStatisticsTests
     {
         // The append's seed reaches a list's elements, which keep a plan memory of their own. The
         // append is one block, so without the seed its elements would have no plan to consult.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         const int Block = 8192;
         ListShape shape = ListShapes.Build(name, 2 * Block);
         Written first = await Write(shape, Block, Block, elementStatistics: true, rows: Block);
@@ -300,15 +302,15 @@ public sealed class ListElementStatisticsTests
         try
         {
             ColumnWriter elements;
-            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path))
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, cancellationToken: ct))
             {
                 int slice = CanonicalSlice.SliceAcross(shape.Arena, shape.Arena, shape.Root, Block, Block);
                 using (RecordBatch batch = new RecordBatch(shape.Arena, slice, Block))
                 {
-                    await writer.WriteAsync(batch);
+                    await writer.WriteAsync(batch, ct);
                 }
 
-                await writer.CompleteAsync();
+                await writer.CompleteAsync(ct);
 
                 // The first leaf under the list: the elements, a map's keys, the inner values.
                 elements = writer.ColumnState(1).Field(0)!;
@@ -334,6 +336,7 @@ public sealed class ListElementStatisticsTests
     [MemberData(nameof(CorpusLists))]
     public async Task TheCorpusListsReadTheirElementsFromTheirBlocks(string id)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string summarized = Path.Combine(Path.GetTempPath(), $"vorticity-elements-{Guid.NewGuid():N}.vortex");
         string measured = Path.Combine(Path.GetTempPath(), $"vorticity-elements-{Guid.NewGuid():N}.vortex");
@@ -344,8 +347,8 @@ public sealed class ListElementStatisticsTests
             Assert.True(unserved == 0, $"{id}: {unserved} list chunk(s) measured their elements");
             Assert.True(wrong.Count == 0, string.Join("\n", wrong.Take(10)));
             Assert.Equal(
-                await System.IO.File.ReadAllBytesAsync(measured),
-                await System.IO.File.ReadAllBytesAsync(summarized));
+                await System.IO.File.ReadAllBytesAsync(measured, ct),
+                await System.IO.File.ReadAllBytesAsync(summarized, ct));
             _ = handed;
         }
         finally

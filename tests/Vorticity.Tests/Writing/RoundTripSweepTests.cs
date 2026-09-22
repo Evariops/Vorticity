@@ -165,7 +165,8 @@ public sealed class RoundTripSweepTests
             // object the compaction wrote is what Rust reads.
             if (mode == 0 && source.RowCount >= 3 && PlainColumns(source.DType))
             {
-                await System.IO.File.WriteAllBytesAsync(destination, await CompactedAsync(source, options));
+                await System.IO.File.WriteAllBytesAsync(
+                    destination, await CompactedAsync(source, options), TestContext.Current.CancellationToken);
                 compacted++;
                 indexed++;
                 written++;

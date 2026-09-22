@@ -62,6 +62,7 @@ public sealed class AppendTests
     [MemberData(nameof(Splits))]
     public async Task AnAppendedFileReadsAsOneWrite(int[] cuts)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string once = TempPath();
         string pieces = TempPath();
@@ -79,9 +80,9 @@ public sealed class AppendTests
                 else
                 {
                     length = new FileInfo(pieces).Length;
-                    await using VortexFileWriter writer = await VortexFileWriter.AppendAsync(pieces);
+                    await using VortexFileWriter writer = await VortexFileWriter.AppendAsync(pieces, cancellationToken: ct);
                     await FeedAsync(writer, start, cut);
-                    WriteReport report = await writer.CompleteAsync();
+                    WriteReport report = await writer.CompleteAsync(ct);
                     Assert.All(report.Indexes, r => Assert.True(
                         r.Outcome == IndexOutcome.Built || r.Kind == IndexKinds.DictProbe || r.Kind == IndexKinds.BloomSbbf && r.Column != "f",
                         $"{r.Column} {r.Kind}: {r.Reason}"));
@@ -90,15 +91,15 @@ public sealed class AppendTests
                 start = cut;
             }
 
-            await using VortexFile expected = await VortexFile.OpenAsync(once);
-            await using VortexFile actual = await VortexFile.OpenAsync(pieces);
+            await using VortexFile expected = await VortexFile.OpenAsync(once, ct);
+            await using VortexFile actual = await VortexFile.OpenAsync(pieces, ct);
             Assert.Equal(Rows, actual.RowCount);
             Assert.Equal(await RowsOf(expected), await RowsOf(actual));
             await AssertSameZones(expected, actual);
             AssertSameStatistics(expected, actual);
             await AssertSameAnswers(expected, actual);
 
-            IndexDirectory? directory = await actual.ReadIndexDirectoryAsync();
+            IndexDirectory? directory = await actual.ReadIndexDirectoryAsync(ct);
             Assert.NotNull(directory);
             Assert.Equal((ulong)length, directory.PreviousEof);
             Assert.Equal(Policy.Columns.Count, directory.Policy.Columns.Count);
@@ -116,21 +117,22 @@ public sealed class AppendTests
         // Found by this file's first run: the append's builders were abandoned for the budget, the
         // old runs stayed, and the exact cover counted the old rows only. A partial index still
         // prunes; a key source over it is refused, and every answer falls back to the data.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = TempPath();
         try
         {
             await WriteAsync(path, 0, 8_192);
             await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(
-                path, new VortexWriteOptions { IndexBudgetPerMille = 1, WritePolicy = Policy }))
+                path, new VortexWriteOptions { IndexBudgetPerMille = 1, WritePolicy = Policy }, ct))
             {
                 await FeedAsync(writer, 8_192, Rows);
-                WriteReport report = await writer.CompleteAsync();
+                WriteReport report = await writer.CompleteAsync(ct);
                 Assert.Contains(report.Indexes, r => r.Column == "v" && r.Outcome == IndexOutcome.Abandoned);
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(path);
-            KeyPlan plan = await file.Keys("v").ExplainAsync();
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            KeyPlan plan = await file.Keys("v").ExplainAsync(ct);
             Assert.Equal(KeySourceKind.None, plan.Source);
             Assert.Contains(plan.Rejected, r => r.Source == KeySourceKind.SortedRuns && r.Reason.Contains("cover", StringComparison.Ordinal));
 
@@ -141,7 +143,7 @@ public sealed class AppendTests
                 expected += V(row) == 417 ? 1 : 0;
             }
 
-            Assert.Equal(expected, await file.ScanBuilder().Where(filter).CountAsync());
+            Assert.Equal(expected, await file.ScanBuilder().Where(filter).CountAsync(ct));
             List<string> rows = await FilteredRows(file, filter);
             Assert.Equal(expected, rows.Count);
         }
@@ -157,6 +159,7 @@ public sealed class AppendTests
         // Plan memory is seeded from the last chunk's encoding tree. The cut falls on a
         // block, so nothing is re-opened and re-priced, and the append is one block -- one chunk,
         // the first -- which without the seed has no memory to consult and no distinct table.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = TempPath();
         try
@@ -164,10 +167,10 @@ public sealed class AppendTests
             WriteReport before = await WriteAsync(path, 0, 8_192);
             WriteReport after;
             long fromTable;
-            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path))
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, cancellationToken: ct))
             {
                 await FeedAsync(writer, 8_192, 8_192 + Block);
-                after = await writer.CompleteAsync();
+                after = await writer.CompleteAsync(ct);
                 fromTable = writer.ChunksFromTable;
             }
 
@@ -194,7 +197,7 @@ public sealed class AppendTests
             Assert.True(dictionaries >= 1);
             Assert.Equal(dictionaries, fromTable);
 
-            await using VortexFile file = await VortexFile.OpenAsync(path);
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
             Assert.Equal(8_192 + Block, file.RowCount);
         }
         finally
@@ -206,6 +209,7 @@ public sealed class AppendTests
     [Fact]
     public async Task ATornAppendIsRepairedToTheFileBeforeIt()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string path = TempPath();
         try
@@ -213,20 +217,20 @@ public sealed class AppendTests
             await WriteAsync(path, 0, 5_000);
             long before = new FileInfo(path).Length;
             List<string> rows;
-            await using (VortexFile file = await VortexFile.OpenAsync(path))
+            await using (VortexFile file = await VortexFile.OpenAsync(path, ct))
             {
                 rows = await RowsOf(file);
             }
 
             // A valid file is left alone.
-            VortexRepairResult untouched = await VortexFileRepair.RepairAsync(path);
+            VortexRepairResult untouched = await VortexFileRepair.RepairAsync(path, ct);
             Assert.False(untouched.Truncated);
             Assert.Equal(before, untouched.Length);
 
-            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path))
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, cancellationToken: ct))
             {
                 await FeedAsync(writer, 5_000, 12_000);
-                await writer.CompleteAsync();
+                await writer.CompleteAsync(ct);
             }
 
             // The tear: the append's last bytes never reached the disk.
@@ -238,7 +242,7 @@ public sealed class AppendTests
 
             // The torn file opens at the version before the append and says so; refusing
             // is an option, and nothing is written behind the tear.
-            await using (VortexFile torn = await VortexFile.OpenAsync(path))
+            await using (VortexFile torn = await VortexFile.OpenAsync(path, ct))
             {
                 Assert.Equal((after - 37, before), (torn.TornTail!.FileLength, torn.TornTail.ValidLength));
                 Assert.Equal(before, torn.FileLength);
@@ -246,15 +250,15 @@ public sealed class AppendTests
             }
 
             await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(
-                path, new VortexOpenOptions { TornTail = VortexTornTailPolicy.Refuse }));
+                path, new VortexOpenOptions { TornTail = VortexTornTailPolicy.Refuse }, ct));
             VortexFormatException refused = await Assert.ThrowsAsync<VortexFormatException>(
-                async () => await VortexFileWriter.AppendAsync(path));
+                async () => await VortexFileWriter.AppendAsync(path, cancellationToken: ct));
             Assert.Contains("torn tail", refused.Message, StringComparison.Ordinal);
 
-            VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path);
+            VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path, ct);
             Assert.True(repaired.Truncated);
             Assert.Equal(before, repaired.Length);
-            await using VortexFile back = await VortexFile.OpenAsync(path);
+            await using VortexFile back = await VortexFile.OpenAsync(path, ct);
             Assert.Equal(5_000, back.RowCount);
             Assert.Equal(rows, await RowsOf(back));
         }
@@ -275,7 +279,7 @@ public sealed class AppendTests
         {
             System.IO.File.Copy(Corpus.Path("containers/dict_layout"), path);
             VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
-                async () => await VortexFileWriter.AppendAsync(path));
+                async () => await VortexFileWriter.AppendAsync(path, cancellationToken: TestContext.Current.CancellationToken));
             Assert.Contains("Rewrite", refused.Message, StringComparison.Ordinal);
         }
         finally
@@ -287,6 +291,7 @@ public sealed class AppendTests
     [Fact]
     public async Task AFileIndexedAfterTheFactAnswersAsOneIndexedWriteAndKeepsItsData()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string once = TempPath();
         string later = TempPath();
@@ -294,37 +299,37 @@ public sealed class AppendTests
         {
             await WriteAsync(once, 0, Rows);
             await WriteAsync(later, 0, Rows, WritePolicy.None);
-            byte[] before = await System.IO.File.ReadAllBytesAsync(later);
+            byte[] before = await System.IO.File.ReadAllBytesAsync(later, ct);
 
             IReadOnlyList<IndexWriteReport> reports = await VortexFileIndexer.AppendIndexesAsync(
-                later, Policy, new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
+                later, Policy, new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 }, ct);
             Assert.Contains(reports, r => r.Column == "v" && r.Kind == IndexKinds.SortedRuns && r.Outcome == IndexOutcome.Built);
             Assert.Contains(reports, r => r.Column == "s" && r.Kind == IndexKinds.PostingsBlocks && r.Outcome == IndexOutcome.Built);
             Assert.Contains(reports, r => r.Column == "f" && r.Kind == IndexKinds.BloomSbbf && r.Outcome == IndexOutcome.Built);
 
             // Not a data byte moved: the old file is a prefix of the new one.
-            byte[] after = await System.IO.File.ReadAllBytesAsync(later);
+            byte[] after = await System.IO.File.ReadAllBytesAsync(later, ct);
             Assert.True(after.Length > before.Length);
             Assert.True(after.AsSpan(0, before.Length).SequenceEqual(before));
 
-            await using (VortexFile expected = await VortexFile.OpenAsync(once))
-            await using (VortexFile actual = await VortexFile.OpenAsync(later))
+            await using (VortexFile expected = await VortexFile.OpenAsync(once, ct))
+            await using (VortexFile actual = await VortexFile.OpenAsync(later, ct))
             {
                 Assert.Equal(await RowsOf(expected), await RowsOf(actual));
                 await AssertSameAnswers(expected, actual);
-                IndexDirectory? directory = await actual.ReadIndexDirectoryAsync();
+                IndexDirectory? directory = await actual.ReadIndexDirectoryAsync(ct);
                 Assert.Equal((ulong)before.Length, directory!.PreviousEof);
             }
 
             // An append after the fact continues the indexes it added.
-            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(later))
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(later, cancellationToken: ct))
             {
                 await FeedAsync(writer, Rows, Rows + 3_000);
-                await writer.CompleteAsync();
+                await writer.CompleteAsync(ct);
             }
 
-            await using VortexFile grown = await VortexFile.OpenAsync(later);
-            await using KeyCursor cursor = await grown.Keys("v").OpenAsync();
+            await using VortexFile grown = await VortexFile.OpenAsync(later, ct);
+            await using KeyCursor cursor = await grown.Keys("v").OpenAsync(ct);
             Assert.Equal(Rows + 3_000 - ((Rows + 3_000 + 16) / 17), cursor.EntryCount);
         }
         finally
@@ -337,6 +342,7 @@ public sealed class AppendTests
     [Fact]
     public async Task AFragmentIndexesAFileItLeavesAloneAndIsRefusedOnceTheFileChanges()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         string once = TempPath();
         string plain = TempPath();
@@ -344,28 +350,28 @@ public sealed class AppendTests
         {
             await WriteAsync(once, 0, Rows);
             await WriteAsync(plain, 0, Rows, WritePolicy.None);
-            byte[] before = await System.IO.File.ReadAllBytesAsync(plain);
+            byte[] before = await System.IO.File.ReadAllBytesAsync(plain, ct);
             IndexFragment fragment;
-            await using (VortexFile unindexed = await VortexFile.OpenAsync(plain))
+            await using (VortexFile unindexed = await VortexFile.OpenAsync(plain, ct))
             {
                 fragment = await VortexFileIndexer.BuildFragmentAsync(
                     unindexed, Policy, new RowRange(0, unindexed.RowCount),
-                    options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 });
+                    options: new VortexWriteOptions { IndexBudgetPerMille = 1_000_000 }, cancellationToken: ct);
             }
-            Assert.True((await System.IO.File.ReadAllBytesAsync(plain)).AsSpan().SequenceEqual(before));
+            Assert.True((await System.IO.File.ReadAllBytesAsync(plain, ct)).AsSpan().SequenceEqual(before));
 
             VortexOpenOptions withFragment = new VortexOpenOptions { Read = new VortexReadOptions { IndexFragments = [fragment.Bytes] } };
-            await using (VortexFile expected = await VortexFile.OpenAsync(once))
-            await using (VortexFile actual = await VortexFile.OpenAsync(plain, withFragment))
+            await using (VortexFile expected = await VortexFile.OpenAsync(once, ct))
+            await using (VortexFile actual = await VortexFile.OpenAsync(plain, withFragment, ct))
             {
                 Assert.True(actual.HasIndexDirectory);
                 await AssertSameAnswers(expected, actual);
-                KeyPlan plan = await actual.Keys("v").ExplainAsync();
+                KeyPlan plan = await actual.Keys("v").ExplainAsync(ct);
                 Assert.Equal(KeySourceKind.SortedRuns, plan.Source);
             }
 
             // Without the option, nothing is looked for.
-            await using (VortexFile bare = await VortexFile.OpenAsync(plain))
+            await using (VortexFile bare = await VortexFile.OpenAsync(plain, ct))
             {
                 Assert.False(bare.HasIndexDirectory);
             }
@@ -373,19 +379,19 @@ public sealed class AppendTests
             // The file changes under the fragment -- an append that writes no directory of its own,
             // so the fragment is still the one looked at: refused as stale, and the scan still answers.
             await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(
-                plain, new VortexWriteOptions { WritePolicy = WritePolicy.None }))
+                plain, new VortexWriteOptions { WritePolicy = WritePolicy.None }, ct))
             {
                 await FeedAsync(writer, Rows, Rows + 100);
-                await writer.CompleteAsync();
+                await writer.CompleteAsync(ct);
             }
 
-            await using VortexFile changed = await VortexFile.OpenAsync(plain, withFragment);
-            Assert.Null(await changed.ReadIndexDirectoryAsync());
+            await using VortexFile changed = await VortexFile.OpenAsync(plain, withFragment, ct);
+            Assert.Null(await changed.ReadIndexDirectoryAsync(ct));
             Assert.Contains("stale", Assert.Single(changed.IndexFragmentRefusals), StringComparison.Ordinal);
             VortexExpr filter = Expr.Eq(Expr.Field("v"), Expr.Literal(FilterLiteral.From(417L)));
             Assert.Equal(
-                await changed.ScanBuilder().Where(filter).WithIndexes(false).CountAsync(),
-                await changed.ScanBuilder().Where(filter).CountAsync());
+                await changed.ScanBuilder().Where(filter).WithIndexes(false).CountAsync(ct),
+                await changed.ScanBuilder().Where(filter).CountAsync(ct));
         }
         finally
         {

@@ -117,7 +117,8 @@ public sealed class LayoutExecutionTests
         LayoutTree tree = LayoutTree.Parse(file);
         using ScanContext context = new ScanContext(file);
 
-        int root = await LayoutExecutor.ReadAsync(file, tree, context, RowRange.Empty, FieldMask.All);
+        int root = await LayoutExecutor.ReadAsync(
+            file, tree, context, RowRange.Empty, FieldMask.All, TestContext.Current.CancellationToken);
         Assert.Equal(0, context.Canonical.GetNode(root).Length);
         Assert.Equal(CanonicalKind.Struct, context.Canonical.GetNode(root).Kind);
         Assert.Equal(2, context.Canonical.GetNode(root).FieldCount);

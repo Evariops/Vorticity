@@ -37,7 +37,7 @@ public sealed class LayoutTreeCorpusTests
                 continue;
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(LayoutCorpus.FullPath(entry));
+            await using VortexFile file = await VortexFile.OpenAsync(LayoutCorpus.FullPath(entry), TestContext.Current.CancellationToken);
             LayoutTree tree = LayoutTree.Parse(file);
             SidecarLayoutNode expected = LayoutCorpus.ReadLayout(entry);
 
@@ -89,7 +89,7 @@ public sealed class LayoutTreeCorpusTests
                 continue;
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(LayoutCorpus.FullPath(entry));
+            await using VortexFile file = await VortexFile.OpenAsync(LayoutCorpus.FullPath(entry), TestContext.Current.CancellationToken);
             LayoutTree tree = LayoutTree.Parse(file);
 
             long budget = ((long)file.RootLayoutBytes.Length / 4) + 1;
@@ -126,7 +126,7 @@ public sealed class LayoutTreeCorpusTests
                 continue;
             }
 
-            await using VortexFile file = await VortexFile.OpenAsync(LayoutCorpus.FullPath(entry));
+            await using VortexFile file = await VortexFile.OpenAsync(LayoutCorpus.FullPath(entry), TestContext.Current.CancellationToken);
             LayoutTree tree = LayoutTree.Parse(file);
             SidecarZoneMap[] expected = LayoutCorpus.ReadZoneMaps(entry);
 
