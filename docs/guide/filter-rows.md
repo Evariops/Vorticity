@@ -1,113 +1,159 @@
 # Filter rows
 
-Push a predicate down so that whole blocks are never read.
+Push a predicate down so that whole blocks are never read, and see what it will cost before it
+runs.
 
 ```csharp
 await using VortexFile file = await VortexFile.OpenAsync(path);
-VortexExpr recent = Expr.Ge(Expr.Field("day"), Expr.Literal(FilterLiteral.From(900)));
+double? maxCelsius = 30.0;
 
+Scan<Reading> scan = file.Scan<Reading>().Where(r => r.Day >= 900 && r.City == "Paris");
+if (maxCelsius is double max)
+{
+    scan.Where(r => r.Celsius <= max);
+}
+
+ScanPlan plan = await scan.ExplainAsync();
 long rows = 0;
-await foreach (RecordBatch batch in file.Scan().Where(recent).ExecuteAsync())
+int earliest = int.MaxValue;
+await foreach (var (day, _, _) in scan)
 {
-    using (batch)
+    rows += day.Length;
+    earliest = Math.Min(earliest, day[0]);
+}
+
+ScanStatistics stats = scan.Statistics;
+```
+
+```
+plan: 14 of 123 blocks, 24 segments, 171472 bytes
+  zone map pruned 109 blocks, reading 8172 bytes to decide
+6116 rows, from day 900
+ran: 14 blocks decoded, 109 pruned, 45 requests, 472268 bytes
+```
+
+**The filter is exact.** What comes back is the matching rows and nothing else, compacted into
+the batches; it is not a hint to check again.
+
+## The lambda is not a delegate over rows
+
+`r` is a `Probe<Reading>`, and `r.Day` a `Sym<int>`: its operators record a predicate instead of
+comparing values. The lambda runs once, when `Where` is called, and what it returns is the plan;
+the sample counts the calls of a lambda over a million rows and prints `the lambda ran 1 time`. A
+captured local such as `max` is read then. An optional filter is a second `Where`, joined to the
+first by `&`; a filter built from optional parts starts from `Predicate.All`, the neutral element
+of `&`, and `ToString()` shows what was built:
+
+```csharp
+Scan<Reading> optional = file.Scan<Reading>().Where(r =>
+{
+    Predicate filter = Predicate.All;
+    if (fromDay is int from)
     {
-        rows += batch.RowCount;
+        filter &= r.Day >= from;
     }
-}
+
+    if (toDay is int to)
+    {
+        filter &= r.Day <= to;
+    }
+
+    if (city is not null)
+    {
+        filter &= r.City == city;
+    }
+
+    Console.WriteLine($"built from optional parts: {filter}");
+    return filter;
+});
 ```
 
-**The filter is exact.** What comes back is the matching rows and nothing else — 100 000 of the
-million, and the earliest `day` among them is 900. It is not a hint you have to re-check.
+```
+built from optional parts: Day >= 500 and City = 'Lyon'
+```
 
-## Writing a predicate
+What compiles is exactly what the scan can push down. [08-semantics.md](../design/08-semantics.md)
+says what each form means, and §5.2 of [14-public-api.md](../design/14-public-api.md) why the
+algebra is built this way:
 
-`Expr` builds them and `FilterLiteral.From` types the constants:
-
-| | |
+| written | meaning |
 |---|---|
-| comparison | `Expr.Eq`, `Ne`, `Lt`, `Le`, `Gt`, `Ge` |
-| logic | `Expr.And`, `Or`, `Not` |
-| membership | `Expr.In(field, [a, b, c])`, `Expr.ListContains(field, value)` |
-| nulls | `Expr.IsNull(field)`, `Expr.IsNotNull(field)` |
-| text | `Expr.StartsWith`, `Expr.Contains`, `Expr.Like(field, pattern, escape)` |
+| `r.Day >= 900`, `r.City == "Paris"` | comparison with a literal of the column's type |
+| `a && b`, `a \|\| b`, `!a` | logic; `&&` and `\|\|` evaluate both sides, as `&` and `\|` |
+| `r.Day.In(1, 2, 3)`, `r.Celsius.Between(10.0, 20.0)` | membership, an inclusive range |
+| `r.Celsius == null`, `r.Celsius.IsNull`, `IsNotNull` | nullity |
+| `r.City.StartsWith("L")`, `Contains`, `Like("P_r%")` | text |
+| `v.Pages.Contains(7)` | a list holds a value |
+| `v.Origin.Country.In("FR", "BE")` | a field of a nested record |
+| `r.High > r.Low`, on a record with two such columns | two columns of the same type |
 
-```csharp
-VortexExpr both = Expr.And(recent, Expr.Gt(Expr.Field("celsius"), Expr.Literal(FilterLiteral.From(45.0))));
-VortexExpr firstDays = Expr.In(
-    Expr.Field("day"), [FilterLiteral.From(1), FilterLiteral.From(2), FilterLiteral.From(3)]);
-```
-
-A field is named by its path, dotted for a nested one.
-
-## What pruning does, and when it does nothing
-
-```csharp
-ScanPlan plan = await file.Scan().Where(recent).ExplainAsync();
-Console.WriteLine($"{plan.LiveBlocks} of {plan.Blocks} blocks survive");
-foreach (PruningStep step in plan.Pruning)
-{
-    Console.WriteLine($"  {step.Structure} pruned {step.BlocksPruned}, reading {step.BytesRead} bytes to decide");
-}
-```
-
-Two predicates of the same shape, on the same file, one on the column the rows are ordered by and
-one on a column whose values are scattered:
+And what does not compile, with the compiler's own words:
 
 ```
-day >= 900:    14 of 123 blocks survive, count exact: True
-  zone map pruned 109 of them, reading 2140 bytes to decide
-celsius > 45: 123 of 123 blocks survive, count exact: False
-  zone map pruned 0 of them, reading 3124 bytes to decide
+r.Day >= "900"            CS0019: Operator '>=' cannot be applied to operands of type 'Sym<int>' and 'string'
+r.Day % 2 == 0            CS0619: 'Sym<int>.operator %(Sym<int>, int)' is obsolete: 'Vortex does not push arithmetic down. Compute it on the columns after the scan.'
+Math.Abs(r.Celsius) > 1   CS1503: Argument 1: cannot convert from 'Vorticity.Sym<double?>' to 'decimal'
+r.City.Length > 3         CS1061: 'Sym<string>' does not contain a definition for 'Length'
 ```
 
-and what that is worth, measured against the file:
+## What happens, in order
 
-| | rounds of reading | bytes | rows |
-|---|---|---|---|
-| no filter | 124 | 184 725 367 | 1 000 000 |
-| `day >= 900` | 18 | 19 751 747 | 100 000 |
-| `celsius > 45` | 125 | 184 728 491 | 124 969 |
+The file statistics may settle the predicate without a read. The zone maps, a minimum, maximum and
+null count per block, prune whole blocks; text columns carry truncated bounds too
+(`StringBoundBytes`, 16 by default). An index, if the writer built one, prunes more
+([indexes.md](indexes.md)). The kernel decides the rest value by value, on the encoded form where
+the encoding allows it, and the batch is compacted to the rows that passed, or handed over whole
+with a selection ([selection.md](selection.md)).
 
-Pruning works on what a block's minimum and maximum can settle. The rows are in `day` order, so
-109 blocks of 123 are provably outside the range and are never read: a ninth of the reading for a
-tenth of the rows. `celsius` walks its whole range inside every block, so no block can be excluded
-and the predicate costs a little more than no filter at all — the 3 124 bytes of zone maps read to
-find that out, and then a comparison per value.
+## When pruning does nothing
 
-**This is a property of the data, not of the predicate.** If you filter on a column, write the rows
-in that column's order, or at least clustered by it.
+Counts from the sample, each with its plan:
 
-## Answers without rows
+| predicate | rows | live blocks | requests | bytes | how the count was answered |
+|---|---|---|---|---|---|
+| `r.Day >= 900` | 100 000 | 14 of 123 | 0 | 0 | exact from the structures |
+| `r.Day.In(1, 2, 3)` | 3 000 | 1 of 123 | 0 | 0 | exact from the structures |
+| `r.Celsius == null` | 20 000 | 123 of 123 | 1 | 3 108 | every block proven from its null count |
+| `r.Celsius > 45.0` | 122 500 | 123 of 123 | 124 | 3 989 416 | 123 blocks evaluated |
+| `r.City == "Paris"` | 125 006 | 123 of 123 | 124 | 1 062 456 | 123 blocks evaluated |
+| `r.City.StartsWith("L")` | 249 999 | 123 of 123 | 124 | 1 062 456 | 123 blocks evaluated |
 
-```csharp
-await file.Scan().Where(recent).AnyAsync();    // True
-await file.Scan().Where(recent).CountAsync();  // 100000
-await file.Scan().MinAsync("celsius");         // 10
-await file.Scan().MaxAsync("celsius");         // 50
-file.MayMatch(recent);                         // True
-```
+The rows are in `Day` order, so a block's bounds settle `Day >= 900` for 109 blocks of 123 and the
+count reads nothing. `Celsius` walks its whole range inside every block and every city appears in
+every block, so no block can be excluded and each value is compared. **This is a property of the
+data, not of the predicate**: write the rows in the order of the column you filter on, or at least
+clustered by it.
 
-`CountAsync` with a filter is answered from the block statistics wherever they suffice: on the
-predicate above, 109 splits pruned, 13 proven whole, and **one** decoded. `MayMatch` is the cheapest
-question of all — it compares the predicate against the file's own statistics and answers whether
-any row could match, which for `day >= 5000` on this file is `False`, with nothing read.
+## Before and after
+
+`ExplainAsync` reads the statistics and zone maps, never the data, and returns a `ScanPlan`: the
+live blocks, the segments and bytes they need, and a `PruningStep` per structure consulted with what
+it pruned and what consulting it cost. `Statistics`, read after the sink, says what the scan did.
+The two counts of bytes above differ because `Statistics.Requests` counts, per batch, the segments
+that batch asked for: a segment shared by several live blocks is counted by each
+([statistics-and-pruning.md](statistics-and-pruning.md)).
+
+The cheapest questions need no scan at all: `CountAsync` and `AnyAsync` answer from the structures
+wherever they suffice, and `file.MayMatch<Reading>(r => r.Day >= 5000)` compares the predicate with
+the file statistics alone and answers `False` here, reading nothing.
 
 ## Watch out
 
-* A field that is not in the schema throws `ArgumentException` when the scan starts, and so does a
-  literal of a kind the column cannot be compared against — `day > "900"` on an `i32` column names
-  both in the message. Integers and floats compare against each other, so `day > 900.0` is fine;
-  text and booleans do not compare against numbers.
-* **Nulls answer `unknown`, and only `true` returns a row.** A row whose `celsius` is null comes
-  back neither for `celsius > 45` nor for its negation. `IsNull` and `IsNotNull` are the two that
-  never answer unknown.
-* The filter may read a column the projection leaves out — that column's segments are read to
-  decide, and not delivered.
-* `ExplainAsync` reads the statistics and the zone maps, never the data. It is the honest way to ask
-  what a query is about to cost.
+* **Nulls answer unknown, and only true keeps a row.** `!(r.Celsius > 45.0)` keeps 857 500 rows,
+  not 877 500: the 20 000 nulls are kept by neither the predicate nor its negation. `== null`,
+  `IsNull` and `IsNotNull` never answer unknown.
+* **Do not branch on a predicate.** `r.Day >= 900 ? r.City == "Paris" : r.City == "Lyon"` compiles
+  and always takes the second branch (125 000 rows, all of Lyon), and so does an `if` on a
+  predicate inside the lambda: a predicate is never true while the lambda runs. Branch on captured
+  values, as the optional parts above do, and combine predicates with `&`, `|` and `!`.
+* **A filter names members of the record.** To filter on a column, the record you scan with names
+  it ([project-columns.md](project-columns.md)).
+* **A scan is single-use**, but `ExplainAsync` may be called before its sink, as here.
+
+The figures come from one run of the sample on the demonstration file of a million rows.
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- filter-rows
+dotnet run -c Release --project samples/Vorticity.Samples -- filter-rows
 ```

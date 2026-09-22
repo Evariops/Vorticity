@@ -1,93 +1,159 @@
 # Open a file
 
-Three ways in, and they differ in who holds the bytes.
+A path, a mapped file, positional reads, or bytes you already hold: the ways in differ in who holds
+the bytes, and the open reads the same thing whichever you choose.
 
 ## From a path
 
 ```csharp
-await using VortexFile file = await VortexFile.OpenAsync(path);
-Console.WriteLine($"{file.RowCount} rows, {file.FileLength} bytes");
-```
-
-The file opens its own handle and reads through it. This is the one to use unless you have a reason
-not to.
-
-## Memory-mapped
-
-```csharp
-await using VortexFile file = await VortexFile.OpenAsync(
-    MemoryMappedSegmentSource.Open(path), VortexOpenOptions.Default);
-```
-
-Every read becomes a pointer into the mapping instead of a syscall. A scan asks its source for the
-same segment once per block that needs it (see [scan-a-table.md](scan-a-table.md)), and over a
-mapping that repetition costs nothing — which makes this the right choice for a file read many
-times, or read many ways.
-
-## From bytes you already hold
-
-```csharp
-byte[] bytes = await File.ReadAllBytesAsync(path);
-await using VortexFile file = await VortexFile.OpenAsync(
-    new MemorySegmentSource(bytes), VortexOpenOptions.Default);
-```
-
-`MemorySegmentSource` takes a `ReadOnlyMemory<byte>` and never copies it. The bytes must outlive the
-file.
-
-## Choosing
-
-| | when |
-|---|---|
-| a path | the default: one pass over a file on local disk |
-| memory-mapped | the file is read more than once, or scanned several ways |
-| bytes in hand | the file came over the wire, out of a cache, or from a test |
-
-For a file on an object store, see `object-store.md`: the seam is the same
-`ISegmentSource`, and `Vorticity.Dataset` has an implementation of it.
-
-## Lending a source
-
-By default the file disposes the source it was given. Tell it not to when the source is yours:
-
-```csharp
-MemoryMappedSegmentSource source = MemoryMappedSegmentSource.Open(path);
-await using (VortexFile file = await VortexFile.OpenAsync(
-    source, new VortexOpenOptions { LeaveSourceOpen = true }))
+await using (VortexFile file = await VortexFile.OpenAsync(path))
 {
-    // ...
+    Console.WriteLine(file.Schema);
+    Console.WriteLine($"{file.RowCount} rows, {file.Length} bytes, edition {file.Edition}");
+    Console.WriteLine($"identity {file.Identity}, metadata keys [{string.Join(", ", file.Metadata.Keys)}]");
 }
-
-// The source is still open, and serves the next open without a second handle.
-await source.DisposeAsync();
 ```
 
-## What an open costs
-
-One read. Measured on a 1 523 369-byte file:
-
 ```
-opening cost 1 read of 65535 bytes for a file of 1523369
+struct{Day: i32, Celsius: f64?, City: utf8}
+1000000 rows, 1564708 bytes, edition Core20260800
+identity dab3a772-f320-44ad-a9ac-a1bf74fc7e21, metadata keys [vorticity.identity]
 ```
 
-The open reads the last 64 KiB and finds the footer, the schema, the layout tree, the statistics
-and — if it fits in that window — the index directory and the file's identity. Nothing else is
-touched until you scan. `VortexOpenOptions.InitialReadSize` changes the size of that window;
-`PreloadIndexes = true` makes the open read the index directory even when it fell outside, which
-costs a second read on a file where it did.
+`VortexFile.OpenAsync(path)` opens in `VortexSession.Default` and maps the file into memory. This is
+the one to use unless you have a reason not to.
+
+What the file tells you before a scan:
+
+| member | what it is |
+|---|---|
+| `Schema` | the columns and their types, a `VortexSchema` you can index, enumerate and print |
+| `RowCount`, `Length` | rows, and bytes on disk |
+| `Edition` | the oldest edition whose readers can open this file, worked out from what it declares ([editions.md](editions.md)) |
+| `Identity` | a `Guid` drawn by every write and append of this library; `Guid.Empty` for a file another writer produced |
+| `Metadata` | the user metadata by key; `ReadAsync(key)` returns a copy of a value |
+| `Statistics` | per column null count, order flags, and the bounds of a numeric column ([statistics-and-pruning.md](statistics-and-pruning.md)) |
+| `TornTail` | not null when the file opened at the version before a torn append ([append-and-repair.md](append-and-repair.md)) |
+
+The identity is stored as metadata under `vorticity.identity`, which is why that key shows up.
+
+## In a session, from a source
+
+```csharp
+await using VortexSession session = VortexSession.Create(options => options.MaxConcurrentReads = 8);
+byte[] bytes = await System.IO.File.ReadAllBytesAsync(path);
+
+await TimeAsync("a path", await session.OpenAsync(path));
+await TimeAsync("a mapped source", await session.OpenAsync(new MemoryMappedSegmentSource(path)));
+await TimeAsync("positional reads", await session.OpenAsync(new FileSegmentSource(path)));
+await TimeAsync("bytes in memory", await session.OpenAsync(new MemorySegmentSource(bytes)));
+```
+
+`TimeAsync` scans the whole file three times and prints the best:
+
+```
+a path            a full scan in 6.5 ms
+a mapped source   a full scan in 6.1 ms
+positional reads  a full scan in 7.0 ms
+bytes in memory   a full scan in 6.9 ms
+```
+
+A session owns the memory pool, the segment cache, the bound on reads in flight and the degree of
+parallelism of every file opened through it ([threads.md](threads.md)). `OpenAsync(path)` on a
+session maps the file, as the static call does; `OpenAsync(ISegmentSource)` takes any source, and
+the file then owns it: disposing the file disposes the source. The three sources of
+`Vorticity.IO`:
+
+| source | reads by | when |
+|---|---|---|
+| `MemoryMappedSegmentSource` | pointers into one mapping of the whole file | the default: a file read more than once, or scanned several ways |
+| `FileSegmentSource` | `RandomAccess` positional reads on one handle | a file too large to map, or a host that forbids mappings |
+| `MemorySegmentSource` | views into bytes you hold, pinned for the source's life | the file came over the wire, out of a cache, or from a test |
+
+A `MemorySegmentSource` copies nothing, except a segment whose address misses the alignment the
+file declares for it. For a file on an object store, implement `ISegmentSource` for your service: a
+length and two read methods ([object-store.md](object-store.md)). The demonstration file fits in
+the page cache, and the four ways in scan it in the same time: the choice is about who holds the
+bytes, not about speed on a warm disk.
+
+## What an open reads
+
+The sample wraps a `FileSegmentSource` in `CountingSource`, an `ISegmentSource` of thirty lines at
+the bottom of the sample that counts what it is asked for and passes every call through:
+
+```csharp
+CountingSource counting = new CountingSource(new FileSegmentSource(path));
+await using (VortexFile file = await session.OpenAsync(counting))
+{
+    Console.WriteLine($"the open: {counting.Requests} request, {counting.Bytes} bytes");
+    long rows = await file.Scan<Reading>().CountAsync();
+    double? hottest = await file.Scan<Reading>().MaxAsync(r => r.Celsius);
+    Console.WriteLine($"CountAsync {rows}, MaxAsync {hottest}: still {counting.Requests} request");
+```
+
+```
+the open: 1 request, 65536 bytes
+CountAsync 1000000, MaxAsync 49.9: still 1 request
+```
+
+One read of the last 64 KiB. It finds the postscript, and through it the schema, the layout, the
+footer and the file statistics; one of them that begins before that window costs one more read,
+issued once for the whole gap. Metadata values are read when asked for, from the tail the open
+already holds when they lie in it. Neither the row count nor `MaxAsync` on a column the statistics
+cover asks for anything more.
+
+`VortexOpenOptions` shapes the open:
+
+```csharp
+CountingSource told = new CountingSource(new FileSegmentSource(path));
+VortexOpenOptions wide = new VortexOpenOptions { Length = bytes.Length, InitialReadSize = 256 * 1024 };
+await using (VortexFile file = await session.OpenAsync(told, wide))
+```
+
+```
+InitialReadSize 256 KiB: 1 request, 262144 bytes
+```
+
+| option | default | what it changes |
+|---|---|---|
+| `InitialReadSize` | 65 536 | the tail read; raise it for a file whose footer is large, so that the open stays one request |
+| `Length` | probed | skips asking the source for its length |
+| `Schema` | the file's | a schema for a file written without one, or to skip reading the embedded one |
+| `TornTail` | `ReadPrevious` | `Refuse` throws on a torn tail instead of opening the version before it |
+| `VerifyStatistics`, `AllowUnknownComponents`, `MaxDecompressedSize` | off, off, 256 MiB | how much the open trusts the bytes ([limits.md](limits.md)) |
+| `IndexFragments` | none | indexes built for this file elsewhere ([indexes.md](indexes.md)) |
+
+## What a scan then reads
+
+```csharp
+await using VortexSession cached = VortexSession.Create(options => options.SegmentCache = new SegmentCache(64L * 1024 * 1024));
+```
+
+```
+a full scan: the plan names 150 segments, 1540608 bytes; the source served 225 requests, 2739476 bytes
+with a segment cache, scan 1: the source served 156 requests, 1641424 bytes; 69 cache hits
+with a segment cache, scan 2: the source served 0 requests, 0 bytes; 225 cache hits
+```
+
+The plan of a full scan names 150 segments, 1.54 MB, about the whole file. Without a cache the
+source was asked 225 times for 2.7 MB: a segment that spans several batches is read again for a
+later batch that needs it. Over a mapping or bytes in memory the repeat costs nothing. Over a source where a read is
+a request, give the session a `SegmentCache`: the first scan then reads nearly every segment once
+(156 requests for 150 segments in this run), and a second scan of the same file reads nothing.
 
 ## Watch out
 
-* **`file.Indexes` is `null` until the directory has been read** — by a scan, by
-  `ReadIndexesAsync()`, or by opening with `PreloadIndexes = true`. Null means "not read yet", and
-  an empty list means "this file has none".
-* **`file.TornTail` is `null` for a file that opened whole.** When it is not, the file you are
-  reading is the version *before* a torn append, and everything it answers is that version's. See
-  [errors.md](errors.md).
-* Two files opened over the same path are two independent readers, each with its own handle.
+* **A source handed to `OpenAsync` belongs to the file.** Keep the bytes of a
+  `MemorySegmentSource` alive until the file is disposed.
+* **Dispose the files before the session.** Disposing a session while one of its files is open
+  throws `InvalidOperationException` naming the file.
+* Two files opened over the same path are two independent readers, each with its own mapping or
+  handle. A file is immutable once open and safe to scan from several threads at once.
+
+The figures come from one run of the sample on the demonstration file of a million rows.
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- open-a-file
+dotnet run -c Release --project samples/Vorticity.Samples -- open-a-file
 ```
