@@ -20,8 +20,8 @@ await foreach (var (_, celsius, _) in scan)
 ```
 
 ```
-the loop: mean 29.4001 over 1000000 rows, 8.2 ms
-  123 batches, 123 blocks decoded, 150 requests, 1540608 bytes
+the loop: mean 29.4001 over 1000000 rows, 5.6 ms
+  50 batches, 123 blocks decoded, 150 requests, 1540608 bytes
 ```
 
 That mean is wrong, and on purpose: `Celsius` is nullable, and `Values` is the raw buffer, which
@@ -38,8 +38,11 @@ declaration order; `_` skips a member. `Columns<Reading>` also carries `RowCount
 file row of its first row) and `Selection` ([selection.md](selection.md)).
 
 `celsius.Values` is a `ReadOnlySpan<double>` over the decoded buffer itself, 64-byte aligned, so
-reading a column copies nothing. A batch holds at most one block of the file, 8 192 rows here: 123
-batches for a million rows. `ScanOptions.BatchRows` asks for smaller ones and never merges blocks:
+reading a column copies nothing. A scan that only reads, like this one, sizes its batches by what
+it reads: as many of the file's 8 192-row blocks as keep a batch of its columns within half of what
+one core has of the L2 cache -- four on the machine these figures come from, and never past the
+end of a chunk: 50 batches for a million rows. A scan with a filter, an order or a take holds one
+block per batch. `ScanOptions.BatchRows` asks for smaller ones and never for more:
 
 ```csharp
 await foreach (Columns<Reading> columns in file.Scan<Reading>().With(new ScanOptions { BatchRows = 4_096 }))
@@ -83,7 +86,7 @@ double? mean = await file.Scan<Reading>().AvgAsync(r => r.Celsius);
 ```
 
 ```
-AvgAsync: mean 30.0000, 5.1 ms
+AvgAsync: mean 30.0000, 3.6 ms
   1 blocks decoded, 50 requests, 1201248 bytes
 ```
 
@@ -102,14 +105,16 @@ the column. [aggregates.md](aggregates.md) has the rest of the operators.
 ## What it costs
 
 * **Reads.** `Statistics.Requests` counts the segments the scan read: 150 for three columns over
-  123 batches, 1.54 MB for a file of 1.56 MB, because a segment that spans several batches is read
+  50 batches, 1.54 MB for a file of 1.56 MB, because a segment that spans several batches is read
   once and shared by them. A second scan reads them all again; over a source where a read is a
   request, [open-a-file.md](open-a-file.md) shows what a `SegmentCache` on the session saves.
 * **Memory.** One batch is decoded ahead of the one you hold (`ScanOptions.Prefetch`, 1 by
   default), in buffers that alternate rather than accumulate.
-* **Allocations.** A whole scan allocated 87 480 bytes over 123 batches and the same 87 480 bytes
-  over 245: about 87 KB to start a scan, then nothing per batch, counted process-wide with
-  `GC.GetTotalAllocatedBytes`, so the thread that decodes ahead is included.
+* **Allocations.** A whole scan allocated 46 224 bytes over its 50 batches, and 87 344 bytes over
+  123 batches of a block as over 245 of half a block: a scan pays for its start and then nothing
+  per batch, and less when each batch holds a whole chunk, which then need not stay decoded from
+  one batch to the next. Counted process-wide with `GC.GetTotalAllocatedBytes`, so the thread
+  that decodes ahead is included.
 
 ## Watch out
 

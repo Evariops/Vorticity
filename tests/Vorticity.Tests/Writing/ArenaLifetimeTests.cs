@@ -32,7 +32,10 @@ namespace Vorticity.Tests.Writing;
 /// <summary>A batch's arena is recycled, so an index into it is meaningless once the batch is gone.</summary>
 public sealed class ArenaLifetimeTests
 {
-    /// <summary>8 193 i32 rows in one chunk, read as two batches: chunk larger than batch.</summary>
+    /// <summary>
+    /// 8 193 i32 rows in one chunk, read as two batches by capping them at a zone: chunk larger
+    /// than batch.
+    /// </summary>
     private const string Entry = "types/i32_nonnull_r8193";
 
     /// <summary>
@@ -67,8 +70,8 @@ public sealed class ArenaLifetimeTests
         List<int> second = [];
         bool checkedStale = false;
 
-        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
-            .WithCancellation(CancellationToken.None))
+        await foreach (RecordBatch batch in file.ScanBuilder().WithMaxBatchRows((int)SplitPlan.DefaultBatchRows)
+            .ExecuteAsync().WithCancellation(CancellationToken.None))
         {
             if (captured is null)
             {

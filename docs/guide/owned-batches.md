@@ -46,7 +46,7 @@ await producer;
 ```
 
 ```
-through a channel: 123 batches, 1000000 rows, mean 30.00 degrees
+through a channel: 50 batches, 1000000 rows, mean 30.00 degrees
 ```
 
 The columns of an ordinary `await foreach` are borrowed: they are valid until the loop moves on, and
@@ -81,7 +81,7 @@ await foreach (Columns<Reading> cols in file.Scan<Reading>())
 ```
 
 ```
-kept past the loop: 8192 rows from row 499712, days 499 to 507, schema struct{Day: i32, Celsius: f64?, City: utf8}
+kept past the loop: 32768 rows from row 491520, days 491 to 524, schema struct{Day: i32, Celsius: f64?, City: utf8}
 ```
 
 `ToOwned()` on borrowed columns is the same copy as `ToBatchesAsync` makes, for the one batch you
@@ -98,10 +98,10 @@ twenty rounds:
 
 | | time | managed allocation |
 |---|---|---|
-| borrowed columns, typed scan | 7.7 ms | 85 KiB |
-| borrowed columns, tool scan | 6.2 ms | 82 KiB |
-| `ToBatchesAsync` | 6.6 ms | 1 158 KiB |
-| `ToOwned()` on every borrowed batch | 8.3 ms | 1 158 KiB |
+| borrowed columns, typed scan | 8.1 ms | 45 KiB |
+| borrowed columns, tool scan | 5.4 ms | 42 KiB |
+| `ToBatchesAsync` | 6.1 ms | 379 KiB |
+| `ToOwned()` on every borrowed batch | 8.3 ms | 379 KiB |
 
 Two things differ between these rows, the copy and the form of the columns:
 
@@ -109,8 +109,8 @@ Two things differ between these rows, the copy and the form of the columns:
   run-end, `Celsius` dictionary. Reading `Values` or a text length decodes them in your loop
   ([encoded-forms.md](encoded-forms.md)). `ToBatchesAsync` and the tool scan decode them in the
   scan, and deliver them canonical.
-* So the tool scan against `ToBatchesAsync` is the copy alone: **0.4 ms, 6 % of the canonical
-  scan** in this run; timings this short move from run to run.
+* So the tool scan against `ToBatchesAsync` is the copy alone: **0.6 ms, 11 % of the canonical
+  scan** in these runs; timings this short move from run to run.
 
 `ToOwned()` copies what it is given as it is, the encoded form included, which is why it adds little
 to the typed scan's own cost. An owned batch allocates a few KiB of managed memory beyond the

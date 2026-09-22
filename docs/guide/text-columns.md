@@ -47,10 +47,10 @@ transcoding. It is borrowed like everything else from a scan: valid inside the l
 The same two counts, once over spans and once with `city.GetString(i)`:
 
 ```
-UTF-8 spans           45.0 ms,      87760 bytes allocated: 125006 rows in Paris, 249999 starting with L
-GetString             62.1 ms,   37087560 bytes allocated: 125006 rows in Paris, 249999 starting with L
-the scan alone         6.5 ms,      87528 bytes allocated: 1000000 rows
-CountDistinctAsync    11.3 ms,      61608 bytes allocated: 8 cities
+UTF-8 spans           41.6 ms,      46464 bytes allocated: 125006 rows in Paris, 249999 starting with L
+GetString             57.3 ms,   37046304 bytes allocated: 125006 rows in Paris, 249999 starting with L
+the scan alone         3.5 ms,      46272 bytes allocated: 1000000 rows
+CountDistinctAsync     9.0 ms,      47328 bytes allocated: 8 cities
 ```
 
 A million strings are 37 MB of garbage for the collector, where the spans allocate nothing beyond

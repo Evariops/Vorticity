@@ -49,7 +49,7 @@ Measured on the demonstration file, a million rows, warmed, the best of five pas
 | | time | allocated |
 |---|---|---|
 | every row as a `Reading` | 27 ms | 35 MiB |
-| the same values as columns, `await foreach` | 8 ms | 85 KiB |
+| the same values as columns, `await foreach` | 7 ms | 45 KiB |
 | the ten hottest, sorted on the client | 163 ms | 148 MiB |
 | `MaxAsync(r => r.Celsius)` | 0.001 ms | 2 312 bytes, no request, no block decoded |
 | `MaxAsync`, then `Where(r => r.Celsius >= max).ToRecordsAsync()` | 13 ms | 440 KiB, 2 500 rows |

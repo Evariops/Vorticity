@@ -27,8 +27,9 @@ completed: chunk rows 8192, 1808, 22708 bytes
 
 ## Two units
 
-* **A block** is `BlockRows` rows, 8 192 by default. It is the unit of pruning, of a take, and of a
-  batch a scan delivers.
+* **A block** is `BlockRows` rows, 8 192 by default. It is the unit of pruning, of a take, and of
+  the batches of a filtered or ordered scan; a scan that only reads delivers several blocks per
+  batch, as many as fit what a core has of the L2 cache ([scan-a-table.md](scan-a-table.md)).
 * **A chunk** is a run of whole blocks encoded together: each column chooses its encoding once per
   chunk. A chunk is also the seam of an append, which keeps the chunks before it and rewrites the
   last one when the file does not end on a block.

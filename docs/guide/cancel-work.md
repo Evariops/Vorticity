@@ -51,13 +51,13 @@ scan stops, and nothing throws.
 on them too. They check it at a batch boundary:
 
 ```
-rows: cancelled after 16384 rows
+rows: cancelled after 32768 rows
 owned batches: cancelled after 3, each disposed by its using
 ```
 
 The rows of the batch in hand are still yielded, so the cancellation above, asked at the 10 000th
-row, surfaced after the second batch of 8 192. An owned batch already handed out stays yours to
-dispose ([owned-batches.md](owned-batches.md)).
+row, surfaced at the end of the batch that held it, the first, of 32 768 rows. An owned batch
+already handed out stays yours to dispose ([owned-batches.md](owned-batches.md)).
 
 ## A token cancelled before the call
 

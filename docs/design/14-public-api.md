@@ -961,7 +961,7 @@ public sealed record VortexWriteOptions
 
 public sealed record ScanOptions
 {
-    public int BatchRows { get; init; }                                             // 0: the file's block size; never larger
+    public int BatchRows { get; init; }                                             // 0: by what the scan reads, a block when it filters, orders or takes; never larger
     public bool Pruning { get; init; } = true;
     public bool UseIndexes { get; init; } = true;
     public bool Compact { get; init; } = true;                                      // false: whole blocks plus a Selection
@@ -1434,9 +1434,10 @@ suspends. The rule inside the body is the one the compiler enforces: a `Column<T
 across an `await`. Do the columnar work, then await what you must, then `MoveNextAsync`.
 
 Parallelism is the session's, and it pays on aggregates and on wide decodes, not on a scan whose
-cost is walking splits. A split is the row range of one batch, a live block unless `BatchRows`
-cuts it smaller; `ExplainAsync` names no splits, and its `LiveBlocks` is the count to read: a scan
-with two live blocks has nothing to gain from eight threads.
+cost is walking splits. A split is the row range of one batch: a live block when the scan filters,
+orders or takes, as many blocks as fit a core's share of the L2 cache when it only reads, and
+smaller when `BatchRows` cuts it; `ExplainAsync` names no splits, and its `LiveBlocks` is the count
+to read: a scan with two live blocks has nothing to gain from eight threads.
 
 ### 9.13 Pipelines with owned batches
 

@@ -205,8 +205,11 @@ internal sealed class ScanBuilder
     /// <param name="maxRows">The largest batch this scan may produce. Must be positive.</param>
     /// <returns>This builder.</returns>
     /// <remarks>
-    /// <b>It caps; it does not set.</b> The natural batch size is the file's zone length, or
-    /// <c>8192</c> when it has no zone map, and a cap above that changes nothing.
+    /// <b>It caps; it does not set.</b> A scan with a filter, a take or an order is batched by the
+    /// file's zone length, or <c>8192</c> when it has no zone map. Any other scan is batched by
+    /// what it reads: the zone length, doubled while a batch of the projection's decoded rows fits
+    /// in half of a core's share of the L2 cache, up to the rows of a window. A cap above that
+    /// changes nothing.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxRows"/> is not positive.</exception>
     public ScanBuilder WithMaxBatchRows(int maxRows)
@@ -527,13 +530,12 @@ internal sealed class ScanBuilder
         // Parsed at most once per open file rather than once per scan: the tree is a function of
         // the file's bytes and nothing else.
         LayoutTree tree = _file.LayoutTree;
-        (RowRange rows, _, long cap) = Frame(tree);
-
         Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
 
         // Filter first, projection second: the scan reads the union so the filter has its columns,
         // and the enumerator trims back down to `keep` once the filter has decided.
         Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
+        (RowRange rows, _, long cap) = Frame(tree, read.RootMask);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
         BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
@@ -601,10 +603,9 @@ internal sealed class ScanBuilder
         System.Threading.CancellationToken cancellationToken = default)
     {
         LayoutTree tree = _file.LayoutTree;
-        (RowRange rows, long natural, long cap) = Frame(tree);
-
         Projection keep = _fields is null ? Projection.All : Projection.Create(_fields.Build());
         Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
+        (RowRange rows, long natural, long cap) = Frame(tree, read.RootMask);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
         // Each structure is credited with the blocks it pruned among those the scan's rows reach, so
@@ -998,12 +999,21 @@ internal sealed class ScanBuilder
     /// its plan and its terminals.
     /// </summary>
     /// <param name="tree">The parsed layout tree.</param>
+    /// <param name="read">The projection the scan decodes.</param>
     /// <returns>The row range, the file's natural batch size, and the cap the scan runs at.</returns>
     /// <remarks>
+    /// <para>
     /// A take narrows the planned range to the span its indices cover, which already skips every
     /// split outside it; the ones inside it that hold no wanted row are skipped per split.
+    /// </para>
+    /// <para>
+    /// A scan that only reads is batched by what it reads, <see cref="BatchBudget"/>'s rows for
+    /// its projection. A filter, a take and an order work zone by zone -- a zone is what is pruned,
+    /// proven and kept -- and a batch of several zones would read the ones they drop, so those
+    /// scans are batched by the zone.
+    /// </para>
     /// </remarks>
-    private (RowRange Rows, long Natural, long Cap) Frame(LayoutTree tree)
+    private (RowRange Rows, long Natural, long Cap) Frame(LayoutTree tree, in FieldMask read)
     {
         RowRange whole = new RowRange(0, tree.Root.RowCount);
         RowRange rows = _rowsSet ? _rows.Intersect(whole) : whole;
@@ -1018,7 +1028,10 @@ internal sealed class ScanBuilder
             natural = int.MaxValue;
         }
 
-        long cap = _maxBatchRows > 0 && _maxBatchRows < natural ? _maxBatchRows : natural;
+        long batch = _filter is null && _take is null && _orderPath is null
+            ? BatchBudget.Rows(_file.DType, in read, natural, _windowRows, BatchBudget.Bytes)
+            : natural;
+        long cap = _maxBatchRows > 0 && _maxBatchRows < batch ? _maxBatchRows : batch;
         return (rows, natural, cap);
     }
 
@@ -1030,10 +1043,10 @@ internal sealed class ScanBuilder
     private TerminalScan Terminal(string? extraPath = null)
     {
         LayoutTree tree = _file.LayoutTree;
-        (RowRange rows, _, long cap) = Frame(tree);
         Projection read = _filter is null && extraPath is null
             ? Projection.All
             : Only(_filterPaths, extraPath);
+        (RowRange rows, _, long cap) = Frame(tree, read.RootMask);
         bool wholeFile = !_rowsSet && _take is null;
         return new TerminalScan(
             _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes);

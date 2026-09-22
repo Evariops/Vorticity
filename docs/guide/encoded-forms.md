@@ -45,9 +45,9 @@ before anything decodes them. The sample counts it for every batch of both files
 
 | batches of | column | canonical | dictionary | run-end | constant |
 |---|---|---|---|---|---|
-| readings | `Day` | 1 | 0 | 122 | 0 |
-| readings | `Celsius` | 1 | 122 | 0 | 0 |
-| readings | `City` | 0 | 0 | 123 | 0 |
+| readings | `Day` | 1 | 0 | 49 | 0 |
+| readings | `Celsius` | 1 | 49 | 0 | 0 |
+| readings | `City` | 0 | 0 | 50 | 0 |
 | visits | `Referrer` | 0 | 13 | 0 | 0 |
 | visits | the six other leaves | 13 each | 0 | 0 | 0 |
 | readings, `Where(r => r.Day == 500)` | `Day`, `City` | 1 each | 0 | 0 | 0 |

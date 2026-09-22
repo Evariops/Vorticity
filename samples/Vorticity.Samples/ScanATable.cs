@@ -62,10 +62,13 @@ internal static class ScanATable
         Console.WriteLine($"file statistics of Day: sum {(hasDaySum ? daySum.ToString() : "absent")}; AvgAsync(r => r.Day) {meanDay}, {days.Statistics.Requests} requests");
 
         long defaultBytes = await AllocatedAsync(file, new ScanOptions());
+        (long defaultBatches, _, _) = await BatchesAsync(file, new ScanOptions());
         long smallBytes = await AllocatedAsync(file, new ScanOptions { BatchRows = 4_096 });
         (long batches, long rows, long lastStart) = await BatchesAsync(file, new ScanOptions { BatchRows = 4_096 });
+        long zoneBytes = await AllocatedAsync(file, new ScanOptions { BatchRows = 8_192 });
+        (long zoneBatches, _, _) = await BatchesAsync(file, new ScanOptions { BatchRows = 8_192 });
         Console.WriteLine($"BatchRows 4096: {batches} batches, {rows} rows, the last starting at row {lastStart}");
-        Console.WriteLine($"allocated by a whole scan: {defaultBytes} bytes in 123 batches, {smallBytes} bytes in {batches}");
+        Console.WriteLine($"allocated by a whole scan: {defaultBytes} bytes in {defaultBatches} batches, {zoneBytes} bytes in {zoneBatches}, {smallBytes} bytes in {batches}");
     }
 
     private static async Task<(long Batches, long Rows, long LastStart)> BatchesAsync(VortexFile file, ScanOptions options)

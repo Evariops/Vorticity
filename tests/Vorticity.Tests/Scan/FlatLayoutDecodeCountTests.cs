@@ -40,7 +40,7 @@ namespace Vorticity.Tests.Scan;
 [Collection(nameof(AllocationCollection))]
 public sealed class FlatLayoutDecodeCountTests
 {
-    /// <summary>Rows in the single chunk. Comfortably more than the 8192-row batch.</summary>
+    /// <summary>Rows in the single chunk. Comfortably more than the zone the scan's batches are capped at.</summary>
     private const int Rows = 50_000;
 
     /// <summary>What a correct reader materializes: each value once. Now the assertion.</summary>
@@ -59,8 +59,10 @@ public sealed class FlatLayoutDecodeCountTests
         long rows = 0;
         await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
         {
-            await foreach (RecordBatch batch in opened.ScanBuilder().ExecuteAsync()
-                .WithCancellation(CancellationToken.None))
+            // Capped at a zone: an unfiltered scan of one narrow column would otherwise take the
+            // whole chunk in one batch, and there would be no second batch to decode it again for.
+            await foreach (RecordBatch batch in opened.ScanBuilder().WithMaxBatchRows((int)SplitPlan.DefaultBatchRows)
+                .ExecuteAsync().WithCancellation(CancellationToken.None))
             {
                 batches++;
                 rows += batch.RowCount;
