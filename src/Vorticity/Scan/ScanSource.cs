@@ -101,34 +101,76 @@ internal sealed class FileScanSource : ScanSource
     // Every consumer of these batches reads one through a view that cannot outlive the step, or
     // copies it, so the scan binds each batch into the object the previous step disposed.
     internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanMetrics metrics) =>
-        spec.MatchesNothing || Refuted(spec) ? System.Linq.AsyncEnumerable.Empty<RecordBatch>() : Builder(spec, metrics).WithReusedBatches().ExecuteAsync();
+        spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>()
+        : Refuted(spec) ? RefusedAsync(spec, metrics)
+        : Builder(spec, metrics).WithReusedBatches().ExecuteAsync();
 
-    internal override ValueTask<long> CountAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken) =>
-        spec.MatchesNothing || Refuted(spec) ? ValueTask.FromResult(0L) : Builder(spec, metrics).CountAsync(cancellationToken);
-
-    internal override ValueTask<bool> AnyAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken) =>
-        spec.MatchesNothing || Refuted(spec) ? ValueTask.FromResult(false) : Builder(spec, metrics).AnyAsync(cancellationToken);
-
-    internal override ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanMetrics metrics, CancellationToken cancellationToken)
+    internal override async ValueTask<long> CountAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken)
     {
-        if (spec.MatchesNothing || Refuted(spec))
+        if (spec.MatchesNothing || await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false))
         {
-            return ValueTask.FromResult(FilterLiteral.Null);
+            return 0;
+        }
+
+        return await Builder(spec, metrics).CountAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    internal override async ValueTask<bool> AnyAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken) =>
+        !spec.MatchesNothing
+        && !await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false)
+        && await Builder(spec, metrics).AnyAsync(cancellationToken).ConfigureAwait(false);
+
+    internal override async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanMetrics metrics, CancellationToken cancellationToken)
+    {
+        if (spec.MatchesNothing || await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false))
+        {
+            return FilterLiteral.Null;
         }
 
         ScanBuilder builder = Builder(spec, metrics);
-        return min ? builder.MinAsync(column.Path, cancellationToken) : builder.MaxAsync(column.Path, cancellationToken);
+        return min
+            ? await builder.MinAsync(column.Path, cancellationToken).ConfigureAwait(false)
+            : await builder.MaxAsync(column.Path, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>The batches of a scan the file statistics refute: none, and its blocks counted pruned.</summary>
+    private async IAsyncEnumerable<RecordBatch> RefusedAsync(
+        ScanSpec spec, ScanMetrics metrics, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
+        yield break;
+    }
+
+    /// <summary>
+    /// Whether the file statistics refute the scan; when they do, its blocks are counted pruned, as
+    /// its plan counts them, and nothing is read.
+    /// </summary>
+    private async ValueTask<bool> RefuseAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken)
+    {
+        if (!Refuted(spec))
+        {
+            return false;
+        }
+
+        metrics.AddBlocksPruned((await WholeAsync(spec, cancellationToken).ConfigureAwait(false)).Blocks);
+        return true;
+    }
+
+    /// <summary>
+    /// The plan of the scan without its filter: the blocks its rows touch, which the layout alone
+    /// gives. It consults no structure, and so reads nothing.
+    /// </summary>
+    private async ValueTask<ScanPlan> WholeAsync(ScanSpec spec, CancellationToken cancellationToken) =>
+        ScanPlan.From(await Builder(spec with { Filter = null, OrderPath = null }, new ScanMetrics())
+            .ExplainAsync(cancellationToken).ConfigureAwait(false));
 
     internal override async ValueTask<ScanPlan> ExplainAsync(ScanSpec spec, CancellationToken cancellationToken)
     {
         if (Refuted(spec) && !spec.MatchesNothing)
         {
-            // The plan of a scan that reads nothing: the blocks its rows touch, which the layout
-            // alone gives, every one of them pruned by the file statistics. The unfiltered plan
-            // is asked for them because it consults no structure, and so reads nothing either.
-            ScanPlan whole = ScanPlan.From(await Builder(spec with { Filter = null, OrderPath = null }, new ScanMetrics())
-                .ExplainAsync(cancellationToken).ConfigureAwait(false));
+            // The plan of a scan that reads nothing: the blocks its rows touch, every one of them
+            // pruned by the file statistics.
+            ScanPlan whole = await WholeAsync(spec, cancellationToken).ConfigureAwait(false);
             return whole with
             {
                 MayMatch = false,
