@@ -9,10 +9,8 @@ using (CancellationTokenSource cts = new CancellationTokenSource())
     int batches = 0;
     try
     {
-        await using Scan<Reading>.AsyncEnumerator batch = file.Scan<Reading>().GetAsyncEnumerator(cts.Token);
-        while (await batch.MoveNextAsync())
+        await foreach (Columns<Reading> cols in file.Scan<Reading>().WithCancellation(cts.Token))
         {
-            Columns<Reading> cols = batch.Current;
             if (cols.RowCount > 0 && ++batches == 2)
             {
                 await cts.CancelAsync();
@@ -37,11 +35,12 @@ it fires is `OperationCanceledException`; catch that, since `TaskCanceledExcepti
 
 ## A scan of borrowed columns
 
-`await foreach (var cols in scan)` passes no token: `WithCancellation` needs an
-`IAsyncEnumerable<T>`, and a scan whose batches are borrowed `ref struct` columns is not one. The
-token goes to `GetAsyncEnumerator(ct)`, and the loop is written out, as above: `MoveNextAsync`
-checks it at each batch boundary and hands it to the reads under it. `await using` disposes the
-enumerator, which returns the scan's buffers, on the way out, cancelled or not.
+`await foreach` passes no token by itself, and a scan whose batches are borrowed `ref struct`
+columns is not an `IAsyncEnumerable<T>`, so the scan carries the token: `WithCancellation(ct)`, as
+above, in the builder chain like `With(options)`. `MoveNextAsync` checks it at each batch boundary
+and hands it to the reads under it, and the enumerator, which returns the scan's buffers, is
+disposed on the way out, cancelled or not. A loop written out by hand passes the token to
+`GetAsyncEnumerator(ct)` instead, which takes precedence.
 
 Breaking out of an `await foreach` is the other clean way to stop: the enumerator is disposed, the
 scan stops, and nothing throws.
@@ -82,12 +81,12 @@ cancelled token is not an assertion that nothing ran; check the token yourself i
 
 ## A cursor
 
-A cancelled move throws, and leaves the cursor **unpositioned in fact but not in name**: `IsValid`
-still says true, and reading `Key` then throws `VortexFormatException`. Seek again before reading:
+A cancelled move throws and leaves the cursor unpositioned: `IsValid` says false, and `Key`, `Row`
+and `KeyCountAsync` throw `InvalidOperationException` until a move succeeds. Seek again:
 
 ```
-  the cursor after it: valid True
-    its Key: VortexFormatException: Canonical node index -1 is outside [0, 0) of the canonical arena.
+  the cursor after it: valid False
+    its Key: InvalidOperationException: The cursor's last move was cancelled or failed, so it has no position; seek again.
   a new seek with no token: True, key 900
 ```
 
@@ -95,7 +94,7 @@ still says true, and reading `Key` then throws `VortexFormatException`. Seek aga
 
 | call | what a cancellation leaves |
 |---|---|
-| `WriteAsync` | throws, and **its rows may already be taken**: `RowCount` said 100 000 after a cancelled second write of 50 000 |
+| `WriteAsync` | throws before taking anything when the token is already cancelled: `RowCount` said 50 000 after a cancelled second write of 50 000, and a builder keeps its rows; cancelled while the rows are being written, the rows are taken |
 | `FlushAsync` | throws |
 | `CompleteAsync` | throws, and the writer is done: a second `CompleteAsync` throws `ObjectDisposedException` |
 

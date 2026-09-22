@@ -102,6 +102,8 @@ public sealed partial class VortexFileWriter
                 "A builder is written by the writer that handed it out; this one is another writer's, or a nested struct's.", nameof(builder));
         }
 
+        // A cancelled call takes nothing: the rows stay in the builder, not in the file.
+        cancellationToken.ThrowIfCancellationRequested();
         return AcceptAsync(cancellationToken);
     }
 
@@ -115,6 +117,7 @@ public sealed partial class VortexFileWriter
         where TRecord : IVortexRecord<TRecord>
     {
         ThrowIfDone();
+        cancellationToken.ThrowIfCancellationRequested();
         ColumnsBuilder<TRecord> builder = Builder<TRecord>();
         int before = builder.Store.Rows;
         try
@@ -183,6 +186,7 @@ public sealed partial class VortexFileWriter
         where TRecord : IVortexRecord<TRecord>
     {
         ThrowIfDone();
+        cancellationToken.ThrowIfCancellationRequested();
         if (!_isTabular)
         {
             throw new VortexSchemaException("A record's columns are written to a file whose root is a struct.");
@@ -227,6 +231,7 @@ public sealed partial class VortexFileWriter
     public ValueTask WriteAsync(BatchView batch, CancellationToken cancellationToken = default)
     {
         ThrowIfDone();
+        cancellationToken.ThrowIfCancellationRequested();
         RequireFits(batch.Arena.GetNode(batch.Node).DType, _schema, "The batch");
         return batch.SelectionWords.IsEmpty
             ? PassThroughAsync(batch.Arena, batch.Node, cancellationToken)
@@ -242,6 +247,7 @@ public sealed partial class VortexFileWriter
     {
         ArgumentNullException.ThrowIfNull(batch);
         ThrowIfDone();
+        cancellationToken.ThrowIfCancellationRequested();
         RequireFits(batch.DType, _schema, "The batch");
         return batch.SelectionWords.IsEmpty
             ? PassThroughAsync(batch.Arena, batch.RootIndex, cancellationToken)
