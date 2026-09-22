@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -150,6 +151,9 @@ internal sealed class FilteredBatches : IAsyncEnumerable<RecordBatch>
         public RecordBatch Current =>
             _inner is null ? ScanThrow.NoCurrentBatch<RecordBatch>() : _inner.Current;
 
+        // Pooled, as the inner enumerator's own steps are: a step that suspends on its read rents
+        // its state machine instead of allocating one per batch.
+        [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
         public async ValueTask<bool> MoveNextAsync()
         {
             if (_inner is null)

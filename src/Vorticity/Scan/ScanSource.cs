@@ -98,8 +98,10 @@ internal sealed class FileScanSource : ScanSource
 
     internal override VortexSession Session => _file.Session;
 
+    // Every consumer of these batches reads one through a view that cannot outlive the step, or
+    // copies it, so the scan binds each batch into the object the previous step disposed.
     internal override IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanMetrics metrics) =>
-        spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>() : Builder(spec, metrics).ExecuteAsync();
+        spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>() : Builder(spec, metrics).WithReusedBatches().ExecuteAsync();
 
     internal override ValueTask<long> CountAsync(ScanSpec spec, ScanMetrics metrics, CancellationToken cancellationToken) =>
         spec.MatchesNothing ? ValueTask.FromResult(0L) : Builder(spec, metrics).CountAsync(cancellationToken);

@@ -80,6 +80,19 @@ internal sealed class ScanBuilder
         return this;
     }
 
+    private bool _reuseBatches;
+
+    /// <summary>
+    /// Binds each batch into the object the previous step disposed, for a consumer that keeps no
+    /// reference to a batch past the next step: a reference kept regardless would read the next
+    /// batch instead of throwing.
+    /// </summary>
+    internal ScanBuilder WithReusedBatches()
+    {
+        _reuseBatches = true;
+        return this;
+    }
+
     private bool _pruned;
     private BlockMask? _live;
 
@@ -511,6 +524,7 @@ internal sealed class ScanBuilder
             Compact = _compact,
             KeepEncodings = _keepEncodings,
             SinkDecodes = _sinkDecodes,
+            ReuseBatches = _reuseBatches,
         };
 
         if (_orderPath is not null)

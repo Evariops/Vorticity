@@ -47,6 +47,17 @@ internal sealed class FilterEvaluator
     /// </remarks>
     private volatile Prepared[]? _prepared;
 
+    /// <summary>
+    /// The mask that reads only the column a pushed comparison names, built by the first split
+    /// that pushes it rather than by every split: it is a few objects, and a split must allocate none.
+    /// </summary>
+    /// <remarks>
+    /// One reference, published whole, because the lanes of a scan race here: a field index and
+    /// a mask held apart could be read half-written, and a mask read as its default reads every
+    /// column, which the pushed pass must not.
+    /// </remarks>
+    private volatile PushedField? _pushed;
+
     /// <summary>Prepares an evaluator for one filter, for the length of one scan.</summary>
     /// <param name="filter">The expression every call will evaluate.</param>
     internal FilterEvaluator(VortexExpr filter)
@@ -56,6 +67,23 @@ internal sealed class FilterEvaluator
 
     /// <summary>The expression this evaluator answers.</summary>
     internal VortexExpr Filter => _filter;
+
+    /// <summary>The mask that reads field <paramref name="field"/> of the root struct and nothing else.</summary>
+    /// <param name="field">The index of the column the pushed comparison names.</param>
+    internal Layouts.FieldMask OnlyField(int field)
+    {
+        PushedField? held = _pushed;
+        if (held is null || held.Field != field)
+        {
+            held = new PushedField(field, new Layouts.FieldMaskBuilder().IncludeField(field).Build());
+            _pushed = held;
+        }
+
+        return held.Mask;
+    }
+
+    /// <summary>A column index and the mask that reads it alone.</summary>
+    private sealed record PushedField(int Field, Layouts.FieldMask Mask);
 
     /// <summary>One <c>IN</c>'s candidates, hashed for the column they were met over.</summary>
     /// <param name="Node">The expression node the set belongs to.</param>

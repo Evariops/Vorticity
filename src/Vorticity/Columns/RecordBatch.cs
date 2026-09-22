@@ -25,14 +25,17 @@ public sealed class RecordBatch : IDisposable
 {
     private readonly bool _owns;
     private VortexSchema? _publicSchema;
-    private readonly ScanContext? _context;
-    private readonly CanonicalArena _arena;
-    private readonly int _root;
-    private readonly DType _schema;
-    private readonly int _rowCount;
-    private readonly long _startRow;
-    private readonly int _fieldCount;
-    private readonly bool _isTabular;
+
+    // Not readonly because a scan whose batches never outlive their successor binds its next batch
+    // into the object it disposed, rather than allocating one per batch; see Rebind.
+    private ScanContext? _context;
+    private CanonicalArena _arena;
+    private int _root;
+    private DType _schema;
+    private int _rowCount;
+    private long _startRow;
+    private int _fieldCount;
+    private bool _isTabular;
 
     // Allocated on the first NullCount() of a bitmap column and never before, so a scan that does
     // not ask for null counts stays allocation-free per batch.
@@ -78,13 +81,47 @@ public sealed class RecordBatch : IDisposable
 
     private RecordBatch(CanonicalArena arena, int rootCanonicalIndex, long startRow, ScanContext? context, bool owns = false)
     {
+        _owns = owns;
+        Bind(arena, rootCanonicalIndex, startRow, context);
+    }
+
+    /// <summary>
+    /// Binds this batch, disposed already, to the next root its scan decoded, as a new batch over
+    /// <paramref name="context"/> would be bound.
+    /// </summary>
+    /// <remarks>
+    /// For a scan whose consumer holds nothing of a batch past the next step, which is what the
+    /// scan's own contract promises: every view a batch hands out is a <c>ref struct</c>, so none can
+    /// outlive the step that disposes it. A reference to the batch kept regardless would now read
+    /// the next batch rather than throw, which is why only such a scan opts in.
+    /// </remarks>
+    /// <param name="context">The scan context that produced the root.</param>
+    /// <param name="rootCanonicalIndex">The root's index in <see cref="ScanContext.Canonical"/>.</param>
+    /// <param name="startRow">The absolute file row index of row 0 of the batch.</param>
+    /// <exception cref="InvalidOperationException">The batch is live, or owns its storage.</exception>
+    internal void Rebind(ScanContext context, int rootCanonicalIndex, long startRow)
+    {
+        if (!_disposed || _owns)
+        {
+            throw new InvalidOperationException("Only a disposed batch that owns nothing can be bound again.");
+        }
+
+        Bind(ArenaOf(context), rootCanonicalIndex, startRow, context);
+        _publicSchema = null;
+        _selection = default;
+        _selected = 0;
+        _disposed = false;
+    }
+
+    [MemberNotNull(nameof(_arena))]
+    private void Bind(CanonicalArena arena, int rootCanonicalIndex, long startRow, ScanContext? context)
+    {
         ArgumentNullException.ThrowIfNull(arena);
         ArgumentOutOfRangeException.ThrowIfNegative(startRow);
 
         _arena = arena;
         _context = context;
         _root = rootCanonicalIndex;
-        _owns = owns;
 
         // GetNode bounds-checks and throws VortexFormatException for an index outside the arena.
         CanonicalNode root = arena.GetNode(rootCanonicalIndex);

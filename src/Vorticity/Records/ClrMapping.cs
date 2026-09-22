@@ -120,6 +120,18 @@ internal static class ClrFit
         }
     }
 
+    /// <summary>
+    /// <see cref="Require{T}"/> for the column named <paramref name="name"/>, whose message is
+    /// written only when it throws: a caller asks this of every batch it reads a column of.
+    /// </summary>
+    internal static void RequireColumn<T>(VortexType column, string name, VortexExtensionRegistry? extensions)
+    {
+        if (!Fits(ClrShape.For<T>.Value, column, extensions, out string? reason))
+        {
+            throw new VortexSchemaException($"Column '{name}' is a column of {column}, which {Name(typeof(T))} does not map to: {reason}");
+        }
+    }
+
     /// <summary>A type as C# spells it, for a message: <c>int?</c>, <c>ReadOnlyMemory&lt;byte&gt;</c>, not <c>Nullable`1</c>.</summary>
     internal static string Name(Type type)
     {
@@ -207,8 +219,10 @@ internal static class ClrFit
                     target = storage;
                 }
 
-                return Expect(target.Kind == VortexTypeKind.Primitive && target.PrimitiveType == shape.PType,
-                    $"a {Name(shape.Type)} maps to a {shape.PType.Name()} column exactly; convert it before a write or after a read.", out reason);
+                // The message names the type, so it is written only for a column that does not fit.
+                bool exact = target.Kind == VortexTypeKind.Primitive && target.PrimitiveType == shape.PType;
+                reason = exact ? null : $"a {Name(shape.Type)} maps to a {shape.PType.Name()} column exactly; convert it before a write or after a read.";
+                return exact;
             case ClrKind.String:
                 return Expect(target.Kind == VortexTypeKind.Utf8, "a string reads a utf8 column.", out reason);
             case ClrKind.Binary:
