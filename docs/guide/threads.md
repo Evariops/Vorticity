@@ -1,85 +1,131 @@
 # Threads
 
-What is safe to share, what is not, and how to turn on parallel decoding.
+Configure a session, share what is safe to share, and turn on parallelism where it pays.
+
+```csharp
+await using VortexSession session = VortexSession.Create(o =>
+{
+    o.MemoryPool = new AlignedMemoryPool();
+    o.SegmentCache = new SegmentCache(256L * 1024 * 1024);
+    o.MaxConcurrentReads = 32;
+    o.MaxDegreeOfParallelism = 4;
+});
+
+await using VortexFile file = await session.OpenAsync(new FileSegmentSource(path));
+
+Task<long>[] concurrent = new Task<long>[4];
+for (int i = 0; i < concurrent.Length; i++)
+{
+    concurrent[i] = CountRowsAsync(file.Scan<Reading>());
+}
+
+Console.WriteLine($"four concurrent scans of one open file: {string.Join(", ", await Task.WhenAll(concurrent))}");
+```
+
+```
+four concurrent scans of one open file: 1000000, 1000000, 1000000, 1000000
+```
+
+One open file, many scans: each task builds its own scan and enumerates it, and nothing is shared
+but the file and its session.
+
+## The session
+
+A `VortexSession` holds what would otherwise be process-wide state, so that a host decides it once:
+
+| option | default | what it governs |
+|---|---|---|
+| `MemoryPool` | `AlignedMemoryPool.Shared` | every batch, segment and builder buffer; disposing the session returns them |
+| `SegmentCache` | none | segments kept across scans, one budget for every file of the session |
+| `MaxConcurrentReads` | 16 | reads in flight across every scan of every file of the session |
+| `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once |
+| `IndexCacheBytes` | 64 MiB | decoded index runs |
+| `Extensions` | empty | extension types the session reads beyond the editions |
+
+The options are set inside `Create` and frozen when it returns; setting one afterwards throws
+`InvalidOperationException: The session is created; its options are frozen. Set them inside
+VortexSession.Create.` `VortexFile.OpenAsync(path)` uses `VortexSession.Default`, which is immutable:
+the shared pool, no cache, 16 reads in flight, no parallelism.
+
+A session is disposed after its files. Disposing it with one still open throws
+`InvalidOperationException: The session still has 'readings.vortex' open; dispose every file before
+the session.` Two `await using` declarations in that order, as above, do it right.
+
+**The cache and the bound on reads apply to a source that does I/O**: a `FileSegmentSource`, as
+above, or your own `ISegmentSource` ([object-store.md](object-store.md)). A path opened with
+`session.OpenAsync(path)` is memory-mapped, and a mapping has nothing to bound or to cache. With the
+cache, a fifth scan of the file made 369 requests and the cache served all 369; over the five scans
+it counted 1 605 hits and 240 misses, and held 1 504 KiB, the data segments of a 1.5 MB file.
 
 ## What is safe to share
 
 | | |
 |---|---|
-| `VortexFile` | **Thread-safe.** Concurrent scans on one open file are expected: the footer and layout tree are immutable after the open |
-| `ISegmentSource` | Must be thread-safe, and the built-in ones are |
-| decoders and kernels | Pure functions over borrowed memory |
-| `ScanPlan`, `KeyPlan` and the other plans | Immutable |
-| the scan builder | **Not** thread-safe: build on one thread, then enumerate |
-| `IAsyncEnumerator<RecordBatch>` | One consumer, as the language requires |
-| `RecordBatch` | **Affine to its consumer.** Not thread-safe, and it must be disposed on the flow that consumed it |
-| `KeyCursor` and its builder | Not thread-safe |
-| `VortexFileWriter`, including an append | One writer per file |
+| `VortexSession` | **thread-safe**, and meant to be shared by every request of a process |
+| `VortexFile` | **thread-safe**: concurrent scans of one open file are expected |
+| `ISegmentSource` | must be thread-safe; the built-in ones are |
+| `Scan<TRecord>`, `Scan` | **single-use, one thread**: build it, then run one sink |
+| `Columns<TRecord>`, `Column<T>`, `BatchView` | valid inside the loop body only; the compiler holds you to it |
+| `RecordBatch` | one consumer at a time; it may be handed to another thread and disposed there |
+| `KeyCursor<TKey>` | not thread-safe |
+| `VortexFileWriter`, `ColumnsBuilder` | one thread, one writer per file |
+| `ScanPlan`, `KeyPlan`, `WriteReport` | immutable |
 
-So the shape that works is one open file, many scans:
+A second sink on the same scan throws `InvalidOperationException: A scan is single-use: build
+another one for another sink.` A scan is cheap to build; build one per question.
 
-```csharp
-await using VortexFile file = await VortexFile.OpenAsync(path);
-Task<long>[] scans = new Task<long>[4];
-for (int i = 0; i < scans.Length; i++)
-{
-    scans[i] = CountAsync(file);
-}
+## Parallelism
 
-long[] counts = await Task.WhenAll(scans);   // 500000, 500000, 500000, 500000
-```
-
-Each task builds its own scan and enumerates it. Nothing is shared but the file.
-
-## Parallel decoding
-
-Decoding is sequential by default. A library has no business taking over its host's thread pool: a
-server running two hundred requests does not want each scan fanning out.
+Parallelism is off by default: a library does not take a host's cores without being asked. The host
+asks once, with `MaxDegreeOfParallelism` on its session, and one scan can say otherwise:
 
 ```csharp
-file.Scan().WithDegreeOfParallelism(4)          // this scan
-ScanBuilder.DefaultDegreeOfParallelism = 4;     // every builder made from here
+ScanOptions four = new ScanOptions { DegreeOfParallelism = 4 };   // 0, the default, is the session's
 ```
 
-The static is thread-safe, a builder reads it once when it is constructed, and a per-scan
-`WithDegreeOfParallelism` always wins over it. It exists for a host that decides its threading at
-start-up rather than at each of a hundred call sites; it is **1** unless you set it.
+Measured on the demonstration file, warmed, each variant run in turn, the best of fifteen rounds:
 
-I/O concurrency is a separate thing and is always on: the reader issues overlapping reads whatever
-the decode degree, because hiding latency is the point on an object store.
+| | degree 1 | degree 4 |
+|---|---|---|
+| a scan that counts rows | 4.7 ms | 3.8 ms |
+| `GroupBy(r => r.City)` with an average | 8.9 ms | 2.8 ms |
+| `Where(r => r.Celsius > 20.0).SumAsync(r => r.Celsius)` | 6.0 ms | 2.0 ms |
 
-## What to expect from it
+An aggregate keeps one state per chunk and merges them at the end, so its chunks run side by side:
+three times faster at four threads. A scan that hands batches to your loop gains little: it still
+delivers them one at a time and in file order (checked, at degree 4), and most of its cost here is
+walking 123 blocks. Measure on your own files; the timings vary from run to run on a busy machine,
+and the ratios are what to read.
 
-Six columns of 500 000 rows, three passes each, the fastest kept, on one machine:
+## Prefetch
 
-| degree | |
-|---|---|
-| 1 | 5 ms |
-| 2 | 5 ms |
-| 4 | 6 ms |
-| 8 | 6 ms |
+`ScanOptions.Prefetch` is how many batches are decoded ahead of the loop, 1 by default, so that the
+decode of the next batch overlaps your work on this one; the scan holds at most that many batches
+more. On a mapped file with a loop that works on every value it changed nothing measurable, 7.2 ms,
+7.1 ms and 7.2 ms at 0, 1 and 2. It pays when the source has latency to hide, which a remote one
+does.
 
-Nothing, and slightly worse past 4. That is the honest result on this file, and it is what to expect
-whenever decoding is not the bottleneck: these columns decode at hundreds of millions of values a
-second, so five milliseconds is mostly the cost of walking 62 splits, which spreading over threads
-does not reduce.
+## Local and remote
 
-Raise the degree when decoding dominates — wide rows, heavy encodings, large blocks — and measure
-rather than assume. `ExplainAsync` gives the splits a scan will walk, which is what the degree has
-to spread; a scan with two of them has nothing to gain from eight threads.
+The loop is the same for every source: there is no synchronous enumeration to choose. A mapped
+segment completes at once, so the `await` costs no suspension; a remote one suspends while it
+reads. Inside the body the rule is the compiler's: a `Column<T>` does not live across an `await`. Do
+the columnar work, then await what you must, then let the loop move on.
 
 ## Watch out
 
-* **A batch must not cross threads.** Its spans point into buffers the scan will recycle; hand over
-  copied values, not columns.
-* A column is a `ref struct`, so it cannot be captured by a lambda or held across an `await`. The
-  compiler enforces this — see [scan-a-table.md](scan-a-table.md).
-* Setting `DefaultDegreeOfParallelism` disturbs no builder already made and no enumeration already
-  running.
-* Parallel decoding does not reorder batches: they still arrive in file order.
+* **A batch's columns must not cross threads.** Their spans point into buffers the scan reuses. To
+  hand rows to another thread, take owned batches ([owned-batches.md](owned-batches.md)).
+* A `MemoryPool` other than an `AlignedMemoryPool` serves the builders and the owned batches only;
+  the engine then decodes into `AlignedMemoryPool.Shared`.
+* Two hosts in one process that want different parallelism or caches want two sessions, not a
+  setting changed between calls.
+
+The contracts are in [09-contracts.md](../design/09-contracts.md) §1 and §2, and the session in §2
+of [14-public-api.md](../design/14-public-api.md).
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- threads
+dotnet run -c Release --project samples/Vorticity.Samples -- threads
 ```

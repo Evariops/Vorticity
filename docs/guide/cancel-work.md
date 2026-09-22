@@ -1,75 +1,119 @@
 # Cancel work
 
-Every call that touches bytes takes a `CancellationToken`. One does not, and that one is the scan.
-
-## Cancelling a scan
-
-`ExecuteAsync()` takes no token. The loop carries it:
+Stop a scan, a sink, a cursor or a writer with a `CancellationToken`, and know what each one leaves
+behind.
 
 ```csharp
-await foreach (RecordBatch batch in file.Scan().ExecuteAsync().WithCancellation(cts.Token))
+using (CancellationTokenSource cts = new CancellationTokenSource())
 {
-    using (batch)
+    int batches = 0;
+    try
     {
-        // ...
+        await using Scan<Reading>.AsyncEnumerator batch = file.Scan<Reading>().GetAsyncEnumerator(cts.Token);
+        while (await batch.MoveNextAsync())
+        {
+            Columns<Reading> cols = batch.Current;
+            if (cols.RowCount > 0 && ++batches == 2)
+            {
+                await cts.CancelAsync();
+            }
+        }
+
+        Console.WriteLine($"the scan ended on its own after {batches} batches");
+    }
+    catch (OperationCanceledException)
+    {
+        Console.WriteLine($"borrowed columns: cancelled after {batches} batches");
     }
 }
 ```
 
-`WithCancellation` is what hands the token to the async enumerator, and the scan polls it between
-batches and around each read. Cancelling mid-scan throws `OperationCanceledException` out of the
-loop; the batch you were holding is still yours to dispose, and the `using` above has already done
-it.
+```
+borrowed columns: cancelled after 2 batches
+```
 
-**A scan enumerated without `WithCancellation` cannot be cancelled.** It will run to the end of the
-file, or until you `break`. Breaking is a clean way out: the enumerator is disposed, the scan stops,
-and nothing throws.
+Every call that reads or writes takes a token as its last argument, defaulted. What comes out when
+it fires is `OperationCanceledException`; catch that, since `TaskCanceledException` derives from it.
 
-## Cancelling everything else
+## A scan of borrowed columns
 
-`OpenAsync`, `CountAsync`, `AnyAsync`, `MinAsync`, `MaxAsync`, `ExplainAsync`,
-`ReadIndexesAsync`, `ReadIndexDirectoryAsync`, `ReadMetadataAsync`, `VerifyIndexesAsync`,
-`WriteAsync`, `CompleteAsync`, `AppendAsync`, `RepairAsync` all take one as their last argument,
-defaulted.
+`await foreach (var cols in scan)` passes no token: `WithCancellation` needs an
+`IAsyncEnumerable<T>`, and a scan whose batches are borrowed `ref struct` columns is not one. The
+token goes to `GetAsyncEnumerator(ct)`, and the loop is written out, as above: `MoveNextAsync`
+checks it at each batch boundary and hands it to the reads under it. `await using` disposes the
+enumerator, which returns the scan's buffers, on the way out, cancelled or not.
 
-## What a cancelled token actually stops
+Breaking out of an `await foreach` is the other clean way to stop: the enumerator is disposed, the
+scan stops, and nothing throws.
 
-A call that has no work to do does not look at the token. With a token cancelled before the call:
+## Rows and owned batches
 
-| | |
+`ToRecordsAsync(ct)` and `ToBatchesAsync(ct)` take the token directly, and `WithCancellation` works
+on them too. They check it at a batch boundary:
+
+```
+rows: cancelled after 16384 rows
+owned batches: cancelled after 3, each disposed by its using
+```
+
+The rows of the batch in hand are still yielded, so the cancellation above, asked at the 10 000th
+row, surfaced after the second batch of 8 192. An owned batch already handed out stays yours to
+dispose ([owned-batches.md](owned-batches.md)).
+
+## A token cancelled before the call
+
+A call that has nothing to read does not look at the token:
+
+| call | with a cancelled token |
 |---|---|
 | `OpenAsync` | throws |
-| the scan, with `WithCancellation` | throws |
-| `CountAsync` with a filter | throws |
-| `CountAsync` with no filter | **answers** — the row count is in the footer, already read |
-| `AnyAsync` | **answers** — the same |
-| `MinAsync`, `MaxAsync` | **answers** on a file whose statistics settle it |
-| `ExplainAsync` | **answers** — it reads statistics the open already holds |
-| `ReadIndexesAsync` | **answers** when the directory is already read |
+| `CountAsync`, no filter | **answers**: the row count is in the footer |
+| `CountAsync`, with a filter | throws |
+| `AnyAsync`, no filter | **answers** |
+| `MaxAsync` | **answers**: the file's statistics hold it |
+| `SumAsync`, with or without a filter | throws: this library's files record no sum |
+| `ExplainAsync` | throws |
+| `GetIndexesAsync` | **answers**: the directory is already read |
+| borrowed columns, `ToRecordsAsync` | throw |
+| `Keys(...).OpenAsync`, `KeyCursor.SeekAsync` | throw |
 
-This is not a bug to work around: a call that reads nothing has nothing to abandon. It does mean
-you cannot use a cancelled token as an assertion that nothing ran. Check the token yourself if you
-need that.
+This is not a bug to work around: a call that reads nothing has nothing to abandon. It does mean a
+cancelled token is not an assertion that nothing ran; check the token yourself if you need one.
 
-## Cancelling a write
+## A cursor
 
-A cancelled `WriteAsync` or `CompleteAsync` leaves a partial file on disk. There is no rollback: the
-file is whatever had been flushed. Delete it, or `Abandon()` the writer before disposing it, which
-is the explicit way to say the file is not wanted.
+A cancelled move throws, and leaves the cursor **unpositioned in fact but not in name**: `IsValid`
+still says true, and reading `Key` then throws `VortexFormatException`. Seek again before reading:
 
-A file whose tail was left half-written by a crash is a different case, and
-[append-and-repair.md](append-and-repair.md) covers it.
+```
+  the cursor after it: valid True
+    its Key: VortexFormatException: Canonical node index -1 is outside [0, 0) of the canonical arena.
+  a new seek with no token: True, key 900
+```
+
+## A writer
+
+| call | what a cancellation leaves |
+|---|---|
+| `WriteAsync` | throws, and **its rows may already be taken**: `RowCount` said 100 000 after a cancelled second write of 50 000 |
+| `FlushAsync` | throws |
+| `CompleteAsync` | throws, and the writer is done: a second `CompleteAsync` throws `ObjectDisposedException` |
+
+A writer that is disposed without completing abandons the file. A created file is deleted — it did
+not exist afterwards — and an append is truncated back to what the file was: 5 324 bytes and 50 000
+rows before, the same after a cancelled `CompleteAsync` of an append that had flushed 50 000 more.
+`Abandon()` says the same explicitly. A file whose tail a crash tore is another case,
+[append-and-repair.md](append-and-repair.md).
 
 ## Watch out
 
-* `OperationCanceledException` is what comes out, and `TaskCanceledException` derives from it. Catch
-  the base.
-* The token is not stored: passing one to `OpenAsync` cancels the open and nothing after it. Each
+* **The token is not stored.** One given to `OpenAsync` cancels the open and nothing after it; each
   later call takes its own.
-* Cancelling does not dispose the file. `await using` still does that.
+* A scan is single-use, cancelled or not: build another one to start again.
+* Cancelling does not dispose the file, the cursor or the writer: `await using` still does.
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- cancel-work
+dotnet run -c Release --project samples/Vorticity.Samples -- cancel-work
 ```
