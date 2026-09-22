@@ -42,6 +42,7 @@ public sealed class DatasetTreeTests
     [Fact]
     public async Task ATreeHoldsWhatWasBuiltIntoIt()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         MemoryPageStore store = new MemoryPageStore();
         List<TreeEntry> entries = [.. Enumerable.Range(0, 2_000).Select(i => Entry(i))];
         DatasetTree tree = DatasetTree.Build(entries, Rule(), store);
@@ -51,7 +52,7 @@ public sealed class DatasetTreeTests
         Assert.InRange(tree.Depth, 2, 4);
 
         List<TreeEntry> walked = [];
-        await foreach (TreeEntry entry in tree.EnumerateAsync(store, default))
+        await foreach (TreeEntry entry in tree.EnumerateAsync(store, ct))
         {
             walked.Add(entry);
         }
@@ -64,9 +65,9 @@ public sealed class DatasetTreeTests
             Assert.Equal(entries[i].Rows, walked[i].Rows);
         }
 
-        TreeEntry found = Assert.NotNull(await tree.FindAsync(Key(1_234), store, default));
+        TreeEntry found = Assert.NotNull(await tree.FindAsync(Key(1_234), store, ct));
         Assert.Equal(Value(1_234).ToArray(), found.Value.ToArray());
-        Assert.Null(await tree.FindAsync(Encoding.UTF8.GetBytes("k99999999"), store, default));
+        Assert.Null(await tree.FindAsync(Encoding.UTF8.GetBytes("k99999999"), store, ct));
     }
 
     [Fact]
@@ -75,21 +76,22 @@ public sealed class DatasetTreeTests
         // A repack, at the tree: a leaf copied elsewhere takes the pages above it along, since
         // their references named its old placement, and nothing else; the content hash, which
         // ignores placement, does not move.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         MemoryPageStore store = new MemoryPageStore();
         List<TreeEntry> entries = [.. Enumerable.Range(0, 2_000).Select(i => Entry(i))];
         DatasetTree tree = DatasetTree.Build(entries, Rule(), store);
-        UInt128 content = await tree.ContentHashAsync(store, default);
+        UInt128 content = await tree.ContentHashAsync(store, ct);
 
         PageReference leaf = Assert.NotNull(await FirstLeafAsync(tree, store));
-        (DatasetTree moved, int written) = await tree.RelocateAsync(reference => reference == leaf, store, store, default);
+        (DatasetTree moved, int written) = await tree.RelocateAsync(reference => reference == leaf, store, store, ct);
         Assert.Equal(tree.Depth, written);
         Assert.NotEqual(tree.Root, moved.Root);
         Assert.NotEqual(leaf, await FirstLeafAsync(moved, store));
-        Assert.Equal(content, await moved.ContentHashAsync(store, default));
+        Assert.Equal(content, await moved.ContentHashAsync(store, ct));
         Assert.Equal((tree.Entries, tree.Rows, tree.Depth), (moved.Entries, moved.Rows, moved.Depth));
 
         // Nothing selected, nothing written, the same tree.
-        (DatasetTree same, int none) = await moved.RelocateAsync(_ => false, store, store, default);
+        (DatasetTree same, int none) = await moved.RelocateAsync(_ => false, store, store, ct);
         Assert.Equal(0, none);
         Assert.Same(moved, same);
     }
@@ -112,6 +114,7 @@ public sealed class DatasetTreeTests
     public async Task IncrementalEditsEqualARebuild(int seed)
     {
         // Oracle one, on randomised batches of adds, removes and value updates.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Random random = new Random(seed);
         MemoryPageStore store = new MemoryPageStore();
         SortedDictionary<string, TreeEntry> truth = new SortedDictionary<string, TreeEntry>(StringComparer.Ordinal);
@@ -142,7 +145,7 @@ public sealed class DatasetTreeTests
             }
 
             List<TreeChange> changes = [.. batch.Values];
-            tree = await tree.CommitAsync(changes, Rule(), store, store, default);
+            tree = await tree.CommitAsync(changes, Rule(), store, store, ct);
 
             foreach (TreeChange change in changes)
             {
@@ -165,8 +168,8 @@ public sealed class DatasetTreeTests
             Assert.Equal(reference.Rows, tree.Rows);
             Assert.Equal(reference.Depth, tree.Depth);
             Assert.Equal(
-                await reference.ContentHashAsync(rebuilt, default),
-                await tree.ContentHashAsync(store, default));
+                await reference.ContentHashAsync(rebuilt, ct),
+                await tree.ContentHashAsync(store, ct));
             Assert.Equal(await EntriesAsync(reference, rebuilt), await EntriesAsync(tree, store));
             Assert.Equal(await ShapeAsync(reference, rebuilt), await ShapeAsync(tree, store));
         }
@@ -177,6 +180,7 @@ public sealed class DatasetTreeTests
     {
         // Oracle two: history independence. The same key set reached by two different
         // sequences of commits must be one tree.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         MemoryPageStore first = new MemoryPageStore();
         MemoryPageStore second = new MemoryPageStore(2);
 
@@ -187,7 +191,7 @@ public sealed class DatasetTreeTests
                 Encoding.UTF8.GetString(entry.Key.Span)[1..], System.Globalization.CultureInfo.InvariantCulture)).ToArray()))
         {
             left = await left.CommitAsync(
-                [.. slice.Select(i => TreeChange.Put(Key(i), Value(i), i + 1))], Rule(), first, first, default);
+                [.. slice.Select(i => TreeChange.Put(Key(i), Value(i), i + 1))], Rule(), first, first, ct);
         }
 
         // The other order: the last third first, then the first third, then the middle.
@@ -200,14 +204,14 @@ public sealed class DatasetTreeTests
         })
         {
             right = await right.CommitAsync(
-                [.. slice.Select(i => TreeChange.Put(Key(i), Value(i), i + 1))], Rule(), second, second, default);
+                [.. slice.Select(i => TreeChange.Put(Key(i), Value(i), i + 1))], Rule(), second, second, ct);
         }
 
         Assert.Equal(left.Entries, right.Entries);
         Assert.Equal(left.Depth, right.Depth);
         Assert.Equal(
-            await left.ContentHashAsync(first, default),
-            await right.ContentHashAsync(second, default));
+            await left.ContentHashAsync(first, ct),
+            await right.ContentHashAsync(second, ct));
         Assert.Equal(await ShapeAsync(left, first), await ShapeAsync(right, second));
     }
 
@@ -216,6 +220,7 @@ public sealed class DatasetTreeTests
     {
         // Values never move a boundary, so an indexer that updates an object's descriptor rewrites
         // exactly `depth` pages.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         MemoryPageStore store = new MemoryPageStore();
         List<TreeEntry> entries = [.. Enumerable.Range(0, 1_000).Select(i => Entry(i))];
         DatasetTree tree = DatasetTree.Build(entries, Rule(), store);
@@ -226,13 +231,13 @@ public sealed class DatasetTreeTests
             Rule(),
             store,
             store,
-            default);
+            ct);
 
         // The page holding key 500 grew, so its own size changed; the number of pages and the
         // boundaries around it did not.
         Assert.Equal(before.Count, (await ShapeAsync(after, store)).Count);
         Assert.Equal(tree.Entries, after.Entries);
-        TreeEntry updated = Assert.NotNull(await after.FindAsync(Key(500), store, default));
+        TreeEntry updated = Assert.NotNull(await after.FindAsync(Key(500), store, ct));
         Assert.Equal(7, updated.Rows);
     }
 
@@ -250,7 +255,7 @@ public sealed class DatasetTreeTests
             store.ResetReads();
 
             tree = await tree.CommitAsync(
-                [TreeChange.Put(Key(size / 2), Value(size / 2, 9), 3)], Rule(), store, store, default);
+                [TreeChange.Put(Key(size / 2), Value(size / 2, 9), 3)], Rule(), store, store, TestContext.Current.CancellationToken);
 
             long written = store.Count - pagesBefore;
             Assert.InRange(written, 1, tree.Depth + 2);
@@ -261,17 +266,18 @@ public sealed class DatasetTreeTests
     [Fact]
     public async Task RemovingEverythingEmptiesTheTree()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         MemoryPageStore store = new MemoryPageStore();
         List<TreeEntry> entries = [.. Enumerable.Range(0, 300).Select(i => Entry(i))];
         DatasetTree tree = DatasetTree.Build(entries, Rule(), store);
 
         DatasetTree empty = await tree.CommitAsync(
-            [.. entries.Select(e => TreeChange.Remove(e.Key))], Rule(), store, store, default);
+            [.. entries.Select(e => TreeChange.Remove(e.Key))], Rule(), store, store, ct);
 
         Assert.True(empty.IsEmpty);
         Assert.Equal(0, empty.Entries);
-        Assert.Equal(UInt128.Zero, await empty.ContentHashAsync(store, default));
-        Assert.Null(await empty.FindAsync(Key(1), store, default));
+        Assert.Equal(UInt128.Zero, await empty.ContentHashAsync(store, ct));
+        Assert.Null(await empty.FindAsync(Key(1), store, ct));
     }
 
     [Fact]
@@ -283,7 +289,7 @@ public sealed class DatasetTreeTests
             Rule(),
             store,
             store,
-            default);
+            TestContext.Current.CancellationToken);
 
         Assert.Equal(50, tree.Entries);
         Assert.Equal(50, tree.Rows);
@@ -307,7 +313,7 @@ public sealed class DatasetTreeTests
                 Rule(),
                 store,
                 store,
-                default));
+                TestContext.Current.CancellationToken));
     }
 
     [Fact]

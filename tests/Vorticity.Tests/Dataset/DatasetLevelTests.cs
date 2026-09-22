@@ -14,6 +14,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -60,12 +61,13 @@ public sealed class DatasetLevelTests
     [Fact]
     public async Task ACommitWritesATreePerLevelAndAReaderFindsThemAll()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
         CommitResult result = await DatasetCommitter.CommitAsync(
             store,
             [Add(1), Add(2), Add(10, level: 1), Add(11, level: 1), Add(100, level: 3)],
             Options(),
-            default);
+            ct);
 
         Assert.Equal(2, result.Levels[0].Entries);
         Assert.Equal(2, result.Levels[1].Entries);
@@ -78,7 +80,7 @@ public sealed class DatasetLevelTests
         Assert.True(result.Levels[2].IsEmpty);
 
         // And the header carries them, so another reader finds the same shape.
-        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, default);
+        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, ct);
         DatasetLevels read = DatasetLevels.Of(Assert.IsType<CommitObject>(commit).Header);
         Assert.Equal(result.Levels.Entries, read.Entries);
         Assert.Equal(result.Levels.Rows, read.Rows);
@@ -96,24 +98,25 @@ public sealed class DatasetLevelTests
         // A leveled compaction reads level 0 and the overlapping objects of level 1, and writes
         // level 1. One operation, because a compaction that lost its input to a race must abandon
         // all of it at once.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await DatasetCommitter.CommitAsync(store, [Add(1), Add(2), Add(3)], Options(), default);
-        await DatasetCommitter.CommitAsync(store, [Add(50, level: 1)], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [Add(1), Add(2), Add(3)], Options(), ct);
+        await DatasetCommitter.CommitAsync(store, [Add(50, level: 1)], Options(), ct);
 
         DatasetOperation compaction = new DatasetOperation.ReplaceObjects(
             [(0, Key(1)), (0, Key(2)), (1, Key(50))],
             [(1, Key(1), Object(1, version: 7))]);
-        CommitResult after = await DatasetCommitter.CommitAsync(store, [compaction], Options(), default);
+        CommitResult after = await DatasetCommitter.CommitAsync(store, [compaction], Options(), ct);
 
         Assert.Equal([OperationOutcome.Applied], after.Outcomes);
         Assert.Equal(1, after.Levels[0].Entries);
         Assert.Equal(1, after.Levels[1].Entries);
-        Assert.NotNull(await after.Levels[0].FindAsync(Key(3), after.Pages, default));
-        Assert.NotNull(await after.Levels[1].FindAsync(Key(1), after.Pages, default));
+        Assert.NotNull(await after.Levels[0].FindAsync(Key(3), after.Pages, ct));
+        Assert.NotNull(await after.Levels[1].FindAsync(Key(1), after.Pages, ct));
 
         // The same key at two levels is two objects, so the input at level 0 is gone and the
         // output at level 1 is there.
-        Assert.Null(await after.Levels[0].FindAsync(Key(1), after.Pages, default));
+        Assert.Null(await after.Levels[0].FindAsync(Key(1), after.Pages, ct));
     }
 
     [Fact]
@@ -122,17 +125,18 @@ public sealed class DatasetLevelTests
         // Across levels too, a compaction whose input is gone abandons: a compactor that planned
         // against level 0 and lost the race to one that already moved the object finds its input
         // missing, and its outputs are garbage.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), ct);
 
         DatasetOperation first = new DatasetOperation.ReplaceObjects(
             [(0, Key(1))], [(1, Key(1), Object(1, version: 3))]);
         Assert.Equal([OperationOutcome.Applied],
-            (await DatasetCommitter.CommitAsync(store, [first], Options(), default)).Outcomes);
+            (await DatasetCommitter.CommitAsync(store, [first], Options(), ct)).Outcomes);
 
         DatasetOperation second = new DatasetOperation.ReplaceObjects(
             [(0, Key(1)), (0, Key(2))], [(1, Key(2), Object(2, version: 4))]);
-        CommitResult loser = await DatasetCommitter.CommitAsync(store, [second], Options(), default);
+        CommitResult loser = await DatasetCommitter.CommitAsync(store, [second], Options(), ct);
 
         Assert.Equal([OperationOutcome.Abandoned], loser.Outcomes);
         Assert.Equal(1, loser.Levels[0].Entries);
@@ -144,6 +148,7 @@ public sealed class DatasetLevelTests
     {
         // The answers equal one file's with the objects spread over levels: where an entry SITS
         // changes nothing about the rows it holds.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -154,12 +159,12 @@ public sealed class DatasetLevelTests
             Seed = 0x1E7E15_5EED,
             Write = new VortexWriteOptions { RowBlockSize = 128, DataBlockTargetBytes = 8 << 10 },
         };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
 
         const int objects = 6;
         for (int i = 0; i < objects; i++)
         {
-            await dataset.AppendAsync(Batches(types, schema, i * 200, 200));
+            await dataset.AppendAsync(Batches(types, schema, i * 200, 200), ct);
         }
 
         List<long> before = await KeysAsync(dataset.ScanBuilder());
@@ -169,7 +174,7 @@ public sealed class DatasetLevelTests
         List<(int Level, ReadOnlyMemory<byte> Key)> inputs = [];
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> outputs = [];
         int at = 0;
-        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync())
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(ct))
         {
             if (at++ % 2 == 0)
             {
@@ -180,7 +185,7 @@ public sealed class DatasetLevelTests
         }
 
         Assert.Equal(3, inputs.Count);
-        await dataset.ApplyAsync([new DatasetOperation.ReplaceObjects(inputs, outputs)]);
+        await dataset.ApplyAsync([new DatasetOperation.ReplaceObjects(inputs, outputs)], ct);
 
         Assert.Equal(3, dataset.Levels[0].Entries);
         Assert.Equal(3, dataset.Levels[1].Entries);
@@ -192,7 +197,7 @@ public sealed class DatasetLevelTests
 
         byte[] single = await OneFileAsync(types, schema, objects * 200, options.Write);
         await using MemorySegmentSource source = new MemorySegmentSource(single);
-        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
         Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.ScanBuilder()));
 
         // And `Rows(a, b)` still addresses the dataset's order across the levels it now spans.
@@ -206,6 +211,7 @@ public sealed class DatasetLevelTests
     {
         // `Explain` reports every violation of the level-0 ceiling as a lag, with the count: a
         // level-0 count above 8 degrades the read bound and is reported, never refused.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -216,14 +222,14 @@ public sealed class DatasetLevelTests
             Seed = 0x1E7E15_5EED,
             Write = new VortexWriteOptions { RowBlockSize = 128, DataBlockTargetBytes = 8 << 10 },
         };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
 
         for (int i = 0; i < 8; i++)
         {
-            await dataset.AppendAsync(Batches(types, schema, i * 100, 100));
+            await dataset.AppendAsync(Batches(types, schema, i * 100, 100), ct);
         }
 
-        DatasetPlan holding = await dataset.ScanBuilder().ExplainAsync();
+        DatasetPlan holding = await dataset.ScanBuilder().ExplainAsync(ct);
         Assert.Equal(0, holding.Lag);
         Assert.Equal(8, holding.Objects);
         Assert.Equal([8L], holding.ObjectsByLevel);
@@ -232,14 +238,14 @@ public sealed class DatasetLevelTests
         // Three more, and the invariant is violated on purpose. Nothing is refused.
         for (int i = 8; i < 11; i++)
         {
-            await dataset.AppendAsync(Batches(types, schema, i * 100, 100));
+            await dataset.AppendAsync(Batches(types, schema, i * 100, 100), ct);
         }
 
-        DatasetPlan lagging = await dataset.ScanBuilder().ExplainAsync();
+        DatasetPlan lagging = await dataset.ScanBuilder().ExplainAsync(ct);
         Assert.Equal(3, lagging.Lag);
         Assert.Equal(11, lagging.Objects);
         Assert.Equal(1_100, lagging.Rows);
-        Assert.Equal(1_100, await dataset.ScanBuilder().CountAsync());
+        Assert.Equal(1_100, await dataset.ScanBuilder().CountAsync(ct));
         Assert.Equal(3, dataset.Lag);
 
         Console.Out.Write(FormattableString.Invariant(

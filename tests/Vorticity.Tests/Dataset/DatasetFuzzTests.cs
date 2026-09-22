@@ -24,6 +24,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -70,6 +71,7 @@ public sealed class DatasetFuzzTests
     [InlineData(34)]
     public async Task ASeededScheduleLeavesTheTreeEqualToTheModel(int seed)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
         Random random = new Random(seed);
         Model model = new Model();
@@ -103,7 +105,7 @@ public sealed class DatasetFuzzTests
             store.CrashesAfterPut = crashing ? _ => true : null;
             try
             {
-                await DatasetCommitter.CommitAsync(store, batch, Options(), default);
+                await DatasetCommitter.CommitAsync(store, batch, Options(), ct);
                 commits++;
             }
             catch (ObjectStoreException) when (crashing)
@@ -127,14 +129,14 @@ public sealed class DatasetFuzzTests
             // must come back as already done.
             if (crashed)
             {
-                await DatasetCommitter.CommitAsync(store, batch, Options(), default);
+                await DatasetCommitter.CommitAsync(store, batch, Options(), ct);
                 stale++;
             }
         }
 
         (DatasetTree tree, IPageSource pages, ulong version) = await LatestAsync(store);
         List<(string Key, ObjectEntry Entry)> held = [];
-        await foreach (TreeEntry entry in tree.EnumerateAsync(pages, default))
+        await foreach (TreeEntry entry in tree.EnumerateAsync(pages, ct))
         {
             held.Add((Convert.ToHexString(entry.Key.Span), ObjectEntry.FromBytes(entry.Value.Span)));
         }
@@ -163,6 +165,8 @@ public sealed class DatasetFuzzTests
     [Fact]
     public async Task ACrashAfterThePutIsNotASecondObject()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A rebased add of an object already there, under the state the rebase exists for: the
         // commit landed and the writer was told it had not. Retrying must add nothing, because
         // the uid is the same bytes.
@@ -171,10 +175,10 @@ public sealed class DatasetFuzzTests
 
         store.CrashesAfterPut = _ => true;
         await Assert.ThrowsAsync<ObjectStoreException>(
-            async () => await DatasetCommitter.CommitAsync(store, batch, Options(), default));
+            async () => await DatasetCommitter.CommitAsync(store, batch, Options(), ct));
         store.CrashesAfterPut = null;
 
-        CommitResult again = await DatasetCommitter.CommitAsync(store, batch, Options(), default);
+        CommitResult again = await DatasetCommitter.CommitAsync(store, batch, Options(), ct);
         Assert.All(again.Outcomes, outcome => Assert.Equal(OperationOutcome.AlreadyThere, outcome));
 
         (DatasetTree tree, IPageSource pages, ulong version) = await LatestAsync(store);
@@ -183,7 +187,7 @@ public sealed class DatasetFuzzTests
         // The retry, having nothing to add, wrote no version: the latest is the crashed commit.
         Assert.Equal(1UL, version);
         Assert.Equal(1UL, again.Version);
-        Assert.NotEqual(UInt128.Zero, await tree.ContentHashAsync(pages, default));
+        Assert.NotEqual(UInt128.Zero, await tree.ContentHashAsync(pages, ct));
     }
 
     [Fact]
@@ -198,7 +202,7 @@ public sealed class DatasetFuzzTests
             List<DatasetOperation> batch = await PrepareAsync(store, random);
             if (batch.Count > 0)
             {
-                await DatasetCommitter.CommitAsync(store, batch, Options(), default);
+                await DatasetCommitter.CommitAsync(store, batch, Options(), TestContext.Current.CancellationToken);
             }
         }
 
@@ -210,6 +214,8 @@ public sealed class DatasetFuzzTests
     [Fact]
     public async Task AScheduleOfRealAppendsAnswersAsOneFile()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The first invariant, end to end: every read equals a scan with indexes off on the same
         // version. Real data objects this time, because there is nothing to scan in a synthetic
         // leaf -- and the single file is the same rows written once.
@@ -226,21 +232,21 @@ public sealed class DatasetFuzzTests
             Seed = Seed,
             Write = new VortexWriteOptions { RowBlockSize = 128, DataBlockTargetBytes = 8 << 10 },
         };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
 
         // Two handles on one dataset, appending in a seeded order: each has to refresh to see the
         // other's commits, and each commit rebases onto whatever landed since.
-        await using VortexDataset second = await VortexDataset.OpenAsync(store, options);
+        await using VortexDataset second = await VortexDataset.OpenAsync(store, options, ct);
         Random random = new Random(7);
         long rows = 0;
         for (int batch = 0; batch < 10; batch++)
         {
             VortexDataset writer = random.Next(2) == 0 ? dataset : second;
-            await writer.AppendAsync(Batches(types, schema, rows, 300));
+            await writer.AppendAsync(Batches(types, schema, rows, 300), ct);
             rows += 300;
         }
 
-        await dataset.RefreshAsync();
+        await dataset.RefreshAsync(ct);
         Assert.Equal(10, dataset.ObjectCount);
         Assert.Equal(rows, dataset.RowCount);
 
@@ -261,6 +267,8 @@ public sealed class DatasetFuzzTests
     [Fact]
     public async Task AScheduleOfRealAppendsAndIndexersAnswersAsWithoutIndexes()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // Indexers are among what the schedule interleaves, and here they are the real one: two
         // handles, each appending or indexing a block range of an object AS IT LAST SAW THE
         // DATASET, in a seeded order. A stale indexer rebases like any writer; every read after
@@ -283,8 +291,8 @@ public sealed class DatasetFuzzTests
                 WritePolicy = WritePolicy.None,
             },
         };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
-        await using VortexDataset second = await VortexDataset.OpenAsync(store, options);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
+        await using VortexDataset second = await VortexDataset.OpenAsync(store, options, ct);
         VortexDataset[] handles = [dataset, second];
         WritePolicy policy = WritePolicy.None
             .For("key", IndexSpec.SortedRuns.AsRequired())
@@ -299,32 +307,32 @@ public sealed class DatasetFuzzTests
         {
             VortexDataset handle = handles[random.Next(2)];
             List<PositionedObject> seen = [];
-            await foreach (PositionedObject held in handle.ScanBuilder().ObjectsAsync())
+            await foreach (PositionedObject held in handle.ScanBuilder().ObjectsAsync(ct))
             {
                 seen.Add(held);
             }
 
             if (seen.Count == 0 || random.Next(3) == 0)
             {
-                await handle.AppendAsync(Batches(types, schema, rows, 300));
+                await handle.AppendAsync(Batches(types, schema, rows, 300), ct);
                 rows += 300;
             }
             else
             {
                 PositionedObject target = seen[random.Next(seen.Count)];
                 IndexingResult result = await DatasetIndexer.IndexAsync(
-                    handle, target, policy, ranges[random.Next(ranges.Length)], build);
+                    handle, target, policy, ranges[random.Next(ranges.Length)], build, ct);
                 outcomes[result.Outcome] = outcomes.GetValueOrDefault(result.Outcome) + 1;
             }
 
             // The other handle stays where it was half of the time: its next step is stale.
             if (random.Next(2) == 0)
             {
-                await handles[0].RefreshAsync();
-                await handles[1].RefreshAsync();
+                await handles[0].RefreshAsync(ct);
+                await handles[1].RefreshAsync(ct);
             }
 
-            await dataset.RefreshAsync();
+            await dataset.RefreshAsync(ct);
             foreach (VortexExpr question in (VortexExpr[])[
                 Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(rows / 2))),
                 Expr.Eq(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(0.3))),
@@ -348,6 +356,8 @@ public sealed class DatasetFuzzTests
     [InlineData(29)]
     public async Task AScheduleWithTheCompactorAndVacuumLosesNothingARetainedVersionNeeds(int seed)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The rest of the schedule's cast: compactors and vacuum, with repack after it, under
         // one clock the schedule moves. Two handles, each acting on the version it last saw half of
         // the time: an append, an indexing, a compaction, a vacuum. Two invariants after every
@@ -369,8 +379,8 @@ public sealed class DatasetFuzzTests
             RetentionWindow = TimeSpan.FromSeconds(3_600),
             Write = new VortexWriteOptions { RowBlockSize = 128, DataBlockTargetBytes = 8 << 10 },
         };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
-        await using VortexDataset second = await VortexDataset.OpenAsync(store, options);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
+        await using VortexDataset second = await VortexDataset.OpenAsync(store, options, ct);
         VortexDataset[] handles = [dataset, second];
         CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 64 << 10 };
         WritePolicy policy = WritePolicy.None.For("measure", IndexSpec.Bloom(falsePositivePpm: 100));
@@ -388,24 +398,24 @@ public sealed class DatasetFuzzTests
             switch (rows == 0 ? 0 : random.Next(4))
             {
                 case 0:
-                    await handle.AppendAsync(Batches(types, schema, rows, 300));
+                    await handle.AppendAsync(Batches(types, schema, rows, 300), ct);
                     rows += 300;
                     break;
 
                 case 1:
                 {
                     List<PositionedObject> seen = [];
-                    await foreach (PositionedObject held in handle.ScanBuilder().ObjectsAsync())
+                    await foreach (PositionedObject held in handle.ScanBuilder().ObjectsAsync(ct))
                     {
                         seen.Add(held);
                     }
 
-                    _ = await DatasetIndexer.IndexAsync(handle, seen[random.Next(seen.Count)], policy, options: build);
+                    _ = await DatasetIndexer.IndexAsync(handle, seen[random.Next(seen.Count)], policy, options: build, cancellationToken: ct);
                     break;
                 }
 
                 case 2:
-                    if (await handle.CompactAsync(compaction) is { Outcome: OperationOutcome.Applied })
+                    if (await handle.CompactAsync(compaction, ct) is { Outcome: OperationOutcome.Applied })
                     {
                         compactions++;
                     }
@@ -416,15 +426,15 @@ public sealed class DatasetFuzzTests
                 {
                     // A threshold of 1: every commit kept by references alone is repacked, so the
                     // schedule puts repack commits between the others rather than almost never.
-                    VacuumResult vacuum = await handle.VacuumAsync(new VacuumOptions { TimeProvider = clock, RepackBelow = 1.0 });
+                    VacuumResult vacuum = await handle.VacuumAsync(new VacuumOptions { TimeProvider = clock, RepackBelow = 1.0 }, ct);
                     deleted += vacuum.Deleted.Length;
                     foreach (ulong version in vacuum.Retained)
                     {
-                        DatasetVerification verified = await DatasetVerifier.VerifyAsync(store, new VerifyOptions { Version = version });
+                        DatasetVerification verified = await DatasetVerifier.VerifyAsync(store, new VerifyOptions { Version = version }, ct);
                         Assert.True(verified.Holds, $"step {step}, version {version}: {string.Join("; ", verified.Problems)}");
                     }
 
-                    if (vacuum.Sparse.Count > 0 && (await handle.RepackAsync(vacuum.Sparse)).Outcome == OperationOutcome.Applied)
+                    if (vacuum.Sparse.Count > 0 && (await handle.RepackAsync(vacuum.Sparse, ct)).Outcome == OperationOutcome.Applied)
                     {
                         repacked++;
                     }
@@ -435,11 +445,11 @@ public sealed class DatasetFuzzTests
 
             if (random.Next(2) == 0)
             {
-                await handles[0].RefreshAsync();
-                await handles[1].RefreshAsync();
+                await handles[0].RefreshAsync(ct);
+                await handles[1].RefreshAsync(ct);
             }
 
-            await dataset.RefreshAsync();
+            await dataset.RefreshAsync(ct);
             Assert.Equal(rows, dataset.RowCount);
             VortexExpr question = Expr.Eq(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(rows / 8.0)));
             Assert.Equal(
@@ -451,7 +461,7 @@ public sealed class DatasetFuzzTests
             Assert.Equal(rows == 0 ? 0 : rows - 1, keys.Count == 0 ? 0 : keys[^1]);
         }
 
-        Assert.True((await dataset.VerifyAsync()).Holds);
+        Assert.True((await dataset.VerifyAsync(cancellationToken: ct)).Holds);
         Console.Out.Write(FormattableString.Invariant(
             $"DATASET FUZZ LIFECYCLE seed {seed}: version {dataset.Version}, {dataset.ObjectCount} objects, {compactions} compaction(s), {deleted} object(s) vacuumed, {repacked} repack(s).\n"));
         Assert.True(deleted > 0, "the schedule should have vacuumed something");

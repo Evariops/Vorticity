@@ -2,6 +2,7 @@
 // number a total of requests cannot give.
 using System;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Xunit;
@@ -15,20 +16,21 @@ public sealed class CountingObjectStoreTests
     [Fact]
     public async Task ItCountsEveryOperationByKindAndTheBytesBothWays()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
-        Assert.Equal(PutOutcome.Created, await store.PutIfAbsentAsync("data/a", Bytes("12345"), default));
-        Assert.Equal(PutOutcome.Exists, await store.PutIfAbsentAsync("data/a", Bytes("67"), default));
-        Assert.NotNull(await store.HeadAsync("data/a", default));
-        using (ObjectRange range = await store.GetRangeAsync("data/a", 1, 3, default))
+        Assert.Equal(PutOutcome.Created, await store.PutIfAbsentAsync("data/a", Bytes("12345"), ct));
+        Assert.Equal(PutOutcome.Exists, await store.PutIfAbsentAsync("data/a", Bytes("67"), ct));
+        Assert.NotNull(await store.HeadAsync("data/a", ct));
+        using (ObjectRange range = await store.GetRangeAsync("data/a", 1, 3, ct))
         {
             Assert.Equal(3, range.Length);
         }
 
-        Assert.Single(await store.ListAsync("data/", null, 10, default));
-        await store.DeleteAsync(["data/a"], default);
-        Assert.Null(await inner.HeadAsync("data/a", default));
+        Assert.Single(await store.ListAsync("data/", null, 10, ct));
+        await store.DeleteAsync(["data/a"], ct);
+        Assert.Null(await inner.HeadAsync("data/a", ct));
 
         Assert.Equal(2, store.CountOf(ObjectOperation.PutIfAbsent));
         Assert.Equal(1, store.CountOf(ObjectOperation.Head));
@@ -47,21 +49,24 @@ public sealed class CountingObjectStoreTests
     [Fact]
     public async Task ResetForgetsTheCountsAndNotTheStore()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
-        await store.PutIfAbsentAsync("data/a", Bytes("x"), default);
+        await store.PutIfAbsentAsync("data/a", Bytes("x"), ct);
         store.Reset();
 
         Assert.Equal(0, store.Requests);
         Assert.Equal(0, store.BytesWritten);
         Assert.Equal(0, store.DependentSteps);
-        Assert.NotNull(await store.HeadAsync("data/a", default));
+        Assert.NotNull(await store.HeadAsync("data/a", ct));
         Assert.Equal(1, store.Requests);
     }
 
     [Fact]
     public async Task ItCountsWhatFailedToo()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A request that throws is a request that was made: a counter that only saw the successes
         // would say a retrying reader was cheap.
         await using MemoryObjectStore inner = new MemoryObjectStore
@@ -69,11 +74,11 @@ public sealed class CountingObjectStoreTests
             Fails = (operation, _) => operation == ObjectOperation.GetRange,
         };
         await using CountingObjectStore store = new CountingObjectStore(inner);
-        await store.PutIfAbsentAsync("data/a", Bytes("x"), default);
+        await store.PutIfAbsentAsync("data/a", Bytes("x"), ct);
         store.Reset();
 
         await Assert.ThrowsAsync<ObjectStoreException>(
-            async () => await store.GetRangeAsync("data/a", 0, 1, default));
+            async () => await store.GetRangeAsync("data/a", 0, 1, ct));
         Assert.Equal(1, store.CountOf(ObjectOperation.GetRange));
         Assert.Equal(0, store.BytesRead);
         Assert.Equal(1, store.DependentSteps);

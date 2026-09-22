@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Xunit;
@@ -43,18 +44,19 @@ public sealed class CommitKeyTests
     [Fact]
     public async Task OneListingOfOneKeyFindsTheNewestCommit()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
         foreach (ulong committed in new ulong[] { 1, 2, 3, 17, 4 })
         {
-            await store.PutIfAbsentAsync(CommitKey.For(committed), new byte[] { 1 }, default);
+            await store.PutIfAbsentAsync(CommitKey.For(committed), new byte[] { 1 }, ct);
         }
 
         // A data object under another prefix must not be in the way.
-        await store.PutIfAbsentAsync(CommitKey.ForData("abcdef"), new byte[] { 1 }, default);
+        await store.PutIfAbsentAsync(CommitKey.ForData("abcdef"), new byte[] { 1 }, ct);
         store.Reset();
 
-        IReadOnlyList<string> newest = await store.ListAsync(CommitKey.Prefix, null, 1, default);
+        IReadOnlyList<string> newest = await store.ListAsync(CommitKey.Prefix, null, 1, ct);
         Assert.True(CommitKey.TryParse(Assert.Single(newest), out ulong version));
         Assert.Equal(17UL, version);
         Assert.Equal(1, store.Requests);

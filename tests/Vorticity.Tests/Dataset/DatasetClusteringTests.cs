@@ -11,6 +11,7 @@
 // by the mandatory run: a test that wrote sorted keys would pass with no index at all.
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -38,23 +39,24 @@ public sealed class DatasetClusteringTests
     [Fact]
     public async Task ObjectsAreHeldInClusteringKeyOrderWhateverOrderTheyArrivedIn()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         Assert.Equal(["key"], dataset.ClusteringKeyPaths);
         Assert.NotNull(dataset.Key);
 
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
         // The tree walks them by key, not by arrival: object 0 holds the smallest key.
         List<long> firstKeys = [];
-        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, ct))
         {
             Assert.True(held.Entry.Summaries.TryGet("key", out ColumnSummary key));
             firstKeys.Add(key.Min.SignedValue);
@@ -67,29 +69,33 @@ public sealed class DatasetClusteringTests
     [Fact]
     public async Task EveryAppendedObjectCarriesTheMandatoryRun()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The keys inside an object are shuffled, so nothing but the run can serve a cursor.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
-        await dataset.AppendAsync(Batches(types, schema, 0));
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        await dataset.AppendAsync(Batches(types, schema, 0), ct);
 
         ObjectEntry entry = Assert.Single(await ObjectsAsync(dataset));
         await using ObjectSegmentSource source = new ObjectSegmentSource(store, entry.Key);
-        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
 
         // The column is not sorted, and yet a key cursor opens and seeks: that is the run.
         Assert.False(IsSorted(file, "key"), "the keys were shuffled; a sorted column would void this test");
-        await using KeyCursor cursor = await file.Keys("key").OpenAsync();
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(4L * 7), SeekOp.Exact));
+        await using KeyCursor cursor = await file.Keys("key").OpenAsync(ct);
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(4L * 7), SeekOp.Exact, ct));
         Assert.Equal(4L * 7, cursor.Key.SignedValue);
     }
 
     [Fact]
     public async Task TheMergedCursorWalksEveryKeyInOrder()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A k-way merge of the level-0 objects, through their runs, at no more than 8 + L cursors:
         // eight level-0 objects and one per level below.
         Decoders.EnsureRegistered();
@@ -97,23 +103,23 @@ public sealed class DatasetClusteringTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
-        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset);
+        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, ct);
         Assert.Equal(0, cursor.Cursors);
 
         List<long> walked = [];
         HashSet<string> objects = new HashSet<string>(StringComparer.Ordinal);
-        bool any = await cursor.SeekFirstAsync();
+        bool any = await cursor.SeekFirstAsync(ct);
         while (any)
         {
             walked.Add(cursor.Key.SignedValue);
             objects.Add(cursor.Object.Key);
-            any = await cursor.NextAsync();
+            any = await cursor.NextAsync(ct);
         }
 
         // Every key of every object, once, in order: 0, 1, 2, … and from all four objects.
@@ -130,9 +136,9 @@ public sealed class DatasetClusteringTests
         Assert.Equal(Objects, cursor.Cursors);
 
         // And a seek lands where a single sorted file would.
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(517L)));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(517L), cancellationToken: ct));
         Assert.Equal(517L, cursor.Key.SignedValue);
-        Assert.True(await cursor.NextAsync());
+        Assert.True(await cursor.NextAsync(ct));
         Assert.Equal(518L, cursor.Key.SignedValue);
 
         Console.Out.Write(FormattableString.Invariant(
@@ -142,6 +148,8 @@ public sealed class DatasetClusteringTests
     [Fact]
     public async Task AnExactSeekLeavesTheMergeAbleToWalkOn()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The trap this covers: seeking each cursor `Exact` invalidates the ones whose object does
         // not hold the key, and the walk after it is then missing their rows for EVERY key that
         // follows. Four interleaved objects and a key only one of them holds is exactly that shape.
@@ -150,17 +158,17 @@ public sealed class DatasetClusteringTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
-        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset);
-        Assert.True(await cursor.SeekAsync(FilterLiteral.From(517L), SeekOp.Exact));
+        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, ct);
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(517L), SeekOp.Exact, ct));
 
         List<long> rest = [cursor.Key.SignedValue];
-        while (await cursor.NextAsync())
+        while (await cursor.NextAsync(ct))
         {
             rest.Add(cursor.Key.SignedValue);
         }
@@ -175,14 +183,16 @@ public sealed class DatasetClusteringTests
         Assert.Equal(expected, rest);
 
         // And a key no object holds is a refusal, not a position on the nearest one.
-        Assert.False(await cursor.SeekAsync(FilterLiteral.From(-1L), SeekOp.Exact));
+        Assert.False(await cursor.SeekAsync(FilterLiteral.From(-1L), SeekOp.Exact, ct));
         Assert.False(cursor.IsValid);
-        Assert.False(await cursor.NextAsync());
+        Assert.False(await cursor.NextAsync(ct));
     }
 
     [Fact]
     public async Task AKeyWalkRefusesAnObjectThatCannotServeIt()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // An imported file with no run on the key: leaving its rows out would be a wrong answer, so
         // the walk refuses and names it.
         Decoders.EnsureRegistered();
@@ -192,25 +202,27 @@ public sealed class DatasetClusteringTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         byte[] unindexed = await OneFileAsync(types, schema, [0], indexes: false);
         string key = CommitKey.ForData("unindexed");
-        await store.PutIfAbsentAsync(key, unindexed, default);
+        await store.PutIfAbsentAsync(key, unindexed, ct);
 
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
-        await dataset.ImportAsync(key);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        await dataset.ImportAsync(key, ct);
 
         // Refused when the walk reaches it -- the first seek, since it is the only object -- which is
         // the one moment its rows could have been left out.
-        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset);
+        await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, ct);
         VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
-            async () => await cursor.SeekFirstAsync());
+            async () => await cursor.SeekFirstAsync(ct));
         Assert.Contains(key, refused.Message, StringComparison.Ordinal);
 
         // The scan is unaffected: it reads objects, not keys.
-        Assert.Equal(PerObject, await dataset.ScanBuilder().CountAsync());
+        Assert.Equal(PerObject, await dataset.ScanBuilder().CountAsync(ct));
     }
 
     [Fact]
     public async Task TheKeysColumnsAreSummarisedWhateverTheLimitSays()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // An entry's summaries are bounded to the first 32 columns. The column the dataset is
         // ORDERED by is not one a limit may drop: without it there is nothing to order a cursor-less
         // object by, and nothing to prune with on the column a reader filters by most.
@@ -224,8 +236,8 @@ public sealed class DatasetClusteringTests
             ClusteringKey = ["measure"],
             SummaryColumnLimit = 1,
         };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, narrow);
-        await dataset.AppendAsync(Batches(types, schema, 0));
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, narrow, ct);
+        await dataset.AppendAsync(Batches(types, schema, 0), ct);
 
         ObjectEntry entry = Assert.Single(await ObjectsAsync(dataset));
         Assert.Equal(2, entry.Summaries.Count);
@@ -237,19 +249,22 @@ public sealed class DatasetClusteringTests
     [Fact]
     public async Task ADatasetOrderedByRowPositionHasNoKeyWalk()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered(), ct);
         Assert.Null(dataset.Key);
-        await Assert.ThrowsAsync<InvalidOperationException>(async () => await DatasetKeyCursor.OpenAsync(dataset));
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await DatasetKeyCursor.OpenAsync(dataset, ct));
     }
 
     [Fact]
     public async Task TheTerminalsAcrossObjectsAnswerAsOneFileDoes()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A single file's terminals, one level up. The summaries let an object that cannot beat
         // the best so far be skipped whole -- the pruning of an ordered LIMIT k, at k = 1.
         Decoders.EnsureRegistered();
@@ -257,35 +272,35 @@ public sealed class DatasetClusteringTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
         byte[] single = await OneFileAsync(types, schema, [3, 1, 0, 2], indexes: true);
         await using MemorySegmentSource source = new MemorySegmentSource(single);
-        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
 
-        Assert.Equal(await file.ScanBuilder().MinAsync("key"), await dataset.ScanBuilder().MinAsync("key"));
-        Assert.Equal(await file.ScanBuilder().MaxAsync("key"), await dataset.ScanBuilder().MaxAsync("key"));
-        Assert.Equal(await file.ScanBuilder().CountAsync(), await dataset.ScanBuilder().CountAsync());
-        Assert.True(await dataset.ScanBuilder().AnyAsync());
+        Assert.Equal(await file.ScanBuilder().MinAsync("key", ct), await dataset.ScanBuilder().MinAsync("key", ct));
+        Assert.Equal(await file.ScanBuilder().MaxAsync("key", ct), await dataset.ScanBuilder().MaxAsync("key", ct));
+        Assert.Equal(await file.ScanBuilder().CountAsync(ct), await dataset.ScanBuilder().CountAsync(ct));
+        Assert.True(await dataset.ScanBuilder().AnyAsync(ct));
 
         VortexExpr window = Expr.And(
             Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(500L))),
             Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(600L))));
         Assert.Equal(
-            await file.ScanBuilder().Where(window).MinAsync("key"),
-            await dataset.ScanBuilder().Where(window).MinAsync("key"));
+            await file.ScanBuilder().Where(window).MinAsync("key", ct),
+            await dataset.ScanBuilder().Where(window).MinAsync("key", ct));
         Assert.Equal(
-            await file.ScanBuilder().Where(window).MaxAsync("key"),
-            await dataset.ScanBuilder().Where(window).MaxAsync("key"));
+            await file.ScanBuilder().Where(window).MaxAsync("key", ct),
+            await dataset.ScanBuilder().Where(window).MaxAsync("key", ct));
 
         // A value no object holds: `Any` refutes it from the summaries alone.
         DatasetScanMetrics metrics = new DatasetScanMetrics();
         VortexExpr absent = Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(-5L)));
-        Assert.False(await dataset.ScanBuilder().Where(absent).WithMetrics(metrics).AnyAsync());
+        Assert.False(await dataset.ScanBuilder().Where(absent).WithMetrics(metrics).AnyAsync(ct));
         Assert.Equal(0, metrics.ObjectsOpened);
         Assert.Equal(Objects, metrics.ObjectsSkipped);
     }

@@ -11,6 +11,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -36,16 +37,17 @@ public sealed class DatasetSummaryTests
     {
         // A predicate that a node's summaries refute skips the whole subtree -- here, at the leaf,
         // the object itself.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
         const int objects = 8;
         for (int i = 0; i < objects; i++)
         {
-            await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows));
+            await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows), ct);
         }
 
         // Wholly inside object 3's keys, which are [3000, 4000).
@@ -62,7 +64,7 @@ public sealed class DatasetSummaryTests
         // The acceptance: the same rows as one file, whichever way the scan got to them.
         byte[] single = await OneFileAsync(types, schema, objects * Rows);
         await using MemorySegmentSource source = new MemorySegmentSource(single);
-        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
         List<long> expected = await KeysAsync(file.ScanBuilder().Where(filter));
         Assert.Equal(100, expected.Count);
         Assert.Equal(expected, withSummaries);
@@ -80,15 +82,16 @@ public sealed class DatasetSummaryTests
     [Fact]
     public async Task AValueNoObjectHoldsOpensNothingAtAll()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
         for (int i = 0; i < 4; i++)
         {
-            await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows));
+            await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows), ct);
         }
 
         VortexExpr absent = Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(-1L)));
@@ -96,7 +99,7 @@ public sealed class DatasetSummaryTests
         Assert.Empty(await KeysAsync(dataset.ScanBuilder().Where(absent).WithMetrics(metrics)));
         Assert.Equal(0, metrics.ObjectsOpened);
         Assert.Equal(4, metrics.ObjectsSkipped);
-        Assert.Equal(0, await dataset.ScanBuilder().Where(absent).CountAsync());
+        Assert.Equal(0, await dataset.ScanBuilder().Where(absent).CountAsync(ct));
     }
 
     [Fact]
@@ -104,6 +107,7 @@ public sealed class DatasetSummaryTests
     {
         // The summaries' claim that only a deep tree can show: the walk stops at an INTERNAL entry,
         // so the leaf pages under it are never read and their objects are never even considered.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -112,11 +116,11 @@ public sealed class DatasetSummaryTests
         // Pages of a few entries, so that sixteen objects make a tree of three levels rather than
         // the one page 128 KiB would hold them all in.
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, schema, Options() with { Rule = new FillBoundaryRule(400) });
+            store, schema, Options() with { Rule = new FillBoundaryRule(400) }, ct);
         const int objects = 16;
         for (int i = 0; i < objects; i++)
         {
-            await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows));
+            await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows), ct);
         }
 
         Assert.True(dataset.Depth >= 3, $"sixteen objects in pages of 400 bytes should nest; depth is {dataset.Depth}");
@@ -143,21 +147,22 @@ public sealed class DatasetSummaryTests
         // Access by position, `Rows(a, b)`, walks the insertion-order tree, whose nodes carry row
         // sums. The ranges below are chosen to fall inside one object, to straddle two, and to run
         // past the end -- the three cases an off-by-one lives in.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
         const int objects = 5;
         for (int i = 0; i < objects; i++)
         {
-            await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows));
+            await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows), ct);
         }
 
         byte[] single = await OneFileAsync(types, schema, objects * Rows);
         await using MemorySegmentSource source = new MemorySegmentSource(single);
-        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
 
         (long From, long To)[] ranges =
         [
@@ -188,15 +193,16 @@ public sealed class DatasetSummaryTests
     {
         // A data object is immutable, so the second scan's opens are pure waste and the cache
         // is what removes them. The counters are the claim; the rows are the acceptance.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
         for (int i = 0; i < 4; i++)
         {
-            await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows));
+            await dataset.AppendAsync(Batches(types, schema, i * Rows, Rows), ct);
         }
 
         DatasetScanMetrics first = new DatasetScanMetrics();

@@ -22,6 +22,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -89,6 +90,7 @@ public sealed class DatasetBudgetTests
         // The point-lookup constant, on the axis a single-file test cannot see. The numbers are
         // printed rather than pinned one by one: what the assertion holds is that they do not
         // GROW, which is the claim, and a ceiling nobody derived would be a number somebody chose.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
@@ -98,19 +100,19 @@ public sealed class DatasetBudgetTests
             operations.Add(Add(i));
         }
 
-        CommitResult built = await DatasetCommitter.CommitAsync(store, operations, Options(), default);
+        CommitResult built = await DatasetCommitter.CommitAsync(store, operations, Options(), ct);
         Assert.Equal(objects, built.Tree.Entries);
 
         // Cold: nothing is known, so this is the list and the header read plus the descent.
         store.Reset();
-        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, default);
+        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, ct);
         CommitObject found = Assert.IsType<CommitObject>(commit);
         CommitPageSource pages = new CommitPageSource(store);
         pages.Inline(found.Header);
         pages.Know(version, found.HeaderEnd);
         DatasetTree tree = DatasetCommitter.TreeOf(found.Header);
 
-        TreeEntry? hit = await tree.FindAsync(Key(objects / 2), pages, default);
+        TreeEntry? hit = await tree.FindAsync(Key(objects / 2), pages, ct);
         Assert.True(hit.HasValue, "the key was committed and should be found");
         Assert.Equal(Key(objects / 2).ToArray(), hit.Value.Key.ToArray());
 
@@ -131,7 +133,7 @@ public sealed class DatasetBudgetTests
         // A DIFFERENT key is a different page and is not warm, which is the honest half of
         // pages being cacheable forever: the cache holds what was read, not what could be.
         store.Reset();
-        Assert.True((await tree.FindAsync(Key(objects / 2), pages, default)).HasValue);
+        Assert.True((await tree.FindAsync(Key(objects / 2), pages, ct)).HasValue);
         Assert.Equal(0, store.Requests);
     }
 
@@ -142,6 +144,7 @@ public sealed class DatasetBudgetTests
         // every leaf of a two-level tree: the leaves are read a window ahead, so the dependent
         // steps are about one per window, not one per leaf -- while the requests, which a total
         // counts, are still one per leaf.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
         List<DatasetOperation> operations = new List<DatasetOperation>(40_000);
@@ -150,14 +153,14 @@ public sealed class DatasetBudgetTests
             operations.Add(Add(i));
         }
 
-        await DatasetCommitter.CommitAsync(store, operations, Options(), default);
+        await DatasetCommitter.CommitAsync(store, operations, Options(), ct);
 
         // A latency, because a store that answers synchronously never has two requests in flight
         // and every request is its own step whatever the walk does -- the same reason the next test
         // injects one.
         inner.Latency = TimeSpan.FromMilliseconds(2);
         store.Reset();
-        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, default);
+        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, ct);
         CommitObject found = Assert.IsType<CommitObject>(commit);
         CommitPageSource pages = new CommitPageSource(store) { Reading = version };
         pages.Know(version, found.HeaderEnd);
@@ -165,7 +168,7 @@ public sealed class DatasetBudgetTests
         Assert.Equal(2, tree.Depth);
 
         long entries = 0;
-        await foreach (TreeEntry entry in tree.EnumerateAsync(pages, default))
+        await foreach (TreeEntry entry in tree.EnumerateAsync(pages, ct))
         {
             entries++;
         }
@@ -187,6 +190,7 @@ public sealed class DatasetBudgetTests
         // cold clustering-key lookup completes within D × λ, D its count of dependent requests,
         // which no total of requests can prove, since parallel requests hide in a total. So this
         // one reads a clock.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
@@ -196,20 +200,20 @@ public sealed class DatasetBudgetTests
             operations.Add(Add(i));
         }
 
-        await DatasetCommitter.CommitAsync(store, operations, Options(), default);
+        await DatasetCommitter.CommitAsync(store, operations, Options(), ct);
 
         TimeSpan latency = TimeSpan.FromMilliseconds(20);
         inner.Latency = latency;
         store.Reset();
 
         Stopwatch clock = Stopwatch.StartNew();
-        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, default);
+        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, ct);
         CommitObject found = Assert.IsType<CommitObject>(commit);
         CommitPageSource pages = new CommitPageSource(store);
         pages.Inline(found.Header);
         pages.Know(version, found.HeaderEnd);
         DatasetTree tree = DatasetCommitter.TreeOf(found.Header);
-        Assert.NotNull(await tree.FindAsync(Key(1_000), pages, default));
+        Assert.NotNull(await tree.FindAsync(Key(1_000), pages, ct));
         clock.Stop();
 
         long steps = store.DependentSteps;
@@ -229,7 +233,7 @@ public sealed class DatasetBudgetTests
 
         // And warm costs no round trip at all: every page the cold lookup read stays cached.
         store.Reset();
-        Assert.True((await tree.FindAsync(Key(1_000), pages, default)).HasValue);
+        Assert.True((await tree.FindAsync(Key(1_000), pages, ct)).HasValue);
         Assert.Equal(0, store.Requests);
     }
 
@@ -243,6 +247,7 @@ public sealed class DatasetBudgetTests
         // total is three. Once the tree outgrows the 192 KiB the header inlines, the touched leaf
         // is a read of its own and the total is four. That is the whole story of this number, and
         // it is why the assertion below is a range with an explanation rather than a constant.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         int[] sizes = [1, 1_000, 100_000];
         long[] steps = new long[sizes.Length];
         long[] written = new long[sizes.Length];
@@ -256,10 +261,10 @@ public sealed class DatasetBudgetTests
                 operations.Add(Add(i));
             }
 
-            await DatasetCommitter.CommitAsync(store, operations, Options(), default);
+            await DatasetCommitter.CommitAsync(store, operations, Options(), ct);
 
             store.Reset();
-            CommitResult one = await DatasetCommitter.CommitAsync(store, [Add(sizes[at] + 1)], Options(), default);
+            CommitResult one = await DatasetCommitter.CommitAsync(store, [Add(sizes[at] + 1)], Options(), ct);
             steps[at] = store.DependentSteps;
             written[at] = store.BytesWritten;
             Assert.Equal(sizes[at] + 1, one.Tree.Entries);

@@ -14,6 +14,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -56,14 +57,15 @@ public sealed class DatasetIndexingTests
     [Fact]
     public async Task EveryIntermediateCommitAnswersAsWithoutIndexes()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int i in (int[])[2, 0, 3, 1])
         {
-            await dataset.AppendAsync(ObjectRows(types, schema,i));
+            await dataset.AppendAsync(ObjectRows(types, schema,i), ct);
         }
 
         List<PositionedObject> objects = await ObjectsAsync(dataset);
@@ -81,7 +83,7 @@ public sealed class DatasetIndexingTests
                 await Assert.ThrowsAsync<VortexUnsupportedException>(
                     async () => await CountRowsAsync(dataset.ScanBuilder().InKeyOrder("id")));
 
-                IndexingResult result = await DatasetIndexer.IndexAsync(dataset, target, Policy, half, Build);
+                IndexingResult result = await DatasetIndexer.IndexAsync(dataset, target, Policy, half, Build, ct);
                 Assert.Equal(OperationOutcome.Applied, result.Outcome);
                 Assert.All(result.Reports, report => Assert.Equal(IndexOutcome.Built, report.Outcome));
                 commits++;
@@ -94,8 +96,8 @@ public sealed class DatasetIndexingTests
         foreach (PositionedObject held in await ObjectsAsync(dataset))
         {
             Assert.Equal(2, held.Entry.Fragments.Count);
-            await using ObjectLease lease = await dataset.RentAsync(held.Entry, default);
-            IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync())!;
+            await using ObjectLease lease = await dataset.RentAsync(held.Entry, ct);
+            IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(ct))!;
             Assert.All(lease.File.IndexFragmentRefusals, Assert.Null);
             Assert.Equal(3, directory.Entries.Count);
             foreach (IndexEntry entry in directory.Entries)
@@ -106,13 +108,13 @@ public sealed class DatasetIndexingTests
 
             // And the fragment's filter prunes inside the object: a tag no row holds.
             VortexExpr noTag = Expr.Eq(Expr.Field("tag"), Expr.Literal(FilterLiteral.From(1L)));
-            ScanExplanation plan = await lease.File.ScanBuilder().Where(noTag).ExplainAsync();
+            ScanExplanation plan = await lease.File.ScanBuilder().Where(noTag).ExplainAsync(ct);
             Assert.Equal(0, plan.LiveBlocks);
         }
 
         // Covered everywhere: the key-ordered read on `id` is served, and it is the sorted column.
         List<long> ids = [];
-        await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("id").ExecuteAsync())
+        await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("id").ExecuteAsync(ct))
         {
             ids.AddRange(batch.Column("id"u8).AsPrimitive<long>().Values.ToArray());
         }
@@ -131,6 +133,8 @@ public sealed class DatasetIndexingTests
     [Fact]
     public async Task ARebuildSwapsAnObjectsFragmentsForOneInOneCommit()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A rebuild drops the entry's fragments and indexes again, in one commit. Three
         // partial fragments become one over the whole object, and no version in between holds the
         // object with neither.
@@ -138,20 +142,20 @@ public sealed class DatasetIndexingTests
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
-        await dataset.AppendAsync(ObjectRows(types, schema, 0));
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        await dataset.AppendAsync(ObjectRows(types, schema, 0), ct);
         PositionedObject target = Assert.Single(await ObjectsAsync(dataset));
         for (int block = 0; block < 3; block++)
         {
             RowRange one = new RowRange(block * BlockRows, (block + 1) * BlockRows);
-            Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(dataset, target, Policy, one, Build)).Outcome);
+            Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(dataset, target, Policy, one, Build, ct)).Outcome);
         }
 
         PositionedObject partial = Assert.Single(await ObjectsAsync(dataset));
         Assert.Equal(3, partial.Entry.Fragments.Count);
         ulong before = dataset.Version;
 
-        IndexingResult rebuilt = await DatasetIndexer.RebuildAsync(dataset, partial, Policy, Build);
+        IndexingResult rebuilt = await DatasetIndexer.RebuildAsync(dataset, partial, Policy, Build, ct);
         Assert.Equal(OperationOutcome.Applied, rebuilt.Outcome);
         Assert.Equal(before + 1, dataset.Version);
         PositionedObject whole = Assert.Single(await ObjectsAsync(dataset));
@@ -162,35 +166,37 @@ public sealed class DatasetIndexingTests
         // answers are the same as without any index.
         Assert.Equal(PerObject, await CountRowsAsync(dataset.ScanBuilder().InKeyOrder("id")));
         await AssertAnswersAsync(dataset);
-        Assert.True((await dataset.VerifyAsync()).Holds);
+        Assert.True((await dataset.VerifyAsync(cancellationToken: ct)).Holds);
     }
 
     [Fact]
     public async Task MoreThanKFragmentsAreBundledIntoOneAndAnswerTheSame()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // An entry with more than K fragments is compacted by merging them (index bytes only)
         // into one fragment in a new commit. Eight one-block fragments on one object, K = 4.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
-        await dataset.AppendAsync(ObjectRows(types, schema, 0));
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        await dataset.AppendAsync(ObjectRows(types, schema, 0), ct);
         PositionedObject target = Assert.Single(await ObjectsAsync(dataset));
         for (int block = 0; block < PerObject / BlockRows; block++)
         {
             RowRange one = new RowRange(block * BlockRows, (block + 1) * BlockRows);
-            Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(dataset, target, Policy, one, Build)).Outcome);
+            Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(dataset, target, Policy, one, Build, ct)).Outcome);
         }
 
         List<long> ordered = await IdsInOrderAsync(dataset);
         await AssertAnswersAsync(dataset);
 
-        CompactionPlan plan = await dataset.PlanCompactionAsync();
+        CompactionPlan plan = await dataset.PlanCompactionAsync(cancellationToken: ct);
         Assert.Equal(1, plan.FragmentedObjects);
         Assert.Equal(CompactionTrigger.Fragments, plan.Job!.Trigger);
 
-        CompactionResult bundled = Assert.IsType<CompactionResult>(await dataset.CompactAsync());
+        CompactionResult bundled = Assert.IsType<CompactionResult>(await dataset.CompactAsync(cancellationToken: ct));
         Assert.Equal(CompactionTrigger.Fragments, bundled.Trigger);
         Assert.Equal(OperationOutcome.Applied, bundled.Outcome);
         Assert.Equal(0, bundled.Rows);
@@ -199,15 +205,15 @@ public sealed class DatasetIndexingTests
         // an alignment and a table.
         PositionedObject held = Assert.Single(await ObjectsAsync(dataset));
         PageReference bundle = Assert.Single(held.Entry.Fragments);
-        ReadOnlyMemory<byte> bytes = await dataset.ReadFragmentAsync(bundle, default);
+        ReadOnlyMemory<byte> bytes = await dataset.ReadFragmentAsync(bundle, ct);
         Assert.True(FragmentBundle.IsBundle(bytes.Span));
         Assert.Equal(8, FragmentBundle.Unpack(bytes).Count);
         Assert.InRange(bundled.BytesOut, bundled.BytesIn, bundled.BytesIn + (9 * 64) + (8 * 16) + 12);
 
         // Read as it was: every entry's eight runs, from the bundle's eight parts.
-        await using (ObjectLease lease = await dataset.RentAsync(held.Entry, default))
+        await using (ObjectLease lease = await dataset.RentAsync(held.Entry, ct))
         {
-            IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync())!;
+            IndexDirectory directory = (await lease.File.ReadIndexDirectoryAsync(ct))!;
             Assert.All(lease.File.IndexFragmentRefusals, Assert.Null);
             Assert.Equal(3, directory.Entries.Count);
             Assert.Equal((1, 8, 8), (directory.Entries[0].Runs.Count, directory.Entries[1].Runs.Count, directory.Entries[2].Runs.Count));
@@ -215,19 +221,19 @@ public sealed class DatasetIndexingTests
 
         Assert.Equal(ordered, await IdsInOrderAsync(dataset));
         await AssertAnswersAsync(dataset);
-        Assert.Null((await dataset.PlanCompactionAsync()).Job);
+        Assert.Null((await dataset.PlanCompactionAsync(cancellationToken: ct)).Job);
 
         // More fragments on top of the bundle, past K again: the next bundle flattens it.
         foreach (RowRange again in (RowRange[])[
             new RowRange(0, 2 * BlockRows), new RowRange(2 * BlockRows, 4 * BlockRows),
             new RowRange(4 * BlockRows, 6 * BlockRows), new RowRange(6 * BlockRows, PerObject)])
         {
-            await DatasetIndexer.IndexAsync(dataset, target, WritePolicy.None.For("tag", IndexSpec.Bloom(falsePositivePpm: 1_000)), again, Build);
+            await DatasetIndexer.IndexAsync(dataset, target, WritePolicy.None.For("tag", IndexSpec.Bloom(falsePositivePpm: 1_000)), again, Build, ct);
         }
 
-        Assert.NotNull(await dataset.CompactAsync());
+        Assert.NotNull(await dataset.CompactAsync(cancellationToken: ct));
         PageReference flat = Assert.Single(Assert.Single(await ObjectsAsync(dataset)).Entry.Fragments);
-        Assert.Equal(12, FragmentBundle.Unpack(await dataset.ReadFragmentAsync(flat, default)).Count);
+        Assert.Equal(12, FragmentBundle.Unpack(await dataset.ReadFragmentAsync(flat, ct)).Count);
         Assert.Equal(ordered, await IdsInOrderAsync(dataset));
         await AssertAnswersAsync(dataset);
     }
@@ -235,44 +241,48 @@ public sealed class DatasetIndexingTests
     [Fact]
     public async Task TwoIndexersOfOneRangeWriteOneFragment()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The rebase of a duplicate fragment, with the real indexer: the same rows under the same
         // policy are the same bytes, and the second commit finds them in the winner's leaf.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
-        await dataset.AppendAsync(ObjectRows(types, schema,0));
-        await using VortexDataset second = await VortexDataset.OpenAsync(store, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        await dataset.AppendAsync(ObjectRows(types, schema,0), ct);
+        await using VortexDataset second = await VortexDataset.OpenAsync(store, Clustered(), ct);
 
         PositionedObject first = Assert.Single(await ObjectsAsync(dataset));
         PositionedObject stale = Assert.Single(await ObjectsAsync(second));
-        Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(dataset, first, Policy, options: Build)).Outcome);
-        Assert.Equal(OperationOutcome.AlreadyThere, (await DatasetIndexer.IndexAsync(second, stale, Policy, options: Build)).Outcome);
+        Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(dataset, first, Policy, options: Build, cancellationToken: ct)).Outcome);
+        Assert.Equal(OperationOutcome.AlreadyThere, (await DatasetIndexer.IndexAsync(second, stale, Policy, options: Build, cancellationToken: ct)).Outcome);
 
-        await dataset.RefreshAsync();
+        await dataset.RefreshAsync(ct);
         Assert.Single(Assert.Single(await ObjectsAsync(dataset)).Entry.Fragments);
     }
 
     [Fact]
     public async Task AFragmentOfAnObjectACompactionReplacedIsDropped()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A data compaction rewrites the object, embeds its index and drops every fragment; an
         // indexer that built against the old object loses.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int i in (int[])[1, 0])
         {
-            await dataset.AppendAsync(ObjectRows(types, schema,i));
+            await dataset.AppendAsync(ObjectRows(types, schema,i), ct);
         }
 
         PositionedObject indexed = (await ObjectsAsync(dataset))[0];
-        Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(dataset, indexed, Policy, options: Build)).Outcome);
+        Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(dataset, indexed, Policy, options: Build, cancellationToken: ct)).Outcome);
 
-        await using VortexDataset stale = await VortexDataset.OpenAsync(store, Clustered());
+        await using VortexDataset stale = await VortexDataset.OpenAsync(store, Clustered(), ct);
         PositionedObject late = (await ObjectsAsync(stale))[1];
 
         CompactionOptions compaction = new CompactionOptions
@@ -281,13 +291,13 @@ public sealed class DatasetIndexingTests
             TargetBytesAtLevelOne = 1L << 30,
             MaxObjectBytes = 1L << 30,
         };
-        Assert.NotNull(await dataset.CompactAsync(compaction));
+        Assert.NotNull(await dataset.CompactAsync(compaction, ct));
         PositionedObject output = Assert.Single(await ObjectsAsync(dataset));
         Assert.Empty(output.Entry.Fragments);
 
-        IndexingResult dropped = await DatasetIndexer.IndexAsync(stale, late, Policy, options: Build);
+        IndexingResult dropped = await DatasetIndexer.IndexAsync(stale, late, Policy, options: Build, cancellationToken: ct);
         Assert.Equal(OperationOutcome.Dropped, dropped.Outcome);
-        await dataset.RefreshAsync();
+        await dataset.RefreshAsync(ct);
         Assert.Empty(Assert.Single(await ObjectsAsync(dataset)).Entry.Fragments);
         await AssertAnswersAsync(dataset);
     }
@@ -295,6 +305,7 @@ public sealed class DatasetIndexingTests
     [Fact]
     public async Task AnObjectWithoutAnIdentityIsRefusedWithTheReason()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -307,23 +318,23 @@ public sealed class DatasetIndexingTests
         {
             await foreach (RecordBatch batch in ObjectRows(types, schema,0))
             {
-                await writer.WriteAsync(batch);
+                await writer.WriteAsync(batch, ct);
             }
 
-            await writer.CompleteAsync();
+            await writer.CompleteAsync(ct);
         }
 
         byte[] foreign = stream.ToArray();
         int key = foreign.AsSpan().LastIndexOf(FileIdentity.MetadataKeyUtf8);
         foreign[key + FileIdentity.MetadataKeyUtf8.Length - 1] = (byte)'Y';
         string objectKey = CommitKey.ForData("foreign");
-        await store.PutIfAbsentAsync(objectKey, foreign, default);
+        await store.PutIfAbsentAsync(objectKey, foreign, ct);
 
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered());
-        await dataset.ImportAsync(objectKey);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered(), ct);
+        await dataset.ImportAsync(objectKey, ct);
         PositionedObject imported = Assert.Single(await ObjectsAsync(dataset));
         VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
-            async () => await DatasetIndexer.IndexAsync(dataset, imported, Policy, options: Build));
+            async () => await DatasetIndexer.IndexAsync(dataset, imported, Policy, options: Build, cancellationToken: ct));
         Assert.Contains("store's token", refused.Message, StringComparison.Ordinal);
     }
 

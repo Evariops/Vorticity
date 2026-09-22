@@ -72,16 +72,18 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task AnUncontendedCommitIsThreeDependentRequests()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The List, the read of the latest commit's header, the creation.
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
-        CommitResult first = await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), default);
+        CommitResult first = await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), ct);
         Assert.Equal(1UL, first.Version);
         Assert.Equal(1, first.Attempts);
 
         store.Reset();
-        CommitResult second = await DatasetCommitter.CommitAsync(store, [Add(2)], Options(), default);
+        CommitResult second = await DatasetCommitter.CommitAsync(store, [Add(2)], Options(), ct);
 
         Assert.Equal(2UL, second.Version);
         Assert.Equal(3, store.DependentSteps);
@@ -94,13 +96,15 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task AppendAndAppendBothLand()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // Both objects land in level 0, ordered by commit.
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), ct);
 
         // Two writers, each reading version 1 and adding its own object.
-        Task<CommitResult> left = DatasetCommitter.CommitAsync(store, [Add(2)], Options(), default).AsTask();
-        Task<CommitResult> right = DatasetCommitter.CommitAsync(store, [Add(3)], Options(), default).AsTask();
+        Task<CommitResult> left = DatasetCommitter.CommitAsync(store, [Add(2)], Options(), ct).AsTask();
+        Task<CommitResult> right = DatasetCommitter.CommitAsync(store, [Add(3)], Options(), ct).AsTask();
         CommitResult[] results = await Task.WhenAll(left, right);
 
         Assert.Equal([2UL, 3UL], [.. results.Select(r => r.Version).OrderBy(v => v)]);
@@ -108,17 +112,19 @@ public sealed class RebaseMatrixTests
         Assert.Equal(3, latest.Tree.Entries);
         foreach (int i in new[] { 1, 2, 3 })
         {
-            Assert.NotNull(await latest.Tree.FindAsync(Key(i), latest.Pages, default));
+            Assert.NotNull(await latest.Tree.FindAsync(Key(i), latest.Pages, ct));
         }
     }
 
     [Fact]
     public async Task ATwiceAddedObjectIsAddedOnce()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The same uid is the same bytes, so the loser's add is already there.
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), default);
-        CommitResult again = await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), ct);
+        CommitResult again = await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), ct);
 
         Assert.Equal([OperationOutcome.AlreadyThere], again.Outcomes);
         Assert.Equal(1, again.Tree.Entries);
@@ -127,103 +133,113 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task TheSecondIndexerOfOneFragmentWritesNothingForIt()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The second indexer finds the fragment present in the winner's leaf, drops its own and
         // writes nothing for it.
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), ct);
 
         DatasetOperation indexing = new DatasetOperation.AddFragment(Key(1), Object(1).Uid, Fragment(7));
-        CommitResult winner = await DatasetCommitter.CommitAsync(store, [indexing], Options(), default);
+        CommitResult winner = await DatasetCommitter.CommitAsync(store, [indexing], Options(), ct);
         Assert.Equal([OperationOutcome.Applied], winner.Outcomes);
 
-        CommitResult loser = await DatasetCommitter.CommitAsync(store, [indexing], Options(), default);
+        CommitResult loser = await DatasetCommitter.CommitAsync(store, [indexing], Options(), ct);
         Assert.Equal([OperationOutcome.AlreadyThere], loser.Outcomes);
 
-        TreeEntry entry = Assert.NotNull(await loser.Tree.FindAsync(Key(1), loser.Pages, default));
+        TreeEntry entry = Assert.NotNull(await loser.Tree.FindAsync(Key(1), loser.Pages, ct));
         PageReference named = Assert.Single(ObjectEntry.FromBytes(entry.Value.Span).Fragments);
 
         // The winner's commit object holds the fragment where its entry says; the loser, having
         // applied nothing, wrote no commit object at all and names the winner's.
-        using ObjectRange won = await store.GetRangeAsync(winner.Key, 0, 1 << 20, default);
+        using ObjectRange won = await store.GetRangeAsync(winner.Key, 0, 1 << 20, ct);
         CommitObject written = CommitObject.Open(won.Memory.Span, won.Length);
         Assert.Equal([named], written.Table.Fragments);
         Assert.Equal(Fragment(7).ToArray(), written.Page(won.Memory.Span, named).ToArray());
 
         Assert.Equal(winner.Version, loser.Version);
         Assert.Equal(winner.Key, loser.Key);
-        Assert.Null(await store.HeadAsync(CommitKey.For(winner.Version + 1), default));
+        Assert.Null(await store.HeadAsync(CommitKey.For(winner.Version + 1), ct));
     }
 
     [Fact]
     public async Task AFragmentWhoseObjectIsGoneIsDropped()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The fragment's object is gone; the fragment is dropped and never written.
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), ct);
 
         // A compaction replaces object 1 by an output of its own.
         DatasetOperation compaction = Replace([1], (1, 9));
-        await DatasetCommitter.CommitAsync(store, [compaction], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [compaction], Options(), ct);
 
         // The indexer was working against the OLD uid.
         CommitResult indexer = await DatasetCommitter.CommitAsync(
             store,
             [new DatasetOperation.AddFragment(Key(1), Object(1).Uid, Fragment(3))],
             Options(),
-            default);
+            ct);
 
         Assert.Equal([OperationOutcome.Dropped], indexer.Outcomes);
-        TreeEntry entry = Assert.NotNull(await indexer.Tree.FindAsync(Key(1), indexer.Pages, default));
+        TreeEntry entry = Assert.NotNull(await indexer.Tree.FindAsync(Key(1), indexer.Pages, ct));
         Assert.Empty(ObjectEntry.FromBytes(entry.Value.Span).Fragments);
     }
 
     [Fact]
     public async Task ACompactionWhoseInputIsGoneAbandons()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The second compaction finds an input missing and abandons; its outputs are garbage.
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await DatasetCommitter.CommitAsync(store, [Add(1), Add(2), Add(3)], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [Add(1), Add(2), Add(3)], Options(), ct);
 
         DatasetOperation first = Replace([1, 2], (1, 5));
-        CommitResult winner = await DatasetCommitter.CommitAsync(store, [first], Options(), default);
+        CommitResult winner = await DatasetCommitter.CommitAsync(store, [first], Options(), ct);
         Assert.Equal([OperationOutcome.Applied], winner.Outcomes);
         Assert.Equal(2, winner.Tree.Entries);
 
         DatasetOperation overlapping = Replace([2, 3], (2, 6));
-        CommitResult loser = await DatasetCommitter.CommitAsync(store, [overlapping], Options(), default);
+        CommitResult loser = await DatasetCommitter.CommitAsync(store, [overlapping], Options(), ct);
 
         Assert.Equal([OperationOutcome.Abandoned], loser.Outcomes);
         Assert.Equal(2, loser.Tree.Entries);
-        Assert.NotNull(await loser.Tree.FindAsync(Key(3), loser.Pages, default));
+        Assert.NotNull(await loser.Tree.FindAsync(Key(3), loser.Pages, ct));
     }
 
     [Fact]
     public async Task AnAppendIsNotSweptUpByACompactionThatDidNotSeeIt()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The compaction took a snapshot of <= 8 objects; the new append is not among them and
         // stays in level 0.
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [Add(1), Add(2)], Options(), ct);
 
         // The compactor read version 1 and decided to fold objects 1 and 2 into one.
         DatasetOperation compaction = Replace([1, 2], (1, 4));
 
         // Meanwhile an append lands.
-        await DatasetCommitter.CommitAsync(store, [Add(3)], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [Add(3)], Options(), ct);
 
-        CommitResult after = await DatasetCommitter.CommitAsync(store, [compaction], Options(), default);
+        CommitResult after = await DatasetCommitter.CommitAsync(store, [compaction], Options(), ct);
         Assert.Equal([OperationOutcome.Applied], after.Outcomes);
         Assert.Equal(2, after.Tree.Entries);
-        Assert.NotNull(await after.Tree.FindAsync(Key(3), after.Pages, default));
+        Assert.NotNull(await after.Tree.FindAsync(Key(3), after.Pages, ct));
     }
 
     [Fact]
     public async Task AReaderHoldsARootAndSeesOneVersion()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The reader holds a root, and everything it references is immutable.
         await using MemoryObjectStore store = new MemoryObjectStore();
         CommitResult first = await DatasetCommitter.CommitAsync(
-            store, [.. Enumerable.Range(0, 200).Select(i => Add(i))], Options(), default);
+            store, [.. Enumerable.Range(0, 200).Select(i => Add(i))], Options(), ct);
 
         // The reader's view, taken now.
         DatasetTree held = first.Tree;
@@ -235,32 +251,34 @@ public sealed class RebaseMatrixTests
                 store,
                 [.. Enumerable.Range(200 + (round * 50), 50).Select(i => Add(i))],
                 Options(),
-                default);
+                ct);
         }
 
         Assert.Equal(200, held.Entries);
         List<TreeEntry> walked = [];
-        await foreach (TreeEntry entry in held.EnumerateAsync(pages, default))
+        await foreach (TreeEntry entry in held.EnumerateAsync(pages, ct))
         {
             walked.Add(entry);
         }
 
         Assert.Equal(200, walked.Count);
-        Assert.Null(await held.FindAsync(Key(250), pages, default));
+        Assert.Null(await held.FindAsync(Key(250), pages, ct));
     }
 
     [Fact]
     public async Task ARebaseCostsTheHeaderTheTouchedLeavesAndTheCreation()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // An iteration of the commit loop costs depth + 2 dependent requests.
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
         await DatasetCommitter.CommitAsync(
-            store, [.. Enumerable.Range(0, 400).Select(i => Add(i))], Options(), default);
+            store, [.. Enumerable.Range(0, 400).Select(i => Add(i))], Options(), ct);
 
-        CommitResult before = await DatasetCommitter.CommitAsync(store, [Add(1_000)], Options(), default);
+        CommitResult before = await DatasetCommitter.CommitAsync(store, [Add(1_000)], Options(), ct);
         store.Reset();
-        CommitResult after = await DatasetCommitter.CommitAsync(store, [Add(1_001)], Options(), default);
+        CommitResult after = await DatasetCommitter.CommitAsync(store, [Add(1_001)], Options(), ct);
 
         Assert.Equal(before.Version + 1, after.Version);
         Assert.Equal(1, store.CountOf(ObjectOperation.List));
@@ -278,14 +296,15 @@ public sealed class RebaseMatrixTests
     [Fact]
     public async Task AWriterThatKeepsLosingGivesUpWithTheReason()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), default);
+        await DatasetCommitter.CommitAsync(store, [Add(1)], Options(), ct);
 
         // A store that always says the key is taken: the writer never wins.
         await using AlwaysTaken taken = new AlwaysTaken(store);
         ObjectStoreException refused = await Assert.ThrowsAsync<ObjectStoreException>(
             async () => await DatasetCommitter.CommitAsync(
-                taken, [Add(2)], Options() with { MaxAttempts = 3 }, default));
+                taken, [Add(2)], Options() with { MaxAttempts = 3 }, ct));
         Assert.Contains("coordinator", refused.Message, StringComparison.Ordinal);
     }
 

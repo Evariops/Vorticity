@@ -25,8 +25,9 @@ public sealed class MemoryStoreFaultTests
     [Fact]
     public async Task RequestsIssuedTogetherCostOneLatencyAndOneStep()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
-        await inner.PutIfAbsentAsync("data/one", Bytes("0123456789"), default);
+        await inner.PutIfAbsentAsync("data/one", Bytes("0123456789"), ct);
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
         TimeSpan latency = TimeSpan.FromMilliseconds(50);
@@ -37,7 +38,7 @@ public sealed class MemoryStoreFaultTests
         Task<ObjectRange>[] reads = new Task<ObjectRange>[8];
         for (int i = 0; i < reads.Length; i++)
         {
-            reads[i] = store.GetRangeAsync("data/one", i, 1, default).AsTask();
+            reads[i] = store.GetRangeAsync("data/one", i, 1, ct).AsTask();
         }
 
         foreach (Task<ObjectRange> read in reads)
@@ -58,7 +59,7 @@ public sealed class MemoryStoreFaultTests
         watch.Restart();
         for (int i = 0; i < 4; i++)
         {
-            using ObjectRange range = await store.GetRangeAsync("data/one", i, 1, default);
+            using ObjectRange range = await store.GetRangeAsync("data/one", i, 1, ct);
         }
 
         // Four requests one after another: four steps, and the clock agrees.
@@ -71,17 +72,18 @@ public sealed class MemoryStoreFaultTests
     [Fact]
     public async Task AFailureThrowsAndChangesNothing()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await store.PutIfAbsentAsync("data/kept", Bytes("kept"), default);
+        await store.PutIfAbsentAsync("data/kept", Bytes("kept"), ct);
 
         store.Fails = (operation, key) => operation == ObjectOperation.PutIfAbsent && key == "data/new";
         await Assert.ThrowsAsync<ObjectStoreException>(
-            async () => await store.PutIfAbsentAsync("data/new", Bytes("never"), default));
-        Assert.Null(await store.HeadAsync("data/new", default));
+            async () => await store.PutIfAbsentAsync("data/new", Bytes("never"), ct));
+        Assert.Null(await store.HeadAsync("data/new", ct));
         Assert.Equal(1, store.Count);
 
         store.Fails = null;
-        Assert.Equal(PutOutcome.Created, await store.PutIfAbsentAsync("data/new", Bytes("now"), default));
+        Assert.Equal(PutOutcome.Created, await store.PutIfAbsentAsync("data/new", Bytes("now"), ct));
     }
 
     [Fact]
@@ -90,33 +92,35 @@ public sealed class MemoryStoreFaultTests
         // The state the rebase exists for: the put succeeded, the writer saw an exception, and
         // the key is now taken by bytes it wrote itself. A test that cannot produce this state
         // tests the easy half of the commit protocol.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
         store.CrashesAfterPut = key => key == "commit/00000000000000000009.vxc";
 
         await Assert.ThrowsAsync<ObjectStoreException>(
-            async () => await store.PutIfAbsentAsync("commit/00000000000000000009.vxc", Bytes("mine"), default));
+            async () => await store.PutIfAbsentAsync("commit/00000000000000000009.vxc", Bytes("mine"), ct));
 
-        ObjectHead head = Assert.NotNull(await store.HeadAsync("commit/00000000000000000009.vxc", default));
+        ObjectHead head = Assert.NotNull(await store.HeadAsync("commit/00000000000000000009.vxc", ct));
         Assert.Equal(4, head.Length);
 
         // And the retry finds the key taken, which is exactly what a rebase has to recognise.
         store.CrashesAfterPut = null;
         Assert.Equal(
             PutOutcome.Exists,
-            await store.PutIfAbsentAsync("commit/00000000000000000009.vxc", Bytes("mine"), default));
+            await store.PutIfAbsentAsync("commit/00000000000000000009.vxc", Bytes("mine"), ct));
     }
 
     [Fact]
     public async Task AFailedListDoesNotHideTheKeys()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await store.PutIfAbsentAsync("data/a", Bytes("a"), default);
+        await store.PutIfAbsentAsync("data/a", Bytes("a"), ct);
         int calls = 0;
         store.Fails = (operation, _) => operation == ObjectOperation.List && calls++ == 0;
 
         await Assert.ThrowsAsync<ObjectStoreException>(
-            async () => await store.ListAsync("data/", null, 10, default));
-        Assert.Equal(["data/a"], await store.ListAsync("data/", null, 10, default));
+            async () => await store.ListAsync("data/", null, 10, ct));
+        Assert.Equal(["data/a"], await store.ListAsync("data/", null, 10, ct));
     }
 
     [Fact]
@@ -128,6 +132,6 @@ public sealed class MemoryStoreFaultTests
         await cancellation.CancelAsync();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await put);
         store.Latency = TimeSpan.Zero;
-        Assert.Null(await store.HeadAsync("data/slow", default));
+        Assert.Null(await store.HeadAsync("data/slow", TestContext.Current.CancellationToken));
     }
 }

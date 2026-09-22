@@ -15,6 +15,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -41,6 +42,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ACompactionOfLevelZeroProducesTheObjectASortedInputWouldHave()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A compaction reading level 0 through its runs produces the same object as one reading
         // inputs sorted beforehand.
         Decoders.EnsureRegistered();
@@ -48,20 +51,20 @@ public sealed class DatasetCompactionTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
         CompactionOptions options = Options(target: 1 << 20);
-        CompactionPlan plan = await dataset.PlanCompactionAsync(options);
+        CompactionPlan plan = await dataset.PlanCompactionAsync(options, ct);
         Assert.Equal(CompactionTrigger.LevelZeroCeiling, plan.Job!.Trigger);
         Assert.Equal(CompactionStyle.Leveled, plan.Style);
         Assert.Equal(Objects, plan.Job.Inputs.Count);
         Assert.Equal(Rows, plan.Job.Rows);
 
-        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options, ct));
         Assert.Equal(OperationOutcome.Applied, result.Outcome);
         Assert.Equal(Objects, result.ObjectsIn);
         Assert.Equal(1, result.ObjectsOut);
@@ -73,7 +76,7 @@ public sealed class DatasetCompactionTests
         // The oracle: the same rows, sorted before they were written, in one file.
         byte[] sorted = await SortedFileAsync(types, schema);
         await using MemorySegmentSource source = new MemorySegmentSource(sorted);
-        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
 
         List<(long Key, double Measure)> expected = await RowsAsync(file.ScanBuilder());
         List<(long Key, double Measure)> produced = await RowsAsync(dataset.ScanBuilder());
@@ -83,7 +86,7 @@ public sealed class DatasetCompactionTests
         // be a seek without reading the run at all.
         ObjectEntry compacted = Assert.Single(await ObjectsAsync(dataset));
         await using ObjectSegmentSource bytes = new ObjectSegmentSource(store, compacted.Key);
-        await using VortexFile output = await VortexFile.OpenAsync(bytes, new VortexOpenOptions(), default);
+        await using VortexFile output = await VortexFile.OpenAsync(bytes, new VortexOpenOptions(), ct);
         Assert.True(IsSorted(output, "key"), "a merge writes its output sorted by construction (§5.3)");
 
         Console.Out.Write(FormattableString.Invariant(
@@ -93,6 +96,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task TheInvariantHoldsAfterEveryStepOfARandomisedAppendStream()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The stream appends a random number of rows at a random offset, and compaction is run to
         // exhaustion at random moments — so level 0 is sometimes over its ceiling and sometimes
         // empty, and the invariant is checked after every single step.
@@ -101,7 +106,7 @@ public sealed class DatasetCompactionTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
 
         // A small target so the merges roll into several objects per level, a fan-out of three so
         // level 1 goes over its size and the second trigger fires too, and a ceiling of two so
@@ -114,7 +119,7 @@ public sealed class DatasetCompactionTests
         {
             int count = 40 + random.Next(120);
             long from = random.Next(2_000);
-            await dataset.AppendAsync(Shuffled(types, schema, from, count, random.Next()));
+            await dataset.AppendAsync(Shuffled(types, schema, from, count, random.Next()), ct);
             for (int i = 0; i < count; i++)
             {
                 appended.Add(from + i);
@@ -125,7 +130,7 @@ public sealed class DatasetCompactionTests
                 continue;
             }
 
-            while (await dataset.CompactAsync(options) is { } step)
+            while (await dataset.CompactAsync(options, ct) is { } step)
             {
                 compactions++;
                 Assert.Equal(OperationOutcome.Applied, step.Outcome);
@@ -133,7 +138,7 @@ public sealed class DatasetCompactionTests
             }
         }
 
-        while (await dataset.CompactAsync(options) is { } last)
+        while (await dataset.CompactAsync(options, ct) is { } last)
         {
             compactions++;
             Assert.Equal(OperationOutcome.Applied, last.Outcome);
@@ -155,6 +160,8 @@ public sealed class DatasetCompactionTests
     [InlineData(false)]
     public async Task TheWriteAmplificationIsMeasuredOverAStreamThatReachesSeveralLevels(bool leveled)
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The price of each style: leveled rewrites a row about F/2 times per level it crosses,
         // tiered about once. Measured in ROWS, which is what the sentence counts: the rows every
         // compaction rewrote, over the rows appended, with compaction drained after every append —
@@ -165,7 +172,7 @@ public sealed class DatasetCompactionTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, schema, leveled ? Clustered() : Unclustered());
+            store, schema, leveled ? Clustered() : Unclustered(), ct);
 
         const int fanout = 4;
         CompactionOptions options = Options(target: 2 << 10) with { Fanout = fanout };
@@ -177,9 +184,9 @@ public sealed class DatasetCompactionTests
         for (int round = 0; round < 64; round++)
         {
             int count = 50 + random.Next(100);
-            await dataset.AppendAsync(Shuffled(types, schema, random.Next(1_000_000), count, random.Next()));
+            await dataset.AppendAsync(Shuffled(types, schema, random.Next(1_000_000), count, random.Next()), ct);
             appended += count;
-            while (await dataset.CompactAsync(options) is { } step)
+            while (await dataset.CompactAsync(options, ct) is { } step)
             {
                 Assert.Equal(OperationOutcome.Applied, step.Outcome);
                 rewritten += step.Rows;
@@ -210,6 +217,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ASeekOpensLevelZeroAndOneObjectPerLevelAbove()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The key cursor is held to the bound `InKeyOrder` is held to. A multi-level dataset from
         // a randomised stream; a fresh cursor per sought key, whose seek must open no more than
         // level 0's objects and one per level above it, and whose walk from there must be every
@@ -218,7 +227,7 @@ public sealed class DatasetCompactionTests
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         List<long> appended = await LevelledAsync(dataset, types, schema);
         appended.Sort();
 
@@ -233,12 +242,12 @@ public sealed class DatasetCompactionTests
         long bound = dataset.Levels[0].Entries + levels;
         foreach (long sought in (long[])[-5, 0, 333, 1_000, 1_777, 2_150])
         {
-            await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset);
-            bool found = await cursor.SeekAsync(FilterLiteral.From(sought));
+            await using DatasetKeyCursor cursor = await DatasetKeyCursor.OpenAsync(dataset, ct);
+            bool found = await cursor.SeekAsync(FilterLiteral.From(sought), cancellationToken: ct);
             Assert.True(cursor.Cursors <= bound, $"a seek to {sought} opened {cursor.Cursors} cursors against {bound}");
 
             List<long> walked = [];
-            for (bool any = found; any; any = await cursor.NextAsync())
+            for (bool any = found; any; any = await cursor.NextAsync(ct))
             {
                 walked.Add(cursor.Key.SignedValue);
             }
@@ -250,6 +259,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ACountOnTheKeyOpensOnlyTheObjectsTheRangeCuts()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A count over a key range: the objects wholly inside the range are counted from their
         // entries; only the ones the range cuts are opened -- at most two per level above 0, plus
         // level 0's. The oracle is the keys appended.
@@ -257,7 +268,7 @@ public sealed class DatasetCompactionTests
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         List<long> appended = await LevelledAsync(dataset, types, schema);
         int levels = 0;
         for (int level = 1; level < dataset.Levels.Count; level++)
@@ -273,7 +284,7 @@ public sealed class DatasetCompactionTests
             VortexExpr range = Expr.And(
                 Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(low))),
                 Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(high))));
-            long count = await dataset.ScanBuilder().Where(range).WithMetrics(metrics).CountAsync();
+            long count = await dataset.ScanBuilder().Where(range).WithMetrics(metrics).CountAsync(ct);
             Assert.Equal(appended.FindAll(key => key >= low && key < high).Count, count);
             Assert.True(metrics.ObjectsOpened <= bound, $"[{low}, {high}) opened {metrics.ObjectsOpened} objects against {bound}");
             counted += metrics.ObjectsCounted;
@@ -284,19 +295,21 @@ public sealed class DatasetCompactionTests
         // The rank is the count below the key, by the same path.
         foreach (long key in (long[])[-1, 0, 1_000, 5_000])
         {
-            Assert.Equal(appended.FindAll(k => k < key).Count, await dataset.RankAsync(FilterLiteral.From(key)));
+            Assert.Equal(appended.FindAll(k => k < key).Count, await dataset.RankAsync(FilterLiteral.From(key), ct));
         }
 
         // A filter the key's summaries cannot count opens what the summaries keep, and answers the same.
         DatasetScanMetrics other = new DatasetScanMetrics();
         VortexExpr measure = Expr.Lt(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(100.0)));
-        Assert.Equal(appended.FindAll(key => key / 4.0 < 100.0).Count, await dataset.ScanBuilder().Where(measure).WithMetrics(other).CountAsync());
+        Assert.Equal(appended.FindAll(key => key / 4.0 < 100.0).Count, await dataset.ScanBuilder().Where(measure).WithMetrics(other).CountAsync(ct));
         Assert.Equal(0, other.ObjectsCounted);
     }
 
     [Fact]
     public async Task OutputsAreRolledAtTheDestinationSizeAndStayKeyDisjoint()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A compaction writes one or more outputs at the target size of the destination level,
         // whose objects must stay key-disjoint. A target below one object's size forces both.
         Decoders.EnsureRegistered();
@@ -304,16 +317,16 @@ public sealed class DatasetCompactionTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
         // Big enough a fan-out that level 1 is not immediately over its own size, small enough a
         // target that the merge has to roll.
         CompactionOptions options = Options(target: 2 << 10) with { Fanout = 1_000 };
-        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options, ct));
         Assert.True(result.ObjectsOut > 1, $"a target of 2 KiB must roll; it wrote {result.ObjectsOut}");
         Assert.Equal(Rows, result.Rows);
         Assert.Equal(Rows, dataset.RowCount);
@@ -337,6 +350,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ATieredCompactionConcatenatesAndKeepsTheDatasetsRowOrder()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The default style is leveled when a clustering key is declared and tiered otherwise. A
         // tiered compaction is a concatenation, and without a clustering key the dataset's order is
         // the first row position — so the rows must come out in exactly the same sequence.
@@ -345,19 +360,19 @@ public sealed class DatasetCompactionTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered(), ct);
         for (int i = 0; i < 6; i++)
         {
-            await dataset.AppendAsync(Shuffled(types, schema, i * 100, 100, seed: i + 1));
+            await dataset.AppendAsync(Shuffled(types, schema, i * 100, 100, seed: i + 1), ct);
         }
 
         List<long> before = await KeysAsync(dataset.ScanBuilder());
         CompactionOptions options = Options(target: 1 << 20) with { LevelZeroCeiling = 3 };
-        CompactionPlan plan = await dataset.PlanCompactionAsync(options);
+        CompactionPlan plan = await dataset.PlanCompactionAsync(options, ct);
         Assert.Equal(CompactionStyle.Tiered, plan.Style);
         Assert.False(plan.IsClustered);
 
-        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options, ct));
         Assert.Equal(6, result.ObjectsIn);
         Assert.Equal(1, result.ObjectsOut);
         Assert.Equal(600, dataset.RowCount);
@@ -372,6 +387,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ALevelAboveItsSizeIsCompactedIntoTheOneAbove()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The level-size trigger. Level 0 goes up first; then level 1 is over the size its fan-out
         // allows, and the next step moves it to level 2 — the lowest level over its size first.
         Decoders.EnsureRegistered();
@@ -379,24 +396,24 @@ public sealed class DatasetCompactionTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
         // A target of 2 KiB and a fan-out of 2: level 1 holds at most 4 KiB, and the rolled outputs
         // are well past it.
         CompactionOptions options = Options(target: 2 << 10) with { Fanout = 2 };
-        Assert.Equal(CompactionTrigger.LevelZeroCeiling, (await dataset.PlanCompactionAsync(options)).Job!.Trigger);
-        _ = await dataset.CompactAsync(options);
+        Assert.Equal(CompactionTrigger.LevelZeroCeiling, (await dataset.PlanCompactionAsync(options, ct)).Job!.Trigger);
+        _ = await dataset.CompactAsync(options, ct);
 
-        CompactionPlan second = await dataset.PlanCompactionAsync(options);
+        CompactionPlan second = await dataset.PlanCompactionAsync(options, ct);
         Assert.Equal(CompactionTrigger.LevelSize, second.Job!.Trigger);
         Assert.Equal(1, second.Job.FromLevel);
         Assert.Equal(2, second.Job.ToLevel);
 
-        CompactionResult moved = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        CompactionResult moved = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options, ct));
         Assert.Equal(1, moved.FromLevel);
         Assert.Equal(2, moved.ToLevel);
         Assert.True(dataset.Levels.Count >= 3);
@@ -407,6 +424,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task TheTopLevelOfACappedDatasetHasNoSize()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The header's `Levels`: the same data as above, where level 1 went over its size
         // and moved up. Capped at two levels, level 1 is the top: it only grows, and a drain ends.
         Decoders.EnsureRegistered();
@@ -415,19 +434,19 @@ public sealed class DatasetCompactionTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, schema, Clustered() with { Compaction = new CompactionSettings(2, 0, 0) });
+            store, schema, Clustered() with { Compaction = new CompactionSettings(2, 0, 0) }, ct);
         Assert.Equal(2, dataset.Compaction.Levels);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
         CompactionOptions options = Options(target: 2 << 10) with { Fanout = 2 };
-        Assert.Equal(CompactionTrigger.LevelZeroCeiling, (await dataset.PlanCompactionAsync(options)).Job!.Trigger);
-        _ = await dataset.CompactAsync(options);
+        Assert.Equal(CompactionTrigger.LevelZeroCeiling, (await dataset.PlanCompactionAsync(options, ct)).Job!.Trigger);
+        _ = await dataset.CompactAsync(options, ct);
         Assert.True(dataset.Levels[1].Entries > 1);
 
-        Assert.Null((await dataset.PlanCompactionAsync(options)).Job);
+        Assert.Null((await dataset.PlanCompactionAsync(options, ct)).Job);
         Assert.Equal(2, dataset.Levels.Count);
         Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.ScanBuilder()));
 
@@ -438,6 +457,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task APlanReadsEntriesAndChangesNothing()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // Compaction is the user's background job, so planning must be pure: a caller
         // reads what it would cost and decides. The version does not move and no object is written.
         Decoders.EnsureRegistered();
@@ -445,15 +466,15 @@ public sealed class DatasetCompactionTests
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
         ulong version = dataset.Version;
         long objects = store.Count;
-        CompactionPlan plan = await dataset.PlanCompactionAsync(Options(target: 1 << 20));
+        CompactionPlan plan = await dataset.PlanCompactionAsync(Options(target: 1 << 20), ct);
 
         Assert.Equal(version, dataset.Version);
         Assert.Equal(objects, store.Count);
@@ -464,7 +485,7 @@ public sealed class DatasetCompactionTests
         Assert.Equal(0, plan.FragmentedObjects);
 
         // Under the specification's own ceiling of eight, four objects are not due at all.
-        CompactionPlan idle = await dataset.PlanCompactionAsync();
+        CompactionPlan idle = await dataset.PlanCompactionAsync(cancellationToken: ct);
         Assert.False(idle.HasWork);
         Assert.Null(idle.Job);
         Assert.Equal(0, idle.Lag);
@@ -473,6 +494,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ACompositeClusteringKeyIsMergedThroughItsRun()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A composite key's objects are read by `InKeyOrder(paths)` over the mandatory composite
         // run and merged on the tuple. Four interleaved, shuffled objects; the output is one
         // object in tuple order, and the dataset reads back in that order.
@@ -482,14 +505,14 @@ public sealed class DatasetCompactionTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         DatasetOptions composite = Unclustered() with { ClusteringKey = ["key", "measure"] };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, composite);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, composite, ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
         CompactionOptions options = Options(target: 1 << 20);
-        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        CompactionResult result = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options, ct));
         Assert.Equal(OperationOutcome.Applied, result.Outcome);
         Assert.Equal((Objects, 1L, (long)Rows), (result.ObjectsIn, result.ObjectsOut, result.Rows));
         Assert.Equal(CompactionStyle.Leveled, result.Style);
@@ -506,6 +529,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task ACompositeKeyHoldingANullIsRefusedByName()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // What stays refused: a composite run holds no tuple with a null, so a merge through it
         // would drop the row. One column's null keys are read last and merged (the test below,
         // `TheNullKeysOfOneColumnAreMergedLast`); a tuple's are not.
@@ -518,12 +543,12 @@ public sealed class DatasetCompactionTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, schema, Unclustered() with { ClusteringKey = ["key", "measure"] });
-        await dataset.AppendAsync(NullableMeasures(types, schema, 0, nullEvery: 5));
-        await dataset.AppendAsync(NullableMeasures(types, schema, 1, nullEvery: 5));
+            store, schema, Unclustered() with { ClusteringKey = ["key", "measure"] }, ct);
+        await dataset.AppendAsync(NullableMeasures(types, schema, 0, nullEvery: 5), ct);
+        await dataset.AppendAsync(NullableMeasures(types, schema, 1, nullEvery: 5), ct);
 
         VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
-            async () => await dataset.CompactAsync(Options(target: 1 << 20) with { LevelZeroCeiling = 1 }));
+            async () => await dataset.CompactAsync(Options(target: 1 << 20) with { LevelZeroCeiling = 1 }, ct));
         Assert.Contains("holds no tuple with a null", refused.Message, StringComparison.Ordinal);
         Assert.Contains("'measure'", refused.Message, StringComparison.Ordinal);
         Assert.Equal(2, dataset.Levels[0].Entries);
@@ -532,6 +557,8 @@ public sealed class DatasetCompactionTests
     [Fact]
     public async Task TheNullKeysOfOneColumnAreMergedLast()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A key column holding nulls compacts. The core's key-ordered read delivers them last,
         // which is where the merge's row encoding sorts them, so no row is dropped and the output
         // reads back keyed rows first, nulls after.
@@ -544,10 +571,10 @@ public sealed class DatasetCompactionTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, schema, Unclustered() with { ClusteringKey = ["measure"] });
+            store, schema, Unclustered() with { ClusteringKey = ["measure"] }, ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(NullableMeasures(types, schema, residue, nullEvery: 7, measureFirst: true));
+            await dataset.AppendAsync(NullableMeasures(types, schema, residue, nullEvery: 7, measureFirst: true), ct);
         }
 
         // Before any compaction, the read merge across the four objects puts them in the same place,
@@ -565,7 +592,7 @@ public sealed class DatasetCompactionTests
         }
 
         CompactionResult result = Assert.IsType<CompactionResult>(
-            await dataset.CompactAsync(Options(target: 1 << 20)));
+            await dataset.CompactAsync(Options(target: 1 << 20), ct));
         Assert.Equal((long)Rows, result.Rows);
 
         List<double?> measures = await MeasuresAsync(dataset.ScanBuilder());

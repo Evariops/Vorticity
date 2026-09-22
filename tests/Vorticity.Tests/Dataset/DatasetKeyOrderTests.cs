@@ -17,6 +17,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -44,15 +45,16 @@ public sealed class DatasetKeyOrderTests
     public async Task InKeyOrderAcrossInterleavedObjectsEqualsTheSortedRows()
     {
         // At level 0: four objects whose keys interleave modulo four.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Shuffled(types, schema, Stride(residue, Objects), residue + 1));
+            await dataset.AppendAsync(Shuffled(types, schema, Stride(residue, Objects), residue + 1), ct);
         }
 
         List<(long Key, double Measure)> sorted = Sorted(Range(0, Rows));
@@ -82,12 +84,13 @@ public sealed class DatasetKeyOrderTests
         // Across levels: level 1 after a compaction, then level 0 on top of it again — and the
         // merge's bound of at most 8 + L cursors, stated by Explain before the read and counted
         // during it.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
 
         // Even keys, interleaved modulo eight across the four objects.
         List<long> held = [];
@@ -95,7 +98,7 @@ public sealed class DatasetKeyOrderTests
         {
             long[] keys = Stride(2 * residue, 2 * Objects);
             held.AddRange(keys);
-            await dataset.AppendAsync(Shuffled(types, schema, keys, residue + 1));
+            await dataset.AppendAsync(Shuffled(types, schema, keys, residue + 1), ct);
         }
 
         await AssertOrderedAsync(dataset, held, cursors: Objects);
@@ -109,7 +112,7 @@ public sealed class DatasetKeyOrderTests
             MaxObjectBytes = 1L << 30,
             Fanout = 1_000,
         };
-        CompactionResult compaction = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options));
+        CompactionResult compaction = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options, ct));
         Assert.True(compaction.ObjectsOut > 2, $"level 1 must hold several objects; it holds {compaction.ObjectsOut}");
         Assert.Equal(0, dataset.Levels[0].Entries);
         await AssertOrderedAsync(dataset, held, cursors: 1);
@@ -120,7 +123,7 @@ public sealed class DatasetKeyOrderTests
         {
             long[] keys = Stride((2 * residue) + 1, 4);
             held.AddRange(keys);
-            await dataset.AppendAsync(Shuffled(types, schema, keys, residue + 7));
+            await dataset.AppendAsync(Shuffled(types, schema, keys, residue + 7), ct);
         }
 
         Assert.Equal(2, dataset.Levels[0].Entries);
@@ -137,15 +140,16 @@ public sealed class DatasetKeyOrderTests
         // exceeds the current k-th best is skipped. Four DISJOINT quarters appended out of order:
         // the first ten keys live in one object, and it is the tree that has to find it, not the
         // arrival order.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int quarter in (int[])[2, 0, 3, 1])
         {
-            await dataset.AppendAsync(Shuffled(types, schema, Range(quarter * PerObject, PerObject), quarter + 1));
+            await dataset.AppendAsync(Shuffled(types, schema, Range(quarter * PerObject, PerObject), quarter + 1), ct);
         }
 
         List<(long Key, double Measure)> sorted = Sorted(Range(0, Rows));
@@ -189,15 +193,16 @@ public sealed class DatasetKeyOrderTests
     {
         // A conjunct on the key bounds each object's walk as it bounds a file's; one on
         // another column prunes as it always does. The summaries skip what the range refutes.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Shuffled(types, schema, Stride(residue, Objects), residue + 1));
+            await dataset.AppendAsync(Shuffled(types, schema, Stride(residue, Objects), residue + 1), ct);
         }
 
         VortexExpr band = Expr.And(
@@ -231,15 +236,16 @@ public sealed class DatasetKeyOrderTests
     {
         // The merge compares rows by the key whatever `Select` says: the key is read on top of the
         // selection and dropped before a batch goes out, as a filter's columns are in a file.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int residue in (int[])[3, 1, 0, 2])
         {
-            await dataset.AppendAsync(Shuffled(types, schema, Stride(residue, Objects), residue + 1));
+            await dataset.AppendAsync(Shuffled(types, schema, Stride(residue, Objects), residue + 1), ct);
         }
 
         List<double> expected = [];
@@ -249,7 +255,7 @@ public sealed class DatasetKeyOrderTests
         }
 
         List<double> measures = [];
-        await foreach (RecordBatch batch in dataset.ScanBuilder().Project(Columns(dataset, "measure")).InKeyOrder("key").ExecuteAsync())
+        await foreach (RecordBatch batch in dataset.ScanBuilder().Project(Columns(dataset, "measure")).InKeyOrder("key").ExecuteAsync(ct))
         {
             Assert.Equal(1, batch.FieldCount);
             Assert.Equal("measure", batch.GetFieldName(0));
@@ -280,6 +286,7 @@ public sealed class DatasetKeyOrderTests
         // An order on another column costs, at best, one cursor per object the summaries cannot
         // refute, with a sorted run per object: proportional to the output, not bounded.
         // A dataset with no clustering key, whose objects carry a run on `key` by their own policy.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -290,17 +297,17 @@ public sealed class DatasetKeyOrderTests
             Write = Unclustered().Write.WithIndexes(
                 WritePolicy.Auto.For("key", IndexSpec.SortedRuns.AsRequired())),
         };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, indexed);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, indexed, ct);
         foreach (int quarter in (int[])[2, 0, 3, 1])
         {
-            await dataset.AppendAsync(Shuffled(types, schema, Range(quarter * PerObject, PerObject), quarter + 1));
+            await dataset.AppendAsync(Shuffled(types, schema, Range(quarter * PerObject, PerObject), quarter + 1), ct);
         }
 
         List<(long Key, double Measure)> sorted = Sorted(Range(0, Rows));
         List<(long Key, double Measure)> reversed = [.. sorted];
         reversed.Reverse();
 
-        DatasetPlan plan = await dataset.ScanBuilder().InKeyOrder("key").ExplainAsync();
+        DatasetPlan plan = await dataset.ScanBuilder().InKeyOrder("key").ExplainAsync(ct);
         Assert.Equal("key", plan.Order);
         Assert.Equal(Objects, plan.Cursors);
 
@@ -326,6 +333,7 @@ public sealed class DatasetKeyOrderTests
         // max exclude NaN: a float's summary is no bound in the key order. A merge that used
         // one downward would deliver the positive NaN after the largest number, and upward the tree's
         // own minimum — the run's first key, NaN included — is the bound, not the summary.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = types.Struct(
@@ -335,7 +343,7 @@ public sealed class DatasetKeyOrderTests
 
         await using MemoryObjectStore store = new MemoryObjectStore();
         DatasetOptions clustered = Unclustered() with { ClusteringKey = ["f"] };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, clustered);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, clustered, ct);
 
         double negativeNaN = BitConverter.Int64BitsToDouble(unchecked((long)0xFFF8_0000_0000_0000UL));
         double positiveNaN = BitConverter.Int64BitsToDouble(0x7FF8_0000_0000_0000L);
@@ -357,7 +365,7 @@ public sealed class DatasetKeyOrderTests
                 all.Add((values[i], ids[i]));
             }
 
-            await dataset.AppendAsync(Floats(types, schema, values, ids));
+            await dataset.AppendAsync(Floats(types, schema, values, ids), ct);
         }
 
         all.Sort((left, right) => TotalOrder(left.Value).CompareTo(TotalOrder(right.Value)));
@@ -384,19 +392,20 @@ public sealed class DatasetKeyOrderTests
         // A run that is a whole batch is handed out as that very batch, and a consumer may dispose
         // what it is given. Disjoint objects make every run a whole batch: stepping past one
         // must not read it again.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
         foreach (int quarter in (int[])[2, 0, 3, 1])
         {
-            await dataset.AppendAsync(Shuffled(types, schema, Range(quarter * PerObject, PerObject), quarter + 1));
+            await dataset.AppendAsync(Shuffled(types, schema, Range(quarter * PerObject, PerObject), quarter + 1), ct);
         }
 
         List<long> keys = [];
-        await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("key").ExecuteAsync())
+        await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("key").ExecuteAsync(ct))
         {
             using (batch)
             {
@@ -410,12 +419,13 @@ public sealed class DatasetKeyOrderTests
     [Fact]
     public async Task InKeyOrderAndRowsExcludeEachOther()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
 
         Assert.Throws<InvalidOperationException>(() => dataset.ScanBuilder().Rows(0, 10).InKeyOrder("key"));
         Assert.Throws<InvalidOperationException>(() => dataset.ScanBuilder().InKeyOrder("key").Rows(0, 10));
@@ -423,7 +433,7 @@ public sealed class DatasetKeyOrderTests
 
         // An empty dataset has nothing to merge, and says so without opening anything.
         Assert.Empty(await RowsAsync(dataset.ScanBuilder().InKeyOrder("key")));
-        DatasetPlan plan = await dataset.ScanBuilder().InKeyOrder("key").ExplainAsync();
+        DatasetPlan plan = await dataset.ScanBuilder().InKeyOrder("key").ExplainAsync(ct);
         Assert.Equal(0, plan.Cursors);
     }
 
@@ -432,6 +442,7 @@ public sealed class DatasetKeyOrderTests
     {
         // An imported file with shuffled keys and no run: leaving its rows out would be a wrong
         // answer, so the key-ordered read refuses, as the core refuses such a file.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -443,21 +454,21 @@ public sealed class DatasetKeyOrderTests
         {
             await foreach (RecordBatch batch in Shuffled(types, schema, Range(0, PerObject), 5))
             {
-                await writer.WriteAsync(batch);
+                await writer.WriteAsync(batch, ct);
             }
 
-            await writer.CompleteAsync();
+            await writer.CompleteAsync(ct);
         }
 
         string key = CommitKey.ForData("unindexed");
-        await store.PutIfAbsentAsync(key, stream.ToArray(), default);
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
-        await dataset.ImportAsync(key);
+        await store.PutIfAbsentAsync(key, stream.ToArray(), ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        await dataset.ImportAsync(key, ct);
 
         await Assert.ThrowsAsync<VortexUnsupportedException>(async () => await RowsAsync(dataset.ScanBuilder().InKeyOrder("key")));
 
         // The scan in the tree's order is unaffected: it reads objects, not keys.
-        Assert.Equal(PerObject, await dataset.Scan().CountAsync());
+        Assert.Equal(PerObject, await dataset.Scan().CountAsync(ct));
     }
 
     /// <summary>

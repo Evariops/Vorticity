@@ -27,16 +27,17 @@ public sealed class MergeFanInTests
     [Fact]
     public async Task MergesSixtyFourObjectsInterleavedRowByRow()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
 
         // Appended back to front, so a tree that kept arrival order rather than key order is caught.
         for (int residue = Objects - 1; residue >= 0; residue--)
         {
-            await dataset.AppendAsync(Batches(types, schema, residue));
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
         List<long> expected = [];
@@ -48,7 +49,7 @@ public sealed class MergeFanInTests
         DatasetScanMetrics metrics = new DatasetScanMetrics();
         List<long> walked = [];
         await foreach (RecordBatch batch in dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key")
-            .ExecuteAsync().WithCancellation(CancellationToken.None))
+            .ExecuteAsync(ct).WithCancellation(CancellationToken.None))
         {
             using (batch)
             {
@@ -68,7 +69,7 @@ public sealed class MergeFanInTests
         // And the descending merge is the exact reverse, which is what the ranks on ties buy.
         List<long> back = [];
         await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("key", descending: true)
-            .ExecuteAsync().WithCancellation(CancellationToken.None))
+            .ExecuteAsync(ct).WithCancellation(CancellationToken.None))
         {
             using (batch)
             {

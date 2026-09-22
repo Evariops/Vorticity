@@ -44,19 +44,20 @@ public sealed class VortexDatasetTests
     [Fact]
     public async Task ADatasetOfSeveralObjectsAnswersAsOneFile()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
         Assert.Equal(1UL, dataset.Version);
         Assert.Equal(0, dataset.RowCount);
 
         const int objects = 4;
         for (int i = 0; i < objects; i++)
         {
-            await dataset.AppendAsync(Batches(types, schema, i * Batch, Batch));
+            await dataset.AppendAsync(Batches(types, schema, i * Batch, Batch), ct);
         }
 
         Assert.Equal(objects, dataset.ObjectCount);
@@ -65,7 +66,7 @@ public sealed class VortexDatasetTests
         // The same rows, written once, into one file.
         byte[] single = await OneFileAsync(types, schema, objects * Batch);
         await using VortexFile file = await VortexFile.OpenAsync(
-            new MemorySegmentSource(single), new VortexOpenOptions(), default);
+            new MemorySegmentSource(single), new VortexOpenOptions(), ct);
 
         Assert.Equal(file.RowCount, dataset.RowCount);
         Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.ScanBuilder()));
@@ -78,8 +79,8 @@ public sealed class VortexDatasetTests
             await KeysAsync(file.ScanBuilder().Where(filter)),
             await KeysAsync(dataset.ScanBuilder().Where(filter)));
         Assert.Equal(
-            await file.ScanBuilder().Where(filter).CountAsync(),
-            await dataset.ScanBuilder().Where(filter).CountAsync());
+            await file.ScanBuilder().Where(filter).CountAsync(ct),
+            await dataset.ScanBuilder().Where(filter).CountAsync(ct));
 
         // With the per-file index chain off, which must not change the answer: an index only
         // skips work.
@@ -92,6 +93,7 @@ public sealed class VortexDatasetTests
     public async Task AFileAlreadyInTheStoreIsImportedWithoutACopy()
     {
         // A single existing Vortex file becomes a dataset of one leaf: one commit object, no copy.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -99,11 +101,11 @@ public sealed class VortexDatasetTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         byte[] single = await OneFileAsync(types, schema, 3_000);
         string key = CommitKey.ForData("imported");
-        await store.PutIfAbsentAsync(key, single, default);
+        await store.PutIfAbsentAsync(key, single, ct);
         long bytesBefore = store.Bytes;
 
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
-        ulong version = await dataset.ImportAsync(key);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        ulong version = await dataset.ImportAsync(key, ct);
 
         // Version 1 is the creation, version 2 is the import: one commit object each.
         Assert.Equal(2UL, version);
@@ -114,9 +116,9 @@ public sealed class VortexDatasetTests
         // somebody chose: the store grew by the commit objects, to the byte. A copy would have added
         // `single.Length` on top, and a chosen ceiling would only have said "not much more".
         long commits = 0;
-        foreach (string commit in await store.ListAsync(CommitKey.Prefix, null, 100, default))
+        foreach (string commit in await store.ListAsync(CommitKey.Prefix, null, 100, ct))
         {
-            commits += Assert.NotNull(await store.HeadAsync(commit, default)).Length;
+            commits += Assert.NotNull(await store.HeadAsync(commit, ct)).Length;
         }
 
         Assert.Equal(commits, store.Bytes - bytesBefore);
@@ -130,7 +132,7 @@ public sealed class VortexDatasetTests
         Assert.NotEqual(UInt128.Zero, entry.Uid);
 
         await using VortexFile file = await VortexFile.OpenAsync(
-            new MemorySegmentSource(single), new VortexOpenOptions(), default);
+            new MemorySegmentSource(single), new VortexOpenOptions(), ct);
         Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.ScanBuilder()));
     }
 
@@ -139,6 +141,7 @@ public sealed class VortexDatasetTests
     {
         // An object with another schema is refused at the import that would add it, not at the
         // first scan that would trip over it. A nullable key is another schema.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -150,16 +153,16 @@ public sealed class VortexDatasetTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         byte[] single = await OneFileAsync(types, schema, 1_000);
         string key = CommitKey.ForData("foreign");
-        await store.PutIfAbsentAsync(key, single, default);
+        await store.PutIfAbsentAsync(key, single, ct);
 
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, other, Options());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, other, Options(), ct);
         ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(
-            async () => await dataset.ImportAsync(key));
+            async () => await dataset.ImportAsync(key, ct));
         Assert.Contains("schema", refused.Message, StringComparison.Ordinal);
 
         Assert.Equal(1UL, dataset.Version);
         Assert.Equal(0, dataset.ObjectCount);
-        Assert.Single(await store.ListAsync(CommitKey.Prefix, null, 100, default));
+        Assert.Single(await store.ListAsync(CommitKey.Prefix, null, 100, ct));
     }
 
     [Fact]
@@ -167,40 +170,42 @@ public sealed class VortexDatasetTests
     {
         // The entry carries the uid the postscript holds and the hash the writer computed, so a
         // fragment bound to an old version of the bytes is refused before anything is read.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
-        await dataset.AppendAsync(Batches(types, schema, 0, 1_000));
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        await dataset.AppendAsync(Batches(types, schema, 0, 1_000), ct);
 
         ObjectEntry entry = Assert.Single(await ObjectsAsync(dataset));
         Assert.Equal(1_000, entry.Rows);
         Assert.NotEqual(UInt128.Zero, entry.Uid);
         Assert.NotEqual(UInt128.Zero, entry.Hash);
 
-        ObjectHead head = Assert.NotNull(await store.HeadAsync(entry.Key, default));
+        ObjectHead head = Assert.NotNull(await store.HeadAsync(entry.Key, ct));
         Assert.Equal(head.Length, entry.Bytes);
 
         // The uid in the entry is the one the file's postscript carries.
         await using ObjectSegmentSource source = new ObjectSegmentSource(store, entry.Key);
-        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
         Assert.NotNull(file.StoredIdentity);
     }
 
     [Fact]
     public async Task AnEmptyAppendCommitsNothing()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
         int objectsBefore = store.Count;
 
-        ulong version = await dataset.AppendAsync(Nothing());
+        ulong version = await dataset.AppendAsync(Nothing(), ct);
 
         Assert.Equal(dataset.Version, version);
         Assert.Equal(objectsBefore, store.Count);
@@ -210,31 +215,33 @@ public sealed class VortexDatasetTests
     [Fact]
     public async Task OpeningAStoreWithoutADatasetSaysSo()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await Assert.ThrowsAsync<ObjectNotFoundException>(async () => await VortexDataset.OpenAsync(store));
+        await Assert.ThrowsAsync<ObjectNotFoundException>(async () => await VortexDataset.OpenAsync(store, cancellationToken: ct));
 
         DTypeArena types = new DTypeArena();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Schema(types), Options());
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Schema(types), Options(), ct);
         await Assert.ThrowsAsync<ObjectStoreException>(
-            async () => await VortexDataset.CreateAsync(store, Schema(types), Options()));
+            async () => await VortexDataset.CreateAsync(store, Schema(types), Options(), ct));
     }
 
     [Fact]
     public async Task ASecondHandleSeesTheFirstsCommits()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset writer = await VortexDataset.CreateAsync(store, schema, Options());
-        await using VortexDataset reader = await VortexDataset.OpenAsync(store, Options());
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        await using VortexDataset reader = await VortexDataset.OpenAsync(store, Options(), ct);
 
-        await writer.AppendAsync(Batches(types, schema, 0, 2_000));
+        await writer.AppendAsync(Batches(types, schema, 0, 2_000), ct);
 
         // The reader holds its own version until it asks for another.
         Assert.Equal(0, reader.RowCount);
-        Assert.Equal(writer.Version, await reader.RefreshAsync());
+        Assert.Equal(writer.Version, await reader.RefreshAsync(ct));
         Assert.Equal(2_000, reader.RowCount);
         Assert.Equal(schema.FieldCount, reader.Schema.Count);
         Assert.Equal(writer.Seed, reader.Seed);

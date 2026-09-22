@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 using Xunit;
@@ -228,14 +229,16 @@ public sealed class CommitObjectTests
     [Fact]
     public async Task OpeningACommitCostsOneRequest()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // A reader opens a commit with one ranged read of its first 256 KiB.
         (byte[] bytes, _, _, _, _, _) = Build();
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
-        await store.PutIfAbsentAsync("commit/99999999999999999992.vxc", bytes, default);
+        await store.PutIfAbsentAsync("commit/99999999999999999992.vxc", bytes, ct);
         store.Reset();
 
-        CommitObject commit = await CommitObject.OpenAsync(store, "commit/99999999999999999992.vxc", default);
+        CommitObject commit = await CommitObject.OpenAsync(store, "commit/99999999999999999992.vxc", ct);
         Assert.Equal(7u, commit.Header.Version);
         Assert.Equal(1, store.Requests);
         Assert.Equal(1, store.DependentSteps);
@@ -248,6 +251,8 @@ public sealed class CommitObjectTests
     [Fact]
     public async Task ACommitLargerThanTheOpenReadOpensOnItsHeaderAlone()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
         // The other shape of the one-read promise: the header is still covered, the table is
         // not, and a page is read by the reference that names it rather than by scanning.
         CommitObjectBuilder builder = new CommitObjectBuilder(11);
@@ -268,10 +273,10 @@ public sealed class CommitObjectTests
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
         const string key = "commit/99999999999999999988.vxc";
-        await store.PutIfAbsentAsync(key, bytes, default);
+        await store.PutIfAbsentAsync(key, bytes, ct);
         store.Reset();
 
-        CommitObject commit = await CommitObject.OpenAsync(store, key, default);
+        CommitObject commit = await CommitObject.OpenAsync(store, key, ct);
         Assert.Equal(1, store.Requests);
         Assert.Equal(11u, commit.Header.Version);
         Assert.Null(commit.Trailer);
@@ -280,7 +285,7 @@ public sealed class CommitObjectTests
         // The last page lies past the open read and is fetched by its reference, checked on arrival.
         PageReference last = commit.Header.Levels[0].Top;
         Assert.True(commit.HeaderEnd + last.Offset > CommitFormat.OpenBytes);
-        byte[] page = await CommitObject.ReadPageAsync(store, key, last, commit.HeaderEnd, default);
+        byte[] page = await CommitObject.ReadPageAsync(store, key, last, commit.HeaderEnd, ct);
         Assert.Equal(Page(39, 16 << 10), page);
         Assert.Equal(2, store.Requests);
     }
@@ -288,6 +293,7 @@ public sealed class CommitObjectTests
     [Fact]
     public async Task APageThatDoesNotHashToItsReferenceIsRefusedOnArrival()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         CommitObjectBuilder builder = new CommitObjectBuilder(3);
         PageReference reference = builder.AddPage(Page(5, 1_024));
         byte[] bytes = builder.Build(new CommitHeader { Version = 3, Levels = [new CommitLevel(0, 1, reference)] });
@@ -299,10 +305,10 @@ public sealed class CommitObjectTests
 
         byte[] flipped = [.. bytes];
         flipped[(int)(commit.HeaderEnd + absolute.Offset)] ^= 0x01;
-        await store.PutIfAbsentAsync(key, flipped, default);
+        await store.PutIfAbsentAsync(key, flipped, ct);
 
         await Assert.ThrowsAsync<CommitFormatException>(
-            async () => await CommitObject.ReadPageAsync(store, key, absolute, commit.HeaderEnd, default));
+            async () => await CommitObject.ReadPageAsync(store, key, absolute, commit.HeaderEnd, ct));
     }
 
     [Fact]

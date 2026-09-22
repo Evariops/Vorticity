@@ -35,14 +35,15 @@ public sealed class ObjectAdapterTests
     [Fact]
     public async Task AFileWrittenThroughTheSinkReadsBackThroughTheSource()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using MemoryObjectStore store = new MemoryObjectStore();
         long written = await WriteAsync(store, Key);
 
-        Assert.Equal(written, (await store.HeadAsync(Key, default))!.Value.Length);
+        Assert.Equal(written, (await store.HeadAsync(Key, ct))!.Value.Length);
 
         await using ObjectSegmentSource source = new ObjectSegmentSource(store, Key);
-        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
         Assert.Equal(Rows, file.RowCount);
 
         long sum = 0;
@@ -71,7 +72,7 @@ public sealed class ObjectAdapterTests
         await using CountingObjectStore store = new CountingObjectStore(inner);
 
         await using ObjectSegmentSource source = new ObjectSegmentSource(store, Key);
-        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), TestContext.Current.CancellationToken);
         store.Reset();
 
         long rows = 0;
@@ -93,41 +94,44 @@ public sealed class ObjectAdapterTests
     [Fact]
     public async Task AnUncommittedSinkWritesNothing()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using (ObjectSegmentSink sink = new ObjectSegmentSink(store, "data/abandoned"))
         {
-            await sink.WriteAsync(new byte[128], default);
-            await sink.FlushAsync(default);
+            await sink.WriteAsync(new byte[128], ct);
+            await sink.FlushAsync(ct);
             Assert.Equal(128, sink.Position);
             Assert.False(sink.IsCommitted);
         }
 
-        Assert.Null(await store.HeadAsync("data/abandoned", default));
+        Assert.Null(await store.HeadAsync("data/abandoned", ct));
         Assert.Equal(0, store.Count);
     }
 
     [Fact]
     public async Task ASinkOverATakenKeyReportsItRatherThanOverwriting()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await store.PutIfAbsentAsync("data/taken", new byte[] { 1, 2, 3 }, default);
+        await store.PutIfAbsentAsync("data/taken", new byte[] { 1, 2, 3 }, ct);
 
         await using ObjectSegmentSink sink = new ObjectSegmentSink(store, "data/taken");
-        await sink.WriteAsync(new byte[] { 9, 9 }, default);
-        Assert.Equal(PutOutcome.Exists, await sink.CommitAsync(default));
+        await sink.WriteAsync(new byte[] { 9, 9 }, ct);
+        Assert.Equal(PutOutcome.Exists, await sink.CommitAsync(ct));
 
-        ObjectHead head = Assert.NotNull(await store.HeadAsync("data/taken", default));
+        ObjectHead head = Assert.NotNull(await store.HeadAsync("data/taken", ct));
         Assert.Equal(3, head.Length);
     }
 
     [Fact]
     public async Task ASinkRefusesToBufferMoreThanItWasGiven()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using ObjectSegmentSink sink = new ObjectSegmentSink(store, "data/huge", maxBytes: 1024);
-        await sink.WriteAsync(new byte[1000], default);
+        await sink.WriteAsync(new byte[1000], ct);
         ObjectStoreException refused = await Assert.ThrowsAsync<ObjectStoreException>(
-            async () => await sink.WriteAsync(new byte[100], default));
+            async () => await sink.WriteAsync(new byte[100], ct));
         Assert.Contains("DatasetOptions.MaxObjectBytes", refused.Message, StringComparison.Ordinal);
     }
 
@@ -137,24 +141,25 @@ public sealed class ObjectAdapterTests
         // A read bound to one object, at the seam: an object is immutable, so a token that changes
         // mid-read means the key was deleted and created again. Carrying on would mix two objects'
         // bytes.
+        CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         await using MemoryObjectStore store = new MemoryObjectStore();
         await WriteAsync(store, Key);
 
         await using ObjectSegmentSource source = new ObjectSegmentSource(store, Key);
-        Assert.True(await source.GetLengthAsync(default) > 0);
+        Assert.True(await source.GetLengthAsync(ct) > 0);
         string? first = source.Token;
         Assert.NotNull(first);
 
         // The same bytes under the same key, created again: a new object, so a new token.
-        using (ObjectRange range = await store.GetRangeAsync(Key, 0, int.MaxValue / 2, default))
+        using (ObjectRange range = await store.GetRangeAsync(Key, 0, int.MaxValue / 2, ct))
         {
-            await store.DeleteAsync(Key, default);
-            await store.PutIfAbsentAsync(Key, range.Memory, default);
+            await store.DeleteAsync(Key, ct);
+            await store.PutIfAbsentAsync(Key, range.Memory, ct);
         }
 
         await Assert.ThrowsAsync<VortexFormatException>(
-            async () => await source.ReadRangeAsync(0, 64, 1, default));
+            async () => await source.ReadRangeAsync(0, 64, 1, ct));
     }
 
     /// <summary>Writes a two-column file into <paramref name="key"/> and returns its bytes.</summary>

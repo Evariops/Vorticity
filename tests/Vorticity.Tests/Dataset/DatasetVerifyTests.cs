@@ -15,6 +15,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
@@ -41,7 +42,7 @@ public sealed class DatasetVerifyTests
         await using (store)
         await using (dataset)
         {
-            DatasetVerification verified = await dataset.VerifyAsync();
+            DatasetVerification verified = await dataset.VerifyAsync(cancellationToken: TestContext.Current.CancellationToken);
             Assert.True(verified.Holds, string.Join("\n", verified.Problems));
             Assert.Equal(Appends, verified.Objects);
             Assert.Equal(1, verified.Fragments);
@@ -54,6 +55,7 @@ public sealed class DatasetVerifyTests
     [Fact]
     public async Task AnObjectReplacedAtEqualSizeIsSeenByVerifyAlone()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         (MemoryObjectStore store, VortexDataset dataset) = await BuildAsync(indexed: false);
         await using (store)
         await using (dataset)
@@ -68,15 +70,15 @@ public sealed class DatasetVerifyTests
 
             // Everything a reader checks still holds: the length, and the identity in the tail it
             // parses. No reader computes the content hash, so no reader can tell.
-            Assert.Equal(victim.Bytes, (await store.HeadAsync(victim.Key, default))!.Value.Length);
+            Assert.Equal(victim.Bytes, (await store.HeadAsync(victim.Key, ct))!.Value.Length);
             await using (VortexFile reopened = await VortexFile.OpenAsync(
-                new ObjectSegmentSource(store, victim.Key), new VortexOpenOptions(), default))
+                new ObjectSegmentSource(store, victim.Key), new VortexOpenOptions(), ct))
             {
                 Assert.Equal(victim.Uid, VortexDataset.Identity(reopened));
                 Assert.Equal(victim.Rows, reopened.RowCount);
             }
 
-            DatasetVerification verified = await dataset.VerifyAsync();
+            DatasetVerification verified = await dataset.VerifyAsync(cancellationToken: ct);
             Assert.False(verified.Holds);
             string problem = Assert.Single(verified.Problems);
             Assert.Contains(victim.Key, problem, StringComparison.Ordinal);
@@ -97,7 +99,7 @@ public sealed class DatasetVerifyTests
             // verify's store-only reads proves: this test fails with the root's. A reader that does
             // read a stored page checks it against its reference (CommitPageSource), and may refuse.
             IReadOnlyList<InternalEntry> root = TreePage.ReadInternal(
-                await dataset.Pages.ReadPageAsync(dataset.Levels[0].Root, default));
+                await dataset.Pages.ReadPageAsync(dataset.Levels[0].Root, TestContext.Current.CancellationToken));
             PageReference leaf = root[0].Child;
             Assert.NotEqual(dataset.Version, leaf.Version);
             _ = await TearEveryByteAsync(store, dataset, leaf, "the page of version");
@@ -136,6 +138,7 @@ public sealed class DatasetVerifyTests
     [Fact]
     public async Task AFragmentOfAnotherObjectIsRefusedAndNamedByVerify()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         (MemoryObjectStore store, VortexDataset dataset) = await BuildAsync(indexed: true);
         await using (store)
         await using (dataset)
@@ -143,19 +146,19 @@ public sealed class DatasetVerifyTests
             List<PositionedObject> objects = await ObjectsAsync(dataset);
             PositionedObject indexed = objects.Single(held => held.Entry.Fragments.Count > 0);
             PositionedObject other = objects.First(held => held.Entry.Fragments.Count == 0);
-            ReadOnlyMemory<byte> theirs = await dataset.ReadFragmentAsync(indexed.Entry.Fragments[0], default);
+            ReadOnlyMemory<byte> theirs = await dataset.ReadFragmentAsync(indexed.Entry.Fragments[0], ct);
 
             // A caller that lies: the operation names the other object, its uid included, and carries
             // bytes built against the indexed one. The commit cannot tell; the fragment's binding
             // to the object it was built from can.
-            await dataset.ApplyAsync([new DatasetOperation.AddFragment(other.TreeKey, other.Entry.Uid, theirs)]);
+            await dataset.ApplyAsync([new DatasetOperation.AddFragment(other.TreeKey, other.Entry.Uid, theirs)], ct);
 
-            await using (VortexDataset reader = await VortexDataset.OpenAsync(store, Options()))
+            await using (VortexDataset reader = await VortexDataset.OpenAsync(store, Options(), ct))
             {
                 Assert.Equal(Expected(), (await KeysAsync(reader.ScanBuilder())).Order());
             }
 
-            DatasetVerification verified = await dataset.VerifyAsync();
+            DatasetVerification verified = await dataset.VerifyAsync(cancellationToken: ct);
             string problem = Assert.Single(verified.Problems);
             Assert.Contains(other.Entry.Key, problem, StringComparison.Ordinal);
             Assert.Contains("refused", problem, StringComparison.Ordinal);
@@ -165,17 +168,18 @@ public sealed class DatasetVerifyTests
     [Fact]
     public async Task AVerifySinceAnotherVersionChecksOnlyWhatChanged()
     {
+        CancellationToken ct = TestContext.Current.CancellationToken;
         (MemoryObjectStore store, VortexDataset dataset) = await BuildAsync(indexed: false);
         await using (store)
         await using (dataset)
         {
             ulong before = dataset.Version;
-            DatasetVerification whole = await dataset.VerifyAsync();
+            DatasetVerification whole = await dataset.VerifyAsync(cancellationToken: ct);
             Assert.True(whole.Holds);
 
             DTypeArena types = new DTypeArena();
-            await dataset.AppendAsync(Of(types, Schema(types), Appends * PerAppend, PerAppend));
-            DatasetVerification since = await dataset.VerifyAsync(since: before);
+            await dataset.AppendAsync(Of(types, Schema(types), Appends * PerAppend, PerAppend), ct);
+            DatasetVerification since = await dataset.VerifyAsync(since: before, cancellationToken: ct);
             Assert.True(since.Holds, string.Join("\n", since.Problems));
             Assert.Equal(1, since.Objects);
             Assert.True(since.Pages < whole.Pages, $"{since.Pages} pages against {whole.Pages}");
@@ -187,9 +191,9 @@ public sealed class DatasetVerifyTests
             ObjectEntry fresh = entries[^1];
             await FlipAsync(store, old.Key, 0.25);
             await FlipAsync(store, fresh.Key, 0.25);
-            DatasetVerification incremental = await dataset.VerifyAsync(since: before);
+            DatasetVerification incremental = await dataset.VerifyAsync(since: before, cancellationToken: ct);
             Assert.Contains(fresh.Key, Assert.Single(incremental.Problems), StringComparison.Ordinal);
-            Assert.Equal(2, (await dataset.VerifyAsync()).Problems.Length);
+            Assert.Equal(2, (await dataset.VerifyAsync(cancellationToken: ct)).Problems.Length);
         }
     }
 
