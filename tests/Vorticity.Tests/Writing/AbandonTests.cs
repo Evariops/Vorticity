@@ -1,14 +1,13 @@
 // Giving up on a file that is being written or appended to.
 //
-// THE ORACLE IS WHAT SURVIVES ON DISK. Disposal completes an unfinished file, so a producer that
-// fails half way leaves one that exists, opens and reports no torn tail; the rows it managed to
-// write become the file, and nothing afterwards can tell that from a file meant to end there.
-// These cases pin both halves: what `Abandon` removes, and what disposal alone still does.
+// The oracle is what survives on disk. Only CompleteAsync completes a file: `Abandon`, and a
+// disposal that comes before completion, remove a file this writer created, so a producer that
+// fails half way leaves nothing that looks whole.
 //
-// THE APPEND CASE IS THE ONE THAT LOSES ROWS. An append re-emits the file's last chunk before its
-// own, so a footer written before that happens describes the kept rows alone and drops the rest
-// while still parsing -- which is exactly what repair cannot see. Abandoning leaves a tail that
-// does not parse, and repair takes the file back to its last whole version.
+// The append case is the one that could lose rows. An append re-emits the file's last chunk before
+// its own, so a footer written before that happens would describe the kept rows alone and drop the
+// rest while still parsing -- which is exactly what repair cannot see. Abandoning leaves a tail
+// that does not parse, and repair takes the file back to its last whole version.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
