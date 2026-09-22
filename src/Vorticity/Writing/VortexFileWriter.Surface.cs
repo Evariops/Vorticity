@@ -298,15 +298,22 @@ public sealed partial class VortexFileWriter
 
     /// <summary>
     /// Writes the pending rows as the tail, then the statistics, zone maps, indexes and footer, and
-    /// hands everything to the sink.
+    /// hands everything to the sink. Rows still in the writer's builder are taken first, as a last
+    /// <see cref="WriteAsync(ColumnsBuilder, CancellationToken)"/> would.
     /// </summary>
     /// <param name="cancellationToken">Cancels the writes.</param>
     /// <returns>What was written: bytes by kind, each column's encodings, and every index asked for, built or abandoned with its reason.</returns>
     /// <exception cref="VortexException">An index the policy marked required was not built; the file is not completed.</exception>
+    /// <exception cref="VortexSchemaException">The builder's columns hold different row counts, or a list is left open.</exception>
     /// <exception cref="ObjectDisposedException">The file is already completed or abandoned.</exception>
     public async ValueTask<WriteReport> CompleteAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDone();
+        if (_root is { } builder && builder.Rows > builder.Committed)
+        {
+            await AcceptAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         _completed = true;
         if (_root is { Committed: > 0 } whole && _rowBlock > 0 && whole.Committed >= _rowBlock)
         {
