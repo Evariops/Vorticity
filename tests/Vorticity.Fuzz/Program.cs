@@ -25,15 +25,10 @@ using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using System.Threading;
+using System.Numerics;
 using System.Threading.Tasks;
 
-using Vorticity;
-using Vorticity.Arrays.Decoders.Canonical;
-using Vorticity.Columns;
-using Vorticity.File;
 using Vorticity.IO;
-using Vorticity.Scanning;
 
 namespace Vorticity.Fuzz;
 
@@ -142,23 +137,15 @@ internal static class Program
         Reach reach = Reach.RejectedAtOpen;
         try
         {
-            await using MemorySegmentSource source = new MemorySegmentSource(bytes);
-            await using VortexFile file = await VortexFile.OpenAsync(
-                source, new VortexOpenOptions { LeaveSourceOpen = true }, CancellationToken.None);
+            // The file owns the source, and disposes it as well when the open fails.
+            await using VortexFile file = await VortexSession.Default.OpenAsync(new MemorySegmentSource(bytes));
 
             reach = Reach.RejectedWhileDecoding;
-            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
-                .WithCancellation(CancellationToken.None))
+            await foreach (BatchView batch in file.Scan())
             {
-                // Touch the rows: a decoder that produced a buffer too short for its declared
-                // length fails here and nowhere earlier.
-                for (int field = 0; field < batch.FieldCount; field++)
+                if (Touch(batch) is { } wrong)
                 {
-                    VortexColumn column = batch.Column(field);
-                    for (int row = 0; row < batch.RowCount; row++)
-                    {
-                        _ = column.IsValid(row);
-                    }
+                    return (new Finding("WrongValue", wrong), reach);
                 }
             }
 
@@ -195,6 +182,181 @@ internal static class Program
             reach);
     }
 
+    /// <summary>
+    /// Reads the validity and every value of each column, which forces its decode: a decoder that
+    /// produced a buffer too short for its declared length fails here and nowhere earlier.
+    /// </summary>
+    /// <returns>What is wrong with a column that read without an exception, or null.</returns>
+    private static string? Touch(BatchView batch)
+    {
+        for (int field = 0; field < batch.Schema.Count; field++)
+        {
+            VortexType type = batch.Schema[field].Type;
+            string? wrong = type.Kind is VortexTypeKind.List or VortexTypeKind.FixedSizeList
+                ? Read(batch, field, type.ElementType!, list: true)
+                : Read(batch, field, type, list: false);
+            if (wrong is not null)
+            {
+                return $"column {Format(field)}, {type}: {wrong}";
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Reads column <paramref name="field"/>, or the elements of its lists, as the .NET type that
+    /// <paramref name="type"/> maps to. A struct, a null, a map, a union, a variant, a list of lists
+    /// and an extension over anything but a number have no such type on the tool path: the scan's
+    /// own decode is all they get.
+    /// </summary>
+    private static string? Read(BatchView batch, int field, VortexType type, bool list)
+    {
+        VortexType t = type.NonNullable;
+        if (t.Kind == VortexTypeKind.Extension && t.ExtensionId != VortexType.Uuid.ExtensionId
+            && t.StorageType is { Kind: VortexTypeKind.Primitive } storage)
+        {
+            // A date, a time, a timestamp or another extension over a number is read as its
+            // storage, which is what the decoders produce; the conversion to a .NET date is not theirs.
+            t = storage.NonNullable;
+        }
+
+        return t switch
+        {
+            _ when t == VortexType.Bool => ReadAs<bool?>(batch, field, list, Bools),
+            _ when t == VortexType.Int8 => ReadAs<sbyte?>(batch, field, list, Numbers<sbyte>),
+            _ when t == VortexType.Int16 => ReadAs<short?>(batch, field, list, Numbers<short>),
+            _ when t == VortexType.Int32 => ReadAs<int?>(batch, field, list, Numbers<int>),
+            _ when t == VortexType.Int64 => ReadAs<long?>(batch, field, list, Numbers<long>),
+            _ when t == VortexType.UInt8 => ReadAs<byte?>(batch, field, list, Numbers<byte>),
+            _ when t == VortexType.UInt16 => ReadAs<ushort?>(batch, field, list, Numbers<ushort>),
+            _ when t == VortexType.UInt32 => ReadAs<uint?>(batch, field, list, Numbers<uint>),
+            _ when t == VortexType.UInt64 => ReadAs<ulong?>(batch, field, list, Numbers<ulong>),
+            _ when t == VortexType.Float16 => ReadAs<Half?>(batch, field, list, Numbers<Half>),
+            _ when t == VortexType.Float32 => ReadAs<float?>(batch, field, list, Numbers<float>),
+            _ when t == VortexType.Float64 => ReadAs<double?>(batch, field, list, Numbers<double>),
+            _ when t == VortexType.Utf8 => ReadAs<string?>(batch, field, list, Text),
+            _ when t == VortexType.Binary => ReadAs<ReadOnlyMemory<byte>?>(batch, field, list, Bytes),
+            _ when t.Kind == VortexTypeKind.Decimal => ReadAs<VortexDecimal?>(batch, field, list, Decimals),
+            _ when t.ExtensionId == VortexType.Uuid.ExtensionId => ReadAs<Guid?>(batch, field, list, Guids),
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// Reads column <paramref name="field"/> with <paramref name="read"/>; for a list column, every
+    /// row's range first, then the elements. The nullable form reads a column of either nullability.
+    /// </summary>
+    private static string? ReadAs<T>(BatchView batch, int field, bool list, Reader<T> read)
+    {
+        if (!list)
+        {
+            Column<T> column = batch.Column<T>(field);
+            if (column.Length != batch.RowCount)
+            {
+                return $"{Format(column.Length)} rows in a batch of {Format(batch.RowCount)}";
+            }
+
+            read(column);
+            return null;
+        }
+
+        Column<ReadOnlyMemory<T>> lists = batch.Column<ReadOnlyMemory<T>>(field);
+        if (lists.Length != batch.RowCount)
+        {
+            return $"{Format(lists.Length)} rows in a batch of {Format(batch.RowCount)}";
+        }
+
+        Validity(lists);
+        Column<T> elements = lists.Elements;
+        for (int row = 0; row < lists.Length; row++)
+        {
+            // A range outside the elements is one a caller slicing them would fail on.
+            Range range = lists[row];
+            if (lists.IsValid(row) && !Within(range, elements.Length))
+            {
+                return $"row {Format(row)} spans {range} of {Format(elements.Length)} elements";
+            }
+        }
+
+        read(elements);
+        return null;
+    }
+
+    private static bool Within(Range range, int length) =>
+        !range.Start.IsFromEnd && !range.End.IsFromEnd
+        && range.Start.Value <= range.End.Value && range.End.Value <= length;
+
+    /// <summary>Reads what every column says of its nulls, before its values.</summary>
+    private static void Validity<T>(Column<T> column)
+    {
+        _ = column.NullCount;
+        _ = column.ValidityWords;
+        for (int row = 0; row < column.Length; row++)
+        {
+            _ = column.IsValid(row);
+        }
+    }
+
+    /// <summary>Reads every slot of the values, a null's included: the buffer covers every row whatever the validity.</summary>
+    private static void Numbers<T>(Column<T?> column)
+        where T : unmanaged, IBinaryNumber<T>
+    {
+        Validity(column);
+        ReadOnlySpan<T> values = column.Values;
+        for (int row = 0; row < column.Length; row++)
+        {
+            _ = values[row];
+        }
+    }
+
+    private static void Bools(Column<bool?> column)
+    {
+        Validity(column);
+        for (int row = 0; row < column.Length; row++)
+        {
+            _ = column[row];
+        }
+    }
+
+    private static void Text(Column<string?> column)
+    {
+        Validity(column);
+        for (int row = 0; row < column.Length; row++)
+        {
+            _ = column[row];
+        }
+    }
+
+    private static void Bytes(Column<ReadOnlyMemory<byte>?> column)
+    {
+        Validity(column);
+        for (int row = 0; row < column.Length; row++)
+        {
+            _ = column[row];
+        }
+    }
+
+    private static void Decimals(Column<VortexDecimal?> column)
+    {
+        Validity(column);
+        for (int row = 0; row < column.Length; row++)
+        {
+            _ = column[row];
+        }
+    }
+
+    private static void Guids(Column<Guid?> column)
+    {
+        Validity(column);
+        for (int row = 0; row < column.Length; row++)
+        {
+            _ = column[row];
+        }
+    }
+
+    private static string Format(int value) => value.ToString(CultureInfo.InvariantCulture);
+
     private static void Save(byte[] bytes, int seed, int iteration)
     {
         // Minimized by hand afterwards and checked in as a regression test.
@@ -203,6 +365,9 @@ internal static class Program
         System.IO.File.WriteAllBytes(
             Path.Combine(directory, $"crash-{seed}-{iteration}.vortex"), bytes);
     }
+
+    /// <summary>Reads one column of a type known here, not by the scan.</summary>
+    private delegate void Reader<T>(Column<T> column);
 
     private readonly record struct Finding(string Kind, string Detail);
 
