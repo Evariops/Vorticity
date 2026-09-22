@@ -818,7 +818,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// The workspace every blob is assembled in, one after the other: a column's chunk, a zone map,
     /// an index payload.
     /// </summary>
-    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace();
+    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace { FrameRows = _rowBlock };
 
     /// <summary>The arena the pending rows live in, created on first use.</summary>
     private CanonicalArena Transit()

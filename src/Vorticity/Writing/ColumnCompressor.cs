@@ -218,7 +218,7 @@ internal readonly struct ColumnPlan
         ColumnScheme.Sequence =>
             $"sequence base={Sequence.GetValueOrDefault().BaseBits} step={Sequence.GetValueOrDefault().Step}",
         ColumnScheme.Fsst => $"fsst size={Fsst!.EncodedSize}",
-        ColumnScheme.Zstd => $"zstd frame={Zstd!.FrameLength}",
+        ColumnScheme.Zstd => $"zstd bytes={Zstd!.CompressedLength} frames={Zstd.FrameCount}",
         ColumnScheme.Alp =>
             $"alp e={Alp!.ExponentE} f={Alp.ExponentF} size={Alp.EncodedSize} " +
             $"patches={Alp.PatchIndices.Length}",
@@ -987,7 +987,7 @@ internal static class ColumnCompressor
         {
             if (frame is not null)
             {
-                return ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.FrameLength };
+                return ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.CompressedLength };
             }
 
             // The exact split can still miss the margin the estimate cleared, when the rows the
@@ -1018,7 +1018,7 @@ internal static class ColumnCompressor
             long ceiling = plain * 9 / 10;
             if (frame is not null)
             {
-                ceiling = Math.Min(ceiling, frame.FrameLength * 10L / 9);
+                ceiling = Math.Min(ceiling, frame.CompressedLength * 10L / 9);
             }
 
             fsst = FsstPlan.TryBuild(arena, nodeIndex, ceiling);
@@ -1033,7 +1033,7 @@ internal static class ColumnCompressor
 
         if (frame is not null)
         {
-            return ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.FrameLength };
+            return ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.CompressedLength };
         }
 
         return ColumnPlan.Canonical with { PredictedBytes = plain };
@@ -1681,7 +1681,7 @@ internal static class ColumnCompressor
                 ZstdPlan? frame = ZstdPlan.TryBuild(arena, nodeIndex, plain, workspace);
                 return frame is null
                     ? ColumnPlan.Canonical
-                    : ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.FrameLength };
+                    : ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.CompressedLength };
             }
 
             case ColumnScheme.Fsst:

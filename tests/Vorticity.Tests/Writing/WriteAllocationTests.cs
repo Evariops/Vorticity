@@ -97,8 +97,8 @@ public sealed class WriteAllocationTests
         // both are built while PRICING, so the candidate that loses would pay for them too. So do
         // the buffers a scheme produces for the blob -- packed blocks, patches, FSST's stream and
         // row tables, a varbin heap -- which the blob hands back once it is laid out.
-        ("containers/zoned_many_zones_nulls", 413_184),   // 412 768 measured, including 40 bytes more on each of the 64 batches it reads, the public writer and report, and its text column's string bounds
-        ("distributions/high_cardinality_i64_r8193", 72_948),   // 72 808 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row, and the writer's zstd encoder
+        ("containers/zoned_many_zones_nulls", 372_296),   // 371 880 measured, including 40 bytes more on each batch it reads, the public writer and report, and its text column's string bounds; the read back decompresses through one zstd decoder a scan and, reading only, in batches of several zones
+        ("distributions/high_cardinality_i64_r8193", 65_724),   // 65 584 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row, and the writer's zstd encoder
         ("encodings/fsst", 66_976),   // 66 512 measured
         ("encodings/onpair", 69_168),   // 68 720 measured, including the public writer and report and the text column's string bounds
         ("types/utf8_nullable_r1025", 211_064),   // 210 624 measured, including the public writer and report and the text column's string bounds

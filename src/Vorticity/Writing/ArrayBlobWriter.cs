@@ -949,14 +949,12 @@ internal static class ArrayBlobWriter
     }
 
     /// <summary>
-    /// Writes <c>vortex.zstd</c>: one frame buffer, one optional validity child.
+    /// Writes <c>vortex.zstd</c>: a buffer per frame, one optional validity child.
     /// </summary>
     /// <remarks>
-    /// One frame, not several. The format allows a column to be split across frames so a slice can
-    /// decompress only the part it wants, and nothing in this writer slices - a second frame would
-    /// be unread structure. The decoder walks frames until their cumulative value count covers the
-    /// rows it needs, so a single frame carrying every value is the degenerate case it already
-    /// handles.
+    /// A frame per block of rows, so that a read of some rows decompresses the frames of their
+    /// blocks and not the column: the decoder walks the frames' value counts to the first frame it
+    /// needs and stops at the last.
     ///
     /// No dictionary buffer: `DictionarySize` is 0, which is what the decoder checks to decide
     /// whether a dictionary buffer is present at all.
@@ -969,27 +967,43 @@ internal static class ArrayBlobWriter
         EncodingDictionary encodings)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
-        // The frame is the pool's, and ownership moves here: `ZstdPlan` keeps the buffer it
-        // compressed into rather than copying it out, so from this line the plan's `Frame` must not
-        // be read again, and `Write` is what hands it back after the blob has been laid out.
-        int frameBuffer = Add(blob, new PendingBuffer(plan.Frame, plan.FrameLength, 0, rented: true));
+
+        // The frames are the pool's, cut from one rental, and ownership moves here: `ZstdPlan` keeps
+        // the buffer it compressed into rather than copying it out, so from this line the plan's
+        // `Data` must not be read again. Only the last frame's buffer says it is rented, so that
+        // `Write` hands the array back once, after the blob has taken every frame.
+        int frames = plan.FrameCount;
+        Span<ushort> stack = stackalloc ushort[64];
+        using Scratch<ushort> scratch = new Scratch<ushort>(frames, stack);
+        Span<ushort> indices = scratch.Span;
+        for (int i = 0; i < frames; i++)
+        {
+            (int start, int length, _, _) = plan.FrameAt(i);
+            indices[i] = (ushort)Add(blob, new PendingBuffer(plan.Data, start, length, 0, rented: i == frames - 1));
+        }
 
         Span<int> children = stackalloc int[1];
         int childCount = Validity(blob, arena, node, encodings, children);
 
-        Span<ushort> indices = stackalloc ushort[1];
-        indices[0] = (ushort)frameBuffer;
-
-        return Node(
+        int written = Node(
             blob, encodings, "vortex.zstd"u8, ZstdBytes(blob, plan), children[..childCount], indices);
+        plan.ReleaseFrames();
+        return written;
     }
 
     private static ReadOnlySpan<byte> ZstdBytes(Workspace blob, ZstdPlan plan)
     {
         ref ProtoWriter writer = ref blob.Metadata();
-        Span<ZstdFrameMetadata> frames = stackalloc ZstdFrameMetadata[1];
-        frames[0] = new ZstdFrameMetadata((ulong)plan.UncompressedSize, (ulong)plan.ValueCount);
-        ZstdMetadata value = new ZstdMetadata(dictionarySize: 0, frameCount: 1);
+        Span<ZstdFrameMetadata> stack = stackalloc ZstdFrameMetadata[16];
+        using Scratch<ZstdFrameMetadata> scratch = new Scratch<ZstdFrameMetadata>(plan.FrameCount, stack);
+        Span<ZstdFrameMetadata> frames = scratch.Span;
+        for (int i = 0; i < frames.Length; i++)
+        {
+            (_, _, int uncompressed, int values) = plan.FrameAt(i);
+            frames[i] = new ZstdFrameMetadata((ulong)uncompressed, (ulong)values);
+        }
+
+        ZstdMetadata value = new ZstdMetadata(dictionarySize: 0, frameCount: frames.Length);
         ZstdMetadata.Write(ref writer, in value, frames);
         return writer.WrittenSpan;
     }
@@ -2122,8 +2136,19 @@ internal static class ArrayBlobWriter
         }
 
         internal PendingBuffer(byte[] bytes, int length, int alignmentExponent, bool rented)
+            : this(bytes, offset: 0, length, alignmentExponent, rented)
+        {
+        }
+
+        /// <summary>
+        /// <paramref name="length"/> bytes of <paramref name="bytes"/> from <paramref name="offset"/>:
+        /// several buffers cut from one rental, of which exactly one says it is rented, so that the
+        /// array goes back to the pool once, after the blob has taken them all.
+        /// </summary>
+        internal PendingBuffer(byte[] bytes, int offset, int length, int alignmentExponent, bool rented)
         {
             _bytes = bytes;
+            Offset = offset;
             Length = length;
             AlignmentExponent = alignmentExponent;
             Rented = rented;
@@ -2150,6 +2175,9 @@ internal static class ArrayBlobWriter
         /// <summary>The pooled array to hand back, or <see langword="null"/> for a view or zeros.</summary>
         internal byte[]? Bytes => _bytes;
 
+        /// <summary>Where in <see cref="Bytes"/> the buffer starts.</summary>
+        internal int Offset { get; }
+
         /// <summary>Bytes that belong in the blob.</summary>
         internal int Length { get; }
 
@@ -2167,7 +2195,7 @@ internal static class ArrayBlobWriter
             }
             else if (_bytes is not null)
             {
-                _bytes.AsSpan(0, Length).CopyTo(destination);
+                _bytes.AsSpan(Offset, Length).CopyTo(destination);
             }
             else
             {
@@ -2206,6 +2234,12 @@ internal static class ArrayBlobWriter
         /// native context is a megabyte, made once rather than once per trial.
         /// </summary>
         internal ZstandardEncoder Zstd => _zstd ??= new ZstandardEncoder();
+
+        /// <summary>
+        /// The rows a zstd frame holds the values of, the writer's block; 0 for one frame a column.
+        /// A read of some rows then decompresses the frames of their blocks and not the column.
+        /// </summary>
+        internal int FrameRows { get; init; }
 
         /// <summary>The buffers the blob being written has queued, in order.</summary>
         internal List<PendingBuffer> Buffers => _buffers;
