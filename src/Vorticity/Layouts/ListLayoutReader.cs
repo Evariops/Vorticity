@@ -170,10 +170,12 @@ internal sealed class ListLayoutReader : LayoutReader
         VortexBuffer sizesOut = context.Canonical.Allocate(length * width, width, out Span<byte> sizes);
         ReadOnlySpan<byte> boundaries = offsets.Values.Span;
 
+        // The selection is in the node's row space and the offsets window starts at the batch's
+        // first row, so a wanted row is read at its distance from that row.
         long elementCount = NodeLength(in elementsLayout);
         for (int i = 0; i < length; i++)
         {
-            int row = wanted.IsEmpty ? i : wanted[i];
+            int row = wanted.IsEmpty ? i : wanted[i] - (int)rows.Start;
             if ((uint)row >= (uint)span)
             {
                 LayoutsThrow.Format($"A {Id} layout was asked for row {row} of {span}.");
