@@ -43,7 +43,7 @@ internal static class LiteralValues
             ClrKind.Guid => new Guid(literal.BytesValue, bigEndian: true),
             ClrKind.Decimal => Decimal(literal, column),
             ClrKind.VortexDecimal => Wide(literal, column),
-            _ => throw new NotSupportedException($"A {typeof(T)} is not read back from a literal."),
+            _ => throw new NotSupportedException($"A {ClrFit.Name(typeof(T))} is not read back from a literal."),
         };
 
         return (T)value;

@@ -116,8 +116,56 @@ internal static class ClrFit
     {
         if (!Fits(ClrShape.For<T>.Value, column, extensions, out string? reason))
         {
-            throw new VortexSchemaException($"{what} is a column of {column}, which {typeof(T)} does not map to: {reason}");
+            throw new VortexSchemaException($"{what} is a column of {column}, which {Name(typeof(T))} does not map to: {reason}");
         }
+    }
+
+    /// <summary>A type as C# spells it, for a message: <c>int?</c>, <c>ReadOnlyMemory&lt;byte&gt;</c>, not <c>Nullable`1</c>.</summary>
+    internal static string Name(Type type)
+    {
+        if (Nullable.GetUnderlyingType(type) is { } underlying)
+        {
+            return Name(underlying) + "?";
+        }
+
+        string? keyword = Type.GetTypeCode(type) switch
+        {
+            TypeCode.Boolean => "bool",
+            TypeCode.SByte => "sbyte",
+            TypeCode.Byte => "byte",
+            TypeCode.Int16 => "short",
+            TypeCode.UInt16 => "ushort",
+            TypeCode.Int32 => "int",
+            TypeCode.UInt32 => "uint",
+            TypeCode.Int64 => "long",
+            TypeCode.UInt64 => "ulong",
+            TypeCode.Single => "float",
+            TypeCode.Double => "double",
+            TypeCode.Decimal => "decimal",
+            TypeCode.String => "string",
+            TypeCode.Char => "char",
+            _ => null,
+        };
+        if (keyword is not null && !type.IsEnum)
+        {
+            return keyword;
+        }
+
+        if (!type.IsGenericType)
+        {
+            return type.Name;
+        }
+
+        string name = type.Name;
+        int tick = name.IndexOf('`', StringComparison.Ordinal);
+        Type[] arguments = type.GetGenericArguments();
+        string[] names = new string[arguments.Length];
+        for (int i = 0; i < arguments.Length; i++)
+        {
+            names[i] = Name(arguments[i]);
+        }
+
+        return (tick < 0 ? name : name[..tick]) + "<" + string.Join(", ", names) + ">";
     }
 
     internal static bool Fits(ClrShape shape, VortexType column, VortexExtensionRegistry? extensions, out string? reason)
@@ -160,7 +208,7 @@ internal static class ClrFit
                 }
 
                 return Expect(target.Kind == VortexTypeKind.Primitive && target.PrimitiveType == shape.PType,
-                    $"a {shape.Type.Name} reads a {shape.PType.Name()} column exactly; convert after the read.", out reason);
+                    $"a {Name(shape.Type)} maps to a {shape.PType.Name()} column exactly; convert it before a write or after a read.", out reason);
             case ClrKind.String:
                 return Expect(target.Kind == VortexTypeKind.Utf8, "a string reads a utf8 column.", out reason);
             case ClrKind.Binary:

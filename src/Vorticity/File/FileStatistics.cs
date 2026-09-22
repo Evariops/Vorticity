@@ -285,7 +285,7 @@ public readonly struct FieldStatistics
 
         if (!ClrFit.Fits(ClrShape.For<T>.Value, type.NonNullable, null, out _) && !ClrFit.Fits(ClrShape.For<T>.Value, type, null, out _))
         {
-            throw new VortexSchemaException($"The statistic is of a column of {type}, which {typeof(T)} does not map to.");
+            throw new VortexSchemaException($"The statistic is of a column of {type}, which {ClrFit.Name(typeof(T))} does not map to.");
         }
 
         value = LiteralValues.ToValue<T>(literal, type)!;

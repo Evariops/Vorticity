@@ -74,6 +74,13 @@ public readonly ref struct BatchView
 
         VortexField field = Schema[index];
         ClrFit.Require<T>(field.Type, $"Column '{field.Name}'", Extensions);
+        if (field.Type.IsNullable && typeof(T).IsValueType && Nullable.GetUnderlyingType(typeof(T)) is null && ClrShape.For<T>.Value.Kind is not (ClrKind.List or ClrKind.Unsupported))
+        {
+            // A list, and a registered extension, have their accessors on the non-nullable form only.
+            throw new VortexSchemaException(
+                $"Column '{field.Name}' is {field.Type}, which is nullable; read it as Column<{ClrFit.Name(typeof(T))}?>, whose accessors say which rows are null.");
+        }
+
         return new Column<T>(Arena, ColumnNode(index), field.Type, Extensions);
     }
 

@@ -311,7 +311,7 @@ internal static class ElementWriter
         if (!AppendConverted(leaf, values))
         {
             throw new VortexSchemaException(
-                $"A list of {typeof(T)} is not appended in one call; append its elements one by one through Elements.");
+                $"A list of {ClrFit.Name(typeof(T))} is not appended in one call; append its elements one by one through Elements.");
         }
     }
 

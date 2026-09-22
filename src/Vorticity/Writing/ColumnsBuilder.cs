@@ -125,7 +125,7 @@ public class ColumnsBuilder
         if (shape.IsNullableValue && !type.IsNullable)
         {
             throw new VortexSchemaException(
-                $"{what} is {type}, which is not nullable; ask for a builder of {Nullable.GetUnderlyingType(shape.Type)!.Name} instead of {shape.Type.Name}.");
+                $"{what} is {type}, which is not nullable; ask for a builder of {ClrFit.Name(Nullable.GetUnderlyingType(shape.Type)!)} instead of {ClrFit.Name(shape.Type)}.");
         }
 
         if (shape.Kind == ClrKind.List && shape.Element is { } element && type.ElementType is { } elements)

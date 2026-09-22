@@ -155,7 +155,7 @@ internal static class SymLowering
 
             default:
                 throw new VortexUnsupportedException(
-                    typeof(T).Name, ComponentKind.Feature, $"'{column.Field.Path}' cannot be compared with a {typeof(T).Name}; a list is filtered by Contains.");
+                    ClrFit.Name(typeof(T)), ComponentKind.Feature, $"'{column.Field.Path}' cannot be compared with a {ClrFit.Name(typeof(T))}; a list is filtered by Contains.");
         }
     }
 

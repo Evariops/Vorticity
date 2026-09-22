@@ -163,7 +163,7 @@ internal static class Aggregators
         if (shape.Kind != StorageKind.Primitive || clr.Kind is not (ClrKind.Signed or ClrKind.Unsigned or ClrKind.Float) || clr.PType != shape.PType)
         {
             throw new VortexSchemaException(
-                $"'{shape.Path}' is {shape.Type}; an aggregator over {typeof(T).Name} reads a column stored as {typeof(T).Name}.");
+                $"'{shape.Path}' is {shape.Type}; an aggregator over {ClrFit.Name(typeof(T))} reads a column stored as {ClrFit.Name(typeof(T))}.");
         }
 
         return new Sym<TState>(new AggregateNode<TState>(AggregateKind.Custom, shape, CustomFactory<T, TAggregator, TState>.Create, null));
@@ -231,7 +231,7 @@ internal static class Aggregators
     {
         if (typeof(T) != typeof(decimal))
         {
-            throw new VortexSchemaException($"A decimal column sums as decimal, not as {typeof(T).Name}.");
+            throw new VortexSchemaException($"A decimal column sums as decimal, not as {ClrFit.Name(typeof(T))}.");
         }
 
         bool negative = unscaled < 0;
