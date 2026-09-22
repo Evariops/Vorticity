@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 
@@ -76,7 +77,8 @@ internal static class DatasetMaintenance
 
         store.Reset();
         VacuumResult done = await dataset.VacuumAsync(later with { DryRun = false });
-        Console.WriteLine($"vacuum in eight days: {done.Deleted.Length} deleted, latest version {done.Latest}; cost: {Cost(store)}");
+        Console.WriteLine($"vacuum in eight days: {done.Deleted.Length} deleted ({done.Deleted.Count(key => key.StartsWith("commit/", StringComparison.Ordinal))} commit objects), " +
+            $"latest version {done.Latest}; cost: {Cost(store)}");
 
         Console.WriteLine($"and the data: {await dataset.Scan<Reading>().CountAsync()} rows, {dataset.ObjectCount} objects");
     }

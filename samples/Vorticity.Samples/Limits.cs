@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Vorticity.IO;
 
 namespace Vorticity.Samples;
 
@@ -111,7 +112,7 @@ internal static class Limits
             string outcome;
             try
             {
-                await using VortexFile file = await VortexSession.Default.OpenAsync(new IO.MemorySegmentSource(bytes));
+                await using VortexFile file = await VortexSession.Default.OpenAsync(new MemorySegmentSource(bytes));
                 long rows = 0;
                 await foreach (BatchView batch in file.Scan())
                 {

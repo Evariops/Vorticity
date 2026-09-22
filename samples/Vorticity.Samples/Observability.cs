@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Linq;
 using System.Threading.Tasks;
+using Vorticity.IO;
 
 namespace Vorticity.Samples;
 
@@ -37,7 +38,7 @@ internal static class Observability
         ActivitySource.AddActivityListener(activities);
 
         await using VortexSession session = VortexSession.Create(o => o.SegmentCache = new SegmentCache(64L * 1024 * 1024));
-        await using (VortexFile file = await session.OpenAsync(new IO.FileSegmentSource(path)))
+        await using (VortexFile file = await session.OpenAsync(new FileSegmentSource(path)))
         {
             for (int run = 1; run <= 2; run++)
             {
