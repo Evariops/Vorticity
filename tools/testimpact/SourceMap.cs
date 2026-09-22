@@ -28,6 +28,32 @@ internal sealed class SourceMap
     internal IReadOnlyList<MethodSpan> Methods(string path) =>
         _byFile.TryGetValue(path, out List<MethodSpan>? spans) ? spans : [];
 
+    /// <summary>
+    /// The methods of the named outermost types and of every type nested in them, in whichever
+    /// file each part is: a partial type spreads over several.
+    /// </summary>
+    internal IEnumerable<MethodSpan> MethodsOf(IReadOnlySet<string> types)
+    {
+        foreach (List<MethodSpan> spans in _byFile.Values)
+        {
+            foreach (MethodSpan span in spans)
+            {
+                if (types.Contains(Outermost(span.Key)))
+                {
+                    yield return span;
+                }
+            }
+        }
+    }
+
+    /// <summary>The outermost type a method key belongs to: its type up to the first nesting.</summary>
+    internal static string Outermost(string key)
+    {
+        string type = ImpactMap.TypeOf(key);
+        int plus = type.IndexOf('+', StringComparison.Ordinal);
+        return plus < 0 ? type : type[..plus];
+    }
+
     /// <summary>Adds the methods of one assembly, when it is built and has its PDB beside it.</summary>
     /// <param name="assembly">The path of the assembly.</param>
     /// <param name="root">The repository root, which document paths are made relative to.</param>
@@ -57,7 +83,7 @@ internal sealed class SourceMap
             }
 
             MethodDefinition method = metadata.GetMethodDefinition(handle.ToDefinitionHandle());
-            string key = TypeName(metadata, method.GetDeclaringType()) + ":" + metadata.GetString(method.Name);
+            string key = JitSummary.Stable(TypeName(metadata, method.GetDeclaringType()) + ":" + metadata.GetString(method.Name));
             bool isVirtual = (method.Attributes & MethodAttributes.Virtual) != 0;
 
             // A method's points are in one document but for rare generated code; each document gets

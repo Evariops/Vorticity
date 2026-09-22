@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace Vorticity.Tools.TestImpact;
@@ -14,7 +15,9 @@ internal readonly record struct TestClass(string Assembly, string Name);
 /// <summary>Which test classes ran which methods of the repository, as <c>testimpact map</c> recorded it.</summary>
 internal sealed class ImpactMap
 {
-    private const string Header = "testimpact 1";
+    /// <summary>The format's first line; a map with another is from an older format, and is rebuilt.</summary>
+    /// <remarks>2: keys without the compiler's ordinals (<see cref="JitSummary.Stable"/>).</remarks>
+    private const string Header = "testimpact 2";
 
     private readonly List<TestClass> _classes;
     private readonly Dictionary<string, List<int>> _byMethod;
@@ -95,10 +98,10 @@ internal sealed class ImpactMap
         File.WriteAllText(path, text.ToString());
     }
 
-    /// <summary>The map at <paramref name="path"/>, or null when there is none.</summary>
+    /// <summary>The map at <paramref name="path"/>, or null when there is none of this format.</summary>
     internal static ImpactMap? Load(string path)
     {
-        if (!File.Exists(path))
+        if (!File.Exists(path) || File.ReadLines(path).FirstOrDefault() != Header)
         {
             return null;
         }

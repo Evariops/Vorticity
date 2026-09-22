@@ -13,8 +13,15 @@ namespace Vorticity.Tools.TestImpact;
 /// (<c>DOTNET_JitNoInline</c>) none is folded into its caller, so the list is every method the
 /// process ran. Generic arguments are dropped, which merges the instantiations of one method: a
 /// change to its source changes them all.
+/// <para>
+/// The ordinals the compiler numbers its generated types and methods with are dropped too: an async
+/// method's state machine <c>&lt;ReadAsync&gt;d__12</c>, a closure <c>&lt;&gt;c__DisplayClass4_0</c>,
+/// a lambda <c>&lt;Scan&gt;b__4_1</c>, a local function <c>&lt;Scan&gt;g__Next|4_2</c>. They count
+/// members in declaration order, so adding a method renumbers every one below it, and a key that
+/// kept them would stop matching the map at the first new member.
+/// </para>
 /// </remarks>
-internal static class JitSummary
+internal static partial class JitSummary
 {
     private const string Marker = "JIT compiled ";
 
@@ -79,8 +86,14 @@ internal static class JitSummary
             return null;
         }
 
-        return WithoutArguments(signature[..colon]) + ":" + WithoutArguments(signature[(colon + 1)..paren]);
+        return Stable(WithoutArguments(signature[..colon]) + ":" + WithoutArguments(signature[(colon + 1)..paren]));
     }
+
+    /// <summary>A method key without the compiler's ordinals, which move when a member is added.</summary>
+    internal static string Stable(string key) => Ordinal().Replace(key, "$1");
+
+    [System.Text.RegularExpressions.GeneratedRegex(@"(d__|DisplayClass|b__|\|)\d+(_\d+)?")]
+    private static partial System.Text.RegularExpressions.Regex Ordinal();
 
     /// <summary>A name with its bracketed generic arguments removed.</summary>
     internal static string WithoutArguments(ReadOnlySpan<char> name)

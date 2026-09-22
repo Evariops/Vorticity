@@ -236,7 +236,7 @@ internal static partial class Program
         ImpactMap? map = ImpactMap.Load(mapPath);
         if (map is null)
         {
-            selection.Everything = "no map yet: run `testimpact map`";
+            selection.Everything = "no map of this format yet: run `testimpact map`";
             Console.WriteLine(selection.Everything);
             return selection;
         }
@@ -300,16 +300,21 @@ internal static partial class Program
             List<MethodSpan> hit = [.. methods.Where(span => span.First <= last && span.Last >= first)];
             if (hit.Count == 0)
             {
-                // A declaration: a constant is copied into every reader, so the whole suite; the
-                // signature or attributes of the method below it; else every method of the file.
-                if (hunk.Text.Any(line => !Inert(line) && line.Contains(" const ", StringComparison.Ordinal)))
+                // A declaration: a constant is copied into every reader, so the whole suite, unless
+                // it is private, when its readers are its own type's methods wherever the type's
+                // parts are; the signature or attributes of the method below it; else every method
+                // of the file.
+                List<string> constants = [.. hunk.Text.Where(line => !Inert(line) && line.Contains(" const ", StringComparison.Ordinal))];
+                if (constants.Count > 0 && !constants.All(line => line.TrimStart().StartsWith("private const ", StringComparison.Ordinal)))
                 {
                     selection.Everything ??= path + " (a constant)";
                     continue;
                 }
 
                 MethodSpan? next = methods.Where(span => span.First > last && span.First - last <= 8).OrderBy(span => span.First).Cast<MethodSpan?>().FirstOrDefault();
-                hit = next is MethodSpan below ? [below] : [.. methods];
+                hit = constants.Count > 0
+                    ? [.. sources.MethodsOf(methods.Select(span => SourceMap.Outermost(span.Key)).ToHashSet(StringComparer.Ordinal))]
+                    : next is MethodSpan below ? [below] : [.. methods];
                 contracts |= path.StartsWith("src/", StringComparison.Ordinal) && hunk.Text.Any(
                     line => !Inert(line) && (line.Contains("public ", StringComparison.Ordinal) || line.Contains("protected ", StringComparison.Ordinal)));
             }
