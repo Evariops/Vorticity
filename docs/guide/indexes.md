@@ -1,119 +1,161 @@
 # Indexes
 
-What `Auto` builds, what it costs, and when to ask for more by name.
-
-An index here is a **skipping** index: it does not find rows, it proves a block cannot hold them, so
-the scan never reads that block. What [statistics-and-pruning.md](statistics-and-pruning.md)
-describes is the free version of the same idea — bounds every file carries. An index is what you
-add when bounds cannot decide.
-
-## What the default does
-
-`VortexWriteOptions.Indexes` is `WritePolicy.Auto`, and `Auto` is allowed to decline. On a file of
-five city names and a temperature:
-
-```
-cities, Auto: 396025 bytes, 101 of them indexes
-  city vorticity.dict.probe.v1: Built
-  city vorticity.bloom.sbbf.v1: Abandoned -- its first 4 blocks hold the same 5 values, so its
-    block filters prune nothing and the pass that would fill their root costs more than a default
-    write may spend
-  celsius vorticity.dict.probe.v1: Built
-  celsius vorticity.bloom.sbbf.v1: Abandoned -- 2048 bytes of filters against 65536 raw bytes of
-    column, over its share
-```
-
-Read the report. `WriteReport.Indexes` is the only place that says what was built, what was given up
-and why, and the reason is a sentence, not a code.
-
-## Asking for one
-
-A Bloom filter is for the column you look a value up in: an identifier, with no order, no repeats,
-and nothing to compress. On a log of 200 000 session identifiers:
+Ask the writer for an index, read in the report whether it was built, and check that a filter uses
+it.
 
 ```csharp
-VortexWriteOptions options = new VortexWriteOptions
+VortexWriteOptions options = new()
 {
-    Indexes = WritePolicy.None.For("session", IndexPolicy.Bloom()),
-    IndexBudgetPerMille = 500,
+    Indexes = IndexPolicy.None
+        .Bloom(Hit.ColumnNames.Session)
+        .NgramBloom(Hit.ColumnNames.Path)
+        .WithBudgetPerMille(300),
 };
 ```
 
-`WritePolicy` is a default plus overrides by column: `For(column, policy)` sets one,
-`WithDefault(policy)` sets the rest, `ForKey([a, b], policy)` covers a composite key. `IndexPolicy`
-offers `Auto`, `None`, `Bloom(...)`, `NgramBloom(...)`, `Postings`, `NgramPostings(...)` and
-`SortedRuns`, and `AsRequired()` marks one you want built.
+`Hit` is `[VortexRecord] public partial record struct Hit(string Session, string Path, int Status, int Score)`,
+and the sample writes 400 000 of them: a twelve-character session identifier, a path, an HTTP status,
+a score, none of them in order. The zone maps and the string bounds every file carries can prune
+nothing on such columns; that is where an index earns its bytes. [statistics-and-pruning.md](statistics-and-pruning.md)
+is the free kind of pruning.
 
-## What it costs and what it buys
+## What the report says
 
-| | bytes |
-|---|---|
-| no index | 1 387 788 |
-| a Bloom at the default false-positive rate | 1 921 129 |
-| a Bloom at one false positive in a million | refused: the filters alone would be 1 572 940 |
+```
+Bloom on Session, NgramBloom on Path, budget 300 per mille: 6219196 bytes, 932416 of them indexes
+  Session vorticity.bloom.sbbf.v1: Built, 820056 bytes
+  Path vorticity.bloom.ngram3.v1: Built, 111448 bytes
+```
 
-The filter is 533 008 bytes against 1 363 772 bytes of data — a third of the file. That is the real
-trade, and it is why the default budget of 100 per mille turns this one down until you raise
-`IndexBudgetPerMille`.
+`report.Indexes` has one entry per index the policy asked for: the column, the kind as the file
+names it, `Built` or `Abandoned`, the reason when it was abandoned, and the bytes it takes. It is the
+only place that says what was given up and why, and the reason is a sentence.
 
-What it buys, on `session = <a value>`:
+## What it buys
 
-| | rounds of reading | bytes |
+The sample asks each filter for its plan with and without the indexes (`ScanOptions.UseIndexes = false`):
+
+| filter | rows | blocks read, with | bytes read, with | without |
+|---|---|---|---|---|
+| `Session == ` a value that exists | 1 | 1 of 49 | 1 022 008 | 49 blocks, 5 271 956 bytes |
+| `Session == ` a value that does not | 0 | 0 of 49 | 805 704 | 49 blocks, 5 271 956 bytes |
+| `Path.Contains("checkout")` | 10 | 10 of 49 | 2 272 840 | 49 blocks, 5 272 012 bytes |
+
+A skipping index does not find rows; it proves that a block cannot hold them, so the block is never
+read. The Bloom filters on `Session` cost 820 KB against 5.3 MB of data and cut the read five times
+for a hit and six and a half for a miss; the filters are read whole, 804 KB of the million bytes.
+The n-gram filters are cheaper and serve `Contains` and `Like`. `plan.Pruning` names
+the structure that pruned each block: `bloom filter pruned 48 reading 803596 bytes`.
+
+## The kinds
+
+| policy | index | serves |
 |---|---|---|
-| with the index, a value that exists | 6 | 1 823 167 |
-| with the index, a value that does not | 5 | 459 511 |
-| without it, either way | 27 | 32 815 051 |
+| `Bloom(column, falsePositiveRate)` | a split-block Bloom filter per block | equality and `In` |
+| `NgramBloom(column)` | a Bloom filter of trigrams per block | `Contains` and `Like` on a text column |
+| `Postings(column)` | value to blocks, exact | equality and `In` on a column of few values |
+| `SortedRuns(column)` | value to rows, sorted | equality, and the key cursor over an unsorted column |
+| `ForKey(columns, kind, encoder)` | sorted runs over a tuple's row encoding | a composite key |
 
-Eighteen times less for a hit, seventy for a miss. A skipping index earns most when the answer is
-no.
+The locating kinds, measured on the same rows:
 
-## Reading what a file carries
+```
+Postings on Status, SortedRuns on Score, budget 3000 per mille: 7140709 bytes, 1853905 of them indexes
+  Status == 301: 16 rows; 16 of 49 blocks and 3461108 bytes with the indexes (… locating index pruned 33 reading 1184 bytes), 49 blocks and 5270804 bytes without
+  Score == a value that exists: 1 rows; 1 of 49 blocks and 550460 bytes with the indexes (… locating index pruned 48 reading 333200 bytes), 49 blocks and 5270804 bytes without
+  Score between 1000 and 1100: 38 rows; 49 of 49 blocks and 5270804 bytes with the indexes (…), 49 blocks and 5270804 bytes without
+  a key cursor on Score: the first key at or after 1000 is 1001, at row 280415; 382 rows hold a smaller one
+```
+
+Postings on four statuses take 1 184 bytes and find the sixteen rows of a rare one. Sorted runs take
+1.85 MB, a third of the data: they list every row. They prune an equality, and they are what lets
+`Scan<Hit>().Keys(r => r.Score)` open a cursor over a column that is not sorted; without them
+`OpenAsync` throws `VortexUnsupportedException` naming the index to build
+([keys-in-order.md](keys-in-order.md)). A range filter is not pruned by them: `Between` read every
+block.
+
+A composite key names its encoder, from the row-encoding package:
 
 ```csharp
-foreach (VortexIndexInfo index in await file.ReadIndexesAsync())
-{
-    Console.WriteLine($"{index.Column} {index.Kind}: {index.Runs} runs over {index.Blocks} blocks " +
-        $"of {index.BlockLength} rows, {index.ListedBytes} bytes listed, layout {index.Layout}");
-}
+Indexes = IndexPolicy.None
+    .ForKey([Hit.ColumnNames.Status, Hit.ColumnNames.Score], IndexKind.SortedRuns, new RowKeyEncoder())
+    .WithBudgetPerMille(3_000),
 ```
 
+It was built, 1.79 MB. No scan of the typed surface reads it: `Status == 301 & Score >= 1000` read
+49 of 49 blocks, and `Keys` takes one column. It is how a dataset's clustering key is written
+([datasets.md](datasets.md)). Without an encoder the key is abandoned: *no key encoder: declare the
+key with IndexPolicy.ForKey(columns, kind, encoder), e.g. with the RowKeyEncoder of
+Vorticity.RowEncoding*. [row-keys.md](row-keys.md) is the encoding.
+
+## Auto, and the budget
+
+`IndexPolicy.Auto` tries the cheap indexes on every column and keeps them only where the statistics
+and its share of the budget say they pay. On these rows:
+
 ```
-session vorticity.bloom.sbbf.v1: 1 runs over 25 blocks of 8192 rows, 124 bytes listed, layout FilterTree
+IndexPolicy.Auto: 5286905 bytes, 101 of them indexes
+  Session vorticity.bloom.sbbf.v1: Abandoned, 0 bytes -- Auto gave it up: 16384 bytes of filters against 229376 raw bytes of column, over its share of 20‰. An explicit Bloom policy overrides the share
+  Status vorticity.dict.probe.v1: Built, 0 bytes
+  Status vorticity.bloom.sbbf.v1: Abandoned, 0 bytes -- Auto gave it up: the first 16 blocks hold 4 distinct values, under the floor of 8 the policy asks before a filter pays
 ```
 
-`ListedBytes` is what the directory lists, not what the index weighs: a `FilterTree` holds the rest
-below those regions. `file.Indexes` is the same list without the read, and is `null` until the
-directory has been read.
+It built dictionary probes, which cost nothing since the dictionary is already in the file, and
+pruned 17 blocks of 49 for `Status == 301` with them; it gave up the Bloom filter the session lookup
+needed. Ask for that one by name.
 
-`VerifyIndexesAsync()` checks that the indexes still describe these bytes — `Holds`, plus what was
-`Held`, what is `Torn` and what is `Bare`. An index that no longer matches the file is not used.
+`WithBudgetPerMille` bounds the bytes the indexes may take together, per thousand bytes of data, 100
+by default. The same Bloom and n-gram policy under the default budget:
 
-## Indexing a file you already wrote
-
-```csharp
-await VortexFileIndexer.AppendIndexesAsync(path, WritePolicy.None.For("session", IndexPolicy.Bloom()), options);
+```
+  Session vorticity.bloom.sbbf.v1: Abandoned, 0 bytes -- the file's indexes reached 296960 bytes against 1729668 bytes of data, over the budget of 100‰ (IndexPolicy.WithBudgetPerMille)
 ```
 
-It reads the file, builds the indexes and appends them, leaving the data untouched: 1 387 788 bytes
-became 1 922 597, with one index listed. `BuildFragmentAsync` does the same but hands you the bytes
-instead of writing them, for an index kept beside the file and passed back at open through
-`VortexReadOptions.IndexFragments`.
+**An abandoned index leaves no bytes.** The file was 106 bytes larger than one without a policy, the
+index directory. The budget drops only an index that has written nothing, so one whose filters are
+already in the file is kept even past the budget.
+
+## Required
+
+```
+a required index over its budget: VortexException: The vorticity.bloom.sbbf.v1 index on 'Session' is required and was not built: the required indexes take 3277420 bytes against 5274028 bytes of data, over the budget of 50‰; raise it with IndexPolicy.WithBudgetPerMille. The file is not completed.
+  the file is left behind: False
+```
+
+`required: true` makes an index that cannot be built fail the write: `CompleteAsync` throws
+`VortexException` naming the index and the reason, before the tail is written, and the writer's
+disposal deletes the partial file. The budget is judged once the data passes 1 MiB.
+
+## What a file carries
+
+```
+  listed: Session vorticity.bloom.sbbf.v1, 1 runs over 49 blocks of 8192 rows, 0 entries, 132 bytes listed, layout FilterTree
+  listed: Path vorticity.bloom.ngram3.v1, 1 runs over 49 blocks of 8192 rows, 0 entries, 2180 bytes listed, layout FilterTree
+  verification holds: True (held 2, torn 0, bare 0)
+```
+
+`file.GetIndexesAsync()` lists the index directory: kind, column, runs, blocks, entries and bytes.
+`ListedBytes` is what the directory lists, not what the index weighs: a `FilterTree` holds the
+filters below those regions. `file.VerifyIndexesAsync()` checks every listed region against its
+checksum, reading each once; it is a tool's check, and a scan does not run it.
 
 ## Watch out
 
-* **An index that is abandoned is not free.** On this file, asking for a Bloom that the budget then
-  refuses leaves 262 368 bytes in it and **no index listed** — the filters are written before the
-  budget is checked, and the abandoned ones stay. Check `report.Indexes` and rewrite without the
-  policy if the bytes matter. The same happens through `AppendIndexesAsync`: +263 788 bytes, nothing
-  listed.
-* **`AsRequired()` does not make the write fail.** A required policy that cannot be built is still
-  abandoned, with its reason in the report; nothing throws.
-* `WithIndexes(false)` on a scan ignores them, which is the way to measure what one is worth.
-* A dictionary probe is built for a column the writer dictionary-encoded, and abandoned for one it
-  did not — the index follows the encoding, not your request.
+* **An index is written with the file.** The surface has no call that adds one to a file already
+  written: write it again with the policy ([copy-a-file.md](copy-a-file.md)). The message of a key
+  cursor refused for want of an index mentions `VortexFileIndexer`, which offers no public method.
+* **A name the schema does not have throws at `CreateWriter`**: *The index policy names 'Referrer',
+  which is no column of the schema struct{…}.*
+* **The composite keys of a file share one encoder**: `ForKey` refuses a second encoder of another
+  format when the policy is built.
+* **A skipping index earns most when the answer is no**, and nothing on a column whose zone maps
+  already prune: a sorted column needs none.
+* [10-indexes.md](../design/10-indexes.md) is the design: the kinds, the directory, the policy.
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- indexes
+dotnet run -c Release --project samples/Vorticity.Samples -- indexes
 ```
+
+The figures above come from that run.

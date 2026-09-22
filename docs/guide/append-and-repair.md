@@ -1,103 +1,131 @@
 # Append and repair
 
-Add rows to a file you already wrote, and recover one whose tail was torn.
-
-## Appending
+Add rows to a file you already wrote, give an append up, and recover a file whose tail was torn.
 
 ```csharp
-await using VortexFileWriter appender = await VortexFileWriter.AppendAsync(path);
-using RecordBatch batch = MakeBatch(rows, startRow: appender.RowCount);
-await appender.WriteAsync(batch);
-WriteReport report = await appender.CompleteAsync();
-```
-
-`appender.RowCount` is **where the append resumes**, and the new batch's `startRow` must be that
-number. It is not always the file's row count: the writer keeps the chunks it can and rewrites the
-last one, so the rows of that chunk are written again along with yours.
-
-## What an append costs, and how to make it cost less
-
-An append never truncates. The rewritten chunk's old bytes stay in the file — that is what lets a
-reader fall back to the previous version when a write is interrupted. So the question is how much
-gets rewritten, and that depends on where your batches end.
-
-Four appends of 8 192 rows onto a file of 16 384, against four appends of 5 000 onto 20 000:
-
-| | resumes at | after four appends |
-|---|---|---|
-| batches of 8 192 onto 16 384 | 16 384, 24 576, 32 768, 40 960 | 49 152 rows, 155 197 bytes |
-| the same rows written once | | 49 152 rows, 104 793 bytes |
-| batches of 5 000 onto 20 000 | 0, 0, 0, 0 | 40 000 rows, 351 621 bytes |
-| the same rows written once | | 40 000 rows, 89 409 bytes |
-
-**Resuming at 0 means the whole file is rewritten, and the old copy stays.** Four appends then left
-a file four times the size of the same rows written once. Ending every batch on a multiple of
-`RowBlockSize` — 8 192 by default, and `writer.PreferredBatchRows` says so — keeps the appends
-incremental: 1.5 times instead of 3.9.
-
-Two habits follow. Write batches that are multiples of the block size, and rewrite the file when it
-has taken many appends, because nothing else reclaims what they left behind.
-
-## What else an append changes
-
-* **The identity is minted anew.** Every version of a file's bytes gets its own sixteen bytes, so
-  `file.Identity` changes at each append. Pin it through `VortexWriteOptions.Identity` when you want
-  the write to be reproducible.
-* **`Abandon()` leaves the file exactly as it was** — 71 053 bytes before and after, batch written
-  and all. It is the way to say the append is not wanted; disposing without `CompleteAsync` does the
-  same.
-* **Nothing else may hold the file.** An open `VortexFile` over the same path makes `AppendAsync`
-  fail with `IOException`.
-* An append refuses a file whose tail is torn: repair it first.
-
-## A torn tail
-
-A crash mid-append leaves bytes after the last complete version. The reader falls back to that
-version by default, and says so:
-
-```csharp
-await using VortexFile file = await VortexFile.OpenAsync(path);
-if (file.TornTail is { } torn)
+await using (VortexFileWriter appender = await session.AppendAsync(path))
 {
-    Console.WriteLine($"{file.RowCount} rows, valid to {torn.ValidLength} of {torn.FileLength}: {torn.Reason}");
+    long resumeAt = appender.RowCount;                         // the file's row count, since it ended on a block
+    await appender.WriteAsync<Reading>(more.AsSpan(), ct);
+    WriteReport report = await appender.CompleteAsync(ct);
 }
 ```
 
 ```
-24576 rows, valid to 71053 of 71181
+appended 8192 rows to 16384: resumed at 16384, the file now holds 24576
+appended 5000 rows to 20000: resumed at 16384, RowCount 21384 after the write, the file now holds 25000
 ```
 
-Everything the file answers is that earlier version's — rows, statistics, indexes, `FileLength`.
-`VortexTornTailPolicy.Refuse` at open turns the fallback into a `VortexFormatException` instead.
+## Where an append resumes
+
+`AppendAsync` opens the file, keeps its chunks, and positions the writer after its rows. The new
+rows always follow the file's last row. What `appender.RowCount` says right after the open is where
+the rewrite starts:
+
+* a file that ends on a block, 16 384 rows here, is continued as it stands: `RowCount` is its row
+  count;
+* a file that does not, 20 000 rows here, has its last chunk read and written again with the new
+  rows: `RowCount` is 16 384, where that chunk starts. The 3 616 rows of the old tail are the file's
+  already; you do not write them again, and they are not counted again either, so `RowCount` after
+  writing 5 000 rows is 21 384 while the file holds 25 000. `report.RowCount` is the file's total.
+
+## What an append costs
+
+An append never truncates while it writes: the rewritten chunk's old bytes stay where they were,
+which is what a reader falls back to when the append is torn. So the question is how much gets
+rewritten. Four appends each way, against the same rows written once:
+
+| | resumes at | after four appends | the same rows written once |
+|---|---|---|---|
+| appends of 8 192 onto 16 384 | 16 384, 24 576, 32 768, 40 960 | 49 152 rows, 101 485 bytes | 80 204 bytes |
+| appends of 5 000 onto 20 000 | 16 384, four times | 40 000 rows, 153 621 bytes | 67 892 bytes |
+
+Appends that end on a block rewrite nothing, and the file is 1.27 times the size of the same rows
+written once: every version's footer stays in the file, and each append's rows form chunks of their
+own. Appends that do not end on a block keep resuming
+at 16 384: the tail chunk grows by each append's rows and is rewritten whole every time, with its
+old copy left behind, and the file reaches 2.26 times the size. Write appends in multiples of
+`BlockRows`, and rewrite a file that has taken many appends ([copy-a-file.md](copy-a-file.md)),
+since nothing else reclaims what they leave behind.
+
+## Giving an append up
+
+```
+an append abandoned after a flush: 106436 bytes on disk before Abandon, 29316 after, 29316 before the append
+an append disposed without CompleteAsync: 29316 bytes, 29316 before
+a created file abandoned: exists False
+a created file disposed without CompleteAsync: exists False
+```
+
+`Abandon()` on an append truncates the file back to the length it had, flushed bytes included; on a
+created file it deletes the file. A writer disposed without `CompleteAsync` does the same. Over a
+caller's `PipeWriter` there is nothing to delete, and the pipe is completed with an error instead
+([stream-to-an-object.md](stream-to-an-object.md)).
+
+## A torn tail
+
+A crash in the middle of an append leaves bytes after the last complete version. The sample makes one
+by cutting the last 100 bytes of a completed append:
+
+```csharp
+await using (VortexFile file = await VortexFile.OpenAsync(path))
+{
+    if (file.TornTail is { } torn)
+    {
+        Console.WriteLine($"reading the version before the torn append: {file.RowCount} rows, valid to {torn.ValidLength} of {torn.FileLength}");
+        Console.WriteLine($"  why: {torn.Reason}");
+    }
+}
+```
+
+```
+16384 rows in 29316 bytes, 24576 after the append in 47029, cut to 46929
+reading the version before the torn append: 16384 rows, valid to 29316 of 46929
+  why: Malformed file: the EOF marker's magic is 0x696e6465, expected 'VTXF'.
+```
+
+The file opens as the version before the append, and everything it answers is that version's: rows,
+statistics, indexes. `VortexTornTailPolicy.Refuse` in `VortexOpenOptions.TornTail` throws
+`VortexFormatException` instead. An append refuses a torn file, with the same exception and a message
+that says what to do.
 
 ## Repairing
 
 ```csharp
-long valid = await VortexFileRepair.ValidLengthAsync(path);      // 71053
-VortexRepairResult result = await VortexFileRepair.RepairAsync(path);
-Console.WriteLine($"truncated {result.Truncated}, {result.OriginalLength} -> {result.Length}");
+long valid = await VortexFileRepair.ValidLengthAsync(path, ct);
+VortexRepairResult repaired = await VortexFileRepair.RepairAsync(path, ct);   // truncates to the last version that parses
 ```
 
 ```
-truncated True, 71181 -> 71053
+valid length 29316; repaired: truncated True, 46929 -> 29316
+the repaired file appends again: 24576 rows
 ```
 
-`RepairAsync` truncates the file to the last length that parses. After it, `TornTail` is null and
-the file appends again like any other.
+`ValidLengthAsync` finds the longest prefix that opens without changing the file; `RepairAsync`
+truncates to it and leaves a valid file alone. After a repair `TornTail` is null and the file appends
+like any other.
 
 **A file with no complete version has nothing to fall back to.** One cut short rather than appended
-to — a download that stopped, a disk that filled mid-write — throws on open, and `ValidLengthAsync`
-throws rather than returning zero.
+to, a download that stopped or a disk that filled, throws `VortexFormatException` on open, and so do
+`ValidLengthAsync` and `RepairAsync`.
 
 ## Watch out
 
-* The append's schema must match the file's. Build it from the same shape, not from a guess.
-* `report.RowCount` after `CompleteAsync` is the file's total, not what this append added.
-* An append is not atomic. That is why the torn-tail fallback exists, and why a reader of a file
-  being appended to sees either the old version or the new one, never half of each.
+* **Nothing else may hold the file.** An append opens it for writing alone, so a `VortexFile` still
+  open over the same path makes `AppendAsync` throw `IOException`.
+* **The identity is drawn anew by each append**: every version of the bytes has its own. Pin it
+  with `VortexWriteOptions.Identity` for a reproducible write ([writer-options.md](writer-options.md)).
+* **An append takes the file's own settings** when its options are null: the block size, the index
+  policy, whether it carries statistics, its metadata. The block size is the file's whatever the
+  options say. A composite key's encoder is not stored, so give it again.
+* **An append is not atomic.** A reader of a file being appended to sees the old version or the new
+  one, never half of each, and a crash leaves the torn tail above.
+* [11-write-strategy.md](../design/11-write-strategy.md), section 3.8, is the design of the append.
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- append-and-repair
+dotnet run -c Release --project samples/Vorticity.Samples -- append-and-repair
 ```
+
+The figures above come from that run.
