@@ -67,7 +67,32 @@ internal sealed class OnPairDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start: 0, count: length);
+    }
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.BufferCount == 1 && node.ChildCount >= 4 &&
+            context.ChildDecodesRange(in node, 1) && context.ChildDecodesRange(in node, 2) &&
+            context.ChildDecodesRange(in node, 3) && context.ValidityDecodesRange(in node, 4);
+    }
+
+    /// <summary>
+    /// Decodes a range of rows from its own slice of the code stream: the range's code offsets
+    /// bound the slice, and its lengths size its heap, as the whole node's do for the whole stream.
+    /// </summary>
+    /// <remarks>
+    /// The dictionary is every range's, and is decoded and checked whole for each: it is bounded by
+    /// 65536 tokens of sixteen bytes, where the rows a range saves decoding are not bounded at all.
+    /// </remarks>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
     }
 
     /// <summary>
@@ -94,55 +119,65 @@ internal sealed class OnPairDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, selective: true, start: 0, count: wanted.Length);
     }
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start, int count)
     {
         CanonicalSupport.RequireBinaryLike(dtype, Id);
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 4, 5, Id);
 
         OnPairMetadata metadata = OnPairMetadata.Read(node.Metadata);
+        bool ranged = !selective && (start != 0 || count != length);
 
         // Child 0: the dictionary's offsets, dict_size + 1 of them.
         int tokenCount = CheckedTokenCount(metadata.DictionarySize);
         CanonicalNode dictOffsets = DecodePart(
-            context, in node, 0, "dict_offsets", metadata.DictionaryOffsetsPType, tokenCount + 1);
+            context, in node, 0, Id + " dict_offsets", metadata.DictionaryOffsetsPType, tokenCount + 1);
 
         VortexBuffer dictionary = node.GetBuffer(0);
         int dictionaryBytes = ValidateDictionary(
             dictOffsets, metadata.DictionaryOffsetsPType, tokenCount, dictionary);
 
-        // Child 1: the code stream, whose length the metadata carries.
+        // Child 1: the code stream, whose length the metadata carries. A range decodes only the
+        // slice its code offsets bound, once it has them.
         int codesLength = ArrayDecodeContext.CheckedLength(metadata.CodesLength, Id + " codes_len");
-        CanonicalNode codes = DecodePart(
-            context, in node, 1, "codes", metadata.CodesPType, codesLength);
+        CanonicalNode codes = ranged
+            ? default
+            : DecodePart(context, in node, 1, Id + " codes", metadata.CodesPType, codesLength);
 
         // Child 2: the per-row code boundaries, len + 1 of them. Only the first and last are read:
-        // a whole-array decode walks the codes in order and never needs the interior.
+        // a whole-array decode walks the codes in order and never needs the interior. A range needs
+        // its own and the one after its last row.
         int offsetCount = ArrayDecodeContext.CheckedLength((ulong)length + 1, Id + " codes_offsets");
-        CanonicalNode codesOffsets = DecodePart(
-            context, in node, 2, "codes_offsets", metadata.CodesOffsetsPType, offsetCount);
+        CanonicalNode codesOffsets = ranged
+            ? DecodePartRange(
+                context, in node, 2, Id + " codes_offsets", metadata.CodesOffsetsPType, offsetCount, start, count + 1)
+            : DecodePart(context, in node, 2, Id + " codes_offsets", metadata.CodesOffsetsPType, offsetCount);
 
-        int produced = selective ? wanted.Length : length;
+        int produced = selective ? wanted.Length : count;
 
         // Child 3: the decoded length of each row, zero for a null one. Not pushed down: selecting
         // it costs a canonical node and its buffer per split, which outweighs the integer decoding
         // it saves and leaves a scattered take allocating more rather than less.
-        CanonicalNode uncompressedLengths = DecodePart(
-            context, in node, 3, "uncompressed_lengths", metadata.UncompressedLengthsPType, length);
+        CanonicalNode uncompressedLengths = ranged
+            ? DecodePartRange(
+                context, in node, 3, Id + " uncompressed_lengths", metadata.UncompressedLengthsPType, length, start, count)
+            : DecodePart(context, in node, 3, Id + " uncompressed_lengths", metadata.UncompressedLengthsPType, length);
 
-        Validity validity = context.DecodeValidity(in node, 4, dtype.Nullability, length);
+        Validity validity = ranged
+            ? context.DecodeValidityRange(in node, 4, dtype.Nullability, length, start, count)
+            : context.DecodeValidity(in node, 4, dtype.Nullability, length);
         if (selective)
         {
             validity = Compute.CanonicalFilter.FilterValidity(context.Canonical, validity, wanted);
         }
 
         int total = TotalDecodedLength(
-            uncompressedLengths, metadata.UncompressedLengthsPType, length, wanted, selective,
+            uncompressedLengths, metadata.UncompressedLengthsPType, count, wanted, selective,
             out int longestRow);
 
         // A heap nobody points into is not worth renting, and on a take that is the common case: a
@@ -180,7 +215,13 @@ internal sealed class OnPairDecoder : ArrayDecoder
         else
         {
             (int codeStart, int codeEnd) = CodeWindow(
-                codesOffsets, metadata.CodesOffsetsPType, length, codesLength);
+                codesOffsets, metadata.CodesOffsetsPType, count, codesLength);
+            if (ranged)
+            {
+                codes = DecodePartRange(
+                    context, in node, 1, Id + " codes", metadata.CodesPType, codesLength, codeStart, codeEnd - codeStart);
+                (codeStart, codeEnd) = (0, codeEnd - codeStart);
+            }
 
             int written = DecodeCodes(
                 codes.Values.Span, metadata.CodesPType, codeStart, codeEnd,
@@ -694,6 +735,12 @@ internal sealed class OnPairDecoder : ArrayDecoder
 
 
     /// <summary>Decodes one non-nullable integer child and checks its shape.</summary>
+    /// <param name="context">The decode.</param>
+    /// <param name="node">The array.</param>
+    /// <param name="childIndex">The child's position.</param>
+    /// <param name="name">The child, as a message names it: a constant, so that naming it costs nothing until it is needed.</param>
+    /// <param name="ptype">The child's integer type.</param>
+    /// <param name="length">The child's rows.</param>
     private static CanonicalNode DecodePart(
         ArrayDecodeContext context,
         in ArrayNode node,
@@ -702,10 +749,30 @@ internal sealed class OnPairDecoder : ArrayDecoder
         PType ptype,
         int length)
     {
-        CanonicalSupport.RequireIntegerPType(ptype, $"{Id} {name}");
+        CanonicalSupport.RequireIntegerPType(ptype, name);
         DType childType = context.Types.Primitive(ptype, Nullability.NonNullable);
         int index = context.DecodeChild(in node, childIndex, childType, length);
-        return CanonicalSupport.RequirePrimitiveChild(context, index, ptype, length, $"{Id} {name}");
+        return CanonicalSupport.RequirePrimitiveChild(context, index, ptype, length, name);
+    }
+
+    /// <summary>
+    /// Decodes <paramref name="count"/> values of one non-nullable integer child from
+    /// <paramref name="start"/>, as <see cref="DecodePart"/> decodes them all.
+    /// </summary>
+    private static CanonicalNode DecodePartRange(
+        ArrayDecodeContext context,
+        in ArrayNode node,
+        int childIndex,
+        string name,
+        PType ptype,
+        int length,
+        int start,
+        int count)
+    {
+        CanonicalSupport.RequireIntegerPType(ptype, name);
+        DType childType = context.Types.Primitive(ptype, Nullability.NonNullable);
+        int index = context.DecodeChildRange(in node, childIndex, childType, length, start, count);
+        return CanonicalSupport.RequirePrimitiveChild(context, index, ptype, count, name);
     }
 
     private static int CheckedTokenCount(uint dictionarySize)

@@ -171,9 +171,20 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
 
         // The kernels index `produced` elements out of this buffer; a short one is a file defect,
         // not a reason to read past the end.
-        CanonicalSupport.RequireExactBuffer(child.Values, produced, ptype.ByteWidth(), $"{Id} {name}");
+        CanonicalSupport.RequireExactBuffer(child.Values, produced, ptype.ByteWidth(), What(childIndex));
         return child;
     }
+
+    /// <summary>
+    /// Child <paramref name="childIndex"/> as a message names it: a constant, so that naming it
+    /// costs nothing on a decode that never fails.
+    /// </summary>
+    private static string What(int childIndex) => childIndex switch
+    {
+        0 => Id + " days",
+        1 => Id + " seconds",
+        _ => Id + " subseconds",
+    };
 
     /// <summary>
     /// The number of sub-second units in one second, for the timestamp unit this dtype declares.

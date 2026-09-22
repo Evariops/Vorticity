@@ -4,6 +4,7 @@
 // regression in one does not hide behind the other's coverage.
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Types;
@@ -150,6 +151,59 @@ public sealed class OnPairDecoderTests
     public void AnEmptyArrayDecodesToAnEmptyColumn()
     {
         Assert.Empty(Decode(["a"], [], []));
+    }
+
+    [Fact]
+    public void ARangeDecodesAsTheWholeArraySliced()
+    {
+        string[] tokens = ["ab", "cde", "f", "0123456789abcdef", "é"];
+        Random random = new Random(11);
+        int rows = 40;
+        List<ushort> codes = [];
+        uint[] codeOffsets = new uint[rows + 1];
+        uint[] lengths = new uint[rows];
+        for (int i = 0; i < rows; i++)
+        {
+            int count = random.Next(7);
+            for (int c = 0; c < count; c++)
+            {
+                int token = random.Next(tokens.Length);
+                codes.Add((ushort)token);
+                lengths[i] += (uint)Encoding.UTF8.GetByteCount(tokens[token]);
+            }
+
+            codeOffsets[i + 1] = (uint)codes.Count;
+        }
+
+        byte[] dictionary = Encoding.UTF8.GetBytes(string.Concat(tokens));
+        uint[] dictOffsets = new uint[tokens.Length + 1];
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            dictOffsets[i + 1] = dictOffsets[i] + (uint)Encoding.UTF8.GetByteCount(tokens[i]);
+        }
+
+        using DecodeHarness harness = DecodeHarness.Load(
+            Root((uint)tokens.Length, (ulong)codes.Count, validityBuffer: -1),
+            dictionary,
+            TestBuffers.UInt32(dictOffsets),
+            TestBuffers.UInt16([.. codes]),
+            TestBuffers.UInt32(codeOffsets),
+            TestBuffers.UInt32(lengths));
+        DType dtype = harness.Types.Utf8(Nullability.NonNullable);
+        ArrayNode root = harness.Scan.Nodes.Root;
+        Assert.True(harness.Scan.Decode.DecodesRange(in root));
+
+        CanonicalNode whole = harness.Node(harness.DecodeRoot(dtype, rows));
+        foreach ((int start, int count) in new[] { (0, rows), (0, 1), (7, 9), (39, 1), (13, 1), (20, 20) })
+        {
+            CanonicalNode range = harness.Node(
+                harness.Scan.Decode.DecodeRootRange(in root, dtype, rows, start, count, keepEncoding: false));
+            Assert.Equal(count, range.Length);
+            for (int i = 0; i < count; i++)
+            {
+                Assert.Equal(Text(whole, start + i), Text(range, i));
+            }
+        }
     }
 
     // ------------------------------------------------------------------------------- fixtures
