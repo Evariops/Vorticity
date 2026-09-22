@@ -174,19 +174,21 @@ public sealed class VortexFileResourceTests
         Assert.Throws<ArgumentOutOfRangeException>(() => new VortexReadOptions { MaxDecompressedSize = -1 });
         Assert.Equal(VortexLimits.DefaultMaxDecompressedSize, VortexReadOptions.Default.MaxDecompressedSize);
         Assert.False(VortexReadOptions.Default.VerifyStatistics);
-        Assert.False(VortexReadOptions.Default.AllowUnknownComponents);
     }
 
     [Fact]
     public void OpenOptionsRejectNonsenseAndCarryTheirDefaults()
     {
-        Assert.Throws<ArgumentOutOfRangeException>(() => new VortexOpenOptions { FileLength = -2 });
+        Assert.Throws<ArgumentOutOfRangeException>(() => new VortexOpenOptions { Length = -2 });
         Assert.Throws<ArgumentOutOfRangeException>(() => new VortexOpenOptions { InitialReadSize = -1 });
-        Assert.Throws<ArgumentNullException>(() => new VortexOpenOptions { Read = null! });
 
+        Assert.Null(VortexOpenOptions.Default.Length);
         Assert.Equal(-1, VortexOpenOptions.Default.FileLength);
-        Assert.Equal(VortexFileFormat.InitialReadSize, VortexOpenOptions.Default.InitialReadSize);
-        Assert.Same(VortexReadOptions.Default, VortexOpenOptions.Default.Read);
+        Assert.Equal(65_536, VortexOpenOptions.Default.InitialReadSize);
+
+        // The read policy follows the public options unless one is given.
+        Assert.Equal(VortexReadOptions.Default.MaxDecompressedSize, VortexOpenOptions.Default.Read.MaxDecompressedSize);
+        Assert.Equal(1024, new VortexOpenOptions { MaxDecompressedSize = 1024 }.Read.MaxDecompressedSize);
         Assert.True(VortexOpenOptions.Default.DType.IsDefault);
         Assert.False(VortexOpenOptions.Default.LeaveSourceOpen);
     }

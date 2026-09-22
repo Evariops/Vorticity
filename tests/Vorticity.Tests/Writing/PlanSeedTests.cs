@@ -82,7 +82,7 @@ public sealed class PlanSeedTests
         // The corpus reaches every scheme the seed maps, so none of them is taken on faith.
         string[] expected =
         [
-            nameof(ColumnScheme.Dict), nameof(ColumnScheme.RunEnd), nameof(ColumnScheme.BitPacked),
+            nameof(EncodingHint.Dictionary), nameof(ColumnScheme.RunEnd), nameof(ColumnScheme.BitPacked),
             nameof(ColumnScheme.Sequence), nameof(ColumnScheme.Alp), nameof(ColumnScheme.Fsst),
             nameof(ColumnScheme.Zstd),
         ];
@@ -167,10 +167,22 @@ public sealed class PlanSeedTests
 
             for (int c = 0; c < flats.Count; c++)
             {
-                PlanSeed? seed = await VortexFileWriter.AppendPlan.SeedAsync(
-                    written, flats[c].Flat, schema.GetField(field), CancellationToken.None);
-                string read = seed?.Scheme?.ToString() ?? nameof(ColumnScheme.None);
-                string wrote = encodings[c].Length == 0 ? nameof(ColumnScheme.None) : encodings[c];
+                DType type = schema.GetField(field);
+                PlanSeed? seed = await VortexFileWriter.AppendPlan.SeedAsync(written, flats[c].Flat, type, CancellationToken.None);
+                string read = seed?.Scheme switch
+                {
+                    null or ColumnScheme.None => nameof(EncodingHint.Canonical),
+                    ColumnScheme.Dict => nameof(EncodingHint.Dictionary),
+                    ColumnScheme scheme => scheme.ToString(),
+                };
+
+                // The report reads a list by its elements, an extension by its storage and a
+                // struct by its fields; a plan seed is the column's own node, which for those
+                // carries no scheme.
+                string wrote = type.Kind is DTypeKind.List or DTypeKind.FixedSizeList or DTypeKind.Struct or DTypeKind.Extension
+                    or DTypeKind.Map or DTypeKind.Union or DTypeKind.Variant
+                    ? nameof(EncodingHint.Canonical)
+                    : encodings[c];
                 if (read != wrote)
                 {
                     failures.Append(CultureInfo.InvariantCulture, $"{id} {schema.GetFieldName(field)} chunk {c}: ")

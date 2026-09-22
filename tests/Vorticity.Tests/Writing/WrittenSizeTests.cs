@@ -18,6 +18,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Indexes;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Layouts;
@@ -108,8 +109,8 @@ public sealed class WrittenSizeTests
     /// </remarks>
     private static readonly (string Id, long Bytes)[] Chunked =
     [
-        // Besides the columns, these sizes carry: on a dictionary-encoded column, the dict.probe
-        // entry Auto writes by default, free at write time, with the index directory that holds it
+        // Written under Auto and without text bounds in the zones. Besides the columns, these sizes
+        // carry: on a dictionary-encoded column, the dict.probe entry Auto writes, free at write time, with the index directory that holds it
         // and its metadata entry in the postscript (138 B; a file where Auto keeps nothing has no
         // directory); the file's identity in every postscript -- 16 bytes of value, the entry's
         // key and segment, and the padding they move (72 or 96 B); and the index directory's
@@ -250,6 +251,8 @@ public sealed class WrittenSizeTests
         {
             RowBlockSize = ChunkedRowBlock,
             DataBlockTargetBytes = null,
+            WritePolicy = WritePolicy.Auto,
+            StringBoundBytes = 0,
         };
         try
         {

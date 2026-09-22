@@ -97,7 +97,9 @@ public sealed class DatasetFuzzTests
             }
 
             // A crash in one commit out of five: the object is stored and the writer never learns.
+            // A batch that applies nothing puts nothing, so it has nothing to crash after.
             bool crashing = random.Next(5) == 0;
+            bool crashed = false;
             store.CrashesAfterPut = crashing ? _ => true : null;
             try
             {
@@ -107,6 +109,7 @@ public sealed class DatasetFuzzTests
             catch (ObjectStoreException) when (crashing)
             {
                 crashes++;
+                crashed = true;
             }
             finally
             {
@@ -122,7 +125,7 @@ public sealed class DatasetFuzzTests
 
             // The writer that crashed did not learn its version; it retries, and every operation
             // must come back as already done.
-            if (crashing)
+            if (crashed)
             {
                 await DatasetCommitter.CommitAsync(store, batch, Options(), default);
                 stale++;
@@ -177,8 +180,9 @@ public sealed class DatasetFuzzTests
         (DatasetTree tree, IPageSource pages, ulong version) = await LatestAsync(store);
         Assert.Equal(2, tree.Entries);
 
-        // The retry wrote a version whose tree is the crashed one's: same entries, same root hash.
-        Assert.Equal(2UL, version);
+        // The retry, having nothing to add, wrote no version: the latest is the crashed commit.
+        Assert.Equal(1UL, version);
+        Assert.Equal(1UL, again.Version);
         Assert.NotEqual(UInt128.Zero, await tree.ContentHashAsync(pages, default));
     }
 

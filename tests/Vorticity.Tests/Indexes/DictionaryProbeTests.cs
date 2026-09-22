@@ -204,6 +204,7 @@ public sealed class DictionaryProbeTests
     private static VortexWriteOptions Options(IEnumerable<string> dictionaries) => new VortexWriteOptions
     {
         RowBlockSize = Block,
+        WritePolicy = WritePolicy.Auto,
 
         // Several chunks, so the probe has several dictionaries to tell apart: at sixteen canonical
         // bytes a view and two columns, this cuts a chunk every couple of thousand rows.

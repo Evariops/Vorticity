@@ -272,7 +272,7 @@ public sealed class ListBloomTests
         try
         {
             await using VortexFileWriter writer = VortexFileWriter.Create(
-                path, shape.Schema, new VortexWriteOptions { RowBlockSize = Block, Identity = Pinned });
+                path, shape.Schema, new VortexWriteOptions { RowBlockSize = Block, Identity = Pinned, WritePolicy = WritePolicy.Auto });
             using (RecordBatch batch = new RecordBatch(shape.Arena, shape.Root, 0))
             {
                 await writer.WriteAsync(batch);

@@ -178,18 +178,18 @@ public sealed class AppendTests
             {
                 string last = before.Columns[field].Encodings[^1];
                 ColumnWriteReport appended = after.Columns[field];
-                bool scheme = last is not ("" or nameof(ColumnScheme.None));
+                bool scheme = last is not nameof(EncodingHint.Canonical);
                 Assert.True(
                     appended.PlansPriced == (scheme ? 1 : 0),
                     $"{Names[field]}: last chunk {last}, {appended.PlansPriced} plans priced");
                 seeded += scheme ? 1 : 0;
-                dictionaries += last == nameof(ColumnScheme.Dict) && appended.Encodings[^1] == last ? 1 : 0;
+                dictionaries += last == nameof(EncodingHint.Dictionary) && appended.Encodings[^1] == last ? 1 : 0;
             }
 
             // The sequence and the dictionary, at least; and each dictionary kept was read off the
             // table the seed turned on.
             Assert.Equal(nameof(ColumnScheme.Sequence), before.Columns[0].Encodings[^1]);
-            Assert.Equal(nameof(ColumnScheme.Dict), before.Columns[2].Encodings[^1]);
+            Assert.Equal(nameof(EncodingHint.Dictionary), before.Columns[2].Encodings[^1]);
             Assert.True(seeded >= 2, $"{seeded} columns seeded");
             Assert.True(dictionaries >= 1);
             Assert.Equal(dictionaries, fromTable);

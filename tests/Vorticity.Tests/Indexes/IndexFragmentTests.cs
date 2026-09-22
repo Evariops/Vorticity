@@ -296,7 +296,7 @@ public sealed class IndexFragmentTests
         anonymous[key + FileIdentity.MetadataKeyUtf8.Length - 1] = (byte)'Y';
         await using VortexFile unbound = await OpenAsync(anonymous);
         Assert.Null(unbound.StoredIdentity);
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<ArgumentException>(
             async () => await VortexFileIndexer.BuildFragmentAsync(unbound, Runs("id"), new RowRange(0, Rows)));
 
         // With a token it is built; a reader that has no token of its own to compare -- one given

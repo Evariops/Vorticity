@@ -155,7 +155,7 @@ public sealed class AutoIndexTests
             arena, arena.AddStruct(schema, Chunk, Validity.NonNullable, [column]), 0);
         await using VortexFileWriter writer = VortexFileWriter.Create(
             new StreamSegmentSink(System.IO.Stream.Null), schema,
-            new VortexWriteOptions { RowBlockSize = Block, DataBlockTargetBytes = null, IndexBudgetPerMille = 1_000_000 });
+            new VortexWriteOptions { RowBlockSize = Block, DataBlockTargetBytes = null, IndexBudgetPerMille = 1_000_000, WritePolicy = WritePolicy.Auto });
         await writer.WriteAsync(batch, CancellationToken.None);
         IndexWriteReport bloom = Find(await writer.CompleteAsync(CancellationToken.None), "cycle", IndexKinds.BloomSbbf);
 
@@ -173,13 +173,17 @@ public sealed class AutoIndexTests
     }
 
     [Fact]
-    public async Task AnAutoFileIsTheDefault()
+    public async Task TheDefaultWritesNoIndexAndAutoIsAskedFor()
     {
         Decoders.EnsureRegistered();
-        Assert.Equal(WritePolicy.Auto, new VortexWriteOptions().WritePolicy);
-        await using Written written = await Written.CreateAsync(new VortexWriteOptions().WritePolicy);
-        Assert.True(written.File.HasIndexDirectory);
-        Assert.True(Find(written.Report, "blob", IndexKinds.BloomSbbf).Outcome == IndexOutcome.Built);
+        Assert.Equal(WritePolicy.None, new VortexWriteOptions().WritePolicy);
+        await using Written plain = await Written.CreateAsync(new VortexWriteOptions().WritePolicy);
+        Assert.False(plain.File.HasIndexDirectory);
+        Assert.Empty(plain.Report.Indexes);
+
+        await using Written auto = await Written.CreateAsync(WritePolicy.Auto);
+        Assert.True(auto.File.HasIndexDirectory);
+        Assert.True(Find(auto.Report, "blob", IndexKinds.BloomSbbf).Outcome == IndexOutcome.Built);
     }
 
     [Fact]

@@ -133,8 +133,8 @@ public sealed class EncodingHintTests
         try
         {
             IReadOnlyList<string> schemes = hinted.Columns[1].Encodings;
-            Assert.NotEqual("Dict", schemes[0]);
-            Assert.Equal("Dict", schemes[^1]);
+            Assert.NotEqual(nameof(EncodingHint.Dictionary), schemes[0]);
+            Assert.Equal(nameof(EncodingHint.Dictionary), schemes[^1]);
             Assert.Equal(fixture.Rendered, await ReadAsync(path));
         }
         finally

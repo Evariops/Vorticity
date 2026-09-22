@@ -192,7 +192,7 @@ public sealed class BloomIndexTests
     public async Task AValueAbsentFromTheFileStopsAtTheFileFilter()
     {
         Decoders.EnsureRegistered();
-        await using Written written = await Written.CreateAsync(Policy());
+        await using Written written = await Written.CreateAsync(Policy(), textBounds: false);
         ScanExplanation plan = await written.File.ScanBuilder().Where(Parse("name = nope")).ExplainAsync();
 
         PruningStep bloom = Assert.Single(plan.Pruning, step => step.Structure == "bloom filter");
@@ -628,13 +628,14 @@ public sealed class BloomIndexTests
         internal long Length { get; }
 
         /// <remarks>
-        /// THE BUDGET IS LIFTED BY DEFAULT HERE, and the reason is a measurement: at 1 % per block, a
+        /// The budget is lifted by default here, and the reason is a measurement: at 1 % per block, a
         /// filter over 1 024 distinct keys is 2 KiB, and ALP and bit-packing put the same block's
         /// data under that -- 1,18 MiB of filters against 0,50 MiB of data over three columns. That
         /// is the case the default budget exists to refuse, and one test says so; the others test
-        /// the filters.
+        /// the filters. <paramref name="textBounds"/> false leaves the text zones without bounds, so
+        /// that what refuses a text value is the filter.
         /// </remarks>
-        internal static async Task<Written> CreateAsync(WritePolicy policy, int budgetPerMille = 1_000_000)
+        internal static async Task<Written> CreateAsync(WritePolicy policy, int budgetPerMille = 1_000_000, bool textBounds = true)
         {
             string path = System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(), $"vorticity-bloom-{Guid.NewGuid():N}.vortex");
@@ -644,6 +645,7 @@ public sealed class BloomIndexTests
                 DataBlockTargetBytes = null,
                 WritePolicy = policy,
                 IndexBudgetPerMille = budgetPerMille,
+                StringBoundBytes = textBounds ? new VortexWriteOptions().StringBoundBytes : 0,
             });
             long length = new System.IO.FileInfo(path).Length;
             return new Written(path, await VortexFile.OpenAsync(path), report, length);

@@ -128,7 +128,7 @@ public sealed class ObjectAdapterTests
         await sink.WriteAsync(new byte[1000], default);
         ObjectStoreException refused = await Assert.ThrowsAsync<ObjectStoreException>(
             async () => await sink.WriteAsync(new byte[100], default));
-        Assert.Contains("multipart", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("DatasetOptions.MaxObjectBytes", refused.Message, StringComparison.Ordinal);
     }
 
     [Fact]

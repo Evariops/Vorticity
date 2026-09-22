@@ -524,7 +524,7 @@ public sealed class DatasetCompactionTests
 
         VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
             async () => await dataset.CompactAsync(Options(target: 1 << 20) with { LevelZeroCeiling = 1 }));
-        Assert.Contains("12 §4.6", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("holds no tuple with a null", refused.Message, StringComparison.Ordinal);
         Assert.Contains("'measure'", refused.Message, StringComparison.Ordinal);
         Assert.Equal(2, dataset.Levels[0].Entries);
     }

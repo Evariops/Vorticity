@@ -156,7 +156,7 @@ public sealed class CompositeKeyTests
 
         VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
             async () => await written.File.Keys("country", "city").OpenAsync());
-        Assert.Contains("WritePolicy.ForKey", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("IndexPolicy.ForKey", refused.Message, StringComparison.Ordinal);
 
         // The policy still records the key, so an append would ask for it again.
         IndexDirectory? directory = await written.File.ReadIndexDirectoryAsync();
@@ -247,7 +247,7 @@ public sealed class CompositeKeyTests
                 batch.Dispose();
             }
         });
-        Assert.Contains("WritePolicy.ForKey", refused.Message, StringComparison.Ordinal);
+        Assert.Contains("IndexPolicy.ForKey", refused.Message, StringComparison.Ordinal);
     }
 
     private static List<(byte[] Key, long Row)> Oracle(Func<int, byte[]?> key)

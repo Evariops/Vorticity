@@ -80,6 +80,7 @@ public sealed partial class PerRowDispatchTests
         ("Arrays/Decoders/Compressed/AlpRdDecoder.cs", 1, 1, "R4"),
         ("Arrays/Decoders/Compressed/CompressedValues.cs", 2, 0, "the definitions of ReadUnsigned/WriteInteger"),
         ("Arrays/Decoders/Compressed/DictDecoder.cs", 1, 0, "legitimate: an error message"),
+        ("Arrays/Decoders/Compressed/EncodedNodes.cs", 4, 0, "per run, not per row: a slice's run bounds and rebased ends; one error message"),
         ("Arrays/Decoders/Compressed/FastLanesRleDecoder.cs", 5, 0, "per run, not per row"),
         ("Arrays/Decoders/Compressed/FsstDecoder.cs", 5, 3, "R11"),
         ("Arrays/Decoders/Compressed/OnPairDecoder.cs", 9, 3, "R2"),
@@ -101,7 +102,7 @@ public sealed partial class PerRowDispatchTests
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
-    private const int TotalCalls = 55;
+    private const int TotalCalls = 59;
 
     /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>

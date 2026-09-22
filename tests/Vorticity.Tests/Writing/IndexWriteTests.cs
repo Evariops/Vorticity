@@ -72,7 +72,7 @@ public sealed class IndexWriteTests
         // The oracle is the report's own ledger: the probe must claim the blocks of every chunk the
         // writer dictionary-encoded, and no other block.
         ColumnWriteReport status = Column(report, "status");
-        Assert.Contains(nameof(ColumnScheme.Dict), status.Encodings);
+        Assert.Contains(nameof(EncodingHint.Dictionary), status.Encodings);
         List<(ulong First, ulong End)> expected = DictionaryBlocks(report, status.Encodings);
 
         IndexWriteReport built = Assert.IsType<IndexWriteReport>(report.Index("status", IndexKinds.DictProbe));
@@ -260,7 +260,7 @@ public sealed class IndexWriteTests
             long first = row / Block;
             row += report.ChunkRows[chunk];
             long last = (row + Block - 1) / Block;
-            if (encodings[chunk] != nameof(ColumnScheme.Dict))
+            if (encodings[chunk] != nameof(EncodingHint.Dictionary))
             {
                 if (open >= 0)
                 {

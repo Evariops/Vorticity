@@ -18,6 +18,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
+using Vorticity.Indexes;
 using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.File;
@@ -118,6 +119,8 @@ public sealed class PlanMemoryTests
         {
             RowBlockSize = Rows,
             DataBlockTargetBytes = 1024,
+            WritePolicy = WritePolicy.Auto,
+            StringBoundBytes = 0,
         };
 
         string path = Path.Combine(Path.GetTempPath(), $"vorticity-memory-dict-{Guid.NewGuid():N}.vortex");
@@ -154,8 +157,8 @@ public sealed class PlanMemoryTests
             Assert.Equal(0, withoutTable);
             // The bytes the reference chooser's dictionaries make, whether the table or a walk built
             // them: pinned so that a table that served a different dictionary would show here first.
-            // The column is a dictionary, so under the default index policy the file also carries
-            // its dict.probe entry and the directory that lists it.
+            // The column is a dictionary, so under Auto the file also carries its dict.probe entry
+            // and the directory that lists it; the zones carry no text bounds.
             Assert.Equal(35_855, new FileInfo(path).Length);
         }
         finally

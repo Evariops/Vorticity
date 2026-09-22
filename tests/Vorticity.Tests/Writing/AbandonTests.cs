@@ -76,10 +76,10 @@ public sealed class AbandonTests
     }
 
     [Fact]
-    public async Task DisposingWithoutAbandoningStillCompletesTheFile()
+    public async Task DisposingWithoutCompletingAbandonsTheFile()
     {
-        // The trap, pinned so the remark on `DisposeAsync` and the behaviour cannot drift apart.
-        // Two thousand rows and a clean open, from a producer that failed.
+        // A producer that failed half way leaves no file that looks whole: only CompleteAsync
+        // completes, and the disposal that unwinds the failure abandons what was written.
         string path = TempPath();
         try
         {
@@ -91,12 +91,7 @@ public sealed class AbandonTests
                 throw new InvalidOperationException("producer failed at batch 2");
             });
 
-            Assert.True(System.IO.File.Exists(path));
-            VortexFile file = await VortexFile.OpenAsync(path);
-            await using (file.ConfigureAwait(false))
-            {
-                Assert.Equal(2_000, file.RowCount);
-            }
+            Assert.False(System.IO.File.Exists(path));
         }
         finally
         {

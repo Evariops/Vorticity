@@ -142,14 +142,16 @@ public sealed class RebaseMatrixTests
         TreeEntry entry = Assert.NotNull(await loser.Tree.FindAsync(Key(1), loser.Pages, default));
         PageReference named = Assert.Single(ObjectEntry.FromBytes(entry.Value.Span).Fragments);
 
-        // The winner's commit object holds the fragment where its entry says; the loser's holds none.
+        // The winner's commit object holds the fragment where its entry says; the loser, having
+        // applied nothing, wrote no commit object at all and names the winner's.
         using ObjectRange won = await store.GetRangeAsync(winner.Key, 0, 1 << 20, default);
         CommitObject written = CommitObject.Open(won.Memory.Span, won.Length);
         Assert.Equal([named], written.Table.Fragments);
         Assert.Equal(Fragment(7).ToArray(), written.Page(won.Memory.Span, named).ToArray());
 
-        using ObjectRange lost = await store.GetRangeAsync(loser.Key, 0, 1 << 20, default);
-        Assert.Empty(CommitObject.Open(lost.Memory.Span, lost.Length).Table.Fragments);
+        Assert.Equal(winner.Version, loser.Version);
+        Assert.Equal(winner.Key, loser.Key);
+        Assert.Null(await store.HeadAsync(CommitKey.For(winner.Version + 1), default));
     }
 
     [Fact]
