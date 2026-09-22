@@ -95,11 +95,11 @@ public sealed class WriteAllocationTests
         // The ALP integers and the dictionary codes come from the pool and go back to it: each is
         // a whole column's worth, eight bytes a row for the first and four for the second, and
         // both are built while PRICING, so the candidate that loses would pay for them too.
-        ("containers/zoned_many_zones_nulls", 711_624),   // 711 208 measured, including 40 bytes more on each of the 64 batches it reads, the public writer and report, and its text column's string bounds
-        ("distributions/high_cardinality_i64_r8193", 73_204),   // 73 024 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
-        ("encodings/fsst", 235_800),   // 67 128 measured
-        ("encodings/onpair", 69_808),   // 69 360 measured, including the public writer and report and the text column's string bounds
-        ("types/utf8_nullable_r1025", 215_608),   // 215 168 measured, including the public writer and report and the text column's string bounds
+        ("containers/zoned_many_zones_nulls", 685_272),   // 684 856 measured, including 40 bytes more on each of the 64 batches it reads, the public writer and report, and its text column's string bounds
+        ("distributions/high_cardinality_i64_r8193", 72_948),   // 72 768 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
+        ("encodings/fsst", 67_200),   // 66 736 measured
+        ("encodings/onpair", 69_392),   // 68 944 measured, including the public writer and report and the text column's string bounds
+        ("types/utf8_nullable_r1025", 215_192),   // 214 752 measured, including the public writer and report and the text column's string bounds
 
         // THE REMAINING COMPONENTS, on the write side, so that each has an allocation ratchet:
         // `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant`. Note
@@ -108,20 +108,20 @@ public sealed class WriteAllocationTests
         // this SHAPE of data cost", which is the question a ratchet can answer. Whether our writer
         // re-elects the same encoding is a different question and `bench/crosscheck.sh` is where
         // it is asked.
-        ("encodings/fastlanes_delta", 65_540),   // 65 448 measured, including the file statistics segment: per file, not per row
-        ("encodings/pco", 67_040),   // 66 912 measured alone; in the suite with dynamic PGO the process-wide measurement adds the JIT's instrumentation, 72 bytes that are not the writer's
+        ("encodings/fastlanes_delta", 64_924),   // 64 832 measured, including the file statistics segment: per file, not per row
+        ("encodings/pco", 66_432),   // 66 304 measured alone; in the suite with dynamic PGO the process-wide measurement adds the JIT's instrumentation, 72 bytes that are not the writer's
         // The read half of this axis keeps a `ZstandardDecoder` per node, so a change on the zstd
         // read path can move this ceiling while the write path stays put.
-        ("encodings/zstd", 210_140),   // 209 656 measured, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
-        ("encodings/map", 89_100),   // 88 992 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
-        ("encodings/variant", 68_456),   // 68 272 measured, including the file statistics segment, the public writer and report, and the two transit ScanContexts the writer creates, whose read-side fields it never uses: per file, not per row (a context reduced to the arena is the fix if that ever matters)
+        ("encodings/zstd", 209_236),   // 208 752 measured, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
+        ("encodings/map", 86_708),   // 86 600 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
+        ("encodings/variant", 67_872),   // 67 688 measured, including the file statistics segment, the public writer and report, and the two transit ScanContexts the writer creates, whose read-side fields it never uses: per file, not per row (a context reduced to the arena is the fix if that ever matters)
 
         // THE TWO ALP SHAPES, so that the ALP write path is watched on both of its cases:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
         // patch. The second is the case that made the patch buffers worth renting, and a ratchet
         // that only held the easy shape would have said nothing about it.
-        ("encodings/alp", 88_940),   // 88 504 measured
-        ("encodings/alprd", 66_740),   // 66 232 measured
+        ("encodings/alp", 88_052),   // 87 616 measured
+        ("encodings/alprd", 66_428),   // 65 920 measured
     ];
 
     // Pricing FSST means training a table and compressing the whole column, and on a column it
@@ -214,21 +214,22 @@ public sealed class WriteAllocationTests
 
     /// <summary>
     /// What one more column adds, in bytes: the ceiling that says the cost is a state and not a
-    /// scratch. The writer's block scratch is ~130 KiB and measured here is **13 878 B**, about a
+    /// scratch. The writer's block scratch is ~130 KiB and measured here is **11 894 B**, under a
     /// tenth of it, so the claim holds with room; the ceiling is set just above the measurement
-    /// as a ratchet, not as a target.
+    /// as a ratchet, not as a target. The blob a column's chunk becomes is assembled in the one
+    /// workspace the writer keeps, so a column adds none of it.
     /// </summary>
     /// <remarks>
     /// Under the default, which writes no index, that is the writer's own per-column state and
     /// the compressor's, and it does not move with the rows, which is the shape claim this axis
     /// exists to make. `IndexPolicy.Auto` adds to it the index writer's per-column arrays and the
-    /// Bloom builder it abandons at the first block. A thousand columns therefore cost about 14 MB
+    /// Bloom builder it abandons at the first block. A thousand columns therefore cost about 12 MB
     /// to write once, against 130 KiB of scratch.
     /// </remarks>
-    private const double PerColumnCeiling = 14_500.0;
+    private const double PerColumnCeiling = 12_500.0;
 
-    /// <summary>The wide schema's own ratchet, in bytes. Measured at 13 899 136 B.</summary>
-    private const long WideCeiling = 14_500_000;
+    /// <summary>The wide schema's own ratchet, in bytes. Measured at 11 914 920 B.</summary>
+    private const long WideCeiling = 12_500_000;
 
     /// <summary>
     /// The schema axis: a schema of a thousand columns costs a thousand small states and one

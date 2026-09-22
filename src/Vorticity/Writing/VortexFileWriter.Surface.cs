@@ -421,6 +421,10 @@ public sealed partial class VortexFileWriter
         _indexes?.Dispose();
         ReleaseBuilders();
 
+        // The blob workspace's builder and metadata writer rent from the shared pool.
+        _blobs?.Dispose();
+        _blobs = null;
+
         if (!_sinkClosed)
         {
             _sinkClosed = true;

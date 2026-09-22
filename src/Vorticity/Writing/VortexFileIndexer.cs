@@ -35,6 +35,9 @@ public sealed record IndexFragment(ReadOnlyMemory<byte> Bytes, IReadOnlyList<Ind
 /// </remarks>
 public static class VortexFileIndexer
 {
+    // Shared, because nothing writes to it and the sink takes memory rather than a span.
+    private static readonly byte[] Padding = new byte[VortexLimits.MaxAlignment];
+
     /// <summary>
     /// Indexes the file at <paramref name="path"/> under <paramref name="policy"/> and appends the
     /// runs behind it, with a new index directory, footer and postscript over the same data.
@@ -404,6 +407,9 @@ public static class VortexFileIndexer
         {
             Fences = options?.Fences ?? FenceShape.Default,
         };
+
+        // Every payload blob of the pass is assembled in the same workspace, one after the other.
+        using ArrayBlobWriter.Workspace blobs = new ArrayBlobWriter.Workspace();
         try
         {
             indexes.Preserve(previous, previousEof);
@@ -497,14 +503,14 @@ public static class VortexFileIndexer
                 // known here, the indexer reading a file that is already whole.
                 if (indexes.TryOpenFlush(file.FileLength + indexes.FileBytes))
                 {
-                    await FlushAsync(indexes, sink, encodings, cancellationToken).ConfigureAwait(false);
+                    await FlushAsync(indexes, blobs, sink, encodings, cancellationToken).ConfigureAwait(false);
                 }
             }
 
             indexes.EndOfData();
             indexes.Judge();
             indexes.SettleBudget(file.FileLength);
-            await FlushAsync(indexes, sink, encodings, cancellationToken).ConfigureAwait(false);
+            await FlushAsync(indexes, blobs, sink, encodings, cancellationToken).ConfigureAwait(false);
             indexes.Close(columns, chunkRows, blockRows, file.FileLength);
             if (indexes.MissingRequired() is { } missing)
             {
@@ -559,9 +565,10 @@ public static class VortexFileIndexer
     }
 
     private static async ValueTask FlushAsync(
-        IndexWriter indexes, StreamSegmentSink sink, EncodingDictionary encodings, CancellationToken cancellationToken)
+        IndexWriter indexes, ArrayBlobWriter.Workspace blobs, StreamSegmentSink sink, EncodingDictionary encodings,
+        CancellationToken cancellationToken)
     {
-        while (indexes.TryTakePayload(encodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload))
+        while (indexes.TryTakePayload(blobs, encodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload))
         {
             using (blob)
             {
@@ -569,7 +576,7 @@ public static class VortexFileIndexer
                 long aligned = (before + VortexLimits.MaxAlignment - 1) & ~((long)VortexLimits.MaxAlignment - 1);
                 if (aligned > before)
                 {
-                    await sink.WriteAsync(new byte[aligned - before], cancellationToken).ConfigureAwait(false);
+                    await sink.WriteAsync(Padding.AsMemory(0, (int)(aligned - before)), cancellationToken).ConfigureAwait(false);
                 }
 
                 await sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);

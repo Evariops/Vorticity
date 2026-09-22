@@ -22,11 +22,12 @@ internal static class ZoneMapWriter
     private static ReadOnlySpan<byte> SkipNaNs => [0x08, 0x01];
 
     /// <summary>
-    /// Builds the zones array for one column, or returns <see langword="false"/> when it gets no
-    /// zone map. <paramref name="strings"/> holds bounded extremes cut to
-    /// <paramref name="stringBytes"/>, one per zone.
+    /// Builds the zones array for one column, in the writer's <paramref name="blobs"/>, or returns
+    /// <see langword="false"/> when it gets no zone map. <paramref name="strings"/> holds bounded
+    /// extremes cut to <paramref name="stringBytes"/>, one per zone.
     /// </summary>
     internal static bool TryBuild(
+        ArrayBlobWriter.Workspace blobs,
         DType column,
         IReadOnlyList<BlockStats> zones,
         EncodingDictionary encodings,
@@ -107,7 +108,7 @@ internal static class ZoneMapWriter
 
             DType dtype = types.Struct(names, dtypes, Nullability.NonNullable);
             int root = arena.AddStruct(dtype, zones.Count, Arrays.Validity.NonNullable, columns);
-            blob = ArrayBlobWriter.Write(arena, root, encodings);
+            blob = ArrayBlobWriter.Write(blobs, arena, root, encodings);
             metadata = ZonedMetadata.Serialize(ZonedMetadata.Create(zoneLength, specs));
             return true;
         }

@@ -208,6 +208,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     private readonly Guid? _identity;
     // Null when the policy asks for nothing, so such a write allocates none of the index machinery.
     private readonly IndexWriter? _indexes;
+
+    /// <summary>What every blob of the file is assembled in, created with the first one.</summary>
+    private ArrayBlobWriter.Workspace? _blobs;
     private WriteBytes _reportBytes;
 
     /// <summary>The sink position the write meter has counted to; an append starts it at the file's length.</summary>
@@ -797,7 +800,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             return;
         }
 
-        while (indexes.TryTakePayload(_arrayEncodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload))
+        while (indexes.TryTakePayload(Blobs, _arrayEncodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload))
         {
             using (blob)
             {
@@ -810,6 +813,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             }
         }
     }
+
+    /// <summary>
+    /// The workspace every blob is assembled in, one after the other: a column's chunk, a zone map,
+    /// an index payload.
+    /// </summary>
+    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace();
 
     /// <summary>The arena the pending rows live in, created on first use.</summary>
     private CanonicalArena Transit()
@@ -979,7 +988,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             }
 
             using ArrayBlobWriter.BlobLease blob =
-                ArrayBlobWriter.Write(arena, node, _arrayEncodings, _compress, stats);
+                ArrayBlobWriter.Write(Blobs, arena, node, _arrayEncodings, _compress, stats);
             _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
             int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
             _columnSegments[field].Add(segment);
@@ -1217,7 +1226,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             }
 
             if (!ZoneMapWriter.TryBuild(
-                    column, _columns[field].Blocks, _arrayEncodings, zoneLength,
+                    Blobs, column, _columns[field].Blocks, _arrayEncodings, zoneLength,
                     out byte[] metadata, out ArrayBlobWriter.BlobLease blob,
                     _columns[field].StringZones, _columns[field].StringBoundBytes))
             {

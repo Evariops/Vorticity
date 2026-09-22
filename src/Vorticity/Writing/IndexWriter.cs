@@ -1019,12 +1019,14 @@ internal sealed class IndexWriter : IDisposable
     }
 
     /// <summary>
-    /// Serializes the next waiting payload as an array blob, or reports there is none. The caller
-    /// disposes <paramref name="blob"/> and hands <paramref name="payload"/> back to
-    /// <see cref="Placed"/> once it is written.
+    /// Serializes the next waiting payload as an array blob, in the caller's
+    /// <paramref name="blobs"/>, or reports there is none. The caller disposes
+    /// <paramref name="blob"/> and hands <paramref name="payload"/> back to <see cref="Placed"/>
+    /// once it is written.
     /// </summary>
     internal bool TryTakePayload(
-        EncodingDictionary encodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload)
+        ArrayBlobWriter.Workspace blobs, EncodingDictionary encodings, out ArrayBlobWriter.BlobLease blob,
+        out PendingPayload? payload)
     {
         foreach (List<IndexBuilder> builders in _builders)
         {
@@ -1044,7 +1046,7 @@ internal sealed class IndexWriter : IDisposable
                 CanonicalArena arena = _payloads.Canonical;
                 int node = payload.Build(arena, _payloadTypes!);
                 payload.DType = DTypeFlatBuffers.Serialize(arena.GetNode(node).DType);
-                blob = ArrayBlobWriter.Write(arena, node, encodings, payload.Compress);
+                blob = ArrayBlobWriter.Write(blobs, arena, node, encodings, payload.Compress);
                 return true;
             }
         }
