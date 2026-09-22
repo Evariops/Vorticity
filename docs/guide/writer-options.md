@@ -128,8 +128,8 @@ block holds all of them and no bound can rule one out.
 ## The options that are not the writer's
 
 Reading has its own options, apart from these. `VortexOpenOptions` (the tail read at open, the
-torn-tail policy, the decompression ceiling, whether statistics are verified, unknown components, a
-schema for a file that embeds none, index fragments) is described in [open-a-file.md](open-a-file.md),
+torn-tail policy, the decompression ceiling, whether statistics are verified, a schema for a file
+that embeds none, index fragments) is described in [open-a-file.md](open-a-file.md),
 and its caps in [limits.md](limits.md). `ScanOptions` (batch size, pruning, indexes, compaction,
 parallelism, read-ahead) belongs to a scan, and the session's options (memory pool, segment cache,
 reads in flight, parallelism) to [threads.md](threads.md).
