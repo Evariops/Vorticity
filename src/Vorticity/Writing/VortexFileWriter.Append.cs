@@ -203,6 +203,7 @@ public sealed partial class VortexFileWriter
         _chunkRows.AddRange(plan.KeptChunkRows);
         _rowCount = plan.KeptRows;
         _acceptedRows = plan.KeptRows;
+        _carriedRows = plan.Rows - plan.KeptRows;
         _emittedBlocks = plan.Boundary;
         bool[] noZoneMap = new bool[_fieldCount];
         _append = new AppendState
@@ -407,6 +408,9 @@ public sealed partial class VortexFileWriter
         internal required int BlockRows { get; init; }
 
         internal required int Boundary { get; init; }
+
+        /// <summary>The file's rows: those kept, then those of the chunk written again.</summary>
+        internal required long Rows { get; init; }
 
         internal required long KeptRows { get; init; }
 
@@ -622,6 +626,7 @@ public sealed partial class VortexFileWriter
                 FileLength = file.FileLength,
                 BlockRows = blockRows,
                 Boundary = boundary,
+                Rows = rows,
                 KeptRows = keptRows,
                 KeptChunkRows = keptChunkRows,
                 ArrayEncodings = encodings,

@@ -32,16 +32,24 @@ public sealed partial class VortexFileWriter
     /// <summary>Where a pass-through lays out what it reshapes: a record's columns in the file's order, a selection.</summary>
     private CanonicalArena? _scratch;
     private long _acceptedRows;
+
+    /// <summary>The rows of an appended file's rewritten tail, until the first write, flush or completion counts them.</summary>
+    private long _carriedRows;
     private Type? _membersOf;
     private int[]? _members;
 
     /// <summary>The file's columns.</summary>
     public VortexSchema Schema => _publicSchema ??= VortexTypes.SchemaOf(_schema);
 
-    /// <summary>Rows accepted so far; right after an append opens, the row the append resumes from.</summary>
+    /// <summary>
+    /// The rows the file holds with those accepted so far; right after an append opens, before any
+    /// write, the row the append resumes from.
+    /// </summary>
     /// <remarks>
-    /// An append whose file did not end on a block rewrites its last chunk; the rows of that chunk
-    /// are the file's already, and this count starts where they start.
+    /// An append whose file did not end on a block writes its last chunk again. The rows of that
+    /// chunk are the file's already and the caller does not write them: this count starts where
+    /// they start, and takes them in at the first write, flush or completion, from which on it is
+    /// the file's row count.
     /// </remarks>
     public long RowCount => _acceptedRows;
 
@@ -259,6 +267,7 @@ public sealed partial class VortexFileWriter
     {
         ArgumentNullException.ThrowIfNull(batch);
         ThrowIfDone();
+        Carry();
         await DrainAsync(cancellationToken).ConfigureAwait(false);
         _acceptedRows += batch.RowCount;
         await WriteCoreAsync(batch.Arena, batch.RootIndex, seal: false, cancellationToken).ConfigureAwait(false);
@@ -271,6 +280,7 @@ public sealed partial class VortexFileWriter
     public async ValueTask FlushAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDone();
+        Carry();
         if (_root is { Committed: > 0 } root)
         {
             if (_rowBlock == 0)
@@ -309,6 +319,7 @@ public sealed partial class VortexFileWriter
     public async ValueTask<WriteReport> CompleteAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDone();
+        Carry();
         if (_root is { } builder && builder.Rows > builder.Committed)
         {
             await AcceptAsync(cancellationToken).ConfigureAwait(false);
@@ -436,6 +447,7 @@ public sealed partial class VortexFileWriter
             throw new VortexSchemaException($"The builder cannot be written: {why}. Complete every row before writing it.");
         }
 
+        Carry();
         int rows = root.Rows - root.Committed;
         if (rows == 0)
         {
@@ -501,8 +513,16 @@ public sealed partial class VortexFileWriter
     private ValueTask DrainAsync(CancellationToken cancellationToken) =>
         _root is { Committed: > 0 } root ? HandOffAsync(root.Committed, seal: false, cancellationToken) : ValueTask.CompletedTask;
 
+    /// <summary>Counts an appended file's rewritten tail in <see cref="RowCount"/>, once: at the first write, flush or completion.</summary>
+    private void Carry()
+    {
+        _acceptedRows += _carriedRows;
+        _carriedRows = 0;
+    }
+
     private async ValueTask PassThroughAsync(CanonicalArena arena, int root, CancellationToken cancellationToken)
     {
+        Carry();
         await DrainAsync(cancellationToken).ConfigureAwait(false);
         _acceptedRows += arena.GetNode(root).Length;
         await WriteCoreAsync(arena, root, seal: false, cancellationToken).ConfigureAwait(false);
