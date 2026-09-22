@@ -27,8 +27,6 @@ public sealed class Scan
     private long[]? _take;
     private ScanOptions _options = ScanOptions.Default;
     private CancellationToken _cancellation;
-    private long _cacheHitsAtStart;
-    private long _cacheHitsAtEnd;
     private int _used;
 
     internal Scan(ScanSource source, ReadOnlySpan<string> columns)
@@ -133,7 +131,7 @@ public sealed class Scan
     }
 
     /// <summary>What the sink did; valid once it has run.</summary>
-    public ScanStatistics Statistics => ScanStatistics.From(_metrics, Math.Max(0, _cacheHitsAtEnd - _cacheHitsAtStart));
+    public ScanStatistics Statistics => ScanStatistics.From(_metrics);
 
     /// <summary>Enumerates the batches as borrowed views.</summary>
     /// <param name="cancellationToken">Cancels at a batch boundary.</param>
@@ -151,12 +149,17 @@ public sealed class Scan
     public async IAsyncEnumerable<RecordBatch> ToBatchesAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         Begin();
-        await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+        try
         {
-            yield return RecordBatch.Own(batch.Arena, batch.RootIndex, batch.StartRow, Schema, _source.Session, batch.SelectionWords, batch.SelectedRows);
+            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                yield return RecordBatch.Own(batch.Arena, batch.RootIndex, batch.StartRow, Schema, _source.Session, batch.SelectionWords, batch.SelectedRows);
+            }
         }
-
-        End();
+        finally
+        {
+            End();
+        }
     }
 
     /// <summary>The number of rows the scan keeps.</summary>
@@ -165,9 +168,14 @@ public sealed class Scan
     public async ValueTask<long> CountAsync(CancellationToken cancellationToken = default)
     {
         Begin();
-        long count = await _source.CountAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
-        End();
-        return count;
+        try
+        {
+            return await _source.CountAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            End();
+        }
     }
 
     /// <summary>Whether the scan keeps at least one row.</summary>
@@ -176,9 +184,14 @@ public sealed class Scan
     public async ValueTask<bool> AnyAsync(CancellationToken cancellationToken = default)
     {
         Begin();
-        bool any = await _source.AnyAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
-        End();
-        return any;
+        try
+        {
+            return await _source.AnyAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            End();
+        }
     }
 
     /// <summary>What the scan will do, without reading a data segment.</summary>
@@ -202,7 +215,6 @@ public sealed class Scan
             throw new InvalidOperationException("A scan is single-use: build another one for another sink.");
         }
 
-        _cacheHitsAtStart = _source.Session.Options.SegmentCache?.Hits ?? 0;
         _activity = VortexTelemetry.StartScan("tool");
     }
 
@@ -210,7 +222,6 @@ public sealed class Scan
     {
         if (Interlocked.Exchange(ref _ended, 1) == 0)
         {
-            _cacheHitsAtEnd = _source.Session.Options.SegmentCache?.Hits ?? 0;
             VortexTelemetry.ScanEnded(_metrics, _activity);
             _activity = null;
         }
@@ -311,9 +322,27 @@ public ref struct FilterHandler
         }
         else
         {
-            ClrFit.Require<T>(column.Type, $"Column '{column.Name}'", null);
-            ColumnSym target = new ColumnSym(new FieldExpr(column.Name), column.Type, null, null, -1, []);
             ClrShape shape = ClrShape.For<T>.Value;
+            if (shape.Kind is ClrKind.Signed or ClrKind.Unsigned or ClrKind.Float)
+            {
+                // A number is a value, not a span over the column's storage: any numeric column
+                // takes it, and the check of the whole filter places it against the column's width
+                // and type as it places a number typed inline. Only a column that is not numeric
+                // refuses it, and says why in the words a member's binding would use.
+                VortexType numeric = column.Type.Kind == VortexTypeKind.Extension && column.Type.StorageType is { Kind: VortexTypeKind.Primitive } storage
+                    ? storage
+                    : column.Type;
+                if (numeric.Kind != VortexTypeKind.Primitive)
+                {
+                    ClrFit.Require<T>(column.Type, $"Column '{column.Name}'", null);
+                }
+            }
+            else
+            {
+                ClrFit.Require<T>(column.Type, $"Column '{column.Name}'", null);
+            }
+
+            ColumnSym target = new ColumnSym(new FieldExpr(column.Name), column.Type, null, null, -1, []);
             if (shape.Kind is ClrKind.Decimal or ClrKind.VortexDecimal)
             {
                 // Refused here when it has more digits than the column keeps; the check of the

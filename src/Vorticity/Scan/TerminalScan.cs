@@ -297,6 +297,7 @@ internal sealed class TerminalScan
 
         decodes.Held.Publish(context.Segments, batch);
         decodes.Held.Release(batch);
+        ScanMetrics.Served(_metrics, context.Segments);
         int root = SplitExecution.Execute(context, _tree, in _mask, split, _take);
         if (_metrics is not null && ScanMetrics.Decoded(context.Canonical, root))
         {

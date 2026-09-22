@@ -32,8 +32,7 @@ public sealed partial class Scan<TRecord>
     private bool _descending;
     private ScanOptions _options = ScanOptions.Default;
     private CancellationToken _cancellation;
-    private long _cacheHitsAtStart;
-    private long _cacheHitsAtEnd;
+    private VortexSchema? _schema;
     private int _used;
 
     internal Scan(ScanSource source)
@@ -133,7 +132,7 @@ public sealed partial class Scan<TRecord>
     }
 
     /// <summary>What the last sink did; valid once it has run.</summary>
-    public ScanStatistics Statistics => ScanStatistics.From(_metrics, Math.Max(0, _cacheHitsAtEnd - _cacheHitsAtStart));
+    public ScanStatistics Statistics => ScanStatistics.From(_metrics);
 
     /// <summary>Enumerates the batches as borrowed columns: <c>await foreach (var (day, celsius, city) in scan)</c>.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
@@ -155,12 +154,17 @@ public sealed partial class Scan<TRecord>
     public async IAsyncEnumerable<RecordBatch> ToBatchesAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         Begin();
-        await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+        try
         {
-            yield return Own(batch);
+            await foreach (RecordBatch batch in _source.BatchesAsync(Spec(), _metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+            {
+                yield return Own(batch);
+            }
         }
-
-        End();
+        finally
+        {
+            End();
+        }
     }
 
     /// <summary>The rows, one <typeparamref name="TRecord"/> each: a field copy per row, and an allocation per row for a string, a list or a nested class.</summary>
@@ -188,9 +192,9 @@ public sealed partial class Scan<TRecord>
             {
                 ArrayPool<TRecord>.Shared.Return(rows, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<TRecord>());
             }
-        }
 
-        End();
+            End();
+        }
     }
 
     /// <summary>The number of rows the scan keeps, answered from the statistics, the zone maps or an exact index when they settle it.</summary>
@@ -199,9 +203,14 @@ public sealed partial class Scan<TRecord>
     public async ValueTask<long> CountAsync(CancellationToken cancellationToken = default)
     {
         Begin();
-        long count = await _source.CountAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
-        End();
-        return count;
+        try
+        {
+            return await _source.CountAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            End();
+        }
     }
 
     /// <summary>Whether the scan keeps at least one row, stopping at the first proof.</summary>
@@ -210,9 +219,14 @@ public sealed partial class Scan<TRecord>
     public async ValueTask<bool> AnyAsync(CancellationToken cancellationToken = default)
     {
         Begin();
-        bool any = await _source.AnyAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
-        End();
-        return any;
+        try
+        {
+            return await _source.AnyAsync(Spec(), _metrics, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            End();
+        }
     }
 
     /// <summary>The smallest non-null value of <paramref name="column"/> among the rows the scan keeps; the default when there is none.</summary>
@@ -262,7 +276,6 @@ public sealed partial class Scan<TRecord>
             throw new InvalidOperationException("A scan is single-use: build another one for another sink.");
         }
 
-        _cacheHitsAtStart = _source.Session.Options.SegmentCache?.Hits ?? 0;
         _activity = VortexTelemetry.StartScan("typed");
     }
 
@@ -274,7 +287,6 @@ public sealed partial class Scan<TRecord>
             return;
         }
 
-        _cacheHitsAtEnd = _source.Session.Options.SegmentCache?.Hits ?? 0;
         VortexTelemetry.ScanEnded(_metrics, _activity);
         _activity = null;
     }
@@ -287,13 +299,28 @@ public sealed partial class Scan<TRecord>
         ArgumentNullException.ThrowIfNull(column);
         ColumnSym target = column(new Probe<TRecord>(Binding)).Column;
         Begin();
-        FilterLiteral value = await _source.ExtremeAsync(Spec(), target.Field, min, _metrics, cancellationToken).ConfigureAwait(false);
-        End();
+        FilterLiteral value;
+        try
+        {
+            value = await _source.ExtremeAsync(Spec(), target.Field, min, _metrics, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            End();
+        }
+
         return LiteralValues.ToValue<T>(value, target.Type);
     }
 
+    /// <summary>The schema every batch of this scan carries: the record's columns, in file order.</summary>
+    /// <remarks>
+    /// One instance for the whole scan, so that every owned batch shares it and binds the record
+    /// once; a schema made per batch would miss the binding cache, which is keyed by the instance.
+    /// </remarks>
+    private VortexSchema Schema => _schema ??= ToolPaths.Project(_source.Schema, Binding.Mask);
+
     private RecordBatch Own(RecordBatch borrowed) =>
-        RecordBatch.Own(borrowed.Arena, borrowed.RootIndex, borrowed.StartRow, null, _source.Session, borrowed.SelectionWords, borrowed.SelectedRows);
+        RecordBatch.Own(borrowed.Arena, borrowed.RootIndex, borrowed.StartRow, Schema, _source.Session, borrowed.SelectionWords, borrowed.SelectedRows);
 
     private static int Fill(RecordBatch batch, RecordBinding binding, ref TRecord[] rows)
     {

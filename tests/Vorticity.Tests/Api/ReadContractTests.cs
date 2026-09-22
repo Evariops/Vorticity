@@ -17,7 +17,52 @@ namespace Vorticity.Tests.Api;
 public sealed class ReadContractTests
 {
     public static TheoryData<string> Queries =>
-        ["unfiltered", "filtered, pruned", "filtered, not pruned", "range", "take", "projection"];
+        ["unfiltered", "filtered, pruned", "filtered, not pruned", "range", "take", "projection", "ordered", "ordered, filtered"];
+
+    /// <summary>The lanes a scan runs on, from one to more than the file's columns: the read-ahead and the degree.</summary>
+    public static TheoryData<int, int> Lanes => new TheoryData<int, int>
+    {
+        { 0, 1 },
+        { 1, 1 },
+        { 2, 1 },
+        { 3, 1 },
+        { 0, 4 },
+        { 1, 4 },
+    };
+
+    /// <summary>
+    /// A chunk larger than a batch is decoded once per scan, whatever runs the scan's batches:
+    /// the lanes of a read-ahead or of a degree take consecutive batches in turn, and each would
+    /// otherwise decode every chunk it meets.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Lanes))]
+    public async Task EveryValueIsDecodedOnceWhateverTheLanes(int prefetch, int degree)
+    {
+        await using VortexFile file = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
+        ScanOptions options = new ScanOptions { Prefetch = prefetch, DegreeOfParallelism = degree };
+
+        Scan<Reading> scan = file.Scan<Reading>().With(options);
+        long rows = 0;
+        await foreach (Columns<Reading> columns in scan.WithCancellation(TestContext.Current.CancellationToken))
+        {
+            rows += columns.RowCount;
+        }
+
+        Assert.Equal(ContractFile.Rows, rows);
+        Assert.Equal(3L * ContractFile.Rows, scan.Metrics.ValuesDecoded);
+
+        // A parallel aggregation runs one scan per partition, cut at chunk boundaries.
+        Scan<Reading> grouped = file.Scan<Reading>().With(options);
+        long counted = 0;
+        await foreach ((string, long) group in grouped.GroupBy(r => r.City).AggAsync(g => (g.Key, g.Count())).WithCancellation(TestContext.Current.CancellationToken))
+        {
+            counted += group.Item2;
+        }
+
+        Assert.Equal(ContractFile.Rows, counted);
+        Assert.Equal(ContractFile.Rows, grouped.Metrics.ValuesDecoded);
+    }
 
     [Theory]
     [MemberData(nameof(Queries))]
@@ -221,6 +266,8 @@ public sealed class ReadContractTests
             "filtered, not pruned" => file.Scan<Reading>().Where(r => r.Celsius > 30.0),
             "range" => file.Scan<Reading>().Rows(new RowRange(10_000, 90_000)),
             "take" => file.Scan<Reading>().Rows(5, 70_000, 150_001, 249_999),
+            "ordered" => file.Scan<Reading>().OrderBy(r => r.Day),
+            "ordered, filtered" => file.Scan<Reading>().OrderBy(r => r.Day).Where(r => r.Day < 20),
             _ => throw new ArgumentOutOfRangeException(nameof(query), query, "no such query"),
         };
 

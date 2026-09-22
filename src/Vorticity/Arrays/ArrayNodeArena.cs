@@ -218,14 +218,29 @@ internal sealed class ArrayNodeArena
     /// <param name="initialNodeCapacity">Hint for the node array's initial size. Must be positive.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialNodeCapacity"/> is not positive.</exception>
     public ArrayNodeArena(int initialNodeCapacity = 64)
+        : this(initialNodeCapacity, 256)
+    {
+    }
+
+    /// <summary>Creates an arena whose copy of the array tree starts at <paramref name="treeCapacity"/> bytes.</summary>
+    /// <param name="initialNodeCapacity">Hint for the node array's initial size. Must be positive.</param>
+    /// <param name="treeCapacity">
+    /// The bytes the tree buffer starts with: the largest tree the file has shown, so that a
+    /// context made for a lane that decodes its first blob late in the scan does not grow the
+    /// buffer in the middle of it.
+    /// </param>
+    internal ArrayNodeArena(int initialNodeCapacity, int treeCapacity)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(initialNodeCapacity);
         _records = new ArrayNodeRecord[initialNodeCapacity];
         _nodeBufferIndices = new int[initialNodeCapacity];
         _globalBuffers = new VortexBuffer[initialNodeCapacity];
         _stats = new ArrayStatsRecord[initialNodeCapacity];
-        _tree = AllocateTree(256);
+        _tree = AllocateTree(Math.Max(treeCapacity, 256));
     }
+
+    /// <summary>The bytes the tree buffer holds, grown to the largest tree loaded so far.</summary>
+    internal int TreeCapacity => _tree.Length;
 
     /// <summary>Number of serialized nodes currently held.</summary>
     public int NodeCount => _recordCount;

@@ -116,7 +116,7 @@ internal sealed class ListLayoutReader : LayoutReader
                     }
                     finally
                     {
-                        context.EndRetainedDecode(elementsKey, retained);
+                        context.EndRetainedDecode(retained);
                     }
                 }
 

@@ -106,10 +106,43 @@ public sealed class RecordBatch : IDisposable
             throw new InvalidOperationException("Only a disposed batch that owns nothing can be bound again.");
         }
 
+        DType previous = _schema;
         Bind(ArenaOf(context), rootCanonicalIndex, startRow, context);
-        _publicSchema = null;
+
+        // The schema a caller was handed stays the schema while the dtype stays the same, which
+        // is every batch of one scan: made anew per batch it would be a fresh instance each time,
+        // and the record binding that keys on the instance would bind the record again per batch.
+        if (_publicSchema is not null && !_schema.Equals(previous))
+        {
+            _publicSchema = null;
+        }
+
         _selection = default;
         _selected = 0;
+        _disposed = false;
+    }
+
+    /// <summary>
+    /// Binds a disposed view that owns nothing to the same rows and selection as
+    /// <paramref name="source"/>, counted from <paramref name="startRow"/>: <see cref="Rebased"/>
+    /// without the allocation, for a reader that rebases every batch of a stream.
+    /// </summary>
+    /// <param name="source">The batch the view is over.</param>
+    /// <param name="startRow">The row of the whole that row 0 of <paramref name="source"/> is.</param>
+    /// <exception cref="InvalidOperationException">The view is live, or owns its storage.</exception>
+    internal void RebindRebased(RecordBatch source, long startRow)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        source.ThrowIfDisposed();
+        if (!_disposed || _owns)
+        {
+            throw new InvalidOperationException("Only a disposed batch that owns nothing can be bound again.");
+        }
+
+        Bind(source._arena, source._root, startRow, null);
+        _publicSchema = source._publicSchema;
+        _selection = source._selection;
+        _selected = source._selected;
         _disposed = false;
     }
 

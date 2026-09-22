@@ -241,6 +241,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly CancellationToken _token;
     private readonly Lane[] _lanes;
     private readonly ScanSegments _segments;
+    private readonly RetainedChunks _retained;
     private readonly bool _sinkDecodes;
     private readonly bool _reuseBatches;
 
@@ -298,6 +299,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _cursor = plan.CreateCursor(reverse);
         _segments = new ScanSegments(degree);
 
+        // Like the segments, the chunks decoded are the scan's and not a lane's: the lanes take
+        // consecutive splits in turn, and a chunk of several splits would otherwise be decoded once
+        // per lane that meets it.
+        _retained = new RetainedChunks(_mask.IsAll ? tree.Root.ChildCount : _mask.NamedFieldCount, degree);
+
         // The blocks the plan counts, so that what is decoded and pruned is counted in its units.
         long blockRows = live?.BlockRows ?? SplitPlan.NaturalBatchRows(tree);
         _decodedBlocks = new BlockTally(blockRows);
@@ -313,6 +319,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             _lanes[i].Context.LiveBlocks = live;
             _lanes[i].Context.Metrics = metrics;
             _lanes[i].Context.KeepEncodings = keepEncodings;
+            _lanes[i].Context.ShareRetained(_retained);
         }
     }
 
@@ -363,6 +370,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _pending = split;
         _currentLane = lane;
         lane.Sequence = _started++;
+        lane.Context.Batch = lane.Sequence;
 
         bool read;
         try
@@ -436,8 +444,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             throw;
         }
 
+        ScanMetrics.Served(_metrics, lane.Context.Segments);
         _segments.Release(lane.Sequence);
-        return CompleteBatch();
+        bool produced = CompleteBatch();
+
+        // Once the split is decoded: what it did not borrow, no later split will.
+        _retained.Release(lane.Sequence);
+        return produced;
     }
 
     /// <summary>Releases everything, whether the enumeration finished, threw, or was abandoned.</summary>
@@ -923,8 +936,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _pending = lane.Rows;
         _currentLane = lane;
 
-        // Every batch before this one has taken its own reference to what it needed.
+        // Every batch before this one has taken its own reference to what it needed, and is dead;
+        // a chunk none of them borrowed after an earlier one is borrowed by no later one either.
         _segments.Release(lane.Sequence);
+        _retained.Release(lane.Sequence);
 
         try
         {
@@ -994,6 +1009,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ScanContext context = lane.Context;
         RowRange rows = lane.Rows;
         long batch = lane.Sequence;
+        context.Batch = batch;
         try
         {
             Register(context, rows);
@@ -1007,6 +1023,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
             await ReadAsync(context.Segments, NoteRequests(context)).ConfigureAwait(false);
             _segments.Publish(context.Segments, batch);
+            ScanMetrics.Served(_metrics, context.Segments);
             if (!_compact && !_filterProven)
             {
                 return ExecuteSelected(lane, rows);
@@ -1133,8 +1150,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             _lanes[i].Context.Dispose();
         }
 
-        // Once no lane runs: the held segments carry references of their own.
+        // Once no lane runs: the held segments and the retained chunks carry references of their own.
         _segments.Dispose();
+        _retained.Dispose();
     }
 
     /// <summary>One decode flow: its own <see cref="ScanContext"/>, never shared.</summary>

@@ -32,6 +32,8 @@ internal sealed class SortedColumnWalker : KeySource
 
     internal override long Row => _source.RowOf(_entry);
 
+    internal override void Share(Scanning.ScanSegments held, Arrays.RetainedChunks retained) => _source.Share(held, retained);
+
     internal override async ValueTask<bool> SeekAsync(
         FilterLiteral key, SeekOp op, CancellationToken cancellationToken)
     {

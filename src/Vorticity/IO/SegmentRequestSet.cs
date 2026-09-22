@@ -49,6 +49,7 @@ internal sealed class SegmentRequestSet : IDisposable
     private int _mask;
 
     private int _count;
+    private int _cacheHits;
     private bool _populated;
 
     /// <summary>Creates an empty set.</summary>
@@ -306,6 +307,15 @@ internal sealed class SegmentRequestSet : IDisposable
     }
 
     /// <summary>
+    /// The slots of the read in flight a session's cache filled, so that a scan counts the hits
+    /// that were its own rather than the session's; cleared with <see cref="Release"/>.
+    /// </summary>
+    internal int CacheHits => _cacheHits;
+
+    /// <summary>Records that the cache filled one slot of the read in flight.</summary>
+    internal void NoteCacheHit() => _cacheHits++;
+
+    /// <summary>
     /// Declares the read complete. Every slot must be filled.
     /// </summary>
     /// <exception cref="InvalidOperationException">
@@ -386,6 +396,7 @@ internal sealed class SegmentRequestSet : IDisposable
         }
 
         _count = 0;
+        _cacheHits = 0;
         _populated = false;
         Array.Clear(_table);
 

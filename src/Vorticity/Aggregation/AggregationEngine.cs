@@ -276,9 +276,14 @@ internal abstract class AggregationHost
     internal async ValueTask<AggregationOutcome> RunAsync(AggregationPlan plan, CancellationToken cancellationToken)
     {
         Begin();
-        AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, Spec(), Metrics, plan, cancellationToken).ConfigureAwait(false);
-        End();
-        return outcome;
+        try
+        {
+            return await AggregationEngine.RunAsync(Source, Spec(), Metrics, plan, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            End();
+        }
     }
 
     /// <summary>The plan of the pass the aggregation would run, before the statistics settle any of it.</summary>
@@ -517,7 +522,10 @@ internal static class AggregationEngine
         for (int p = 0; p < partitions.Length; p++)
         {
             AggregationPartition partition = partitions[p];
-            ScanSpec lane = spec with { Rows = ranges[p], Options = spec.Options with { DegreeOfParallelism = 1 } };
+
+            // The degree is the parallelism: a partition already runs on the pool, and decoding
+            // ahead inside each one would put twice the degree's lanes on it.
+            ScanSpec lane = spec with { Rows = ranges[p], Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 } };
             lanes[p] = Task.Run(
                 async () =>
                 {

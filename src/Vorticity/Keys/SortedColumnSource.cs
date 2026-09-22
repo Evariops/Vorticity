@@ -32,6 +32,9 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     private readonly int _zoneCount;
 
     private ScanContext? _context;
+    private ScanSegments? _held;
+    private RetainedChunks? _retained;
+    private bool _ownsHeld = true;
     private long _loadedStart = -1;
     private long _loadedEnd = -1;
     private int _column = -1;
@@ -163,6 +166,26 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     private ScanMetrics? Metrics { get; init; }
 
     /// <summary>
+    /// Makes the source read through what a scan holds, rather than through segments and chunks of
+    /// its own: the scan then releases what the two no longer need.
+    /// </summary>
+    /// <param name="held">The scan's segments.</param>
+    /// <param name="retained">The scan's decoded chunks.</param>
+    internal void Share(ScanSegments held, RetainedChunks retained)
+    {
+        ArgumentNullException.ThrowIfNull(held);
+        ArgumentNullException.ThrowIfNull(retained);
+        if (_context is not null || _held is not null)
+        {
+            throw new InvalidOperationException("The source has read already; it shares before its first seek.");
+        }
+
+        _held = held;
+        _retained = retained;
+        _ownsHeld = false;
+    }
+
+    /// <summary>
     /// Orders two keys the way this source's own entries are ordered: IEEE for floats, because
     /// <c>is_sorted</c> is computed with IEEE comparisons, so <c>-0.0</c> and <c>+0.0</c> are one
     /// key here (see <see cref="KeyOrder"/>).
@@ -228,6 +251,12 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     {
         _context?.Dispose();
         _context = null;
+        if (_ownsHeld)
+        {
+            _held?.Dispose();
+        }
+
+        _held = null;
         _column = -1;
         _loadedStart = -1;
         _loadedEnd = -1;
@@ -380,17 +409,54 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         long start = (long)zone * _zones.ZoneLength;
         long end = Math.Min(start + _zones.ZoneLength, _rowCount);
 
-        _context ??= new ScanContext(_file);
+        if (_context is null)
+        {
+            _context = new ScanContext(_file);
+            if (_retained is not null)
+            {
+                _context.ShareRetained(_retained);
+            }
+        }
+
         _context.ResetBatch();
         _loadedStart = -1;
         _loadedEnd = -1;
         _column = -1;
 
+        // A zone is a window of a chunk, and consecutive zones are windows of the same chunk: the
+        // segment is read once for the chunk and the chunk decoded once, whether the holder is
+        // this source's own or the scan's that walks it.
+        ScanSegments held = _held ??= new ScanSegments(1);
+        long ticket = held.NextTicket();
+        _context.Batch = ticket;
         RowRange range = new RowRange(start, end);
         SplitExecution.Register(_context, _tree, in _mask, range);
-        ScanMetrics.Note(Metrics, _context.Segments);
-        await _file.Segments.ReadManyAsync(_context.Segments, cancellationToken).ConfigureAwait(false);
+        held.Claim(_context.Segments, ticket, waiter: null);
+        try
+        {
+            if (ScanMetrics.Note(Metrics, _context.Segments))
+            {
+                await _file.Segments.ReadManyAsync(_context.Segments, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                _context.Segments.Complete();
+            }
+
+            held.Publish(_context.Segments, ticket);
+        }
+        catch
+        {
+            held.Abandon(ticket);
+            throw;
+        }
+
+        ScanMetrics.Served(Metrics, _context.Segments);
         int root = SplitExecution.Execute(_context, _tree, in _mask, range, take: null);
+        if (_ownsHeld)
+        {
+            held.Release(ticket);
+        }
 
         _column = FilterEvaluator.Resolve(_context.Canonical, root, _field, (int)(end - start));
         _loadedStart = start;

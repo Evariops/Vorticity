@@ -113,9 +113,10 @@ Two things differ between these rows, the copy and the form of the columns:
   scan** in this run; timings this short move from run to run.
 
 `ToOwned()` copies what it is given as it is, the encoded form included, which is why it adds little
-to the typed scan's own cost. An owned batch allocates about 9 KiB of managed memory beyond the
-scan's own, the `RecordBatch` and its bookkeeping; its buffers come from the pool. A borrowed batch
-allocates nothing.
+to the typed scan's own cost. An owned batch allocates a few KiB of managed memory beyond the
+scan's own, the `RecordBatch` and its bookkeeping; its buffers come from the pool. Its `Schema` is
+the scan's, one instance for every batch, so `As<T>()` binds the record once for the whole scan
+rather than once per batch. A borrowed batch allocates nothing.
 
 ## Watch out
 

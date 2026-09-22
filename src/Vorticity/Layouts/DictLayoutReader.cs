@@ -111,7 +111,7 @@ internal sealed class DictLayoutReader : LayoutReader
                 }
                 finally
                 {
-                    context.EndRetainedDecode(valuesKey, retainedValues);
+                    context.EndRetainedDecode(retainedValues);
                     context.ExchangeSelection(saved.Buffer, saved.Count);
                 }
             }

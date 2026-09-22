@@ -59,8 +59,11 @@ internal sealed class ArrayDecodeContext
     /// </summary>
     /// <param name="segment">The whole array-blob segment.</param>
     /// <exception cref="VortexFormatException">The blob is malformed.</exception>
-    public void LoadBlob(VortexBuffer segment) =>
+    public void LoadBlob(VortexBuffer segment)
+    {
         ArrayBlobReader.Load(_scan.Nodes, segment, _scan.ArrayEncodings);
+        _scan.NoteArrayTree();
+    }
 
     /// <summary>
     /// Loads an array blob whose <c>Array</c> FlatBuffer was inlined in the layout's
@@ -69,8 +72,11 @@ internal sealed class ArrayDecodeContext
     /// <param name="arrayTree">The inlined <c>Array</c> FlatBuffer.</param>
     /// <param name="segment">The segment holding the data buffers.</param>
     /// <exception cref="VortexFormatException">The blob is malformed.</exception>
-    public void LoadBlob(ReadOnlySpan<byte> arrayTree, VortexBuffer segment) =>
+    public void LoadBlob(ReadOnlySpan<byte> arrayTree, VortexBuffer segment)
+    {
         ArrayBlobReader.Load(_scan.Nodes, arrayTree, segment, _scan.ArrayEncodings);
+        _scan.NoteArrayTree();
+    }
 
     /// <summary>
     /// Decodes an array node at the top of a traversal - the root of a blob, or a chunk of one.
@@ -240,7 +246,7 @@ internal sealed class ArrayDecodeContext
             }
             finally
             {
-                _scan.EndRetainedDecode(key, retained);
+                _scan.EndRetainedDecode(retained);
             }
         }
 

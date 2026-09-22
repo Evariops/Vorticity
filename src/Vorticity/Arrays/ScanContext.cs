@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -89,7 +88,14 @@ internal sealed class ScanContext : IDisposable
         // rather than widened: a full scan keeps the dtype capacity the arena chooses for itself.
         Types = new DTypeArena(Math.Min(capacity, 16));
         Scalars = new ScalarStore();
-        Nodes = new ArrayNodeArena(capacity);
+
+        // A context that decodes batches starts its tree buffer at the largest array tree such a
+        // context of the file has loaded: a lane whose first decode of its own comes late in the
+        // scan, every earlier chunk having been decoded by another lane, would otherwise grow it
+        // then. A context that reads metadata loads other trees and is thrown away, so it neither
+        // takes the hint nor gives one.
+        _notesTrees = capacity >= ScanCapacity;
+        Nodes = new ArrayNodeArena(capacity, _notesTrees ? file.LargestArrayTree : 0);
         _batchCanonical = new CanonicalArena(capacity);
 
         // Deliberately not sized from the arena capacity. A batch registers one segment per leaf it
@@ -148,6 +154,17 @@ internal sealed class ScanContext : IDisposable
 
     /// <summary><see langword="true"/> when this context was built over a <see cref="VortexFile"/>.</summary>
     public bool HasFile => _file is not null;
+
+    private readonly bool _notesTrees;
+
+    /// <summary>Tells the file how large an array tree this context has loaded, for the contexts made after it.</summary>
+    internal void NoteArrayTree()
+    {
+        if (_notesTrees)
+        {
+            _file!.NoteArrayTree(Nodes.TreeCapacity);
+        }
+    }
 
     private int[]? _selection;
     private int _selectionCount;
@@ -422,119 +439,75 @@ internal sealed class ScanContext : IDisposable
         return previous;
     }
 
-    /// <summary>One retained chunk: the arena that owns it, the node, and when it was last used.</summary>
-    /// <remarks>Evicted entries are kept with their arena and refilled, so a scan that walks many chunks allocates none per chunk.</remarks>
-    private sealed class RetainedChunk(CanonicalArena arena)
-    {
-        internal CanonicalArena Arena { get; } = arena;
-
-        internal long Key;
-
-        internal int NodeIndex;
-
-        /// <summary>The batch number that last asked for this entry.</summary>
-        internal long LastTouched;
-
-        /// <summary>
-        /// The segment its records view. A decode can hand back views onto the segment it read, a
-        /// primitive's values for one, and the batch that read the segment releases it at
-        /// <see cref="ResetBatch"/> while this entry lives on, so the entry holds a reference of
-        /// its own from the moment it is published until it is evicted.
-        /// </summary>
-        internal SegmentOwner? Segment;
-
-        /// <summary>Any further segment the decode read, when it read more than one.</summary>
-        internal List<SegmentOwner>? MoreSegments;
-
-        /// <summary>
-        /// Adds a segment the decode depends on, once; no reference is taken here.
-        /// </summary>
-        internal void Depend(SegmentOwner? owner)
-        {
-            if (owner is null || ReferenceEquals(Segment, owner))
-            {
-                return;
-            }
-
-            if (Segment is null)
-            {
-                Segment = owner;
-                return;
-            }
-
-            MoreSegments ??= [];
-            if (!MoreSegments.Contains(owner))
-            {
-                MoreSegments.Add(owner);
-            }
-        }
-
-        /// <summary>
-        /// Takes a reference on every segment gathered, as the entry is published.
-        /// </summary>
-        internal void RetainSegments()
-        {
-            Segment?.Retain();
-            if (MoreSegments is { } more)
-            {
-                foreach (SegmentOwner owner in more)
-                {
-                    owner.Retain();
-                }
-            }
-        }
-
-        /// <summary>Drops the references <see cref="RetainSegments"/> took.</summary>
-        internal void ReleaseSegments()
-        {
-            Segment?.Release();
-            if (MoreSegments is { } more)
-            {
-                foreach (SegmentOwner owner in more)
-                {
-                    owner.Release();
-                }
-            }
-
-            Forget();
-        }
-
-        /// <summary>Clears what the entry gathered without releasing it, for a decode that published nothing.</summary>
-        internal void Forget()
-        {
-            Segment = null;
-            MoreSegments?.Clear();
-        }
-    }
-
     /// <summary>
     /// Decoded chunks held across the batches carved out of them. Never cleared by
     /// <see cref="ResetBatch"/>; that is the whole point.
     /// </summary>
     /// <remarks>
-    /// Allocated on first use. A file whose chunk is its batch never retains anything, which is the
-    /// common case, and the scan paths hold tight allocation ceilings: the common path must pay
-    /// nothing for a feature it does not use.
-    ///
-    /// Keyed rather than listed, because the lookup is asked once per retained column and per
-    /// batch, and a walk over the entries would make a wide read cost the square of its columns.
-    ///
-    /// Keyed and nothing beside it, evicted entries included: an evicted entry, its arena reset, stays
-    /// in the dictionary with no node, and is taken back out to hold the next chunk. A collection of
-    /// spares beside it would cost a field on every scan context, and its storage would be allocated
-    /// at the first eviction, which is a chunk into the scan rather than its first batch.
+    /// The context's own unless a scan <see cref="ShareRetained"/>s one table between every context
+    /// it runs -- its lanes and its key source -- so that a chunk is decoded once per scan rather
+    /// than once per context that meets it. Created at the first claim: a file whose chunk is its
+    /// batch never retains anything, and the scan paths hold tight allocation ceilings.
     /// </remarks>
-    private Dictionary<long, RetainedChunk>? _retained;
+    private RetainedChunks? _retained;
+
+    /// <summary>Whether this context owns <see cref="_retained"/>, and so advances its floor and disposes it.</summary>
+    private bool _ownsRetained = true;
+
+    /// <summary>The claim this context holds on a chunk it has not decoded yet, or null.</summary>
+    private RetainedChunk? _claim;
 
     /// <summary>
-    /// The first key an evicted entry is moved to when the key it held is asked for again: above
-    /// every layout and segment key and below every array child key, with or without the answer
-    /// bit, so no published entry can hold it.
+    /// The number of the batch in flight, in the order the scan walks its rows. A retained chunk
+    /// records the last batch that borrowed it, and is evicted only once the scan has moved past it.
     /// </summary>
-    private const long SpareKeys = 1L << 61;
+    /// <remarks>
+    /// Set by the scan that drives this context, per split; a context running alone counts its own
+    /// batches through <see cref="ResetBatch"/>.
+    /// </remarks>
+    internal long Batch { get; set; }
 
-    /// <summary>Counts batches, so an entry can say whether the batch in flight has used it.</summary>
-    private long _batchNumber;
+    /// <summary>The table of retained chunks, created at the first claim; a context running alone reads a few columns.</summary>
+    private RetainedChunks Retained => _retained ??= new RetainedChunks(columns: 3, lanes: 1);
+
+    /// <summary>The retained decode for <paramref name="key"/>, if one is published; no claim is made.</summary>
+    /// <param name="key">From <see cref="SegmentKey"/>, <see cref="LayoutKey"/> or <see cref="ChildKey"/>.</param>
+    /// <param name="arena">The arena holding it. The caller may borrow from this until eviction.</param>
+    /// <param name="nodeIndex">The node's index in <paramref name="arena"/>.</param>
+    /// <returns><see langword="true"/> when this key is retained.</returns>
+    /// <remarks>
+    /// For a reader that decides only after a look at the node whether it decodes the chunk at all:
+    /// a claim made and given back on every batch of a chunk the encoding serves without a decode
+    /// would be an entry churned per batch.
+    /// </remarks>
+    internal bool TryPeekRetained(long key, out CanonicalArena arena, out int nodeIndex)
+    {
+        if (_retained is not null)
+        {
+            return _retained.Peek(key, Batch, out arena, out nodeIndex);
+        }
+
+        arena = null!;
+        nodeIndex = -1;
+        return false;
+    }
+
+    /// <summary>
+    /// Makes this context retain into <paramref name="shared"/>, a table another context of the same
+    /// scan may retain into too. The scan that shares it advances its floor and disposes it.
+    /// </summary>
+    /// <param name="shared">The scan's table.</param>
+    internal void ShareRetained(RetainedChunks shared)
+    {
+        ArgumentNullException.ThrowIfNull(shared);
+        if (_retained is not null)
+        {
+            throw new InvalidOperationException("This scan context already retains chunks of its own.");
+        }
+
+        _retained = shared;
+        _ownsRetained = false;
+    }
 
     /// <summary>
     /// The retention key for a flat layout, which its segment identifies within the file.
@@ -723,43 +696,60 @@ internal sealed class ScanContext : IDisposable
     /// <param name="owner">The owner, held by the batch's request set; no reference taken.</param>
     internal void NoteSegment(SegmentOwner owner) => _building?.Depend(owner);
 
-    /// <summary>The retained decode for <paramref name="key"/>, if one is held.</summary>
-    /// <param name="key">From <see cref="SegmentKey"/> or <see cref="LayoutKey"/>.</param>
+    /// <summary>
+    /// The retained decode for <paramref name="key"/>, if one is held; otherwise a claim on the key,
+    /// which the caller closes with <see cref="BeginRetainedDecode"/> and
+    /// <see cref="EndRetainedDecode"/>, or gives up with <see cref="AbandonRetained"/>.
+    /// </summary>
+    /// <param name="key">From <see cref="SegmentKey"/>, <see cref="LayoutKey"/> or <see cref="ChildKey"/>.</param>
     /// <param name="arena">The arena holding it. The caller may borrow from this until eviction.</param>
     /// <param name="nodeIndex">The node's index in <paramref name="arena"/>.</param>
     /// <returns><see langword="true"/> when this key is retained.</returns>
+    /// <remarks>
+    /// Touching an entry is what keeps it from eviction while the batch in flight borrows it, so it
+    /// happens on the hit path and not only when the entry is created. A miss claims the key: when
+    /// another context of the scan is decoding it, the call waits for that decode and returns it,
+    /// so a chunk is decoded once per scan. A claim still held from an earlier miss is given up
+    /// first, since this context has moved on without decoding it; inside a retained decode the
+    /// table is only looked at, never claimed, because the context already holds one claim.
+    /// </remarks>
     internal bool TryGetRetained(long key, out CanonicalArena arena, out int nodeIndex)
     {
-        if (_retained is null || !_retained.TryGetValue(key, out RetainedChunk? entry))
+        if (_building is not null)
         {
+            if (_retained is not null)
+            {
+                return _retained.Peek(key, Batch, out arena, out nodeIndex);
+            }
+
             arena = null!;
             nodeIndex = -1;
             return false;
         }
 
-        if (entry.NodeIndex < 0)
+        AbandonRetained();
+        if (Retained.TryGet(key, this, Batch, out RetainedChunk? claim, out arena, out nodeIndex))
         {
-            // Evicted, and still under the key it held: it moves out of the way of the decode this
-            // miss is about to publish under that key, which would otherwise drop it. The move
-            // takes the slot the removal frees, so the dictionary does not grow.
-            _retained.Remove(key);
-            Park(entry);
-            arena = null!;
-            nodeIndex = -1;
-            return false;
+            return true;
         }
 
-        // Touching it is what makes it un-evictable for the rest of this batch, so it has to
-        // happen on the hit path and not only when the entry is created.
-        entry.LastTouched = _batchNumber;
-        arena = entry.Arena;
-        nodeIndex = entry.NodeIndex;
-        return true;
+        _claim = claim;
+        return false;
+    }
+
+    /// <summary>Gives up the claim a miss of <see cref="TryGetRetained"/> made, for a path that decodes nothing under it.</summary>
+    internal void AbandonRetained()
+    {
+        if (_claim is { } claim)
+        {
+            _claim = null;
+            _retained!.Abandon(claim);
+        }
     }
 
     /// <summary>
-    /// Picks the arena a chunk will be retained in and redirects <see cref="Canonical"/> at it, so
-    /// the decode lands there instead of being copied there afterwards.
+    /// Redirects <see cref="Canonical"/> at the arena of the chunk this context has claimed, so the
+    /// decode lands there instead of being copied there afterwards.
     /// </summary>
     /// <returns>The arena, which the caller must close with <see cref="EndRetainedDecode"/>.</returns>
     /// <remarks>
@@ -770,25 +760,15 @@ internal sealed class ScanContext : IDisposable
     /// argument changes, because the arena was always the retained one.
     /// </para>
     /// <para>
-    /// The eviction rule is a proof, not a heuristic. Callers borrow a retained arena: a batch's
-    /// records hold views onto its memory rather than copies. So an entry may be freed only when no
-    /// live batch can be looking at it, and there is exactly one fact that establishes that -- a
-    /// batch is invalid once the next <c>MoveNextAsync</c> begins, so an entry whose
-    /// <see cref="RetainedChunk.LastTouched"/> is below the batch number in flight is borrowed by
-    /// nobody.
-    /// </para>
-    /// <para>
     /// Each entry owns its own arena, and there is an entry per key rather than a single slot,
     /// because <b>a batch reads several columns, so several flat nodes, each with its own
     /// segment</b>. One slot would let one column evict another mid-batch; one shared arena would
     /// make evicting anything free everything, since <see cref="CanonicalArena.Reset"/> returns
-    /// every block it owns.
-    /// </para>
-    /// <para>
-    /// The working set is therefore one chunk per column, which the schema bounds. Evicted arenas are
-    /// kept and refilled rather than reallocated.
+    /// every block it owns. The working set is therefore one chunk per column, which the schema
+    /// bounds, and the eviction rule is <see cref="RetainedChunks"/>'s.
     /// </para>
     /// </remarks>
+    /// <exception cref="InvalidOperationException">A retained decode is in flight, or no chunk is claimed.</exception>
     internal CanonicalArena BeginRetainedDecode()
     {
         if (_building is not null)
@@ -799,63 +779,35 @@ internal sealed class ScanContext : IDisposable
                 "A retained decode is already in flight on this scan context.");
         }
 
-        _retained ??= [];
+        RetainedChunk claim = _claim ?? throw new InvalidOperationException(
+            "No chunk is claimed on this scan context: a retained decode follows a miss of TryGetRetained.");
+        _building = claim;
 
-        // Every entry no live batch borrows is evicted in place, its arena reset and its segments
-        // released, and the first evicted entry met is the one refilled. Adding while enumerating
-        // is what a dictionary does not allow, which is why an evicted entry keeps its key.
-        RetainedChunk? spare = null;
-        long spareKey = 0;
-        foreach (KeyValuePair<long, RetainedChunk> held in _retained)
-        {
-            RetainedChunk entry = held.Value;
-            if (entry.NodeIndex >= 0)
-            {
-                if (entry.LastTouched >= _batchNumber)
-                {
-                    continue;
-                }
-
-                entry.Arena.Reset();
-                entry.ReleaseSegments();
-                entry.NodeIndex = -1;
-            }
-
-            if (spare is null)
-            {
-                spare = entry;
-                spareKey = held.Key;
-            }
-        }
-
-        if (spare is not null)
-        {
-            _retained.Remove(spareKey);
-        }
-
-        _building = spare ?? new RetainedChunk(new CanonicalArena());
+        // The arena is made for the first decode the entry holds, not for the claim: a claim given
+        // back without a decode, an answer an encoding declined, never needs one.
+        CanonicalArena arena = claim.Arena ??= new CanonicalArena();
 
         // What the decode views is the blob in the node arena, which a flat reader loads just
         // before it begins; a child decoded inside the redirect notes its own segment as it loads.
-        _building.Depend(Segments.OwnerHolding(Nodes.FirstBlobBuffer()));
-        return _building.Arena;
+        claim.Depend(Segments.OwnerHolding(Nodes.FirstBlobBuffer()));
+        return arena;
     }
 
     /// <summary>
-    /// Ends the redirect and records the decoded node, or discards the arena when the decode
-    /// failed.
+    /// Ends the redirect and publishes the decoded node under the claimed key, or discards the
+    /// arena when the decode failed.
     /// </summary>
-    /// <param name="key">What the node is retained under, or 0 when discarding.</param>
     /// <param name="nodeIndex">The decoded node's index in the redirected arena, or -1.</param>
     /// <remarks>
     /// Called from a <c>finally</c>, so it has to be correct for the throwing path too: a decode
     /// that raised leaves an arena full of half-built records, which is reset and returned to the
     /// spares rather than published.
     /// </remarks>
-    internal void EndRetainedDecode(long key, int nodeIndex)
+    internal void EndRetainedDecode(int nodeIndex)
     {
         RetainedChunk? entry = _building;
         _building = null;
+        _claim = null;
         if (entry is null)
         {
             return;
@@ -864,29 +816,11 @@ internal sealed class ScanContext : IDisposable
         if (nodeIndex < 0)
         {
             // Nothing was retained on the gathered segments yet, so there is nothing to release.
-            entry.Arena.Reset();
-            entry.Forget();
-            Park(entry);
+            _retained!.Abandon(entry);
             return;
         }
 
-        entry.Key = key;
-        entry.NodeIndex = nodeIndex;
-        entry.LastTouched = _batchNumber;
-        entry.RetainSegments();
-        (_retained ??= [])[key] = entry;
-    }
-
-    /// <summary>Keeps an evicted entry, with no node, under the first spare key free.</summary>
-    private void Park(RetainedChunk entry)
-    {
-        entry.NodeIndex = -1;
-        Dictionary<long, RetainedChunk> retained = _retained ??= [];
-        long key = SpareKeys;
-        while (!retained.TryAdd(key, entry))
-        {
-            key++;
-        }
+        _retained!.Publish(entry, nodeIndex, Batch);
     }
 
     /// <summary>
@@ -899,9 +833,17 @@ internal sealed class ScanContext : IDisposable
     /// </remarks>
     public void ResetBatch()
     {
-        // Before anything else: the batch that was borrowing retained arenas is now dead, which is
-        // what makes the eviction in `Retain` safe.
-        _batchNumber++;
+        // Before anything else: the batch that was borrowing retained arenas is now dead. A context
+        // that counts its own batches evicts what the batch before the dead one was the last to
+        // borrow -- the dead one touched nothing of it, so no later batch will -- and a context a
+        // scan drives leaves the floor to the scan, whose other contexts may still borrow.
+        Batch++;
+        AbandonRetained();
+        if (_ownsRetained)
+        {
+            _retained?.Release(Batch - 1);
+        }
+
         _selection = null;
         _selectionCount = 0;
         if (_pushed is not null)
@@ -934,16 +876,10 @@ internal sealed class ScanContext : IDisposable
 
         _disposed = true;
         _batchCanonical.Reset();
-        if (_retained is not null)
+        AbandonRetained();
+        if (_ownsRetained)
         {
-            // An evicted entry has been reset and holds no segment, so this is a no-op for it.
-            foreach (RetainedChunk entry in _retained.Values)
-            {
-                entry.Arena.Reset();
-                entry.ReleaseSegments();
-            }
-
-            _retained.Clear();
+            _retained?.Dispose();
         }
 
         Segments.Dispose();

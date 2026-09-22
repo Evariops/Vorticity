@@ -618,6 +618,26 @@ internal sealed class ScanBuilder
         long zoneLiveBlocks = 0;
         long liveBlocks = 0;
 
+        // A key-ordered scan walks its key source over the key column: a sorted column is decoded
+        // zone by zone from the segments the scan itself reads, through what the scan holds, so
+        // they are registered with the scan's own; and opening it reads the column's zone map when
+        // the filter's pruning did not read it already, which the scan counts as it does.
+        Compute.ZoneColumn? keyZones = null;
+        ScanMetrics? orderCost = null;
+        FieldMask walk = read.RootMask;
+        if (_orderPath is not null && _orderComposite is null && Keys.KeyCursorBuilder.StatedSorted(_file, _orderPath))
+        {
+            walk = Union(read, [Expr.Field(_orderPath)]).RootMask;
+            keyZones = pruning.Zones?.Column(_orderPath);
+            if (keyZones is null)
+            {
+                orderCost = new ScanMetrics();
+                keyZones = (await Compute.ZonePruningPlan
+                    .PlanAsync(_file, tree, Expr.IsNotNull(Expr.Field(_orderPath)), cancellationToken, steps: null, orderCost)
+                    .ConfigureAwait(false)).Zones?.Column(_orderPath);
+            }
+        }
+
         int splits = 0;
         int zoneLiveSplits = 0;
         int liveSplits = 0;
@@ -626,7 +646,7 @@ internal sealed class ScanBuilder
         {
             LayoutNode root = tree.Root;
             LayoutReader reader = LayoutReaderTable.Require(in root);
-            FieldMask mask = read.RootMask;
+            FieldMask mask = walk;
             SplitCursor cursor = plan.CreateCursor();
             while (cursor.TryNext(out RowRange split))
             {
@@ -678,6 +698,12 @@ internal sealed class ScanBuilder
                 bytes += steps[i].BytesRead;
             }
 
+            if (orderCost is not null)
+            {
+                toRead += checked((int)orderCost.SegmentRequests);
+                bytes += orderCost.BytesRequested;
+            }
+
             // The whole file-level answer: the statistics, then the file filters when indexes are on.
             bool fileMayMatch = _filter is null
                 || (_indexes
@@ -692,7 +718,7 @@ internal sealed class ScanBuilder
                 count = new CountExplanation(exact, covered, splitsPruned, splitsProven, zoneLiveSplits - splitsProven);
             }
 
-            OrderExplanation? order = _orderPath is null ? null : await OrderAsync(cancellationToken).ConfigureAwait(false);
+            OrderExplanation? order = _orderPath is null ? null : await OrderAsync(keyZones, cancellationToken).ConfigureAwait(false);
             return new ScanExplanation(
                 _take?.Count ?? rows.Length, blockRows, checked((int)blocks), checked((int)liveBlocks), steps, splits, liveSplits,
                 proven?.Count ?? 0, toRead, bytes, _file.FileLength, fileMayMatch)
@@ -814,7 +840,10 @@ internal sealed class ScanBuilder
     }
 
     /// <summary>The key source <c>InKeyOrder</c> would walk, and the range it would walk.</summary>
-    private async System.Threading.Tasks.ValueTask<OrderExplanation> OrderAsync(System.Threading.CancellationToken cancellationToken)
+    /// <param name="keyZones">The key column's zone map, when the plan read it already; null to let the source read it.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    private async System.Threading.Tasks.ValueTask<OrderExplanation> OrderAsync(
+        Compute.ZoneColumn? keyZones, System.Threading.CancellationToken cancellationToken)
     {
         Keys.KeySource? source;
         KeySourceKind kind;
@@ -829,7 +858,7 @@ internal sealed class ScanBuilder
         else
         {
             (source, kind) = await Keys.KeyCursorBuilder
-                .OpenSourceAsync(_file, _orderPath!, _indexes, cancellationToken)
+                .OpenSourceAsync(_file, _orderPath!, _indexes, cancellationToken, keyZones)
                 .ConfigureAwait(false);
         }
 

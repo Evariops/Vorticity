@@ -88,8 +88,8 @@ public sealed record OrderPlan(string Source, int Runs, long? Entries, bool Desc
 public readonly record struct ScanStatistics(
     long Rows, long Batches, long Requests, long BytesRequested, long BlocksDecoded, long BlocksPruned, long CacheHits)
 {
-    internal static ScanStatistics From(ScanMetrics metrics, long cacheHits) => new ScanStatistics(
-        metrics.Rows, metrics.Batches, metrics.SegmentRequests, metrics.BytesRequested, metrics.BlocksDecoded, metrics.BlocksPruned, cacheHits);
+    internal static ScanStatistics From(ScanMetrics metrics) => new ScanStatistics(
+        metrics.Rows, metrics.Batches, metrics.SegmentRequests, metrics.BytesRequested, metrics.BlocksDecoded, metrics.BlocksPruned, metrics.CacheHits);
 }
 
 /// <summary>

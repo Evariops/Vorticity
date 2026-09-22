@@ -193,7 +193,7 @@ internal sealed class KeyCursorBuilder
     }
 
     /// <summary>Whether the file statistics say a top-level column is sorted, read without allocating.</summary>
-    private static bool StatedSorted(VortexFile file, string path)
+    internal static bool StatedSorted(VortexFile file, string path)
     {
         DType schema = file.DType;
         if (!file.HasFileStatistics || schema.IsDefault || schema.Kind != DTypeKind.Struct)

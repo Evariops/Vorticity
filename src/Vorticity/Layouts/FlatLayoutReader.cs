@@ -156,7 +156,7 @@ internal sealed class FlatLayoutReader : LayoutReader
             }
             finally
             {
-                context.EndRetainedDecode(key, retained);
+                context.EndRetainedDecode(retained);
             }
         }
 
@@ -217,8 +217,11 @@ internal sealed class FlatLayoutReader : LayoutReader
 
         if (length < total)
         {
+            // A look before a claim: whether the chunk is decoded at all is the encoding's to say,
+            // and the blob has to be parsed to ask it, so the retained entry is looked for first and
+            // claimed only for a decode.
             long key = ScanContext.SegmentKey(node.Segments[0]);
-            if (context.TryGetRetained(key, out CanonicalArena hit, out int hitNode))
+            if (context.TryPeekRetained(key, out CanonicalArena hit, out int hitNode))
             {
                 return Gather(hit, hitNode, in fields, context, total);
             }
@@ -228,16 +231,19 @@ internal sealed class FlatLayoutReader : LayoutReader
                     .Require(context, chunkRoot.Encoding, chunkRoot.EncodingSpecIndex)
                     .SelectsWithoutFullDecode)
             {
-                Decoded(context, total);
-                CanonicalArena held = context.BeginRetainedDecode();
-                int retained = -1;
-                try
+                if (!context.TryGetRetained(key, out CanonicalArena held, out int retained))
                 {
-                    retained = context.Decode.DecodeRoot(in chunkRoot, node.DType, total, context.KeepEncodings);
-                }
-                finally
-                {
-                    context.EndRetainedDecode(key, retained);
+                    Decoded(context, total);
+                    held = context.BeginRetainedDecode();
+                    retained = -1;
+                    try
+                    {
+                        retained = context.Decode.DecodeRoot(in chunkRoot, node.DType, total, context.KeepEncodings);
+                    }
+                    finally
+                    {
+                        context.EndRetainedDecode(retained);
+                    }
                 }
 
                 return Gather(held, retained, in fields, context, total);
@@ -331,8 +337,10 @@ internal sealed class FlatLayoutReader : LayoutReader
         in LayoutNode node, ScanContext context, long key, int total,
         out CanonicalArena arena, out int answer)
     {
+        // A look before a claim: an encoding that declines is asked again by every batch of the
+        // chunk, and a claim made and given back each time would churn an entry per batch.
         long answerKey = key ^ AnswerKey;
-        if (context.TryGetRetained(answerKey, out CanonicalArena hit, out int hitNode))
+        if (context.TryPeekRetained(answerKey, out CanonicalArena hit, out int hitNode))
         {
             context.PredicateAnswered = true;
             arena = hit;
@@ -362,18 +370,22 @@ internal sealed class FlatLayoutReader : LayoutReader
                 return false;
             }
 
-            // Only the answer itself is retained. Whatever the encoding decoded to reach it -- a
-            // dictionary's codes, say -- stays in the batch's arena and dies with the batch, which
-            // is what keeps the retained arena the size of one bit a row.
-            CanonicalArena held = context.BeginRetainedDecode();
-            int retained = -1;
-            try
+            // Another lane may have published the answer since the look; otherwise this one is
+            // claimed and published. Only the answer itself is retained. Whatever the encoding
+            // decoded to reach it -- a dictionary's codes, say -- stays in the batch's arena and
+            // dies with the batch, which is what keeps the retained arena the size of one bit a row.
+            if (!context.TryGetRetained(answerKey, out CanonicalArena held, out int retained))
             {
-                retained = Answer(context, states, total);
-            }
-            finally
-            {
-                context.EndRetainedDecode(answerKey, retained);
+                held = context.BeginRetainedDecode();
+                retained = -1;
+                try
+                {
+                    retained = Answer(context, states, total);
+                }
+                finally
+                {
+                    context.EndRetainedDecode(retained);
+                }
             }
 
             context.PredicateAnswered = true;

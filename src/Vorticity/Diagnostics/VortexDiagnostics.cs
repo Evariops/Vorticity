@@ -42,7 +42,25 @@ internal static class VortexTelemetry
     private static readonly Counter<long> WriteBytes = Meter.CreateCounter<long>("vortex.write.bytes", "By", "Bytes written by writers.");
 
     /// <summary>Starts the activity of one scan, or returns null when nothing listens.</summary>
-    internal static Activity? StartScan(string kind) => Source.StartActivity("vortex.scan." + kind, ActivityKind.Internal);
+    /// <remarks>
+    /// The activity is a child of whatever the caller had current, and the caller keeps that one
+    /// current: a scan starts where its enumerator is built and ends inside an awaited step, whose
+    /// execution context does not flow back, so an activity left current would outlive its stop on
+    /// the caller's side and parent every span the caller opened after the scan.
+    /// </remarks>
+    internal static Activity? StartScan(string kind) => Start("vortex.scan." + kind);
+
+    private static Activity? Start(string name)
+    {
+        Activity? ambient = Activity.Current;
+        Activity? started = Source.StartActivity(name, ActivityKind.Internal);
+        if (started is not null)
+        {
+            Activity.Current = ambient;
+        }
+
+        return started;
+    }
 
     /// <summary>Adds what a finished scan did to the counters, and to its activity.</summary>
     internal static void ScanEnded(ScanMetrics metrics, Activity? activity)
@@ -74,7 +92,7 @@ internal static class VortexTelemetry
     internal static void Written(long bytes) => WriteBytes.Add(bytes);
 
     /// <summary>Starts the activity of one write, or returns null when nothing listens.</summary>
-    internal static Activity? StartWrite() => Source.StartActivity("vortex.write", ActivityKind.Internal);
+    internal static Activity? StartWrite() => Start("vortex.write");
 
     /// <summary>Tags and ends the activity of a write that completed its file or gave it up.</summary>
     internal static void WriteEnded(Activity? activity, long rows, long bytes, bool completed)

@@ -29,6 +29,18 @@ internal abstract class KeySource : IAsyncDisposable
     /// <summary>What a composite key's bytes follow; null for a single column.</summary>
     internal virtual string? KeyFormat => null;
 
+    /// <summary>
+    /// Makes the source read through what the scan that walks it holds: the segments it has read
+    /// and the chunks it has decoded, so a column the scan also delivers is read and decoded once
+    /// between the two. A source that reads its own structures rather than the file's columns has
+    /// nothing to share, and ignores it.
+    /// </summary>
+    /// <param name="held">The scan's segments.</param>
+    /// <param name="retained">The scan's decoded chunks.</param>
+    internal virtual void Share(Scanning.ScanSegments held, Arrays.RetainedChunks retained)
+    {
+    }
+
     /// <summary>Whether the source is positioned on an entry.</summary>
     internal abstract bool IsValid { get; }
 

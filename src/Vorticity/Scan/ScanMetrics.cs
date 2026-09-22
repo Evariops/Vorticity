@@ -14,6 +14,7 @@ internal sealed class ScanMetrics
 {
     private long _segmentRequests;
     private long _bytesRequested;
+    private long _cacheHits;
     private long _valuesDecoded;
     private long _batches;
     private long _rows;
@@ -28,6 +29,9 @@ internal sealed class ScanMetrics
 
     /// <summary>The bytes those requests named.</summary>
     public long BytesRequested => Interlocked.Read(ref _bytesRequested);
+
+    /// <summary>Of the segments asked for, those the session's cache served without a read.</summary>
+    public long CacheHits => Interlocked.Read(ref _cacheHits);
 
     /// <summary>
     /// Values the flat layout reader materialized: whole nodes, retained chunks, and the rows a
@@ -117,6 +121,21 @@ internal sealed class ScanMetrics
     {
         metrics?.AddRequests(segments, bytes);
         Diagnostics.VortexEventSource.Requested(segments, bytes);
+    }
+
+    /// <summary>
+    /// Adds to the sink the segments of a read just made that the session's cache served: the
+    /// scan's own hits, where the cache's counter is the session's.
+    /// </summary>
+    /// <param name="metrics">The scan's sink, or null.</param>
+    /// <param name="segments">The request set, read.</param>
+    internal static void Served(ScanMetrics? metrics, IO.SegmentRequestSet segments)
+    {
+        int hits = segments.CacheHits;
+        if (hits > 0 && metrics is not null)
+        {
+            Interlocked.Add(ref metrics._cacheHits, hits);
+        }
     }
 
     internal void AddDecoded(long values) => Interlocked.Add(ref _valuesDecoded, values);

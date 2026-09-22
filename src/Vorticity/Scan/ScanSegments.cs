@@ -43,10 +43,18 @@ internal sealed class ScanSegments : IDisposable
     private readonly SegmentWaiter?[] _parked;
     private Entry[] _entries = [];
     private int _count;
+    private long _tickets;
     private bool _failed;
 
     /// <param name="lanes">How many batches may be built at once; above one, a batch may wait for another's read.</param>
     internal ScanSegments(int lanes) => _parked = lanes > 1 ? new SegmentWaiter?[lanes] : [];
+
+    /// <summary>
+    /// The next batch number, for a scan whose batches are not numbered by a split plan: a
+    /// key-ordered walk numbers the zones its key source decodes and the groups of each window in
+    /// the order they happen, which is the order their rows are walked in.
+    /// </summary>
+    internal long NextTicket() => Interlocked.Increment(ref _tickets);
 
     /// <summary>
     /// Fills the unread slots of a batch's registered set from what the scan holds, and claims for

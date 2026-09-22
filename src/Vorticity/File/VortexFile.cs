@@ -1080,6 +1080,32 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>Number of entries in the footer's <c>array_specs</c> dictionary.</summary>
     internal int ArrayEncodingCount => _arrayEncodings.Length;
 
+    private int _largestArrayTree;
+
+    /// <summary>
+    /// The largest array tree a context of this file has loaded, in bytes, for the contexts made
+    /// after it to start their tree buffer at: a lane whose first decode of its own comes late in a
+    /// scan then grows nothing in the middle of it.
+    /// </summary>
+    internal int LargestArrayTree => Volatile.Read(ref _largestArrayTree);
+
+    /// <summary>Records the size of a tree buffer a context grew to.</summary>
+    /// <param name="bytes">The buffer's size.</param>
+    internal void NoteArrayTree(int bytes)
+    {
+        int seen = Volatile.Read(ref _largestArrayTree);
+        while (bytes > seen)
+        {
+            int previous = Interlocked.CompareExchange(ref _largestArrayTree, bytes, seen);
+            if (previous == seen)
+            {
+                return;
+            }
+
+            seen = previous;
+        }
+    }
+
     /// <summary>
     /// The resolved array encoding for a <c>u16</c> <c>ArrayNode.encoding</c> index.
     /// <see cref="ArrayEncodingId.Unknown"/> for an id this library does not decode, which is not

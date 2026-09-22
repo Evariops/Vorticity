@@ -254,6 +254,7 @@ internal sealed class DatasetScanBuilder
             yield break;
         }
 
+        RecordBatch? view = null;
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
             if (Covered(held) == 0)
@@ -268,7 +269,7 @@ internal sealed class DatasetScanBuilder
                 await foreach (RecordBatch batch in Of(lease.File, held).ExecuteAsync()
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
-                    yield return InDataset(batch, held.FirstRow);
+                    yield return InDataset(batch, held.FirstRow, ref view);
                 }
             }
         }
@@ -678,9 +679,32 @@ internal sealed class DatasetScanBuilder
 
     private static int Narrow(long value) => (int)Math.Min(value, int.MaxValue);
 
-    /// <summary>A file's batch seen as the dataset's rows: row 0 is the object's row <c>StartRow</c>, after the rows before the object.</summary>
-    private static RecordBatch InDataset(RecordBatch batch, long firstRow) =>
-        firstRow == 0 ? batch : batch.Rebased(firstRow + batch.StartRow);
+    /// <summary>
+    /// A file's batch seen as the dataset's rows: row 0 is the object's row <c>StartRow</c>, after
+    /// the rows before the object. One view serves the whole stream, bound again per batch, since a
+    /// batch is valid until the next one is asked for and a view per batch would be an allocation
+    /// per batch.
+    /// </summary>
+    /// <param name="batch">The file's batch.</param>
+    /// <param name="firstRow">The dataset row the object's row 0 is.</param>
+    /// <param name="view">The stream's view, made at the first batch that needs one.</param>
+    private static RecordBatch InDataset(RecordBatch batch, long firstRow, ref RecordBatch? view)
+    {
+        if (firstRow == 0)
+        {
+            return batch;
+        }
+
+        if (view is null)
+        {
+            view = batch.Rebased(firstRow + batch.StartRow);
+            return view;
+        }
+
+        view.Dispose();
+        view.RebindRebased(batch, firstRow + batch.StartRow);
+        return view;
+    }
 
     /// <summary>
     /// The most objects the scan will hold open at once, stated before any is read: one in the
@@ -768,6 +792,7 @@ internal sealed class DatasetScanBuilder
             file => OrderedOf(file, paths, drop),
             RecordOpen,
             cancellationToken);
+        RecordBatch? view = null;
         await using (merge.ConfigureAwait(false))
         {
             try
@@ -778,7 +803,7 @@ internal sealed class DatasetScanBuilder
                     long firstRow = merge.CurrentFirstRow;
                     if (!drop)
                     {
-                        yield return InDataset(run, firstRow);
+                        yield return InDataset(run, firstRow, ref view);
                         continue;
                     }
 
@@ -786,7 +811,7 @@ internal sealed class DatasetScanBuilder
                     RecordBatch projected = run.Project(kept.Value);
                     try
                     {
-                        yield return InDataset(projected, firstRow);
+                        yield return InDataset(projected, firstRow, ref view);
                     }
                     finally
                     {

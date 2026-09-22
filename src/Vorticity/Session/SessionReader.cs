@@ -91,6 +91,7 @@ internal sealed class SessionReader : ISegmentReader
                         owner.Release();
                     }
 
+                    requests.NoteCacheHit();
                     (served ??= new bool[requests.Count])[slot] = true;
                 }
             }
