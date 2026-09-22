@@ -253,7 +253,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             _columns[i] = new ColumnWriter
             {
                 EditionAllowsDictionary = ColumnCompressor.Allows(target, "vortex.dict"),
-                StringBoundBytes = stringBoundBytes,
+                StringBoundBytes = HasStringBounds(schema, _isTabular, i) ? stringBoundBytes : 0,
             };
         }
 
@@ -270,6 +270,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
                 Fences = fences,
             }
             : null;
+    }
+
+    /// <summary>
+    /// Whether column <paramref name="field"/> is one whose zone map carries string bounds: a utf8 or
+    /// binary column, and no other, so that no other column keeps any.
+    /// </summary>
+    private static bool HasStringBounds(DType schema, bool tabular, int field)
+    {
+        if (tabular && field >= schema.FieldCount)
+        {
+            return false;
+        }
+
+        return (tabular ? schema.GetField(field) : schema).Kind is DTypeKind.Utf8 or DTypeKind.Binary;
     }
 
     /// <summary>
