@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The declarations the compiler or the generator refuse; see Bodies.csproj for how the cases
+       are checked and why they are split. -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <RootNamespace>MustNotCompile</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <IsAotCompatible>false</IsAotCompatible>
+    <IsTrimmable>false</IsTrimmable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Vorticity/Vorticity.csproj" />
+    <ProjectReference Include="../../../src/Vorticity.Generators/Vorticity.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

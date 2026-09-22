@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Every case carries the diagnostic it must raise as a trailing `// expect: ID "fragment"`
+       marker. Neither project is in the solution and neither builds clean: MustNotCompileTests
+       builds each one and compares what the compiler and the analyzers report with the markers,
+       line for line. The cases are split in two because the compiler binds no method body once a
+       declaration is in error, so a refused record would hide every case below. -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <RootNamespace>MustNotCompile</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <IsAotCompatible>false</IsAotCompatible>
+    <IsTrimmable>false</IsTrimmable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../src/Vorticity/Vorticity.csproj" />
+    <ProjectReference Include="../../../src/Vorticity.Generators/Vorticity.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>
