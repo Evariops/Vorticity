@@ -146,7 +146,28 @@ internal sealed class FsstDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start: 0, count: length);
+    }
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.BufferCount == 3 && node.ChildCount >= 2 &&
+            context.ChildDecodesRange(in node, 0) && context.ChildDecodesRange(in node, 1) &&
+            context.ValidityDecodesRange(in node, 2);
+    }
+
+    /// <summary>
+    /// Decodes the range's slice of the code stream in one pass, as the whole node decodes the
+    /// whole stream: the range's code offsets bound its slice, and its lengths size its heap.
+    /// </summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
     }
 
     /// <summary>
@@ -171,12 +192,12 @@ internal sealed class FsstDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, selective: true, start: 0, count: wanted.Length);
     }
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start, int count)
     {
         CanonicalSupport.RequireBinaryLike(dtype, Id);
         if (node.BufferCount == 2)
@@ -201,7 +222,8 @@ internal sealed class FsstDecoder : ArrayDecoder
             .Create(node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id)
             .Prepare(symbolScratch, widthScratch);
 
-        int produced = selective ? wanted.Length : length;
+        int produced = count;
+        bool ranged = !selective && (start != 0 || count != length);
 
         // The lengths are pushed down: one per wanted row is all the views need, and the child is
         // free to specialize its own take.
@@ -210,20 +232,27 @@ internal sealed class FsstDecoder : ArrayDecoder
         DType lengthsType = context.Types.Primitive(lengthsPType, Nullability.NonNullable);
         int lengthsIndex = selective
             ? context.DecodeChildSelected(in node, 0, lengthsType, length, wanted)
-            : context.DecodeChild(in node, 0, lengthsType, length);
+            : ranged
+                ? context.DecodeChildRange(in node, 0, lengthsType, length, start, count)
+                : context.DecodeChild(in node, 0, lengthsType, length);
         CanonicalNode uncompressedLengths = CanonicalSupport.RequirePrimitiveChild(
             context, lengthsIndex, lengthsPType, produced, Id + " uncompressed_lengths");
 
-        // VarBin offsets are len + 1, and they bound the code stream rather than the decoded one.
+        // VarBin offsets are len + 1, and they bound the code stream rather than the decoded one: a
+        // range of rows needs its own offsets and the one after its last row.
         PType offsetsPType = metadata.CodesOffsetsPType;
         CanonicalSupport.RequireIntegerPType(offsetsPType, Id + " codes_offsets");
         int offsetCount = ArrayDecodeContext.CheckedLength((ulong)length + 1, Id + " codes_offsets");
         DType offsetsType = context.Types.Primitive(offsetsPType, Nullability.NonNullable);
-        int offsetsIndex = context.DecodeChild(in node, 1, offsetsType, offsetCount);
+        int offsetsIndex = ranged
+            ? context.DecodeChildRange(in node, 1, offsetsType, offsetCount, start, count + 1)
+            : context.DecodeChild(in node, 1, offsetsType, offsetCount);
         CanonicalNode codesOffsets = CanonicalSupport.RequirePrimitiveChild(
-            context, offsetsIndex, offsetsPType, offsetCount, Id + " codes_offsets");
+            context, offsetsIndex, offsetsPType, ranged ? count + 1 : offsetCount, Id + " codes_offsets");
 
-        Validity validity = context.DecodeValidity(in node, 2, dtype.Nullability, length);
+        Validity validity = ranged
+            ? context.DecodeValidityRange(in node, 2, dtype.Nullability, length, start, count)
+            : context.DecodeValidity(in node, 2, dtype.Nullability, length);
         if (selective)
         {
             validity = Compute.CanonicalFilter.FilterValidity(context.Canonical, validity, wanted);
@@ -245,7 +274,7 @@ internal sealed class FsstDecoder : ArrayDecoder
         }
         else
         {
-            ReadOnlySpan<byte> stream = CodeStream(codesOffsets, offsetsPType, length, codes);
+            ReadOnlySpan<byte> stream = CodeStream(codesOffsets, offsetsPType, produced, codes);
             int written = table.Decode(stream, destination, Id, ref escapeBits);
             if (written != total)
             {

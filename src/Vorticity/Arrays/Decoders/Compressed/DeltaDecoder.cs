@@ -39,7 +39,30 @@ internal sealed class DeltaDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, 0, length);
+    }
 
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.ChildCount == 2 && context.ChildDecodesRange(in node, 0) && context.ChildDecodesRange(in node, 1);
+    }
+
+    /// <summary>
+    /// Sums the blocks the range touches and no others: a block is seeded from its own bases, so
+    /// the bases and deltas of every other block are left unread.
+    /// </summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, start, count);
+    }
+
+    private static int Core(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
 
@@ -75,14 +98,24 @@ internal sealed class DeltaDecoder : ArrayDecoder
         int blocks = deltasLength / BlockSize;
         int basesLength = blocks * lanes;
 
-        int basesIndex = context.DecodeChild(in node, 0, dtype, basesLength);
-        int deltasIndex = context.DecodeChild(in node, 1, dtype, deltasLength);
+        // The rows wanted, in the decoded space the offset is measured in, and the blocks they fall
+        // in; the whole node reads every block.
+        int first = offset + start;
+        bool whole = start == 0 && count == length;
+        int firstBlock = whole ? 0 : first / BlockSize;
+        int spanned = whole ? blocks : ((first + count - 1) / BlockSize) - firstBlock + 1;
+        int basesIndex = whole
+            ? context.DecodeChild(in node, 0, dtype, basesLength)
+            : context.DecodeChildRange(in node, 0, dtype, basesLength, firstBlock * lanes, spanned * lanes);
+        int deltasIndex = whole
+            ? context.DecodeChild(in node, 1, dtype, deltasLength)
+            : context.DecodeChildRange(in node, 1, dtype, deltasLength, firstBlock * BlockSize, spanned * BlockSize);
 
-        CanonicalNode bases = RequirePrimitive(context, basesIndex, ptype, "bases", basesLength);
-        CanonicalNode deltas = RequirePrimitive(context, deltasIndex, ptype, "deltas", deltasLength);
+        CanonicalNode bases = RequirePrimitive(context, basesIndex, ptype, "bases", spanned * lanes);
+        CanonicalNode deltas = RequirePrimitive(context, deltasIndex, ptype, "deltas", spanned * BlockSize);
 
-        // Only the window is materialized, not the whole decoded run: a delta node of a million rows
-        // asked for one batch has no reason to produce a million values.
+        // Only the rows asked for are materialized, not the whole decoded run: a delta node of a
+        // million rows asked for one batch has no reason to produce a million values.
         //
         // The zero fill stays even though the loop below writes every element of the window. A
         // buffer of this size comes back from the pool with its pages already faulted, so the fill
@@ -91,11 +124,15 @@ internal sealed class DeltaDecoder : ArrayDecoder
         // large for the pool, which get fresh pages on every scan, are worth leaving uninitialized:
         // the rule is the size, not the encoding.
         VortexBuffer output = CompressedValues.Allocate(
-            context, length * width, width, Id, out Span<byte> destination);
+            context, count * width, width, Id, out Span<byte> destination);
 
-        Undelta(bases.Values.Span, deltas.Values.Span, destination, width, lanes, offset, length);
+        int within = first - (firstBlock * BlockSize);
+        Undelta(bases.Values.Span, deltas.Values.Span, destination, width, lanes, within, count);
 
-        return context.Canonical.AddPrimitive(dtype, length, deltas.Validity, ptype, output);
+        // The deltas carry the array's validity, one bit per decoded value: the rows asked for are a
+        // range of it, which a bitmap is sliced to.
+        Validity validity = Layouts.CanonicalSlice.ValidityRange(context.Canonical, deltas.Validity, within, count);
+        return context.Canonical.AddPrimitive(dtype, count, validity, ptype, output);
     }
 
     private static CanonicalNode RequirePrimitive(

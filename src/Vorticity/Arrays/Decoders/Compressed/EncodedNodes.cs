@@ -109,7 +109,9 @@ internal static class EncodedNodes
     /// <remarks>
     /// Only the runs the rows touch are kept -- a run ending at the offset holds none of them, and
     /// the runs past the one reaching <c>offset + length</c> none either -- and the ends are
-    /// rebased so the first row is row 0 and clipped so the last end is the row count.
+    /// rebased so the first row is row 0 and clipped so the last end is the row count. The first
+    /// and last of those runs are found by binary searches over the ascending ends, so a window
+    /// late in a chunk of many runs reads a few ends rather than every run before it.
     /// </remarks>
     /// <exception cref="VortexFormatException">The runs do not cover the rows.</exception>
     internal static int RunEnd(
@@ -126,18 +128,8 @@ internal static class EncodedNodes
 
         ulong start = (ulong)offset;
         ulong stop = start + (ulong)(uint)length;
-        int first = 0;
-        while (first < runCount && CompressedValues.ReadUnsigned(ends, endsPType, first) <= start)
-        {
-            first++;
-        }
-
-        int last = first;
-        while (last < runCount && CompressedValues.ReadUnsigned(ends, endsPType, last) < stop)
-        {
-            last++;
-        }
-
+        int first = FirstEndAbove(ends, endsPType, 0, runCount, start);
+        int last = FirstEndAbove(ends, endsPType, first, runCount, stop - 1);
         if (last == runCount)
         {
             CompressedThrow.Format(
@@ -160,6 +152,30 @@ internal static class EncodedNodes
         int values = Layouts.CanonicalSlice.Slice(context, valuesIndex, first, count);
         return arena.AddRunEnd(
             dtype, length, RowValidity(context, dtype, values, into, length, encodingId), rebased, values);
+    }
+
+    /// <summary>
+    /// The first run in <c>[from, runCount)</c> whose end is above <paramref name="row"/>, or
+    /// <paramref name="runCount"/> when none is; the ends strictly ascend.
+    /// </summary>
+    private static int FirstEndAbove(ReadOnlySpan<byte> ends, PType endsPType, int from, int runCount, ulong row)
+    {
+        int low = from;
+        int high = runCount;
+        while (low < high)
+        {
+            int middle = low + ((high - low) >> 1);
+            if (CompressedValues.ReadUnsigned(ends, endsPType, middle) <= row)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+
+        return low;
     }
 
     /// <summary>Each run's value validity spread over its rows.</summary>

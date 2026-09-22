@@ -30,7 +30,23 @@ internal sealed class RunEndDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start: 0, count: length);
+    }
+
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node) => true;
+
+    /// <summary>
+    /// Expands the runs the range falls in and no others, the first found by a binary search over
+    /// the ends; the ends and values, one entry per run, are read whole and decoded once for every
+    /// range of the node.
+    /// </summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
     }
 
     /// <summary>
@@ -53,12 +69,12 @@ internal sealed class RunEndDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, selective: true, start: 0, count: wanted.Length);
     }
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start, int count)
     {
         // Read before the children are decoded, which take the grant over. A take keeps the
         // canonical form: its rows are scattered, and runs of scattered rows are not runs.
@@ -81,9 +97,16 @@ internal sealed class RunEndDecoder : ArrayDecoder
         int runCount = ArrayDecodeContext.CheckedLength(metadata.NumRuns, $"{Id} num_runs");
         int offset = ArrayDecodeContext.CheckedLength(metadata.Offset, $"{Id} offset");
 
+        // The ends and values are one entry per run and every range or batch of the node reads all
+        // of them, so anything short of the whole node decodes them once for every visit.
+        bool whole = !selective && start == 0 && count == length;
         DType endsType = context.Types.Primitive(metadata.EndsPType, Nullability.NonNullable);
-        int endsIndex = context.DecodeChild(in node, 0, endsType, runCount);
-        int valuesIndex = context.DecodeChild(in node, 1, dtype, runCount);
+        int endsIndex = whole
+            ? context.DecodeChild(in node, 0, endsType, runCount)
+            : context.DecodeWholeChild(in node, 0, endsType, runCount);
+        int valuesIndex = whole
+            ? context.DecodeChild(in node, 1, dtype, runCount)
+            : context.DecodeWholeChild(in node, 1, dtype, runCount);
 
         ReadOnlySpan<byte> ends = CompressedValues.RequireIndexChild(
             context, endsIndex, metadata.EndsPType, runCount, Id, "ends");
@@ -120,8 +143,9 @@ internal sealed class RunEndDecoder : ArrayDecoder
 
         if (keep)
         {
+            // A range of a run-end node is the same runs read from a later row.
             return EncodedNodes.RunEnd(
-                context, dtype, length, ends, metadata.EndsPType, runCount, offset, valuesIndex, Id);
+                context, dtype, count, ends, metadata.EndsPType, runCount, offset + start, valuesIndex, Id);
         }
 
         ValidityReader valuesValidity = ValidityReader.Of(context.Canonical, values.Validity);
@@ -144,23 +168,35 @@ internal sealed class RunEndDecoder : ArrayDecoder
             // the loop turns "did not reach the end" into a format error rather than a buffer
             // holding whatever the pool last put there. Zero-filling first would be a whole pass
             // that the expansion immediately overwrites.
-            ValueWriter writer = ValueWriter.CreateUninitialized(context, in values, length, 0, Id);
-            ValidityWriter validity = ValidityWriter.Create(context, length, tracked, Id);
+            ValueWriter writer = ValueWriter.CreateUninitialized(context, in values, count, 0, Id);
+            ValidityWriter validity = ValidityWriter.Create(context, count, tracked, Id);
 
-            ulong unsignedOffset = (ulong)offset;
-            ulong unsignedLength = (ulong)(uint)length;
+            // A range reads the runs from the one its first row falls in, with that row as the
+            // origin every end is measured from.
+            int firstRun = 0;
+            if (start != 0)
+            {
+                firstRun = FindRun(ends, metadata.EndsPType, runCount, (ulong)offset, start);
+                if (firstRun < 0)
+                {
+                    CompressedThrow.Format($"{Id} row {start} falls outside the {length} rows its runs cover.");
+                }
+            }
+
+            ulong unsignedOffset = (ulong)offset + (ulong)(uint)start;
+            ulong unsignedLength = (ulong)(uint)count;
 
             // The general loop below is correct and stays, but it pays once per run for two answers
             // that hold for the whole node: the ends' physical type and the value width.
             // `RepeatRuns` resolves both once and runs the same loop typed, returning -1 for the
             // shapes it has no kernel for, which then walk here.
             int position = writer.RepeatRuns(
-                in values, ends, metadata.EndsPType, runCount, unsignedOffset, length,
+                in values, ends, metadata.EndsPType, firstRun, runCount, unsignedOffset, count,
                 in valuesValidity, in validity, tracked);
             if (position < 0)
             {
                 position = 0;
-                for (int run = 0; run < runCount && position < length; run++)
+                for (int run = firstRun; run < runCount && position < count; run++)
                 {
                     ulong end =
                         CompressedValues.ReadUnsigned(ends, metadata.EndsPType, run) - unsignedOffset;
@@ -175,21 +211,21 @@ internal sealed class RunEndDecoder : ArrayDecoder
                         continue;
                     }
 
-                    int count = endRow - position;
-                    writer.Repeat(in values, run, position, count);
+                    int rows = endRow - position;
+                    writer.Repeat(in values, run, position, rows);
                     if (tracked && valuesValidity.IsValid(run))
                     {
-                        validity.SetValidRange(position, count);
+                        validity.SetValidRange(position, rows);
                     }
 
                     position = endRow;
                 }
             }
 
-            if (position != length)
+            if (position != count)
             {
                 CompressedThrow.Format(
-                    $"{Id} runs cover {position} of {length} rows; the last run end must reach " +
+                    $"{Id} runs cover {position} of {count} rows; the last run end must reach " +
                     "offset + length.");
             }
 

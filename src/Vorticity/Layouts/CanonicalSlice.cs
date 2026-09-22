@@ -373,6 +373,18 @@ internal static class CanonicalSlice
         }
     }
 
+    /// <summary>
+    /// The validity of rows <c>[start, start + length)</c> of a node whose validity is
+    /// <paramref name="validity"/>, in the same arena: a bitmap is sliced, and every other kind holds
+    /// for any range as it holds for the whole.
+    /// </summary>
+    /// <param name="arena">The arena holding the validity's bitmap, which receives its slice.</param>
+    /// <param name="validity">The whole node's validity.</param>
+    /// <param name="start">The range's first row.</param>
+    /// <param name="length">The range's row count.</param>
+    internal static Validity ValidityRange(CanonicalArena arena, Validity validity, int start, int length) =>
+        SliceValidity(arena, arena, validity, start, length, depth: 1);
+
     private static Validity SliceValidity(
         CanonicalArena source,
         CanonicalArena destination,

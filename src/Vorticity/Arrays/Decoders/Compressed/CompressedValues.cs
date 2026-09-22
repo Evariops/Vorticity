@@ -353,6 +353,7 @@ internal ref struct ValueWriter
     /// <param name="source">The run values, one per run.</param>
     /// <param name="ends">The run ends, as their own physical type.</param>
     /// <param name="endsPType">The ends' physical type; must be an integer.</param>
+    /// <param name="firstRun">The first run whose end lies past <paramref name="offset"/>: the run the first row falls in.</param>
     /// <param name="runCount">How many runs.</param>
     /// <param name="offset">Subtracted from every end, as <c>vortex.runend</c> defines it.</param>
     /// <param name="length">Rows to produce.</param>
@@ -374,7 +375,7 @@ internal ref struct ValueWriter
     /// </remarks>
     public readonly int RepeatRuns(
         in ValueReader source, ReadOnlySpan<byte> ends, PType endsPType,
-        int runCount, ulong offset, int length,
+        int firstRun, int runCount, ulong offset, int length,
         in ValidityReader sourceValidity, in ValidityWriter validity, bool tracked)
     {
         if (_kind == CanonicalKind.Bool
@@ -387,28 +388,28 @@ internal ref struct ValueWriter
         return endsPType switch
         {
             PType.U8 => Ends<byte>(
-                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+                in source, ends, firstRun, runCount, offset, length, in sourceValidity, in validity, tracked),
             PType.U16 => Ends<ushort>(
-                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+                in source, ends, firstRun, runCount, offset, length, in sourceValidity, in validity, tracked),
             PType.U32 => Ends<uint>(
-                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+                in source, ends, firstRun, runCount, offset, length, in sourceValidity, in validity, tracked),
             PType.U64 => Ends<ulong>(
-                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+                in source, ends, firstRun, runCount, offset, length, in sourceValidity, in validity, tracked),
             PType.I8 => Ends<sbyte>(
-                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+                in source, ends, firstRun, runCount, offset, length, in sourceValidity, in validity, tracked),
             PType.I16 => Ends<short>(
-                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+                in source, ends, firstRun, runCount, offset, length, in sourceValidity, in validity, tracked),
             PType.I32 => Ends<int>(
-                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+                in source, ends, firstRun, runCount, offset, length, in sourceValidity, in validity, tracked),
             PType.I64 => Ends<long>(
-                in source, ends, runCount, offset, length, in sourceValidity, in validity, tracked),
+                in source, ends, firstRun, runCount, offset, length, in sourceValidity, in validity, tracked),
             _ => -1,
         };
     }
 
     private readonly int Ends<TEnd>(
         in ValueReader source, ReadOnlySpan<byte> ends,
-        int runCount, ulong offset, int length,
+        int firstRun, int runCount, ulong offset, int length,
         in ValidityReader sourceValidity, in ValidityWriter validity, bool tracked)
         where TEnd : unmanaged
     {
@@ -416,15 +417,15 @@ internal ref struct ValueWriter
         return _width switch
         {
             1 => Runs<TEnd, byte>(
-                typed, in source, offset, length, in sourceValidity, in validity, tracked),
+                typed, in source, firstRun, offset, length, in sourceValidity, in validity, tracked),
             2 => Runs<TEnd, ushort>(
-                typed, in source, offset, length, in sourceValidity, in validity, tracked),
+                typed, in source, firstRun, offset, length, in sourceValidity, in validity, tracked),
             4 => Runs<TEnd, uint>(
-                typed, in source, offset, length, in sourceValidity, in validity, tracked),
+                typed, in source, firstRun, offset, length, in sourceValidity, in validity, tracked),
             8 => Runs<TEnd, ulong>(
-                typed, in source, offset, length, in sourceValidity, in validity, tracked),
+                typed, in source, firstRun, offset, length, in sourceValidity, in validity, tracked),
             16 => Runs<TEnd, Vector128<byte>>(
-                typed, in source, offset, length, in sourceValidity, in validity, tracked),
+                typed, in source, firstRun, offset, length, in sourceValidity, in validity, tracked),
 
             // Width 32 is `i256`, and it has no 32-byte unmanaged type here the way `RowKernels`
             // has its own private one. A run-end column of i256 walks the caller's loop.
@@ -434,7 +435,7 @@ internal ref struct ValueWriter
 
     /// <summary>The run loop with both types resolved: a compare, a widen and a typed fill.</summary>
     private readonly int Runs<TEnd, TValue>(
-        ReadOnlySpan<TEnd> ends, in ValueReader source, ulong offset, int length,
+        ReadOnlySpan<TEnd> ends, in ValueReader source, int firstRun, ulong offset, int length,
         in ValidityReader sourceValidity, in ValidityWriter validity, bool tracked)
         where TEnd : unmanaged
         where TValue : unmanaged
@@ -443,7 +444,7 @@ internal ref struct ValueWriter
         Span<TValue> destination = MemoryMarshal.Cast<byte, TValue>(_bytes)[..length];
         ulong unsignedLength = (ulong)(uint)length;
         int position = 0;
-        for (int run = 0; run < ends.Length && position < length; run++)
+        for (int run = firstRun; run < ends.Length && position < length; run++)
         {
             ulong end = WidenEnd(ends[run]) - offset;
             if (end > unsignedLength)

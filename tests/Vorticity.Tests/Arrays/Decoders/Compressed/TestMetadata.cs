@@ -73,6 +73,22 @@ internal static class TestMetadata
         }
     }
 
+    /// <summary>A delta body, whose two fields are written here: the library reads delta and never writes it.</summary>
+    internal static byte[] Delta(ulong deltasLength, uint offset)
+    {
+        ProtoWriter writer = new();
+        try
+        {
+            writer.WriteUInt64(1, deltasLength);
+            writer.WriteUInt32(2, offset);
+            return writer.WrittenSpan.ToArray();
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
     internal static byte[] Dict(uint valuesLength, PType codesPType, bool? isNullableCodes)
     {
         DictMetadata value = new(valuesLength, codesPType, isNullableCodes, null);

@@ -13,7 +13,7 @@ namespace Vorticity.Tests.Layouts;
 /// A chunk larger than a window is read a window at a time, row for row what a whole decode
 /// gives, with every value decoded once: a progression, packed integers, a dictionary of few
 /// strings, bits with nulls and a dictionary of many doubles whose values every window borrows,
-/// side by side in one table.
+/// side by side in one table; and a column of runs kept encoded, whose windows start inside a run.
 /// </summary>
 public sealed class WindowedChunkTests
 {
@@ -57,6 +57,49 @@ public sealed class WindowedChunkTests
     }
 
     /// <summary>
+    /// A run-end column kept encoded for a typed scan, read a window at a time, with windows that
+    /// start inside a run: each batch holds the runs its rows fall in, rebased to its first row,
+    /// and every value is decoded once.
+    /// </summary>
+    [Fact]
+    public async Task ARunEndChunkKeptEncodedReadsBackInWindowsRunForRun()
+    {
+        Assert.True(FlatLayoutReader.WindowRows % RunLength != 0, "a window must start inside a run");
+        string path = await WriteRunsAsync();
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
+            Scan<Runs> scan = file.Scan<Runs>();
+            long seen = 0;
+            await foreach (Columns<Runs> columns in scan.WithCancellation(TestContext.Current.CancellationToken))
+            {
+                Column<int> day = columns.Column<int>(0);
+                Assert.Equal(ColumnEncoding.RunEnd, day.Encoding);
+                RunEndView<int> runs = day.AsRunEnd();
+                ReadOnlySpan<int> values = runs.Values.Values;
+                int row = 0;
+                for (int run = 0; run < runs.RunCount; run++)
+                {
+                    for (; row < runs.RunEnds[run]; row++)
+                    {
+                        Assert.Equal(Day(checked((int)(seen + row))), values[run]);
+                    }
+                }
+
+                Assert.Equal(columns.RowCount, row);
+                seen += row;
+            }
+
+            Assert.Equal(Rows, seen);
+            Assert.Equal(Rows, scan.Metrics.ValuesDecoded);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>
     /// An encoding overrides the range decode and the question about it together: one without the
     /// other is a window never taken, or a decode that throws where the reader was told it would not.
     /// </summary>
@@ -89,7 +132,7 @@ public sealed class WindowedChunkTests
         }
 
         Assert.Equal(string.Empty, wrong.ToString());
-        Assert.True(ranged >= 9, $"only {ranged} encodings decode a range");
+        Assert.True(ranged >= 14, $"only {ranged} encodings decode a range");
     }
 
     private static bool Overrides(ArrayDecoder decoder, string method)
@@ -130,6 +173,59 @@ public sealed class WindowedChunkTests
 
         await writer.CompleteAsync(CancellationToken.None);
         return path;
+    }
+
+    /// <summary>Rows per run of the run-end table.</summary>
+    private const int RunLength = 100;
+
+    /// <summary>Row <paramref name="row"/>'s value in the run-end table: one value per run, each run's differing from its neighbours'.</summary>
+    private static int Day(int row) => (int)((row / RunLength) * 2_654_435_761u >> 20);
+
+    private static async Task<string> WriteRunsAsync()
+    {
+        string directory = Path.Combine(AppContext.BaseDirectory, "windows");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"runs-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        VortexWriteOptions options = new VortexWriteOptions { DataBlockTargetBytes = 64 << 20 };
+        await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Runs>(path, options);
+        Runs[] block = new Runs[writer.BlockRows];
+        for (int start = 0; start < Rows; start += writer.BlockRows)
+        {
+            int count = Math.Min(writer.BlockRows, Rows - start);
+            for (int i = 0; i < count; i++)
+            {
+                block[i] = new Runs(Day(start + i));
+            }
+
+            await writer.WriteAsync<Runs>(block.AsSpan(0, count), CancellationToken.None);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None);
+        return path;
+    }
+
+    /// <summary>One row of the run-end table.</summary>
+    internal readonly record struct Runs(int Day) : IVortexRecord<Runs>
+    {
+        public static VortexSchema Schema { get; } = [("Day", VortexType.Int32)];
+
+        public static void ReadRows(Columns<Runs> columns, Span<Runs> rows)
+        {
+            ReadOnlySpan<int> day = columns.Column<int>(0).Values;
+            for (int i = 0; i < rows.Length; i++)
+            {
+                rows[i] = new Runs(day[i]);
+            }
+        }
+
+        public static void WriteRows(ColumnsBuilder<Runs> builder, ReadOnlySpan<Runs> rows)
+        {
+            ColumnBuilder<int> day = builder.Column<int>(0);
+            for (int i = 0; i < rows.Length; i++)
+            {
+                day.Append(rows[i].Day);
+            }
+        }
     }
 
     /// <summary>One row of the table, written by hand the way the generator would.</summary>

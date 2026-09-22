@@ -42,7 +42,28 @@ internal sealed class AlpDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start: 0, count: length);
+    }
+
+    /// <summary>ALP is pointwise, so a range is the encoded integers' range, scaled.</summary>
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return node.ChildCount >= 1 && context.ChildDecodesRange(in node, 0);
+    }
+
+    /// <summary>
+    /// The encoded integers' range, scaled, with the patches of the range applied: the patch set is
+    /// read whole, decoded once for every range of the node, and its first patch in the range found
+    /// by a binary search.
+    /// </summary>
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
     }
 
     /// <summary>
@@ -58,12 +79,12 @@ internal sealed class AlpDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, selective: true, start: 0, count: wanted.Length);
     }
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start, int count)
     {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         AlpMetadata metadata = AlpMetadata.Read(node.Metadata);
@@ -90,10 +111,13 @@ internal sealed class AlpDecoder : ArrayDecoder
         ArrayDecodeContext.RequireChildCount(node.ChildCount, expectedChildren, Id);
 
         DType encodedType = context.Types.Primitive(encodedPType, dtype.Nullability);
+        bool whole = !selective && start == 0 && count == length;
         int encodedIndex = selective
             ? context.DecodeChildSelected(in node, 0, encodedType, length, wanted)
-            : context.DecodeChild(in node, 0, encodedType, length);
-        int produced = selective ? wanted.Length : length;
+            : whole
+                ? context.DecodeChild(in node, 0, encodedType, length)
+                : context.DecodeChildRange(in node, 0, encodedType, length, start, count);
+        int produced = count;
         CanonicalNode encoded = CanonicalSupport.RequirePrimitiveChild(
             context, encodedIndex, encodedPType, produced, Id + " encoded");
 
@@ -125,7 +149,7 @@ internal sealed class AlpDecoder : ArrayDecoder
 
         if (metadata.HasPatches)
         {
-            ApplyPatches(context, in node, dtype, length, in metadata, width, destination, wanted, selective);
+            ApplyPatches(context, in node, dtype, length, in metadata, width, destination, wanted, selective, start, count);
         }
 
         return context.Canonical.AddPrimitive(dtype, produced, encoded.Validity, dtype.PType, output);
@@ -135,10 +159,10 @@ internal sealed class AlpDecoder : ArrayDecoder
     /// Overwrites the rows the encoder could not represent with the values it stored verbatim.
     /// </summary>
     /// <remarks>
-    /// Applied once the whole array is decoded rather than one window at a time. Patching per
-    /// window only helps a sliced read stay in cache; over a whole array both orders produce the
-    /// same bytes, because a patch overwrites its row outright rather than combining with what the
-    /// decode wrote there.
+    /// A patch overwrites its row outright rather than combining with what the decode wrote there,
+    /// so the patches are applied after the scaling, over the whole array, the selection or the
+    /// range alike. Anything short of the whole array reads the whole patch set, decoded once for
+    /// every visit of the node.
     /// </remarks>
     private static void ApplyPatches(
         ArrayDecodeContext context,
@@ -149,28 +173,37 @@ internal sealed class AlpDecoder : ArrayDecoder
         int width,
         Span<byte> destination,
         ReadOnlySpan<int> wanted,
-        bool selective)
+        bool selective,
+        int start,
+        int count)
     {
         PatchesMetadata patchesMetadata = metadata.Patches;
         int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, $"{Id} patch count");
+        bool whole = !selective && start == 0 && count == length;
 
         DType indicesType = context.Types.Primitive(
             patchesMetadata.IndicesPType, Nullability.NonNullable);
-        int indicesIndex = context.DecodeChild(in node, 1, indicesType, patchCount);
+        int indicesIndex = whole
+            ? context.DecodeChild(in node, 1, indicesType, patchCount)
+            : context.DecodeWholeChild(in node, 1, indicesType, patchCount);
 
         // The patch values are floats at the array's own dtype: the originals the encoder could not
         // represent, not encoded integers.
-        int valuesIndex = context.DecodeChild(in node, 2, dtype, patchCount);
+        int valuesIndex = whole
+            ? context.DecodeChild(in node, 2, dtype, patchCount)
+            : context.DecodeWholeChild(in node, 2, dtype, patchCount);
 
         if (patchesMetadata.HasChunkOffsets)
         {
-            // Validated and then deliberately unused: the per-chunk index offsets only accelerate
-            // a sliced patch lookup, and nothing here slices.
+            // Validated and then deliberately unused: the first patch of a range is found by a
+            // binary search over the indices, which the per-chunk offsets would only shorten.
             int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(
                 patchesMetadata.ChunkOffsetsLength, $"{Id} patch chunk_offsets_len");
             DType chunkOffsetsType = context.Types.Primitive(
                 patchesMetadata.ChunkOffsetsPType, Nullability.NonNullable);
-            int chunkOffsets = context.DecodeChild(in node, 3, chunkOffsetsType, chunkOffsetsLength);
+            int chunkOffsets = whole
+                ? context.DecodeChild(in node, 3, chunkOffsetsType, chunkOffsetsLength)
+                : context.DecodeWholeChild(in node, 3, chunkOffsetsType, chunkOffsetsLength);
             CompressedValues.RequireIndexChild(
                 context, chunkOffsets, patchesMetadata.ChunkOffsetsPType, chunkOffsetsLength, Id,
                 "patch_chunk_offsets");
@@ -212,7 +245,13 @@ internal sealed class AlpDecoder : ArrayDecoder
             return;
         }
 
-        patches.ApplyAll(source, width, destination);
+        if (whole)
+        {
+            patches.ApplyAll(source, width, destination);
+            return;
+        }
+
+        Patches.ApplyRange(in patches, source, width, start, count, destination);
     }
 
     /// <summary>
