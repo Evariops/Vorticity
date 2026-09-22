@@ -118,11 +118,11 @@ scan's own, the `RecordBatch` and its bookkeeping; its buffers come from the poo
 
 ## Watch out
 
-* **An owned batch has no selection.** With `ScanOptions.Compact = false`, or on a take by position,
-  the scan delivers whole blocks with a `Selection`, and `ToBatchesAsync` and `ToOwned()` drop it:
-  on this file `Celsius > 45` under `Compact = false` passes 122 500 rows and the owned batches
-  select all 1 000 000, and `Rows(4, 900_000)` gives owned batches of 15 264 rows. Leave `Compact`
-  on for an owned pipeline, and read a take through the borrowed columns or `ToRecordsAsync`.
+* **An owned batch keeps its selection.** With `ScanOptions.Compact = false`, or on a take by
+  position, the scan delivers whole blocks with a `Selection`, and the copy carries it: on this file
+  `Celsius > 45` under `Compact = false` passes 122 500 rows and the owned batches select the same
+  122 500, and `Rows(4, 900_000)` gives owned batches that select 2. Read `Selection` on the batch's
+  `View` or `As<T>()` as you would on a borrowed one; the whole block is still copied.
 * **A batch left in a channel is still owned.** A consumer that stops early drains the channel and
   disposes what it finds; a producer that fails to hand a batch over disposes it, as above.
 * Holding batches holds pool memory: a bounded channel, as above, is what keeps a slow consumer from

@@ -105,14 +105,26 @@ public sealed class RecordBatch : IDisposable
         }
     }
 
-    /// <summary>A batch that owns a copy of the rows of <paramref name="node"/>, in an arena of its own.</summary>
-    internal static RecordBatch Own(CanonicalArena source, int node, long startRow, VortexSchema? schema, VortexSession? session)
+    /// <summary>
+    /// A batch that owns a copy of the rows of <paramref name="node"/>, in an arena of its own, with
+    /// the rows a filter kept when the batch came whole with a selection.
+    /// </summary>
+    internal static RecordBatch Own(
+        CanonicalArena source, int node, long startRow, VortexSchema? schema, VortexSession? session, ReadOnlySpan<ulong> selection, int selected)
     {
         CanonicalArena owned = new CanonicalArena(64, (session ?? VortexSession.Default).Options.EnginePool);
         try
         {
             int root = owned.CopyFrom(source, node);
-            return new RecordBatch(owned, root, startRow, null, owns: true) { _publicSchema = schema, Session = session };
+            RecordBatch batch = new RecordBatch(owned, root, startRow, null, owns: true) { _publicSchema = schema, Session = session };
+            if (!selection.IsEmpty)
+            {
+                Buffers.VortexBuffer words = owned.AllocateUninitialized(selection.Length * sizeof(ulong), 64, out Span<byte> destination);
+                System.Runtime.InteropServices.MemoryMarshal.AsBytes(selection).CopyTo(destination);
+                batch.Select(words, selected);
+            }
+
+            return batch;
         }
         catch
         {
@@ -162,7 +174,7 @@ public sealed class RecordBatch : IDisposable
         get
         {
             ThrowIfDisposed();
-            return new BatchView(this, _arena, _root, Schema, _startRow, default, _rowCount);
+            return new BatchView(this, _arena, _root, Schema, _startRow, SelectionWords, SelectedRows);
         }
     }
 
@@ -175,7 +187,7 @@ public sealed class RecordBatch : IDisposable
     {
         ThrowIfDisposed();
         RecordBinding binding = RecordBinding.For<TRecord>(Schema, Session?.Options.Extensions);
-        return new Columns<TRecord>(this, _arena, _root, binding, _startRow, default, _rowCount, projected: false);
+        return new Columns<TRecord>(this, _arena, _root, binding, _startRow, SelectionWords, SelectedRows, projected: false);
     }
 
     /// <summary>

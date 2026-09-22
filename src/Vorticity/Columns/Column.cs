@@ -219,7 +219,7 @@ public readonly ref struct Columns<TRecord>
 
     /// <summary>Copies the batch once into buffers the caller owns, to keep it past the enumeration.</summary>
     /// <returns>The owned batch; the caller disposes it.</returns>
-    public RecordBatch ToOwned() => RecordBatch.Own(Arena, StructNode(), StartRow, Batch?.Schema, Batch?.Session);
+    public RecordBatch ToOwned() => RecordBatch.Own(Arena, StructNode(), StartRow, Batch?.Schema, Batch?.Session, _selection, _selected);
 
     private int StructNode()
     {

@@ -106,7 +106,7 @@ public readonly ref struct BatchView
     /// <returns>The owned batch; the caller disposes it.</returns>
     /// <exception cref="InvalidOperationException">The view is the key columns a writer lends a key encoder, which are not a batch.</exception>
     public RecordBatch ToOwned() => _columns.IsEmpty
-        ? RecordBatch.Own(Arena, Node, StartRow, Schema, Batch?.Session)
+        ? RecordBatch.Own(Arena, Node, StartRow, Schema, Batch?.Session, _selection, _selected)
         : throw new InvalidOperationException("The key columns a writer lends an encoder are not a batch; encode them and keep the keys instead.");
 
     private int StructNode()

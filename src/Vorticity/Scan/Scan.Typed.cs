@@ -279,7 +279,7 @@ public sealed partial class Scan<TRecord>
     }
 
     private RecordBatch Own(RecordBatch borrowed) =>
-        RecordBatch.Own(borrowed.Arena, borrowed.RootIndex, borrowed.StartRow, null, _source.Session);
+        RecordBatch.Own(borrowed.Arena, borrowed.RootIndex, borrowed.StartRow, null, _source.Session, borrowed.SelectionWords, borrowed.SelectedRows);
 
     private static int Fill(RecordBatch batch, RecordBinding binding, ref TRecord[] rows)
     {
