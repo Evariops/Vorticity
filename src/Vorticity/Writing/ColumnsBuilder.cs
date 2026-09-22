@@ -303,8 +303,17 @@ public static class ColumnBuilderExtensions
         /// <summary>Appends one value's bytes.</summary>
         public void Append(ReadOnlySpan<byte> bytes) => Text(b.Store).Append(bytes);
 
+        /// <summary>A span to write one value into, of exactly <paramref name="sizeHint"/> bytes when it is positive; <c>Commit</c> appends it.</summary>
+        public Span<byte> GetSpan(int sizeHint = 0) => Text(b.Store).GetSpan(sizeHint);
+
+        /// <summary>Appends the value of <paramref name="length"/> bytes written into the last span.</summary>
+        public void Commit(int length) => Text(b.Store).Commit(length);
+
         /// <summary>Appends a null.</summary>
         public void AppendNull() => Text(b.Store).AppendNulls(1);
+
+        /// <summary>Appends <paramref name="count"/> nulls.</summary>
+        public void AppendNulls(int count) => Text(b.Store).AppendNulls(count);
     }
 
     extension(ColumnBuilder<decimal> b)
