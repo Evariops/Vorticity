@@ -1,115 +1,121 @@
 # Getting started
 
-Write a million rows, read them back, and take the mean of one column. Ten minutes, two files, no
-concepts to learn first.
+Declare a record, write a hundred thousand rows, read them back, take a mean and count a filter.
+One file of code, a few minutes, and the only page that shows both directions.
 
 ## Reference the library
 
 Nothing is published to nuget.org yet, so there is no version to ask for. Until the first release,
-reference the project:
+reference the projects from a project that targets .NET 11:
 
 ```xml
-<ProjectReference Include="path/to/Vorticity/src/Vorticity/Vorticity.csproj" />
+<ItemGroup>
+  <ProjectReference Include="path/to/Vorticity/src/Vorticity/Vorticity.csproj" />
+  <ProjectReference Include="path/to/Vorticity/src/Vorticity.Generators/Vorticity.Generators.csproj"
+                    OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+</ItemGroup>
 ```
 
-`Vorticity` is the whole format: opening, decoding, scanning, filtering, indexes and the writer.
-The two other assemblies are separate subjects — `Vorticity.Dataset` for a versioned dataset over
-an object store, `Vorticity.RowEncoding` for the byte-sortable row encoding — and neither is
-needed to read or write a file.
+`Vorticity` is the whole format: opening, scanning, filtering, aggregating, indexes and the
+writer, with `System.IO.Hashing` as its only dependency. `Vorticity.Generators` runs at build time
+only: it turns a `[VortexRecord]` type into the code that reads and writes it, and ships the
+analyzers. The two other assemblies are separate subjects, both experimental:
+`Vorticity.Dataset` for a versioned dataset over an object store ([datasets.md](datasets.md)),
+`Vorticity.RowEncoding` for byte-sortable keys ([row-keys.md](row-keys.md)).
 
-The library is async-only: everything that touches bytes returns a `ValueTask` or an
-`IAsyncEnumerable`.
+Everything that touches bytes is asynchronous: a file is opened with `await`, a scan is consumed
+with `await foreach`, a writer is fed with `WriteAsync`. There is no synchronous path to look for.
+
+## Declare a record
+
+```csharp
+[VortexRecord]
+public partial record struct Reading(int Day, double? Celsius, string City);
+```
+
+A record is a schema, not a row: its members are the columns, in declaration order, under their
+own names. `double?` makes `Celsius` a nullable column; `int` and `string` are not nullable. The
+type must be `partial`, because the generator adds the `IVortexRecord<Reading>` implementation and
+the members the examples below use (`r.Celsius`, the deconstruction of a batch).
+[records.md](records.md) says what else a record can hold.
 
 ## Write a file
 
-A file has a schema, and rows arrive in batches. A batch is built in an arena: you ask it for a
-buffer per column, fill the buffer in place, and tell it what the buffer is.
-
 ```csharp
-DTypeArena types = new DTypeArena();
-DType schema = types.Struct(
-    ["day", "celsius"],
-    [types.Primitive(PType.I32, Nullability.NonNullable),
-     types.Primitive(PType.F64, Nullability.NonNullable)],
-    Nullability.NonNullable);
+string[] cities = ["Paris", "Lyon", "Marseille", "Toulouse"];
 
-await using VortexFileWriter writer = VortexFileWriter.Create(path, schema);
-CanonicalArena arena = new CanonicalArena();
-
-VortexBuffer days = arena.Allocate(rows * sizeof(int), 8, out Span<byte> dayBytes);
-VortexBuffer degrees = arena.Allocate(rows * sizeof(double), 8, out Span<byte> degreeBytes);
-Span<int> day = MemoryMarshal.Cast<byte, int>(dayBytes);
-Span<double> celsius = MemoryMarshal.Cast<byte, double>(degreeBytes);
-for (int i = 0; i < rows; i++)
+Reading[] readings = new Reading[100_000];
+for (int i = 0; i < readings.Length; i++)
 {
-    day[i] = i / 1_000;
-    celsius[i] = 10.0 + (i * 7919L % 4001) / 100.0;
+    double? celsius = i % 50 == 0 ? null : 10.0 + i % 400 / 10.0;
+    readings[i] = new Reading(i / 1_000, celsius, cities[i / 7 % cities.Length]);
 }
 
-int dayNode = arena.AddPrimitive(schema.GetField(0), rows, Validity.NonNullable, PType.I32, days);
-int celsiusNode = arena.AddPrimitive(schema.GetField(1), rows, Validity.NonNullable, PType.F64, degrees);
-int root = arena.AddStruct(schema, rows, Validity.NonNullable, [dayNode, celsiusNode]);
-
-using RecordBatch batch = new RecordBatch(arena, root, 0);
-await writer.WriteAsync(batch);
-await writer.CompleteAsync();
+await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Reading>(path))
+{
+    await writer.WriteAsync<Reading>(readings);
+    WriteReport report = await writer.CompleteAsync();
+    Console.WriteLine($"wrote {report.RowCount} rows in {report.Bytes.Total} bytes");
+}
 ```
 
-`CompleteAsync` is what makes the file a file: it writes the statistics, the zone maps, any index
-the writer decided to build, and the footer. A writer disposed without it leaves nothing usable
-behind.
+`CompleteAsync` is what makes the bytes a file: it writes the last block, the statistics, the zone
+maps and the footer. A writer disposed without it deletes what it wrote.
 
 ## Read it back
 
 ```csharp
 await using VortexFile file = await VortexFile.OpenAsync(path);
-double total = 0;
-long seen = 0;
-await foreach (RecordBatch batch in file.Scan().Project(["celsius"]).ExecuteAsync())
+Console.WriteLine($"{file.Schema}, {file.RowCount} rows");
+
+long batches = 0;
+long rows = 0;
+long nulls = 0;
+await foreach (var (day, celsius, _) in file.Scan<Reading>())
 {
-    using (batch)
-    {
-        total += Sum(batch);
-        seen += batch.RowCount;
-    }
+    batches++;
+    rows += day.Length;
+    nulls += celsius.NullCount;
 }
 
-Console.WriteLine($"{seen} rows of {file.RowCount}, mean {total / seen:F2} degrees");
-
-static double Sum(RecordBatch batch)
-{
-    ReadOnlySpan<double> values = batch.Column("celsius"u8).AsPrimitive<double>().Values;
-    double sum = 0;
-    foreach (double value in values)
-    {
-        sum += value;
-    }
-
-    return sum;
-}
+double? mean = await file.Scan<Reading>().AvgAsync(r => r.Celsius);
+long hot = await file.Scan<Reading>().Where(r => r.Celsius > 45.0 && r.City == "Paris").CountAsync();
 ```
 
 It prints:
 
 ```
-1000000 rows of 1000000, mean 30.00 degrees
-12000000 bytes of values became a file of 1523369
+wrote 100000 rows in 158508 bytes
+struct{Day: i32, Celsius: f64?, City: utf8}, 100000 rows
+13 batches, 100000 rows, 2000 without a temperature
+mean 30.00 degrees
+3039 readings above 45 degrees in Paris
 ```
 
-Three things happened worth naming. The scan came back in batches, not rows — 123 of them here, of
-at most 8 192 rows. `Values` is the decoded column itself, a span over the batch's own memory, so
-reading it copies nothing. And the twelve megabytes of values became a file of 1.5 MB, because the
-writer chose an encoding per column rather than storing what you handed it.
+## What happened
+
+* **The rows became columns.** About 1.85 MB of values became a file of 158 508 bytes, because the
+  writer chose an encoding per column and per chunk instead of storing what it was handed.
+* **The scan came back in batches, not rows**: 13 of them, of at most 8 192 rows, the file's block
+  size. `day`, `celsius` and `city` are `Column<T>` values over the decoded batch. They are
+  borrowed: valid inside the loop body, and the compiler refuses to let one outlive it
+  ([scan-a-table.md](scan-a-table.md)).
+* **`AvgAsync` ran inside the scan.** No batch reached the caller; the nulls were skipped for you.
+  An aggregate is an operator, not a loop you write ([aggregates.md](aggregates.md)).
+* **The filter is not a delegate.** The lambda given to `Where` runs once, when the scan is built,
+  over a symbolic record: `r.Celsius` is a `Sym<double?>`, and `>` records a predicate instead of
+  comparing. A breakpoint inside the lambda sees `Sym<double?>`, not values, and hits once. What
+  compiles is exactly what the scan can push down ([filter-rows.md](filter-rows.md)).
 
 ## Next
 
-* [open-a-file.md](open-a-file.md) — the three ways in, and what each costs.
-* [scan-a-table.md](scan-a-table.md) — the loop above, in full, and who owns what.
-* [write-a-file.md](write-a-file.md) — text columns, nulls, and what the writer decided.
-* [filter-rows.md](filter-rows.md) — how to not read the rows you do not want.
+* [open-a-file.md](open-a-file.md): the ways in, and what an open reads.
+* [scan-a-table.md](scan-a-table.md): the loop above, and who owns what.
+* [filter-rows.md](filter-rows.md): how not to read the rows you do not want.
+* [write-a-file.md](write-a-file.md): the writer, column by column.
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- getting-started
+dotnet run -c Release --project samples/Vorticity.Samples -- getting-started
 ```

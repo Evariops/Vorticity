@@ -1,99 +1,127 @@
 # Scan a table
 
-Read every row, in batches, without copying.
+Read every row, in batches, without copying, and know when not to write the loop at all.
 
 ```csharp
 await using VortexFile file = await VortexFile.OpenAsync(path);
-long rows = 0;
-await foreach (RecordBatch batch in file.Scan().ExecuteAsync())
+
+Scan<Reading> scan = file.Scan<Reading>();
+double total = 0;
+long seen = 0;
+await foreach (var (_, celsius, _) in scan)
 {
-    using (batch)
+    foreach (double value in celsius.Values)
     {
-        rows += batch.RowCount;
+        total += value;
     }
+
+    seen += celsius.Length;
 }
 ```
 
-`Scan()` returns a builder. Nothing is read until `ExecuteAsync()` is enumerated, and the builder is
-where projection, filter, row selection, batch size and metrics are set — each returns the same
-builder, so they chain.
+```
+the loop: mean 29.4001 over 1000000 rows, 7.7 ms
+  123 batches, 123 blocks decoded, 369 requests, 5084356 bytes
+```
+
+That mean is wrong, and on purpose: `Celsius` is nullable, and `Values` is the raw buffer, which
+holds something meaningless at each of the 20 000 null slots. The right mean is 30.0000.
+[nullable-columns.md](nullable-columns.md) has the two ways to read around the nulls; the end of
+this page has the way that does not need a loop.
 
 ## What comes back
 
-A `RecordBatch` is a window of rows over the decoded columns. It carries its own schema, its
-`RowCount`, and `StartRow`, the file row its first row is. Columns come out of it by name or by
-index:
+`file.Scan<Reading>()` returns a `Scan<Reading>`, a builder: `Where`, `Rows`, `OrderBy` and `With`
+compose it, and nothing is read until a sink runs. `await foreach` is the sink that hands you each
+batch as a `Columns<Reading>`, which deconstructs into one `Column<T>` per member of the record, in
+declaration order; `_` skips a member. `Columns<Reading>` also carries `RowCount`, `StartRow` (the
+file row of its first row) and `Selection` ([selection.md](selection.md)).
+
+`celsius.Values` is a `ReadOnlySpan<double>` over the decoded buffer itself, 64-byte aligned, so
+reading a column copies nothing. A batch holds at most one block of the file, 8 192 rows here: 123
+batches for a million rows. `ScanOptions.BatchRows` asks for smaller ones and never merges blocks:
 
 ```csharp
-ReadOnlySpan<double> values = batch.Column("celsius"u8).AsPrimitive<double>().Values;
+await foreach (Columns<Reading> columns in file.Scan<Reading>().With(new ScanOptions { BatchRows = 4_096 }))
 ```
 
-`Values` is the decoded buffer, not a copy of it: reading a column allocates nothing.
-
-On the million-row file, the default scan gives 123 batches of at most 8 192 rows. That ceiling is
-the file's block size, not a constant; `WithMaxBatchRows(4_096)` halves it to 245 batches. Asking
-for more than a block holds does not merge blocks.
+```
+BatchRows 4096: 245 batches, 1000000 rows, the last starting at row 999424
+```
 
 ## Who owns what
 
-**Dispose every batch.** Its buffers go back to the pool, and the next batch takes them. A scan
-whose batches are not disposed holds every buffer it ever decoded.
-
-**Nothing a batch gave you survives it.** A column, a span, a string span: all of them point into
-the batch's memory, and the batch is recycled the moment it is disposed. Copy what you need to keep.
-
-**A column may not cross an `await`.** `VortexColumn` and its typed forms are `ref struct`s, so the
-compiler refuses:
-
-```
-error CS4007: Instance of type 'Vorticity.Columns.VortexColumn' cannot be preserved
-              across 'await' or 'yield' boundary.
-```
-
-Holding one inside the loop body is fine. Awaiting while holding one is not, and the compiler says
-so rather than letting you read recycled memory.
-
-## What it costs the file
+**A batch is borrowed.** `Current` is valid until the next `MoveNextAsync`: the buffers go back to
+the scan and the next batch decodes into them. `Columns<T>` and `Column<T>` are `ref struct`s, so
+the compiler refuses to let one, or a span taken from one, live across an `await`:
 
 ```csharp
-ScanMetrics metrics = new ScanMetrics();
-await foreach (RecordBatch batch in file.Scan().WithMetrics(metrics).ExecuteAsync())
+await foreach (var (day, _, _) in file.Scan<Reading>())
 {
-    batch.Dispose();
+    await Task.Yield();
+    Console.WriteLine(day.Length);
 }
-
-Console.WriteLine($"{metrics.Batches} batches, {metrics.ValuesDecoded} values decoded");
 ```
 
-`ScanMetrics` is a counter you hand in and read afterwards; it costs an interlocked add per event.
+```
+error CS4007: Instance of type 'Vorticity.Column<int>' cannot be preserved across 'await' or 'yield' boundary.
+```
 
-The reads underneath are worth knowing about. Scanning the million-row 1 523 369-byte file asked
-its source for **124 rounds totalling 184 725 367 bytes** — 121 times the file. A segment holds many
-blocks, and it is fetched again for every block that needs it; nothing caches it between batches.
-Over a memory map or over bytes in memory that repetition is free, which is why
-[open-a-file.md](open-a-file.md) recommends a mapping for a file you read more than once. Over a
-source where a read is a request, put a cache in front of it.
+The body of the loop runs synchronously between two batches, which is what makes a `ref struct`
+legal there. Do the columnar work, then await what you must, then let the loop move on. To keep a
+batch past its iteration, copy it once with `ToOwned()`, or ask for owned batches with
+`ToBatchesAsync()` ([owned-batches.md](owned-batches.md)).
 
-## Counting without decoding
+**A scan is single-use.** One sink per builder: a second throws `InvalidOperationException`.
+`ExplainAsync` may be asked before the sink, and `Statistics` read after it. The sinks, and what
+each one costs, are tabled in §5.6 of [14-public-api.md](../design/14-public-api.md).
+
+## Or let the scan do it
 
 ```csharp
-long rows = await file.Scan().CountAsync();
+double? mean = await file.Scan<Reading>().AvgAsync(r => r.Celsius);
 ```
 
-With no filter this is the footer's row count and reads nothing. With a filter it is what
-[filter-rows.md](filter-rows.md) describes: block statistics first, rows only where they cannot
-decide.
+```
+AvgAsync: mean 30.0000, 5.1 ms
+  123 blocks decoded, 123 requests, 3986308 bytes
+```
+
+The right answer, faster, and no batch ever reaches your code: the aggregate runs block by block
+inside the scan, skips the nulls, and reads the one column it needs. The loop above read three,
+because the record names three: [project-columns.md](project-columns.md) is how to name fewer.
+
+A file this library writes carries, per column, a null count, order flags and, for a numeric
+column, a minimum and a maximum; it carries no sum. `MinAsync`, `MaxAsync` and `CountAsync`
+without a filter answer from those statistics and read nothing; `SumAsync` and `AvgAsync` decode
+the column. [aggregates.md](aggregates.md) has the rest of the operators.
+
+## What it costs
+
+* **Reads.** `Statistics.Requests` counts the segments each batch asked for: 369 for three columns
+  over 123 batches, 5.1 MB named for a file of 1.56 MB, because a segment that spans several
+  batches is asked for by each. Over the mapped file of `VortexFile.OpenAsync(path)` that costs
+  nothing; over a source where a read is a request, [open-a-file.md](open-a-file.md) shows what a
+  `SegmentCache` on the session saves.
+* **Memory.** One batch is decoded ahead of the one you hold (`ScanOptions.Prefetch`, 1 by
+  default), in buffers that alternate rather than accumulate.
+* **Allocations.** A whole scan allocated 122 632 bytes over 123 batches and 142 488 bytes over
+  245: about 100 KB to start a scan, then under 200 bytes per batch, counted process-wide with
+  `GC.GetTotalAllocatedBytes`, so the thread that decodes ahead is included.
 
 ## Watch out
 
-* The batches arrive in file order. There is no parallel enumeration to opt into here;
-  `WithDegreeOfParallelism` parallelises the decoding under one enumerator, and
-  [threads.md](threads.md) says what that changes.
-* Breaking out of the loop stops the scan. Any batch already yielded is still yours to dispose.
-* A scan does not see a write that happened after the file was opened. Open again for that.
+* Batches arrive in file order. [keys-in-order.md](keys-in-order.md) has the key-ordered scan.
+* Breaking out of the loop ends the scan and returns its buffers.
+* A scan does not see rows appended after the file was opened. Open it again for that.
+* Parallelism is the session's, and pays on aggregates and wide decodes rather than on a loop like
+  this one ([threads.md](threads.md)).
+
+The figures come from one run of the sample on the demonstration file of a million rows; the
+timings are the best of three passes.
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- scan-a-table
+dotnet run -c Release --project samples/Vorticity.Samples -- scan-a-table
 ```
