@@ -154,13 +154,17 @@ public sealed class VortexMetadata
         ImmutableArray<string>.Builder keys = ImmutableArray.CreateBuilder<string>(file.MetadataCount);
         for (int i = 0; i < file.MetadataCount; i++)
         {
-            keys.Add(file.GetMetadataKey(i));
+            string key = file.GetMetadataKey(i);
+            if (!Writing.UserMetadata.IsReserved(System.Text.Encoding.UTF8.GetBytes(key)))
+            {
+                keys.Add(key);
+            }
         }
 
-        Keys = keys.MoveToImmutable();
+        Keys = keys.ToImmutable();
     }
 
-    /// <summary>The keys, in the order the file stores them.</summary>
+    /// <summary>The caller's keys, in the order the file stores them; the entries the library writes for itself are left out.</summary>
     public ImmutableArray<string> Keys { get; }
 
     /// <summary>The value of <paramref name="key"/>, read from the tail the open already holds when it can.</summary>

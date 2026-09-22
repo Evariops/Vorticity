@@ -79,6 +79,7 @@ internal static class UserMetadata
         return entries.ToImmutable();
     }
 
-    private static bool IsReserved(ReadOnlySpan<byte> keyUtf8) =>
+    /// <summary>Whether a key is one the library writes for itself: the file's identity, its index directory.</summary>
+    internal static bool IsReserved(ReadOnlySpan<byte> keyUtf8) =>
         keyUtf8.SequenceEqual(FileIdentity.MetadataKeyUtf8) || keyUtf8.SequenceEqual(IndexDirectory.MetadataKeyUtf8);
 }
