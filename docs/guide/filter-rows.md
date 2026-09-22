@@ -146,6 +146,11 @@ the file statistics alone and answers `False` here, reading nothing.
   and always takes the second branch (125 000 rows, all of Lyon), and so does an `if` on a
   predicate inside the lambda: a predicate is never true while the lambda runs. Branch on captured
   values, as the optional parts above do, and combine predicates with `&`, `|` and `!`.
+* **A literal is compared as it is, not rounded to the column.** `r.At <= DateTime.UtcNow` on a
+  microsecond timestamp compares against the stored microsecond at or below the instant, so the
+  boundary row is neither gained nor lost, and `r.At == DateTime.UtcNow` matches nothing unless the
+  instant falls on a whole microsecond. A decimal with more digits than the column's scale is held
+  the same way.
 * **A filter names members of the record.** To filter on a column, the record you scan with names
   it ([project-columns.md](project-columns.md)).
 * **A scan is single-use**, but `ExplainAsync` may be called before its sink, as here.
