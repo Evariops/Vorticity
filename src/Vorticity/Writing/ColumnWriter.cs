@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Types;
 
@@ -20,7 +19,7 @@ namespace Vorticity.Writing;
 internal sealed class ColumnWriter
 {
     /// <summary>One summary per closed block, in block order, until the zone map is written.</summary>
-    private readonly List<BlockStats> _closed = [];
+    private readonly AppendList<BlockStats> _closed = new AppendList<BlockStats>();
 
     /// <summary>
     /// One pair of width histograms per closed block, parallel to <see cref="_closed"/>. Per block
@@ -29,7 +28,7 @@ internal sealed class ColumnWriter
     /// chunk's blocks into this one's. An entry is nulled and its buffer returned once the chunk is
     /// written, leaving one buffer per block in transit.
     /// </summary>
-    private readonly List<int[]?> _widths = [];
+    private readonly AppendList<int[]?> _widths = new AppendList<int[]?>();
 
     /// <summary>
     /// The row-aligned children, created on the first <see cref="Accumulate"/> and therefore always
@@ -90,7 +89,7 @@ internal sealed class ColumnWriter
     /// chunk closes the table has probed rows beyond it, but since codes are handed out in order of
     /// first appearance, the chunk's rows use exactly the codes below the count at close.
     /// </summary>
-    private readonly List<(int Distinct, long Heap)> _tableAtClose = [];
+    private readonly AppendList<(int Distinct, long Heap)> _tableAtClose = new AppendList<(int Distinct, long Heap)>();
 
     /// <summary>
     /// The column's last row, kept because run continuity is a question about the previous row and
@@ -330,11 +329,11 @@ internal sealed class ColumnWriter
     {
         for (int i = first; i < first + count && i < _widths.Count; i++)
         {
-            int[]? widths = _widths[i];
+            ref int[]? widths = ref _widths.At(i);
             if (widths is not null)
             {
                 ArrayPool<int>.Shared.Return(widths);
-                _widths[i] = null;
+                widths = null;
             }
         }
 
@@ -438,11 +437,10 @@ internal sealed class ColumnWriter
 
         // What each block's chunk became, in a byte the closed block already had spare. The hit is
         // counted against the memory the chunk was chosen under, which is the one being replaced.
-        Span<BlockStats> closed = CollectionsMarshal.AsSpan(_closed);
         byte written = (byte)(plan.Scheme + 1);
-        for (int block = Math.Max(firstBlock, 0); block < firstBlock + blockCount && block < closed.Length; block++)
+        for (int block = Math.Max(firstBlock, 0); block < firstBlock + blockCount && block < _closed.Count; block++)
         {
-            closed[block].WrittenScheme = written;
+            _closed.At(block).WrittenScheme = written;
         }
 
         if (Memory is { } previous)

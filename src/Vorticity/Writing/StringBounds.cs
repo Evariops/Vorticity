@@ -25,7 +25,7 @@ internal sealed class StringZones : IReadOnlyList<ZoneString>
     /// <summary>The largest chunk, past which the chunks stop doubling.</summary>
     private const int MaxChunk = 1 << 16;
 
-    private readonly List<ZoneString?> _closed = [];
+    private readonly AppendList<ZoneString?> _closed = new AppendList<ZoneString?>();
     private StringBounds? _open;
     private byte[] _chunk = [];
     private int _chunkUsed;
