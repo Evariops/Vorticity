@@ -240,8 +240,8 @@ public sealed class DatasetFuzzTests
         Assert.Equal(10, dataset.ObjectCount);
         Assert.Equal(rows, dataset.RowCount);
 
-        List<long> withIndexes = await KeysAsync(dataset.Scan());
-        List<long> without = await KeysAsync(dataset.Scan().WithIndexes(false).WithSummaries(false));
+        List<long> withIndexes = await KeysAsync(dataset.ScanBuilder());
+        List<long> without = await KeysAsync(dataset.ScanBuilder().WithIndexes(false).WithSummaries(false));
         Assert.Equal(withIndexes, without);
 
         List<long> expected = [];
@@ -295,7 +295,7 @@ public sealed class DatasetFuzzTests
         {
             VortexDataset handle = handles[random.Next(2)];
             List<PositionedObject> seen = [];
-            await foreach (PositionedObject held in handle.Scan().ObjectsAsync())
+            await foreach (PositionedObject held in handle.ScanBuilder().ObjectsAsync())
             {
                 seen.Add(held);
             }
@@ -327,8 +327,8 @@ public sealed class DatasetFuzzTests
                 Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(rows / 3)))])
             {
                 Assert.Equal(
-                    await KeysAsync(dataset.Scan().Where(question).WithIndexes(false).WithSummaries(false)),
-                    await KeysAsync(dataset.Scan().Where(question)));
+                    await KeysAsync(dataset.ScanBuilder().Where(question).WithIndexes(false).WithSummaries(false)),
+                    await KeysAsync(dataset.ScanBuilder().Where(question)));
             }
         }
 
@@ -357,12 +357,12 @@ public sealed class DatasetFuzzTests
             Nullability.NonNullable);
 
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 0, 0, 0, TimeSpan.Zero));
-        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
         DatasetOptions options = new DatasetOptions
         {
             Seed = Seed,
             ClusteringKey = ["key"],
-            Retention = new RetentionSettings(0, 3_600),
+            RetentionWindow = TimeSpan.FromSeconds(3_600),
             Write = new VortexWriteOptions { RowBlockSize = 128, DataBlockTargetBytes = 8 << 10 },
         };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
@@ -391,7 +391,7 @@ public sealed class DatasetFuzzTests
                 case 1:
                 {
                     List<PositionedObject> seen = [];
-                    await foreach (PositionedObject held in handle.Scan().ObjectsAsync())
+                    await foreach (PositionedObject held in handle.ScanBuilder().ObjectsAsync())
                     {
                         seen.Add(held);
                     }
@@ -412,8 +412,8 @@ public sealed class DatasetFuzzTests
                 {
                     // A threshold of 1: every commit kept by references alone is repacked, so the
                     // schedule puts repack commits between the others rather than almost never.
-                    VacuumResult vacuum = await handle.VacuumAsync(new VacuumOptions { Clock = clock, RepackBelow = 1.0 });
-                    deleted += vacuum.Deleted.Count;
+                    VacuumResult vacuum = await handle.VacuumAsync(new VacuumOptions { TimeProvider = clock, RepackBelow = 1.0 });
+                    deleted += vacuum.Deleted.Length;
                     foreach (ulong version in vacuum.Retained)
                     {
                         DatasetVerification verified = await DatasetVerifier.VerifyAsync(store, new VerifyOptions { Version = version });
@@ -439,9 +439,9 @@ public sealed class DatasetFuzzTests
             Assert.Equal(rows, dataset.RowCount);
             VortexExpr question = Expr.Eq(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(rows / 8.0)));
             Assert.Equal(
-                await KeysAsync(dataset.Scan().Where(question).WithIndexes(false).WithSummaries(false)),
-                await KeysAsync(dataset.Scan().Where(question)));
-            List<long> keys = await KeysAsync(dataset.Scan());
+                await KeysAsync(dataset.ScanBuilder().Where(question).WithIndexes(false).WithSummaries(false)),
+                await KeysAsync(dataset.ScanBuilder().Where(question)));
+            List<long> keys = await KeysAsync(dataset.ScanBuilder());
             keys.Sort();
             Assert.Equal(rows, keys.Count);
             Assert.Equal(rows == 0 ? 0 : rows - 1, keys.Count == 0 ? 0 : keys[^1]);

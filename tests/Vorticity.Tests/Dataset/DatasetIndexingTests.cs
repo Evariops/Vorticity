@@ -79,7 +79,7 @@ public sealed class DatasetIndexingTests
                 // Before the last fragment lands, some object still has a block no run on `id`
                 // covers: a key-ordered read on it is refused, never served short.
                 await Assert.ThrowsAsync<VortexUnsupportedException>(
-                    async () => await CountRowsAsync(dataset.Scan().InKeyOrder("id")));
+                    async () => await CountRowsAsync(dataset.ScanBuilder().InKeyOrder("id")));
 
                 IndexingResult result = await DatasetIndexer.IndexAsync(dataset, target, Policy, half, Build);
                 Assert.Equal(OperationOutcome.Applied, result.Outcome);
@@ -112,7 +112,7 @@ public sealed class DatasetIndexingTests
 
         // Covered everywhere: the key-ordered read on `id` is served, and it is the sorted column.
         List<long> ids = [];
-        await foreach (RecordBatch batch in dataset.Scan().InKeyOrder("id").ExecuteAsync())
+        await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("id").ExecuteAsync())
         {
             ids.AddRange(batch.Column("id"u8).AsPrimitive<long>().Values.ToArray());
         }
@@ -160,7 +160,7 @@ public sealed class DatasetIndexingTests
 
         // The fragment covers every block now, so a key-ordered read on `id` is served, and the
         // answers are the same as without any index.
-        Assert.Equal(PerObject, await CountRowsAsync(dataset.Scan().InKeyOrder("id")));
+        Assert.Equal(PerObject, await CountRowsAsync(dataset.ScanBuilder().InKeyOrder("id")));
         await AssertAnswersAsync(dataset);
         Assert.True((await dataset.VerifyAsync()).Holds);
     }
@@ -343,10 +343,10 @@ public sealed class DatasetIndexingTests
 
         foreach (VortexExpr question in questions)
         {
-            List<long> plain = await KeysAsync(dataset.Scan().Where(question).WithIndexes(false).WithSummaries(false));
-            Assert.Equal(plain, await KeysAsync(dataset.Scan().Where(question)));
-            Assert.Equal(plain, await KeysAsync(dataset.Scan().Where(question).WithSummaries(false)));
-            Assert.Equal(plain.Count, await dataset.Scan().Where(question).CountAsync());
+            List<long> plain = await KeysAsync(dataset.ScanBuilder().Where(question).WithIndexes(false).WithSummaries(false));
+            Assert.Equal(plain, await KeysAsync(dataset.ScanBuilder().Where(question)));
+            Assert.Equal(plain, await KeysAsync(dataset.ScanBuilder().Where(question).WithSummaries(false)));
+            Assert.Equal(plain.Count, await dataset.ScanBuilder().Where(question).CountAsync());
         }
     }
 
@@ -364,7 +364,7 @@ public sealed class DatasetIndexingTests
     private static async Task<List<long>> IdsInOrderAsync(VortexDataset dataset)
     {
         List<long> ids = [];
-        await foreach (RecordBatch batch in dataset.Scan().InKeyOrder("id").ExecuteAsync())
+        await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("id").ExecuteAsync())
         {
             ids.AddRange(batch.Column("id"u8).AsPrimitive<long>().Values.ToArray());
         }
@@ -386,7 +386,7 @@ public sealed class DatasetIndexingTests
     private static async Task<List<PositionedObject>> ObjectsAsync(VortexDataset dataset)
     {
         List<PositionedObject> objects = [];
-        await foreach (PositionedObject held in dataset.Scan().ObjectsAsync())
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync())
         {
             objects.Add(held);
         }

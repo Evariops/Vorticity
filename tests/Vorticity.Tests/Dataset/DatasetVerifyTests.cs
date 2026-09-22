@@ -11,6 +11,7 @@
 // bytes changed, which is the only way bytes change in a store this library writes: it never
 // overwrites an object.
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -68,8 +69,8 @@ public sealed class DatasetVerifyTests
             // Everything a reader checks still holds: the length, and the identity in the tail it
             // parses. No reader computes the content hash, so no reader can tell.
             Assert.Equal(victim.Bytes, (await store.HeadAsync(victim.Key, default))!.Value.Length);
-            await using (Vorticity.File.VortexFile reopened = await Vorticity.File.VortexFile.OpenAsync(
-                new ObjectSegmentSource(store, victim.Key), new Vorticity.File.VortexOpenOptions(), default))
+            await using (VortexFile reopened = await VortexFile.OpenAsync(
+                new ObjectSegmentSource(store, victim.Key), new VortexOpenOptions(), default))
             {
                 Assert.Equal(victim.Uid, VortexDataset.Identity(reopened));
                 Assert.Equal(victim.Rows, reopened.RowCount);
@@ -151,7 +152,7 @@ public sealed class DatasetVerifyTests
 
             await using (VortexDataset reader = await VortexDataset.OpenAsync(store, Options()))
             {
-                Assert.Equal(Expected(), (await KeysAsync(reader.Scan())).Order());
+                Assert.Equal(Expected(), (await KeysAsync(reader.ScanBuilder())).Order());
             }
 
             DatasetVerification verified = await dataset.VerifyAsync();
@@ -188,7 +189,7 @@ public sealed class DatasetVerifyTests
             await FlipAsync(store, fresh.Key, 0.25);
             DatasetVerification incremental = await dataset.VerifyAsync(since: before);
             Assert.Contains(fresh.Key, Assert.Single(incremental.Problems), StringComparison.Ordinal);
-            Assert.Equal(2, (await dataset.VerifyAsync()).Problems.Count);
+            Assert.Equal(2, (await dataset.VerifyAsync()).Problems.Length);
         }
     }
 
@@ -216,7 +217,7 @@ public sealed class DatasetVerifyTests
             try
             {
                 await using VortexDataset reader = await VortexDataset.OpenAsync(store, Options());
-                Assert.Equal(expected, (await KeysAsync(reader.Scan())).Order());
+                Assert.Equal(expected, (await KeysAsync(reader.ScanBuilder())).Order());
             }
             catch (CommitFormatException)
             {
@@ -302,9 +303,9 @@ public sealed class DatasetVerifyTests
     private static async Task<List<ObjectEntry>> EntriesAsync(VortexDataset dataset)
     {
         List<ObjectEntry> entries = [];
-        await foreach (ObjectEntry entry in dataset.ObjectsAsync())
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
         {
-            entries.Add(entry);
+            entries.Add(held.Entry);
         }
 
         return entries;
@@ -313,7 +314,7 @@ public sealed class DatasetVerifyTests
     private static async Task<List<PositionedObject>> ObjectsAsync(VortexDataset dataset)
     {
         List<PositionedObject> objects = [];
-        await foreach (PositionedObject held in dataset.Scan().ObjectsAsync())
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync())
         {
             objects.Add(held);
         }

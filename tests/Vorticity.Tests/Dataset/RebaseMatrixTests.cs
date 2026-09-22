@@ -7,6 +7,7 @@
 // exists and does what the row says.
 using System;
 using System.Collections.Generic;
+using System.IO.Pipelines;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -143,12 +144,12 @@ public sealed class RebaseMatrixTests
 
         // The winner's commit object holds the fragment where its entry says; the loser's holds none.
         using ObjectRange won = await store.GetRangeAsync(winner.Key, 0, 1 << 20, default);
-        CommitObject written = CommitObject.Open(won.Bytes.Span, won.Length);
+        CommitObject written = CommitObject.Open(won.Memory.Span, won.Length);
         Assert.Equal([named], written.Table.Fragments);
-        Assert.Equal(Fragment(7).ToArray(), written.Page(won.Bytes.Span, named).ToArray());
+        Assert.Equal(Fragment(7).ToArray(), written.Page(won.Memory.Span, named).ToArray());
 
         using ObjectRange lost = await store.GetRangeAsync(loser.Key, 0, 1 << 20, default);
-        Assert.Empty(CommitObject.Open(lost.Bytes.Span, lost.Length).Table.Fragments);
+        Assert.Empty(CommitObject.Open(lost.Memory.Span, lost.Length).Table.Fragments);
     }
 
     [Fact]
@@ -296,16 +297,19 @@ public sealed class RebaseMatrixTests
         public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
             inner.HeadAsync(key, cancellationToken);
 
-        public ValueTask<PutOutcome> PutIfAbsentAsync(
-            string key, ReadOnlyMemory<byte> content, CancellationToken cancellationToken) =>
-            new ValueTask<PutOutcome>(PutOutcome.Exists);
+        public async ValueTask<PutOutcome> PutIfAbsentAsync(
+            string key, PipeReader content, long length, CancellationToken cancellationToken)
+        {
+            await content.CompleteAsync().ConfigureAwait(false);
+            return PutOutcome.Exists;
+        }
 
-        public ValueTask<bool> DeleteAsync(string key, CancellationToken cancellationToken) =>
-            inner.DeleteAsync(key, cancellationToken);
+        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
+            inner.DeleteAsync(keys, cancellationToken);
 
-        public ValueTask<IReadOnlyList<string>> ListAsync(
-            string prefix, string? startAfter, int max, CancellationToken cancellationToken) =>
-            inner.ListAsync(prefix, startAfter, max, cancellationToken);
+        public IAsyncEnumerable<string> ListAsync(
+            string prefix, string? startAfter, CancellationToken cancellationToken) =>
+            inner.ListAsync(prefix, startAfter, cancellationToken);
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }

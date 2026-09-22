@@ -54,9 +54,9 @@ public sealed class DatasetClusteringTests
 
         // The tree walks them by key, not by arrival: object 0 holds the smallest key.
         List<long> firstKeys = [];
-        await foreach (ObjectEntry entry in dataset.ObjectsAsync())
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
         {
-            Assert.True(entry.Summaries.TryGet("key", out ColumnSummary key));
+            Assert.True(held.Entry.Summaries.TryGet("key", out ColumnSummary key));
             firstKeys.Add(key.Min.SignedValue);
         }
 
@@ -205,7 +205,7 @@ public sealed class DatasetClusteringTests
         Assert.Contains(key, refused.Message, StringComparison.Ordinal);
 
         // The scan is unaffected: it reads objects, not keys.
-        Assert.Equal(PerObject, await dataset.Scan().CountAsync());
+        Assert.Equal(PerObject, await dataset.ScanBuilder().CountAsync());
     }
 
     [Fact]
@@ -267,25 +267,25 @@ public sealed class DatasetClusteringTests
         await using MemorySegmentSource source = new MemorySegmentSource(single);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
 
-        Assert.Equal(await file.ScanBuilder().MinAsync("key"), await dataset.Scan().MinAsync("key"));
-        Assert.Equal(await file.ScanBuilder().MaxAsync("key"), await dataset.Scan().MaxAsync("key"));
-        Assert.Equal(await file.ScanBuilder().CountAsync(), await dataset.Scan().CountAsync());
-        Assert.True(await dataset.Scan().AnyAsync());
+        Assert.Equal(await file.ScanBuilder().MinAsync("key"), await dataset.ScanBuilder().MinAsync("key"));
+        Assert.Equal(await file.ScanBuilder().MaxAsync("key"), await dataset.ScanBuilder().MaxAsync("key"));
+        Assert.Equal(await file.ScanBuilder().CountAsync(), await dataset.ScanBuilder().CountAsync());
+        Assert.True(await dataset.ScanBuilder().AnyAsync());
 
         VortexExpr window = Expr.And(
             Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(500L))),
             Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(600L))));
         Assert.Equal(
             await file.ScanBuilder().Where(window).MinAsync("key"),
-            await dataset.Scan().Where(window).MinAsync("key"));
+            await dataset.ScanBuilder().Where(window).MinAsync("key"));
         Assert.Equal(
             await file.ScanBuilder().Where(window).MaxAsync("key"),
-            await dataset.Scan().Where(window).MaxAsync("key"));
+            await dataset.ScanBuilder().Where(window).MaxAsync("key"));
 
         // A value no object holds: `Any` refutes it from the summaries alone.
         DatasetScanMetrics metrics = new DatasetScanMetrics();
         VortexExpr absent = Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(-5L)));
-        Assert.False(await dataset.Scan().Where(absent).WithMetrics(metrics).AnyAsync());
+        Assert.False(await dataset.ScanBuilder().Where(absent).WithMetrics(metrics).AnyAsync());
         Assert.Equal(0, metrics.ObjectsOpened);
         Assert.Equal(Objects, metrics.ObjectsSkipped);
     }
@@ -302,9 +302,9 @@ public sealed class DatasetClusteringTests
     private static async Task<List<ObjectEntry>> ObjectsAsync(VortexDataset dataset)
     {
         List<ObjectEntry> entries = [];
-        await foreach (ObjectEntry entry in dataset.ObjectsAsync())
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
         {
-            entries.Add(entry);
+            entries.Add(held.Entry);
         }
 
         return entries;

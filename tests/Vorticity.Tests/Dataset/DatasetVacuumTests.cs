@@ -38,7 +38,7 @@ public sealed class DatasetVacuumTests
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
-        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
         for (int i = 0; i < Objects; i++)
         {
@@ -54,41 +54,41 @@ public sealed class DatasetVacuumTests
 
         // Inside the window: every version is retained, so nothing is garbage yet, and the inputs
         // are marked by the versions that still name them.
-        VacuumResult early = await dataset.VacuumAsync(new VacuumOptions { Clock = clock });
+        VacuumResult early = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock });
         Assert.Equal(dataset.Version, early.Latest);
         Assert.Equal(Window, early.Window);
-        Assert.Equal((int)dataset.Version, early.Retained.Count);
+        Assert.Equal((int)dataset.Version, early.Retained.Length);
         Assert.Empty(early.Deleted);
         Assert.Empty(early.Young);
 
         // Two hours on, only the latest is inside the window. A dry run deletes nothing.
         clock.Advance(TimeSpan.FromHours(2));
         int count = store.Count;
-        VacuumResult dry = await dataset.VacuumAsync(new VacuumOptions { Clock = clock, DryRun = true });
+        VacuumResult dry = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock, DryRun = true });
         Assert.Equal(count, store.Count);
         Assert.Equal([dataset.Version], dry.Retained);
 
-        VacuumResult swept = await dataset.VacuumAsync(new VacuumOptions { Clock = clock });
+        VacuumResult swept = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock });
         Assert.Equal(dry.Deleted, swept.Deleted);
         Assert.Equal(inputs.Order(StringComparer.Ordinal), swept.Deleted.Where(key => key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal)).Order(StringComparer.Ordinal));
         Assert.DoesNotContain(CommitKey.For(dataset.Version), swept.Deleted);
-        Assert.Equal(count - swept.Deleted.Count, store.Count);
+        Assert.Equal(count - swept.Deleted.Length, store.Count);
 
         // The oracle: the latest version, from a fresh handle, whole.
         await using (VortexDataset fresh = await VortexDataset.OpenAsync(store))
         {
-            Assert.Equal(Enumerable.Range(0, Objects * PerObject).Select(i => (long)i), (await KeysAsync(fresh.Scan())).Order());
+            Assert.Equal(Enumerable.Range(0, Objects * PerObject).Select(i => (long)i), (await KeysAsync(fresh.ScanBuilder())).Order());
         }
 
         // A reader on a swept version reports the object it lost, and its version.
         ObjectNotFoundException lost = await Assert.ThrowsAsync<ObjectNotFoundException>(
-            async () => await KeysAsync(stale.Scan()));
+            async () => await KeysAsync(stale.ScanBuilder()));
         Assert.Equal(staleVersion, lost.Version);
         Assert.Contains(lost.Key, swept.Deleted);
         Assert.Contains("retention window", lost.Message, StringComparison.Ordinal);
 
         // And a second vacuum finds nothing left to do.
-        VacuumResult again = await dataset.VacuumAsync(new VacuumOptions { Clock = clock });
+        VacuumResult again = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock });
         Assert.Empty(again.Deleted);
     }
 
@@ -99,7 +99,7 @@ public sealed class DatasetVacuumTests
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
-        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
         await dataset.AppendAsync(Of(types, schema, 0, PerObject));
 
@@ -111,13 +111,13 @@ public sealed class DatasetVacuumTests
         string inFlight = CommitKey.ForData("orphan-in-flight");
         await store.PutIfAbsentAsync(inFlight, new byte[] { 7, 8, 9 }, default);
 
-        VacuumResult result = await dataset.VacuumAsync(new VacuumOptions { Clock = clock });
+        VacuumResult result = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock });
         Assert.Contains(old, result.Deleted);
         Assert.Contains(inFlight, result.Young);
         Assert.Null(await store.HeadAsync(old, default));
         Assert.NotNull(await store.HeadAsync(inFlight, default));
         Assert.NotNull(await store.HeadAsync("imports/theirs.vortex", default));
-        Assert.Equal(PerObject, (await KeysAsync(dataset.Scan())).Count);
+        Assert.Equal(PerObject, (await KeysAsync(dataset.ScanBuilder())).Count);
     }
 
     [Fact]
@@ -127,9 +127,9 @@ public sealed class DatasetVacuumTests
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
-        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, schema, Options() with { Retention = new RetentionSettings(2, (long)Window.TotalSeconds) });
+            store, schema, Options() with { RetainedVersions = 2 });
         for (int i = 0; i < Objects; i++)
         {
             await dataset.AppendAsync(Of(types, schema, i * PerObject, PerObject));
@@ -138,7 +138,7 @@ public sealed class DatasetVacuumTests
         clock.Advance(TimeSpan.FromDays(30));
         ulong latest = dataset.Version;
         await using VortexDataset previous = await VortexDataset.OpenAsync(store);
-        VacuumResult result = await dataset.VacuumAsync(new VacuumOptions { Clock = clock });
+        VacuumResult result = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock });
         Assert.Equal([latest, latest - 1, latest - 2], result.Retained);
         Assert.Contains(CommitKey.For(1), result.Deleted);
 
@@ -148,7 +148,7 @@ public sealed class DatasetVacuumTests
             Assert.NotNull(await store.HeadAsync(CommitKey.For(version), default));
         }
 
-        Assert.Equal(Objects * PerObject, (await KeysAsync(previous.Scan())).Count);
+        Assert.Equal(Objects * PerObject, (await KeysAsync(previous.ScanBuilder())).Count);
     }
 
     [Fact]
@@ -162,7 +162,7 @@ public sealed class DatasetVacuumTests
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
-        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options());
         await dataset.AppendAsync(Of(types, schema, 0, PerObject));
         PositionedObject target = await SingleObjectAsync(dataset);
@@ -177,14 +177,14 @@ public sealed class DatasetVacuumTests
         }
 
         clock.Advance(TimeSpan.FromHours(2));
-        VacuumResult result = await dataset.VacuumAsync(new VacuumOptions { Clock = clock });
+        VacuumResult result = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock });
         Assert.Equal([dataset.Version], result.Retained);
         Assert.Contains(CommitKey.For(indexing - 1), result.Deleted);
         Assert.DoesNotContain(CommitKey.For(indexing), result.Deleted);
 
         // The object opens with its fragment, from a fresh handle.
         await using VortexDataset fresh = await VortexDataset.OpenAsync(store);
-        Assert.Equal(Objects * PerObject, (await KeysAsync(fresh.Scan())).Count);
+        Assert.Equal(Objects * PerObject, (await KeysAsync(fresh.ScanBuilder())).Count);
     }
 
     [Fact]
@@ -197,7 +197,7 @@ public sealed class DatasetVacuumTests
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
-        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
         DatasetOptions options = Options() with { Rule = new FillBoundaryRule(400) };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
         const int appends = 8;
@@ -208,7 +208,7 @@ public sealed class DatasetVacuumTests
 
         Assert.True(dataset.Depth > 1, $"depth {dataset.Depth}");
         clock.Advance(TimeSpan.FromHours(2));
-        VacuumResult result = await dataset.VacuumAsync(new VacuumOptions { Clock = clock });
+        VacuumResult result = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock });
         Assert.Equal([dataset.Version], result.Retained);
 
         List<string> commits = [];
@@ -224,7 +224,7 @@ public sealed class DatasetVacuumTests
         Assert.NotEmpty(result.Deleted);
 
         await using VortexDataset fresh = await VortexDataset.OpenAsync(store, options);
-        Assert.Equal(Enumerable.Range(0, appends * 50).Select(i => (long)i), (await KeysAsync(fresh.Scan())).Order());
+        Assert.Equal(Enumerable.Range(0, appends * 50).Select(i => (long)i), (await KeysAsync(fresh.ScanBuilder())).Order());
     }
 
     [Fact]
@@ -237,7 +237,7 @@ public sealed class DatasetVacuumTests
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
-        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
         DatasetOptions options = Options() with { Rule = new FillBoundaryRule(400) };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options);
         const int appends = 8;
@@ -259,8 +259,8 @@ public sealed class DatasetVacuumTests
         // Measured: an append here writes a leaf and the internal pages above it, and the leaf stays
         // live, so about a third of each body is live -- over the default 0.25. A threshold of 1
         // names every commit kept by references alone.
-        Assert.Empty((await dataset.VacuumAsync(new VacuumOptions { Clock = clock, DryRun = true })).Sparse);
-        VacuumResult first = await dataset.VacuumAsync(new VacuumOptions { Clock = clock, RepackBelow = 1.0 });
+        Assert.Empty((await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock, DryRun = true })).Sparse);
+        VacuumResult first = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock, RepackBelow = 1.0 });
         Assert.NotEmpty(first.Sparse);
         Assert.DoesNotContain(dataset.Version, first.Sparse);
 
@@ -284,7 +284,7 @@ public sealed class DatasetVacuumTests
 
         // Past the window again, the next vacuum takes every one of them.
         clock.Advance(TimeSpan.FromHours(2));
-        VacuumResult second = await dataset.VacuumAsync(new VacuumOptions { Clock = clock });
+        VacuumResult second = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock });
         foreach (ulong version in first.Sparse)
         {
             Assert.Contains(CommitKey.For(version), second.Deleted);
@@ -295,7 +295,7 @@ public sealed class DatasetVacuumTests
         // next one due.
         Assert.Empty(second.Sparse);
         await using VortexDataset fresh = await VortexDataset.OpenAsync(store, options);
-        Assert.Equal(Enumerable.Range(0, appends * 50).Select(i => (long)i), (await KeysAsync(fresh.Scan())).Order());
+        Assert.Equal(Enumerable.Range(0, appends * 50).Select(i => (long)i), (await KeysAsync(fresh.ScanBuilder())).Order());
     }
 
     [Fact]
@@ -313,7 +313,7 @@ public sealed class DatasetVacuumTests
     {
         Seed = 0x7AC_0017,
         ClusteringKey = ["key"],
-        Retention = new RetentionSettings(0, (long)Window.TotalSeconds),
+        RetentionWindow = Window,
         Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 512 },
     };
 
@@ -325,9 +325,9 @@ public sealed class DatasetVacuumTests
     private static async Task<List<ObjectEntry>> EntriesAsync(VortexDataset dataset)
     {
         List<ObjectEntry> entries = [];
-        await foreach (ObjectEntry entry in dataset.ObjectsAsync())
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
         {
-            entries.Add(entry);
+            entries.Add(held.Entry);
         }
 
         return entries;
@@ -344,7 +344,7 @@ public sealed class DatasetVacuumTests
     private static async Task<PositionedObject> SingleObjectAsync(VortexDataset dataset)
     {
         List<PositionedObject> objects = [];
-        await foreach (PositionedObject held in dataset.Scan().ObjectsAsync())
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync())
         {
             objects.Add(held);
         }

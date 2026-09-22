@@ -76,7 +76,7 @@ public sealed class DatasetCompactionTests
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
 
         List<(long Key, double Measure)> expected = await RowsAsync(file.ScanBuilder());
-        List<(long Key, double Measure)> produced = await RowsAsync(dataset.Scan());
+        List<(long Key, double Measure)> produced = await RowsAsync(dataset.ScanBuilder());
         Assert.Equal(expected, produced);
 
         // And the output says what it is: a sorted key column, which is what lets a lookup inside it
@@ -273,7 +273,7 @@ public sealed class DatasetCompactionTests
             VortexExpr range = Expr.And(
                 Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(low))),
                 Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(high))));
-            long count = await dataset.Scan().Where(range).WithMetrics(metrics).CountAsync();
+            long count = await dataset.ScanBuilder().Where(range).WithMetrics(metrics).CountAsync();
             Assert.Equal(appended.FindAll(key => key >= low && key < high).Count, count);
             Assert.True(metrics.ObjectsOpened <= bound, $"[{low}, {high}) opened {metrics.ObjectsOpened} objects against {bound}");
             counted += metrics.ObjectsCounted;
@@ -290,7 +290,7 @@ public sealed class DatasetCompactionTests
         // A filter the key's summaries cannot count opens what the summaries keep, and answers the same.
         DatasetScanMetrics other = new DatasetScanMetrics();
         VortexExpr measure = Expr.Lt(Expr.Field("measure"), Expr.Literal(FilterLiteral.From(100.0)));
-        Assert.Equal(appended.FindAll(key => key / 4.0 < 100.0).Count, await dataset.Scan().Where(measure).WithMetrics(other).CountAsync());
+        Assert.Equal(appended.FindAll(key => key / 4.0 < 100.0).Count, await dataset.ScanBuilder().Where(measure).WithMetrics(other).CountAsync());
         Assert.Equal(0, other.ObjectsCounted);
     }
 
@@ -328,7 +328,7 @@ public sealed class DatasetCompactionTests
         }
 
         // And the rows are still every key, once, in order.
-        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.Scan()));
+        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.ScanBuilder()));
 
         Console.Out.Write(FormattableString.Invariant(
             $"DATASET COMPACTION ROLL: a target of 2 KiB split {result.Rows} rows into {result.ObjectsOut} key-disjoint objects at level 1.\n"));
@@ -351,7 +351,7 @@ public sealed class DatasetCompactionTests
             await dataset.AppendAsync(Shuffled(types, schema, i * 100, 100, seed: i + 1));
         }
 
-        List<long> before = await KeysAsync(dataset.Scan());
+        List<long> before = await KeysAsync(dataset.ScanBuilder());
         CompactionOptions options = Options(target: 1 << 20) with { LevelZeroCeiling = 3 };
         CompactionPlan plan = await dataset.PlanCompactionAsync(options);
         Assert.Equal(CompactionStyle.Tiered, plan.Style);
@@ -364,9 +364,9 @@ public sealed class DatasetCompactionTests
 
         // The same rows in the same sequence, which is what a concatenation promises and a merge
         // does not: these keys are shuffled inside each object and still come back shuffled.
-        Assert.Equal(before, await KeysAsync(dataset.Scan()));
-        Assert.Equal(before, await KeysAsync(dataset.Rows(0, 600)));
-        Assert.Equal(before.GetRange(150, 300), await KeysAsync(dataset.Rows(150, 450)));
+        Assert.Equal(before, await KeysAsync(dataset.ScanBuilder()));
+        Assert.Equal(before, await KeysAsync(dataset.ScanBuilder().Rows(0, 600)));
+        Assert.Equal(before.GetRange(150, 300), await KeysAsync(dataset.ScanBuilder().Rows(150, 450)));
     }
 
     [Fact]
@@ -401,7 +401,7 @@ public sealed class DatasetCompactionTests
         Assert.Equal(2, moved.ToLevel);
         Assert.True(dataset.Levels.Count >= 3);
         Assert.Equal(Rows, dataset.RowCount);
-        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.Scan()));
+        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.ScanBuilder()));
     }
 
     [Fact]
@@ -429,7 +429,7 @@ public sealed class DatasetCompactionTests
 
         Assert.Null((await dataset.PlanCompactionAsync(options)).Job);
         Assert.Equal(2, dataset.Levels.Count);
-        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.Scan()));
+        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.ScanBuilder()));
 
         // And a cap that leaves level 0 nowhere to go is refused where it is stated.
         Assert.Throws<ArgumentOutOfRangeException>(() => new CompactionOptions { MaxLevels = 1 });
@@ -496,11 +496,11 @@ public sealed class DatasetCompactionTests
 
         // The one output, read in its own file order, is the tuple order; and the dataset's
         // key-ordered read on the tuple, in both directions, is the same rows.
-        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.Scan()));
-        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.Scan().InKeyOrder(["key", "measure"])));
+        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.ScanBuilder()));
+        Assert.Equal(await SortedKeysAsync(), await KeysAsync(dataset.ScanBuilder().InKeyOrder(["key", "measure"])));
         List<long> descending = await SortedKeysAsync();
         descending.Reverse();
-        Assert.Equal(descending, await KeysAsync(dataset.Scan().InKeyOrder(["key", "measure"], descending: true)));
+        Assert.Equal(descending, await KeysAsync(dataset.ScanBuilder().InKeyOrder(["key", "measure"], descending: true)));
     }
 
     [Fact]
@@ -556,7 +556,7 @@ public sealed class DatasetCompactionTests
         // another object's largest keys.
         foreach (bool descending in (bool[])[false, true])
         {
-            List<double?> merged = await MeasuresAsync(dataset.Scan().InKeyOrder("measure", descending));
+            List<double?> merged = await MeasuresAsync(dataset.ScanBuilder().InKeyOrder("measure", descending));
             int tail = merged.Count(m => m is null);
             Assert.Equal(Rows, merged.Count);
             Assert.All(merged.Skip(merged.Count - tail), m => Assert.Null(m));
@@ -568,7 +568,7 @@ public sealed class DatasetCompactionTests
             await dataset.CompactAsync(Options(target: 1 << 20)));
         Assert.Equal((long)Rows, result.Rows);
 
-        List<double?> measures = await MeasuresAsync(dataset.Scan());
+        List<double?> measures = await MeasuresAsync(dataset.ScanBuilder());
         int nulls = measures.Count(m => m is null);
         Assert.True(nulls > 0);
         Assert.All(measures.Take(measures.Count - nulls), m => Assert.NotNull(m));
@@ -687,7 +687,7 @@ public sealed class DatasetCompactionTests
 
         List<long> sorted = [.. appended];
         sorted.Sort();
-        List<long> held = await KeysAsync(dataset.Scan());
+        List<long> held = await KeysAsync(dataset.ScanBuilder());
         held.Sort();
         Assert.Equal(sorted, held);
     }
@@ -718,9 +718,9 @@ public sealed class DatasetCompactionTests
     private static async Task<List<ObjectEntry>> ObjectsAsync(VortexDataset dataset)
     {
         List<ObjectEntry> entries = [];
-        await foreach (ObjectEntry entry in dataset.ObjectsAsync())
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
         {
-            entries.Add(entry);
+            entries.Add(held.Entry);
         }
 
         return entries;

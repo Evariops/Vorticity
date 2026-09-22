@@ -162,14 +162,14 @@ public sealed class DatasetLevelTests
             await dataset.AppendAsync(Batches(types, schema, i * 200, 200));
         }
 
-        List<long> before = await KeysAsync(dataset.Scan());
+        List<long> before = await KeysAsync(dataset.ScanBuilder());
         Assert.Equal(objects * 200, before.Count);
 
         // Move every other object down a level, by hand, the way a compaction would.
         List<(int Level, ReadOnlyMemory<byte> Key)> inputs = [];
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> outputs = [];
         int at = 0;
-        await foreach (PositionedObject held in dataset.Scan().ObjectsAsync())
+        await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync())
         {
             if (at++ % 2 == 0)
             {
@@ -188,17 +188,17 @@ public sealed class DatasetLevelTests
         Assert.Equal(objects * 200, dataset.RowCount);
 
         // The same rows, in the same order, and the same as one file's.
-        Assert.Equal(before, await KeysAsync(dataset.Scan()));
+        Assert.Equal(before, await KeysAsync(dataset.ScanBuilder()));
 
         byte[] single = await OneFileAsync(types, schema, objects * 200, options.Write);
         await using MemorySegmentSource source = new MemorySegmentSource(single);
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), default);
-        Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.Scan()));
+        Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.ScanBuilder()));
 
         // And `Rows(a, b)` still addresses the dataset's order across the levels it now spans.
         Assert.Equal(
             await KeysAsync(file.ScanBuilder().Rows(new RowRange(150, 450))),
-            await KeysAsync(dataset.Rows(150, 450)));
+            await KeysAsync(dataset.ScanBuilder().Rows(150, 450)));
     }
 
     [Fact]
@@ -223,7 +223,7 @@ public sealed class DatasetLevelTests
             await dataset.AppendAsync(Batches(types, schema, i * 100, 100));
         }
 
-        DatasetPlan holding = await dataset.Scan().ExplainAsync();
+        DatasetPlan holding = await dataset.ScanBuilder().ExplainAsync();
         Assert.Equal(0, holding.Lag);
         Assert.Equal(8, holding.Objects);
         Assert.Equal([8L], holding.ObjectsByLevel);
@@ -235,11 +235,11 @@ public sealed class DatasetLevelTests
             await dataset.AppendAsync(Batches(types, schema, i * 100, 100));
         }
 
-        DatasetPlan lagging = await dataset.Scan().ExplainAsync();
+        DatasetPlan lagging = await dataset.ScanBuilder().ExplainAsync();
         Assert.Equal(3, lagging.Lag);
         Assert.Equal(11, lagging.Objects);
         Assert.Equal(1_100, lagging.Rows);
-        Assert.Equal(1_100, await dataset.Scan().CountAsync());
+        Assert.Equal(1_100, await dataset.ScanBuilder().CountAsync());
         Assert.Equal(3, dataset.Lag);
 
         Console.Out.Write(FormattableString.Invariant(

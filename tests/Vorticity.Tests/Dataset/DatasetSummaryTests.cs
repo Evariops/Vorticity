@@ -55,9 +55,9 @@ public sealed class DatasetSummaryTests
 
         DatasetScanMetrics pruned = new DatasetScanMetrics();
         DatasetScanMetrics whole = new DatasetScanMetrics();
-        List<long> withSummaries = await KeysAsync(dataset.Scan().Where(filter).WithMetrics(pruned));
+        List<long> withSummaries = await KeysAsync(dataset.ScanBuilder().Where(filter).WithMetrics(pruned));
         List<long> without = await KeysAsync(
-            dataset.Scan().Where(filter).WithSummaries(false).WithMetrics(whole));
+            dataset.ScanBuilder().Where(filter).WithSummaries(false).WithMetrics(whole));
 
         // The acceptance: the same rows as one file, whichever way the scan got to them.
         byte[] single = await OneFileAsync(types, schema, objects * Rows);
@@ -93,10 +93,10 @@ public sealed class DatasetSummaryTests
 
         VortexExpr absent = Expr.Eq(Expr.Field("key"), Expr.Literal(FilterLiteral.From(-1L)));
         DatasetScanMetrics metrics = new DatasetScanMetrics();
-        Assert.Empty(await KeysAsync(dataset.Scan().Where(absent).WithMetrics(metrics)));
+        Assert.Empty(await KeysAsync(dataset.ScanBuilder().Where(absent).WithMetrics(metrics)));
         Assert.Equal(0, metrics.ObjectsOpened);
         Assert.Equal(4, metrics.ObjectsSkipped);
-        Assert.Equal(0, await dataset.Scan().Where(absent).CountAsync());
+        Assert.Equal(0, await dataset.ScanBuilder().Where(absent).CountAsync());
     }
 
     [Fact]
@@ -123,14 +123,14 @@ public sealed class DatasetSummaryTests
 
         VortexExpr absent = Expr.Gt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(1_000_000L)));
         DatasetScanMetrics metrics = new DatasetScanMetrics();
-        Assert.Empty(await KeysAsync(dataset.Scan().Where(absent).WithMetrics(metrics)));
+        Assert.Empty(await KeysAsync(dataset.ScanBuilder().Where(absent).WithMetrics(metrics)));
         Assert.True(metrics.SubtreesSkipped > 0, "a node's summaries should have refuted the predicate");
         Assert.Equal(0, metrics.ObjectsConsidered);
         Assert.Equal(0, metrics.ObjectsOpened);
 
         // And the acceptance again: with the summaries off, the same empty answer the long way.
         DatasetScanMetrics whole = new DatasetScanMetrics();
-        Assert.Empty(await KeysAsync(dataset.Scan().Where(absent).WithSummaries(false).WithMetrics(whole)));
+        Assert.Empty(await KeysAsync(dataset.ScanBuilder().Where(absent).WithSummaries(false).WithMetrics(whole)));
         Assert.Equal(objects, whole.ObjectsConsidered);
         Assert.Equal(0, whole.SubtreesSkipped);
         Console.Out.Write(FormattableString.Invariant(
@@ -173,12 +173,12 @@ public sealed class DatasetSummaryTests
         {
             Assert.Equal(
                 await KeysAsync(file.ScanBuilder().Rows(new RowRange(from, Math.Min(to, file.RowCount)))),
-                await KeysAsync(dataset.Rows(from, to)));
+                await KeysAsync(dataset.ScanBuilder().Rows(from, to)));
         }
 
         // And it does not open what it does not need: rows 2 000..2 500 are object 2's alone.
         DatasetScanMetrics metrics = new DatasetScanMetrics();
-        Assert.Equal(500, (await KeysAsync(dataset.Rows(2_000, 2_500).WithMetrics(metrics))).Count);
+        Assert.Equal(500, (await KeysAsync(dataset.ScanBuilder().Rows(2_000, 2_500).WithMetrics(metrics))).Count);
         Assert.Equal(1, metrics.ObjectsOpened);
         Assert.Equal(1, metrics.ObjectsConsidered);
     }
@@ -201,8 +201,8 @@ public sealed class DatasetSummaryTests
 
         DatasetScanMetrics first = new DatasetScanMetrics();
         DatasetScanMetrics second = new DatasetScanMetrics();
-        List<long> once = await KeysAsync(dataset.Scan().WithMetrics(first));
-        List<long> twice = await KeysAsync(dataset.Scan().WithMetrics(second));
+        List<long> once = await KeysAsync(dataset.ScanBuilder().WithMetrics(first));
+        List<long> twice = await KeysAsync(dataset.ScanBuilder().WithMetrics(second));
 
         Assert.Equal(once, twice);
         Assert.Equal(0, first.CacheHits);

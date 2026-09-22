@@ -47,7 +47,7 @@ public sealed class MergeFanInTests
 
         DatasetScanMetrics metrics = new DatasetScanMetrics();
         List<long> walked = [];
-        await foreach (RecordBatch batch in dataset.Scan().WithMetrics(metrics).InKeyOrder("key")
+        await foreach (RecordBatch batch in dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key")
             .ExecuteAsync().WithCancellation(CancellationToken.None))
         {
             using (batch)
@@ -67,7 +67,7 @@ public sealed class MergeFanInTests
 
         // And the descending merge is the exact reverse, which is what the ranks on ties buy.
         List<long> back = [];
-        await foreach (RecordBatch batch in dataset.Scan().InKeyOrder("key", descending: true)
+        await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("key", descending: true)
             .ExecuteAsync().WithCancellation(CancellationToken.None))
         {
             using (batch)

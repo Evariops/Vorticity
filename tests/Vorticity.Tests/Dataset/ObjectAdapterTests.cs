@@ -150,7 +150,7 @@ public sealed class ObjectAdapterTests
         using (ObjectRange range = await store.GetRangeAsync(Key, 0, int.MaxValue / 2, default))
         {
             await store.DeleteAsync(Key, default);
-            await store.PutIfAbsentAsync(Key, range.Bytes, default);
+            await store.PutIfAbsentAsync(Key, range.Memory, default);
         }
 
         await Assert.ThrowsAsync<VortexFormatException>(

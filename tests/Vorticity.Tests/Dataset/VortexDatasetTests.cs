@@ -68,7 +68,7 @@ public sealed class VortexDatasetTests
             new MemorySegmentSource(single), new VortexOpenOptions(), default);
 
         Assert.Equal(file.RowCount, dataset.RowCount);
-        Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.Scan()));
+        Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.ScanBuilder()));
 
         // And under a filter, which each object's own scan applies with its own indexes.
         VortexExpr filter = Expr.And(
@@ -76,16 +76,16 @@ public sealed class VortexDatasetTests
             Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(12_345L))));
         Assert.Equal(
             await KeysAsync(file.ScanBuilder().Where(filter)),
-            await KeysAsync(dataset.Scan().Where(filter)));
+            await KeysAsync(dataset.ScanBuilder().Where(filter)));
         Assert.Equal(
             await file.ScanBuilder().Where(filter).CountAsync(),
-            await dataset.Scan().Where(filter).CountAsync());
+            await dataset.ScanBuilder().Where(filter).CountAsync());
 
         // With the per-file index chain off, which must not change the answer: an index only
         // skips work.
         Assert.Equal(
             await KeysAsync(file.ScanBuilder().Where(filter).WithIndexes(false)),
-            await KeysAsync(dataset.Scan().Where(filter).WithIndexes(false)));
+            await KeysAsync(dataset.ScanBuilder().Where(filter).WithIndexes(false)));
     }
 
     [Fact]
@@ -131,7 +131,7 @@ public sealed class VortexDatasetTests
 
         await using VortexFile file = await VortexFile.OpenAsync(
             new MemorySegmentSource(single), new VortexOpenOptions(), default);
-        Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.Scan()));
+        Assert.Equal(await KeysAsync(file.ScanBuilder()), await KeysAsync(dataset.ScanBuilder()));
     }
 
     [Fact]
@@ -236,16 +236,16 @@ public sealed class VortexDatasetTests
         Assert.Equal(0, reader.RowCount);
         Assert.Equal(writer.Version, await reader.RefreshAsync());
         Assert.Equal(2_000, reader.RowCount);
-        Assert.Equal(schema.FieldCount, reader.Schema.FieldCount);
+        Assert.Equal(schema.FieldCount, reader.Schema.Count);
         Assert.Equal(writer.Seed, reader.Seed);
     }
 
     private static async Task<List<ObjectEntry>> ObjectsAsync(VortexDataset dataset)
     {
         List<ObjectEntry> entries = [];
-        await foreach (ObjectEntry entry in dataset.ObjectsAsync())
+        await foreach (PositionedObject held in dataset.WalkAsync(null, 0, long.MaxValue, null, default))
         {
-            entries.Add(entry);
+            entries.Add(held.Entry);
         }
 
         return entries;

@@ -4,6 +4,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Pipelines;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
@@ -23,7 +25,7 @@ public sealed class ObjectSegmentSourceFailureTests
         // Two runs, because the gap is wider than the coalescer is allowed to bridge. The first
         // fails at once; the second is held open, so at the moment the batch gives up it is still
         // in flight.
-        using Held held = new Held();
+        await using Held held = new Held();
         ObjectSegmentSource source = new ObjectSegmentSource(
             held, Key, new SegmentReadOptions { CoalesceGapBytes = 0 });
         using SegmentRequestSet set = new SegmentRequestSet();
@@ -38,22 +40,30 @@ public sealed class ObjectSegmentSourceFailureTests
         await Assert.ThrowsAsync<IOException>(async () => await read);
 
         Assert.NotNull(held.Handed);
-        Assert.Throws<ObjectDisposedException>(() => held.Handed!.Bytes);
+        Assert.True(held.Handed!.Released);
         Assert.False(set.IsPopulated);
         Assert.False(set.IsFilled(0));
         Assert.False(set.IsFilled(1));
     }
 
+    /// <summary>What the bytes of a range are released to, so the test can see they were.</summary>
+    private sealed class Owner : IDisposable
+    {
+        internal bool Released { get; private set; }
+
+        public void Dispose() => Released = true;
+    }
+
     /// <summary>A store whose first range fails and whose second waits to be let go.</summary>
-    private sealed class Held : IObjectStore, IDisposable
+    private sealed class Held : IObjectStore
     {
         private readonly TaskCompletionSource _gate =
             new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         private int _calls;
 
-        /// <summary>The range the second read produced, so the test can see it was disposed.</summary>
-        internal ObjectRange? Handed { get; private set; }
+        /// <summary>The owner of the range the second read produced.</summary>
+        internal Owner? Handed { get; private set; }
 
         internal void Release() => _gate.TrySetResult();
 
@@ -66,26 +76,27 @@ public sealed class ObjectSegmentSourceFailureTests
             }
 
             await _gate.Task.ConfigureAwait(false);
-            Handed = ObjectRange.CopyOf(new byte[length], "token");
-            return Handed;
+            Handed = new Owner();
+            return new ObjectRange(new SegmentLease(new byte[length], Handed), "token");
         }
 
         public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
             new ValueTask<ObjectHead?>(new ObjectHead(1 << 20, "token", DateTimeOffset.UnixEpoch));
 
-        public ValueTask<PutOutcome> PutIfAbsentAsync(
-            string key, ReadOnlyMemory<byte> content, CancellationToken cancellationToken) =>
-            new ValueTask<PutOutcome>(PutOutcome.Created);
+        public async ValueTask<PutOutcome> PutIfAbsentAsync(
+            string key, PipeReader content, long length, CancellationToken cancellationToken)
+        {
+            await content.CompleteAsync().ConfigureAwait(false);
+            return PutOutcome.Created;
+        }
 
-        public ValueTask<bool> DeleteAsync(string key, CancellationToken cancellationToken) =>
-            new ValueTask<bool>(false);
+        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
+            ValueTask.CompletedTask;
 
-        public ValueTask<IReadOnlyList<string>> ListAsync(
-            string prefix, string? startAfter, int max, CancellationToken cancellationToken) =>
-            new ValueTask<IReadOnlyList<string>>(Array.Empty<string>());
+        public IAsyncEnumerable<string> ListAsync(
+            string prefix, string? startAfter, CancellationToken cancellationToken) =>
+            AsyncEnumerable.Empty<string>();
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-
-        public void Dispose() => Handed?.Dispose();
     }
 }

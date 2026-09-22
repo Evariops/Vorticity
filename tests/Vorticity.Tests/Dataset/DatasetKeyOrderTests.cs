@@ -26,6 +26,7 @@ using Vorticity.Diagnostics;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.IO;
+using Vorticity.Layouts;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -62,7 +63,7 @@ public sealed class DatasetKeyOrderTests
             DatasetScanMetrics metrics = new DatasetScanMetrics();
             Assert.Equal(
                 sorted,
-                await RowsAsync(dataset.Scan().WithSummaries(summaries).WithMetrics(metrics).InKeyOrder("key")));
+                await RowsAsync(dataset.ScanBuilder().WithSummaries(summaries).WithMetrics(metrics).InKeyOrder("key")));
 
             // Every object reaches down to the smallest keys, so all four are held at once: level 0
             // is the part of the merge's bound that the level-0 ceiling is there to keep small.
@@ -71,7 +72,7 @@ public sealed class DatasetKeyOrderTests
 
             Assert.Equal(
                 reversed,
-                await RowsAsync(dataset.Scan().WithSummaries(summaries).InKeyOrder("key", descending: true)));
+                await RowsAsync(dataset.ScanBuilder().WithSummaries(summaries).InKeyOrder("key", descending: true)));
         }
     }
 
@@ -154,18 +155,18 @@ public sealed class DatasetKeyOrderTests
         // Upward on the clustering key, by the tree's exact minima: one object for the first ten,
         // and two for the first three hundred, which cross one boundary and not a second.
         DatasetScanMetrics metrics = new DatasetScanMetrics();
-        Assert.Equal(sorted[..10], await FirstAsync(dataset.Scan().WithMetrics(metrics).InKeyOrder("key"), 10));
+        Assert.Equal(sorted[..10], await FirstAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key"), 10));
         Assert.Equal(1, metrics.ObjectsOpened);
 
         metrics = new DatasetScanMetrics();
-        Assert.Equal(sorted[..300], await FirstAsync(dataset.Scan().WithMetrics(metrics).InKeyOrder("key"), 300));
+        Assert.Equal(sorted[..300], await FirstAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key"), 300));
         Assert.Equal(2, metrics.ObjectsOpened);
 
         // Downward, by the summaries' maxima.
         metrics = new DatasetScanMetrics();
         Assert.Equal(
             reversed[..10],
-            await FirstAsync(dataset.Scan().WithMetrics(metrics).InKeyOrder("key", descending: true), 10));
+            await FirstAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key", descending: true), 10));
         Assert.Equal(1, metrics.ObjectsOpened);
 
         // Without the summaries, the same rows and every object opened: they are what bought the skip.
@@ -175,7 +176,7 @@ public sealed class DatasetKeyOrderTests
             Assert.Equal(
                 descending ? reversed[..10] : sorted[..10],
                 await FirstAsync(
-                    dataset.Scan().WithSummaries(false).WithMetrics(metrics).InKeyOrder("key", descending), 10));
+                    dataset.ScanBuilder().WithSummaries(false).WithMetrics(metrics).InKeyOrder("key", descending), 10));
             Assert.Equal(Objects, metrics.ObjectsOpened);
         }
 
@@ -211,16 +212,16 @@ public sealed class DatasetKeyOrderTests
         {
             Assert.Equal(
                 expected,
-                await RowsAsync(dataset.Scan().Where(band).WithSummaries(summaries).InKeyOrder("key")));
+                await RowsAsync(dataset.ScanBuilder().Where(band).WithSummaries(summaries).InKeyOrder("key")));
             Assert.Equal(
                 reversed,
-                await RowsAsync(dataset.Scan().Where(band).WithSummaries(summaries).InKeyOrder("key", descending: true)));
+                await RowsAsync(dataset.ScanBuilder().Where(band).WithSummaries(summaries).InKeyOrder("key", descending: true)));
         }
 
         // A key no object holds: the summaries refute every object, and nothing is opened.
         DatasetScanMetrics metrics = new DatasetScanMetrics();
         VortexExpr absent = Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(-1L)));
-        Assert.Empty(await RowsAsync(dataset.Scan().Where(absent).WithMetrics(metrics).InKeyOrder("key")));
+        Assert.Empty(await RowsAsync(dataset.ScanBuilder().Where(absent).WithMetrics(metrics).InKeyOrder("key")));
         Assert.Equal(0, metrics.ObjectsOpened);
         Assert.Equal(Objects, metrics.ObjectsSkipped);
     }
@@ -248,7 +249,7 @@ public sealed class DatasetKeyOrderTests
         }
 
         List<double> measures = [];
-        await foreach (RecordBatch batch in dataset.Scan().Select("measure").InKeyOrder("key").ExecuteAsync())
+        await foreach (RecordBatch batch in dataset.ScanBuilder().Project(Columns(dataset, "measure")).InKeyOrder("key").ExecuteAsync())
         {
             Assert.Equal(1, batch.FieldCount);
             Assert.Equal("measure", batch.GetFieldName(0));
@@ -258,7 +259,19 @@ public sealed class DatasetKeyOrderTests
         Assert.Equal(expected, measures);
 
         // Selected, the key stays, and the order is the same.
-        Assert.Equal(Sorted(Range(0, Rows)), await RowsAsync(dataset.Scan().Select("key", "measure").InKeyOrder("key")));
+        Assert.Equal(Sorted(Range(0, Rows)), await RowsAsync(dataset.ScanBuilder().Project(Columns(dataset, "key", "measure")).InKeyOrder("key")));
+    }
+
+    /// <summary>The mask of <paramref name="columns"/>, resolved against the dataset's schema.</summary>
+    private static FieldMask Columns(VortexDataset dataset, params string[] columns)
+    {
+        FieldMaskBuilder mask = new FieldMaskBuilder();
+        foreach (string column in columns)
+        {
+            mask.Include(ToolPaths.Resolve(dataset.Schema, column));
+        }
+
+        return mask.Build();
     }
 
     [Fact]
@@ -287,22 +300,22 @@ public sealed class DatasetKeyOrderTests
         List<(long Key, double Measure)> reversed = [.. sorted];
         reversed.Reverse();
 
-        DatasetPlan plan = await dataset.Scan().InKeyOrder("key").ExplainAsync();
+        DatasetPlan plan = await dataset.ScanBuilder().InKeyOrder("key").ExplainAsync();
         Assert.Equal("key", plan.Order);
         Assert.Equal(Objects, plan.Cursors);
 
         foreach (bool summaries in (bool[])[true, false])
         {
-            Assert.Equal(sorted, await RowsAsync(dataset.Scan().WithSummaries(summaries).InKeyOrder("key")));
+            Assert.Equal(sorted, await RowsAsync(dataset.ScanBuilder().WithSummaries(summaries).InKeyOrder("key")));
             Assert.Equal(
                 reversed,
-                await RowsAsync(dataset.Scan().WithSummaries(summaries).InKeyOrder("key", descending: true)));
+                await RowsAsync(dataset.ScanBuilder().WithSummaries(summaries).InKeyOrder("key", descending: true)));
         }
 
         // Output-sensitive, and still pruned by the summaries: their minima say which quarter
         // holds the first ten rows, and the other three are not opened.
         DatasetScanMetrics metrics = new DatasetScanMetrics();
-        Assert.Equal(sorted[..10], await FirstAsync(dataset.Scan().WithMetrics(metrics).InKeyOrder("key"), 10));
+        Assert.Equal(sorted[..10], await FirstAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key"), 10));
         Assert.Equal(1, metrics.ObjectsOpened);
     }
 
@@ -358,10 +371,10 @@ public sealed class DatasetKeyOrderTests
         downward.Reverse();
         foreach (bool summaries in (bool[])[true, false])
         {
-            Assert.Equal(upward, await IdsAsync(dataset.Scan().WithSummaries(summaries).InKeyOrder("f")));
+            Assert.Equal(upward, await IdsAsync(dataset.ScanBuilder().WithSummaries(summaries).InKeyOrder("f")));
             Assert.Equal(
                 downward,
-                await IdsAsync(dataset.Scan().WithSummaries(summaries).InKeyOrder("f", descending: true)));
+                await IdsAsync(dataset.ScanBuilder().WithSummaries(summaries).InKeyOrder("f", descending: true)));
         }
     }
 
@@ -383,7 +396,7 @@ public sealed class DatasetKeyOrderTests
         }
 
         List<long> keys = [];
-        await foreach (RecordBatch batch in dataset.Scan().InKeyOrder("key").ExecuteAsync())
+        await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("key").ExecuteAsync())
         {
             using (batch)
             {
@@ -404,13 +417,13 @@ public sealed class DatasetKeyOrderTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
 
-        Assert.Throws<InvalidOperationException>(() => dataset.Rows(0, 10).InKeyOrder("key"));
-        Assert.Throws<InvalidOperationException>(() => dataset.Scan().InKeyOrder("key").Rows(0, 10));
-        Assert.Throws<ArgumentException>(() => dataset.Scan().InKeyOrder("nope"));
+        Assert.Throws<InvalidOperationException>(() => dataset.ScanBuilder().Rows(0, 10).InKeyOrder("key"));
+        Assert.Throws<InvalidOperationException>(() => dataset.ScanBuilder().InKeyOrder("key").Rows(0, 10));
+        Assert.Throws<ArgumentException>(() => dataset.ScanBuilder().InKeyOrder("nope"));
 
         // An empty dataset has nothing to merge, and says so without opening anything.
-        Assert.Empty(await RowsAsync(dataset.Scan().InKeyOrder("key")));
-        DatasetPlan plan = await dataset.Scan().InKeyOrder("key").ExplainAsync();
+        Assert.Empty(await RowsAsync(dataset.ScanBuilder().InKeyOrder("key")));
+        DatasetPlan plan = await dataset.ScanBuilder().InKeyOrder("key").ExplainAsync();
         Assert.Equal(0, plan.Cursors);
     }
 
@@ -441,7 +454,7 @@ public sealed class DatasetKeyOrderTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered());
         await dataset.ImportAsync(key);
 
-        await Assert.ThrowsAsync<VortexUnsupportedException>(async () => await RowsAsync(dataset.Scan().InKeyOrder("key")));
+        await Assert.ThrowsAsync<VortexUnsupportedException>(async () => await RowsAsync(dataset.ScanBuilder().InKeyOrder("key")));
 
         // The scan in the tree's order is unaffected: it reads objects, not keys.
         Assert.Equal(PerObject, await dataset.Scan().CountAsync());
@@ -457,24 +470,24 @@ public sealed class DatasetKeyOrderTests
         List<(long Key, double Measure)> reversed = [.. sorted];
         reversed.Reverse();
 
-        DatasetPlan plan = await dataset.Scan().InKeyOrder("key").ExplainAsync();
+        DatasetPlan plan = await dataset.ScanBuilder().InKeyOrder("key").ExplainAsync();
         Assert.Equal("key", plan.Order);
         Assert.Equal(cursors, plan.Cursors);
 
         DatasetScanMetrics metrics = new DatasetScanMetrics();
-        Assert.Equal(sorted, await RowsAsync(dataset.Scan().WithMetrics(metrics).InKeyOrder("key")));
+        Assert.Equal(sorted, await RowsAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key")));
         Assert.Equal(cursors, metrics.Cursors);
 
         metrics = new DatasetScanMetrics();
-        Assert.Equal(reversed, await RowsAsync(dataset.Scan().WithMetrics(metrics).InKeyOrder("key", descending: true)));
+        Assert.Equal(reversed, await RowsAsync(dataset.ScanBuilder().WithMetrics(metrics).InKeyOrder("key", descending: true)));
         Assert.Equal(cursors, metrics.Cursors);
 
         // Without the summaries every object is opened up front, and the answer does not move.
-        Assert.Equal(sorted, await RowsAsync(dataset.Scan().WithSummaries(false).InKeyOrder("key")));
-        Assert.Equal(reversed, await RowsAsync(dataset.Scan().WithSummaries(false).InKeyOrder("key", descending: true)));
+        Assert.Equal(sorted, await RowsAsync(dataset.ScanBuilder().WithSummaries(false).InKeyOrder("key")));
+        Assert.Equal(reversed, await RowsAsync(dataset.ScanBuilder().WithSummaries(false).InKeyOrder("key", descending: true)));
         Assert.Equal(
             dataset.ObjectCount,
-            (await dataset.Scan().WithSummaries(false).InKeyOrder("key").ExplainAsync()).Cursors);
+            (await dataset.ScanBuilder().WithSummaries(false).InKeyOrder("key").ExplainAsync()).Cursors);
     }
 
     private static async Task<List<(long Key, double Measure)>> RowsAsync(DatasetScanBuilder scan)

@@ -27,7 +27,8 @@ public sealed class CountingObjectStoreTests
         }
 
         Assert.Single(await store.ListAsync("data/", null, 10, default));
-        Assert.True(await store.DeleteAsync("data/a", default));
+        await store.DeleteAsync(["data/a"], default);
+        Assert.Null(await inner.HeadAsync("data/a", default));
 
         Assert.Equal(2, store.CountOf(ObjectOperation.PutIfAbsent));
         Assert.Equal(1, store.CountOf(ObjectOperation.Head));

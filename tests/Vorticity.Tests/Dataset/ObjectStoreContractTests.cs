@@ -8,6 +8,7 @@
 // take a factory and know nothing else about the store under them, and the two that ship here --
 // memory and file system -- are simply the first two callers.
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -79,7 +80,10 @@ public sealed class ObjectStoreContractTests : IDisposable
         Assert.Null(await store.HeadAsync("data/none.vortex", default));
         await Assert.ThrowsAsync<ObjectNotFoundException>(
             async () => await store.GetRangeAsync("data/none.vortex", 0, 16, default));
-        Assert.False(await store.DeleteAsync("data/none.vortex", default));
+
+        // Deleting an absent key is not an error, and creates nothing.
+        await store.DeleteAsync(["data/none.vortex"], default);
+        Assert.Null(await store.HeadAsync("data/none.vortex", default));
     }
 
     [Theory]
@@ -130,7 +134,8 @@ public sealed class ObjectStoreContractTests : IDisposable
         await store.PutIfAbsentAsync("data/token", Bytes("first"), default);
         string first = (await store.HeadAsync("data/token", default))!.Value.Token;
 
-        Assert.True(await store.DeleteAsync("data/token", default));
+        await store.DeleteAsync(["data/token"], default);
+        Assert.Null(await store.HeadAsync("data/token", default));
 
         // A file store's token carries the last-write time, whose resolution is the file system's;
         // a different length is what makes this test independent of that resolution.
@@ -159,7 +164,7 @@ public sealed class ObjectStoreContractTests : IDisposable
     public async Task TheMemoryStoreStampsObjectsWithItsOwnClock()
     {
         ManualClock clock = new ManualClock(new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero));
-        await using MemoryObjectStore store = new MemoryObjectStore { Clock = clock };
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
         await store.PutIfAbsentAsync("data/first", Bytes("first"), default);
         clock.Advance(TimeSpan.FromHours(1));
         await store.PutIfAbsentAsync("data/second", Bytes("second"), default);
@@ -207,7 +212,7 @@ public sealed class ObjectStoreContractTests : IDisposable
     {
         await using IObjectStore store = Open(kind);
         await store.PutIfAbsentAsync("data/gone", Bytes("one"), default);
-        Assert.True(await store.DeleteAsync("data/gone", default));
+        await store.DeleteAsync(["data/gone"], default);
         Assert.Null(await store.HeadAsync("data/gone", default));
         Assert.Equal(PutOutcome.Created, await store.PutIfAbsentAsync("data/gone", Bytes("two"), default));
         using ObjectRange range = await store.GetRangeAsync("data/gone", 0, 3, default);
@@ -240,7 +245,7 @@ public sealed class ObjectStoreContractTests : IDisposable
 
         // And the object that is there is one writer's bytes, whole.
         using ObjectRange range = await store.GetRangeAsync("commit/00000000000000000001.vxc", 0, 64, default);
-        Assert.StartsWith("writer ", Encoding.UTF8.GetString(range.Bytes.Span), StringComparison.Ordinal);
+        Assert.StartsWith("writer ", Encoding.UTF8.GetString(range.Bytes), StringComparison.Ordinal);
     }
 
     [Theory]
