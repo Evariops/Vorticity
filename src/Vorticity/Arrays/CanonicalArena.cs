@@ -514,6 +514,12 @@ internal sealed partial class CanonicalArena
     private NativeSegmentOwner[] _owned;
     private int _ownedCount;
 
+    // The 64-bit words ArenaWords has built for a bool node, by node index, until the arena is reset.
+    // Kept beside the records rather than in each of them, so that an arena nobody asks for words
+    // pays nothing for them: sixteen bytes a record is a kilobyte at the default capacity, on every
+    // arena of every scan and every write.
+    private VortexBuffer[]? _words;
+
     private readonly AlignedBufferPool _pool;
 
     /// <summary>Creates an arena backed by <see cref="AlignedBufferPool.Shared"/>.</summary>
@@ -616,6 +622,13 @@ internal sealed partial class CanonicalArena
             NativeSegmentOwner owner = _owned[i];
             _owned[i] = null!;
             _pool.Return(owner);
+        }
+
+        // The words view blocks the loop above has just returned, and a node that takes one of these
+        // indices after the reset is another node.
+        if (_words is not null)
+        {
+            Array.Clear(_words, 0, Math.Min(_recordCount, _words.Length));
         }
 
         _ownedCount = 0;
@@ -1127,6 +1140,24 @@ internal sealed partial class CanonicalArena
         return ref _records[index];
     }
 
+    /// <summary>The words kept for node <paramref name="index"/>, or an empty buffer when none are.</summary>
+    /// <param name="index">The node's index.</param>
+    internal VortexBuffer KeptWords(int index) =>
+        _words is { } words && (uint)index < (uint)words.Length ? words[index] : default;
+
+    /// <summary>Keeps <paramref name="words"/> for node <paramref name="index"/> until the arena is reset.</summary>
+    /// <param name="index">The node's index, below <see cref="NodeCount"/>.</param>
+    /// <param name="words">A block of this arena holding the node's words.</param>
+    internal void KeepWords(int index, VortexBuffer words)
+    {
+        if (_words is null || index >= _words.Length)
+        {
+            Array.Resize(ref _words, _records.Length);
+        }
+
+        _words[index] = words;
+    }
+
     internal int ChildAt(int slot)
     {
         if ((uint)slot >= (uint)_childCount)
@@ -1591,10 +1622,10 @@ internal sealed partial class CanonicalArena
         // record with a live memo anyway, since the memo is written through `RecordRefMutable`
         // after the commit that issued the index.
         //
-        // The word memo goes for the same reason and a worse outcome: it is a view onto a block the
-        // issuing arena rented, so a copy that kept it would read that arena's next batch.
+        // The words ArenaWords builds are not part of the record, so a copy cannot carry them: they
+        // view a block the issuing arena rented, and a copy that kept them would read that arena's
+        // next batch.
         record.Materialized = -1;
-        record.Words = default;
 
         int index = _recordCount;
         _records[index] = record;
@@ -1625,12 +1656,6 @@ internal struct CanonicalRecord
     /// contiguous span. -1 until then.
     /// </summary>
     internal int Materialized;
-
-    /// <summary>
-    /// The node's validity, or a bool node's own bits, as 64-bit words from bit 0 with the bits past
-    /// the length cleared: computed on the first request and kept until the arena is reset.
-    /// </summary>
-    internal VortexBuffer Words;
 
     internal CanonicalKind Kind;
     internal PType PType;

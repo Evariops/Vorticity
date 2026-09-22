@@ -54,20 +54,21 @@ internal static class ArenaWords
     {
         node = arena.Decoded(node);
         ref readonly CanonicalRecord record = ref arena.RecordRef(node);
+        VortexBuffer kept = arena.KeptWords(node);
         if (record.Kind == CanonicalKind.Constant)
         {
             bool value = record.BufferA.Span[0] != 0;
-            if (!record.Words.IsEmpty)
+            if (!kept.IsEmpty)
             {
-                return record.Words.Cast<ulong>();
+                return kept.Cast<ulong>();
             }
 
             return Cached(arena, cacheOn: node, record.Length, bits: default, bitOffset: 0, fill: value);
         }
 
-        if (!record.Words.IsEmpty)
+        if (!kept.IsEmpty)
         {
-            return record.Words.Cast<ulong>();
+            return kept.Cast<ulong>();
         }
 
         return Cached(arena, cacheOn: node, record.Length, record.BufferA.Span, record.BitOffset, fill: true);
@@ -168,7 +169,7 @@ internal static class ArenaWords
 
         if (cacheOn >= 0)
         {
-            arena.RecordRefMutable(cacheOn).Words = buffer;
+            arena.KeepWords(cacheOn, buffer);
         }
 
         return destination;
