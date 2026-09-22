@@ -1,116 +1,151 @@
 # Dataset maintenance
 
-Compact, vacuum, verify, and what each costs.
-
-Appending to a dataset is cheap and leaves it in a poor shape: many small objects, and every old
-version still holding its own. The three operations here are how it is put back in order.
-
-## Compaction
-
-Ten appends of 5 000 rows:
-
-```
-after 10 appends: version 11, 50000 rows, 10 objects, depth 1, lag 2
-  level 0: 10 entries, 50000 rows
-```
-
-`Lag` is how far past its ceiling level zero has drifted — it holds eight objects before compaction
-has anything to do. Ask before doing:
+Compact, vacuum and verify a dataset, and what each costs in requests.
 
 ```csharp
+await using CountingObjectStore store = new CountingObjectStore(new MemoryObjectStore(), ownsInner: true);
+await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions
+{
+    ClusteringKey = [Reading.ColumnNames.Day],
+});
+
+const int Appends = 10;
+for (int i = 0; i < Appends; i++)
+{
+    await using ObjectDraft draft = dataset.StartObject();
+    await draft.Writer.WriteAsync<Reading>(Rows(i * 5_000, 5_000));
+    await dataset.AppendAsync(draft);
+}
+
+store.Reset();
 CompactionPlan plan = await dataset.PlanCompactionAsync();
 ```
 
 ```
-the plan: work to do True, style Leveled, clustered True, lag 2, fragmented 0
-  objects by level [10], bytes by level [305440]
-  job: level 0 to 1, trigger LevelZeroCeiling, 10 inputs, 50000 rows, 305440 bytes, target 268435456
+after 10 appends: version 11, 50000 rows, 10 objects, lag 2
+plan: work True, style Leveled, clustered True, lag 2, objects by level [10], bytes by level [128962]
+  job: level 0 to 1, LevelZeroCeiling, 10 objects, 50000 rows, 128962 bytes, target 268435456
+  cost: 0 requests (0 get, 0 head, 0 put, 0 delete, 0 list), 0 dependent steps, 0 bytes read, 0 written
 ```
 
-`HasWork` is the question; `Job` is the one job it would run, with the level it moves from and to,
-what triggered it, and the bytes involved. Then:
+Appending is cheap and leaves a dataset in poor shape: many small objects, and every old version
+still holding its own. The three operations here put it back in order. None of them runs by
+itself: they are the caller's background job, and the dataset only reports how far behind it is.
+Like everything in `Vorticity.Dataset`, they are experimental: see [datasets.md](datasets.md).
+
+## Compaction
+
+Level 0 is where appends land, and it holds eight objects before compaction has work to do. `Lag`
+is how far past that ceiling it is: here ten objects, a lag of 2, and every lookup by key touches
+the two extra objects until compaction catches up. Ask before doing: `PlanCompactionAsync` reads
+the version's own header, which the handle already holds, and costs no request at all. `HasWork`
+is the question; `Job` is the one job it would run: the levels it moves between, what triggered
+it, the objects, rows and bytes it would read, and the size of the objects it would write.
 
 ```csharp
-CompactionResult result = await dataset.CompactAsync();
+CompactionResult? compacted = await dataset.CompactAsync();
 ```
 
 ```
-compacted: version 12, outcome Applied, level 0 to 1, 10 objects in and 1 out,
-           305440 bytes in and 92382 out, 50000 rows
-now: 1 objects, depth 0, lag 0
+compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128962 bytes in and 82950 out, 50000 rows
+  cost: 56 requests (42 get, 10 head, 2 put, 0 delete, 2 list), 56 dependent steps, 232716 bytes read, 83563 written
+now: 1 objects, lag 0; again: nothing to do
 ```
 
-**Ten objects became one, and 305 440 bytes became 92 382** — a third of the size for the same
-50 000 rows. That is not compaction overhead being reclaimed: it is what a column encoder can do
-with 50 000 rows that it cannot do with 5 000 at a time. Small appends cost size, and compaction is
-what gets it back.
+**Ten objects became one, and 128 962 bytes became 82 950**: the same 50 000 rows in two thirds of
+the space, because a column encoder does more with 50 000 rows than with 5 000 at a time. Small
+appends cost size, and compaction is what gets it back.
 
-`CompactAsync` returns `null` when there is nothing to do, and `Outcome` says whether the commit was
-applied or lost a race.
-
-## Vacuum
-
-Old versions keep their objects. Vacuum deletes what no retained version needs:
-
-```csharp
-VacuumResult dry = await dataset.VacuumAsync(new VacuumOptions { DryRun = true });
-```
-
-```
-vacuum today: 0 would go, 0 too young, 12 versions retained, window 7.00:00:00
-```
-
-Nothing goes, because every version is inside the retention window of seven days. A week later, on
-the same dataset:
-
-```
-vacuum in eight days, dry run: 21 would go, 0 too young, 1 retained, 1 pages read
-vacuum in eight days: 21 deleted, latest version 12
-```
-
-Twenty-one objects, one version kept. `VacuumOptions.Clock` is the `TimeProvider` it asks, which is
-how the figures above were measured and how you test your own retention. `RepackBelow` also asks it
-to rewrite objects that have become mostly dead rows.
-
-**Always `DryRun` first.** `Deleted`, `Young`, `Retained` and `Sparse` say exactly what would go.
+`CompactAsync` runs one job and returns `null` when none is due, so a caller that wants the
+dataset back within its bounds loops until it does, rather than having one call rewrite
+gigabytes. With a clustering key the style is `Leveled`: the levels above 0 hold key-disjoint
+objects, so a lookup by key touches at most one object per level. Without one it is `Tiered`,
+which rewrites each row less often and bounds lookups less. `CompactionOptions` moves the level 0
+ceiling, the fan-out between levels, the size of a level 1 object and the cap on an output object.
+`Outcome` says whether the commit applied, or found that a concurrent writer had already done it.
 
 ## Verify
 
 ```csharp
-DatasetVerification check = await dataset.VerifyAsync();
+DatasetVerification verified = await dataset.VerifyAsync();
+DatasetVerification since = await dataset.VerifyAsync(since: checkedAt);
 ```
 
 ```
-verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems
+verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 13 requests (10 get, 3 head, 0 put, 0 delete, 0 list), 13 dependent steps, 150615 bytes read, 0 written
+verify since 12: holds True, 1 objects, 1 pages; cost: 12 requests (9 get, 3 head, 0 put, 0 delete, 0 list), 12 dependent steps, 28850 bytes read, 0 written
 ```
 
-It walks the commit tree and checks every object against the hash the tree records for it.
-`Problems` is a list of sentences, empty when `Holds` is true, and `Unhashed` counts what could not
-be checked because nothing recorded a hash. `VerifyOptions.Since` limits it to versions after one
-you already trust, which is what makes it affordable to run often.
+`VerifyAsync` checks the version's tree pages, objects and index fragments against what their
+references promise, and names every problem instead of throwing: `Problems` is a list of
+sentences, empty when `Holds` is true. An object is hashed against the hash its entry records;
+`Unhashed` counts the imported objects whose entry records none, whose length is checked instead.
+`since` skips what an earlier, trusted version shares with this one: after one more append, it
+read 28 850 bytes where a full verification read 150 615.
+
+## Vacuum
+
+Old versions keep their objects readable. Vacuum deletes what no version inside the retention
+window references:
+
+```csharp
+VacuumResult today = await dataset.VacuumAsync(new VacuumOptions { DryRun = true });
+
+VacuumOptions later = new VacuumOptions { TimeProvider = new Later(TimeSpan.FromDays(8)), DryRun = true };
+VacuumResult dry = await dataset.VacuumAsync(later);
+VacuumResult done = await dataset.VacuumAsync(later with { DryRun = false });
+```
+
+```
+vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 29 requests (13 get, 13 head, 0 put, 0 delete, 3 list), 29 dependent steps, 22850 bytes read, 0 written
+vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 28 requests (2 get, 23 head, 0 put, 0 delete, 3 list), 28 dependent steps, 888 bytes read, 0 written
+vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 30 requests (2 get, 23 head, 0 put, 2 delete, 3 list), 30 dependent steps, 888 bytes read, 0 written
+and the data: 55000 rows, 2 objects
+```
+
+Today nothing goes: every version is younger than the window, seven days unless
+`DatasetOptions.RetentionWindow` said otherwise when the dataset was created, and
+`RetainedVersions` keeps a number of versions whatever their age. Eight days later only the latest
+version is kept, and 21 objects go: the ten data objects compaction replaced, and eleven of the
+twelve superseded commit objects, the twelfth still holding pages the latest version reads. `VacuumOptions.TimeProvider` is the clock vacuum measures ages against, which is
+how the sample crosses the window and how you test your own retention; it must agree with the
+store's clock, because the ages it compares are the store's timestamps. The deletes go out in
+batches, two requests for twenty-one keys here.
+
+**Run a dry run first.** `Deleted` lists what would go, commit objects first, `Young` the
+unreferenced objects kept because they may belong to a writer still in flight, and `Retained` the
+versions kept.
 
 ## What each costs
 
-| | in requests |
-|---|---|
-| `PlanCompactionAsync` | reads the commit tree only |
-| `CompactAsync` | reads every input object, writes one, commits once |
-| `VacuumAsync` | walks the retained versions' trees, then one delete per object |
-| `VerifyAsync` | reads every object's head, and its pages when hashing |
+Measured above with `CountingObjectStore`, on a dataset of one object after compaction:
 
-A `CountingObjectStore` around your store prices any of them exactly — see
+| | requests | what they are |
+|---|---|---|
+| `PlanCompactionAsync` | 0 | the header the handle holds |
+| `CompactAsync` | 56 | every input object read, one object written, one commit |
+| `VerifyAsync` | 13 | every object hashed, every page read |
+| `VerifyAsync(since)` | 12 | what the earlier version does not share |
+| `VacuumAsync` | 28 to 30 | a listing, a head per commit object, the retained trees, the deletes in batches |
+
+`DependentSteps` is the number that decides latency: the round trips that waited for the one
+before. On a store where a request costs 30 ms, it is what a job takes. See
 [object-store.md](object-store.md).
 
 ## Watch out
 
-* Compaction and vacuum are **separate**: compaction leaves the old objects in place for the old
-  versions, and vacuum is what removes them.
-* Both are ordinary commits, so a concurrent writer can win the race and either can come back
-  having done nothing. Look at `Outcome`.
-* Nothing here changes the data: after all three, the same 50 000 rows read back.
+* **Compaction and vacuum are separate.** Compaction leaves the replaced objects in place for the
+  versions that still name them; vacuum removes them once those versions are past the window.
+* **A reader that outlives the window loses its objects.** Vacuum marks from the store's latest
+  version, not from yours: a handle still on an old version then finds an object missing, and
+  `ObjectNotFoundException` says to refresh.
+* Compaction commits like any writer, so a concurrent writer can win the race; look at `Outcome`.
+  Vacuum deletes only what no retained version references, and deletes nothing until every
+  retained version is marked.
+* Nothing here changes the data: after all three, the same rows read back.
 
 ## Run it
 
 ```
-dotnet run --project samples/Vorticity.Samples -- dataset-maintenance
+dotnet run -c Release --project samples/Vorticity.Samples -- dataset-maintenance
 ```

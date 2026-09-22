@@ -2,21 +2,9 @@
 
 Publish an application that uses this library ahead of time.
 
-The library is built for it: no reflection and no assembly scanning. The decoder table is a static
-constructor that names every decoder explicitly, so a trimmer keeps what is reachable and nothing is
-resolved by name at run time.
-
-One thing does run at load: a module initializer that refuses a big-endian host, because the reader
-casts file buffers directly and would otherwise hand back byte-swapped values. It is a single branch
-and it throws `PlatformNotSupportedException` rather than reading wrong data.
-
-## Your application
-
 ```xml
 <PropertyGroup>
   <PublishAot>true</PublishAot>
-  <PublishTrimmed>true</PublishTrimmed>
-  <TrimMode>full</TrimMode>
   <InvariantGlobalization>true</InvariantGlobalization>
 </PropertyGroup>
 ```
@@ -25,53 +13,74 @@ and it throws `PlatformNotSupportedException` rather than reading wrong data.
 dotnet publish -c Release -r linux-x64
 ```
 
-Nothing else is required. `Vorticity` ships with `IsAotCompatible` and `IsTrimmable` set, so the
-analyzers run against your code as well and an `IL2xxx` or `IL3xxx` warning tells you which of your
-own calls is the problem.
+Nothing else is required. The three libraries are built with `IsAotCompatible` and `IsTrimmable`,
+so the trim and AOT analyzers run over your code when you publish, and an `IL2xxx` or `IL3xxx`
+warning names the call of yours that is the problem. `InvariantGlobalization` is an application's
+choice, not a library's: set it if your application can live without culture data. vxdump and the
+samples set it.
 
-`InvariantGlobalization` is an application property, not a library one: set it in your project if
-you want it, and never expect a library to have decided it for you.
+## What makes it possible
 
-## What it buys
+Ahead-of-time compilation needs to see, at publish time, every type and every generic
+instantiation the program will use. The surface is built so that it can:
 
-`vxdump`, the tool in this repository, is the proof and the example. Published for arm64 on a
-laptop:
+* **A record is compiled, not discovered.** `[VortexRecord]` runs in the compiler and writes
+  `Schema`, `ReadRows` and `WriteRows` into the type as static members of `IVortexRecord<T>`. The
+  library calls them through the constraint `where TRecord : IVortexRecord<TRecord>`, so
+  `file.Scan<Order>()` and `writer.WriteAsync<Order>(rows)` are ordinary generic code over a type
+  the compiler knows. Nothing reads a member by name, builds a delegate or emits code at run time.
+  A record written by hand works the same way ([records.md](records.md)).
+* **A filter is data, not an expression tree.** The lambda given to `Where` runs once over a
+  `Probe<T>`, and its `Sym<T>` operators record a predicate. There is no `Expression<T>` to
+  compile, so there is nothing an interpreter would have to stand in for.
+* **An extension type is a generic registration.** `o.Extensions.Register<Money>()` reaches
+  `Money`'s static members through `IVortexExtension<Money>`; no type is activated by name.
+* **The decoders are a table.** Every encoding the library reads is registered by a static
+  constructor that names each decoder, so the trimmer keeps what is reachable and nothing is
+  resolved from an id string by reflection.
+* **The generator is a build-time dependency.** It ships as an analyzer and never loads in your
+  process.
 
-| | |
-|---|---|
-| the binary | 5 032 280 bytes, self-contained |
-| startup, ahead of time | 0 to 10 ms |
-| startup, on the shared runtime | 30 to 50 ms |
+One path reflects, and it is guarded: a caller's aggregator that implements
+`IEncodedAggregator<T, TState>` has its encoded steps reached through `MakeGenericMethod` when
+the runtime can compile code, and under Native AOT it takes its canonical `Step` instead, on
+decoded values. The answer is the same, the decode is not skipped. See
+[aggregates.md](aggregates.md).
 
-Thirty milliseconds per invocation is nothing inside a server and everything in a tool that runs
-once per file over a directory of ten thousand.
+One check runs at load: a module initializer refuses a big-endian host with
+`PlatformNotSupportedException`, because the reader casts file buffers directly and would
+otherwise return byte-swapped values.
 
-## What CI proves on every pull request
+## vxdump is the proof
 
-The publish is done with warnings as errors, so a reflection-shaped mistake fails the build rather
-than being scrolled past. Then the published binary opens **every file of the conformance corpus**
-and walks its layout tree: 855 of 856 open, and the one refusal is a file that embeds no schema and
-so cannot be opened without one supplied.
+A library cannot prove it is AOT-clean; an executable that uses it can. vxdump, the inspection
+tool in this repository, is written against the public surface alone and is published ahead of
+time with `PublishAot`, `PublishTrimmed`, `TrimMode` full and warnings as errors, so a
+reflection-shaped mistake fails the publish rather than scrolling past. The CI job then opens
+**every file of the conformance corpus** with the published binary, `--all`, and fails if more than
+one is refused; the one refusal is a file that embeds no schema, which cannot be opened without
+one supplied. That pair, a clean publish and a run over real files, is what lets this page say the
+library works under Native AOT rather than believe it.
 
-A separate step runs `--row-keys` over the corpus, because the row encoder is generic over eleven
-value types and dispatches through static abstract interface members — the shape most likely to
-compile clean and then fail to find an instantiation at run time. That it scans as well means it
-also meets encodings no pinned edition carries.
+```
+dotnet publish tools/vxdump -c Release -r linux-x64
+tools/vxdump/bin/Release/net11.0/linux-x64/publish/vxdump readings.vortex --all
+```
 
-That pair is what lets this page say the library is AOT-clean rather than believe it.
+What it buys is startup. On the shared runtime, vxdump spends about 60 ms from start to exit on
+`--schema` over the demonstration file, most of it the runtime starting and the first calls being
+compiled. That is nothing inside a server and everything in a tool that runs once per file over a
+directory of ten thousand; a native binary starts without either.
 
 ## Watch out
 
-* **A library cannot prove it is AOT-clean; an executable can.** If you build one, publish it
-  ahead of time in your own CI and run it over real files. A trim warning at publish is cheap; a
-  missing instantiation at run time in production is not.
-* `Vorticity.RowEncoding` is the part to exercise hardest under AOT, for the reason above.
-* Trimming and AOT are separate switches. `PublishTrimmed` alone already removes what nothing
-  reaches, and is worth having even where AOT is not an option.
-
-## Run it
-
-```
-dotnet publish tools/vxdump -c Release -r osx-arm64
-./tools/vxdump/bin/Release/net11.0/osx-arm64/publish/vxdump <file.vortex> --all
-```
+* **Publish your own executable ahead of time in your CI, and run it over real files.** A trim
+  warning at publish is cheap; a missing instantiation in production is not.
+* **Generic code you write over records stays generic.** A method of yours that takes a
+  `TRecord : IVortexRecord<TRecord>` is compiled for each record it is called with, which is what
+  you want, as long as every call site names a concrete record type the compiler can see.
+* A timestamp column with a named zone resolves it with `TimeZoneInfo.FindSystemTimeZoneById`
+  once, at open. A host without time zone data, such as a minimal container image, cannot resolve
+  it, and the column then binds only as its `long` storage, not as `DateTimeOffset`.
+* Trimming and AOT are separate switches: `PublishTrimmed` alone already removes what nothing
+  reaches, and is worth having where AOT is not an option.
