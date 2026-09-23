@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections;
 using System.Collections.Generic;
@@ -31,6 +32,10 @@ internal sealed class StringZones : IReadOnlyList<ZoneString>
     private StringBounds? _open;
     private byte[] _chunk = [];
     private int _chunkUsed;
+
+    /// <summary>Every chunk rented so far, to give back at <see cref="Release"/>.</summary>
+    private byte[][] _chunks = [];
+    private int _chunkCount;
 
     /// <param name="limit">The byte limit; at least 1.</param>
     internal StringZones(int limit) => Limit = limit;
@@ -80,14 +85,50 @@ internal sealed class StringZones : IReadOnlyList<ZoneString>
             // The chunk before stays where it is: the slices already handed out point into it. The
             // first holds one zone's two bounds, which is all a column of one block ever needs.
             int first = 2 * (Limit + 1);
-            _chunk = new byte[Math.Max(bytes.Length, Math.Min(Math.Max(_chunk.Length * 2, first), MaxChunk))];
+            _chunk = ArrayPool<byte>.Shared.Rent(Math.Max(bytes.Length, Math.Min(Math.Max(_chunk.Length * 2, first), MaxChunk)));
             _chunkUsed = 0;
+            if (_chunkCount == _chunks.Length)
+            {
+                byte[][] grown = ArrayPool<byte[]>.Shared.Rent(Math.Max(4, _chunks.Length * 2));
+                _chunks.AsSpan(0, _chunkCount).CopyTo(grown);
+                if (_chunks.Length != 0)
+                {
+                    ArrayPool<byte[]>.Shared.Return(_chunks, clearArray: true);
+                }
+
+                _chunks = grown;
+            }
+
+            _chunks[_chunkCount++] = _chunk;
         }
 
         Memory<byte> slice = _chunk.AsMemory(_chunkUsed, bytes.Length);
         bytes.CopyTo(slice.Span);
         _chunkUsed += bytes.Length;
         return slice;
+    }
+
+    /// <summary>
+    /// Gives the chunks and the list back to the shared pools, once the file is done: the bounds
+    /// handed out are slices of those chunks, and nothing reads them any more.
+    /// </summary>
+    internal void Release()
+    {
+        _closed.Release();
+        for (int i = 0; i < _chunkCount; i++)
+        {
+            ArrayPool<byte>.Shared.Return(_chunks[i]);
+        }
+
+        if (_chunks.Length != 0)
+        {
+            ArrayPool<byte[]>.Shared.Return(_chunks, clearArray: true);
+        }
+
+        _chunks = [];
+        _chunkCount = 0;
+        _chunk = [];
+        _chunkUsed = 0;
     }
 
     /// <summary>Closed blocks, once <see cref="All"/> has vouched that every one has its bounds.</summary>

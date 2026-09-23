@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
@@ -19,6 +20,8 @@ namespace Vorticity.Writing;
 /// behind -- ten arrays for a column of 1 280 blocks, the last two past the large object threshold
 /// -- while this one keeps the full array as its first segment and adds segments of 64, 128, 256
 /// and then 512 entries, never copying one: under half the bytes at that length, none of them large.
+/// Every array comes from the shared pools and goes back to them at <see cref="Release"/>, so a
+/// process that writes file after file grows its lists in the same arrays.
 /// </remarks>
 /// <typeparam name="T">The entry.</typeparam>
 internal sealed class AppendList<T> : IReadOnlyList<T>
@@ -70,7 +73,7 @@ internal sealed class AppendList<T> : IReadOnlyList<T>
             T[]? single = Unsafe.As<T[]?>(_store);
             if (single is null || index == single.Length)
             {
-                Array.Resize(ref single, single is null ? FirstLength : single.Length * 2);
+                single = Grow(single, index);
                 _store = single;
             }
 
@@ -86,17 +89,81 @@ internal sealed class AppendList<T> : IReadOnlyList<T>
             {
                 if (segment == segments.Length)
                 {
-                    Array.Resize(ref segments, segments.Length * 2);
+                    T[][] grown = ArrayPool<T[]>.Shared.Rent(segments.Length * 2);
+                    segments.AsSpan().CopyTo(grown);
+                    ArrayPool<T[]>.Shared.Return(segments, clearArray: true);
+                    segments = grown;
                     _store = segments;
                 }
 
-                segments[segment] = new T[Length(segment)];
+                segments[segment] = ArrayPool<T>.Shared.Rent(Length(segment));
             }
 
             segments[segment][offset] = item;
         }
 
         _count = index + 1;
+    }
+
+    /// <summary>
+    /// Gives every array back to the shared pools and empties the list; for a writer that is done
+    /// with the file, whose next file then grows its lists in the same arrays.
+    /// </summary>
+    internal void Release()
+    {
+        object? store = _store;
+        int count = _count;
+        _store = null;
+        _count = 0;
+        if (store is null)
+        {
+            return;
+        }
+
+        if (count <= 1 << SingleShift)
+        {
+            Give(Unsafe.As<T[]>(store));
+            return;
+        }
+
+        T[][] segments = Unsafe.As<T[][]>(store);
+        for (int i = 0; i < segments.Length && segments[i] is { } segment; i++)
+        {
+            Give(segment);
+        }
+
+        ArrayPool<T[]>.Shared.Return(segments, clearArray: true);
+    }
+
+    /// <summary>The single array, twice as long, holding its <paramref name="count"/> entries; the old one goes back.</summary>
+    /// <remarks>
+    /// Below <see cref="PooledLength"/> the array is the list's own: the pools hand out nothing
+    /// shorter, and a schema of a thousand one-block columns would take a thousand of their
+    /// shortest arrays, four times the entries it needs and more arrays than they keep.
+    /// </remarks>
+    private static T[] Grow(T[]? single, int count)
+    {
+        int length = single is null ? FirstLength : single.Length * 2;
+        T[] grown = length < PooledLength ? new T[length] : ArrayPool<T>.Shared.Rent(length);
+        if (single is not null)
+        {
+            single.AsSpan(0, count).CopyTo(grown);
+            Give(single);
+        }
+
+        return grown;
+    }
+
+    /// <summary>The shortest array the shared pools hand out, below which the list keeps its own.</summary>
+    private const int PooledLength = 16;
+
+    /// <summary>Returns <paramref name="array"/> to the shared pool when it came from there.</summary>
+    private static void Give(T[] array)
+    {
+        if (array.Length >= PooledLength)
+        {
+            ArrayPool<T>.Shared.Return(array, RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+        }
     }
 
     /// <inheritdoc/>
@@ -113,7 +180,7 @@ internal sealed class AppendList<T> : IReadOnlyList<T>
     /// <summary>The full single array, now the first of the segments.</summary>
     private T[][] Segmented()
     {
-        T[][] segments = new T[8][];
+        T[][] segments = ArrayPool<T[]>.Shared.Rent(8);
         segments[0] = Unsafe.As<T[]>(_store!);
         _store = segments;
         return segments;

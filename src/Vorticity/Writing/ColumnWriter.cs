@@ -353,6 +353,41 @@ internal sealed class ColumnWriter
         }
     }
 
+    /// <summary>
+    /// Gives back everything the column kept per block and the open block's scratch, its children's
+    /// too, once the file is done: its lists grow the next file's in the same arrays.
+    /// </summary>
+    internal void Release()
+    {
+        for (int i = 0; i < _widths.Count; i++)
+        {
+            ref int[]? widths = ref _widths.At(i);
+            if (widths is not null)
+            {
+                ArrayPool<int>.Shared.Return(widths);
+                widths = null;
+            }
+        }
+
+        if (_openWidths is not null)
+        {
+            ArrayPool<int>.Shared.Return(_openWidths);
+            _openWidths = null;
+        }
+
+        _closed.Release();
+        _widths.Release();
+        _tableAtClose.Release();
+        _stringZones?.Release();
+        if (_children is { } children)
+        {
+            for (int i = 0; i < children.Length; i++)
+            {
+                children[i].Release();
+            }
+        }
+    }
+
     internal DistinctTable? Table => _table;
 
     /// <summary>
