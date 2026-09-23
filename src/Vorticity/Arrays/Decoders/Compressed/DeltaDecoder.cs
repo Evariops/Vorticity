@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 using Vorticity.Arrays.Decoders.Canonical;
 
@@ -233,12 +234,18 @@ internal sealed class DeltaDecoder : ArrayDecoder
             for (int b = firstBlock; b <= lastBlock; b++)
             {
                 ReadOnlySpan<T> deltaBlock = deltaValues.Slice(b * BlockSize, BlockSize);
-                baseValues.Slice(b * lanes, lanes).CopyTo(running);
-
-                for (int row = 0; row < rowsPerLane; row++)
+                if (Vector128.IsHardwareAccelerated && lanes == 8 * Vector128<T>.Count)
                 {
-                    int at = (order[row >> 3] * 16) + ((row & 7) * 128);
-                    Accumulate(running, deltaBlock.Slice(at, lanes), block.Slice(at, lanes));
+                    AccumulateInRegisters(baseValues.Slice(b * lanes, lanes), deltaBlock, block, rowsPerLane);
+                }
+                else
+                {
+                    baseValues.Slice(b * lanes, lanes).CopyTo(running);
+                    for (int row = 0; row < rowsPerLane; row++)
+                    {
+                        int at = (order[row >> 3] * 16) + ((row & 7) * 128);
+                        Accumulate(running, deltaBlock.Slice(at, lanes), block.Slice(at, lanes));
+                    }
                 }
 
                 // Untranspose on the way out: the prefix sum runs in FastLanes' transposed space, so
@@ -266,6 +273,51 @@ internal sealed class DeltaDecoder : ArrayDecoder
         {
             laneScratch.Dispose();
             blockScratch.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The block's prefix sums with every lane's running sum held in a register: a block's lanes
+    /// are 1 024 bits whatever the width, eight 128-bit vectors, so each row is eight loads, eight
+    /// adds and eight stores, where the running sums would otherwise be loaded and stored back
+    /// every row.
+    /// </summary>
+    private static void AccumulateInRegisters<T>(ReadOnlySpan<T> bases, ReadOnlySpan<T> deltaBlock, Span<T> block, int rowsPerLane)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        nuint step = (nuint)Vector128<T>.Count;
+        ref T start = ref MemoryMarshal.GetReference(bases);
+        Vector128<T> r0 = Vector128.LoadUnsafe(ref start);
+        Vector128<T> r1 = Vector128.LoadUnsafe(ref start, step);
+        Vector128<T> r2 = Vector128.LoadUnsafe(ref start, 2 * step);
+        Vector128<T> r3 = Vector128.LoadUnsafe(ref start, 3 * step);
+        Vector128<T> r4 = Vector128.LoadUnsafe(ref start, 4 * step);
+        Vector128<T> r5 = Vector128.LoadUnsafe(ref start, 5 * step);
+        Vector128<T> r6 = Vector128.LoadUnsafe(ref start, 6 * step);
+        Vector128<T> r7 = Vector128.LoadUnsafe(ref start, 7 * step);
+
+        ref T delta = ref MemoryMarshal.GetReference(deltaBlock);
+        ref T into = ref MemoryMarshal.GetReference(block);
+        ref byte order = ref MemoryMarshal.GetReference(FastLanes.Order);
+        for (int row = 0; row < rowsPerLane; row++)
+        {
+            nuint at = (nuint)((Unsafe.Add(ref order, row >> 3) * 16) + ((row & 7) * 128));
+            r0 += Vector128.LoadUnsafe(ref delta, at);
+            r0.StoreUnsafe(ref into, at);
+            r1 += Vector128.LoadUnsafe(ref delta, at + step);
+            r1.StoreUnsafe(ref into, at + step);
+            r2 += Vector128.LoadUnsafe(ref delta, at + (2 * step));
+            r2.StoreUnsafe(ref into, at + (2 * step));
+            r3 += Vector128.LoadUnsafe(ref delta, at + (3 * step));
+            r3.StoreUnsafe(ref into, at + (3 * step));
+            r4 += Vector128.LoadUnsafe(ref delta, at + (4 * step));
+            r4.StoreUnsafe(ref into, at + (4 * step));
+            r5 += Vector128.LoadUnsafe(ref delta, at + (5 * step));
+            r5.StoreUnsafe(ref into, at + (5 * step));
+            r6 += Vector128.LoadUnsafe(ref delta, at + (6 * step));
+            r6.StoreUnsafe(ref into, at + (6 * step));
+            r7 += Vector128.LoadUnsafe(ref delta, at + (7 * step));
+            r7.StoreUnsafe(ref into, at + (7 * step));
         }
     }
 
