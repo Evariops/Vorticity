@@ -790,7 +790,7 @@ internal static class Report
     /// </summary>
     private static string Reading(List<Row> table)
     {
-        List<Row> compared = [.. table.Where(r => r.Aot is not null && r.Theirs is not null)];
+        List<Row> compared = [.. table.Where(r => RatioOf(r) > 0)];
         StringBuilder text = new StringBuilder();
         text.AppendLine("## Reading it");
         text.AppendLine();
@@ -825,9 +825,9 @@ internal static class Report
                 continue;
             }
 
-            Row best = at.MaxBy(RatioOf)!;
-            Row worst = at.MinBy(RatioOf)!;
-            int ahead = at.Count(r => RatioOf(r) > 1);
+            Row best = at.MinBy(RatioOf)!;
+            Row worst = at.MaxBy(RatioOf)!;
+            int ahead = at.Count(r => RatioOf(r) < 1);
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                 $"**{(cores == Cores.One ? "On one core" : $"On all {Environment.ProcessorCount} cores")}.** Of {at.Count} compared rows, the native build took less time than"));
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
@@ -837,7 +837,7 @@ internal static class Report
             text.AppendLine();
         }
 
-        text.AppendLine("A ratio is the reference's time over the native build's: above 1.00x, we took less.");
+        text.AppendLine("A ratio is the native build's time over the reference's: under 1.00x, we took less.");
         text.AppendLine();
 
         List<Row> refused = [.. table.Where(r => r.Scenario.Reference is not null && r.Theirs is null)];
@@ -887,17 +887,19 @@ internal static class Report
         return text.ToString();
     }
 
+    /// <summary>
+    /// Our native build's action time over the reference's, the direction of every ratio in the
+    /// bench: under 1.00x, we took less. 0 when either side has no time to divide.
+    /// </summary>
     private static double RatioOf(Row row) =>
-        row.Theirs is null || row.Aot is null || row.Aot.WorkMs.Median <= 0
+        row.Theirs is null || row.Aot is null || row.Theirs.WorkMs.Median <= 0
             ? 0
-            : row.Theirs.WorkMs.Median / row.Aot.WorkMs.Median;
+            : row.Aot.WorkMs.Median / row.Theirs.WorkMs.Median;
 
-    /// <summary>The reference's action time over our native build's: above 1.00x, we took less.</summary>
     private static string Ratio(Row row) =>
-        row.Theirs is null || row.Aot is null || row.Aot.WorkMs.Median <= 0
-            ? "n/a"
-            : string.Create(CultureInfo.InvariantCulture,
-                $"{row.Theirs.WorkMs.Median / row.Aot.WorkMs.Median:F2}x");
+        RatioOf(row) is > 0 and double ratio
+            ? string.Create(CultureInfo.InvariantCulture, $"{ratio:F2}x")
+            : "n/a";
 
     private static string First(string message)
     {
@@ -911,7 +913,7 @@ internal static class Report
             $"{runs} runs of each scenario, each in its own process, the median reported with the " +
             $"lowest and highest beside it; one discarded run before them.\n" +
             $"Figures are the action's time inside the process, from its own clock; the process start is reported apart.\n" +
-            $"Ratio is the reference's time over our Native AOT build's: above 1.00x, we took less.\n" +
+            $"Ratio is our Native AOT build's time over the reference's: under 1.00x, we took less.\n" +
             $"machine: {Processor()} ({RuntimeInformation.OSArchitecture}), " +
             $"{Environment.ProcessorCount} processors, {RuntimeInformation.OSDescription}\n" +
             $"runtime: {RuntimeInformation.FrameworkDescription}, as Native AOT for this instruction set and on the JIT; " +
