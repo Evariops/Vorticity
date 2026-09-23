@@ -565,6 +565,7 @@ Vorticity:     property long SampleRows { get; init; }
 Vorticity:     property long StorageBytesPerSecond { get; init; }
 Vorticity: enum Vorticity.EncodingHint
 Vorticity:     const EncodingHint Alp = 6
+Vorticity:     const EncodingHint AlpRd = 9
 Vorticity:     const EncodingHint Auto = 0
 Vorticity:     const EncodingHint BitPacked = 4
 Vorticity:     const EncodingHint Canonical = 1

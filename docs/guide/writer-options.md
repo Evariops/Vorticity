@@ -93,6 +93,11 @@ A hint is a preference, and the report is where you find out whether it held:
   column one percent true reads twelve times faster than its runs.
 * **A hint that does not apply falls back** to what `Auto` would have chosen, as bit-packing on
   floating-point values does.
+* **`AlpRd` is the hint for floats with no short decimal form**, measurements or ratios that `Alp`
+  refuses: their high bits go to a dictionary of eight and the rest are bit-packed. `Auto` keeps
+  zstd on such a column whenever zstd saves a tenth on it, since the file would otherwise grow; the
+  split reads and writes several times faster than zstd, for several times its bytes, which pays on
+  a local disk and not over a slow network. `VortexSession.AdviseAsync` measures both on your data.
 * **Every profile takes the hint**, `Smallest` included, and prices the columns without one.
 * `Auto` is not the smallest: zstd shrank `Celsius` threefold, and `City` by a fifth. `Auto` weighs
   decode speed too, and a zstd block must be inflated whole before one value is read. Take such a

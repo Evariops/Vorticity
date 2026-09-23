@@ -282,7 +282,7 @@ internal static class EncodingAdvisor
     private static EncodingHint[] HintsFor(ColumnKind kind) => kind switch
     {
         ColumnKind.Integer => [EncodingHint.Canonical, EncodingHint.Dictionary, EncodingHint.BitPacked, EncodingHint.Zstd],
-        ColumnKind.Float => [EncodingHint.Canonical, EncodingHint.Dictionary, EncodingHint.Alp, EncodingHint.Zstd],
+        ColumnKind.Float => [EncodingHint.Canonical, EncodingHint.Dictionary, EncodingHint.Alp, EncodingHint.AlpRd, EncodingHint.Zstd],
         ColumnKind.Text => [EncodingHint.Canonical, EncodingHint.Dictionary, EncodingHint.Fsst, EncodingHint.Zstd],
         _ => [EncodingHint.Canonical, EncodingHint.RunEnd],
     };

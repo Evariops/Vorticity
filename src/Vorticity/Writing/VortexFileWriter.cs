@@ -391,6 +391,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
                 EncodingHint.Alp => ColumnScheme.Alp,
                 EncodingHint.Sequence => ColumnScheme.Sequence,
                 EncodingHint.Zstd => ColumnScheme.Zstd,
+                EncodingHint.AlpRd => ColumnScheme.AlpRd,
                 _ => throw new ArgumentOutOfRangeException(
                     nameof(hints), hint, "not a defined encoding hint"),
             });

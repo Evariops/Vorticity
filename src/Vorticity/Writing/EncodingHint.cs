@@ -34,4 +34,10 @@ public enum EncodingHint : byte
 
     /// <summary>Zstd over the canonical buffers.</summary>
     Zstd = 8,
+
+    /// <summary>
+    /// ALP-RD, for floats with no short decimal form: their high bits in a dictionary of eight and
+    /// the rest bit-packed, which decodes at bit-packing's speed and a row at a time on a take.
+    /// </summary>
+    AlpRd = 9,
 }

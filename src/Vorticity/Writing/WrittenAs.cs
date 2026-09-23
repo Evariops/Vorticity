@@ -152,7 +152,8 @@ internal static class WrittenAs
         "vortex.runend" => nameof(EncodingHint.RunEnd),
         "fastlanes.bitpacked" or "fastlanes.for" or "vortex.zigzag" => nameof(EncodingHint.BitPacked),
         "vortex.fsst" => nameof(EncodingHint.Fsst),
-        "vortex.alp" or "vortex.alprd" => nameof(EncodingHint.Alp),
+        "vortex.alp" => nameof(EncodingHint.Alp),
+        "vortex.alprd" => nameof(EncodingHint.AlpRd),
         "vortex.sequence" => nameof(EncodingHint.Sequence),
         "vortex.zstd" => nameof(EncodingHint.Zstd),
         "vortex.null" or "vortex.bool" or "vortex.primitive" or "vortex.decimal" or "vortex.varbinview" or "vortex.varbin"

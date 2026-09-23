@@ -330,6 +330,53 @@ public sealed class EncodingHintTests
         }
     }
 
+    [Fact]
+    public async Task AFloatWithNoShortDecimalFormIsWrittenAsAlpRdWhenAskedAndReadsBack()
+    {
+        // Sevenths have no short decimal form, so ALP refuses them and only the hint asks for the
+        // split; `Auto` weighs it against zstd and the plain form instead.
+        Decoders.EnsureRegistered();
+        string plainPath = Temp();
+        string hintedPath = Temp();
+        try
+        {
+            (DType schema, CanonicalArena plainArena, int plainRoot) = Sevenths();
+            await WriteOneAsync(plainPath, schema, plainArena, plainRoot, Options(null), CancellationToken.None);
+            (_, CanonicalArena hintedArena, int hintedRoot) = Sevenths();
+            WriteReport hinted = await WriteOneAsync(
+                hintedPath, schema, hintedArena, hintedRoot,
+                Options(new Dictionary<string, EncodingHint> { ["x"] = EncodingHint.AlpRd }), CancellationToken.None);
+
+            Assert.NotEmpty(hinted.Columns[0].Encodings);
+            Assert.All(hinted.Columns[0].Encodings, scheme => Assert.Equal(nameof(EncodingHint.AlpRd), scheme));
+            Assert.Equal(await ReadAsync(plainPath), await ReadAsync(hintedPath));
+        }
+        finally
+        {
+            System.IO.File.Delete(plainPath);
+            System.IO.File.Delete(hintedPath);
+        }
+    }
+
+    /// <summary>One f64 column of sixteen thousand sevenths.</summary>
+    private static (DType Schema, CanonicalArena Arena, int Root) Sevenths()
+    {
+        const int rows = 16_384;
+        DTypeArena types = new DTypeArena();
+        DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
+        DType schema = types.Struct(["x"], [f64], Nullability.NonNullable);
+        CanonicalArena arena = new CanonicalArena();
+        Vorticity.Buffers.VortexBuffer values = arena.Allocate(rows * sizeof(double), sizeof(double), out Span<byte> destination);
+        Span<double> doubles = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, double>(destination);
+        for (int row = 0; row < rows; row++)
+        {
+            doubles[row] = row / 7.0;
+        }
+
+        int column = arena.AddPrimitive(f64, rows, Validity.NonNullable, PType.F64, values);
+        return (schema, arena, arena.AddStruct(schema, rows, Validity.NonNullable, [column]));
+    }
+
     // ------------------------------------------------------------------------------ plumbing
 
     private static string Temp() =>
