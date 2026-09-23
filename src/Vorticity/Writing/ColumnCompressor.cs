@@ -220,8 +220,8 @@ internal readonly struct ColumnPlan
         ColumnScheme.Fsst => $"fsst size={Fsst!.EncodedSize}",
         ColumnScheme.Zstd => $"zstd bytes={Zstd.GetValueOrDefault().CompressedLength} frames={Zstd.GetValueOrDefault().FrameCount}",
         ColumnScheme.Alp =>
-            $"alp e={Alp!.ExponentE} f={Alp.ExponentF} size={Alp.EncodedSize} " +
-            $"patches={Alp.PatchIndices.Length}",
+            $"alp e={Alp.GetValueOrDefault().ExponentE} f={Alp.GetValueOrDefault().ExponentF} " +
+            $"size={Alp.GetValueOrDefault().EncodedSize} patches={Alp.GetValueOrDefault().PatchCount}",
         ColumnScheme.AlpRd =>
             $"alprd right={AlpRd!.RightBitWidth} dictionary={AlpRd.DictionaryLength} " +
             $"exceptions={AlpRd.ExceptionCount} size={AlpRd.EncodedSize}",
@@ -932,8 +932,7 @@ internal static class ColumnCompressor
         // scale to bit-packs where the double never could.
         if (node.Kind == CanonicalKind.Primitive && node.PType.IsFloat() && Allows(target, "vortex.alp"))
         {
-            AlpPlan? alp = AlpPlan.TryBuild(arena, nodeIndex, plain);
-            if (alp is not null)
+            if (AlpPlan.TryBuild(arena, nodeIndex, plain) is { } alp)
             {
                 return ColumnPlan.ForAlp(alp) with { PredictedBytes = alp.EncodedSize };
             }
@@ -1650,10 +1649,9 @@ internal static class ColumnCompressor
                     return ColumnPlan.Canonical;
                 }
 
-                AlpPlan? alp = AlpPlan.TryBuild(arena, nodeIndex, plain);
-                return alp is null
-                    ? ColumnPlan.Canonical
-                    : ColumnPlan.ForAlp(alp) with { PredictedBytes = alp.EncodedSize };
+                return AlpPlan.TryBuild(arena, nodeIndex, plain) is { } alp
+                    ? ColumnPlan.ForAlp(alp) with { PredictedBytes = alp.EncodedSize }
+                    : ColumnPlan.Canonical;
             }
 
             case ColumnScheme.AlpRd:

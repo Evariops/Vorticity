@@ -155,7 +155,7 @@ public sealed class WriteAllocationTests
         // ALP-RD, `alprd` is written as ALP-RD rather than plain, its column about an eighth
         // smaller: the ceiling rose by 552 bytes for it, the file's encoding table growing once more
         // for its two extra ids and the plan and its two packed children.
-        ("encodings/alp", 8_244),   // 7 808 measured
+        ("encodings/alp", 8_180),   // 7 744 measured, the ALP plan a value rather than an object
         ("encodings/alprd", 8_396),   // 7 888 measured
     ];
 

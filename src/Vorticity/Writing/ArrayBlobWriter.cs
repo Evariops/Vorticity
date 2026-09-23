@@ -264,7 +264,8 @@ internal static class ArrayBlobWriter
 
         if (plan.Scheme == ColumnScheme.Alp)
         {
-            return WriteAlp(blob, arena, nodeIndex, plan.Alp!, encodings);
+            AlpPlan alp = plan.Alp.GetValueOrDefault();
+            return WriteAlp(blob, arena, nodeIndex, in alp, encodings);
         }
 
         if (plan.Scheme == ColumnScheme.AlpRd)
@@ -1032,35 +1033,40 @@ internal static class ArrayBlobWriter
         Workspace blob,
         CanonicalArena arena,
         int nodeIndex,
-        AlpPlan plan,
+        in AlpPlan plan,
         EncodingDictionary encodings)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int rows = node.Length;
-
-        // The encoded integers carry the float column's own validity, so they are added to the
-        // arena as a node rather than written as a bare buffer.
-        // The dtype arena is the column's own: a DType carries the arena it belongs to, and a
-        // node whose dtype came from a different one would not compare equal downstream.
-        DType encodedType = node.DType.Arena.Primitive(plan.EncodedPType, node.DType.Nullability);
-        // Uninitialized: the CopyTo on the next line fills it whole.
-        VortexBuffer encodedBuffer = arena.AllocateUninitialized(
-            plan.Encoded.Length, plan.EncodedPType.ByteWidth(), out Span<byte> destination);
-        plan.Encoded.CopyTo(destination);
-
-        // The integers live in the arena from here on, so the pool can have its array back before
-        // writing them rents anything. Every float column is priced with ALP, and one that loses
-        // now costs the pool a rental instead of the heap a column.
-        plan.ReleaseEncoded();
-        int encodedNode = arena.AddPrimitive(
-            encodedType, rows, node.Validity, plan.EncodedPType, encodedBuffer);
-
         Span<int> children = stackalloc int[3];
         int childCount = 1;
         int patchCount = plan.PatchCount;
         PatchesMetadata patches = default;
+
+        // The plan is a value this call consumes: each rental goes back once, here or through
+        // the blob it is handed to, and the finally gives back whatever neither took.
+        bool encodedBack = false;
+        bool valuesHanded = false;
         try
         {
+            // The encoded integers carry the float column's own validity, so they are added to the
+            // arena as a node rather than written as a bare buffer.
+            // The dtype arena is the column's own: a DType carries the arena it belongs to, and a
+            // node whose dtype came from a different one would not compare equal downstream.
+            DType encodedType = node.DType.Arena.Primitive(plan.EncodedPType, node.DType.Nullability);
+            // Uninitialized: the CopyTo on the next line fills it whole.
+            VortexBuffer encodedBuffer = arena.AllocateUninitialized(
+                plan.Encoded.Length, plan.EncodedPType.ByteWidth(), out Span<byte> destination);
+            plan.Encoded.CopyTo(destination);
+
+            // The integers live in the arena from here on, so the pool can have its array back
+            // before writing them rents anything. Every float column is priced with ALP, and one
+            // that loses now costs the pool a rental instead of the heap a column.
+            plan.ReturnEncoded();
+            encodedBack = true;
+            int encodedNode = arena.AddPrimitive(
+                encodedType, rows, node.Validity, plan.EncodedPType, encodedBuffer);
+
             children[0] = WriteCompressed(blob, arena, encodedNode, encodings);
             if (patchCount > 0)
             {
@@ -1069,7 +1075,8 @@ internal static class ArrayBlobWriter
                 PType indicesPType = FsstPlan.IndexPType(rows);
                 patches = PatchesMetadata.Create((ulong)patchCount, 0, indicesPType);
                 children[1] = WriteIndexArray(blob, encodings, plan.PatchIndices, indicesPType);
-                (byte[] values, int length) = plan.TakePatchValues();
+                (byte[] values, int length) = plan.PatchValueRental;
+                valuesHanded = true;
                 children[2] = WriteRawPrimitive(
                     blob, encodings,
                     new PendingBuffer(values, length, Exponent(node.DType.PType.ByteWidth()), rented: true));
@@ -1078,7 +1085,7 @@ internal static class ArrayBlobWriter
         }
         finally
         {
-            plan.Release();
+            plan.Release(encodedBack, valuesHanded);
         }
 
         return Node(

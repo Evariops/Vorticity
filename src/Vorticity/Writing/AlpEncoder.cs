@@ -19,11 +19,11 @@ namespace Vorticity.Writing;
 /// different NaN, or the writer would silently change values that compare equal without being the
 /// same.
 /// </summary>
-internal sealed class AlpPlan
+internal readonly struct AlpPlan
 {
-    private byte[] _encoded;
-    private int[] _patchIndices;
-    private byte[] _patchValues;
+    private readonly byte[] _encoded;
+    private readonly int[] _patchIndices;
+    private readonly byte[] _patchValues;
     private readonly int _patchWidth;
 
     private AlpPlan(
@@ -48,11 +48,11 @@ internal sealed class AlpPlan
     /// <summary>The <c>10^-f</c> exponent.</summary>
     internal byte ExponentF { get; }
 
-    /// <summary>The encoded integers, little-endian, one per row.</summary>
+    /// <summary>The encoded integers, little-endian, one per row; not to be read once given back.</summary>
     internal ReadOnlySpan<byte> Encoded => _encoded.AsSpan(0, EncodedLength);
 
     /// <summary>How many bytes of the rental the integers occupy.</summary>
-    internal int EncodedLength { get; private set; }
+    internal int EncodedLength { get; }
 
     /// <summary>Their physical type: <c>i32</c> for f32, <c>i64</c> for f64.</summary>
     internal PType EncodedPType { get; }
@@ -60,69 +60,56 @@ internal sealed class AlpPlan
     /// <summary>The rows that could not be represented, ascending.</summary>
     internal ReadOnlySpan<int> PatchIndices => _patchIndices.AsSpan(0, PatchCount);
 
-    /// <summary>
-    /// Their original values, at the column's own float width; empty once
-    /// <see cref="TakePatchValues"/> has handed them on.
-    /// </summary>
-    internal ReadOnlySpan<byte> PatchValues =>
-        _patchValues.Length == 0 ? [] : _patchValues.AsSpan(0, PatchCount * _patchWidth);
+    /// <summary>Their original values, at the column's own float width; not to be read once handed on.</summary>
+    internal ReadOnlySpan<byte> PatchValues => _patchValues.AsSpan(0, PatchCount * _patchWidth);
 
     /// <summary>How many rows are patches.</summary>
-    internal int PatchCount { get; private set; }
+    internal int PatchCount { get; }
 
     /// <summary>The estimated size of this encoding once the integers are bit-packed.</summary>
     internal long EncodedSize { get; }
 
-    /// <summary>Hands the integers back to the pool, once they live somewhere else.</summary>
-    /// <remarks>
-    /// Called by the encoder as soon as it has laid the integers in the arena, before it writes
-    /// them, so that the pool can serve the rentals that writing makes. Safe twice, and a plan
-    /// that has released reads as empty rather than as whatever the next renter wrote.
-    /// </remarks>
-    internal void ReleaseEncoded()
-    {
-        byte[] encoded = _encoded;
-        _encoded = [];
-        EncodedLength = 0;
-        if (encoded.Length > 0)
-        {
-            ArrayPool<byte>.Shared.Return(encoded);
-        }
-    }
+    /// <summary>
+    /// The patch values' rental and the bytes of it that are values, at the column's own float
+    /// width, for the one caller that hands them on to be given back.
+    /// </summary>
+    internal (byte[] Values, int Length) PatchValueRental => (_patchValues, PatchCount * _patchWidth);
 
     /// <summary>
-    /// The patch values' rental and the bytes of it that are values. They pass to the caller: the
-    /// plan forgets them, and <see cref="Release"/> no longer hands them back.
+    /// Hands back the rentals no one has taken over: the integers unless
+    /// <paramref name="encodedBack"/>, the patch indices, the patch values unless
+    /// <paramref name="valuesHanded"/>.
     /// </summary>
-    internal (byte[] Values, int Length) TakePatchValues()
-    {
-        byte[] values = _patchValues;
-        int length = values.Length == 0 ? 0 : PatchCount * _patchWidth;
-        _patchValues = [];
-        return (values, length);
-    }
-
-    /// <summary>Hands back every rental the plan still holds: the integers, the patches.</summary>
+    /// <param name="encodedBack">Whether the integers went back already.</param>
+    /// <param name="valuesHanded">Whether the patch values passed to someone who gives them back.</param>
     /// <remarks>
-    /// Called where the plan stops being needed: by the encoder once it has written the node, and
-    /// by the chooser for a plan nothing will write. Safe twice.
+    /// A plan is a value, so what it owns is given back by the one party that consumes it, once:
+    /// the encoder that writes it, or the chooser for a plan nothing will write.
     /// </remarks>
-    internal void Release()
+    internal void Release(bool encodedBack = false, bool valuesHanded = false)
     {
-        ReleaseEncoded();
-        int[] indices = _patchIndices;
-        byte[] values = _patchValues;
-        _patchIndices = [];
-        _patchValues = [];
-        PatchCount = 0;
-        if (indices.Length > 0)
+        if (!encodedBack)
         {
-            ArrayPool<int>.Shared.Return(indices);
+            ReturnEncoded();
         }
 
-        if (values.Length > 0)
+        if (_patchIndices.Length > 0)
         {
-            ArrayPool<byte>.Shared.Return(values);
+            ArrayPool<int>.Shared.Return(_patchIndices);
+        }
+
+        if (!valuesHanded && _patchValues.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_patchValues);
+        }
+    }
+
+    /// <summary>Hands the integers back to the pool, once they live somewhere else.</summary>
+    internal void ReturnEncoded()
+    {
+        if (_encoded.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(_encoded);
         }
     }
 

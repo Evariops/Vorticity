@@ -50,9 +50,10 @@ public sealed class AlpEncoderTests
 
         using ColumnFixture fixture = new ColumnFixture();
         int node = DoubleNode(fixture, values);
-        AlpPlan? plan = AlpPlan.TryBuild(fixture.Arena, node, values.Length * sizeof(double));
+        AlpPlan? built = AlpPlan.TryBuild(fixture.Arena, node, values.Length * sizeof(double));
 
-        Assert.NotNull(plan);
+        Assert.NotNull(built);
+        AlpPlan plan = built.Value;
         Assert.True(plan.PatchIndices.IsEmpty);
         Assert.True(
             plan.EncodedSize * 4 < values.Length * sizeof(double),
@@ -120,9 +121,10 @@ public sealed class AlpEncoderTests
 
         using ColumnFixture fixture = new ColumnFixture();
         int node = DoubleNode(fixture, values, valid);
-        AlpPlan? plan = AlpPlan.TryBuild(fixture.Arena, node, values.Length * sizeof(double));
+        AlpPlan? built = AlpPlan.TryBuild(fixture.Arena, node, values.Length * sizeof(double));
 
-        Assert.NotNull(plan);
+        Assert.NotNull(built);
+        AlpPlan plan = built.Value;
         Assert.True(plan.PatchIndices.IsEmpty);
     }
 
@@ -140,8 +142,9 @@ public sealed class AlpEncoderTests
 
         using ColumnFixture fixture = new ColumnFixture();
         int node = SingleNode(fixture, values);
-        AlpPlan? plan = AlpPlan.TryBuild(fixture.Arena, node, values.Length * sizeof(float));
-        Assert.NotNull(plan);
+        AlpPlan? built = AlpPlan.TryBuild(fixture.Arena, node, values.Length * sizeof(float));
+        Assert.NotNull(built);
+        AlpPlan plan = built.Value;
 
         int[] encoded = new int[values.Length];
         MemoryMarshal.Cast<byte, int>(plan.Encoded).CopyTo(encoded);
@@ -187,8 +190,9 @@ public sealed class AlpEncoderTests
         }
 
         using ColumnFixture fixture = new ColumnFixture();
-        AlpPlan? wide = AlpPlan.TryBuild(fixture.Arena, DoubleNode(fixture, doubles), length * sizeof(double) * 4L);
-        Assert.NotNull(wide);
+        AlpPlan? builtWide = AlpPlan.TryBuild(fixture.Arena, DoubleNode(fixture, doubles), length * sizeof(double) * 4L);
+        Assert.NotNull(builtWide);
+        AlpPlan wide = builtWide.Value;
         List<int> expectedPatches = [];
         long[] expected = new long[length];
         long? fill = null;
@@ -217,8 +221,9 @@ public sealed class AlpEncoderTests
         Assert.Equal(expectedPatches, wide.PatchIndices.ToArray());
         Assert.Equal(expected, MemoryMarshal.Cast<byte, long>(wide.Encoded).ToArray());
 
-        AlpPlan? narrow = AlpPlan.TryBuild(fixture.Arena, SingleNode(fixture, singles), length * sizeof(float) * 4L);
-        Assert.NotNull(narrow);
+        AlpPlan? builtNarrow = AlpPlan.TryBuild(fixture.Arena, SingleNode(fixture, singles), length * sizeof(float) * 4L);
+        Assert.NotNull(builtNarrow);
+        AlpPlan narrow = builtNarrow.Value;
         expectedPatches.Clear();
         int[] expectedNarrow = new int[length];
         int? fillNarrow = null;
@@ -252,8 +257,9 @@ public sealed class AlpEncoderTests
     {
         using ColumnFixture fixture = new ColumnFixture();
         int node = DoubleNode(fixture, values);
-        AlpPlan? plan = AlpPlan.TryBuild(fixture.Arena, node, values.Length * sizeof(double));
-        Assert.NotNull(plan);
+        AlpPlan? built = AlpPlan.TryBuild(fixture.Arena, node, values.Length * sizeof(double));
+        Assert.NotNull(built);
+        AlpPlan plan = built.Value;
 
         long[] encoded = new long[values.Length];
         MemoryMarshal.Cast<byte, long>(plan.Encoded).CopyTo(encoded);
