@@ -468,31 +468,50 @@ public sealed class RecordBatch : IDisposable
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The window is not inside the batch.</exception>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    internal RecordBatch Window(int start, int length) => Window(start, length, null);
-
-    /// <summary>
-    /// <see cref="Window(int, int)"/> bound into <paramref name="spare"/>, the previous window of a
-    /// stream of them, disposed: one object for the stream rather than one per window.
-    /// </summary>
-    /// <param name="start">The first row of the window, within this batch.</param>
-    /// <param name="length">How many rows it holds; zero gives an empty batch.</param>
-    /// <param name="spare">The previous window, disposed, or null for a new one.</param>
-    /// <returns>The window, <paramref name="spare"/> when there is one.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">The window is not inside the batch.</exception>
-    /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    /// <exception cref="InvalidOperationException"><paramref name="spare"/> is live, or owns its storage.</exception>
-    internal RecordBatch Window(int start, int length, RecordBatch? spare)
+    internal RecordBatch Window(int start, int length)
     {
-        ThrowIfDisposed();
-        ArgumentOutOfRangeException.ThrowIfNegative(start);
-        ArgumentOutOfRangeException.ThrowIfNegative(length);
-        ArgumentOutOfRangeException.ThrowIfGreaterThan(start + (long)length, _rowCount);
+        CheckWindow(start, length);
 
         // A contiguous window is a slice and not a gather. Handing the row numbers to the filter
         // would say the same thing at the price of copying every value named; narrowing the
         // buffers into views moves nothing.
         int root = CanonicalSlice.SliceAcross(_arena, _arena, _root, start, length);
-        return Over(_arena, root, _startRow + start, spare);
+        return Over(_arena, root, _startRow + start, null);
+    }
+
+    /// <summary>
+    /// <see cref="Window(int, int)"/> with its records cut into <paramref name="into"/>, and bound
+    /// into <paramref name="spare"/>, the previous window of a stream of them, disposed: one object
+    /// and one arena for the stream rather than one per window.
+    /// </summary>
+    /// <param name="start">The first row of the window, within this batch.</param>
+    /// <param name="length">How many rows it holds; zero gives an empty batch.</param>
+    /// <param name="into">The arena the window's records are cut into.</param>
+    /// <param name="spare">The previous window, disposed, or null for a new one.</param>
+    /// <returns>The window, <paramref name="spare"/> when there is one.</returns>
+    /// <remarks>
+    /// Cut into this batch's own arena, a stream of windows would leave a handful of records there
+    /// per window until the batch is released, and a merge of keys that interleave row by row cuts a
+    /// window a row. <paramref name="into"/> gets records only, whose buffers view this batch's
+    /// storage: the window is valid while this batch is and until <paramref name="into"/> is reset,
+    /// which the caller does once it is done with the window.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The window is not inside the batch.</exception>
+    /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
+    /// <exception cref="InvalidOperationException"><paramref name="spare"/> is live, or owns its storage.</exception>
+    internal RecordBatch Window(int start, int length, CanonicalArena into, RecordBatch? spare)
+    {
+        CheckWindow(start, length);
+        int root = CanonicalSlice.SliceAcross(_arena, into, _root, start, length);
+        return Over(into, root, _startRow + start, spare);
+    }
+
+    private void CheckWindow(int start, int length)
+    {
+        ThrowIfDisposed();
+        ArgumentOutOfRangeException.ThrowIfNegative(start);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(start + (long)length, _rowCount);
     }
 
     /// <summary>

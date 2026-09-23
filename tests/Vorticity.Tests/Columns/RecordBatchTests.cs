@@ -299,18 +299,21 @@ public sealed class RecordBatchTests
     [Fact]
     public void AStreamOfWindowsBindsOneObjectAgain()
     {
-        // A merge emits a window per run: the previous window, disposed, carries the next one.
+        // A merge emits a window per run: the previous window, disposed, carries the next one, cut
+        // into an arena the merge resets between them.
         using ColumnFixture f = new ColumnFixture();
         RecordBatch batch = f.Batch(f.Int64Node([10L, 20L, 30L, 40L, 50L], Validity.NonNullable), startRow: 400);
+        CanonicalArena windows = new CanonicalArena();
 
-        RecordBatch first = batch.Window(0, 2, null);
+        RecordBatch first = batch.Window(0, 2, windows, null);
         Assert.Equal([10L, 20L], first.Column(0).AsPrimitive<long>().Values.ToArray());
 
         // A live window carries nothing else: its rows are still being read.
-        Assert.Throws<InvalidOperationException>(() => batch.Window(2, 3, first));
+        Assert.Throws<InvalidOperationException>(() => batch.Window(2, 3, windows, first));
 
         first.Dispose();
-        RecordBatch second = batch.Window(2, 3, first);
+        windows.Reset();
+        RecordBatch second = batch.Window(2, 3, windows, first);
         Assert.Same(first, second);
         Assert.Equal(3, second.RowCount);
         Assert.Equal(402L, second.StartRow);
@@ -319,7 +322,45 @@ public sealed class RecordBatchTests
         // A batch that owns its storage is never bound again.
         RecordBatch owned = RecordBatch.Own(batch.Arena, batch.RootIndex, 0, null, null, default, 0);
         owned.Dispose();
-        Assert.Throws<InvalidOperationException>(() => batch.Window(0, 1, owned));
+        Assert.Throws<InvalidOperationException>(() => batch.Window(0, 1, windows, owned));
+        windows.Reset();
+    }
+
+    [Fact]
+    public void WindowsCutIntoAnArenaOfTheirOwnLeaveTheBatchsAsItWas()
+    {
+        // Keys that interleave row by row have a merge cut a window a row. Their records go to the
+        // arena the merge resets between windows, and the batch's arena keeps the nodes it had:
+        // a dictionary's entries and a validity bitmap come along as records viewing its storage.
+        using ColumnFixture f = new ColumnFixture();
+        int keys = f.Int64Node([10L, 20L, 30L, 40L, 50L], Validity.NonNullable);
+        byte[]?[] words = ["alpha"u8.ToArray(), null, "a word longer than a view holds"u8.ToArray()];
+        int entries = f.Utf8Node(words, Nullability.Nullable);
+        int names = f.Arena.AddDictionary(
+            f.Types.Utf8(Nullability.Nullable), 5, f.BitmapValidity([true, false, true, false, true]),
+            f.Int32s([0, 0, 2, 1, 2]), entries);
+        DType schema = f.Types.Struct(
+            ["key", "name"],
+            [f.Types.Primitive(PType.I64, Nullability.NonNullable), f.Types.Utf8(Nullability.Nullable)],
+            Nullability.NonNullable);
+        RecordBatch batch = f.Batch(f.Arena.AddStruct(schema, 5, Validity.NonNullable, [keys, names]));
+        int nodes = batch.Arena.NodeCount;
+        string?[] expected = ["alpha", null, "a word longer than a view holds", null, "a word longer than a view holds"];
+
+        CanonicalArena windows = new CanonicalArena();
+        RecordBatch? window = null;
+        for (int row = 0; row < 5; row++)
+        {
+            window = batch.Window(row, 1, windows, window);
+            Assert.Equal(10L * (row + 1), window.Column(0).AsPrimitive<long>().Values[0]);
+            BinaryColumn name = window.Column(1).AsBinary();
+            Assert.Equal(expected[row], name.IsValid(0) ? Encoding.UTF8.GetString(name.GetSpan(0)) : null);
+            window.Dispose();
+            windows.Reset();
+        }
+
+        Assert.Equal(nodes, batch.Arena.NodeCount);
+        Assert.Equal(0, windows.NodeCount);
     }
 
     [Fact]

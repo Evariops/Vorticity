@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.RowEncoding;
@@ -43,6 +44,12 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     // The run's window when the run is part of a batch, and once the run is stepped past, disposed
     // and kept for the next window to bind again: one object for the merge rather than one per run.
     private RecordBatch? _window;
+
+    // The arena the run's window is cut into, made at the first window and reset once the run is
+    // stepped past. Cut into the batch's own arena, the windows' records would stay there until the
+    // batch is released: a handful a run, and a run a row where keys interleave row by row.
+    private CanonicalArena? _windows;
+
     private RecordBatch? _current;
     private bool _disposed;
 
@@ -144,7 +151,8 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         }
         else
         {
-            _window = batch.Window(chosen.Row, count, _window);
+            _windows ??= new CanonicalArena();
+            _window = batch.Window(chosen.Row, count, _windows, _window);
             _current = _window;
         }
 
@@ -163,6 +171,8 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         _emitting = null;
         _window?.Dispose();
         _window = null;
+        _windows?.Reset();
+        _windows = null;
         foreach (MergeInput input in _open)
         {
             await input.DisposeAsync().ConfigureAwait(false);
@@ -184,6 +194,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         _count = 0;
         _current = null;
         _window?.Dispose();
+        _windows?.Reset();
         if (!await input.AdvanceAsync(count).ConfigureAwait(false))
         {
             _open.Remove(input);
