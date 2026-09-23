@@ -514,6 +514,16 @@ internal sealed partial class CanonicalArena
     // themselves, so that a batch renting more of them than the one before allocates nothing.
     private NativeSegmentOwner? _owned;
 
+    // How much of the block at the head of that chain small allocations have carved, or -1 when none
+    // has been made since the reset. The pool's smallest block is 4 KiB, which a buffer of one row
+    // would otherwise hold whole: a writer holding a chunk that came as one-row batches would take a
+    // block per column per row, gigabytes for a chunk of a few columns. The first slab is that
+    // smallest block and each next one doubles up to 64 KiB, so that an arena with one small buffer
+    // holds one smallest block, and one carving thousands rents a block per 64 KiB of them. The slab
+    // stays at the head of the chain, the blocks rented whole going in behind it, so that it costs no
+    // reference of its own on every arena of every scan and every write.
+    private int _slabUsed = -1;
+
     // The 64-bit words ArenaWords has built for a bool node, by node index, until the arena is reset.
     // Kept beside the records rather than in each of them, so that an arena nobody asks for words
     // pays nothing for them: sixteen bytes a record is a kilobyte at the default capacity, on every
@@ -618,6 +628,7 @@ internal sealed partial class CanonicalArena
     {
         NativeSegmentOwner? owner = _owned;
         _owned = null;
+        _slabUsed = -1;
         while (owner is not null)
         {
             // Unlinked before it goes back, because the pool may hand it to another arena at once.
@@ -1078,6 +1089,11 @@ internal sealed partial class CanonicalArena
     /// </remarks>
     public VortexBuffer AllocateUninitialized(int byteLength, int alignment, out Span<byte> destination)
     {
+        if ((uint)byteLength <= SmallAllocation)
+        {
+            return Carve(byteLength, alignment, out destination);
+        }
+
         NativeSegmentOwner owner = Own(_pool.Rent(byteLength, alignment));
         destination = owner.WritableSpan;
         return owner.Buffer;
@@ -1097,18 +1113,61 @@ internal sealed partial class CanonicalArena
     /// </exception>
     public VortexBuffer Allocate(int byteLength, int alignment, out Span<byte> destination)
     {
-        NativeSegmentOwner owner = Own(_pool.Rent(byteLength, alignment));
-        destination = owner.WritableSpan;
+        VortexBuffer buffer = AllocateUninitialized(byteLength, alignment, out destination);
         destination.Clear();
-        return owner.Buffer;
+        return buffer;
     }
 
     // ------------------------------------------------------------------------------ internals
 
+    /// <summary>The largest allocation carved from a slab rather than rented a block of its own.</summary>
+    private const int SmallAllocation = 1024;
+
+    /// <summary>The first slab of an arena: the pool's smallest block.</summary>
+    private const int FirstSlabBytes = 4 * 1024;
+
+    /// <summary>The largest slab: sixteen of the pool's smallest blocks.</summary>
+    private const int LargestSlabBytes = 64 * 1024;
+
+    /// <summary>
+    /// <paramref name="byteLength"/> bytes at the next boundary of <paramref name="alignment"/> in
+    /// the slab, a new slab when the current one cannot hold them. Returned with the arena's other
+    /// blocks on <see cref="Reset"/>, as the blocks rented one by one are.
+    /// </summary>
+    private unsafe VortexBuffer Carve(int byteLength, int alignment, out Span<byte> destination)
+    {
+        int exponent = NativeSegmentOwner.CheckLengthAndAlignment(byteLength, alignment);
+        int start = (_slabUsed + alignment - 1) & -alignment;
+        NativeSegmentOwner? slab = _owned;
+        if (_slabUsed < 0 || start + byteLength > slab!.Length)
+        {
+            int slabBytes = _slabUsed < 0 ? FirstSlabBytes : Math.Min(slab!.Length * 2, LargestSlabBytes);
+            slab = _pool.Rent(slabBytes, VortexLimits.MaxAlignment);
+            slab.NextOwned = _owned;
+            _owned = slab;
+            start = 0;
+        }
+
+        _slabUsed = start + byteLength;
+        destination = slab.WritableSpan.Slice(start, byteLength);
+        return VortexBuffer.FromPointer(
+            (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(destination)), byteLength, exponent);
+    }
+
     private NativeSegmentOwner Own(NativeSegmentOwner owner)
     {
-        owner.NextOwned = _owned;
-        _owned = owner;
+        // Behind the slab when there is one, which Carve finds at the head.
+        if (_slabUsed < 0)
+        {
+            owner.NextOwned = _owned;
+            _owned = owner;
+        }
+        else
+        {
+            owner.NextOwned = _owned!.NextOwned;
+            _owned.NextOwned = owner;
+        }
+
         return owner;
     }
 
