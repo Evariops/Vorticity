@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
+using Vorticity.Compute;
 
 namespace Vorticity.Aggregating;
 
@@ -255,12 +256,26 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         int[] order = Identity(Count);
         if (sorted)
         {
-            TValue[] keys = _keys;
-            int nullGroup = _null;
-            Array.Sort(order, (a, b) => a == nullGroup ? (b == nullGroup ? 0 : 1) : b == nullGroup ? -1 : keys[a].CompareTo(keys[b]));
+            SpanSort.Sort(order.AsSpan(), new ByKey(_keys, _null));
         }
 
         return order;
+    }
+
+    /// <summary>Groups by their key, the null group last.</summary>
+    private readonly struct ByKey : IComparer<int>
+    {
+        private readonly TValue[] _keys;
+        private readonly int _null;
+
+        internal ByKey(TValue[] keys, int nullGroup)
+        {
+            _keys = keys;
+            _null = nullGroup;
+        }
+
+        public int Compare(int a, int b) =>
+            a == _null ? (b == _null ? 0 : 1) : b == _null ? -1 : _keys[a].CompareTo(_keys[b]);
     }
 
     internal override Func<int, T> Reader<T>(int component)
@@ -491,10 +506,20 @@ internal sealed class BytesKeys : GroupKeys
         int[] order = Identity(Count);
         if (sorted)
         {
-            Array.Sort(order, Compare);
+            SpanSort.Sort(order.AsSpan(), new ByKey(this));
         }
 
         return order;
+    }
+
+    /// <summary>Groups by their key's bytes, the null group last.</summary>
+    private readonly struct ByKey : IComparer<int>
+    {
+        private readonly BytesKeys _keys;
+
+        internal ByKey(BytesKeys keys) => _keys = keys;
+
+        public int Compare(int a, int b) => _keys.Compare(a, b);
     }
 
     internal override Func<int, T> Reader<T>(int component)
@@ -604,11 +629,20 @@ internal sealed class BoolKeys : GroupKeys
         int[] order = Identity(Count);
         if (sorted)
         {
-            byte[] keys = _keyOf;
-            Array.Sort(order, (a, b) => keys[a].CompareTo(keys[b]));
+            SpanSort.Sort(order.AsSpan(), new ByKey(_keyOf));
         }
 
         return order;
+    }
+
+    /// <summary>Groups by false, true, then null: the order of their codes.</summary>
+    private readonly struct ByKey : IComparer<int>
+    {
+        private readonly byte[] _keys;
+
+        internal ByKey(byte[] keys) => _keys = keys;
+
+        public int Compare(int a, int b) => _keys[a].CompareTo(_keys[b]);
     }
 
     internal override Func<int, T> Reader<T>(int component)

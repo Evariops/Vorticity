@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
+using Vorticity.Compute;
 
 namespace Vorticity.Writing;
 
@@ -639,33 +640,46 @@ internal sealed class FsstSymbols
     /// </summary>
     private void OrderByLength()
     {
-        int[] order = new int[_count];
-        for (int i = 0; i < _count; i++)
+        // A table is 255 symbols at most, so its reordering fits the stack.
+        int count = _count;
+        Span<int> order = stackalloc int[MaxSymbols];
+        order = order[..count];
+        for (int i = 0; i < count; i++)
         {
             order[i] = i;
         }
 
         // One-byte symbols sort last, the rest by ascending length; stable within a length, which
         // keeps the gain order the optimizer chose.
-        Array.Sort(order, (a, b) =>
-        {
-            int keyA = _lengths[a] == 1 ? MaxSymbolLength + 1 : _lengths[a];
-            int keyB = _lengths[b] == 1 ? MaxSymbolLength + 1 : _lengths[b];
-            return keyA != keyB ? keyA.CompareTo(keyB) : a.CompareTo(b);
-        });
+        SpanSort.Sort(order, new ByLength(_lengths));
 
-        ulong[] bits = new ulong[_count];
-        byte[] lengths = new byte[_count];
-        for (int i = 0; i < _count; i++)
+        Span<ulong> bits = stackalloc ulong[MaxSymbols];
+        Span<byte> lengths = stackalloc byte[MaxSymbols];
+        for (int i = 0; i < count; i++)
         {
             bits[i] = _bits[order[i]];
             lengths[i] = _lengths[order[i]];
         }
 
         Clear();
-        for (int i = 0; i < bits.Length; i++)
+        for (int i = 0; i < count; i++)
         {
             Insert(bits[i], lengths[i]);
+        }
+    }
+
+    /// <summary>Symbols by length, one-byte ones last, then by their place in the table.</summary>
+    private readonly struct ByLength : IComparer<int>
+    {
+        private readonly byte[] _lengths;
+
+        internal ByLength(byte[] lengths) => _lengths = lengths;
+
+        public int Compare(int a, int b)
+        {
+            int keyA = _lengths[a] == 1 ? MaxSymbolLength + 1 : _lengths[a];
+            int keyB = _lengths[b] == 1 ? MaxSymbolLength + 1 : _lengths[b];
+            return keyA != keyB ? keyA.CompareTo(keyB) : a.CompareTo(b);
         }
     }
 

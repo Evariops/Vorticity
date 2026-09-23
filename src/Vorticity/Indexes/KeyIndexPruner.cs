@@ -904,23 +904,42 @@ internal sealed class KeyIndexPruner
                 return built;
             }
 
-            List<(int Literal, byte[] Key, ulong Sort)> pairs = [];
+            int count = 0;
             for (int i = 0; i < _keys.Length; i++)
             {
-                foreach (byte[]? key in (byte[]?[])[_keys[i], _otherZeros[i]])
-                {
-                    if (key is not null)
-                    {
-                        pairs.Add((i, key, _layout.Shape == KeyShape.Bytes ? 0 : _layout.SortKey(key)));
-                    }
-                }
+                count += (_keys[i] is null ? 0 : 1) + (_otherZeros[i] is null ? 0 : 1);
             }
 
-            pairs.Sort((a, b) => _layout.Shape == KeyShape.Bytes
-                ? _layout.Compare(a.Key, b.Key)
-                : a.Sort.CompareTo(b.Sort));
-            _sorted = [.. pairs];
-            return _sorted;
+            (int Literal, byte[] Key, ulong Sort)[] sorted = count == 0 ? [] : new (int, byte[], ulong)[count];
+            int at = 0;
+            for (int i = 0; i < _keys.Length; i++)
+            {
+                Add(sorted, ref at, i, _keys[i]);
+                Add(sorted, ref at, i, _otherZeros[i]);
+            }
+
+            SpanSort.Sort(sorted.AsSpan(), new ByKey(_layout));
+            _sorted = sorted;
+            return sorted;
+
+            void Add((int Literal, byte[] Key, ulong Sort)[] into, ref int next, int literal, byte[]? key)
+            {
+                if (key is not null)
+                {
+                    into[next++] = (literal, key, _layout.Shape == KeyShape.Bytes ? 0 : _layout.SortKey(key));
+                }
+            }
+        }
+
+        /// <summary>Keys in the runs' order: their bytes for a bytes key, their sort key otherwise.</summary>
+        private readonly struct ByKey : IComparer<(int Literal, byte[] Key, ulong Sort)>
+        {
+            private readonly KeyLayout _layout;
+
+            internal ByKey(KeyLayout layout) => _layout = layout;
+
+            public int Compare((int Literal, byte[] Key, ulong Sort) a, (int Literal, byte[] Key, ulong Sort) b) =>
+                _layout.Shape == KeyShape.Bytes ? _layout.Compare(a.Key, b.Key) : a.Sort.CompareTo(b.Sort);
         }
 
         /// <summary>

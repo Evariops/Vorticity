@@ -528,7 +528,7 @@ internal sealed class TerminalScan
                 // Best stated bound first: the true extreme of a candidate is at or beyond its
                 // bound, so once one is decoded, every candidate whose bound cannot beat the best
                 // is out -- and so is every one after it in this order.
-                candidates.Sort((a, b) => Order(a.Bound, b.Bound, wantMin));
+                SpanSort.Sort(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(candidates), new ByBound(wantMin));
                 for (int i = 0; i < candidates.Count; i++)
                 {
                     if (best.Kind != FilterLiteralKind.Null && !Beats(candidates[i].Bound, best, wantMin))
@@ -732,5 +732,16 @@ internal sealed class TerminalScan
     {
         int order = ZonePruner.TryCompare(a, b, out int o) ? o : 0;
         return wantMin ? order : -order;
+    }
+
+    /// <summary>Candidate splits by their stated bound, the one likeliest to hold the extreme first.</summary>
+    private readonly struct ByBound : IComparer<(RowRange Split, FilterLiteral Bound)>
+    {
+        private readonly bool _wantMin;
+
+        internal ByBound(bool wantMin) => _wantMin = wantMin;
+
+        public int Compare((RowRange Split, FilterLiteral Bound) a, (RowRange Split, FilterLiteral Bound) b) =>
+            Order(a.Bound, b.Bound, _wantMin);
     }
 }

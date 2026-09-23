@@ -127,7 +127,7 @@ public sealed class WriteAllocationTests
         ("distributions/high_cardinality_i64_r8193", 10_220),   // 9 864 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
         ("encodings/fsst", 9_040),   // 8 576 measured
         ("encodings/onpair", 9_976),   // 9 528 measured, including the public writer and report and the text column's string bounds
-        ("types/utf8_nullable_r1025", 153_352),   // 152 648 measured, including the public writer and report and the text column's string bounds
+        ("types/utf8_nullable_r1025", 150_880),   // 150 176 measured, its FSST tables reordered on the stack, including the public writer and report and the text column's string bounds
 
         // THE REMAINING COMPONENTS, on the write side, so that each has an allocation ratchet:
         // `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant`. Note
@@ -140,7 +140,7 @@ public sealed class WriteAllocationTests
         ("encodings/pco", 8_960),   // 8 840 measured alone; in the suite with dynamic PGO the process-wide measurement adds the JIT's instrumentation, 72 bytes that are not the writer's
         // The read half of this axis keeps a `ZstandardDecoder` per node, so a change on the zstd
         // read path can move this ceiling while the write path stays put.
-        ("encodings/zstd", 146_020),   // 145 560 measured, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
+        ("encodings/zstd", 145_580),   // 145 120 measured, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
         ("encodings/map", 11_588),   // 11 480 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
         ("encodings/variant", 10_336),   // 10 152 measured, including the file statistics segment and the public writer and report: per file, not per row
 

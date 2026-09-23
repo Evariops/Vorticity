@@ -180,22 +180,14 @@ internal sealed partial class SortedRunsSource
             order[i] = i;
         }
 
-        int Compare(int a, int b)
-        {
-            ReadOnlySpan<byte> left = unsorted.AsSpan(starts[a], starts[a + 1] - starts[a]);
-            ReadOnlySpan<byte> right = unsorted.AsSpan(starts[b], starts[b + 1] - starts[b]);
-            return bytes
-                ? Math.Sign(left.SequenceCompareTo(right))
-                : KeyOrder.Total(LiteralOf(layout, left), LiteralOf(layout, right));
-        }
-
-        Array.Sort(order, Compare);
+        ByKey compare = new ByKey(unsorted, starts, bytes, layout);
+        SpanSort.Sort(order.AsSpan(), compare);
 
         // Adjacent equals are one key: a writer's dictionary has none, a lying one may.
         List<int> kept = new List<int>(count);
         foreach (int i in order)
         {
-            if (kept.Count == 0 || Compare(kept[^1], i) != 0)
+            if (kept.Count == 0 || compare.Compare(kept[^1], i) != 0)
             {
                 kept.Add(i);
             }
@@ -215,6 +207,32 @@ internal sealed partial class SortedRunsSource
         }
 
         return new RunSegment(keys, bytes ? offsets : null, null, kept.Count);
+    }
+
+    /// <summary>A dictionary's keys, by index into their concatenated bytes, in the key order.</summary>
+    private readonly struct ByKey : IComparer<int>
+    {
+        private readonly byte[] _unsorted;
+        private readonly List<int> _starts;
+        private readonly bool _bytes;
+        private readonly KeyLayout _layout;
+
+        internal ByKey(byte[] unsorted, List<int> starts, bool bytes, KeyLayout layout)
+        {
+            _unsorted = unsorted;
+            _starts = starts;
+            _bytes = bytes;
+            _layout = layout;
+        }
+
+        public int Compare(int a, int b)
+        {
+            ReadOnlySpan<byte> left = _unsorted.AsSpan(_starts[a], _starts[a + 1] - _starts[a]);
+            ReadOnlySpan<byte> right = _unsorted.AsSpan(_starts[b], _starts[b + 1] - _starts[b]);
+            return _bytes
+                ? Math.Sign(left.SequenceCompareTo(right))
+                : KeyOrder.Total(LiteralOf(_layout, left), LiteralOf(_layout, right));
+        }
     }
 
     /// <summary>
