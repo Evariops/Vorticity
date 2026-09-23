@@ -1,31 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
-//
-// Vortex's Rust reader behind a C ABI, so the benchmarks can compare the right way: both
-// implementations measured in one process, on the same bytes, with the same clock and the same
-// page-cache state. Cross-process comparison is what makes a 1.4x ratio unreadable.
-//
-// Why this is not `vortex-ffi`: the design once named it, but `vortex-ffi` is `publish = false`
-// upstream, so using it would mean a second git dependency; and it is a general-purpose C API with
-// its own object model, whose per-call overhead would land inside the measurement. A shim built
-// against the same crates.io pin the corpus was generated with (`vortex = "=0.86.1"`) measures the
-// scan path and nothing else, which is the thing being compared.
-//
-// Built and run as upstream's own benchmarks are: mimalloc as the global allocator, and the target
-// CPU, frame pointers and release profile of `vortex-bench` (see Cargo.toml and .cargo/config.toml).
-//
-// Two runtimes, and the thread count is pinned on both sides. With no thread count set, every call
-// runs on `vortex::io::runtime::single`, all work on the calling thread: one core, against our
-// reader at one lane. `vxbench_set_threads(n)` runs them on a multi-threaded Tokio runtime of `n`
-// workers under `with_tokio`, which is how upstream's benchmarks use every core. A ratio between a
-// reader held to one core and one free to use all of them measures a threading model, not a decoder.
-//
-// A scan decodes each split to its canonical form on the split's own task, through
-// `ScanBuilder::map`, as upstream's Arrow conversion does: decoded in the loop that drains the
-// stream, the splits would be read on every core and decoded on one.
-//
-// Every entry point returns a count or a negative error. No out-parameters, no allocation handed
-// across the boundary, no object lifetime to manage: the whole surface is `path in, rows out`, so
-// nothing in the harness can leak and nothing in the measurement is FFI bookkeeping.
+//! Vortex's Rust reader and writer behind a C ABI, for the benchmarks to measure against: the
+//! cdylib the in-process ratios load, and the binary the published report runs, from the same
+//! functions.
+//!
+//! Every entry point takes a path and returns a count, or a negative error: no out-parameter, no
+//! allocation handed across the boundary, no object lifetime to manage, so nothing in a
+//! measurement is FFI bookkeeping.
+//!
+//! Built as upstream's benchmarks are, and run either on the single-threaded runtime, all the work
+//! on the calling thread, or on a multi-threaded Tokio runtime of as many workers as our reader has
+//! lanes: a ratio between a reader held to one core and one free to use them all measures a
+//! threading model, not a decoder.
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::future::Future;
@@ -211,44 +195,20 @@ pub unsafe extern "C" fn vxbench_scan_all(path: *const c_char) -> i64 {
     })
 }
 
-/// Opens `path`, scans every batch AND CANONICALIZES IT, returning the row count.
+/// Opens `path`, scans every batch and decodes it to its canonical form, returning the row count.
 ///
-/// THIS IS THE LIKE-FOR-LIKE AXIS, and `vxbench_scan_all` is not.
+/// The like-for-like full scan: our reader has no representation but the canonical one, so it
+/// decodes every column it delivers, where `vxbench_scan_all` hands back arrays in their stored
+/// encodings and counts rows off their metadata.
 ///
-/// `file.scan()` hands back arrays in whatever encoding the file holds: a `vortex.fsst` column
-/// comes out as an FsstArray, and `array.len()` answers from its metadata without touching a code.
-/// The .NET reader has no such state -- its `RecordBatch` is canonical by construction, because
-/// `CanonicalArena` is the only representation it has -- so `vxbench_scan_all` compares a scan that
-/// decompresses against one that does not, on every compressed encoding. That is not a small
-/// correction: on the 1M-row axis it is most of what the per-encoding ratios were measuring.
+/// `RecursiveCanonical` and not `Canonical`, which stops as soon as the root is canonical: a struct
+/// is, so on a table it would decode none of the columns under it.
 ///
-/// `execute::<RecursiveCanonical>` AND NOT `execute::<Canonical>`, and the difference is the whole
-/// axis on every tabular file. `Canonical` runs `execute_until::<AnyCanonical>`, which STOPS as
-/// soon as the ROOT matches one of twelve kinds (`vortex-array-0.86.1/src/canonical.rs:616-629`,
-/// `:1233-1251`) -- and `Struct`, `Map`, `ListView` and `Variant` are all in that list. Upstream
-/// states the consequence outright: "canonicalization is shallow: children of canonical
-/// struct/list arrays may still be encoded" (`src/lib.rs:37-38`). So on a file whose root is a
-/// struct of encoded columns, or a variant over a constant, this call decoded NOTHING: it opened
-/// the file, split it, and returned. Measured on the corpus's `variant` file, that was 85 us
-/// against our 600 -- a ratio of 7,00 between a full decode and a file open.
+/// On the way, a constant array is expanded, as our reader expands it; were ours to keep constants
+/// as they are, this call would charge the reference for work ours no longer does.
 ///
-/// `RecursiveCanonical` (`canonical.rs:788`, `:814-991`) is the one that "recursively execute[s]
-/// the array until all of its children are canonical", which is what our reader does by
-/// construction: `CanonicalArena` is the only representation it has, so every column of every batch
-/// is materialized. That is the like-for-like.
-///
-/// A COMMENT HERE USED TO CLAIM this was "the same call its arrow conversion makes". It is not:
-/// the arrow path is `into_arrow`, which executes each struct field in turn
-/// (`vortex-arrow-0.86.1/src/executor/struct_.rs:152-166`). That claim is what made the shallow
-/// call look defensible, so it is stated rather than quietly deleted.
-///
-/// ONE ASYMMETRY TO WATCH, and it is not live today: `Canonical` -- which this goes through first
-/// -- "will fully expand constant arrays" (`canonical.rs:616-620`). So does our reader, today.
-/// The day `ConstantForm` becomes our default, this call would charge Rust for an expansion we no
-/// longer pay, and the bench would be wrong in the other direction.
-///
-/// The decoded splits are dropped as they are counted: the decode has already happened by then,
-/// and holding a million rows of it would measure the allocator.
+/// The decoded splits are dropped as they are counted: holding a million rows of them would
+/// measure the allocator.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
@@ -324,8 +284,7 @@ pub unsafe extern "C" fn vxbench_scan_projected(path: *const c_char, field: *con
 ///
 /// The like-for-like projected scan, for the same reason `vxbench_scan_canonical` is the
 /// like-for-like full scan: `vxbench_scan_projected` counts rows off metadata and decodes nothing,
-/// while our reader materializes every column it delivers. Comparing the two measures the
-/// difference between decoding and not.
+/// while our reader materializes every column it delivers.
 ///
 /// # Safety
 /// `path` and `field` must be valid NUL-terminated C strings for the duration of the call.
@@ -349,7 +308,7 @@ pub unsafe extern "C" fn vxbench_scan_projected_canonical(
     })
 }
 
-/// Opens `path` and reads ONE batch, returning its row count: the time-to-first-batch axis.
+/// Opens `path` and reads one batch, returning its row count: the time-to-first-batch axis.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
@@ -368,16 +327,12 @@ pub unsafe extern "C" fn vxbench_open_first_batch(path: *const c_char) -> i64 {
     })
 }
 
-/// Reads `path` and WRITES it back out with the default strategy, returning the rows written.
+/// Reads `path` and writes it back out with the default strategy, returning the rows written.
 ///
-/// THE WRITE AXIS HAD NO REFERENCE AT ALL. The benchmark design compares reading against Vortex
-/// Rust on five axes and writing against nothing, so every write-side change in this repository has
-/// been measured against its own past and never against the implementation it is a port of. The
-/// read is included in the measurement on BOTH sides -- it is the same file and the same reader, so
-/// it is common-mode -- and `vxbench_scan_canonical` gives the caller the number to subtract when
-/// the read is a large share.
+/// The read is inside the measurement on both sides, the same file through the same reader, and
+/// `vxbench_scan_canonical` gives the figure to subtract when the read is a large share.
 ///
-/// The output goes to an in-memory sink rather than to disk, matching the .NET side's `DiscardSink`:
+/// The output goes to an in-memory sink rather than to disk, as the .NET side's `DiscardSink` does:
 /// a write benchmark that measures the filesystem measures the filesystem.
 ///
 /// The writer is given each split decoded to its canonical form, which is what our reader hands
@@ -434,11 +389,8 @@ pub unsafe extern "C" fn vxbench_rewrite(path: *const c_char, destination: *cons
 
 /// Takes `count` rows of `path`, one every `stride`, canonicalizing, and counts them.
 ///
-/// THE TAKE AXIS HAD NO REFERENCE. Our take figure was "0.32x of a full scan", which is a
-/// ratio against ourselves and says nothing about whether the path is fast. The indices are a
-/// stride rather than a list so the same call describes a scattered take of any density without
-/// marshalling an array across the ABI -- the .NET side's `TakeBenchmarks` uses exactly this shape,
-/// `i * 1024 + 511`.
+/// The indices are a stride rather than a list, so that one call describes a scattered take of any
+/// density without marshalling an array across the ABI.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
@@ -464,12 +416,7 @@ pub unsafe extern "C" fn vxbench_take(path: *const c_char, count: i64, stride: i
 
 /// Scans `path` under `field >= lo AND field < lo + width`, canonicalizing, and counts the rows.
 ///
-/// THE FILTER AXIS HAD NO REFERENCE EITHER. A branching study priced the comparison kernel's
-/// remedy at 6.0x and `FilterSelectivityBenchmarks` measured the whole path at four selectivities,
-/// but nothing said whether 230 microseconds for a 1% band was good, bad or indifferent -- the
-/// reference had no filter entry point to ask.
-///
-/// The predicate is a BAND rather than a single comparison, because that is what the .NET side's
+/// The predicate is a band rather than a single comparison, because that is what the .NET side's
 /// selectivity benchmark uses and what a zone map can actually prune: a half-open interval on one
 /// i64 field. `lo` and `width` are the caller's, so the same call serves every selectivity.
 ///
@@ -503,15 +450,9 @@ pub unsafe extern "C" fn vxbench_scan_filtered(
 
 /// Scans `path` keeping the rows whose `field` equals `value`, and returns how many survived.
 ///
-/// The band filter above is an i64 interval, so no axis asked a string column anything. That is
-/// the measurement gap this pair closes: the cost of a predicate on text is the question every
-/// encoding that stores text compressed has to answer, and a ratio needs the reference's answer to
-/// the same question.
-///
-/// `eq` rather than a band, because equality is the predicate an encoding can answer without
-/// decompressing -- on a dictionary by comparing the k values, on FSST by compressing the needle
-/// with the column's own table. A band would measure ordering, which text encodings do not
-/// accelerate.
+/// `eq` rather than a band, because equality is the predicate a text encoding can answer without
+/// decompressing: on a dictionary by comparing its values, on FSST by compressing the needle with
+/// the column's own table. A band would measure ordering, which text encodings do not accelerate.
 ///
 /// # Safety
 /// `path`, `field` and `value` must be valid NUL-terminated C strings for the duration of the call.
@@ -535,7 +476,7 @@ pub unsafe extern "C" fn vxbench_scan_filtered_eq_utf8(
 /// would actually write, not a shape imposed on one side to resemble the other -- and the harness
 /// holds them to the same surviving row count before it times anything.
 ///
-/// `prefix` MUST NOT contain `%` or `_`. Both are LIKE wildcards here and neither is a wildcard to
+/// `prefix` must not contain `%` or `_`. Both are LIKE wildcards here and neither is a wildcard to
 /// `StartsWith`, so a prefix carrying one would quietly make the two sides ask different questions.
 /// The caller picks the prefixes; escaping is not added for a needle nobody needs.
 ///
@@ -565,7 +506,7 @@ pub unsafe extern "C" fn vxbench_scan_filtered_prefix_utf8(
 /// the recursive canonicalization that makes the count evidence of a decode rather than of a
 /// metadata read.
 ///
-/// An EMPTY `field` addresses the root array instead of a column of it. The single-encoding files
+/// An empty `field` addresses the root array instead of a column of it. The single-encoding files
 /// have a bare array at their root, so without this there is no way to put a predicate on one at
 /// all -- and those are the only files that carry a given encoding with nothing else mixed in.
 fn filtered_utf8<F>(path: *const c_char, field: String, build: F) -> i64
@@ -589,32 +530,24 @@ where
     })
 }
 
-/// Scans `path` and folds every decoded VALUE into one 64-bit checksum.
+/// Scans `path` and folds every decoded value into one 64-bit checksum: the same rows, in the same
+/// order, with the same values, where a row count says nothing of whether anything was decoded.
 ///
-/// THE PRECONDITION `--ffi-check` NEVER HAD. It compared row counts, and a row count is not
-/// evidence of a decode: upstream's lazy scan answers `len()` from metadata without materializing
-/// a byte, which is how a "0.96x" ratio came to compare a decode against an absence of one. Same
-/// rows, same order, same bytes is what this says instead.
+/// It does not prove that `vxbench_scan_canonical` decodes: `execute_scalar` reaches every value
+/// whatever a scan decoded, so the two are checked apart.
 ///
-/// WHAT IT DOES NOT PROVE, and a comment here used to claim it did: that
-/// `vxbench_scan_canonical` canonicalizes. This walks `execute_scalar` row by row, which is a
-/// DIFFERENT PATH -- it reaches every value whatever the scan did or did not decode, so it stayed
-/// green for as long as that entry point was stopping at a canonical root without touching a
-/// child. The two are checked separately, and this one checks values.
-///
-/// THE ENCODING IS A CONTRACT WITH THE .NET SIDE, byte for byte
-/// (bench/Vorticity.Benchmarks/Checksum.cs):
+/// The encoding is a contract with `bench/Vorticity.Benchmarks/Checksum.cs`, byte for byte:
 ///
 ///   null 0x00 · bool 0x01 + byte · signed 0x02 + width + LE bytes · unsigned 0x03 + width + LE
 ///   bytes · float 0x04 + width + LE bits · utf8/binary 0x05 + u32 LE length + bytes · struct 0x06
 ///   + u32 field count + fields in order · list 0x07 + u32 count + elements · decimal 0x08 + width
 ///   + LE bits · extension 0x09 + the storage value
 ///
-/// It is a checksum of VALUES and not of buffers, because a buffer is where the two
-/// implementations are allowed to differ: an Arrow view's buffer index and offset, a validity
-/// bitmap that is absent here and all-ones there, the bytes under a null. None of that is data.
+/// A checksum of values and not of buffers, because buffers are where two implementations may
+/// differ: an Arrow view's buffer index and offset, a validity bitmap absent here and all-ones
+/// there, the bytes under a null.
 ///
-/// FNV-1a, because the mixing does not have to be good -- it has to be identical.
+/// FNV-1a: the mixing has to be identical on both sides, not good.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
@@ -656,9 +589,8 @@ fn hash_count(count: usize, hash: &mut u64) {
 
 /// Folds one scalar in, by the encoding above.
 ///
-/// THE DTYPE IS CARRIED because a `Tuple` is a struct, a list and a fixed-size list on this side,
-/// and the .NET side tags a struct 0x06 and a list 0x07 -- the value alone cannot say which. It is
-/// the same reason `sidecar.rs` walks a dtype beside its value.
+/// The dtype is carried because a `Tuple` is a struct, a list and a fixed-size list on this side,
+/// and the .NET side tags a struct 0x06 and a list 0x07: the value alone cannot say which.
 fn hash_value(dtype: &DType, value: Option<&ScalarValue>, hash: &mut u64) {
     let Some(value) = value else {
         hash_byte(0x00, hash);
@@ -706,8 +638,8 @@ fn hash_value(dtype: &DType, value: Option<&ScalarValue>, hash: &mut u64) {
             hash_value(ext.storage_dtype(), Some(v), hash);
         }
         (dtype, value) => {
-            // LOUD RATHER THAN SILENT. A shape neither side has an encoding for would otherwise
-            // fold into something plausible and the check would pass for no reason at all.
+            // A shape neither side has an encoding for is folded in whole, rather than into
+            // something plausible that would let the check pass for no reason.
             hash_byte(0xFF, hash);
             hash_bytes(format!("{dtype} {value:?}").as_bytes(), hash);
         }
@@ -763,20 +695,16 @@ pub unsafe extern "C" fn vxbench_open_only(path: *const c_char) -> i64 {
     })
 }
 
-/// The session, built ONCE.
+/// The session, built once: `VortexSession::default()` registers every edition and initializes the
+/// arrow and parquet-variant integrations, which the .NET side also does once per process, its
+/// `EncodingRegistry` being static. Built per call, it would charge the reference for a harness
+/// decision.
 ///
-/// This is a fairness fix, not an optimization, and it moved a number: `VortexSession::default()`
-/// registers every edition and initializes the arrow and parquet-variant integrations, which the
-/// first version of this shim paid on every call. Nothing on the .NET side does that per open -
-/// `EncodingRegistry` is static and initialized once - so charging Rust for it measured a harness
-/// decision rather than the reader. Rebuilding it per call cost ~100 us, which is more than the
-/// entire open-latency axis.
-///
-/// The FILE is still opened from scratch on every call, which is what the .NET side does and what
-/// keeps the segment cache cold on both sides.
+/// The file is still opened from scratch on every call, as the .NET side opens it, which keeps the
+/// segment cache cold on both sides.
 static SESSION: OnceLock<VortexSession> = OnceLock::new();
 
-/// Opens `path` and returns how many BATCHES a full scan produces.
+/// Opens `path` and returns how many batches a full scan produces.
 ///
 /// Not a timing axis. It exists because "time to first batch" only compares like with like if the
 /// two implementations agree on what a batch is, and they do not have to: the split strategy is a
@@ -805,12 +733,9 @@ pub unsafe extern "C" fn vxbench_batch_count(path: *const c_char) -> i64 {
 /// Decodes the C string, runs the body on the shared session, and turns every failure mode -
 /// including a panic, which must never unwind across the ABI - into a negative return.
 ///
-/// THE ERROR IS PRINTED BEFORE IT IS FLATTENED. An i64 can carry
-/// "it failed" across the ABI and nothing more, so discarding the `VortexError` left the .NET side
-/// with a message it had invented -- "the Rust reader returned an error" -- and no way to learn
-/// which call, which encoding, or what the reference actually refused. One `eprintln!` is the
-/// difference between a diagnosable reference and an opaque one; a panic's payload is printed by
-/// the default hook already.
+/// The error is printed before it is flattened: an i64 carries that the call failed and nothing
+/// more, and the message is what says which call, which encoding and what the reference refused. A
+/// panic's payload is printed by the default hook.
 fn run<F>(path: *const c_char, body: F) -> i64
 where
     F: FnOnce(VortexSession, String) -> VortexResult<i64>,

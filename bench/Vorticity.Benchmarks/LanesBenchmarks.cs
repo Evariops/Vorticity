@@ -1,21 +1,3 @@
-// What a lane buys, on both sides, at the same thread count.
-//
-// `ScanBuilder.WithDegreeOfParallelism` existed and nothing measured it, and `vxbench` was
-// single-threaded by construction -- so the family of contention questions had no number at
-// all, and nothing there should be optimized before the bench exists. This is the bench.
-//
-// THE THREAD COUNT IS PINNED ON BOTH SIDES, which is the only way the
-// pair means anything: a ratio between an n-lane reader and a reference free to use every core
-// measures a threading model, not a decoder. `vxbench_scan_canonical_threads` drives upstream's
-// worker pool with exactly n workers for the same reason we ask for exactly n lanes.
-//
-// ONE LANE IS NOT THE SINGLE-THREADED PATH on either side, and the class says so by measuring it
-// anyway: ours at degree 1 takes the non-pipelined branch, theirs at 1 worker still pays the pool
-// hand-off that the single-thread runtime does not. The interesting number is not the speed-up
-// alone -- it is where the speed-up stops, and whether the two stop in the same place.
-//
-// `[ThreadingDiagnoser]` because the question behind the family is contention: lock contention and
-// completed work items are what tell a lane that did work from a lane that waited.
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
@@ -27,7 +9,23 @@ using Set = Vorticity.Bench.Scenarios.ScenarioSet;
 
 namespace Vorticity.Benchmarks;
 
-/// <summary>Our scan at n lanes against the reference's pool at n workers.</summary>
+/// <summary>Our scan at n lanes against the reference on a Tokio runtime of n workers.</summary>
+/// <remarks>
+/// <para>
+/// The thread count is pinned on both sides: a ratio between an n-lane reader and a reference free
+/// to use every core measures a threading model, not a decoder.
+/// </para>
+/// <para>
+/// One lane is not the single-threaded path on either side, and the class measures it anyway: ours
+/// at degree 1 takes the non-pipelined branch, theirs at one worker still hands the work to that
+/// worker. The number to read is where the speed-up stops, and whether the two stop in the same
+/// place.
+/// </para>
+/// <para>
+/// <c>[ThreadingDiagnoser]</c> because the question behind the class is contention: lock contention
+/// and completed work items tell a lane that did work from a lane that waited.
+/// </para>
+/// </remarks>
 [Config(typeof(BenchmarkConfig))]
 [BenchmarkCategory(BenchmarkConfig.Path)]
 [ThreadingDiagnoser]

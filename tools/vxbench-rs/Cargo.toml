@@ -3,7 +3,7 @@ name = "vxbench"
 version = "0.1.0"
 edition = "2021"
 publish = false
-description = "Vortex's Rust reader, as a cdylib for in-process ratios and as a binary for the published report, so both sides run the same code either way."
+description = "Vortex's Rust reader and writer, as a cdylib for in-process ratios and as a binary for the published report, so both run the same code."
 
 [lib]
 # The cdylib is what BenchmarkDotNet loads; the rlib is what the binary links, so the scenarios the
@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 name = "vxbench"
 path = "src/main.rs"
 
-# The SAME crates.io pin tools/conformance-gen uses. Not a git dependency and not `vortex-ffi`:
+# The same crates.io pin tools/conformance-gen uses. Not a git dependency and not `vortex-ffi`:
 # see the README for why the shim is purpose-built rather than borrowed.
 [dependencies]
 # `tokio` for the runtime upstream's benchmarks run on: `with_tokio` over a multi-threaded runtime,
