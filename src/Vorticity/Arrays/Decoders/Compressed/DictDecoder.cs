@@ -224,14 +224,6 @@ internal sealed class DictDecoder : ArrayDecoder
             : whole
                 ? context.DecodeChild(in node, 0, codesType, length)
                 : context.DecodeChildRange(in node, 0, codesType, length, start, count);
-
-        // Shared only when the codes are narrowed. A selection or a range narrows the codes and
-        // never the values, so a take that visits a hundred batches of one chunk would decode this
-        // child a hundred times; on the whole-node path the reader above has already retained the
-        // node itself, and asking again here would retain the same bytes twice.
-        int valuesIndex = whole
-            ? context.DecodeChild(in node, 1, dtype, valuesLength)
-            : context.DecodeWholeChild(in node, 1, dtype, valuesLength);
         int produced = count;
 
         CanonicalNode codesNode = context.Canonical.GetNode(codesIndex);
@@ -252,25 +244,124 @@ internal sealed class DictDecoder : ArrayDecoder
             CompressedThrow.ChildLength(Id, "codes", codesNode.Length, produced);
         }
 
-        ValueReader values = ValueReader.Of(context.Canonical, valuesIndex, Id);
-        if (values.Length != valuesLength)
-        {
-            CompressedThrow.ChildLength(Id, "values", values.Length, valuesLength);
-        }
-
-        if (keep)
-        {
-            // The consumer reads the codes and the values as they are: no gather, and a selection
-            // has already narrowed the codes alone.
-            return EncodedNodes.Dictionary(context, dtype, codesIndex, valuesIndex, valuesLength, Id, Id);
-        }
-
         ReadOnlySpan<byte> codes = codesNode.Values.Span;
         PType codesPType = metadata.CodesPType;
         ValidityReader codesValidity = ValidityReader.Of(context.Canonical, codesNode.Validity);
+
+        // A take of a few rows names a few entries, and when the values' encoding reaches an entry
+        // without decoding the rest, only those are decoded and the rows' codes renumbered onto
+        // them: a row taken from each of a file's chunks otherwise decodes every chunk's whole
+        // dictionary for one of its entries. Otherwise the values are shared, and only when the
+        // codes are narrowed: a take that visits a hundred batches of one chunk would decode them a
+        // hundred times, and on the whole-node path the reader above has already retained the node
+        // itself, so asking again here would retain the same bytes twice.
+        int entries = valuesLength;
+        int[]? narrowed = null;
+        int valuesIndex;
+        if (selective && !keep && produced * NarrowedValues < valuesLength && context.ChildSelectsWithoutFullDecode(in node, 1))
+        {
+            narrowed = System.Buffers.ArrayPool<int>.Shared.Rent(2 * produced);
+            entries = Narrow(codes, codesPType, in codesValidity, produced, valuesLength, narrowed);
+            valuesIndex = context.DecodeChildSelected(in node, 1, dtype, valuesLength, narrowed.AsSpan(produced, entries));
+            codes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(narrowed.AsSpan(0, produced));
+            codesPType = PType.I32;
+        }
+        else
+        {
+            valuesIndex = whole
+                ? context.DecodeChild(in node, 1, dtype, valuesLength)
+                : context.DecodeWholeChild(in node, 1, dtype, valuesLength);
+        }
+
+        try
+        {
+            ValueReader values = ValueReader.Of(context.Canonical, valuesIndex, Id);
+            if (values.Length != entries)
+            {
+                CompressedThrow.ChildLength(Id, "values", values.Length, entries);
+            }
+
+            if (keep)
+            {
+                // The consumer reads the codes and the values as they are: no gather, and a selection
+                // has already narrowed the codes alone.
+                return EncodedNodes.Dictionary(context, dtype, codesIndex, valuesIndex, valuesLength, Id, Id);
+            }
+
+            return Gather(context, dtype, in values, codes, codesPType, entries, produced, in codesValidity, codesNode.Validity);
+        }
+        finally
+        {
+            if (narrowed is not null)
+            {
+                System.Buffers.ArrayPool<int>.Shared.Return(narrowed);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A take narrows the values to the entries its rows name when there are fewer than a quarter as
+    /// many rows as entries: the bar under which a sparse take of <c>vortex.varbin</c> measured
+    /// reading a few rows faster than decoding them all.
+    /// </summary>
+    private const int NarrowedValues = 4;
+
+    /// <summary>
+    /// Writes, from <paramref name="scratch"/>'s <paramref name="rows"/>-th slot, the distinct codes
+    /// the valid rows name, ascending, and in its first <paramref name="rows"/> slots each row's code
+    /// renumbered onto them; a null row gets 0, which its validity hides.
+    /// </summary>
+    /// <returns>How many distinct codes.</returns>
+    private static int Narrow(
+        ReadOnlySpan<byte> codes, PType codesPType, in ValidityReader validity, int rows, int valuesLength, Span<int> scratch)
+    {
+        Span<int> renumbered = scratch[..rows];
+        Span<int> named = scratch.Slice(rows, rows);
+        int count = 0;
+        for (int row = 0; row < rows; row++)
+        {
+            if (!validity.IsValid(row))
+            {
+                continue;
+            }
+
+            uint code = RowKernels.CodeAt(codes, codesPType, row);
+            if (code >= (uint)valuesLength)
+            {
+                ThrowCode(codes, codesPType, row, valuesLength);
+            }
+
+            named[count++] = (int)code;
+        }
+
+        named = named[..count];
+        named.Sort();
+        int distinct = 0;
+        for (int i = 0; i < named.Length; i++)
+        {
+            if (distinct == 0 || named[i] != named[distinct - 1])
+            {
+                named[distinct++] = named[i];
+            }
+        }
+
+        named = named[..distinct];
+        for (int row = 0; row < rows; row++)
+        {
+            renumbered[row] = validity.IsValid(row) ? named.BinarySearch((int)RowKernels.CodeAt(codes, codesPType, row)) : 0;
+        }
+
+        return distinct;
+    }
+
+    /// <summary>Each row's value through its code, the codes' and the values' nulls combined.</summary>
+    private static int Gather(
+        ArrayDecodeContext context, DType dtype, in ValueReader values, ReadOnlySpan<byte> codes, PType codesPType,
+        int valuesLength, int produced, in ValidityReader codesValidity, Validity codesNodeValidity)
+    {
         ValidityReader valuesValidity = ValidityReader.Of(context.Canonical, values.Validity);
 
-        bool tracked = !codesNode.Validity.IsAllValid || !values.Validity.IsAllValid;
+        bool tracked = !codesNodeValidity.IsAllValid || !values.Validity.IsAllValid;
 
         DataBufferSet dataBuffers = DataBufferSet.Collect(context.Canonical, in values, false, default);
         try
@@ -284,7 +375,22 @@ internal sealed class DictDecoder : ArrayDecoder
                 : ValueWriter.CreateUninitialized(context, in values, produced, 0, Id);
             ValidityWriter validity = ValidityWriter.Create(context, produced, tracked, Id);
 
-            if (bitPacked)
+            if (valuesValidity.IsAllInvalid)
+            {
+                // Every entry is null, so every row is, and a gather has no bitmap to read their
+                // nulls from: the entries a take names can all be null where the whole dictionary
+                // is not. The codes are still held to the entries, and nothing is copied.
+                for (int row = 0; row < produced; row++)
+                {
+                    if (codesValidity.IsValid(row) && RowKernels.CodeAt(codes, codesPType, row) >= (uint)valuesLength)
+                    {
+                        ThrowCode(codes, codesPType, row, valuesLength);
+                    }
+                }
+
+                writer.Bytes.Clear();
+            }
+            else if (bitPacked)
             {
                 GatherBits(
                     in values, codes, codesPType, valuesLength, produced, in codesValidity,

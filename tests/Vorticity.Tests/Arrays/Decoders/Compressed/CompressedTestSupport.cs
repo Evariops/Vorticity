@@ -211,6 +211,10 @@ internal sealed class DecodeHarness : IDisposable
     internal int DecodeRoot(DType dtype, int length) =>
         Scan.Decode.DecodeRoot(Scan.Nodes.Root, dtype, length);
 
+    /// <summary>Decodes the <paramref name="wanted"/> rows of the loaded root, as a take does.</summary>
+    internal int DecodeRootSelected(DType dtype, int length, ReadOnlySpan<int> wanted) =>
+        Scan.Decode.DecodeRootSelected(Scan.Nodes.Root, dtype, length, wanted, keepEncoding: false);
+
     /// <summary>The decoded node at <paramref name="index"/>.</summary>
     internal CanonicalNode Node(int index) => Scan.Canonical.GetNode(index);
 

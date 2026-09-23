@@ -223,6 +223,15 @@ internal sealed class ArrayDecodeContext
         node.ChildCount <= validityChildIndex ||
         ChildMaterializesNothing(in node, validityChildIndex, Types.Bool(Nullability.NonNullable));
 
+    /// <summary>Whether child <paramref name="childIndex"/> of <paramref name="node"/> reaches a selection of its rows without decoding the rest.</summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    internal bool ChildSelectsWithoutFullDecode(in ArrayNode node, int childIndex)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        return ArrayDecoderTable.Require(_scan, child.Encoding, child.EncodingSpecIndex).SelectsWithoutFullDecode;
+    }
+
     /// <summary>Whether child <paramref name="childIndex"/> of <paramref name="node"/> decodes a range of its rows.</summary>
     /// <param name="node">The parent node.</param>
     /// <param name="childIndex">0-based child position.</param>

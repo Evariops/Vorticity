@@ -1,5 +1,7 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Types;
@@ -272,6 +274,151 @@ public sealed class DictDecoderTests
         {
             Assert.Equal(100 * ((i % 4) + 1), decoded[i]);
         }
+    }
+
+    [Fact]
+    public void ATakeOfAFewRowsDecodesOnlyTheEntriesTheyName()
+    {
+        // Sixty-four entries, some past the twelve bytes a view holds inline; three rows taken, two
+        // of them naming the same entry.
+        (TestNode root, byte[][] buffers, string[] entries, byte[] codes) = TextDictionary(64, rows: 200, nullableCodes: false, nullEntry: -1);
+        using DecodeHarness harness = DecodeHarness.Load(root, buffers);
+
+        int[] wanted = [3, 67, 150];
+        DType utf8 = harness.Types.Utf8(Nullability.NonNullable);
+        CanonicalNode node = harness.Node(harness.DecodeRootSelected(utf8, 200, wanted));
+
+        Assert.Equal(3, node.Length);
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            Assert.Equal(entries[codes[wanted[i]]], ReadValue(node, i));
+        }
+
+        Assert.Equal(0, WholeEntries(harness, 64));
+    }
+
+    [Fact]
+    public void ANarrowedTakeKeepsTheNullsOfTheCodesAndOfTheEntries()
+    {
+        (TestNode root, byte[][] buffers, string[] entries, byte[] codes) = TextDictionary(64, rows: 200, nullableCodes: true, nullEntry: 5);
+        using DecodeHarness harness = DecodeHarness.Load(root, buffers);
+
+        // Row 7 is a null code, row 5 names the null entry, row 11 a valid one.
+        int[] wanted = [5, 7, 11];
+        DType utf8 = harness.Types.Utf8(Nullability.Nullable);
+        CanonicalNode node = harness.Node(harness.DecodeRootSelected(utf8, 200, wanted));
+
+        Assert.False(harness.IsValid(node, 0));
+        Assert.False(harness.IsValid(node, 1));
+        Assert.True(harness.IsValid(node, 2));
+        Assert.Equal(entries[codes[11]], ReadValue(node, 2));
+    }
+
+    [Fact]
+    public void ATakeNamingOnlyNullEntriesReadsNullRows()
+    {
+        // The entries it names are all null, which the whole dictionary is not: the narrowed values
+        // carry no bitmap at all.
+        (TestNode root, byte[][] buffers, _, _) = TextDictionary(64, rows: 200, nullableCodes: true, nullEntry: 5);
+        using DecodeHarness harness = DecodeHarness.Load(root, buffers);
+
+        CanonicalNode node = harness.Node(harness.DecodeRootSelected(harness.Types.Utf8(Nullability.Nullable), 200, [5, 7]));
+
+        Assert.Equal(2, node.Length);
+        Assert.False(harness.IsValid(node, 0));
+        Assert.False(harness.IsValid(node, 1));
+    }
+
+    [Fact]
+    public void ATakeOfManyRowsDecodesTheEntriesWhole()
+    {
+        (TestNode root, byte[][] buffers, string[] entries, byte[] codes) = TextDictionary(64, rows: 200, nullableCodes: false, nullEntry: -1);
+        using DecodeHarness harness = DecodeHarness.Load(root, buffers);
+
+        // Sixteen rows name up to sixteen entries, a quarter of them: past the bar.
+        int[] wanted = [.. Enumerable.Range(0, 16).Select(i => i * 12)];
+        CanonicalNode node = harness.Node(harness.DecodeRootSelected(harness.Types.Utf8(Nullability.NonNullable), 200, wanted));
+
+        for (int i = 0; i < wanted.Length; i++)
+        {
+            Assert.Equal(entries[codes[wanted[i]]], ReadValue(node, i));
+        }
+
+        Assert.Equal(1, WholeEntries(harness, 64));
+    }
+
+    [Fact]
+    public void ANarrowedTakeRefusesACodePastTheEntries()
+    {
+        (TestNode root, byte[][] buffers, _, byte[] codes) = TextDictionary(64, rows: 200, nullableCodes: false, nullEntry: -1);
+        codes[67] = 64;
+        using DecodeHarness harness = DecodeHarness.Load(root, buffers);
+
+        Assert.Throws<VortexFormatException>(
+            () => harness.DecodeRootSelected(harness.Types.Utf8(Nullability.NonNullable), 200, [3, 67]));
+    }
+
+    /// <summary>
+    /// A dictionary of <paramref name="count"/> text entries under <c>vortex.varbin</c>, which
+    /// reaches an entry without decoding the others, and <paramref name="rows"/> codes over it.
+    /// </summary>
+    private static (TestNode Root, byte[][] Buffers, string[] Entries, byte[] Codes) TextDictionary(
+        int count, int rows, bool nullableCodes, int nullEntry)
+    {
+        string[] entries = [.. Enumerable.Range(0, count).Select(i => i % 3 == 0 ? $"entry-{i:D2}-longer-than-a-view" : $"e{i}")];
+        byte[] heap = Encoding.UTF8.GetBytes(string.Concat(entries));
+        int[] offsets = new int[count + 1];
+        for (int i = 0; i < count; i++)
+        {
+            offsets[i + 1] = offsets[i] + Encoding.UTF8.GetByteCount(entries[i]);
+        }
+
+        byte[] codes = new byte[rows];
+        for (int row = 0; row < rows; row++)
+        {
+            codes[row] = (byte)((row * 37) % count);
+        }
+
+        // Row 67 names the same entry as row 3.
+        codes[67] = codes[3];
+        codes[5] = (byte)Math.Max(nullEntry, 0);
+
+        TestNode values = new TestNode("vortex.varbin")
+            .WithMetadata(Canonical.TestMetadata.VarBin(PType.I32))
+            .WithBuffer(1)
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(2));
+        List<byte[]> buffers = [codes, heap, TestBuffers.Int32(offsets)];
+        if (nullEntry >= 0)
+        {
+            values = values.WithChild(new TestNode("vortex.bool").WithMetadata(Canonical.TestMetadata.Bool(0)).WithBuffer(buffers.Count));
+            buffers.Add(TestBuffers.Bitmap([.. Enumerable.Range(0, count).Select(i => i != nullEntry)]));
+        }
+
+        TestNode codesNode = new TestNode("vortex.primitive").WithBuffer(0);
+        if (nullableCodes)
+        {
+            codesNode = codesNode.WithChild(new TestNode("vortex.bool").WithBuffer(buffers.Count));
+            buffers.Add(TestBuffers.Bitmap([.. Enumerable.Range(0, rows).Select(row => row != 7)]));
+        }
+
+        TestNode root = new TestNode("vortex.dict")
+            .WithMetadata(TestMetadata.Dict((uint)count, PType.U8, nullableCodes))
+            .WithChild(codesNode)
+            .WithChild(values);
+        return (root, [.. buffers], entries, codes);
+    }
+
+    /// <summary>How many times the decode left the dictionary's <paramref name="count"/> entries whole in the arena.</summary>
+    private static int WholeEntries(DecodeHarness harness, int count)
+    {
+        int found = 0;
+        for (int i = 0; i < harness.Scan.Canonical.NodeCount; i++)
+        {
+            CanonicalNode node = harness.Node(i);
+            found += node.Kind == CanonicalKind.VarBinView && node.Length == count ? 1 : 0;
+        }
+
+        return found;
     }
 
     internal static void WriteView(Span<byte> view, ReadOnlySpan<byte> data, int offset, int length)
