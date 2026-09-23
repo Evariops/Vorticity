@@ -54,16 +54,16 @@ column of every batch to its plain form with `Canonical()`:
 
 | profile | bytes | written in | decoded in | encodings |
 |---|---|---|---|---|
-| `Auto` | 1 508 212 | 35 ms | 1 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
-| `Fastest` | 1 508 212 | 35 ms | 1 ms | the same |
-| `Smallest` | 1 298 700 | 64 ms | 2 ms | `Day` and `City` zstd, `Celsius` ALP |
-| `None` | 20 929 820 | 30 ms | 1 ms | every column `Canonical`, the plain form |
+| `Auto` | 1 508 212 | 33 ms | 1 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
+| `Fastest` | 1 508 212 | 33 ms | 1 ms | the same |
+| `Smallest` | 247 124 | 63 ms | 2 ms | `Day` runs, `Celsius` and `City` zstd |
+| `None` | 20 929 820 | 28 ms | 4 ms | every column `Canonical`, the plain form |
 
 Encoding is what makes the file fourteen times smaller than its plain form. `Auto` prices each
 column's size and decode speed together; `Fastest` spends less time choosing and builds no index,
-and on this data chose the same encodings; `Smallest` prices bytes alone and tries zstd, FSST and ALP
-on every chunk. It is not always the smallest there is: a zstd hint on `Celsius` under `Auto` gives
-563 988 bytes, where `Smallest` chose ALP for that column.
+and on this data chose the same encodings; `Smallest` prices bytes alone, tries zstd, FSST, ALP and
+ALP-RD on every chunk and keeps the smallest: zstd for `Celsius` and `City`, a file six times
+smaller than `Auto`'s, which a full decode pays for with a millisecond more.
 
 ## Hints
 
@@ -78,7 +78,7 @@ at a time, the rest left to the chooser:
 | `Celsius` as `Zstd` | 563 988 | zstd (ALP on the 576-row tail) |
 | `Celsius` as `BitPacked` | 1 508 212 | a dictionary: bit-packing does not apply to floats |
 | `Celsius` as `Canonical` | 8 483 996 | `Canonical`, the plain form |
-| `Celsius` as `Canonical`, under `Smallest` | 1 298 700 | ALP |
+| `Celsius` as `Canonical`, under `Smallest` | 247 124 | zstd |
 
 A hint is a preference, and the report is where you find out whether it held:
 

@@ -195,6 +195,17 @@ internal static class ArrayBlobWriter
             nodeIndex = Materialize(arena, nodeIndex);
             plan = ColumnCompressor.Choose(
                 arena, nodeIndex, encodings.Target, in summary, cascade, stats, blob);
+
+            // A trial that came in under an exact plan's price has beaten the plan's layer, not
+            // what the plan writes once its children take their own schemes. Size first is about
+            // the bytes written, so the exact plan is written for measure only and the smaller of
+            // the two is the one kept.
+            if (plan.DisplacedExact && KeepsExact(blob, arena, nodeIndex, in plan, encodings, in summary, cascade, stats))
+            {
+                plan.Release();
+                plan = ColumnCompressor.Choose(
+                    arena, nodeIndex, encodings.Target, in summary, cascade, stats.Dry(), blob);
+            }
         }
 
         // The bytes the plan actually produced, handed back to the column for its plan memory:
@@ -224,6 +235,46 @@ internal static class ArrayBlobWriter
 
         stats.Remember(in plan, produced);
         return written;
+    }
+
+    /// <summary>
+    /// Whether the plan every other profile writes for this column takes fewer bytes than the
+    /// size-first <paramref name="trial"/> that displaced an exact plan: that plan is written into
+    /// the measuring workspace and dropped, and set against the trial's buffers and the validity it
+    /// writes beside them.
+    /// </summary>
+    private static bool KeepsExact(
+        Workspace blob, CanonicalArena arena, int nodeIndex, in ColumnPlan trial, EncodingDictionary encodings,
+        in BlockStats summary, Cascade cascade, ChunkStats stats)
+    {
+        (Workspace measure, EncodingDictionary measured) = blob.Measure(encodings.Target);
+        try
+        {
+            ChunkStats dry = stats.Dry();
+            ColumnPlan exact = ColumnCompressor.Choose(arena, nodeIndex, encodings.Target, in summary, cascade, dry, measure);
+            WriteChosen(measure, arena, nodeIndex, in exact, measured, dry, out _);
+            long exactBytes = QueuedBytes(measure);
+            measure.Discard();
+
+            Span<int> children = stackalloc int[1];
+            Validity(measure, arena, arena.GetNode(nodeIndex), measured, children);
+            return exactBytes < trial.PredictedBytes + QueuedBytes(measure);
+        }
+        finally
+        {
+            measure.Discard();
+        }
+    }
+
+    private static long QueuedBytes(Workspace blob)
+    {
+        long bytes = 0;
+        foreach (PendingBuffer pending in blob.Buffers)
+        {
+            bytes += pending.Length;
+        }
+
+        return bytes;
     }
 
     /// <summary>Writes the node the way <paramref name="plan"/> says to.</summary>
@@ -2216,6 +2267,8 @@ internal static class ArrayBlobWriter
         private BufferSpec[] _specs = [];
         private ProtoWriter _metadata;
         private ZstandardEncoder? _zstd;
+        private Workspace? _measure;
+        private EncodingDictionary? _measureEncodings;
 
         /// <summary>The builder, cleared by each blob as it starts.</summary>
         internal FlatBufferBuilder Builder { get; } = new FlatBufferBuilder();
@@ -2266,6 +2319,37 @@ internal static class ArrayBlobWriter
             return _specs.AsSpan(0, count);
         }
 
+        /// <summary>
+        /// A second workspace, and an encoding table of its own, for a node written only to be
+        /// measured: made at the first such write, which only size first asks for.
+        /// </summary>
+        /// <param name="target">The edition the measured node is written under.</param>
+        internal (Workspace Blob, EncodingDictionary Encodings) Measure(VortexEdition target)
+        {
+            _measure ??= new Workspace { FrameRows = FrameRows };
+            if (_measureEncodings is null || _measureEncodings.Target != target)
+            {
+                _measureEncodings = new EncodingDictionary(ComponentKind.Array, target);
+            }
+
+            return (_measure, _measureEncodings);
+        }
+
+        /// <summary>Drops what a blob queued without writing it: its rentals go back, its builder is cleared.</summary>
+        internal void Discard()
+        {
+            foreach (PendingBuffer pending in _buffers)
+            {
+                if (pending.Rented && pending.Bytes is byte[] rented)
+                {
+                    ArrayPool<byte>.Shared.Return(rented);
+                }
+            }
+
+            _buffers.Clear();
+            Builder.Clear();
+        }
+
         /// <summary>Hands the builder's and the metadata writer's rentals back, and the zstd encoder to the process's.</summary>
         public void Dispose()
         {
@@ -2276,6 +2360,9 @@ internal static class ArrayBlobWriter
                 _zstd = null;
                 ZstdEncoders.Return(zstd);
             }
+
+            _measure?.Dispose();
+            _measure = null;
         }
     }
 }

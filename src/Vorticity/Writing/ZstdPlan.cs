@@ -77,18 +77,23 @@ internal readonly struct ZstdPlan
     /// The writer's blob workspace, whose encoder the frames are compressed in and whose block
     /// rows they are cut at; null to compress one frame with a context of the call's own.
     /// </param>
+    /// <param name="anyGain">
+    /// Whether frames any smaller than <paramref name="canonicalSize"/> are kept: size first leaves
+    /// the decompression pass out of the price, and with it the margin that pays for it.
+    /// </param>
     internal static ZstdPlan? TryBuild(
-        CanonicalArena arena, int nodeIndex, long canonicalSize, ArrayBlobWriter.Workspace? workspace = null)
+        CanonicalArena arena, int nodeIndex, long canonicalSize, ArrayBlobWriter.Workspace? workspace = null,
+        bool anyGain = false)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         int frameRows = workspace?.FrameRows is > 0 and int rows ? rows : int.MaxValue;
         if (node.Kind == CanonicalKind.Primitive)
         {
-            return TryBuildPrimitive(arena, node, canonicalSize, workspace, frameRows);
+            return TryBuildPrimitive(arena, node, canonicalSize, workspace, frameRows, anyGain);
         }
 
         return node.Kind == CanonicalKind.VarBinView
-            ? TryBuildViews(arena, node, canonicalSize, workspace, frameRows)
+            ? TryBuildViews(arena, node, canonicalSize, workspace, frameRows, anyGain)
             : null;
     }
 
@@ -97,7 +102,8 @@ internal readonly struct ZstdPlan
     /// frames cut where a block of rows ends.
     /// </summary>
     private static ZstdPlan? TryBuildViews(
-        CanonicalArena arena, CanonicalNode node, long canonicalSize, ArrayBlobWriter.Workspace? workspace, int frameRows)
+        CanonicalArena arena, CanonicalNode node, long canonicalSize, ArrayBlobWriter.Workspace? workspace, int frameRows,
+        bool anyGain)
     {
         int rows = node.Length;
         long streamBytes = 0;
@@ -164,7 +170,7 @@ internal readonly struct ZstdPlan
 
             return Compress(
                 workspace, stream.AsSpan(0, (int)streamBytes), frames, blocks,
-                canonicalSize, MarginNumerator, MarginDenominator);
+                canonicalSize, anyGain ? 1 : MarginNumerator, anyGain ? 1 : MarginDenominator);
         }
         finally
         {
@@ -177,7 +183,8 @@ internal readonly struct ZstdPlan
     /// prefixes, since the decoder scatters them using the fixed width alone.
     /// </summary>
     private static ZstdPlan? TryBuildPrimitive(
-        CanonicalArena arena, CanonicalNode node, long canonicalSize, ArrayBlobWriter.Workspace? workspace, int frameRows)
+        CanonicalArena arena, CanonicalNode node, long canonicalSize, ArrayBlobWriter.Workspace? workspace, int frameRows,
+        bool anyGain)
     {
         int width = node.PType.ByteWidth();
         if (width == 0)
@@ -240,7 +247,7 @@ internal readonly struct ZstdPlan
             // only the large size wins are worth taking and the marginal ones are left to it.
             return Compress(
                 workspace, input, frames, blocks, canonicalSize,
-                PrimitiveMarginNumerator, PrimitiveMarginDenominator);
+                anyGain ? 1 : PrimitiveMarginNumerator, anyGain ? 1 : PrimitiveMarginDenominator);
         }
         finally
         {

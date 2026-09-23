@@ -34,6 +34,7 @@ internal readonly struct ChunkStats
     private readonly int _firstBlock;
     private readonly int _blockCount;
     private readonly IChunkLedger? _ledger;
+    private readonly bool _dry;
 
     /// <summary>Points at <paramref name="column"/> over the chunk's block range.</summary>
     /// <param name="column">The column's ingest state, or <see langword="null"/> for none.</param>
@@ -41,12 +42,24 @@ internal readonly struct ChunkStats
     /// <param name="blockCount">How many blocks the chunk covers.</param>
     /// <param name="ledger">Where the misses of a list's elements are counted, or none.</param>
     internal ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger = null)
+        : this(column, firstBlock, blockCount, ledger, dry: false)
+    {
+    }
+
+    private ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger, bool dry)
     {
         _column = column;
         _firstBlock = firstBlock;
         _blockCount = blockCount;
         _ledger = ledger;
+        _dry = dry;
     }
+
+    /// <summary>
+    /// The same statistics for a write that is only measured: priced under the rules every profile
+    /// but size first applies, and leaving the column's memory and counters as they were.
+    /// </summary>
+    internal ChunkStats Dry() => new ChunkStats(_column, _firstBlock, _blockCount, ledger: null, dry: true);
 
     /// <summary>This column's summary over the chunk, or an absent one.</summary>
     internal BlockStats Stats =>
@@ -95,23 +108,35 @@ internal readonly struct ChunkStats
             && distinct > 0 && distinct <= table.Distinct;
     }
 
-    /// <summary>The column's memory of its last chunk, or none.</summary>
-    internal ColumnWriter.PlanMemory? Memory => _column?.Memory;
+    /// <summary>The column's memory of its last chunk, or none; none for a dry cursor, which prices in full.</summary>
+    internal ColumnWriter.PlanMemory? Memory => _dry ? null : _column?.Memory;
 
     /// <summary>Whether the file asks for its columns priced by their bytes alone.</summary>
     internal bool SizeFirst => _ledger is { SizeFirst: true };
 
     /// <summary>Tells the column its bit-packing was priced from the ingested widths.</summary>
-    internal void NoteWidthsServed() => _column?.NoteWidthsServed();
+    internal void NoteWidthsServed()
+    {
+        if (!_dry)
+        {
+            _column?.NoteWidthsServed();
+        }
+    }
 
     /// <summary>
     /// Hands the column what its chunk was encoded as and what that produced, for the next chunk's
-    /// memory. An absent cursor remembers nothing, which is what a child a scheme invented gets.
+    /// memory. An absent cursor remembers nothing, which is what a child a scheme invented gets,
+    /// and neither does a dry one.
     /// </summary>
     /// <param name="plan">The plan the encoder just wrote.</param>
     /// <param name="actualBytes">The buffer bytes it produced.</param>
-    internal void Remember(in ColumnPlan plan, long actualBytes) =>
-        _column?.Remember(in plan, actualBytes, _firstBlock, _blockCount);
+    internal void Remember(in ColumnPlan plan, long actualBytes)
+    {
+        if (!_dry)
+        {
+            _column?.Remember(in plan, actualBytes, _firstBlock, _blockCount);
+        }
+    }
 
     /// <summary>
     /// The cursor for field <paramref name="index"/>, which covers the same blocks because a
@@ -121,7 +146,7 @@ internal readonly struct ChunkStats
     internal ChunkStats Field(int index) =>
         _column is null
             ? default
-            : new ChunkStats(_column.Field(index), _firstBlock, _blockCount, _ledger);
+            : new ChunkStats(_column.Field(index), _firstBlock, _blockCount, _ledger, _dry);
 
     /// <summary>
     /// The cursor for a list's elements, which their parent's blocks cover, or an absent one when
@@ -145,6 +170,6 @@ internal readonly struct ChunkStats
             return default;
         }
 
-        return new ChunkStats(child, _firstBlock, _blockCount, _ledger);
+        return new ChunkStats(child, _firstBlock, _blockCount, _ledger, _dry);
     }
 }

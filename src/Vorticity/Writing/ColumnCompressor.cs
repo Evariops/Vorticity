@@ -116,6 +116,13 @@ internal readonly struct ColumnPlan
     internal bool FromMemory { get; init; }
 
     /// <summary>
+    /// Whether this trial took the column from an exactly priced plan by coming in under its price.
+    /// That price counts the plan's own layer, its children before they are encoded in turn, and
+    /// so runs above what the plan writes: size first holds the trial to the written bytes instead.
+    /// </summary>
+    internal bool DisplacedExact { get; init; }
+
+    /// <summary>
     /// For a dictionary the ingest-time table priced: the table itself, which owns the codes and
     /// the entries the encoder reads directly — nothing is copied into <see cref="Codes"/> or
     /// <see cref="Gather"/>, which are then empty.
@@ -189,6 +196,16 @@ internal readonly struct ColumnPlan
         {
             ArrayPool<int>.Shared.Return(Codes);
         }
+    }
+
+    /// <summary>Hands back everything a plan that will not be written holds from the pools.</summary>
+    internal void Release()
+    {
+        Zstd?.Release();
+        Alp?.Release();
+        AlpRd?.Release();
+        Fsst?.Release();
+        ReleaseCodes();
     }
 
     /// <summary>
@@ -1039,6 +1056,69 @@ internal static class ColumnCompressor
     }
 
     /// <summary>
+    /// Size first's trials: every scheme that applies, each held to the smallest found before it,
+    /// and the smallest kept. <see cref="Trials"/> stops at the first that pays and asks zstd,
+    /// FSST and ALP-RD for margins that buy a faster decode, which size first does not price.
+    /// </summary>
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="nodeIndex">The column chunk.</param>
+    /// <param name="node">The same chunk, resolved.</param>
+    /// <param name="target">The edition being written.</param>
+    /// <param name="budget">The bytes a trial has to come in under.</param>
+    /// <param name="gatesOff">Whether the size gate in front of zstd is lifted.</param>
+    /// <param name="workspace">The writer's blob workspace, for the zstd trial's encoder.</param>
+    private static ColumnPlan SmallestTrial(
+        CanonicalArena arena, int nodeIndex, CanonicalNode node, VortexEdition target, long budget,
+        bool gatesOff, ArrayBlobWriter.Workspace? workspace)
+    {
+        ColumnPlan smallest = ColumnPlan.Canonical with { PredictedBytes = budget };
+        long bound = budget;
+        bool floats = node.Kind == CanonicalKind.Primitive && node.PType.IsFloat();
+        if (floats && Allows(target, "vortex.alp") && AlpPlan.TryBuild(arena, nodeIndex, bound) is { } alp)
+        {
+            smallest = ColumnPlan.ForAlp(alp) with { PredictedBytes = alp.EncodedSize };
+            bound = alp.EncodedSize;
+        }
+
+        // ALP-RD keeps a split only under nine tenths of what it is handed, so it is handed ten
+        // ninths of the bound and held to the bound itself after.
+        if (floats && Allows(target, "vortex.alprd")
+            && AlpRdPlan.Search(arena, nodeIndex) is { } cut && cut.EstimatedBytes(node.Length) < bound
+            && AlpRdPlan.TryBuild(arena, nodeIndex, (bound * 10 / 9) + 1, in cut) is { } split)
+        {
+            if (split.BufferBytes < bound)
+            {
+                smallest.Release();
+                smallest = ColumnPlan.ForAlpRd(split) with { PredictedBytes = split.BufferBytes };
+                bound = split.BufferBytes;
+            }
+            else
+            {
+                split.Release();
+            }
+        }
+
+        if (node.Kind is CanonicalKind.VarBinView or CanonicalKind.Primitive
+            && Allows(target, "vortex.zstd")
+            && (gatesOff || DataBytes(node) >= ZstdMinimumBytes)
+            && ZstdPlan.TryBuild(arena, nodeIndex, bound, workspace, anyGain: true) is { } frame)
+        {
+            smallest.Release();
+            smallest = ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.CompressedLength };
+            bound = frame.CompressedLength;
+        }
+
+        if (node.Kind == CanonicalKind.VarBinView && Allows(target, "vortex.fsst")
+            && FsstPlan.TryBuild(arena, nodeIndex, bound - 1) is { } fsst)
+        {
+            smallest.Release();
+            smallest = ColumnPlan.ForFsst(fsst) with { PredictedBytes = fsst.EncodedSize };
+        }
+
+        return smallest;
+    }
+
+    /// <summary>
     /// Builds a dictionary and keeps it only when it is smaller, in bytes, than the column.
     /// </summary>
     /// <remarks>
@@ -1467,10 +1547,10 @@ internal static class ColumnCompressor
             if (dictionary.Scheme != ColumnScheme.None)
             {
                 if (sizeFirst && dictionary.PredictedBytes > 0
-                    && Trials(arena, nodeIndex, node, target, dictionary.PredictedBytes, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } smaller)
+                    && SmallestTrial(arena, nodeIndex, node, target, dictionary.PredictedBytes, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } smaller)
                 {
                     dictionary.ReleaseCodes();
-                    return smaller;
+                    return smaller with { DisplacedExact = true };
                 }
 
                 return dictionary;
@@ -1483,10 +1563,10 @@ internal static class ColumnCompressor
         // a trial is offered only the columns no exactly priced scheme took, under the plain
         // column's bytes as its ceiling. Size first is the one profile that wants exactly that.
         if (sizeFirst && bestScheme != ColumnScheme.None
-            && Trials(arena, nodeIndex, node, target, best, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } trial)
+            && SmallestTrial(arena, nodeIndex, node, target, best, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } trial)
         {
             walkedRuns.ReleaseCodes();
-            return trial;
+            return trial with { DisplacedExact = true };
         }
 
         switch (bestScheme)
@@ -1499,7 +1579,9 @@ internal static class ColumnCompressor
                 return ColumnPlan.ForBitPacking(chosen) with { PredictedBytes = chosen.BufferBytes };
 
             default:
-                return Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace);
+                return sizeFirst
+                    ? SmallestTrial(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace)
+                    : Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace);
         }
     }
 
