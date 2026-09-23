@@ -55,12 +55,6 @@ public sealed partial class VortexFile : IAsyncDisposable
     private readonly SegmentOwner _tail;
     private readonly long _tailOffset;
     private readonly DType _schema;
-
-    // Held for their lifetime, not for their API: the parsed schema, the widened sum DTypes and
-    // every statistic's ScalarValue are handles into these two, and a handle whose backing store
-    // has been collected is a null dereference waiting to happen.
-    private readonly DTypeArena _derivedTypes;
-    private readonly ScalarStore _scalars;
     private readonly ArrayEncodingId[] _arrayEncodings;
     private readonly IdLocation[] _arrayEncodingIds;
     private readonly LayoutEncodingId[] _layoutEncodings;
@@ -86,8 +80,6 @@ public sealed partial class VortexFile : IAsyncDisposable
         FileLength = state.FileLength;
         ReadOptions = state.ReadOptions;
         _schema = state.Schema;
-        _derivedTypes = state.DerivedTypes;
-        _scalars = state.Scalars;
         RowCount = state.RowCount;
         _arrayEncodings = state.ArrayEncodings;
         _arrayEncodingIds = state.ArrayEncodingIds;
@@ -595,8 +587,6 @@ public sealed partial class VortexFile : IAsyncDisposable
         public required long FileLength { get; init; }
         public required VortexReadOptions ReadOptions { get; init; }
         public required DType Schema { get; init; }
-        public required DTypeArena DerivedTypes { get; init; }
-        public required ScalarStore Scalars { get; init; }
         public required long RowCount { get; init; }
         public required ArrayEncodingId[] ArrayEncodings { get; init; }
         public required IdLocation[] ArrayEncodingIds { get; init; }
@@ -621,8 +611,10 @@ public sealed partial class VortexFile : IAsyncDisposable
         in PostscriptInfo postscript)
     {
         ReadOnlySpan<byte> window = tail.Buffer.Span;
-        DTypeArena derivedTypes = new DTypeArena();
-        ScalarStore scalars = new ScalarStore();
+
+        // The schema and the sum types of its statistics: nine distinct nodes or fewer for 99
+        // files in 100, and the arena grows for the others.
+        DTypeArena derivedTypes = new DTypeArena(8);
 
         DType schema;
         if (!options.DType.IsDefault)
@@ -699,7 +691,7 @@ public sealed partial class VortexFile : IAsyncDisposable
         {
             ReadOnlySpan<byte> statisticsBytes =
                 SliceSegment(window, tailOffset, in postscript.StatisticsSegment, "Statistics segment");
-            statistics = ParseStatistics(statisticsBytes, schema, derivedTypes, scalars);
+            statistics = ParseStatistics(statisticsBytes, schema, derivedTypes);
         }
 
         OpenState state = new OpenState
@@ -711,8 +703,6 @@ public sealed partial class VortexFile : IAsyncDisposable
             FileLength = fileLength,
             ReadOptions = options.Read,
             Schema = schema,
-            DerivedTypes = derivedTypes,
-            Scalars = scalars,
             RowCount = (long)wireRowCount,
             ArrayEncodings = arrayEncodings,
             ArrayEncodingIds = arrayEncodingIds,
@@ -826,8 +816,7 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     // ------------------------------------------------------------------------- file statistics
 
-    private static FileStatistics ParseStatistics(
-        ReadOnlySpan<byte> bytes, DType schema, DTypeArena types, ScalarStore scalars)
+    private static FileStatistics ParseStatistics(ReadOnlySpan<byte> bytes, DType schema, DTypeArena types)
     {
         int budget = VortexLimits.MaxFlatBufferTables;
         FileStatisticsView view = FileStatisticsView.Root(bytes, ref budget);
@@ -843,21 +832,21 @@ public sealed partial class VortexFile : IAsyncDisposable
             FileThrow.StatisticsFieldCount(actual, expected, isStruct ? "struct" : "non-struct");
         }
 
-        DType[] fieldDTypes = expected == 0 ? Array.Empty<DType>() : new DType[expected];
         DType[] sumDTypes = expected == 0 ? Array.Empty<DType>() : new DType[expected];
         FieldStatistics[] fields =
             expected == 0 ? Array.Empty<FieldStatistics>() : new FieldStatistics[expected];
 
+        // A minimum and a maximum a field: a nested value takes more nodes, and the store grows.
+        ScalarStore scalars = new ScalarStore(2 * expected);
         for (int i = 0; i < expected; i++)
         {
             DType fieldDType = isStruct ? schema.GetField(i) : schema;
             DType sumDType = SumDType(fieldDType, types);
-            fieldDTypes[i] = fieldDType;
             sumDTypes[i] = sumDType;
             fields[i] = ReadFieldStatistics(view.GetFieldStats(i), fieldDType, sumDType, types, scalars);
         }
 
-        return new FileStatistics(fieldDTypes, sumDTypes, fields);
+        return new FileStatistics(schema, sumDTypes, fields);
     }
 
     private static FieldStatistics ReadFieldStatistics(

@@ -15,13 +15,16 @@ namespace Vorticity;
 /// </summary>
 internal sealed class FileStatistics
 {
-    private readonly DType[] _fieldDTypes;
+    private readonly DType _schema;
     private readonly DType[] _sumDTypes;
     private readonly FieldStatistics[] _fields;
 
-    internal FileStatistics(DType[] fieldDTypes, DType[] sumDTypes, FieldStatistics[] fields)
+    /// <param name="schema">The file's DType, whose fields, or itself for a non-struct root, the statistics are typed against.</param>
+    /// <param name="sumDTypes">One sum DType a field.</param>
+    /// <param name="fields">One entry a field.</param>
+    internal FileStatistics(DType schema, DType[] sumDTypes, FieldStatistics[] fields)
     {
-        _fieldDTypes = fieldDTypes;
+        _schema = schema;
         _sumDTypes = sumDTypes;
         _fields = fields;
     }
@@ -40,7 +43,7 @@ internal sealed class FileStatistics
     {
         ArgumentOutOfRangeException.ThrowIfNegative(index);
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, _fields.Length);
-        return _fieldDTypes[index];
+        return _schema.Kind == DTypeKind.Struct ? _schema.GetField(index) : _schema;
     }
 
     /// <summary>

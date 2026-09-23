@@ -79,14 +79,17 @@ internal sealed class ScalarStore
 
     /// <summary>Creates an empty store.</summary>
     /// <param name="initialCapacity">Hint for the initial node capacity. Must not be negative.</param>
+    /// <remarks>
+    /// Only the nodes are allocated here. The children, the bytes and the variant dtypes are each
+    /// allocated by the first value that has some: a store of numbers holds none of them.
+    /// </remarks>
     public ScalarStore(int initialCapacity = 16)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(initialCapacity);
-        int cap = Math.Max(initialCapacity, 4);
-        _nodes = new ScalarNode[cap];
-        _children = new int[cap];
-        _bytes = new byte[cap * 4];
-        _variantTypes = new DType[4];
+        _nodes = new ScalarNode[Math.Max(initialCapacity, 4)];
+        _children = [];
+        _bytes = [];
+        _variantTypes = [];
     }
 
     /// <summary>Number of value nodes currently held.</summary>
@@ -185,7 +188,7 @@ internal sealed class ScalarStore
         depth++;
         VortexLimits.CheckDepth(depth, VortexLimits.MaxDTypeDepth, "Scalar");
 
-        Ensure(ref _children, _childCount, elements.Length);
+        Ensure(ref _children, _childCount, elements.Length, _nodes.Length);
         int start = _childCount;
         for (int i = 0; i < elements.Length; i++)
         {
@@ -213,7 +216,7 @@ internal sealed class ScalarStore
         int depth = ElementDepth(scalar.Value) + 1;
         VortexLimits.CheckDepth(depth, VortexLimits.MaxDTypeDepth, "Scalar");
 
-        Ensure(ref _variantTypes, _variantTypeCount, 1);
+        Ensure(ref _variantTypes, _variantTypeCount, 1, 4);
         int slot = _variantTypeCount;
         _variantTypes[slot] = scalar.DType;
         _variantTypeCount++;
@@ -430,7 +433,7 @@ internal sealed class ScalarStore
 
     private ScalarValue Blob(ScalarValueKind kind, ReadOnlySpan<byte> value)
     {
-        Ensure(ref _bytes, _byteCount, value.Length);
+        Ensure(ref _bytes, _byteCount, value.Length, _nodes.Length * 4);
         // `value` may alias _bytes; it then refers to the pre-resize array, whose contents
         // Array.Resize copied forward, so the copy is well defined either way.
         value.CopyTo(_bytes.AsSpan(_byteCount));
@@ -447,7 +450,7 @@ internal sealed class ScalarStore
     private ScalarValue Add(ref ScalarNode node)
     {
         node.Hash = ComputeHash(in node);
-        Ensure(ref _nodes, _nodeCount, 1);
+        Ensure(ref _nodes, _nodeCount, 1, _nodes.Length);
         _nodes[_nodeCount] = node;
         return new ScalarValue(this, _nodeCount++);
     }
@@ -516,7 +519,8 @@ internal sealed class ScalarStore
         return hc.ToHashCode();
     }
 
-    private static void Ensure<T>(ref T[] array, int count, int extra)
+    /// <summary>Grows <paramref name="array"/> to hold <paramref name="extra"/> more past <paramref name="count"/>, from <paramref name="first"/> when it is still empty.</summary>
+    private static void Ensure<T>(ref T[] array, int count, int extra, int first)
     {
         long need = (long)count + extra;
         if (need <= array.Length)
@@ -530,7 +534,7 @@ internal sealed class ScalarStore
             ThrowTooLarge();
         }
 
-        int capacity = array.Length == 0 ? 4 : array.Length;
+        int capacity = array.Length == 0 ? Math.Max(first, 4) : array.Length;
         while (capacity < need)
         {
             capacity = capacity > Ceiling / 2 ? Ceiling : capacity * 2;
