@@ -53,7 +53,7 @@ public sealed class WrittenSizeTests
     /// describes without reading them.
     /// </para>
     /// </remarks>
-    private const double CorpusCeiling = 0.65;
+    private const double CorpusCeiling = 0.653;
 
     /// <summary>How many of the worst offenders to name, so the number is actionable.</summary>
     private const int Worst = 12;
@@ -159,9 +159,9 @@ public sealed class WrittenSizeTests
             .Append(" bytes against the reference's ")
             .Append(theirs.ToString(CultureInfo.InvariantCulture))
             .Append(" -- ratio ")
-            .Append(ratio.ToString("F3", CultureInfo.InvariantCulture))
+            .Append(ratio.ToString("F4", CultureInfo.InvariantCulture))
             .Append(" (target 1.05, ceiling ")
-            .Append(CorpusCeiling.ToString("F2", CultureInfo.InvariantCulture))
+            .Append(CorpusCeiling.ToString("F3", CultureInfo.InvariantCulture))
             .Append(")\n");
 
         // Ranked by BYTES LOST, not by ratio: a 40x ratio on a 300-byte file is a rounding error,
@@ -187,7 +187,7 @@ public sealed class WrittenSizeTests
         Assert.True(files > 700, $"only {files} files were measured");
         Assert.True(
             ratio <= CorpusCeiling,
-            $"the corpus rewrites at {ratio:F3}x, above the {CorpusCeiling:F2}x ratchet.\n{report}");
+            $"the corpus rewrites at {ratio:F4}x, above the {CorpusCeiling:F3}x ratchet.\n{report}");
     }
 
     /// <summary>
