@@ -24,22 +24,39 @@ namespace Vorticity.Layouts;
 /// </remarks>
 internal readonly struct ZoneMap
 {
-    private readonly AggregateId[]? _aggregates;
-    private readonly int[]? _columnIndices;
+    /// <summary>
+    /// The aggregates of every zone map of the tree, one int an aggregate -- its id in the low byte,
+    /// its column in the zones struct plus one above it, zero for none -- of which this map's are
+    /// the run from <see cref="_start"/>: one table a tree rather than two arrays a zone map.
+    /// </summary>
+    private readonly int[]? _aggregates;
+    private readonly int _start;
+
+    /// <summary>The most aggregates a zone map resolves: its columns plus one fit the bits above the id.</summary>
+    internal const int MaxResolvedAggregates = (1 << 23) - 1;
+
+    /// <summary>An aggregate and its column, packed as <see cref="_aggregates"/> holds them.</summary>
+    internal static int Pack(AggregateId aggregate, int column) => (int)aggregate | ((column + 1) << 8);
 
     internal ZoneMap(
         bool pruningAvailable,
         int zoneCount,
         long zoneLength,
-        AggregateId[]? aggregates,
-        int[]? columnIndices)
+        int[]? aggregates,
+        int start,
+        int count)
     {
         IsPruningAvailable = pruningAvailable;
         ZoneCount = zoneCount;
         ZoneLength = zoneLength;
         _aggregates = aggregates;
-        _columnIndices = columnIndices;
+        _start = start;
+        AggregateCount = count;
     }
+
+    /// <summary>This map over <paramref name="aggregates"/>, the tree's table once its parse is done.</summary>
+    internal ZoneMap WithAggregates(int[] aggregates) =>
+        new ZoneMap(IsPruningAvailable, ZoneCount, ZoneLength, aggregates, _start, AggregateCount);
 
     /// <summary>
     /// Whether the map is complete enough to prune with. Always <see langword="false"/> for a
@@ -54,7 +71,7 @@ internal readonly struct ZoneMap
     public long ZoneLength { get; }
 
     /// <summary>How many aggregate specs the metadata declared, in wire order.</summary>
-    public int AggregateCount => _aggregates?.Length ?? 0;
+    public int AggregateCount { get; }
 
     /// <summary>The aggregate at <paramref name="index"/>, in the metadata's own order.</summary>
     /// <param name="index">0-based, below <see cref="AggregateCount"/>.</param>
@@ -65,13 +82,12 @@ internal readonly struct ZoneMap
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="index"/> is out of range.</exception>
     public AggregateId GetAggregate(int index)
     {
-        AggregateId[]? aggregates = _aggregates;
-        if (aggregates is null || (uint)index >= (uint)aggregates.Length)
+        if ((uint)index >= (uint)AggregateCount)
         {
             throw new ArgumentOutOfRangeException(nameof(index), index, "Outside the aggregate list.");
         }
 
-        return aggregates[index];
+        return (AggregateId)(byte)_aggregates![_start + index];
     }
 
     /// <summary>
@@ -83,13 +99,12 @@ internal readonly struct ZoneMap
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="aggregateIndex"/> is out of range.</exception>
     public int GetColumnIndex(int aggregateIndex)
     {
-        int[]? columns = _columnIndices;
-        if (columns is null || (uint)aggregateIndex >= (uint)columns.Length)
+        if ((uint)aggregateIndex >= (uint)AggregateCount)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(aggregateIndex), aggregateIndex, "Outside the aggregate list.");
         }
 
-        return columns[aggregateIndex];
+        return (_aggregates![_start + aggregateIndex] >> 8) - 1;
     }
 }

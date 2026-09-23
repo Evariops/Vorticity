@@ -598,6 +598,34 @@ public sealed class LayoutTreeStructureTests
     // ---------------------------------------------------------------------------------- limits
 
     [Fact]
+    public void AParseAfterOneThatFailedStartsClean()
+    {
+        // Parses share one builder: one that throws once it has gathered records, a zone map and
+        // its aggregates must leave the next parse none of them.
+        SyntheticLayout failing = new SyntheticLayout("vortex.zoned", 8)
+            .WithMetadata(ZonedMetadataBytes(4, "vortex.min", "vortex.max"))
+            .With(SyntheticLayout.Flat(8, 0), SyntheticLayout.Flat(2, 4));
+        Assert.Throws<VortexFormatException>(() => Parse(failing, I64, segmentCount: 4));
+
+        SyntheticLayout zoned = new SyntheticLayout("vortex.zoned", 8)
+            .WithMetadata(ZonedMetadataBytes(4, "vortex.bounded_max", "vortex.bounded_min"))
+            .With(SyntheticLayout.Flat(8, 0), SyntheticLayout.Flat(2, 1));
+        LayoutTree tree = Parse(zoned, Utf8, segmentCount: 4);
+
+        Assert.Equal(3, tree.NodeCount);
+        Assert.True(tree.Root.TryGetZoneMap(out ZoneMap map));
+        Assert.Equal(2, map.AggregateCount);
+        Assert.Equal(AggregateId.BoundedMax, map.GetAggregate(0));
+        Assert.Equal(AggregateId.BoundedMin, map.GetAggregate(1));
+        Assert.Equal(0, map.GetColumnIndex(0));
+        Assert.Equal(1, map.GetColumnIndex(1));
+
+        LayoutTree flat = Parse(SyntheticLayout.Flat(4, 3), I64, segmentCount: 4);
+        Assert.Equal(1, flat.NodeCount);
+        Assert.False(flat.Root.TryGetZoneMap(out _));
+    }
+
+    [Fact]
     public void SegmentIdEqualToTheSegmentCountIsRejectedAtParse()
     {
         LayoutTree ok = Parse(SyntheticLayout.Flat(4, 3), I64, segmentCount: 4);

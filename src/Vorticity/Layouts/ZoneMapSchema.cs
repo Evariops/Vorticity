@@ -53,34 +53,33 @@ internal static class ZoneMapSchema
     /// <param name="column">The zoned layout's own dtype.</param>
     /// <param name="specs">The aggregate specs, already resolved by <see cref="AggregateSpecList"/>.</param>
     /// <param name="tableDType">The zones child's dtype: a non-nullable struct, one field per contributing aggregate.</param>
-    /// <param name="aggregates">One entry per spec, in wire order.</param>
-    /// <param name="columnIndices">One entry per spec: its column in <paramref name="tableDType"/>, or -1.</param>
+    /// <param name="aggregates">
+    /// One int per spec, in wire order: the aggregate's id and its column in
+    /// <paramref name="tableDType"/> or -1, packed as <see cref="ZoneMap.Pack"/> packs them.
+    /// </param>
     /// <returns>
-    /// <see langword="false"/> when an aggregate id is unknown or its options are unusable. The
-    /// zones table then cannot be reconstructed, so pruning is disabled and the zones child is left
-    /// unresolved. Never an error: an unreadable zone map only costs the chance to skip data.
+    /// <see langword="false"/> when an aggregate id is unknown or its options are unusable, or when
+    /// the map declares more aggregates than a packed column holds. The zones table then cannot be
+    /// reconstructed, so pruning is disabled and the zones child is left unresolved. Never an error:
+    /// an unreadable zone map only costs the chance to skip data.
     /// </returns>
     internal static bool TryBuildAggregateTable(
         DTypeArena types,
         DType column,
         AggregateSpecList specs,
         out DType tableDType,
-        out AggregateId[] aggregates,
-        out int[] columnIndices)
+        Span<int> aggregates)
     {
         tableDType = default;
         int count = specs.Count;
-        aggregates = count == 0 ? [] : new AggregateId[count];
-        columnIndices = count == 0 ? [] : new int[count];
 
         // Every aggregate id is resolved first, so the caller can report the whole list even when
         // one of them defeats the table derivation.
-        bool resolvable = true;
+        bool resolvable = count <= ZoneMap.MaxResolvedAggregates;
         for (int i = 0; i < count; i++)
         {
             AggregateId aggregate = specs.GetAggregate(i);
-            aggregates[i] = aggregate;
-            columnIndices[i] = -1;
+            aggregates[i] = ZoneMap.Pack(aggregate, -1);
             resolvable &= aggregate != AggregateId.Unknown;
         }
 
@@ -98,7 +97,7 @@ internal static class ZoneMapSchema
             int columns = 0;
             for (int i = 0; i < count; i++)
             {
-                AggregateId aggregate = aggregates[i];
+                AggregateId aggregate = specs.GetAggregate(i);
                 int nameLength = WriteDisplayName(aggregate, specs.GetOptions(i), name);
                 if (nameLength < 0)
                 {
@@ -121,7 +120,7 @@ internal static class ZoneMapSchema
                 // own arena, and the file schema's arena is shared by every concurrent scan, so
                 // that write would be a data race.
                 fields[columns] = DTypeImport.Into(types, state).WithNullability(Nullability.Nullable);
-                columnIndices[i] = columns;
+                aggregates[i] = ZoneMap.Pack(aggregate, columns);
                 columns++;
             }
 

@@ -430,8 +430,12 @@ internal static class LayoutParser
         // and an empty protobuf tail are three distinct rejections upstream and all three here.
         ZonedMetadata zoned = ZonedMetadata.Read(metadata, b.Specs);
 
+        // Filled before the children are parsed: a nested zone map reserves after this one, and
+        // growing the table would leave the span behind.
+        int aggregateCount = b.Specs.Count;
+        int aggregateStart = b.ReserveZoneAggregates(aggregateCount);
         bool derived = ZoneMapSchema.TryBuildAggregateTable(
-            b.Types, dtype, b.Specs, out DType zonesType, out AggregateId[] aggregates, out int[] columns);
+            b.Types, dtype, b.Specs, out DType zonesType, b.ZoneAggregates.AsSpan(aggregateStart, aggregateCount));
 
         int childCount = derived ? 2 : 1;
         record.ChildStart = b.ReserveChildren(childCount);
@@ -463,7 +467,7 @@ internal static class LayoutParser
         // (ZonedLayout::zoned_reader). An unresolvable aggregate disables pruning the same way.
         bool pruning = derived && zoned.ZoneLength > 0;
         record.ZoneMapIndex = b.AddZoneMap(
-            new ZoneMap(pruning, zoneCount, zoned.ZoneLength, aggregates, columns));
+            new ZoneMap(pruning, zoneCount, zoned.ZoneLength, null, aggregateStart, aggregateCount));
     }
 
     // ----------------------------------------------------------------------------- vortex.stats
@@ -526,7 +530,7 @@ internal static class LayoutParser
         int zoneCount = CheckedZoneCount(b.Records[zonesIndex].RowCount);
 
         // Structural only: the legacy zone map never enables pruning.
-        record.ZoneMapIndex = b.AddZoneMap(new ZoneMap(false, zoneCount, zoneLength, null, null));
+        record.ZoneMapIndex = b.AddZoneMap(new ZoneMap(false, zoneCount, zoneLength, null, 0, 0));
     }
 
     private static int CheckedZoneCount(long rowCount)

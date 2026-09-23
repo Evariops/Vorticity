@@ -214,7 +214,7 @@ internal sealed class LayoutTree
         // into it and the parse copies nothing per node. A caller's span is copied once, which
         // decouples the tree from it; an array the caller owns for the tree's life is not.
         byte[] retained = owned ?? layoutBytes.ToArray();
-        Builder builder = new Builder(file, detachedEncodingIds, segmentCount, retained);
+        Builder builder = Builder.Take(file, detachedEncodingIds, segmentCount, retained);
         try
         {
             // The budget lives for the whole traversal: forward-only uoffsets exclude cycles but
@@ -228,16 +228,63 @@ internal sealed class LayoutTree
         }
         finally
         {
-            builder.ReturnScratch();
+            builder.Give();
         }
     }
 
-    /// <summary>Mutable state for one parse. Discarded once <see cref="Freeze"/> has run.</summary>
+    /// <summary>Mutable state for one parse, which the tree copies what it needs out of.</summary>
+    /// <remarks>
+    /// Parses share one builder and the scratch it grew, taken for a parse and given back after it
+    /// holding nothing of it: the tree keeps no reference to its builder, and a parse runs to its
+    /// end on the thread that began it. A parse that finds the builder taken makes its own, whose
+    /// scratch goes back to the shared pools.
+    /// </remarks>
     internal sealed class Builder
     {
-        private readonly LayoutEncodingId[]? _detachedEncodings;
+        /// <summary>The builder parses share; null while a parse holds it.</summary>
+        private static Builder? Cached;
 
-        internal Builder(VortexFile? file, string[]? detachedEncodingIds, int segmentSpecCount, byte[] layoutBytes)
+        private LayoutEncodingId[]? _detachedEncodings;
+
+        private Builder()
+        {
+        }
+
+        /// <summary>The shared builder, or a new one when another parse holds it, ready for a parse.</summary>
+        internal static Builder Take(VortexFile? file, string[]? detachedEncodingIds, int segmentSpecCount, byte[] layoutBytes)
+        {
+            Builder builder = Interlocked.Exchange(ref Cached, null) ?? new Builder();
+            builder.Begin(file, detachedEncodingIds, segmentSpecCount, layoutBytes);
+            return builder;
+        }
+
+        /// <summary>
+        /// Forgets the parse and keeps the builder and its scratch for the next one, or gives the
+        /// scratch back to the shared pools when another builder is kept already.
+        /// </summary>
+        internal void Give()
+        {
+            // The records hold the tree's dtypes and the zone maps its aggregates: cleared, so that
+            // the kept scratch keeps neither alive.
+            Records.AsSpan(0, RecordCount).Clear();
+            ZoneMaps.AsSpan(0, ZoneMapCount).Clear();
+            RecordCount = 0;
+            ChildIndexCount = 0;
+            ZoneMapCount = 0;
+            ChunkOffsetCount = 0;
+            ZoneAggregateCount = 0;
+            File = null;
+            DetachedEncodingIds = null;
+            Buffer = [];
+            _detachedEncodings = null;
+            _types = null;
+            if (Interlocked.CompareExchange(ref Cached, this, null) is not null)
+            {
+                ReturnScratch();
+            }
+        }
+
+        private void Begin(VortexFile? file, string[]? detachedEncodingIds, int segmentSpecCount, byte[] layoutBytes)
         {
             File = file;
             DetachedEncodingIds = detachedEncodingIds;
@@ -245,6 +292,14 @@ internal sealed class LayoutTree
             Buffer = layoutBytes;
             LayoutBytes = layoutBytes.Length;
             InspectionBudget = ((long)layoutBytes.Length * 4) + 4096;
+            if (Records.Length == 0)
+            {
+                Records = ArrayPool<LayoutNodeRecord>.Shared.Rent(64);
+                ChildIndices = ArrayPool<int>.Shared.Rent(64);
+                ZoneMaps = ArrayPool<ZoneMap>.Shared.Rent(16);
+                ChunkOffsets = ArrayPool<long>.Shared.Rent(64);
+                ZoneAggregates = ArrayPool<int>.Shared.Rent(32);
+            }
 
             if (detachedEncodingIds is not null)
             {
@@ -272,17 +327,17 @@ internal sealed class LayoutTree
             MaxNodes = ((long)layoutBytes.Length / 4) + 1;
         }
 
-        internal VortexFile? File { get; }
+        internal VortexFile? File { get; private set; }
 
-        internal string[]? DetachedEncodingIds { get; }
+        internal string[]? DetachedEncodingIds { get; private set; }
 
-        internal int SegmentSpecCount { get; }
+        internal int SegmentSpecCount { get; private set; }
 
-        internal int LayoutBytes { get; }
+        internal int LayoutBytes { get; private set; }
 
-        internal byte[] Buffer { get; }
+        internal byte[] Buffer { get; private set; } = [];
 
-        internal long MaxNodes { get; }
+        internal long MaxNodes { get; private set; }
 
         /// <summary>
         /// Bytes of file-supplied vectors this parse may still inspect.
@@ -346,30 +401,26 @@ internal sealed class LayoutTree
 
         private DTypeArena? _types;
 
-        /// <summary>
-        /// The specs of the zone map being parsed, each zone map's read and used up before the
-        /// next one's: the list parses share, taken by the first zone map of a parse and given
-        /// back with the scratch.
-        /// </summary>
-        internal AggregateSpecList Specs =>
-            _specs ??= Interlocked.Exchange(ref CachedSpecs, null) ?? new AggregateSpecList();
+        /// <summary>The specs of the zone map being parsed, each zone map's read and used up before the next one's.</summary>
+        internal AggregateSpecList Specs => _specs ??= new AggregateSpecList();
 
         private AggregateSpecList? _specs;
-
-        /// <summary>The one list parses share; null while a parse holds it.</summary>
-        private static AggregateSpecList? CachedSpecs;
 
         // The parse grows these in rented arrays, and the tree keeps exact copies of them: a tree's
         // size is known only once it is parsed, and growing its own arrays by doubling left three
         // or four discarded generations of each behind every open.
-        internal LayoutNodeRecord[] Records = ArrayPool<LayoutNodeRecord>.Shared.Rent(64);
+        internal LayoutNodeRecord[] Records = [];
         internal int RecordCount;
-        internal int[] ChildIndices = ArrayPool<int>.Shared.Rent(64);
+        internal int[] ChildIndices = [];
         internal int ChildIndexCount;
-        internal ZoneMap[] ZoneMaps = ArrayPool<ZoneMap>.Shared.Rent(16);
+        internal ZoneMap[] ZoneMaps = [];
         internal int ZoneMapCount;
-        internal long[] ChunkOffsets = ArrayPool<long>.Shared.Rent(64);
+        internal long[] ChunkOffsets = [];
         internal int ChunkOffsetCount;
+
+        /// <summary>The aggregates of every zone map, packed as <see cref="ZoneMap.Pack"/> packs them.</summary>
+        internal int[] ZoneAggregates = [];
+        internal int ZoneAggregateCount;
 
         /// <summary>
         /// Resolves a wire <c>u16</c> to a layout encoding. An id this build does not know is
@@ -426,19 +477,14 @@ internal sealed class LayoutTree
             array = grown;
         }
 
-        /// <summary>Gives the rented arrays and the spec list back; the tree holds copies of what they held. Safe to call twice.</summary>
-        internal void ReturnScratch()
+        /// <summary>Gives the rented arrays back; the tree holds copies of what they held. Safe to call twice.</summary>
+        private void ReturnScratch()
         {
             Return(ref Records);
             Return(ref ChildIndices);
             Return(ref ZoneMaps);
             Return(ref ChunkOffsets);
-            if (_specs is { } specs)
-            {
-                // Losing the race to another parse's list simply drops one to the collector.
-                _specs = null;
-                Volatile.Write(ref CachedSpecs, specs);
-            }
+            Return(ref ZoneAggregates);
         }
 
         private static void Return<T>(ref T[] array)
@@ -479,6 +525,20 @@ internal sealed class LayoutTree
             return ZoneMapCount++;
         }
 
+        /// <summary>Reserves the <paramref name="count"/> aggregates of a zone map and returns their start.</summary>
+        internal int ReserveZoneAggregates(int count)
+        {
+            int start = ZoneAggregateCount;
+            int needed = start + count;
+            if (needed > ZoneAggregates.Length)
+            {
+                Grow(ref ZoneAggregates, needed);
+            }
+
+            ZoneAggregateCount = needed;
+            return start;
+        }
+
         /// <summary>Reserves <paramref name="count"/> cumulative chunk offsets and returns their start.</summary>
         internal int ReserveChunkOffsets(int count)
         {
@@ -494,16 +554,27 @@ internal sealed class LayoutTree
         }
 
         /// <summary>The tree, holding exact copies of what the parse gathered.</summary>
-        internal LayoutTree Freeze() =>
-            new LayoutTree(
+        internal LayoutTree Freeze()
+        {
+            // The zone maps read their aggregates from the tree's copy of the table, which only
+            // exists now.
+            int[] aggregates = ZoneAggregates.AsSpan(0, ZoneAggregateCount).ToArray();
+            ZoneMap[] zoneMaps = ZoneMapCount == 0 ? [] : new ZoneMap[ZoneMapCount];
+            for (int i = 0; i < zoneMaps.Length; i++)
+            {
+                zoneMaps[i] = ZoneMaps[i].WithAggregates(aggregates);
+            }
+
+            return new LayoutTree(
                 File,
                 DetachedEncodingIds,
                 Buffer,
                 Records.AsSpan(0, RecordCount).ToArray(),
                 RecordCount,
                 ChildIndices.AsSpan(0, ChildIndexCount).ToArray(),
-                ZoneMaps.AsSpan(0, ZoneMapCount).ToArray(),
+                zoneMaps,
                 ChunkOffsets.AsSpan(0, ChunkOffsetCount).ToArray());
+        }
     }
 }
 
