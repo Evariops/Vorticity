@@ -81,19 +81,6 @@ internal sealed class ScanBuilder
         return this;
     }
 
-    private bool _reuseBatches;
-
-    /// <summary>
-    /// Binds each batch into the object the previous step disposed, for a consumer that keeps no
-    /// reference to a batch past the next step: a reference kept regardless would read the next
-    /// batch instead of throwing.
-    /// </summary>
-    internal ScanBuilder WithReusedBatches()
-    {
-        _reuseBatches = true;
-        return this;
-    }
-
     private bool _pruned;
     private BlockMask? _live;
 
@@ -544,7 +531,6 @@ internal sealed class ScanBuilder
             Compact = _compact,
             KeepEncodings = _keepEncodings,
             SinkDecodes = _sinkDecodes,
-            ReuseBatches = _reuseBatches,
         };
 
         if (_orderPath is not null)
@@ -1136,27 +1122,38 @@ internal sealed class ScanBuilder
         int[] order = [];
         int ordered = 0;
 
-        await foreach (RecordBatch batch in scan.ConfigureAwait(false))
+        // The reversed rows are a view the walk binds again per batch, as the scan binds its own.
+        RecordBatch? reversed = null;
+        try
         {
-            if (batch.RowCount > order.Length)
+            await foreach (RecordBatch batch in scan.ConfigureAwait(false))
             {
-                order = new int[batch.RowCount];
-                ordered = 0;
-            }
-
-            if (ordered != batch.RowCount)
-            {
-                for (int row = 0; row < batch.RowCount; row++)
+                if (batch.RowCount > order.Length)
                 {
-                    order[row] = batch.RowCount - 1 - row;
+                    order = new int[batch.RowCount];
+                    ordered = 0;
                 }
 
-                ordered = batch.RowCount;
-            }
+                if (ordered != batch.RowCount)
+                {
+                    for (int row = 0; row < batch.RowCount; row++)
+                    {
+                        order[row] = batch.RowCount - 1 - row;
+                    }
 
-            // In the batch's own arena: the scan owns it, and disposes it at its next batch.
-            int root = CanonicalFilter.Apply(batch.Arena, batch.RootIndex, order.AsSpan(0, batch.RowCount));
-            yield return new RecordBatch(batch.Arena, root, batch.StartRow);
+                    ordered = batch.RowCount;
+                }
+
+                // In the batch's own arena: the scan owns it, and resets it at its next batch.
+                int root = CanonicalFilter.Apply(batch.Arena, batch.RootIndex, order.AsSpan(0, batch.RowCount));
+                reversed?.Dispose();
+                reversed = RecordBatch.Over(batch.Arena, root, batch.StartRow, reversed);
+                yield return reversed;
+            }
+        }
+        finally
+        {
+            reversed?.Dispose();
         }
     }
 

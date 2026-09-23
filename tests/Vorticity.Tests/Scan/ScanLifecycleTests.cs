@@ -227,7 +227,7 @@ public sealed class ScanLifecycleTests
     }
 
     [Fact]
-    public async Task ThePreviousBatchIsDisposedByTheNextMoveNext()
+    public async Task TheNextMoveNextBindsTheSameBatchToTheNextRows()
     {
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Multi), CancellationToken.None);
@@ -237,12 +237,37 @@ public sealed class ScanLifecycleTests
 
         Assert.True(await enumerator.MoveNextAsync());
         RecordBatch first = enumerator.Current;
+        long next = first.StartRow + first.RowCount;
         Assert.True(await enumerator.MoveNextAsync());
 
-        // The arenas were reused, so the previous batch is dead. Touching it must say so rather
-        // than hand back another batch's memory.
+        // One object for the scan: the step disposed the batch and bound it to the next rows.
+        Assert.Same(first, enumerator.Current);
+        Assert.Equal(next, first.StartRow);
+
+        // Once the scan has no batch left, what was kept of it says so rather than hand back
+        // memory another scan now holds.
+        while (await enumerator.MoveNextAsync())
+        {
+        }
+
         Assert.Throws<ObjectDisposedException>(() => first.Column(0));
         await enumerator.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task ABatchKeptPastItsScanThrows()
+    {
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Multi), CancellationToken.None);
+
+        IAsyncEnumerator<RecordBatch> enumerator =
+            file.ScanBuilder().WithMaxBatchRows(1000).ExecuteAsync().GetAsyncEnumerator(TestContext.Current.CancellationToken);
+        Assert.True(await enumerator.MoveNextAsync());
+        RecordBatch kept = enumerator.Current;
+
+        await enumerator.DisposeAsync();
+
+        Assert.Throws<ObjectDisposedException>(() => kept.Column(0));
     }
 
     [Fact]

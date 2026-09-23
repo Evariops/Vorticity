@@ -130,7 +130,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live: null, _metrics,
-            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes, reuseBatches: ReuseBatches);
+            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes);
 
     /// <summary>Batches decoded ahead of the consumer, on lanes of their own.</summary>
     internal int Prefetch { get; init; }
@@ -147,12 +147,6 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </summary>
     internal bool SinkDecodes { get; init; }
 
-    /// <summary>
-    /// Whether each step binds its batch into the object the previous step disposed rather than
-    /// allocating one: for a consumer that keeps no reference to a batch past the next step.
-    /// </summary>
-    internal bool ReuseBatches { get; init; }
-
     /// <summary>The lanes the scan runs on: the degree, widened by the read-ahead.</summary>
     private int Lanes => _reverse ? 1 : Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1);
 
@@ -164,7 +158,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         BlockMask? live, CancellationToken cancellationToken, ZonePruner? zones = null) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live, _metrics,
-            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes, reuseBatches: ReuseBatches,
+            cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
             zones: zones);
 
     /// <summary>
@@ -178,7 +172,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         BlockMask? live, RowSelection proven, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, proven, live, _metrics,
-            cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes, reuseBatches: ReuseBatches);
+            cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes);
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
     internal bool HasTake => _take is not null;
@@ -207,19 +201,19 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 /// </para>
 /// <para>
 /// <b><see cref="Current"/> is invalidated by the next <see cref="MoveNextAsync"/></b>, which
-/// disposes the previous batch on the caller's behalf so the arenas can be reused. Every span
-/// borrowed from a batch dies with it. A caller who needs two batches alive at once must copy.
+/// disposes the previous batch on the caller's behalf so the arenas can be reused, and binds the
+/// same object to the next batch. Every span borrowed from a batch dies with it; a reference to it
+/// kept past the step reads the next batch, and kept past the last step throws. A caller who needs
+/// two batches alive at once must copy.
 /// </para>
 /// <para>
 /// <b>Why it is written out.</b> A compiler-generated async iterator allocates its state machine
 /// and can allocate again per <c>MoveNextAsync</c>; one allocation per scan is acceptable, one per
 /// batch is not. So <see cref="MoveNextAsync"/> plans the split and issues the read itself and
-/// hands the await to a single helper. The one allocation left per batch is the
-/// <see cref="RecordBatch"/>, and a scan whose consumer keeps no reference to a batch past the next
-/// step binds each into the object the previous step disposed, which leaves none; in a sequential
-/// scan nothing else allocates in steady state. A degree above one puts the decode on the thread
-/// pool, where that claim covers only what the caller's thread pays, not what the scan costs across
-/// every thread.
+/// hands the await to a single helper, and each step binds its batch into the object the previous
+/// step disposed: in a sequential scan nothing allocates per batch in steady state. A degree above
+/// one puts the decode on the thread pool, where that claim covers only what the caller's thread
+/// pays, not what the scan costs across every thread.
 /// </para>
 /// </remarks>
 internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
@@ -246,15 +240,14 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly ScanSegments _segments;
     private readonly RetainedChunks _retained;
     private readonly bool _sinkDecodes;
-    private readonly bool _reuseBatches;
 
     private SplitCursor _cursor;
     private BlockTally _decodedBlocks;
     private BlockTally _prunedBlocks;
 
-    // The batch of the last step, which is current while `_held`. Once released it is dropped, or,
-    // when the scan reuses batches, kept for the next step to bind again: a flag rather than a
-    // second reference, because the scan paths hold ceilings in bytes per enumerator.
+    // The batch of the last step, which is current while `_held`. Once released it is kept for the
+    // next step to bind again: a flag rather than a second reference, because the scan paths hold
+    // ceilings in bytes per enumerator.
     private RecordBatch? _current;
     private bool _held;
     private Lane? _currentLane;
@@ -282,13 +275,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         bool compact = true,
         bool keepEncodings = false,
         bool sinkDecodes = false,
-        bool reuseBatches = false,
         ZonePruner? zones = null)
     {
         _compact = compact;
         _filterProven = filterProven;
         _sinkDecodes = sinkDecodes;
-        _reuseBatches = reuseBatches;
         _tree = tree;
         _take = take;
         _live = live;
@@ -1275,11 +1266,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         Lane? lane = _currentLane;
         _held = false;
         _currentLane = null;
-        if (!_reuseBatches)
-        {
-            _current = null;
-        }
-
         if (batch is not null && lane is not null)
         {
             NoteDecoded(batch, lane);
@@ -1289,8 +1275,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>
-    /// Makes the batch over <paramref name="root"/> current: a new one, or, for a scan that reuses
-    /// batches, the one the previous step disposed, bound again, so that a step allocates nothing.
+    /// Makes the batch over <paramref name="root"/> current: the one the previous step disposed,
+    /// bound again so that a step allocates nothing, or a new one at the first step.
     /// </summary>
     private RecordBatch Deliver(Lane lane, int root, long startRow)
     {

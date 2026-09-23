@@ -39,6 +39,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     private bool _pending;
     private MergeInput? _emitting;
     private int _count;
+
+    // The run's window when the run is part of a batch, and once the run is stepped past, disposed
+    // and kept for the next window to bind again: one object for the merge rather than one per run.
     private RecordBatch? _window;
     private RecordBatch? _current;
     private bool _disposed;
@@ -141,7 +144,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         }
         else
         {
-            _window = batch.Window(chosen.Row, count);
+            _window = batch.Window(chosen.Row, count, _window);
             _current = _window;
         }
 
@@ -181,7 +184,6 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         _count = 0;
         _current = null;
         _window?.Dispose();
-        _window = null;
         if (!await input.AdvanceAsync(count).ConfigureAwait(false))
         {
             _open.Remove(input);

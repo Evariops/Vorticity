@@ -297,6 +297,32 @@ public sealed class RecordBatchTests
     }
 
     [Fact]
+    public void AStreamOfWindowsBindsOneObjectAgain()
+    {
+        // A merge emits a window per run: the previous window, disposed, carries the next one.
+        using ColumnFixture f = new ColumnFixture();
+        RecordBatch batch = f.Batch(f.Int64Node([10L, 20L, 30L, 40L, 50L], Validity.NonNullable), startRow: 400);
+
+        RecordBatch first = batch.Window(0, 2, null);
+        Assert.Equal([10L, 20L], first.Column(0).AsPrimitive<long>().Values.ToArray());
+
+        // A live window carries nothing else: its rows are still being read.
+        Assert.Throws<InvalidOperationException>(() => batch.Window(2, 3, first));
+
+        first.Dispose();
+        RecordBatch second = batch.Window(2, 3, first);
+        Assert.Same(first, second);
+        Assert.Equal(3, second.RowCount);
+        Assert.Equal(402L, second.StartRow);
+        Assert.Equal([30L, 40L, 50L], second.Column(0).AsPrimitive<long>().Values.ToArray());
+
+        // A batch that owns its storage is never bound again.
+        RecordBatch owned = RecordBatch.Own(batch.Arena, batch.RootIndex, 0, null, null, default, 0);
+        owned.Dispose();
+        Assert.Throws<InvalidOperationException>(() => batch.Window(0, 1, owned));
+    }
+
+    [Fact]
     public void WindowRefusesWhatIsNotInsideTheBatch()
     {
         using ColumnFixture f = new ColumnFixture();

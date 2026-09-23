@@ -237,13 +237,17 @@ public sealed class PathAllocationTests
         // from two arrays each: 408 bytes less on this file of five zoned columns. A text column's
         // bounded maximum takes its two fields in an array on the stack.
         ("open, first batch", File, 43_848, FirstBatch),
-        ("full scan", File, 51_408, FullScan),
+        // A scan binds each batch into the object its previous batch was rather than allocating
+        // one: 120 bytes less a batch after the first, on every axis below that reads more than
+        // one -- 7 560 over the 64 batches of this file, 120 over the two the pruned filter reads.
+        // A full scan now costs what its first batch does.
+        ("full scan", File, 43_848, FullScan),
         // A projection of one whole column is held in the mask itself, with no node and no arrays:
         // 104 bytes less.
-        ("projected scan, 1 of 5 columns", File, 53_760, ProjectedScan),
+        ("projected scan, 1 of 5 columns", File, 46_200, ProjectedScan),
         // A take or a filter goes through the filtered delivery, whose enumerable and enumerator hold
         // one more field each: 16 bytes a scan.
-        ("take 64 rows from 64 splits", File, 52_656, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 45_096, ScatteredTake),
         // The filter's field references hold one more field each, and the zone column the pruning
         // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
         // context that reads the zone map.
@@ -265,7 +269,7 @@ public sealed class PathAllocationTests
         // mask of one column that is the mask itself; the pushed comparison's mask is no longer a
         // builder's and a record's; the evaluator holds the share of rows kept so far, which the
         // second pass reads its columns by: 168 bytes less on both axes.
-        ("selective filter, pruning on", File, 55_656, PrunedFilter),
+        ("selective filter, pruning on", File, 55_536, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -279,7 +283,7 @@ public sealed class PathAllocationTests
         // and that context's arenas sized for what they hold rather than for a batch: either one
         // undone costs more than the whole gap that remains. The lane's context holds its zstd
         // decoder's field, 8 bytes, as above.
-        ("selective filter, pruning off", File, 55_176, UnprunedFilter),
+        ("selective filter, pruning off", File, 47_616, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here

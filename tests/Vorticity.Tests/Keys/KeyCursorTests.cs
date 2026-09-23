@@ -412,15 +412,15 @@ public sealed class KeyCursorTests
     }
 
     [Fact]
-    public async Task AKeyOrderedWindowAllocatesItsBatchAndNothingElse()
+    public async Task AKeyOrderedWindowAllocatesNothing()
     {
         // An InKeyOrder window costs what a filtered batch costs plus its rented permutation: the
-        // permutation and the verdicts are rented, the selection is the scan's own, so a window
-        // in steady state costs its RecordBatch.
+        // permutation and the verdicts are rented, the selection is the scan's own, and the
+        // window's batch is the previous window's bound again, so a window in steady state
+        // allocates nothing.
         ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
         await using Written written = await Written.CreateAsync();
-        long batchObject = OneRecordBatch();
 
         // Row 500 is key 2 500: the filtered windows start on a split boundary too.
         VortexExpr filter = Expr.Ge(Expr.Field("strict_i64"), Expr.Literal(FilterLiteral.From(2_500L)));
@@ -430,8 +430,8 @@ public sealed class KeyCursorTests
             await PerWindow(written.File.ScanBuilder().InKeyOrder("strict_i64").WithMaxBatchRows(100));
         }
 
-        Assert.Equal(batchObject, await PerWindow(written.File.ScanBuilder().InKeyOrder("strict_i64").WithMaxBatchRows(100)));
-        Assert.Equal(batchObject, await PerWindow(written.File.ScanBuilder().InKeyOrder("strict_i64").Where(filter).WithMaxBatchRows(500)));
+        Assert.Equal(0, await PerWindow(written.File.ScanBuilder().InKeyOrder("strict_i64").WithMaxBatchRows(100)));
+        Assert.Equal(0, await PerWindow(written.File.ScanBuilder().InKeyOrder("strict_i64").Where(filter).WithMaxBatchRows(500)));
     }
 
     /// <summary>
@@ -481,22 +481,6 @@ public sealed class KeyCursorTests
         ValueTask<bool> move = enumerator.MoveNextAsync();
         Assert.True(move.IsCompletedSuccessfully, "a memory-mapped window must complete synchronously");
         return move.Result;
-    }
-
-    private static long OneRecordBatch()
-    {
-        CanonicalArena arena = new CanonicalArena();
-        int root = arena.AddNull(new DTypeArena().Null(Nullability.Nullable), 1);
-        for (int i = 0; i < 64; i++)
-        {
-            GC.KeepAlive(new RecordBatch(arena, root, 0));
-        }
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        RecordBatch probe = new RecordBatch(arena, root, 0);
-        long after = GC.GetAllocatedBytesForCurrentThread();
-        GC.KeepAlive(probe);
-        return after - before;
     }
 
     [Fact]

@@ -26,8 +26,8 @@ public sealed class RecordBatch : IDisposable
     private readonly bool _owns;
     private VortexSchema? _publicSchema;
 
-    // Not readonly because a scan whose batches never outlive their successor binds its next batch
-    // into the object it disposed, rather than allocating one per batch; see Rebind.
+    // Not readonly because a scan binds its next batch into the object it disposed, rather than
+    // allocating one per batch; see Rebind.
     private ScanContext? _context;
     private CanonicalArena _arena;
     private int _root;
@@ -90,16 +90,41 @@ public sealed class RecordBatch : IDisposable
     /// <paramref name="context"/> would be bound.
     /// </summary>
     /// <remarks>
-    /// For a scan whose consumer holds nothing of a batch past the next step, which is what the
-    /// scan's own contract promises: every view a batch hands out is a <c>ref struct</c>, so none can
-    /// outlive the step that disposes it. A reference to the batch kept regardless would now read
-    /// the next batch rather than throw, which is why only such a scan opts in.
+    /// What every scan does from its second step on, rather than allocating a batch per step. Its
+    /// consumer holds nothing of a batch past the next step, which is the scan's contract, and every
+    /// view a batch hands out is a <c>ref struct</c>, so none can outlive the step that disposes
+    /// it. A reference to the batch kept regardless reads the next batch rather than throwing; kept
+    /// past the scan's last step it throws, since the scan leaves the batch disposed.
     /// </remarks>
     /// <param name="context">The scan context that produced the root.</param>
     /// <param name="rootCanonicalIndex">The root's index in <see cref="ScanContext.Canonical"/>.</param>
     /// <param name="startRow">The absolute file row index of row 0 of the batch.</param>
     /// <exception cref="InvalidOperationException">The batch is live, or owns its storage.</exception>
-    internal void Rebind(ScanContext context, int rootCanonicalIndex, long startRow)
+    internal void Rebind(ScanContext context, int rootCanonicalIndex, long startRow) =>
+        BindAgain(ArenaOf(context), rootCanonicalIndex, startRow, context);
+
+    /// <summary>
+    /// A view over <paramref name="rootCanonicalIndex"/> of <paramref name="arena"/>, which owns
+    /// nothing: <paramref name="spare"/>, a view the same stream disposed, bound again on the terms
+    /// of <see cref="Rebind"/>, or a new one when there is no spare yet.
+    /// </summary>
+    /// <param name="arena">The arena holding the root and all of its descendants.</param>
+    /// <param name="rootCanonicalIndex">The root's index in <paramref name="arena"/>.</param>
+    /// <param name="startRow">The absolute file row index of row 0 of the view.</param>
+    /// <param name="spare">The stream's previous view, disposed, or null.</param>
+    /// <exception cref="InvalidOperationException"><paramref name="spare"/> is live, or owns its storage.</exception>
+    internal static RecordBatch Over(CanonicalArena arena, int rootCanonicalIndex, long startRow, RecordBatch? spare)
+    {
+        if (spare is null)
+        {
+            return new RecordBatch(arena, rootCanonicalIndex, startRow);
+        }
+
+        spare.BindAgain(arena, rootCanonicalIndex, startRow, null);
+        return spare;
+    }
+
+    private void BindAgain(CanonicalArena arena, int rootCanonicalIndex, long startRow, ScanContext? context)
     {
         if (!_disposed || _owns)
         {
@@ -107,7 +132,7 @@ public sealed class RecordBatch : IDisposable
         }
 
         DType previous = _schema;
-        Bind(ArenaOf(context), rootCanonicalIndex, startRow, context);
+        Bind(arena, rootCanonicalIndex, startRow, context);
 
         // The schema a caller was handed stays the schema while the dtype stays the same, which
         // is every batch of one scan: made anew per batch it would be a fresh instance each time,
@@ -443,7 +468,20 @@ public sealed class RecordBatch : IDisposable
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The window is not inside the batch.</exception>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    internal RecordBatch Window(int start, int length)
+    internal RecordBatch Window(int start, int length) => Window(start, length, null);
+
+    /// <summary>
+    /// <see cref="Window(int, int)"/> bound into <paramref name="spare"/>, the previous window of a
+    /// stream of them, disposed: one object for the stream rather than one per window.
+    /// </summary>
+    /// <param name="start">The first row of the window, within this batch.</param>
+    /// <param name="length">How many rows it holds; zero gives an empty batch.</param>
+    /// <param name="spare">The previous window, disposed, or null for a new one.</param>
+    /// <returns>The window, <paramref name="spare"/> when there is one.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">The window is not inside the batch.</exception>
+    /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
+    /// <exception cref="InvalidOperationException"><paramref name="spare"/> is live, or owns its storage.</exception>
+    internal RecordBatch Window(int start, int length, RecordBatch? spare)
     {
         ThrowIfDisposed();
         ArgumentOutOfRangeException.ThrowIfNegative(start);
@@ -454,7 +492,7 @@ public sealed class RecordBatch : IDisposable
         // would say the same thing at the price of copying every value named; narrowing the
         // buffers into views moves nothing.
         int root = CanonicalSlice.SliceAcross(_arena, _arena, _root, start, length);
-        return new RecordBatch(_arena, root, _startRow + start);
+        return Over(_arena, root, _startRow + start, spare);
     }
 
     /// <summary>
@@ -492,9 +530,9 @@ public sealed class RecordBatch : IDisposable
     /// struct nodes above them are rebuilt, so the cost is the fields, whatever the row count.
     /// </para>
     /// <para>
-    /// <b>Lifetime.</b> As for <see cref="Window"/>: the projection lives in this batch's arena, is
-    /// valid until this batch is disposed or its successor is decoded, and disposing it releases
-    /// nothing.
+    /// <b>Lifetime.</b> As for <see cref="Window(int, int)"/>: the projection lives in this batch's
+    /// arena, is valid until this batch is disposed or its successor is decoded, and disposing it
+    /// releases nothing.
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentException">The projection names fields and the batch's root is not a struct.</exception>

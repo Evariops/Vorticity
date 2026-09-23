@@ -110,7 +110,11 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         private bool _positioned;
         private bool _started;
         private bool _disposed;
+
+        // The window's batch, current while `_hasCurrent`, and once released kept for the next
+        // window to bind again, as the scan underneath keeps its own.
         private RecordBatch? _current;
+        private bool _hasCurrent;
         private IAsyncEnumerator<RecordBatch>? _tail;
 
         internal Enumerator(KeyOrderedBatches owner, CancellationToken token)
@@ -151,7 +155,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         }
 
         public RecordBatch Current =>
-            _tail is not null ? _tail.Current : _current ?? ScanThrow.NoCurrentBatch<RecordBatch>();
+            _tail is not null ? _tail.Current : _hasCurrent ? _current! : ScanThrow.NoCurrentBatch<RecordBatch>();
 
         public async ValueTask<bool> MoveNextAsync()
         {
@@ -195,7 +199,16 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                     _retained.Release(_first);
                     if (_context.Canonical.GetNode(root).Length > 0)
                     {
-                        _current = new RecordBatch(_context, root, first);
+                        if (_current is { } spare)
+                        {
+                            spare.Rebind(_context, root, first);
+                        }
+                        else
+                        {
+                            _current = new RecordBatch(_context, root, first);
+                        }
+
+                        _hasCurrent = true;
                         _scan.Metrics?.AddBatch(_current.RowCount);
                         return true;
                     }
@@ -249,8 +262,8 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         /// <summary>Drops the current batch and everything the lanes decoded for it.</summary>
         private void Release()
         {
-            RecordBatch? batch = _current;
-            _current = null;
+            RecordBatch? batch = _hasCurrent ? _current : null;
+            _hasCurrent = false;
             batch?.Dispose();
             _context.ResetBatch();
 

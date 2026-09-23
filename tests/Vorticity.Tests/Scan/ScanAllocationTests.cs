@@ -1,15 +1,3 @@
-// The allocation invariant of a scan: zero managed bytes per batch in steady state.
-//
-// THE BOUND IS MEASURED, NOT GUESSED. The only per-batch allocation the design permits is the
-// RecordBatch object itself - it is a sealed class with readonly fields, so it cannot be
-// recycled and the enumerator must make a new one per batch. So the test first measures exactly
-// what one RecordBatch costs, then asserts the scan's steady-state per-batch figure is not one byte
-// more. A round number like "under 200 bytes" would let a small per-batch List<T> or a boxed
-// enumerator slip through.
-//
-// The second assertion is the one that catches growth WITH the data: the same per-batch figure over
-// two different batch sizes and two different files. Anything proportional to rows, columns or
-// segments moves it.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -30,6 +18,16 @@ namespace Vorticity.Tests.Scan;
 
 // IN THE SERIALISED COLLECTION because the degree-2 axis counts every thread's bytes, so anything
 // else the process allocates while it runs would land in its figure.
+
+/// <summary>
+/// The allocation invariant of a scan: nothing per batch in steady state, the batch included, which
+/// each step binds into the object the previous step disposed.
+/// </summary>
+/// <remarks>
+/// Zero, and not a round number under which a small per-batch list or a boxed enumerator would slip
+/// through. Held over two batch sizes and two files, it also catches growth with the data: anything
+/// proportional to rows, columns or segments moves it.
+/// </remarks>
 [Collection(nameof(AllocationCollection))]
 public sealed class ScanAllocationTests
 {
@@ -38,26 +36,24 @@ public sealed class ScanAllocationTests
     /// <summary>What a batch of a degree-2 scan may cost across every thread.</summary>
     /// <remarks>
     /// <para>
-    /// THE MARGIN IS THE MEASUREMENT, and it is wide because the quantity is. Inside the suite the
-    /// axis reads 3 466 to 3 479 with intrinsics over four runs and 3 459 to 3 696 without them
-    /// over four more -- a spread of 237 bytes on a path whose degree-1 control reads 1 632 in
-    /// every one of the eight. The swing is the pool's, not the scan's: lanes decode on threads the
-    /// caller never touches, and how many of those the runtime injects is not a property of this
-    /// code.
+    /// The margin is the measurement's, and wide because the quantity is. Run alone the axis reads
+    /// 109 to 454 bytes over 24 runs with intrinsics and 181 to 594 over six without them, and
+    /// 109 inside the suite, on a path whose degree-1 control reads 71 in every one. The swing is
+    /// the pool's, not the scan's: lanes decode on threads the caller never touches, and how many
+    /// of those the runtime injects while a scan runs is not a property of this code.
     /// </para>
     /// <para>
-    /// WHAT THAT COSTS THE AXIS, said plainly: at this width it catches a regression of a few
-    /// hundred bytes a batch and not the eighty a per-split closure cost, which is what it was
-    /// added to watch. The instruments for that size are the sequential axis above, which holds an
-    /// equality against one <see cref="RecordBatch"/>, and the read-path ceilings, which see a
-    /// per-scan delegate at eight bytes. This one is here for the order of magnitude.
+    /// What that costs the axis: at this width it catches a regression of a few hundred bytes a
+    /// batch and not the eighty a per-split closure costs. The instruments for that size are the
+    /// sequential axis, which holds zero, and the read-path ceilings, which see a per-scan
+    /// delegate at eight bytes. This one is here for the order of magnitude.
     /// </para>
     /// <para>
-    /// Set at 3 900 rather than at the worst seen, because a ceiling ON the worst seen is the
-    /// coin flip this axis already turned the no-intrinsics suite red with, one run in ten.
+    /// Set at 1 000 rather than at the worst seen, which a run's thread injections cross now and
+    /// then.
     /// </para>
     /// </remarks>
-    private const long ParallelPerBatchCeiling = 3_900;
+    private const long ParallelPerBatchCeiling = 1_000;
     private const string Struct = "containers/uncompressed_canonical";
 
     /// <summary>65536 rows in 64 zones of 1024.</summary>
@@ -139,22 +135,11 @@ public sealed class ScanAllocationTests
             .CountAsync();
 
     [Fact]
-    public async Task SteadyStateAllocatesNothingBeyondOneRecordBatch()
+    public async Task SteadyStateAllocatesNothingPerBatch()
     {
         ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
-        long batchObject = MeasureOneRecordBatch();
-        Assert.True(batchObject > 0, "a RecordBatch must cost something, or the probe is wrong");
-
-        long perBatch = await MeasurePerBatch(Multi, 500);
-
-        // Not "under some threshold": exactly the RecordBatch and nothing else.
-        Assert.True(
-            perBatch <= batchObject,
-            string.Create(
-                CultureInfo.InvariantCulture,
-                $"{perBatch} bytes per batch, but one RecordBatch is only {batchObject}"));
-        Assert.Equal(batchObject, perBatch);
+        Assert.Equal(0, await MeasurePerBatch(Multi, 500));
     }
 
     /// <summary>What a scan at a degree above one allocates per batch, across every thread.</summary>
@@ -195,35 +180,29 @@ public sealed class ScanAllocationTests
                 $"{parallel} B per batch at degree 2 against a ceiling of {ParallelPerBatchCeiling}"));
     }
 
-    /// <summary>
-    /// A descending key-ordered scan costs the two <see cref="RecordBatch"/> objects a reversal
-    /// needs, and nothing else.
-    /// </summary>
+    /// <summary>A descending key-ordered scan allocates nothing per batch either.</summary>
     /// <remarks>
     /// <para>
     /// Every key is null, so every row comes out of the reversing tail and nothing out of the key
     /// cursor: the two phases allocate differently and averaging them would measure neither.
     /// </para>
     /// <para>
-    /// Two and not one, because a reversal cannot make fewer. The scan underneath yields a batch
-    /// over the rows in file order, the reversed rows are a different root, and a
-    /// <see cref="RecordBatch"/> is sealed, with readonly fields, precisely so that neither is
-    /// recycled. Nothing else may be rebuilt per batch: not a plan, an enumerable or a filter for
-    /// every split, a split being a batch here.
+    /// The scan underneath yields a batch over the rows in file order and the reversed rows are a
+    /// different root, a view the walk binds again per batch as the scan binds its own. Nothing
+    /// else may be rebuilt per batch: not a plan, an enumerable or a filter for every split, a
+    /// split being a batch here.
     /// </para>
     /// </remarks>
     [Fact]
-    public async Task ADescendingScanCostsTheTwoBatchesAReversalNeeds()
+    public async Task ADescendingScanAllocatesNothingPerBatch()
     {
         ReleaseOnlyCeilings.Require();
         Decoders.EnsureRegistered();
-        long batchObject = MeasureOneRecordBatch();
 
         string path = WriteNullKeys();
         try
         {
-            long perBatch = await MeasureDescendingPerBatch(path, 64);
-            Assert.Equal(2 * batchObject, perBatch);
+            Assert.Equal(0, await MeasureDescendingPerBatch(path, 64));
         }
         finally
         {
@@ -265,27 +244,6 @@ public sealed class ScanAllocationTests
 
         await enumerator.DisposeAsync();
         Assert.True(batches > 10);
-    }
-
-    /// <summary>The exact cost of one <see cref="RecordBatch"/>, measured rather than assumed.</summary>
-    private static long MeasureOneRecordBatch()
-    {
-        DTypeArena types = new DTypeArena();
-        CanonicalArena arena = new CanonicalArena();
-        DType dtype = types.Null(Nullability.Nullable);
-        int root = arena.AddNull(dtype, 1);
-
-        // Warm the JIT and the allocation context before measuring.
-        for (int i = 0; i < 64; i++)
-        {
-            GC.KeepAlive(new RecordBatch(arena, root, 0));
-        }
-
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        RecordBatch probe = new RecordBatch(arena, root, 0);
-        long after = GC.GetAllocatedBytesForCurrentThread();
-        GC.KeepAlive(probe);
-        return after - before;
     }
 
     /// <summary>Every thread's bytes over one whole scan, divided by the batches it produced.</summary>
@@ -363,7 +321,7 @@ public sealed class ScanAllocationTests
                 {
                     // The final MoveNextAsync returns false and produces no batch. Asserted on its
                     // own rather than averaged in with the others, which is what the two claims
-                    // actually are: a batch costs one RecordBatch, and ending costs nothing.
+                    // actually are: a batch costs nothing, and neither does ending.
                     terminal = delta;
                     break;
                 }
@@ -391,8 +349,8 @@ public sealed class ScanAllocationTests
     /// per-batch regression that reproduces on no particular commit.
     ///
     /// The floor is strictly stronger than the mean for what the test is FOR: anything allocated on
-    /// EVERY batch raises the floor itself, which the caller's assertion then catches against the
-    /// measured RecordBatch cost. What the floor alone cannot see is something allocated on SOME
+    /// EVERY batch raises the floor itself, which the caller's assertion of zero then catches. What
+    /// the floor alone cannot see is something allocated on SOME
     /// batches, so the median is required to equal it - that catches anything affecting a majority
     /// while staying indifferent to how many methods happen to tier up inside the window. Counting
     /// outliers instead needs a number, and any number there is arbitrary.
