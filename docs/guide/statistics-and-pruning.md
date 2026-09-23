@@ -18,7 +18,7 @@ Print("Day >= 900", scan.Statistics);
 plan, Day >= 900: 1000000 rows, 14 of 123 blocks live, 13 segments, 210980 bytes to read, may match True
   zone map: 109 blocks pruned, 1 segments and 2124 bytes read to decide
   count: exact True, 100000 rows, 109 pruned, 13 proven, 1 decoded
-ran, Day >= 900: 100000 rows in 14 batches, 12 requests, 208856 bytes, 14 blocks decoded, 109 pruned
+ran, Day >= 900: 100000 rows in 5 batches, 12 requests, 208856 bytes, 14 blocks decoded, 109 pruned
 ```
 
 `Print` writes the fields of the two records; the sample has it. 2 124 bytes of zone maps decided
@@ -56,7 +56,9 @@ them and 210 980 bytes with the 2 124 bytes of zone maps it consulted; the run m
 blocks of one column, and the scan reads it once for all the blocks that need it. A second
 scan reads it again; over a `FileSegmentSource` or a remote source, a session `SegmentCache` is
 what keeps it from reaching the disk or the network again. `BlocksDecoded` matches `LiveBlocks`:
-14.
+14. They come in 5 batches rather than 14: the 13 blocks the zone maps prove whole, every row of
+which passes, go out up to sixteen at a time, as a scan that only reads delivers them
+([blocks-and-chunks.md](blocks-and-chunks.md)).
 
 ## A filter that prunes, and one that cannot
 

@@ -73,7 +73,7 @@ One activity per scan, named `vortex.scan.typed` or `vortex.scan.tool` after the
 and one per write, `vortex.write`. Each carries what the operation did as tags, set when it ends:
 
 ```
-activity vortex.scan.typed [Unset]: vortex.rows=100000, vortex.batches=14, vortex.requests=13, vortex.bytes_requested=210980, vortex.blocks_decoded=14, vortex.blocks_pruned=109
+activity vortex.scan.typed [Unset]: vortex.rows=100000, vortex.batches=5, vortex.requests=13, vortex.bytes_requested=210980, vortex.blocks_decoded=14, vortex.blocks_pruned=109
 activity vortex.scan.tool [Unset]: vortex.rows=0, vortex.batches=0, vortex.requests=18, vortex.bytes_requested=339896, vortex.blocks_decoded=123, vortex.blocks_pruned=0
 activity vortex.write [Unset]: vortex.rows=2, vortex.bytes=3012, vortex.completed=True
 activity vortex.write [Error]: vortex.rows=1, vortex.bytes=0, vortex.completed=False
@@ -103,8 +103,8 @@ Console.WriteLine($"scan {run}: {stats.Rows} rows in {stats.Batches} batches, {s
 ```
 
 ```
-scan 1: 100000 rows in 14 batches, 13 requests, 210980 bytes, 14 blocks decoded, 109 pruned, 0 cache hits
-scan 2: 100000 rows in 14 batches, 12 requests, 208856 bytes, 14 blocks decoded, 109 pruned, 12 cache hits
+scan 1: 100000 rows in 5 batches, 13 requests, 210980 bytes, 14 blocks decoded, 109 pruned, 0 cache hits
+scan 2: 100000 rows in 5 batches, 12 requests, 208856 bytes, 14 blocks decoded, 109 pruned, 12 cache hits
 ```
 
 `ScanStatistics` is a `readonly record struct` of seven `long`s: `Rows`, `Batches`, `Requests`,
