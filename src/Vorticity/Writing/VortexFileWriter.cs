@@ -824,10 +824,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     private CanonicalArena Transit()
     {
         // A detached scan context: the writer needs the arena and decode plumbing CanonicalConcat
-        // and CanonicalSlice take, and has no file to scan. The second one is created only when a
+        // and CanonicalSlice take, and has no file to scan. The second one is taken only when a
         // block actually splits.
         _transit ??= new ScanContext?[2];
-        return (_transit[_current] ??= new ScanContext([])).Canonical;
+        return (_transit[_current] ??= TransitContexts.Rent()).Canonical;
     }
 
     /// <summary>
@@ -892,7 +892,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
         // The remainder moves to the other arena before this one is reset, because a slice is a
         // view onto the storage the reset would hand back.
-        ScanContext to = _transit[_current ^ 1] ??= new ScanContext([]);
+        ScanContext to = _transit[_current ^ 1] ??= TransitContexts.Rent();
         _carry.Clear();
         if (straddleTail >= 0)
         {
