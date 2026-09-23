@@ -263,11 +263,13 @@ internal static class ZoneMapSchema
 
     private static DType BoundedMaxPartial(DTypeArena types, DType element)
     {
-        // A DType holds an arena reference, so it is a managed type and cannot be stackalloc'd.
-        // This runs once per zoned layout node at parse time, never on a decode path.
-        DType[] fields = new DType[2];
-        fields[0] = DTypeImport.Into(types, element).WithNullability(Nullability.Nullable);
-        fields[1] = types.Bool(Nullability.NonNullable);
+        // A DType holds an arena reference, so it cannot be stackalloc'd: the two sit in an inline
+        // array on the stack instead.
+        ReadOnlySpan<DType> fields =
+        [
+            DTypeImport.Into(types, element).WithNullability(Nullability.Nullable),
+            types.Bool(Nullability.NonNullable),
+        ];
 
         Span<int> names = stackalloc int[2];
         names[0] = types.InternName("bound"u8);
@@ -522,7 +524,7 @@ internal static class ZoneMapSchema
     }
 
     /// <summary>The longest display name, <c>vortex.bounded_max(4294967295)</c>, rounded up.</summary>
-    private const int MaxDisplayNameBytes = 32;
+    internal const int MaxDisplayNameBytes = 32;
 
     /// <summary>
     /// Writes the struct field name a zone-map column carries, <c>"{id}({optionsDisplay})"</c>, as
@@ -535,7 +537,7 @@ internal static class ZoneMapSchema
     /// The name's length, or -1 when the options payload cannot be read, which disables pruning
     /// rather than failing the read.
     /// </returns>
-    private static int WriteDisplayName(AggregateId aggregate, ReadOnlySpan<byte> options, Span<byte> destination)
+    internal static int WriteDisplayName(AggregateId aggregate, ReadOnlySpan<byte> options, Span<byte> destination)
     {
         ReadOnlySpan<byte> name;
         switch (aggregate)

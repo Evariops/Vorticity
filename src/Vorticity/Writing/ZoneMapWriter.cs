@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Editions;
+using Vorticity.Layouts;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -18,6 +20,35 @@ namespace Vorticity.Writing;
 /// </summary>
 internal static class ZoneMapWriter
 {
+    /// <summary>
+    /// What a zone map is built in -- its arrays' arena, its dtypes' arena, its aggregate specs --
+    /// emptied before each zone map, since the blob and the metadata are copies once built: one
+    /// for every zone map a completion writes, and kept for the next completion.
+    /// </summary>
+    internal sealed class Scratch
+    {
+        /// <summary>The scratch completions share; null while one holds it.</summary>
+        private static Scratch? Cached;
+
+        internal CanonicalArena Arena { get; } = new CanonicalArena();
+
+        internal DTypeArena Types { get; } = new DTypeArena();
+
+        internal AggregateSpecList Specs { get; } = new AggregateSpecList();
+
+        /// <summary>The shared scratch, or a new one when another completion holds it.</summary>
+        internal static Scratch Take() => Interlocked.Exchange(ref Cached, null) ?? new Scratch();
+
+        /// <summary>Keeps the scratch, emptied, for the next completion.</summary>
+        internal void Give()
+        {
+            Arena.Reset();
+            Types.Clear();
+            Specs.Clear();
+            Volatile.Write(ref Cached, this);
+        }
+    }
+
     /// <summary>The options bytes for <c>NumericalAggregateOpts { skip_nans: true }</c>, the default.</summary>
     private static ReadOnlySpan<byte> SkipNaNs => [0x08, 0x01];
 
@@ -28,6 +59,7 @@ internal static class ZoneMapWriter
     /// </summary>
     internal static bool TryBuild(
         ArrayBlobWriter.Workspace blobs,
+        Scratch scratch,
         DType column,
         IReadOnlyList<BlockStats> zones,
         EncodingDictionary encodings,
@@ -51,18 +83,19 @@ internal static class ZoneMapWriter
         bool bounded = stringBytes > 0 && strings is not null && strings.Count == zones.Count
             && column.Kind is (DTypeKind.Utf8 or DTypeKind.Binary) && AnyPresent(strings);
 
-        DTypeArena types = new DTypeArena();
-        CanonicalArena arena = new CanonicalArena();
+        DTypeArena types = scratch.Types;
+        CanonicalArena arena = scratch.Arena;
+        AggregateSpecList specs = scratch.Specs;
 
         // The arena is the sole owner of what it rents from the shared pool: left unreset, its
-        // blocks are freed on the finalizer thread instead of returning to the pool.
+        // blocks are freed on the finalizer thread instead of returning to the pool. The dtypes
+        // and the specs are emptied with it, since the blob and the metadata are copies.
         try
         {
-            AggregateSpecList specs = new AggregateSpecList();
-            int fields = (bounds ? 2 : 0) + (bounded ? 2 : 0) + 1;
-            Span<int> columns = stackalloc int[fields];
-            string[] names = new string[fields];
-            DType[] dtypes = new DType[fields];
+            Span<int> columns = stackalloc int[MaxFields];
+            Span<int> names = stackalloc int[MaxFields];
+            FieldTypes dtypes = default;
+            Span<byte> name = stackalloc byte[ZoneMapSchema.MaxDisplayNameBytes];
             int at = 0;
 
             // Aggregates and the layout that carries them are independent ids, so an edition may
@@ -76,8 +109,8 @@ internal static class ZoneMapWriter
                 specs.Add("vortex.min"u8, SkipNaNs);
                 specs.Add("vortex.max"u8, SkipNaNs);
                 DType bound = types.Primitive(column.PType, Nullability.Nullable);
-                Field(columns, names, dtypes, ref at, Bounds(arena, types, column, zones, wantMin: true), "vortex.min()", bound);
-                Field(columns, names, dtypes, ref at, Bounds(arena, types, column, zones, wantMin: false), "vortex.max()", bound);
+                Field(columns, names, dtypes, ref at, Bounds(arena, types, column, zones, wantMin: true), Named(types, AggregateId.Min, SkipNaNs, name), bound);
+                Field(columns, names, dtypes, ref at, Bounds(arena, types, column, zones, wantMin: false), Named(types, AggregateId.Max, SkipNaNs, name), bound);
             }
 
             if (bounded)
@@ -86,28 +119,27 @@ internal static class ZoneMapWriter
                 // the display name carries the limit too.
                 RequireAggregate(encodings.Target, "vortex.bounded_min");
                 RequireAggregate(encodings.Target, "vortex.bounded_max");
-                byte[] limit = new byte[sizeof(ulong)];
+                Span<byte> limit = stackalloc byte[sizeof(ulong)];
                 System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(limit, (ulong)stringBytes);
-                string n = stringBytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 DType element = column.Kind == DTypeKind.Utf8
                     ? types.Utf8(Nullability.Nullable)
                     : types.Binary(Nullability.Nullable);
 
                 specs.Add("vortex.bounded_min"u8, limit);
-                Field(columns, names, dtypes, ref at, BoundedMin(arena, types, element, strings!), "vortex.bounded_min(" + n + ")", element);
+                Field(columns, names, dtypes, ref at, BoundedMin(arena, types, element, strings!), Named(types, AggregateId.BoundedMin, limit, name), element);
 
                 specs.Add("vortex.bounded_max"u8, limit);
                 DType partial = BoundedMaxPartial(types, element);
-                Field(columns, names, dtypes, ref at, BoundedMax(arena, types, element, partial, strings!), "vortex.bounded_max(" + n + ")", partial);
+                Field(columns, names, dtypes, ref at, BoundedMax(arena, types, element, partial, strings!), Named(types, AggregateId.BoundedMax, limit, name), partial);
             }
 
             specs.Add("vortex.null_count"u8, default);
             Field(
-                columns, names, dtypes, ref at, NullCounts(arena, types, zones), "vortex.null_count()",
+                columns, names, dtypes, ref at, NullCounts(arena, types, zones), Named(types, AggregateId.NullCount, default, name),
                 types.Primitive(PType.U64, Nullability.NonNullable));
 
-            DType dtype = types.Struct(names, dtypes, Nullability.NonNullable);
-            int root = arena.AddStruct(dtype, zones.Count, Arrays.Validity.NonNullable, columns);
+            DType dtype = types.Struct(names[..at], ((ReadOnlySpan<DType>)dtypes)[..at], Nullability.NonNullable);
+            int root = arena.AddStruct(dtype, zones.Count, Arrays.Validity.NonNullable, columns[..at]);
             blob = ArrayBlobWriter.Write(blobs, arena, root, encodings);
             metadata = ZonedMetadata.Serialize(ZonedMetadata.Create(zoneLength, specs));
             return true;
@@ -116,8 +148,27 @@ internal static class ZoneMapWriter
         {
             // The blob is a copy by the time Write returns, so nothing outlives the arena.
             arena.Reset();
+            types.Clear();
+            specs.Clear();
         }
     }
+
+    /// <summary>The most columns a zones struct has: a minimum, a maximum, two bounded extremes and the null count.</summary>
+    private const int MaxFields = 5;
+
+    /// <summary>The dtypes of a zones struct's columns, on the stack: a DType holds its arena, so it cannot be stackalloc'd.</summary>
+    [System.Runtime.CompilerServices.InlineArray(MaxFields)]
+    private struct FieldTypes
+    {
+        private DType _first;
+    }
+
+    /// <summary>
+    /// The column name of <paramref name="aggregate"/>, interned in <paramref name="types"/>: the
+    /// name the reader derives from the same options, so that the two can never disagree.
+    /// </summary>
+    private static int Named(DTypeArena types, AggregateId aggregate, ReadOnlySpan<byte> options, Span<byte> name) =>
+        types.InternName(name[..ZoneMapSchema.WriteDisplayName(aggregate, options, name)]);
 
     private static void RequireAggregate(VortexEdition target, string id)
     {
@@ -224,7 +275,7 @@ internal static class ZoneMapWriter
     /// reader derives the field name from.
     /// </summary>
     private static void Field(
-        Span<int> columns, string[] names, DType[] dtypes, ref int at, int column, string name, DType dtype)
+        Span<int> columns, Span<int> names, Span<DType> dtypes, ref int at, int column, int name, DType dtype)
     {
         columns[at] = column;
         names[at] = name;
@@ -299,8 +350,8 @@ internal static class ZoneMapWriter
 
     private static DType BoundedMaxPartial(DTypeArena types, DType element)
     {
-        string[] names = ["bound", "unknown"];
-        DType[] fields = [element, types.Bool(Nullability.NonNullable)];
+        ReadOnlySpan<string> names = ["bound", "unknown"];
+        ReadOnlySpan<DType> fields = [element, types.Bool(Nullability.NonNullable)];
         return types.Struct(names, fields, Nullability.Nullable);
     }
 

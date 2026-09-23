@@ -1411,31 +1411,39 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
         _zoneSegments = new int[_fieldCount];
         _zoneMetadata = new byte[_fieldCount][];
-        for (int field = 0; field < _fieldCount; field++)
+        ZoneMapWriter.Scratch scratch = ZoneMapWriter.Scratch.Take();
+        try
         {
-            _zoneSegments[field] = -1;
-            DType column = _isTabular ? _schema.GetField(field) : _schema;
-            if (_append is { } append && append.NoZoneMap[field])
+            for (int field = 0; field < _fieldCount; field++)
             {
-                // An appended column whose old part had no zones: a map over the new part alone
-                // would describe the old rows with invented counts.
-                continue;
-            }
+                _zoneSegments[field] = -1;
+                DType column = _isTabular ? _schema.GetField(field) : _schema;
+                if (_append is { } append && append.NoZoneMap[field])
+                {
+                    // An appended column whose old part had no zones: a map over the new part
+                    // alone would describe the old rows with invented counts.
+                    continue;
+                }
 
-            if (!ZoneMapWriter.TryBuild(
-                    Blobs, column, _columns[field].Blocks, _arrayEncodings, zoneLength,
-                    out byte[] metadata, out ArrayBlobWriter.BlobLease blob,
-                    _columns[field].StringZones, _columns[field].StringBoundBytes))
-            {
-                continue;
-            }
+                if (!ZoneMapWriter.TryBuild(
+                        Blobs, scratch, column, _columns[field].Blocks, _arrayEncodings, zoneLength,
+                        out byte[] metadata, out ArrayBlobWriter.BlobLease blob,
+                        _columns[field].StringZones, _columns[field].StringBoundBytes))
+                {
+                    continue;
+                }
 
-            using (blob)
-            {
-                _zoneMetadata[field] = metadata;
-                _zoneSegments[field] =
-                    await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+                using (blob)
+                {
+                    _zoneMetadata[field] = metadata;
+                    _zoneSegments[field] =
+                        await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+                }
             }
+        }
+        finally
+        {
+            scratch.Give();
         }
     }
 
