@@ -34,6 +34,9 @@ internal sealed class ZstdDecoder : ArrayDecoder
     /// <summary>Bytes of the little-endian length prefix in front of every stored value.</summary>
     private const int ValueLengthPrefix = sizeof(uint);
 
+    /// <summary>The compression level a dictionary is created at: the one whose tables are smallest.</summary>
+    private const int FastestLevel = 1;
+
     /// <summary>The shared, stateless instance.</summary>
     public static readonly ZstdDecoder Instance = new ZstdDecoder();
 
@@ -357,7 +360,12 @@ internal sealed class ZstdDecoder : ArrayDecoder
                 // Allocates native state, so it is built only for a file that actually carries a
                 // dictionary - which no default writer produces - and for that node alone. Every
                 // other frame goes through the context's decoder, built once for the scan.
-                dictionary = ZstandardDictionary.Create(raw.Span);
+                //
+                // Only ever decompressed with, the dictionary is still given a compression table by
+                // the platform, sized by the level it is created at: level 1's is the smallest, and
+                // building the dictionary and its decoder costs about two thirds of what the
+                // default level's does.
+                dictionary = ZstandardDictionary.Create(raw.Span, FastestLevel);
                 owned = new ZstandardDecoder(dictionary);
             }
 
