@@ -34,50 +34,50 @@ Figures are the action's time inside the process, from its own clock; the proces
 Ratio is the reference's time over our Native AOT build's: above 1.00x, we took less.
 machine: Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0
 runtime: .NET 11.0.0-rc.1.26425.128, as Native AOT and on the JIT; reference: Vortex 0.86.1, cargo release with lto
-commit: 6a43c16
-date: 2026-09-22 15:46 UTC
+commit: da335f7
+date: 2026-09-23 14:02 UTC
 
 ## 1,048,576 rows, 3,191,324 bytes
 
 | scenario | what it does | ours AOT, ms | ours JIT, ms | Vortex Rust, ms | ratio | ours AOT, peak | Rust, peak |
 |---|---|---|---|---|---|---|---|
-| `open` | open the file and read no rows | 0.2 (0.2-0.2) | 12.2 (11.8-13.8) | 0.5 (0.4-0.5) | 3.03x | 9 MiB | 9 MiB |
-| `scan` | read every column of every row | 3.6 (3.5-4.0) | 55.6 (54.9-56.5) | 10.4 (10.2-11.2) | 2.87x | 24 MiB | 19 MiB |
-| `project` | read one column of four | 0.5 (0.5-0.6) | 40.6 (39.4-44.1) | 0.8 (0.8-0.8) | 1.61x | 12 MiB | 11 MiB |
-| `filter-narrow` | read the rows of a band holding about one in a hundred | 1.3 (1.3-1.6) | 78.0 (76.3-78.1) | 1.9 (1.8-2.0) | 1.43x | 12 MiB | 15 MiB |
-| `filter-wide` | read the rows of a band holding about half | 2.8 (2.7-3.0) | 70.3 (68.4-72.3) | 6.4 (6.1-6.5) | 2.29x | 22 MiB | 17 MiB |
-| `take` | take a thousand rows spread across the file | 2.4 (2.2-2.4) | 51.9 (51.5-53.5) | 8.5 (8.4-9.4) | 3.57x | 15 MiB | 16 MiB |
-| `write` | read the file and encode it back out | 38.8 (38.1-39.5) | 182.6 (181.1-191.0) | 193.3 (192.0-197.0) | 4.98x | 30 MiB | 49 MiB |
-| `append` | append a tenth of the rows to a copy of the file | 10.3 (9.6-11.0) | 179.4 (175.1-181.0) | not asked | n/a | 27 MiB | not asked |
+| `open` | open the file and read no rows | 0.2 (0.1-0.3) | 12.7 (11.7-13.5) | 0.5 (0.5-0.6) | 3.12x | 9 MiB | 9 MiB |
+| `scan` | read every column of every row | 2.9 (2.8-3.1) | 58.3 (57.2-60.2) | 10.2 (10.1-10.5) | 3.54x | 19 MiB | 21 MiB |
+| `project` | read one column of four | 0.4 (0.4-0.5) | 42.3 (41.0-43.9) | 0.8 (0.7-1.1) | 2.04x | 11 MiB | 11 MiB |
+| `filter-narrow` | read the rows of a band holding about one in a hundred | 1.1 (1.0-1.2) | 80.3 (79.2-82.2) | 2.0 (1.6-2.1) | 1.88x | 12 MiB | 15 MiB |
+| `filter-wide` | read the rows of a band holding about half | 2.1 (2.1-2.3) | 76.5 (75.8-82.1) | 5.7 (5.6-5.8) | 2.76x | 22 MiB | 17 MiB |
+| `take` | take a thousand rows spread across the file | 2.2 (2.1-2.4) | 59.9 (57.8-62.7) | 7.7 (7.6-7.8) | 3.52x | 15 MiB | 16 MiB |
+| `write` | read the file and encode it back out | 26.7 (26.3-27.3) | 189.2 (187.0-195.6) | 195.5 (193.9-202.1) | 7.34x | 28 MiB | 51 MiB |
+| `append` | append a tenth of the rows to a copy of the file | 8.8 (8.7-10.0) | 187.7 (186.4-195.2) | not asked | n/a | 26 MiB | not asked |
 
 ## 10,485,760 rows, 31,886,396 bytes
 
 | scenario | what it does | ours AOT, ms | ours JIT, ms | Vortex Rust, ms | ratio | ours AOT, peak | Rust, peak |
 |---|---|---|---|---|---|---|---|
-| `open` | open the file and read no rows | 0.2 (0.2-0.7) | 12.1 (11.6-13.1) | 0.5 (0.4-0.6) | 2.73x | 9 MiB | 9 MiB |
-| `scan` | read every column of every row | 24.5 (24.1-25.5) | 87.8 (85.9-98.1) | 100.6 (94.5-115.2) | 4.11x | 50 MiB | 42 MiB |
-| `project` | read one column of four | 1.8 (1.7-3.8) | 43.1 (42.7-44.9) | 1.7 (1.6-1.7) | 0.94x | 12 MiB | 12 MiB |
-| `filter-narrow` | read the rows of a band holding about one in a hundred | 3.0 (3.0-3.2) | 76.2 (74.3-76.4) | 3.3 (3.2-3.7) | 1.09x | 12 MiB | 19 MiB |
-| `filter-wide` | read the rows of a band holding about half | 18.8 (17.5-20.0) | 101.7 (100.1-102.5) | 50.1 (49.8-52.5) | 2.67x | 36 MiB | 39 MiB |
-| `take` | take a thousand rows spread across the file | 17.3 (17.1-17.6) | 77.5 (77.0-78.8) | 69.4 (69.1-70.0) | 4.02x | 37 MiB | 36 MiB |
-| `write` | read the file and encode it back out | 369.7 (367.4-372.0) | 698.8 (681.3-704.2) | 1897.5 (1896.0-1903.3) | 5.13x | 65 MiB | 215 MiB |
-| `append` | append a tenth of the rows to a copy of the file | 57.6 (55.8-63.1) | 261.6 (261.3-262.2) | not asked | n/a | 38 MiB | not asked |
+| `open` | open the file and read no rows | 0.2 (0.2-0.3) | 12.1 (11.6-12.9) | 0.6 (0.4-0.8) | 3.23x | 9 MiB | 9 MiB |
+| `scan` | read every column of every row | 23.5 (22.8-31.0) | 90.6 (88.0-91.8) | 94.5 (93.9-96.8) | 4.02x | 45 MiB | 41 MiB |
+| `project` | read one column of four | 1.2 (1.1-8.5) | 45.7 (42.4-48.0) | 2.0 (1.9-3.6) | 1.59x | 11 MiB | 12 MiB |
+| `filter-narrow` | read the rows of a band holding about one in a hundred | 1.3 (1.3-1.6) | 79.0 (76.4-83.8) | 3.2 (2.9-5.6) | 2.42x | 12 MiB | 19 MiB |
+| `filter-wide` | read the rows of a band holding about half | 13.1 (12.8-14.1) | 91.7 (90.0-93.4) | 50.1 (50.0-50.7) | 3.84x | 36 MiB | 37 MiB |
+| `take` | take a thousand rows spread across the file | 16.9 (16.6-23.7) | 85.6 (84.4-87.4) | 70.0 (69.3-71.5) | 4.13x | 35 MiB | 39 MiB |
+| `write` | read the file and encode it back out | 250.6 (250.0-252.4) | 519.8 (516.7-531.6) | 1972.5 (1967.6-2489.2) | 7.87x | 57 MiB | 217 MiB |
+| `append` | append a tenth of the rows to a copy of the file | 46.4 (45.7-47.7) | 295.4 (282.3-323.4) | not asked | n/a | 37 MiB | not asked |
 
 ## Reading it
 
 **What the table leaves out.** Starting the process, up to the point where it begins
-its action, costs 16 ms for the native build and 14 ms for the reference on this machine, most of it
+its action, costs 7 ms for the native build and 7 ms for the reference on this machine, most of it
 the operating system starting any binary at all.
-The JIT build's start is 41 ms, the managed runtime coming up; what its
+The JIT build's start is 34 ms, the managed runtime coming up; what its
 column then shows is the action compiling its own code as it runs, which is why an
 `open` that takes the native build a fraction of a millisecond takes it tens.
 
 **Where we stand.** Of 14 compared scenarios, the best is `write`
-at 10,485,760 rows (5.13x) and the worst is `project` at 10,485,760 rows
-(0.94x). A ratio above 1.00x means the native build's action took less time
+at 10,485,760 rows (7.87x) and the worst is `project` at 10,485,760 rows
+(1.59x). A ratio above 1.00x means the native build's action took less time
 than the reference's.
 
-**Memory.** On the full scan at 10,485,760 rows our peak is 50 MiB against 42 MiB. We decode a chunk in windows of
+**Memory.** On the full scan at 10,485,760 rows our peak is 45 MiB against 41 MiB. We decode a chunk in windows of
 131,072 rows where its encoding can decode a range of its rows, with a
 dictionary's values decoded once for every window of its chunk, and whole where it cannot,
 a compressed blob among them, or where its decode is only views onto the segment; the
@@ -85,7 +85,7 @@ reference decodes a split of at most a hundred thousand rows at a time. Every co
 file is read in windows or as views, so the difference lies in what each reader holds at
 once, its windows, the dictionaries' values and the segments read ahead, rather than in a
 chunk held whole.
-The reference's own worst is `write` at 10,485,760 rows, 215 MiB against our 65.
+The reference's own worst is `write` at 10,485,760 rows, 217 MiB against our 57.
 
 **Where there is nothing to compare against.** `append`: the reference shim
 exposes no such entry point, so the figure is ours alone and is not a ratio. Those
