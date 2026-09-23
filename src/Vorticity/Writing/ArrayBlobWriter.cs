@@ -2230,10 +2230,11 @@ internal static class ArrayBlobWriter
         internal FlatBufferBuilder Builder { get; } = new FlatBufferBuilder();
 
         /// <summary>
-        /// The encoder every zstd trial of the file compresses in, created with the first: its
-        /// native context is a megabyte, made once rather than once per trial.
+        /// The encoder every zstd trial of the file compresses in, taken from the process's with
+        /// the first and given back with the workspace: its native context is a megabyte, made once
+        /// for many files rather than once per trial or per file.
         /// </summary>
-        internal ZstandardEncoder Zstd => _zstd ??= new ZstandardEncoder();
+        internal ZstandardEncoder Zstd => _zstd ??= ZstdEncoders.Rent();
 
         /// <summary>
         /// The rows a zstd frame holds the values of, the writer's block; 0 for one frame a column.
@@ -2274,13 +2275,16 @@ internal static class ArrayBlobWriter
             return _specs.AsSpan(0, count);
         }
 
-        /// <summary>Hands the builder's and the metadata writer's rentals back, and frees the zstd context.</summary>
+        /// <summary>Hands the builder's and the metadata writer's rentals back, and the zstd encoder to the process's.</summary>
         public void Dispose()
         {
             Builder.Dispose();
             _metadata.Dispose();
-            _zstd?.Dispose();
-            _zstd = null;
+            if (_zstd is { } zstd)
+            {
+                _zstd = null;
+                ZstdEncoders.Return(zstd);
+            }
         }
     }
 }
