@@ -96,7 +96,8 @@ A hint is a preference, and the report is where you find out whether it held:
 * `Auto` is not the smallest: zstd shrank `Celsius` threefold, and `City` by a fifth. `Auto` weighs
   decode speed too, and a zstd block must be inflated whole before one value is read. Take such a
   hint for a file written once and read rarely; leave `Auto` for one scanned often, and measure on
-  your own data.
+  your own data: `VortexSession.AdviseAsync` does
+  ([choose-encodings.md](choose-encodings.md#let-your-data-choose)).
 
 ## String bounds
 

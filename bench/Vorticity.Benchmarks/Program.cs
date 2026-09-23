@@ -242,7 +242,9 @@ internal static class Program
             [
                 .. args.Where((a, i) => i > 0 && i != rowsFlag + 1 && !a.StartsWith("--", StringComparison.Ordinal))
             ];
-            return await EncodingTradeoffs.RunAsync(rows, columns).ConfigureAwait(false);
+            return Array.IndexOf(args, "--advise") >= 0
+                ? await EncodingTradeoffs.AdviseAsync(rows, columns).ConfigureAwait(false)
+                : await EncodingTradeoffs.RunAsync(rows, columns).ConfigureAwait(false);
         }
 
         if (args.Length > 0 && args[0] == "--tree")
@@ -445,7 +447,9 @@ internal static class Program
                                      bytes, write, scan, take, and the storage throughput at which
                                      each crosses Auto; Markdown tables
                                      --rows N          rows a column, default ten million
-          --ffi-check              rows AND decoded values agree with the reference, < 1 s
+                                     --advise          the encoding advice on each shape instead,
+                                                       under five goals, the choice and its reason
+          --ffi-check             rows AND decoded values agree with the reference, < 1 s
           --report                 the published comparison: eight high-level scenarios at a
                                      million rows and ten million, EACH SIDE IN ITS OWN PROCESS,
                                      reporting wall time, peak resident memory and rows rendered.

@@ -119,6 +119,76 @@ as the text holds, and is the largest file every time.
 * **What a hint cannot do.** A hint is tried first and falls back when it does not apply: a
   `Dictionary` hint on the repeating floats still gave zstd, because a chunk held too few repeats
   for a dictionary to pay ([writer-options.md](writer-options.md)).
+* **All of it at once, on your data**: the advice below measures these levers for your columns and
+  your reads, and returns the options that pull them.
+
+## Let your data choose
+
+The tables above measure twenty shapes on one machine. `VortexSession.AdviseAsync` makes the same
+measurements on your data and your machine, and ranks every way to write each column for the reads
+you describe:
+
+```csharp
+await using VortexFile file = await session.OpenAsync("events.vortex");
+EncodingAdvice advice = await session.AdviseAsync(file, new EncodingGoal
+{
+    StorageBytesPerSecond = 100_000_000,   // one stream from an object store
+    LookupsPerScan = 10_000,               // rows read one at a time, for each whole scan
+});
+
+foreach (ColumnEncodingAdvice column in advice.Columns)
+{
+    Console.WriteLine($"{column.Path}: {column.Reason}");
+}
+
+VortexWriteOptions options = advice.ToWriteOptions();
+```
+
+Rows in memory are advised on the same way, `session.AdviseAsync<Event>(events)`, which writes only
+the rows it samples. Per column of numbers, booleans, text or binary, the advice:
+
+* **samples** a million rows, `SampleRows`, in eight windows spread over the data;
+* **writes** them under the writer's own choice and under each hint the column's kind takes, and
+  at 4 and 16 MiB chunks when its values come back across the data more than within a chunk, on
+  rows enough for whole chunks of that size;
+* **reads** each back from memory: a full scan, and single rows spread over its chunks;
+* **ranks** them by the time a scan of the data would take: the decode, the bytes at
+  `StorageBytesPerSecond`, and for each lookup its decode and the chunk it reads. `Objective.Size`
+  ranks by bytes alone, under `Smallest`. The writer's own choice stands unless another is 5 %
+  cheaper, and a larger chunk is taken only when it saves 5 % over all the columns together.
+
+`Reason` says why in one sentence with the numbers. Each candidate carries its bytes, its scan and
+lookup times, its cost, and the throughput at which it and the recommended one cross.
+`ToWriteOptions` returns the hints, the chunk target and the profile, over a baseline of yours.
+
+On the twenty shapes above, the advice departs from `Auto` here and nowhere else:
+
+| shape | scans at 2 GB/s | at 100 MB/s | at 10 GB/s | a row in 1 000 read by row | the bytes |
+|---|---|---|---|---|---|
+| timestamps | | `Zstd` | | | |
+| 100 003 distinct integers, repeating | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | | 16 MiB chunks |
+| integers in 0..999, one in ten null | | `Dictionary` | | `Dictionary` | `Dictionary` |
+| 100 003 distinct floats, repeating | 16 MiB chunks | | `Canonical` | `Canonical` | |
+| uniform floats | | | `Canonical` | | |
+| 10 000 distinct ids, with or without nulls | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | | 16 MiB chunks |
+| unique UUIDs | `Canonical` | | `Canonical` | `Fsst` | |
+| log lines | `Fsst` | | `Canonical` | `Fsst` | |
+| booleans, 1 % true | `Canonical` | | `Canonical` | | |
+
+It falls where the tables' crossings put it, and it compares every candidate with every other,
+where the tables compare each with `Auto`. So it finds the plain form ahead of FSST for UUIDs read
+at 2 GB/s: 36 bytes a value, read in 18 ns and decoded in 3, against 25 bytes read in 12.5 ns and
+decoded in 12; the two cross at 1.3 GB/s. And under the bytes alone it finds the dictionary that
+saves 8 % on the nullable integers, which `Smallest` alone does not take.
+
+* **It is a measurement.** A column costs 0.3 to 3.5 s on the machine above: run it once for a
+  kind of data, keep the options, and run it again when the data or the machine changes. Under the
+  JIT, it first waits for the runtime to finish compiling the decoders it times, up to 3 s a
+  column; a process whose other threads keep compiling is measured on the code it runs then.
+* **The decode is timed on one thread.** A scan decoding on several shares the storage between
+  them: give `StorageBytesPerSecond` divided by the threads.
+* **A chunk target is the file's.** A column that wants 16 MiB chunks gets them for every column,
+  which the advice weighs over all of them, and which a selective read pays for in larger reads.
 
 ## Watch out
 
@@ -138,4 +208,5 @@ DOTNET_TieredCompilation=0 dotnet run -c Release --project bench/Vorticity.Bench
 
 `--rows N` changes the volume, and words after it pick columns by name: `-- --tradeoffs --rows
 1000000 utf8` runs the text columns on a million rows. It writes its tables in Markdown; the figures
-above come from it, the 16 MiB chunks from its columns named `distinct`.
+above come from it, the 16 MiB chunks from its columns named `distinct`. `--advise` runs the advice
+on each column instead, under the five goals of the table above, with the choice and its reason.

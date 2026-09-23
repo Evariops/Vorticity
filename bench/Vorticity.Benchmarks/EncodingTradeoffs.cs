@@ -74,6 +74,59 @@ internal static class EncodingTradeoffs
         return 0;
     }
 
+    /// <summary>
+    /// The advice on every column whose name contains one of <paramref name="only"/>, or on all of
+    /// them, under the goals the tables above tell apart: whole scans from a local drive, from an
+    /// object store and from the page cache, reads by row, and the bytes alone.
+    /// </summary>
+    internal static async Task<int> AdviseAsync(long rows, string[] only)
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "vorticity-tradeoffs");
+        Directory.CreateDirectory(directory);
+        (string Name, EncodingGoal Goal)[] goals =
+        [
+            ("scans at 2 GB/s", EncodingGoal.Default),
+            ("scans at 100 MB/s", new EncodingGoal { StorageBytesPerSecond = 100_000_000 }),
+            ("scans at 10 GB/s", new EncodingGoal { StorageBytesPerSecond = 10_000_000_000 }),
+            ("a row in 1 000 read by row", new EncodingGoal { LookupsPerScan = rows / 1_000.0 }),
+            ("size", EncodingGoal.Smallest),
+        ];
+
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"# Encoding advice, {rows:N0} rows a column\n"));
+        foreach (Column column in Columns())
+        {
+            if (only.Length > 0 && !only.Any(o => column.Name.Contains(o, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            string path = Path.Combine(directory, "column.vortex");
+            await WriteAsync(column, rows, path, new VortexWriteOptions { Compression = CompressionProfile.None }).ConfigureAwait(false);
+            StringBuilder text = new StringBuilder();
+            text.Append(CultureInfo.InvariantCulture, $"## {column.Name}\n\n");
+            text.Append("| goal | advised | written as | chunk | B/value | scan ns | lookup µs | seconds | reason |\n");
+            text.Append("|---|---|---|---:|---:|---:|---:|---:|---|\n");
+            await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None).ConfigureAwait(false))
+            {
+                foreach ((string name, EncodingGoal goal) in goals)
+                {
+                    long start = Stopwatch.GetTimestamp();
+                    EncodingAdvice advice = await VortexSession.Default.AdviseAsync(file, goal).ConfigureAwait(false);
+                    double seconds = Stopwatch.GetElapsedTime(start).TotalSeconds;
+                    ColumnEncodingAdvice advised = advice.Columns[0];
+                    EncodingCandidate chosen = advised.Recommended;
+                    text.Append(CultureInfo.InvariantCulture,
+                        $"| {name} | {chosen.Hint} | {string.Join(", ", chosen.WrittenAs)} | {advice.ChunkTargetBytes >> 20} MiB | {chosen.BytesPerValue:F2} | {chosen.ScanNanosecondsPerValue:F2} | {chosen.LookupMicroseconds:F1} | {seconds:F1} | {advised.Reason} |\n");
+                }
+            }
+
+            System.IO.File.Delete(path);
+            Console.WriteLine(text.ToString());
+        }
+
+        return 0;
+    }
+
     private static async Task MeasureAsync(Column column, long rows, string directory)
     {
         string path = Path.Combine(directory, "column.vortex");

@@ -226,6 +226,21 @@ Vorticity:     const ColumnEncoding Constant = 3
 Vorticity:     const ColumnEncoding Dictionary = 1
 Vorticity:     const ColumnEncoding RunEnd = 2
 Vorticity:     field byte value__
+Vorticity: sealed class Vorticity.ColumnEncodingAdvice : IEquatable<ColumnEncodingAdvice>
+Vorticity:     ctor ColumnEncodingAdvice(string, ColumnProfile, ImmutableArray<EncodingCandidate>, EncodingCandidate, string)
+Vorticity:     method ColumnEncodingAdvice <Clone>$()
+Vorticity:     method bool Equals(ColumnEncodingAdvice)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(ColumnEncodingAdvice, ColumnEncodingAdvice)
+Vorticity:     method bool op_Inequality(ColumnEncodingAdvice, ColumnEncodingAdvice)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out string, out ColumnProfile, out ImmutableArray<EncodingCandidate>, out EncodingCandidate, out string)
+Vorticity:     property ColumnProfile Profile { get; init; }
+Vorticity:     property EncodingCandidate Recommended { get; init; }
+Vorticity:     property ImmutableArray<EncodingCandidate> Candidates { get; init; }
+Vorticity:     property string Path { get; init; }
+Vorticity:     property string Reason { get; init; }
 Vorticity: static class Vorticity.ColumnExtensions
 Vorticity:     method Column<Nullable<long>> Storage(Column<Nullable<DateTime>>)
 Vorticity:     method Column<T> get_Elements<T>(Column<ReadOnlyMemory<T>>)
@@ -416,6 +431,23 @@ Vorticity:     method void CopyTo(Span<Nullable<DateOnly>>)
 Vorticity:     property Nullable<DateOnly> Item[int] { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$E6635382CECAB661DF6ABE6CD0258555.<M>$4E9D5909A22E276040D945561C6A15B3
 Vorticity:     method void <Extension>$(Column<Nullable<DateOnly>>)
+Vorticity: sealed class Vorticity.ColumnProfile : IEquatable<ColumnProfile>
+Vorticity:     ctor ColumnProfile(long, long, long, double, double, bool, double)
+Vorticity:     method ColumnProfile <Clone>$()
+Vorticity:     method bool Equals(ColumnProfile)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(ColumnProfile, ColumnProfile)
+Vorticity:     method bool op_Inequality(ColumnProfile, ColumnProfile)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out long, out long, out long, out double, out double, out bool, out double)
+Vorticity:     property bool Ascending { get; init; }
+Vorticity:     property double AverageLength { get; init; }
+Vorticity:     property double AverageRun { get; init; }
+Vorticity:     property double RowsPerDistinctInChunk { get; init; }
+Vorticity:     property long Distinct { get; init; }
+Vorticity:     property long Nulls { get; init; }
+Vorticity:     property long Rows { get; init; }
 Vorticity: sealed class Vorticity.ColumnWriteReport : IEquatable<ColumnWriteReport>
 Vorticity:     ctor ColumnWriteReport(string, ImmutableArray<string>)
 Vorticity:     method ColumnWriteReport <Clone>$()
@@ -483,6 +515,55 @@ Vorticity: ref struct Vorticity.DictionaryView<T>
 Vorticity:     property Column<T> Values { get; }
 Vorticity:     property ReadOnlySpan<uint> Codes { get; }
 Vorticity:     property int Cardinality { get; }
+Vorticity: sealed class Vorticity.EncodingAdvice : IEquatable<EncodingAdvice>
+Vorticity:     ctor EncodingAdvice(EncodingGoal, long, long, int, ImmutableArray<ColumnEncodingAdvice>)
+Vorticity:     method EncodingAdvice <Clone>$()
+Vorticity:     method VortexWriteOptions ToWriteOptions(VortexWriteOptions = default)
+Vorticity:     method bool Equals(EncodingAdvice)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(EncodingAdvice, EncodingAdvice)
+Vorticity:     method bool op_Inequality(EncodingAdvice, EncodingAdvice)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out EncodingGoal, out long, out long, out int, out ImmutableArray<ColumnEncodingAdvice>)
+Vorticity:     property EncodingGoal Goal { get; init; }
+Vorticity:     property ImmutableArray<ColumnEncodingAdvice> Columns { get; init; }
+Vorticity:     property int ChunkTargetBytes { get; init; }
+Vorticity:     property long Rows { get; init; }
+Vorticity:     property long SampledRows { get; init; }
+Vorticity: sealed class Vorticity.EncodingCandidate : IEquatable<EncodingCandidate>
+Vorticity:     ctor EncodingCandidate(EncodingHint, int, ImmutableArray<string>, double, double, double, double, Nullable<long>)
+Vorticity:     method EncodingCandidate <Clone>$()
+Vorticity:     method bool Equals(EncodingCandidate)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(EncodingCandidate, EncodingCandidate)
+Vorticity:     method bool op_Inequality(EncodingCandidate, EncodingCandidate)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     method void Deconstruct(out EncodingHint, out int, out ImmutableArray<string>, out double, out double, out double, out double, out Nullable<long>)
+Vorticity:     property EncodingHint Hint { get; init; }
+Vorticity:     property ImmutableArray<string> WrittenAs { get; init; }
+Vorticity:     property Nullable<long> CrossesAtBytesPerSecond { get; init; }
+Vorticity:     property double BytesPerValue { get; init; }
+Vorticity:     property double Cost { get; init; }
+Vorticity:     property double LookupMicroseconds { get; init; }
+Vorticity:     property double ScanNanosecondsPerValue { get; init; }
+Vorticity:     property int ChunkTargetBytes { get; init; }
+Vorticity: sealed class Vorticity.EncodingGoal : IEquatable<EncodingGoal>
+Vorticity:     ctor EncodingGoal()
+Vorticity:     method EncodingGoal <Clone>$()
+Vorticity:     method bool Equals(EncodingGoal)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(EncodingGoal, EncodingGoal)
+Vorticity:     method bool op_Inequality(EncodingGoal, EncodingGoal)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     property EncodingGoal Default { get; }
+Vorticity:     property EncodingGoal Smallest { get; }
+Vorticity:     property EncodingObjective Objective { get; init; }
+Vorticity:     property double LookupsPerScan { get; init; }
+Vorticity:     property long SampleRows { get; init; }
+Vorticity:     property long StorageBytesPerSecond { get; init; }
 Vorticity: enum Vorticity.EncodingHint
 Vorticity:     const EncodingHint Alp = 6
 Vorticity:     const EncodingHint Auto = 0
@@ -493,6 +574,10 @@ Vorticity:     const EncodingHint Fsst = 5
 Vorticity:     const EncodingHint RunEnd = 2
 Vorticity:     const EncodingHint Sequence = 7
 Vorticity:     const EncodingHint Zstd = 8
+Vorticity:     field byte value__
+Vorticity: enum Vorticity.EncodingObjective
+Vorticity:     const EncodingObjective ReadTime = 0
+Vorticity:     const EncodingObjective Size = 1
 Vorticity:     field byte value__
 Vorticity: static class Vorticity.ExtensionColumnBuilderExtensions
 Vorticity:     method void Append<T>(ColumnBuilder<T>, T)
@@ -1305,6 +1390,8 @@ Vorticity:     property int Length { get; init; }
 Vorticity:     property long Offset { get; init; }
 Vorticity: sealed class Vorticity.VortexSession : IAsyncDisposable
 Vorticity:     method ValueTask DisposeAsync()
+Vorticity:     method ValueTask<EncodingAdvice> AdviseAsync(VortexFile, EncodingGoal = default, CancellationToken = default)
+Vorticity:     method ValueTask<EncodingAdvice> AdviseAsync<TRecord>(ReadOnlyMemory<TRecord>, EncodingGoal = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFile> OpenAsync(ISegmentSource, VortexOpenOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFile> OpenAsync(string, VortexOpenOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<VortexFileWriter> AppendAsync(string, VortexWriteOptions = default, CancellationToken = default)

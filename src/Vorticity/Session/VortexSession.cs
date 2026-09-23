@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Advice;
 using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Types;
@@ -253,6 +254,45 @@ public sealed class VortexSession : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(path);
         ThrowIfDisposed();
         return VortexFileWriter.AppendInSessionAsync(path, options, this, cancellationToken);
+    }
+
+    /// <summary>
+    /// Measures, on a sample of <paramref name="file"/>, every way the writer can write each of its
+    /// columns, and ranks them for the reads <paramref name="goal"/> describes.
+    /// </summary>
+    /// <param name="file">The data to advise on: a table, whose columns of booleans, numbers, text and binary are measured.</param>
+    /// <param name="goal">The reads the files written from such data will serve; null for <see cref="EncodingGoal.Default"/>.</param>
+    /// <param name="cancellationToken">Cancels the measurement.</param>
+    /// <returns>Per column, the candidates measured and the one to take; and the options that take them.</returns>
+    /// <remarks>
+    /// A measurement, made once for a kind of data and not for every file: each candidate is a write
+    /// and some reads of the sample, on this machine. The advice moves with the machine, and the
+    /// write that takes it is as exact as any other.
+    /// </remarks>
+    /// <exception cref="ArgumentException">The file's root is not a struct.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A value of <paramref name="goal"/> describes no goal.</exception>
+    public ValueTask<EncodingAdvice> AdviseAsync(VortexFile file, EncodingGoal? goal = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        ThrowIfDisposed();
+        return EncodingAdvisor.AdviseAsync(file, goal ?? EncodingGoal.Default, this, cancellationToken);
+    }
+
+    /// <summary>
+    /// Measures, on a sample of <paramref name="rows"/>, every way the writer can write each column of
+    /// <typeparamref name="TRecord"/>, and ranks them for the reads <paramref name="goal"/> describes.
+    /// </summary>
+    /// <typeparam name="TRecord">The record type; its schema is the columns advised on.</typeparam>
+    /// <param name="rows">The data to advise on; only the sample's rows are written, into memory.</param>
+    /// <param name="goal">The reads the files written from such data will serve; null for <see cref="EncodingGoal.Default"/>.</param>
+    /// <param name="cancellationToken">Cancels the measurement.</param>
+    /// <returns>Per column, the candidates measured and the one to take; and the options that take them.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">A value of <paramref name="goal"/> describes no goal.</exception>
+    public ValueTask<EncodingAdvice> AdviseAsync<TRecord>(ReadOnlyMemory<TRecord> rows, EncodingGoal? goal = null, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ThrowIfDisposed();
+        return EncodingAdvisor.AdviseAsync(rows, goal ?? EncodingGoal.Default, this, cancellationToken);
     }
 
     /// <summary>Clears the segment cache and trims the pool. A file of the session still open makes this throw.</summary>
