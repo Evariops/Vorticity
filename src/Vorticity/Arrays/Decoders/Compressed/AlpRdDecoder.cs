@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 using System.Buffers.Binary;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
@@ -264,6 +265,17 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         // narrowing give different values once the declared right bit width reaches the narrow
         // width -- and that width comes from the file. Each branch therefore pre-shifts at exactly
         // the width its body works in.
+        //
+        // Every code is checked before any is combined, in one pass a vector does many codes at a
+        // time: the combine is then a lookup, an or and a store a row, with no test and no call in
+        // its body -- a call the loop might make, however rare, keeps its state on the stack.
+        int bad = FirstOutOfRange(codes, (uint)dictionary.Length);
+        if (bad >= 0)
+        {
+            ThrowCode(Row(bad, wanted, start), Widen(codes[bad]), dictionary.Length);
+        }
+
+        ref TCode code = ref MemoryMarshal.GetReference(codes);
         if (isSingle)
         {
             Span<uint> shifted = stackalloc uint[dictionary.Length];
@@ -272,17 +284,13 @@ internal sealed class AlpRdDecoder : ArrayDecoder
                 shifted[i] = unchecked(dictionary[i] << rightBitWidth);
             }
 
-            ReadOnlySpan<uint> low = MemoryMarshal.Cast<byte, uint>(right)[..length];
-            Span<uint> target = MemoryMarshal.Cast<byte, uint>(destination)[..length];
+            ref uint table = ref MemoryMarshal.GetReference(shifted);
+            ref uint low = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, uint>(right)[..length]);
+            ref uint target = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, uint>(destination)[..length]);
             for (int i = 0; i < length; i++)
             {
-                uint code = Widen(codes[i]);
-                if (code >= (uint)dictionary.Length)
-                {
-                    ThrowCode(Row(i, wanted, start), code, dictionary.Length);
-                }
-
-                target[i] = unchecked(shifted[(int)code] | low[i]);
+                Unsafe.Add(ref target, i) = unchecked(
+                    Unsafe.Add(ref table, (nint)Widen(Unsafe.Add(ref code, i))) | Unsafe.Add(ref low, i));
             }
 
             return;
@@ -294,18 +302,60 @@ internal sealed class AlpRdDecoder : ArrayDecoder
             wideShifted[i] = unchecked((ulong)dictionary[i] << rightBitWidth);
         }
 
-        ReadOnlySpan<ulong> wide = MemoryMarshal.Cast<byte, ulong>(right)[..length];
-        Span<ulong> output = MemoryMarshal.Cast<byte, ulong>(destination)[..length];
+        ref ulong wideTable = ref MemoryMarshal.GetReference(wideShifted);
+        ref ulong wide = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, ulong>(right)[..length]);
+        ref ulong output = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, ulong>(destination)[..length]);
         for (int i = 0; i < length; i++)
         {
-            uint code = Widen(codes[i]);
-            if (code >= (uint)dictionary.Length)
+            Unsafe.Add(ref output, i) = unchecked(
+                Unsafe.Add(ref wideTable, (nint)Widen(Unsafe.Add(ref code, i))) | Unsafe.Add(ref wide, i));
+        }
+    }
+
+    /// <summary>
+    /// The first code at or past <paramref name="limit"/>, or -1: a vector pass for the file whose
+    /// codes are all in range, and a walk only for one whose are not.
+    /// </summary>
+    private static int FirstOutOfRange<TCode>(ReadOnlySpan<TCode> codes, uint limit)
+        where TCode : unmanaged
+    {
+        uint widest = 0;
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && codes.Length >= Vector128<TCode>.Count)
+        {
+            ref TCode first = ref MemoryMarshal.GetReference(codes);
+            Vector128<TCode> max = Vector128.LoadUnsafe(ref first);
+            int last = codes.Length - Vector128<TCode>.Count;
+            for (i = Vector128<TCode>.Count; i <= last; i += Vector128<TCode>.Count)
             {
-                ThrowCode(Row(i, wanted, start), code, dictionary.Length);
+                max = Vector128.Max(max, Vector128.LoadUnsafe(ref first, (nuint)i));
             }
 
-            output[i] = unchecked(wideShifted[(int)code] | wide[i]);
+            for (int lane = 0; lane < Vector128<TCode>.Count; lane++)
+            {
+                widest = Math.Max(widest, Widen(max.GetElement(lane)));
+            }
         }
+
+        for (; i < codes.Length; i++)
+        {
+            widest = Math.Max(widest, Widen(codes[i]));
+        }
+
+        if (widest < limit)
+        {
+            return -1;
+        }
+
+        for (int row = 0; row < codes.Length; row++)
+        {
+            if (Widen(codes[row]) >= limit)
+            {
+                return row;
+            }
+        }
+
+        return -1;
     }
 
     /// <summary>

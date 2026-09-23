@@ -216,6 +216,27 @@ public sealed class AlpRdDecoderTests
         Assert.Throws<VortexFormatException>(() => harness.DecodeRoot(f64, 2));
     }
 
+    [Fact]
+    public void ACodePastTheDictionaryIsRejectedAtItsRowAmongMany()
+    {
+        // Enough rows for the codes to be checked a vector at a time: the one past the dictionary
+        // is still found, and named at its own row.
+        ushort[] codes = new ushort[40];
+        double[] values = new double[40];
+        for (int i = 0; i < codes.Length; i++)
+        {
+            codes[i] = (ushort)(i % 2);
+            values[i] = 1.0 + (i / 100.0);
+        }
+
+        codes[25] = 7;
+        TestNode root = Root(TestMetadata.AlpRd(RightBitWidth, PType.U16, 1, 2));
+        using DecodeHarness harness = DecodeHarness.Load(root, TestBuffers.UInt16(codes), RightParts(values));
+        DType f64 = harness.Types.Primitive(PType.F64, Nullability.NonNullable);
+        VortexFormatException error = Assert.Throws<VortexFormatException>(() => harness.DecodeRoot(f64, codes.Length));
+        Assert.Contains("row 25 ", error.Message, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(64u)]
     [InlineData(100u)]
