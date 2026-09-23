@@ -130,11 +130,14 @@ internal sealed class ZstdDecoder : ArrayDecoder
         VortexBuffer values = Decompress(
             context, in node, metadata, frames, firstFrame, usedFrames, hasDictionary, total, byteWidth,
             scanAscii, out bool allAscii);
+        int decompressed = values.Length;
         values = StepOver(values, skipped, isPrimitive, byteWidth);
 
         return isPrimitive
             ? Scatter(context, dtype, count, validity, values, valueCount, byteWidth)
-            : BuildViews(context, dtype, count, validity, values, valueCount, scanAscii && !allAscii);
+            : BuildViews(
+                context, dtype, count, validity, values, valueCount, scanAscii && !allAscii,
+                frames.Slice(firstFrame, usedFrames), skipped, decompressed - values.Length);
     }
 
     /// <summary>The values the frames hold before row <paramref name="start"/>: its valid rows before it.</summary>
@@ -529,6 +532,16 @@ internal sealed class ZstdDecoder : ArrayDecoder
     /// Rebuilds Arrow views by walking the length-prefixed value stream, then scatters them over
     /// the null slots.
     /// </summary>
+    /// <param name="context">The decode context.</param>
+    /// <param name="dtype">The array's dtype.</param>
+    /// <param name="length">Rows.</param>
+    /// <param name="validity">Their validity.</param>
+    /// <param name="values">The stream, from the first value wanted.</param>
+    /// <param name="valueCount">The valid rows, which is how many values are wanted.</param>
+    /// <param name="requireUtf8">Whether each value must be checked as UTF-8.</param>
+    /// <param name="frames">The frames the stream was decompressed from, in order.</param>
+    /// <param name="skipped">The values of the first frame stepped over before the stream starts.</param>
+    /// <param name="stepped">The bytes they took.</param>
     private static int BuildViews(
         ArrayDecodeContext context,
         DType dtype,
@@ -536,7 +549,10 @@ internal sealed class ZstdDecoder : ArrayDecoder
         Validity validity,
         VortexBuffer values,
         int valueCount,
-        bool requireUtf8)
+        bool requireUtf8,
+        ReadOnlySpan<ZstdFrameMetadata> frames,
+        int skipped,
+        int stepped)
     {
         int viewBytes = ArrayDecodeContext.CheckedMultiply(
             length, CanonicalSupport.ViewSize, Id + " views");
@@ -562,10 +578,13 @@ internal sealed class ZstdDecoder : ArrayDecoder
         // shape of essentially every string column. When the sweep does find a high byte, whether
         // a genuinely non-ASCII value or one at least 128 bytes long, the per-row path below runs.
 
-        // Every row valid and no row to validate, the common shape: a loop that calls nothing. Should
-        // a prefix or a value run past the stream, it stops short, and the loop below walks the rows
-        // again to say which.
-        if (mask.AllValid && !requireUtf8 && ViewKernels.BuildFromPrefixed(heap, writable, length) == length)
+        // Every row valid and no row to validate, the common shape: loops that call nothing, frame
+        // by frame and several frames at once where the frames account for the stream, else over
+        // the stream as one. Should a prefix or a value run past the stream, it stops short, and the
+        // loop below walks the rows again to say which.
+        if (mask.AllValid && !requireUtf8
+            && (BuildFromFrames(heap, writable, length, frames, skipped, stepped)
+                || ViewKernels.BuildFromPrefixed(heap, writable, length) == length))
         {
             return AttachHeap(context, dtype, length, validity, views, values);
         }
@@ -620,6 +639,52 @@ internal sealed class ZstdDecoder : ArrayDecoder
         }
 
         return AttachHeap(context, dtype, length, validity, views, values);
+    }
+
+    /// <summary>
+    /// Cuts the stream frame by frame, every frame starting on a value of its own, so that several
+    /// frames are cut at once; false when there is one frame, or when the frames' value counts and
+    /// sizes do not account for the stream, for the caller to cut it as one.
+    /// </summary>
+    /// <remarks>
+    /// Where a value starts is known only once the length before it is read, so the stream alone is
+    /// a chain of dependent loads; the frame table gives every frame's start, which splits it into
+    /// independent chains. The table comes from the file and is not trusted: every value must lie in
+    /// its frame's bytes, and every frame cut whole must end where its last value does.
+    /// </remarks>
+    private static bool BuildFromFrames(
+        ReadOnlySpan<byte> heap, Span<byte> views, int length, ReadOnlySpan<ZstdFrameMetadata> frames,
+        int skipped, int stepped)
+    {
+        if (frames.Length < 2)
+        {
+            return false;
+        }
+
+        Span<ViewKernels.PrefixedRun> stack = stackalloc ViewKernels.PrefixedRun[16];
+        using Scratch<ViewKernels.PrefixedRun> scratch = new Scratch<ViewKernels.PrefixedRun>(frames.Length, stack);
+        Span<ViewKernels.PrefixedRun> runs = scratch.Span;
+
+        // In the stream's own terms, which start past the stepped-over values of the first frame.
+        long start = -stepped;
+        int row = 0;
+        int used = 0;
+        for (int i = 0; i < frames.Length && row < length; i++)
+        {
+            long held = (long)frames[i].ValueCount - (i == 0 ? skipped : 0);
+            long end = start + (long)frames[i].UncompressedSize;
+            if (held <= 0 || end > heap.Length)
+            {
+                return false;
+            }
+
+            int rows = (int)Math.Min(held, length - row);
+            runs[used++] = new ViewKernels.PrefixedRun((int)Math.Max(start, 0), (int)end, row, rows, rows == held);
+            row += rows;
+            start = end;
+        }
+
+        return row == length && ViewKernels.BuildFromPrefixedRuns(heap, views, runs[..used]);
     }
 
     /// <summary>The varbin view node over <paramref name="views"/>, with the heap as its one data buffer unless it is empty.</summary>

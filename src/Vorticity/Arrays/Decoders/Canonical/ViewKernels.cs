@@ -1118,6 +1118,193 @@ internal static class ViewKernels
     }
 
     /// <summary>
+    /// <see cref="BuildFromPrefixed"/> over a stream whose runs each start on a value of their own,
+    /// four runs at a time; false when a value runs past its run, or a whole run does not end where
+    /// its last value does, for the caller to cut the stream as one.
+    /// </summary>
+    /// <remarks>
+    /// Where a value starts is known only once the length before it is read, so cutting one stream
+    /// is a chain of dependent loads, a load's latency a row. Runs that start on values of their own,
+    /// the frames of a compressed stream, are independent chains, and cutting four of them in one
+    /// loop, or two when fewer are left, overlaps their latencies. The loops call nothing, for
+    /// <see cref="CutInline{T, TSizes, TStarts}"/>'s reason; the run left over, and the rows a run
+    /// has past the shortest of its group, are cut one run at a time.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal static bool BuildFromPrefixedRuns(ReadOnlySpan<byte> heap, Span<byte> views, ReadOnlySpan<PrefixedRun> runs)
+    {
+        ref byte heapRef = ref MemoryMarshal.GetReference(heap);
+        ref byte viewRef = ref MemoryMarshal.GetReference(views);
+        int heapLength = heap.Length;
+        int r = 0;
+        for (; r + 4 <= runs.Length; r += 4)
+        {
+            PrefixedRun a = runs[r];
+            PrefixedRun b = runs[r + 1];
+            PrefixedRun c = runs[r + 2];
+            PrefixedRun d = runs[r + 3];
+            int common = Math.Min(Math.Min(a.Rows, b.Rows), Math.Min(c.Rows, d.Rows));
+            int atA = a.Start;
+            int atB = b.Start;
+            int atC = c.Start;
+            int atD = d.Start;
+            if (!FourRuns(
+                    ref heapRef, heapLength, ref viewRef, common,
+                    ref atA, a.End, a.FirstRow, ref atB, b.End, b.FirstRow,
+                    ref atC, c.End, c.FirstRow, ref atD, d.End, d.FirstRow)
+                || !RestOfRun(ref heapRef, heapLength, ref viewRef, a, atA, common)
+                || !RestOfRun(ref heapRef, heapLength, ref viewRef, b, atB, common)
+                || !RestOfRun(ref heapRef, heapLength, ref viewRef, c, atC, common)
+                || !RestOfRun(ref heapRef, heapLength, ref viewRef, d, atD, common))
+            {
+                return false;
+            }
+        }
+
+        if (r + 2 <= runs.Length)
+        {
+            PrefixedRun a = runs[r];
+            PrefixedRun b = runs[r + 1];
+            int common = Math.Min(a.Rows, b.Rows);
+            int atA = a.Start;
+            int atB = b.Start;
+            if (!TwoRuns(ref heapRef, heapLength, ref viewRef, common, ref atA, a.End, a.FirstRow, ref atB, b.End, b.FirstRow)
+                || !RestOfRun(ref heapRef, heapLength, ref viewRef, a, atA, common)
+                || !RestOfRun(ref heapRef, heapLength, ref viewRef, b, atB, common))
+            {
+                return false;
+            }
+
+            r += 2;
+        }
+
+        return r == runs.Length || RestOfRun(ref heapRef, heapLength, ref viewRef, runs[r], runs[r].Start, 0);
+    }
+
+    /// <summary>
+    /// A stretch of a length-prefixed stream that starts on a value of its own: bytes
+    /// [<paramref name="Start"/>, <paramref name="End"/>) of the stream hold the values of rows
+    /// [<paramref name="FirstRow"/>, <paramref name="FirstRow"/> + <paramref name="Rows"/>).
+    /// </summary>
+    /// <param name="Start">Where the length of its first value sits.</param>
+    /// <param name="End">Where it ends.</param>
+    /// <param name="FirstRow">The row of its first value.</param>
+    /// <param name="Rows">How many of its values are wanted.</param>
+    /// <param name="Whole">Whether those are all it holds, so that the last one ends at <paramref name="End"/>.</param>
+    internal readonly record struct PrefixedRun(int Start, int End, int FirstRow, int Rows, bool Whole);
+
+    /// <summary>
+    /// The first <paramref name="rows"/> rows of four runs, a row of each a turn, each run's length
+    /// at its <c>at</c>, which it moves on; false when a value runs past its run.
+    /// </summary>
+    /// <remarks>
+    /// The runs come in as values rather than by reference, so that their ends stay in registers
+    /// instead of being read again past every view the loop stores.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool FourRuns(
+        ref byte heap, int heapLength, ref byte views, int rows,
+        ref int atA, int endA, int rowA, ref int atB, int endB, int rowB,
+        ref int atC, int endC, int rowC, ref int atD, int endD, int rowD)
+    {
+        int offsetA = atA;
+        int offsetB = atB;
+        int offsetC = atC;
+        int offsetD = atD;
+        ref byte viewA = ref Unsafe.Add(ref views, (nint)rowA * ViewSize);
+        ref byte viewB = ref Unsafe.Add(ref views, (nint)rowB * ViewSize);
+        ref byte viewC = ref Unsafe.Add(ref views, (nint)rowC * ViewSize);
+        ref byte viewD = ref Unsafe.Add(ref views, (nint)rowD * ViewSize);
+        bool inside = true;
+        for (nint i = 0; i < rows && inside; i++)
+        {
+            // Non-short-circuiting: the four steps are independent, and each checks its own run.
+            inside = NextPrefixed(ref heap, heapLength, ref offsetA, endA, ref Unsafe.Add(ref viewA, i * ViewSize))
+                & NextPrefixed(ref heap, heapLength, ref offsetB, endB, ref Unsafe.Add(ref viewB, i * ViewSize))
+                & NextPrefixed(ref heap, heapLength, ref offsetC, endC, ref Unsafe.Add(ref viewC, i * ViewSize))
+                & NextPrefixed(ref heap, heapLength, ref offsetD, endD, ref Unsafe.Add(ref viewD, i * ViewSize));
+        }
+
+        atA = offsetA;
+        atB = offsetB;
+        atC = offsetC;
+        atD = offsetD;
+        return inside;
+    }
+
+    /// <summary><see cref="FourRuns"/> for two runs.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool TwoRuns(
+        ref byte heap, int heapLength, ref byte views, int rows,
+        ref int atA, int endA, int rowA, ref int atB, int endB, int rowB)
+    {
+        int offsetA = atA;
+        int offsetB = atB;
+        ref byte viewA = ref Unsafe.Add(ref views, (nint)rowA * ViewSize);
+        ref byte viewB = ref Unsafe.Add(ref views, (nint)rowB * ViewSize);
+        bool inside = true;
+        for (nint i = 0; i < rows && inside; i++)
+        {
+            inside = NextPrefixed(ref heap, heapLength, ref offsetA, endA, ref Unsafe.Add(ref viewA, i * ViewSize))
+                & NextPrefixed(ref heap, heapLength, ref offsetB, endB, ref Unsafe.Add(ref viewB, i * ViewSize));
+        }
+
+        atA = offsetA;
+        atB = offsetB;
+        return inside;
+    }
+
+    /// <summary>
+    /// The rows of <paramref name="run"/> from its row <paramref name="done"/>, whose length sits at
+    /// <paramref name="offset"/>; false when one runs past the run, or a whole run does not end
+    /// where its last value does.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool RestOfRun(ref byte heap, int heapLength, ref byte views, in PrefixedRun run, int offset, int done)
+    {
+        ref byte view = ref Unsafe.Add(ref views, (nint)run.FirstRow * ViewSize);
+        for (nint i = done; i < run.Rows; i++)
+        {
+            if (!NextPrefixed(ref heap, heapLength, ref offset, run.End, ref Unsafe.Add(ref view, i * ViewSize)))
+            {
+                return false;
+            }
+        }
+
+        return !run.Whole || offset == run.End;
+    }
+
+    /// <summary>
+    /// The view of the value whose length sits at <paramref name="offset"/>, which it moves past the
+    /// value; false, and nothing written, when the length or the value runs past <paramref name="end"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool NextPrefixed(ref byte heap, int heapLength, ref int offset, int end, ref byte view)
+    {
+        int at = offset;
+        if (at > end - sizeof(uint))
+        {
+            return false;
+        }
+
+        uint size = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref heap, at));
+        if (!BitConverter.IsLittleEndian)
+        {
+            size = BinaryPrimitives.ReverseEndianness(size);
+        }
+
+        int start = at + sizeof(uint);
+        if (size > (uint)(end - start))
+        {
+            return false;
+        }
+
+        Place(ref view, ref heap, start, (int)size, heapLength, requireUtf8: false);
+        offset = start + (int)size;
+        return true;
+    }
+
+    /// <summary>
     /// Writes the view of the <paramref name="size"/> bytes at <paramref name="offset"/> of a heap
     /// they lie inside; false, and nothing written, when a UTF-8 row starts off a character.
     /// </summary>

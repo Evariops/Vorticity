@@ -123,6 +123,102 @@ public sealed class ZstdDecoderTests
         Assert.Equal(["alpha", "beta", "gamma"], ReadStrings(node, 3));
     }
 
+    /// <summary>
+    /// Frames cut four and two at a time and one alone, of every size around the inline limit,
+    /// decode as the stream they concatenate to, whole and in ranges that start inside a frame
+    /// and stop inside another.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(5)]
+    [InlineData(7)]
+    [InlineData(9)]
+    public void FramesCutTogetherDecodeAsTheirStream(int frameCount)
+    {
+        Random random = new Random(frameCount);
+        List<string> stored = [];
+        int[] perFrame = new int[frameCount];
+        for (int f = 0; f < frameCount; f++)
+        {
+            perFrame[f] = 5 + random.Next(30);
+            for (int i = 0; i < perFrame[f]; i++)
+            {
+                stored.Add(new string((char)('a' + random.Next(26)), random.Next(0, 31)));
+            }
+        }
+
+        List<byte[]> buffers = [];
+        List<ZstdFrameMetadata> metadata = [];
+        int first = 0;
+        foreach (int count in perFrame)
+        {
+            byte[] stream = ValueStream([.. stored.GetRange(first, count)]);
+            buffers.Add(Compress(stream));
+            metadata.Add(new ZstdFrameMetadata((ulong)stream.Length, (ulong)count));
+            first += count;
+        }
+
+        TestNode root = new TestNode("vortex.zstd").WithMetadata(TestMetadata.Zstd(0, [.. metadata]));
+        for (int b = 0; b < buffers.Count; b++)
+        {
+            root = root.WithBuffer(b);
+        }
+
+        using DecodeHarness harness = DecodeHarness.Load(root, [.. buffers]);
+        DType utf8 = harness.Types.Utf8(Nullability.NonNullable);
+        int rows = stored.Count;
+        Assert.Equal(stored, ReadStrings(harness.Node(harness.DecodeRoot(utf8, rows)), rows));
+
+        ArrayNode node = harness.Scan.Nodes.Root;
+        foreach ((int start, int count) in new[] { (1, rows - 2), (perFrame[0] - 1, rows - perFrame[0]), (3, 4) })
+        {
+            if (count <= 0 || start + count > rows)
+            {
+                continue;
+            }
+
+            CanonicalNode range = harness.Node(
+                harness.Scan.Decode.DecodeRootRange(in node, utf8, rows, start, count, keepEncoding: false));
+            Assert.Equal(stored.GetRange(start, count), ReadStrings(range, count));
+        }
+    }
+
+    /// <summary>
+    /// Frames whose value counts do not account for their bytes are not trusted to split the
+    /// stream: it is cut as one, as the stream says.
+    /// </summary>
+    [Fact]
+    public void FramesWhoseCountsDisagreeWithTheirBytesAreCutAsOneStream()
+    {
+        string[] values = ["alpha", "beta", "a value long enough to go out of line", "gamma", "delta", "epsilon", "zeta", "eta"];
+        byte[] first = ValueStream(values[..4]);
+        byte[] second = ValueStream(values[4..]);
+
+        // Four values in each frame, declared as three and five.
+        TestNode root = new TestNode("vortex.zstd")
+            .WithMetadata(TestMetadata.Zstd(
+                0,
+                new ZstdFrameMetadata((ulong)first.Length, 3),
+                new ZstdFrameMetadata((ulong)second.Length, 5)))
+            .WithBuffer(0)
+            .WithBuffer(1);
+
+        using DecodeHarness harness = DecodeHarness.Load(root, Compress(first), Compress(second));
+        DType utf8 = harness.Types.Utf8(Nullability.NonNullable);
+        CanonicalNode node = harness.Node(harness.DecodeRoot(utf8, 8));
+
+        Assert.Equal(values, ReadStrings(node, 8));
+
+        // Seven rows stop inside the second frame, whose bytes then hold every row asked of it:
+        // only the first frame, cut whole and ending short of its bytes, gives the counts away.
+        ArrayNode root8 = harness.Scan.Nodes.Root;
+        CanonicalNode range = harness.Node(
+            harness.Scan.Decode.DecodeRootRange(in root8, utf8, 8, 0, 7, keepEncoding: false));
+        Assert.Equal(values[..7], ReadStrings(range, 7));
+    }
+
     [Fact]
     public void ADictionaryBufferIsUsedForEveryFrame()
     {
