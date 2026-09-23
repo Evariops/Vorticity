@@ -263,6 +263,115 @@ public sealed class AllocationTests
         Assert.Equal(0, bytes);
     }
 
+    /// <summary>
+    /// A scan's context makes each scan's arena from what the last one needed, so that the same
+    /// scan again grows nothing. What it needed includes a dtype built a second time: its children
+    /// and names are written out before the arena finds the first and rolls them back.
+    /// </summary>
+    [Fact]
+    public void AnArenaShapedLikeAnotherDerivesTheSameWithoutGrowing()
+    {
+        DTypeArena first = new(4);
+        Derive(first);
+        Derive(first);
+        DTypeArenaShape shape = first.Shape;
+
+        long alone = Measure(() => Consume(new DTypeArena(in shape)));
+        long derived = Measure(() =>
+        {
+            DTypeArena arena = new(in shape);
+            Derive(arena);
+            Derive(arena);
+            Consume(arena);
+        });
+
+        Assert.Equal(alone, derived);
+
+        static void Derive(DTypeArena arena)
+        {
+            DType i64 = arena.Primitive(PType.I64, Nullability.NonNullable);
+            DType utf8 = arena.Utf8(Nullability.Nullable);
+            DType pair = arena.Struct(["k", "v"], [utf8, i64], Nullability.NonNullable);
+            DType list = arena.List(pair, Nullability.Nullable);
+            Consume(arena.Struct(["id", "name", "pairs"], [i64, utf8, list], Nullability.NonNullable).NodeIndex);
+        }
+    }
+
+    [Fact]
+    public void AnArenaOfLeavesAllocatesNothingBesideItsNodes()
+    {
+        long alone = Measure(() => Consume(new DTypeArena(4)));
+        long leaves = Measure(() =>
+        {
+            DTypeArena arena = new(4);
+            Consume(arena.Primitive(PType.I64, Nullability.NonNullable).NodeIndex);
+            Consume(arena.Bool(Nullability.Nullable).NodeIndex);
+            Consume(arena.Utf8(Nullability.NonNullable).NodeIndex);
+            Consume(arena.GetName(arena.InternName("unused"u8)).Length);
+            Consume(arena);
+        });
+
+        // Interning a name makes the name tables, and nothing else past the nodes: the children,
+        // the field names, the type ids and the metadata stay unallocated.
+        long names = Measure(() =>
+        {
+            DTypeArena arena = new(4);
+            Consume(arena.InternName("unused"u8));
+            Consume(arena);
+        });
+
+        Assert.Equal(names, leaves);
+        Assert.True(alone < names, $"{alone} bytes alone, {names} with a name");
+    }
+
+    /// <summary>
+    /// A wide struct's names are interned knowing how many are still to come: the name tables grow
+    /// once for all of them, where one name at a time grows them once per doubling, and a struct
+    /// whose names the arena already holds grows them not at all.
+    /// </summary>
+    [Fact]
+    public void NamesInternedTogetherGrowTheirTablesOnceAndKnownOnesNotAtAll()
+    {
+        byte[][] names = new byte[300][];
+        int bytes = 0;
+        for (int i = 0; i < names.Length; i++)
+        {
+            names[i] = System.Text.Encoding.UTF8.GetBytes("column_" + i.ToString(CultureInfo.InvariantCulture));
+            bytes += names[i].Length;
+        }
+
+        DTypeArena together = new(4);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        InternTogether(together);
+        long once = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        DTypeArena apart = new(4);
+        before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < names.Length; i++)
+        {
+            Consume(apart.InternName(names[i]));
+        }
+
+        long doubling = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(once < doubling, $"{once} bytes interned together, {doubling} one at a time");
+
+        before = GC.GetAllocatedBytesForCurrentThread();
+        InternTogether(together);
+        Assert.Equal(before, GC.GetAllocatedBytesForCurrentThread());
+        Assert.Equal(names.Length, together.NameCount);
+        Assert.True(together.GetName(together.InternName(names[123])).SequenceEqual(names[123]));
+
+        void InternTogether(DTypeArena arena)
+        {
+            int pending = bytes;
+            for (int i = 0; i < names.Length; i++)
+            {
+                Consume(arena.InternName(names[i], names.Length - i, pending));
+                pending -= names[i].Length;
+            }
+        }
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void Consume<T>(T value) => _ = value;
 

@@ -86,9 +86,6 @@ internal sealed class ScanContext : IDisposable
             _arrayEncodings[i] = file.GetArrayEncoding(i);
         }
 
-        // `DTypeArena`'s own default is narrower than a scan capacity, so the value is capped
-        // rather than widened: a full scan keeps the dtype capacity the arena chooses for itself.
-        Types = new DTypeArena(Math.Min(capacity, 16));
         Scalars = new ScalarStore();
 
         // A context that decodes batches starts its tree buffer at the largest array tree such a
@@ -146,7 +143,6 @@ internal sealed class ScanContext : IDisposable
             _arrayEncodings[i] = EncodingRegistry.ResolveArray(utf8[..written]);
         }
 
-        Types = new DTypeArena();
         Scalars = new ScalarStore();
         Nodes = new ArrayNodeArena();
         _batchCanonical = new CanonicalArena();
@@ -195,8 +191,18 @@ internal sealed class ScanContext : IDisposable
     /// arena would race on its arrays. Structural equality and hashing work across arenas, so a
     /// DType built here compares equal to the schema's. It is not cleared per batch: the arena
     /// deduplicates, and the set of derivable dtypes is bounded by the schema's shape.
+    /// <para>
+    /// It is made by the first dtype the scan derives, since most scans derive none, and at the
+    /// size the last scan of this context filled: a context serving the same scans over and over
+    /// grows it at none of their batches.
+    /// </para>
     /// </remarks>
-    public DTypeArena Types { get; private set; }
+    public DTypeArena Types => _types ??= new DTypeArena(in _typesShape);
+
+    private DTypeArena? _types;
+
+    /// <summary>What the last arena of this context filled.</summary>
+    private DTypeArenaShape _typesShape;
 
     /// <summary>
     /// The batch's scalar store. Cleared by <see cref="ResetBatch"/>, so a
@@ -1156,13 +1162,13 @@ internal sealed class ScanContext : IDisposable
 
     /// <summary>
     /// Readies a context a scan gave back for a scan of <paramref name="file"/>: the file's
-    /// encoding table and read options, and an arena of its own for the dtypes the scan derives.
+    /// encoding table and read options, and no dtype arena until the scan derives a dtype.
     /// </summary>
     /// <remarks>
-    /// The dtype arena is the one thing not kept. A batch its caller owns may hold dtypes the last
-    /// scan derived, which a cleared arena would make throw; a new one leaves them theirs. The node
-    /// and canonical arenas, the scalars, the segment set and the zstd decoder were reset when the
-    /// context came back, and keep the capacity they grew to.
+    /// The dtype arena is the one thing not kept once it holds a node. A batch its caller owns may
+    /// hold dtypes the last scan derived, which a cleared arena would make throw; leaving the arena
+    /// to them keeps them valid. The node and canonical arenas, the scalars, the segment set and
+    /// the zstd decoder were reset when the context came back, and keep the capacity they grew to.
     /// </remarks>
     /// <param name="file">The file the next scan reads.</param>
     internal void Rebind(VortexFile file)
@@ -1180,7 +1186,11 @@ internal sealed class ScanContext : IDisposable
             _arrayEncodings[i] = file.GetArrayEncoding(i);
         }
 
-        Types = new DTypeArena(Math.Min(ScanCapacity, 16));
+        if (_types is { NodeCount: not 0 } types)
+        {
+            _typesShape = types.Shape;
+            _types = null;
+        }
     }
 
     /// <summary>

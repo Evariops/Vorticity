@@ -37,7 +37,10 @@ public sealed class ScanContextPoolTests
             Corpus.Path("encodings/runend"), CancellationToken.None);
 
         ScanContext context = ScanContexts.Rent(first);
+
+        // A dtype the scan derived, which a batch its caller owns may hold.
         DTypeArena types = context.Types;
+        types.Primitive(PType.I32, Nullability.NonNullable);
         context.LiveBlocks = new BlockMask(first.RowCount, 1024);
         context.Metrics = new ScanMetrics();
         context.KeepEncodings = true;
@@ -77,6 +80,31 @@ public sealed class ScanContextPoolTests
             for (int i = 0; i < second.ArrayEncodingCount; i++)
             {
                 Assert.Equal(second.GetArrayEncoding(i), again.ArrayEncodings[i]);
+            }
+        }
+        finally
+        {
+            ScanContexts.Return(again);
+        }
+    }
+
+    [Fact]
+    public async Task AContextKeepsAnArenaThatHoldsNothing()
+    {
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+
+        ScanContext context = ScanContexts.Rent(file);
+        DTypeArena types = context.Types;
+        types.InternName("a name, which no batch holds"u8);
+        ScanContexts.Return(context);
+        ScanContext again = ScanContexts.Rent(file);
+        try
+        {
+            // No dtype came out of the arena, so nothing a caller owns can hold one of its nodes.
+            if (ReferenceEquals(again, context))
+            {
+                Assert.Same(types, again.Types);
             }
         }
         finally

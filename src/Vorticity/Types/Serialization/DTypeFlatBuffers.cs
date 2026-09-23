@@ -307,10 +307,19 @@ internal static class DTypeFlatBuffers
         DType[] fields = ArrayPool<DType>.Shared.Rent(Math.Max(count, 1));
         try
         {
+            int nameBytes = 0;
             for (int i = 0; i < count; i++)
             {
-                // Interned straight from the file's bytes: no intermediate string.
-                nameHandles[i] = arena.InternName(names.GetStringUtf8(i));
+                nameBytes += names.GetStringUtf8(i).Length;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                // Interned straight from the file's bytes: no intermediate string. The names still
+                // to come size the tables' growth, so a wide struct grows them once.
+                ReadOnlySpan<byte> name = names.GetStringUtf8(i);
+                nameHandles[i] = arena.InternName(name, count - i, nameBytes);
+                nameBytes -= name.Length;
             }
 
             for (int i = 0; i < count; i++)
@@ -416,9 +425,17 @@ internal static class DTypeFlatBuffers
         DType[] fields = ArrayPool<DType>.Shared.Rent(Math.Max(count, 1));
         try
         {
+            int nameBytes = 0;
             for (int i = 0; i < count; i++)
             {
-                nameHandles[i] = arena.InternName(names.GetStringUtf8(i));
+                nameBytes += names.GetStringUtf8(i).Length;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                ReadOnlySpan<byte> name = names.GetStringUtf8(i);
+                nameHandles[i] = arena.InternName(name, count - i, nameBytes);
+                nameBytes -= name.Length;
             }
 
             for (int i = 0; i < count; i++)

@@ -73,6 +73,32 @@ internal struct DTypeNameEntry
 }
 
 /// <summary>
+/// How much of each of its arrays an arena filled: the size a later arena doing the same work
+/// starts at, so that it grows none of them.
+/// </summary>
+internal readonly struct DTypeArenaShape
+{
+    internal readonly int Nodes;
+    internal readonly int Children;
+    internal readonly int FieldNames;
+    internal readonly int TypeIds;
+    internal readonly int Meta;
+    internal readonly int Names;
+    internal readonly int NameBytes;
+
+    internal DTypeArenaShape(int nodes, int children, int fieldNames, int typeIds, int meta, int names, int nameBytes)
+    {
+        Nodes = nodes;
+        Children = children;
+        FieldNames = fieldNames;
+        TypeIds = typeIds;
+        Meta = meta;
+        Names = names;
+        NameBytes = nameBytes;
+    }
+}
+
+/// <summary>
 /// Arena of DType nodes. A <see cref="DType"/> is a (arena, index) handle, so a wide schema
 /// produces no objects beyond this arena's own growable arrays: the nodes themselves, and beside
 /// them the child indices, the struct and union field-name handles, the union type ids, the
@@ -146,21 +172,90 @@ internal sealed class DTypeArena
 
     private int _generation;
 
+    /// <summary>
+    /// The name table of an arena that holds no name yet: one empty bucket, so that a lookup ends
+    /// at once, and never written, since the first name interned rehashes into a table of its own.
+    /// </summary>
+    private static readonly int[] NoNameBuckets = new int[1];
+
     /// <summary>Creates an empty arena.</summary>
     /// <param name="initialCapacity">Hint for the initial node capacity. Must not be negative.</param>
+    /// <remarks>
+    /// Only the nodes are allocated here. The children, the field names, the union type ids, the
+    /// extension metadata and the names are each allocated by the first dtype that has some, at
+    /// the node capacity then reached: most arenas hold leaves only, and none of the reference
+    /// corpus's holds a union.
+    /// </remarks>
     public DTypeArena(int initialCapacity = 16)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(initialCapacity);
         int cap = Math.Max(initialCapacity, 4);
         _nodes = new DTypeNode[cap];
         _nodeBuckets = new int[NextPowerOfTwo(Math.Max(cap * 2, MinBuckets))];
-        _children = new int[cap];
-        _fieldNames = new int[cap];
-        _typeIds = new byte[cap];
-        _meta = new byte[MinBuckets];
-        _nameBytes = new byte[cap * 8];
-        _nameEntries = new DTypeNameEntry[cap];
-        _nameBuckets = new int[NextPowerOfTwo(Math.Max(cap * 2, MinBuckets))];
+        _children = [];
+        _fieldNames = [];
+        _typeIds = [];
+        _meta = [];
+        _nameBytes = [];
+        _nameEntries = [];
+        _nameBuckets = NoNameBuckets;
+    }
+
+    /// <summary>Creates an empty arena whose arrays hold what <paramref name="shape"/> says, each allocated only when it is not empty.</summary>
+    /// <param name="shape">What an earlier arena doing the same work filled.</param>
+    internal DTypeArena(in DTypeArenaShape shape)
+    {
+        int cap = Math.Max(shape.Nodes, 4);
+        _nodes = new DTypeNode[cap];
+        _nodeBuckets = new int[NextPowerOfTwo(cap * 2)];
+        _children = shape.Children == 0 ? [] : new int[shape.Children];
+        _fieldNames = shape.FieldNames == 0 ? [] : new int[shape.FieldNames];
+        _typeIds = shape.TypeIds == 0 ? [] : new byte[shape.TypeIds];
+        _meta = shape.Meta == 0 ? [] : new byte[shape.Meta];
+        _nameBytes = shape.NameBytes == 0 ? [] : new byte[shape.NameBytes];
+        _nameEntries = shape.Names == 0 ? [] : new DTypeNameEntry[shape.Names];
+        _nameBuckets = shape.Names == 0 ? NoNameBuckets : new int[NextPowerOfTwo(shape.Names * 2)];
+    }
+
+    /// <summary>How much of each array this arena has needed.</summary>
+    /// <remarks>
+    /// A composite dtype is written out before the arena looks for it and rolled back when it
+    /// finds it, so each array needs room for one node beyond what it keeps: the widest it holds,
+    /// since a node found is one of them.
+    /// </remarks>
+    internal DTypeArenaShape Shape
+    {
+        get
+        {
+            int children = 0;
+            int fieldNames = 0;
+            int typeIds = 0;
+            int meta = 0;
+            for (int i = 0; i < _nodeCount; i++)
+            {
+                ref readonly DTypeNode n = ref _nodes[i];
+                children = Math.Max(children, n.ChildCount);
+                meta = Math.Max(meta, n.MetaLength);
+                if (n.Kind is DTypeKind.Struct or DTypeKind.Union)
+                {
+                    fieldNames = Math.Max(fieldNames, n.ChildCount);
+                }
+
+                if (n.Kind == DTypeKind.Union)
+                {
+                    typeIds = Math.Max(typeIds, n.ChildCount);
+                }
+            }
+
+            return new DTypeArenaShape(
+                _nodeCount,
+                _childCount + children,
+                _fieldNameCount + fieldNames,
+                _typeIdCount + typeIds,
+                _metaCount + meta,
+                _nameCount,
+                _nameByteCount);
+        }
     }
 
     /// <summary>Number of distinct nodes currently held. Structurally equal nodes share one entry.</summary>
@@ -191,7 +286,10 @@ internal sealed class DTypeArena
         _nameByteCount = 0;
         _nameCount = 0;
         Array.Clear(_nodeBuckets);
-        Array.Clear(_nameBuckets);
+        if (_nameBuckets != NoNameBuckets)
+        {
+            Array.Clear(_nameBuckets);
+        }
     }
 
     // ---------------------------------------------------------------- name interning
@@ -201,7 +299,16 @@ internal sealed class DTypeArena
     /// nothing is allocated to look one up: parsers intern directly from the file's bytes without
     /// materialising a <see cref="string"/>.
     /// </summary>
-    public int InternName(ReadOnlySpan<byte> utf8)
+    public int InternName(ReadOnlySpan<byte> utf8) => InternName(utf8, 1, utf8.Length);
+
+    /// <summary>
+    /// Interns a name the caller interns with others: <paramref name="pendingNames"/> names of about
+    /// <paramref name="pendingBytes"/> bytes in all, this one and the ones after it. A table this
+    /// name does not fit grows once for all of them rather than once per doubling, and a name the
+    /// arena already holds grows nothing, which a reservation made ahead of the lookups could not
+    /// tell.
+    /// </summary>
+    internal int InternName(ReadOnlySpan<byte> utf8, int pendingNames, int pendingBytes)
     {
         int hash = HashBytes(utf8);
         if (TryLookupName(utf8, hash, out int existing))
@@ -209,9 +316,9 @@ internal sealed class DTypeArena
             return existing;
         }
 
-        Ensure(ref _nameBytes, _nameByteCount, utf8.Length);
+        Ensure(ref _nameBytes, _nameByteCount, utf8.Length, _nodes.Length * 8, pendingBytes);
         utf8.CopyTo(_nameBytes.AsSpan(_nameByteCount));
-        Ensure(ref _nameEntries, _nameCount, 1);
+        Ensure(ref _nameEntries, _nameCount, 1, _nodes.Length, pendingNames);
         _nameEntries[_nameCount] = new DTypeNameEntry
         {
             Start = _nameByteCount,
@@ -223,7 +330,7 @@ internal sealed class DTypeArena
 
         if ((long)_nameCount * 4 >= (long)_nameBuckets.Length * 3)
         {
-            RehashNames();
+            RehashNames((long)handle + pendingNames);
         }
         else
         {
@@ -234,13 +341,16 @@ internal sealed class DTypeArena
     }
 
     /// <summary>Interns a name given as a <see cref="string"/>. Equivalent to interning its UTF-8 bytes.</summary>
-    public int InternName(string name)
+    public int InternName(string name) => InternName(name, 1, 0);
+
+    /// <inheritdoc cref="InternName(ReadOnlySpan{byte}, int, int)"/>
+    private int InternName(string name, int pendingNames, int pendingBytes)
     {
         ArgumentNullException.ThrowIfNull(name);
         Span<byte> stack = stackalloc byte[256];
         using Scratch<byte> buffer = new Scratch<byte>(Encoding.UTF8.GetByteCount(name), stack);
         int written = Encoding.UTF8.GetBytes(name, buffer.Span);
-        return InternName(buffer.Span[..written]);
+        return InternName(buffer.Span[..written], pendingNames, Math.Max(pendingBytes, written));
     }
 
     /// <summary>Returns the UTF-8 bytes behind an interned name handle.</summary>
@@ -306,9 +416,14 @@ internal sealed class DTypeArena
         _nameBuckets[i] = handle + 1;
     }
 
-    private void RehashNames()
+    /// <summary>
+    /// Rehashes into a table at least twice the last and under three quarters full once it holds
+    /// <paramref name="names"/> names, which interning keeps it at.
+    /// </summary>
+    private void RehashNames(long names)
     {
-        _nameBuckets = new int[_nameBuckets.Length * 2];
+        int holding = NextPowerOfTwo((int)Math.Min((names * 4 / 3) + 1, int.MaxValue / 2));
+        _nameBuckets = new int[Math.Max(_nameBuckets.Length * 2, holding)];
         for (int h = 0; h < _nameCount; h++)
         {
             InsertNameBucket(h);
@@ -509,7 +624,7 @@ internal sealed class DTypeArena
         n.NameHandle = nameHandle;
         if (metadata.Length != 0)
         {
-            Ensure(ref _meta, _metaCount, metadata.Length);
+            Ensure(ref _meta, _metaCount, metadata.Length, MinBuckets);
             // `metadata` may alias _meta; the span still refers to the pre-resize array, whose
             // contents Array.Resize copied forward, so the copy is well defined either way.
             metadata.CopyTo(_meta.AsSpan(_metaCount));
@@ -574,7 +689,7 @@ internal sealed class DTypeArena
         DTypeNode n = NewNode(DTypeKind.Union, nullability);
         n.Depth = depth;
         AppendNameHandles(nameHandles);
-        Ensure(ref _typeIds, _typeIdCount, typeIds.Length);
+        Ensure(ref _typeIds, _typeIdCount, typeIds.Length, _nodes.Length);
         typeIds.CopyTo(_typeIds.AsSpan(_typeIdCount));
         n.TypeIdStart = _typeIdCount;
         _typeIdCount += typeIds.Length;
@@ -660,7 +775,7 @@ internal sealed class DTypeArena
         n.ChildStart = _childCount;
         if (src.ChildCount > 0)
         {
-            Ensure(ref _children, _childCount, src.ChildCount);
+            Ensure(ref _children, _childCount, src.ChildCount, _nodes.Length);
             Array.Copy(_children, src.ChildStart, _children, _childCount, src.ChildCount);
             _childCount += src.ChildCount;
         }
@@ -668,7 +783,7 @@ internal sealed class DTypeArena
         n.NameStart = _fieldNameCount;
         if (src.Kind is DTypeKind.Struct or DTypeKind.Union && src.ChildCount > 0)
         {
-            Ensure(ref _fieldNames, _fieldNameCount, src.ChildCount);
+            Ensure(ref _fieldNames, _fieldNameCount, src.ChildCount, _nodes.Length);
             Array.Copy(_fieldNames, src.NameStart, _fieldNames, _fieldNameCount, src.ChildCount);
             _fieldNameCount += src.ChildCount;
         }
@@ -676,7 +791,7 @@ internal sealed class DTypeArena
         n.TypeIdStart = _typeIdCount;
         if (src.Kind == DTypeKind.Union && src.ChildCount > 0)
         {
-            Ensure(ref _typeIds, _typeIdCount, src.ChildCount);
+            Ensure(ref _typeIds, _typeIdCount, src.ChildCount, _nodes.Length);
             Array.Copy(_typeIds, src.TypeIdStart, _typeIds, _typeIdCount, src.ChildCount);
             _typeIdCount += src.ChildCount;
         }
@@ -684,7 +799,7 @@ internal sealed class DTypeArena
         n.MetaStart = _metaCount;
         if (src.MetaLength > 0)
         {
-            Ensure(ref _meta, _metaCount, src.MetaLength);
+            Ensure(ref _meta, _metaCount, src.MetaLength, MinBuckets);
             Array.Copy(_meta, src.MetaStart, _meta, _metaCount, src.MetaLength);
             _metaCount += src.MetaLength;
         }
@@ -896,13 +1011,13 @@ internal sealed class DTypeArena
 
     private void AppendChild(DType child)
     {
-        Ensure(ref _children, _childCount, 1);
+        Ensure(ref _children, _childCount, 1, _nodes.Length);
         _children[_childCount++] = child.NodeIndex;
     }
 
     private void AppendChildren(ReadOnlySpan<DType> children)
     {
-        Ensure(ref _children, _childCount, children.Length);
+        Ensure(ref _children, _childCount, children.Length, _nodes.Length);
         for (int i = 0; i < children.Length; i++)
         {
             _children[_childCount + i] = children[i].NodeIndex;
@@ -913,7 +1028,7 @@ internal sealed class DTypeArena
 
     private void AppendNameHandles(ReadOnlySpan<int> nameHandles)
     {
-        Ensure(ref _fieldNames, _fieldNameCount, nameHandles.Length);
+        Ensure(ref _fieldNames, _fieldNameCount, nameHandles.Length, _nodes.Length);
         for (int i = 0; i < nameHandles.Length; i++)
         {
             int h = nameHandles[i];
@@ -931,7 +1046,15 @@ internal sealed class DTypeArena
     private void AppendInternedNames(ReadOnlySpan<string> names)
     {
         // Interning can grow _nameBytes but never _fieldNames, so reserving first is safe.
-        Ensure(ref _fieldNames, _fieldNameCount, names.Length);
+        Ensure(ref _fieldNames, _fieldNameCount, names.Length, _nodes.Length);
+
+        // A name's characters are its bytes when it is ASCII, which field names mostly are.
+        int chars = 0;
+        for (int i = 0; i < names.Length; i++)
+        {
+            chars += names[i]?.Length ?? 0;
+        }
+
         for (int i = 0; i < names.Length; i++)
         {
             string? name = names[i];
@@ -940,7 +1063,8 @@ internal sealed class DTypeArena
                 ThrowNullFieldName(i);
             }
 
-            _fieldNames[_fieldNameCount + i] = InternName(name);
+            _fieldNames[_fieldNameCount + i] = InternName(name, names.Length - i, chars);
+            chars -= name.Length;
         }
 
         _fieldNameCount += names.Length;
@@ -974,7 +1098,7 @@ internal sealed class DTypeArena
             i = (i + 1) & mask;
         }
 
-        Ensure(ref _nodes, _nodeCount, 1);
+        Ensure(ref _nodes, _nodeCount, 1, _nodes.Length);
         _nodes[_nodeCount] = node;
         int index = _nodeCount++;
         if ((long)_nodeCount * 4 >= (long)_nodeBuckets.Length * 3)
@@ -1133,7 +1257,12 @@ internal sealed class DTypeArena
         return result;
     }
 
-    private static void Ensure<T>(ref T[] array, int count, int extra)
+    /// <summary>
+    /// Grows <paramref name="array"/> to hold <paramref name="extra"/> more past
+    /// <paramref name="count"/>: to <paramref name="first"/> when it is still empty and to twice
+    /// its length otherwise, or to <paramref name="reserve"/> past the count when that is more.
+    /// </summary>
+    private static void Ensure<T>(ref T[] array, int count, int extra, int first, int reserve = 0)
     {
         long need = (long)count + extra;
         if (need <= array.Length)
@@ -1147,13 +1276,9 @@ internal sealed class DTypeArena
             ThrowFormat("DType arena exceeded the maximum addressable size.");
         }
 
-        int capacity = array.Length == 0 ? 4 : array.Length;
-        while (capacity < need)
-        {
-            capacity = capacity > Ceiling / 2 ? Ceiling : capacity * 2;
-        }
-
-        Array.Resize(ref array, capacity);
+        long grown = array.Length == 0 ? Math.Max(first, 4) : (long)array.Length * 2;
+        long capacity = Math.Min(Math.Max(Math.Max(grown, need), (long)count + reserve), Ceiling);
+        Array.Resize(ref array, (int)capacity);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

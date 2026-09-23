@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
@@ -35,7 +36,6 @@ internal sealed class LayoutTree
     private LayoutTree(
         VortexFile? file,
         string[]? detachedEncodingIds,
-        DTypeArena types,
         byte[] layoutBytes,
         LayoutNodeRecord[] records,
         int nodeCount,
@@ -45,7 +45,6 @@ internal sealed class LayoutTree
     {
         _file = file;
         _detachedEncodingIds = detachedEncodingIds;
-        DerivedTypes = types;
         _layoutBytes = layoutBytes;
         _records = records;
         NodeCount = nodeCount;
@@ -155,18 +154,6 @@ internal sealed class LayoutTree
 
         return new LayoutNode(this, index);
     }
-
-    /// <summary>
-    /// The arena holding every dtype this tree derived: the struct layout's validity <c>Bool</c>,
-    /// the dict layout's codes, and the zoned/stats zones tables.
-    /// </summary>
-    /// <remarks>
-    /// Deliberately not the file's arena. A <see cref="DTypeArena"/> mutates when asked for a node
-    /// it does not hold, and the file's is shared by every scan; this one is written only during
-    /// <c>Parse</c> and read-only afterwards, which is what makes the tree thread-safe. Structural
-    /// equality works across arenas, so these compare equal to the schema's nodes.
-    /// </remarks>
-    public DTypeArena DerivedTypes { get; }
 
     internal ref readonly LayoutNodeRecord RecordRef(int index) => ref _records[index];
 
@@ -343,9 +330,34 @@ internal sealed class LayoutTree
         internal int OffsetOf(ReadOnlySpan<uint> slice) =>
             OffsetOf(System.Runtime.InteropServices.MemoryMarshal.AsBytes(slice));
 
-        internal DTypeArena Types { get; } = new DTypeArena();
+        /// <summary>
+        /// The arena every dtype the tree derives is built in: the struct layout's validity
+        /// <c>Bool</c>, the dict layout's codes, the list layout's offsets and the zones tables.
+        /// Made by the first of them, since many trees derive none.
+        /// </summary>
+        /// <remarks>
+        /// Deliberately not the file's arena. A <see cref="DTypeArena"/> mutates when asked for a
+        /// node it does not hold, and the file's is shared by every scan; this one is written only
+        /// while the tree is parsed and read-only afterwards, which is what makes the tree
+        /// thread-safe. Structural equality works across arenas, so these compare equal to the
+        /// schema's nodes. The dtypes keep it alive: the tree holds no reference to it.
+        /// </remarks>
+        internal DTypeArena Types => _types ??= new DTypeArena();
 
-        internal AggregateSpecList Specs { get; } = new AggregateSpecList();
+        private DTypeArena? _types;
+
+        /// <summary>
+        /// The specs of the zone map being parsed, each zone map's read and used up before the
+        /// next one's: the list parses share, taken by the first zone map of a parse and given
+        /// back with the scratch.
+        /// </summary>
+        internal AggregateSpecList Specs =>
+            _specs ??= Interlocked.Exchange(ref CachedSpecs, null) ?? new AggregateSpecList();
+
+        private AggregateSpecList? _specs;
+
+        /// <summary>The one list parses share; null while a parse holds it.</summary>
+        private static AggregateSpecList? CachedSpecs;
 
         // The parse grows these in rented arrays, and the tree keeps exact copies of them: a tree's
         // size is known only once it is parsed, and growing its own arrays by doubling left three
@@ -414,13 +426,19 @@ internal sealed class LayoutTree
             array = grown;
         }
 
-        /// <summary>Gives the rented arrays back; the tree holds copies of what they held. Safe to call twice.</summary>
+        /// <summary>Gives the rented arrays and the spec list back; the tree holds copies of what they held. Safe to call twice.</summary>
         internal void ReturnScratch()
         {
             Return(ref Records);
             Return(ref ChildIndices);
             Return(ref ZoneMaps);
             Return(ref ChunkOffsets);
+            if (_specs is { } specs)
+            {
+                // Losing the race to another parse's list simply drops one to the collector.
+                _specs = null;
+                Volatile.Write(ref CachedSpecs, specs);
+            }
         }
 
         private static void Return<T>(ref T[] array)
@@ -480,7 +498,6 @@ internal sealed class LayoutTree
             new LayoutTree(
                 File,
                 DetachedEncodingIds,
-                Types,
                 Buffer,
                 Records.AsSpan(0, RecordCount).ToArray(),
                 RecordCount,
