@@ -75,24 +75,28 @@ at a time, the rest left to the chooser:
 | hint | bytes | written as |
 |---|---|---|
 | none | 1 508 212 | `Celsius` a dictionary, `City` runs |
-| `City` as `Dictionary`, `Zstd`, `Fsst` or `Canonical` | 1 508 212 | `City` runs, every time |
+| `City` as `Dictionary` | 1 551 604 | a dictionary |
+| `City` as `Zstd` | 1 191 380 | zstd (runs on the 576-row tail) |
+| `City` as `Fsst` | 7 393 428 | FSST |
+| `City` as `Canonical` | 9 958 964 | `Canonical`, the plain form |
 | `Celsius` as `Alp` | 1 611 636 | ALP |
 | `Celsius` as `Zstd` | 563 988 | zstd (ALP on the 576-row tail) |
 | `Celsius` as `BitPacked` | 1 508 212 | a dictionary: bit-packing does not apply to floats |
 | `Celsius` as `Canonical` | 8 483 996 | `Canonical`, the plain form |
-| `Celsius` as `Canonical`, under `Smallest` | 247 124 | zstd |
+| `Celsius` as `Canonical`, under `Smallest` | 8 167 092 | `Canonical`; `Day` and `City` as `Smallest` writes them |
 
 A hint is a preference, and the report is where you find out whether it held:
 
-* **A column that is a progression or made of long runs is written that way whatever the hint
-  says**, `Canonical` included: those verdicts come before the hint. `City` changes every seven
-  rows, so every hint on it gave runs.
+* **A column that is a progression is written as one whatever the hint says**: nothing costs less
+  per row. Runs are not: a hint comes before them, since runs cost to decode, and the bitmap of a
+  column one percent true reads twelve times faster than its runs.
 * **A hint that does not apply falls back** to what `Auto` would have chosen, as bit-packing on
   floating-point values does.
-* **`Smallest` does not consult hints.** It prices every candidate by its bytes.
-* `Auto` is not the smallest: zstd shrank `Celsius` threefold. `Auto` weighs decode speed too, and a
-  zstd block must be inflated whole before one value is read. Take such a hint for a file written
-  once and read rarely; leave `Auto` for one scanned often, and measure on your own data.
+* **Every profile takes the hint**, `Smallest` included, and prices the columns without one.
+* `Auto` is not the smallest: zstd shrank `Celsius` threefold, and `City` by a fifth. `Auto` weighs
+  decode speed too, and a zstd block must be inflated whole before one value is read. Take such a
+  hint for a file written once and read rarely; leave `Auto` for one scanned often, and measure on
+  your own data.
 
 ## String bounds
 

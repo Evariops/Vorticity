@@ -132,8 +132,8 @@ internal static class WriterOptions
             Compression = CompressionProfile.Smallest,
             Hints = ImmutableDictionary<string, EncodingHint>.Empty.Add(Reading.ColumnNames.Celsius, EncodingHint.Canonical),
         };
-        WriteReport ignored = await Write(session, path, readings, smallest);
-        Console.WriteLine($"Celsius as Canonical under Smallest: {ignored.Bytes.Total} bytes, written as {WriteReportText.Encodings(ignored.Columns[1].Encodings)}");
+        WriteReport sizeFirst = await Write(session, path, readings, smallest);
+        Console.WriteLine($"Celsius as Canonical under Smallest: {sizeFirst.Bytes.Total} bytes, written as {WriteReportText.Encodings(sizeFirst.Columns[1].Encodings)}");
 
         try
         {

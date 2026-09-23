@@ -4,9 +4,9 @@
 //
 // A HINT IS PLAN MEMORY WITH THE TOLERANCE SET TO INFINITY, so what it changes is what is
 // PRICED, never what is legal: the hinted scheme is re-priced on every chunk's own statistics and
-// written when it still applies; a chunk it cannot describe is priced in full and the next chunk is
-// offered the hint again. And what the statistics answer for nothing -- a progression, a run count
-// -- still comes first, because no scheme beats a column that costs nothing per row.
+// written when it still applies, under every profile; a chunk it cannot describe is priced in full
+// and the next chunk is offered the hint again. A progression still comes first, because no scheme
+// beats a column that costs nothing per row; a run count does not, since runs cost to decode.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -164,6 +164,82 @@ public sealed class EncodingHintTests
     }
 
     [Fact]
+    public async Task AHintComesBeforeTheRunCount()
+    {
+        // One row in a hundred true: the run count prices runs for nothing, which a bitmap reads
+        // many times faster, and the caller who pins the bitmap gets it.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        CanonicalArena arena = new CanonicalArena();
+        DType flag = types.Bool(Nullability.NonNullable);
+        DType schema = types.Struct(["flag"], [flag], Nullability.NonNullable);
+        VortexBuffer buffer = arena.Allocate((Rows + 7) / 8, 64, out Span<byte> bits);
+        bits.Clear();
+        for (int row = 0; row < Rows; row += 100)
+        {
+            bits[row >> 3] |= (byte)(1 << (row & 7));
+        }
+
+        int column = arena.AddBool(flag, Rows, Validity.NonNullable, buffer, 0);
+        int root = arena.AddStruct(schema, Rows, Validity.NonNullable, [column]);
+        string runs = Temp();
+        string pinned = Temp();
+        try
+        {
+            WriteReport byRuns = await WriteOneAsync(runs, schema, arena, root, Options(null), ct);
+            WriteReport byHint = await WriteOneAsync(
+                pinned, schema, arena, root, Options(new Dictionary<string, EncodingHint> { ["flag"] = EncodingHint.Canonical }), ct);
+
+            Assert.All(byRuns.Columns[0].Encodings, scheme => Assert.Equal("RunEnd", scheme));
+            Assert.All(byHint.Columns[0].Encodings, scheme => Assert.Equal("Canonical", scheme));
+            Assert.Equal(await ReadAsync(runs), await ReadAsync(pinned));
+        }
+        finally
+        {
+            System.IO.File.Delete(runs);
+            System.IO.File.Delete(pinned);
+        }
+    }
+
+    [Fact]
+    public async Task AHintHoldsUnderTheSmallestProfile()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        Fixture fixture = new Fixture(Rows);
+        string smallest = Temp();
+        string pinned = Temp();
+        try
+        {
+            VortexWriteOptions sizeFirst = Options(null) with { Compression = CompressionProfile.Smallest };
+            WriteReport bySize;
+            await using (VortexFileWriter writer = VortexFileWriter.Create(smallest, fixture.Schema, sizeFirst))
+            {
+                await fixture.WriteAsync(writer, 4_096);
+                bySize = await writer.CompleteAsync(ct);
+            }
+
+            WriteReport byHint;
+            await using (VortexFileWriter writer = VortexFileWriter.Create(
+                pinned, fixture.Schema, sizeFirst with { EncodingHints = new Dictionary<string, EncodingHint> { ["dense"] = EncodingHint.Canonical } }))
+            {
+                await fixture.WriteAsync(writer, 4_096);
+                byHint = await writer.CompleteAsync(ct);
+            }
+
+            Assert.All(bySize.Columns[0].Encodings, scheme => Assert.NotEqual("Canonical", scheme));
+            Assert.All(byHint.Columns[0].Encodings, scheme => Assert.Equal("Canonical", scheme));
+            Assert.Equal(fixture.Rendered, await ReadAsync(pinned));
+        }
+        finally
+        {
+            System.IO.File.Delete(smallest);
+            System.IO.File.Delete(pinned);
+        }
+    }
+
+    [Fact]
     public async Task NoHintIsByteForByteTheWriteWithoutOne()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -268,6 +344,18 @@ public sealed class EncodingHintTests
             WritePolicy = WritePolicy.None,
             EncodingHints = hints,
         };
+
+    private static async Task<WriteReport> WriteOneAsync(
+        string path, DType schema, CanonicalArena arena, int root, VortexWriteOptions options, CancellationToken ct)
+    {
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, schema, options);
+        using (RecordBatch batch = new RecordBatch(arena, root, 0))
+        {
+            await writer.WriteAsync(batch, ct);
+        }
+
+        return await writer.CompleteAsync(ct);
+    }
 
     private static async Task<(WriteReport Report, string Path)> WriteAsync(
         Fixture fixture, IReadOnlyDictionary<string, EncodingHint>? hints)

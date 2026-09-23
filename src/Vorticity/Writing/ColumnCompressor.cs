@@ -1408,8 +1408,8 @@ internal static class ColumnCompressor
     /// <param name="workspace">The writer's blob workspace, for the zstd trial's encoder; null for one of its own.</param>
     /// <param name="sizeFirst">
     /// Whether the column goes to its smallest encoding whatever it costs to decode: no remembered
-    /// plan stands in for the pricing, and the trials are offered the column under the best exact
-    /// plan's bytes instead of only when no exact plan took it.
+    /// plan stands in for the pricing, a caller's hint aside, and the trials are offered the column
+    /// under the best exact plan's bytes instead of only when no exact plan took it.
     /// </param>
     private static ColumnPlan ChooseByFormula(
         CanonicalArena arena, int nodeIndex, VortexEdition target, in BlockStats stats,
@@ -1437,6 +1437,19 @@ internal static class ColumnCompressor
         if (progression.Scheme != ColumnScheme.None)
         {
             return progression;
+        }
+
+        // A caller's hint, before the run count and under every profile: runs cost nothing to
+        // price but not nothing to decode, a column one percent true reads twelve times faster as
+        // a bitmap than as runs, and the caller who pins a scheme is the one who knows which. It
+        // is re-priced on this chunk and written when it applies, as a remembered plan is.
+        if (measured && chunk.Memory is { Pinned: true } pin)
+        {
+            ColumnPlan pinned = Reprice(pin.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain, workspace);
+            if (pinned.Scheme == pin.Scheme)
+            {
+                return pinned with { FromMemory = true };
+            }
         }
 
         RowComparer comparer = cascade.RunsAreDead && cascade.DictionaryIsDead
@@ -1473,7 +1486,7 @@ internal static class ColumnCompressor
         // and a chunk the pass did not measure is not trusted with one. What memory skips is
         // exactly what costs: the walks below and the trials at the end, never a candidate the
         // statistics have already answered above.
-        if (!sizeFirst && measured && chunk.Memory is { WithinTolerance: true } memory)
+        if (!sizeFirst && measured && chunk.Memory is { WithinTolerance: true, Pinned: false } memory)
         {
             ColumnPlan remembered = Reprice(
                 memory.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain, workspace);
