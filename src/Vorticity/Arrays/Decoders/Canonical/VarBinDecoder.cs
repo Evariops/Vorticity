@@ -93,15 +93,23 @@ internal sealed class VarBinDecoder : ArrayDecoder
 
         VortexBuffer bytes = node.GetBuffer(0);
         ReadOnlySpan<byte> offsetBytes = offsets.Values.Span;
+        ValidityMask mask = ValidityMask.From(context, validity);
 
         // "The offsets start at zero, never decrease and stay inside the heap" is a property of the
         // node, and a selective read visits the same node once per batch of the take, so the walk
         // is remembered per node. Outside a scope that remembers it, `IsNodeChecked` answers false
-        // and every read walks the offsets again.
-        if (!context.IsNodeChecked(in node))
+        // and every read walks the offsets again. A dense read of rows that are all valid checks
+        // every offset as it cuts the heap, so it makes no walk of its own, and marks the node once
+        // it has cut it.
+        bool checksOffsets = !selective && mask.AllValid;
+        bool checkedBefore = context.IsNodeChecked(in node);
+        if (!checkedBefore)
         {
-            ValidateOffsets(offsetBytes, offsetsPType, length, bytes.Length);
-            context.MarkNodeChecked(in node);
+            RequireZeroStart(offsetBytes, offsetsPType);
+            if (!checksOffsets)
+            {
+                ValidateOffsets(offsetBytes, offsetsPType, length, bytes.Length);
+            }
         }
 
         int produced = selective ? wanted.Length : length;
@@ -113,7 +121,6 @@ internal sealed class VarBinDecoder : ArrayDecoder
         VortexBuffer views = CanonicalSupport.AllocateUninitialized(
             context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
 
-        ValidityMask mask = ValidityMask.From(context, validity);
         if (mask.AllInvalid)
         {
             // Every row is null, so every view is `empty_view()` and no offset is read.
@@ -129,7 +136,12 @@ internal sealed class VarBinDecoder : ArrayDecoder
         {
             ViewKernels.BuildFromOffsets(
                 offsetBytes, offsetsPType, bytes.Span, writable, length,
-                dtype.Kind == DTypeKind.Utf8, in mask);
+                dtype.Kind == DTypeKind.Utf8, in mask, Id);
+        }
+
+        if (!checkedBefore)
+        {
+            context.MarkNodeChecked(in node);
         }
 
         if (bytes.Length == 0)
@@ -144,10 +156,21 @@ internal sealed class VarBinDecoder : ArrayDecoder
         return context.Canonical.AddVarBinView(dtype, produced, validity, views, single);
     }
 
+    /// <summary>Offsets must start at zero.</summary>
+    private static void RequireZeroStart(ReadOnlySpan<byte> offsets, PType ptype)
+    {
+        long first = CanonicalSupport.ReadInteger(offsets, ptype, 0);
+        if (first != 0)
+        {
+            throw new VortexFormatException(
+                $"{Id} offsets must start at 0; this array starts at {first}.");
+        }
+    }
+
     /// <summary>
-    /// Offsets must start at zero, never decrease, and never leave the byte heap. A view's length
-    /// is the difference of two consecutive offsets, so a decreasing pair would produce a length
-    /// that reaches past the heap; all three properties are checked before a single view is written.
+    /// Offsets must never decrease, and never leave the byte heap. A view's length is the
+    /// difference of two consecutive offsets, so a decreasing pair would produce a length that
+    /// reaches past the heap; both properties are checked before a single view is written.
     /// </summary>
     /// <remarks>
     /// The monotonicity check is a shifted compare, the same one <c>vortex.list</c>'s size vector
@@ -157,13 +180,6 @@ internal sealed class VarBinDecoder : ArrayDecoder
     private static void ValidateOffsets(
         ReadOnlySpan<byte> offsets, PType ptype, int length, int byteCount)
     {
-        long first = CanonicalSupport.ReadInteger(offsets, ptype, 0);
-        if (first != 0)
-        {
-            throw new VortexFormatException(
-                $"{Id} offsets must start at 0; this array starts at {first}.");
-        }
-
         ViewKernels.RequireAscending(offsets, ptype, length + 1, Id);
 
         long last = CanonicalSupport.ReadInteger(offsets, ptype, length);

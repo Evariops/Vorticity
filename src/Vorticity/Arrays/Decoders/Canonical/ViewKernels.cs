@@ -551,50 +551,329 @@ internal static class ViewKernels
         return referenced;
     }
 
+    /// <summary>Rows whose offsets <see cref="DenseFromOffsets{TOff}"/> checks before cutting any of them.</summary>
+    /// <remarks>
+    /// Its offsets, four or eight kilobytes, are still in the first-level cache when the rows are
+    /// cut, so the check costs the file's offsets one read from memory rather than two.
+    /// </remarks>
+    private const int OffsetBlockRows = 1024;
+
     /// <summary>
-    /// The dense arm of <see cref="FromOffsets{TOff}"/>: every row valid, and a UTF-8 heap already
-    /// checked whole, so that a row's only check is that it starts on a character.
+    /// The dense arm of <see cref="BuildFromOffsets"/>, every row valid: cuts
+    /// <paramref name="count"/> rows by <c>offsets[i]..offsets[i + 1]</c>, and gives the first and
+    /// the last offset, checked; false when an offset decreases or leaves the heap, or a UTF-8 row
+    /// starts off a character, for the caller to say which.
     /// </summary>
     /// <remarks>
-    /// Calls nothing, for <see cref="DenseFromLengths{TLen}"/>'s reason: a row out of the heap, or
-    /// off a character, ends the loop and is reported after it. The offsets come from the file, and
-    /// the check that a row lies inside the heap is what keeps their ascending and in-heap
-    /// properties, established elsewhere, from being load-bearing here.
+    /// The offsets come from the file and nothing upstream is trusted with them: a block's are
+    /// surveyed before any of its rows is read, never decreasing and ending inside the heap, which
+    /// puts every row of the block inside the heap, so that its rows are then cut with no check of
+    /// their own. The survey is a vector pass, a lane per offset, and it also finds the block's
+    /// shortest and longest row, by which <see cref="CutBlock{TOff, TStarts}"/> picks the loop that
+    /// cuts it.
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void DenseFromOffsets<TOff>(
-        ReadOnlySpan<TOff> offsets, ReadOnlySpan<byte> heap, Span<byte> views, int count, bool requireUtf8)
-        where TOff : unmanaged
+    private static bool DenseFromOffsets<TOff>(
+        ReadOnlySpan<TOff> offsets, ReadOnlySpan<byte> heap, Span<byte> views, int count, bool requireUtf8,
+        out int first, out int end)
+        where TOff : unmanaged, INumber<TOff>
     {
+        ref TOff offsetRef = ref MemoryMarshal.GetReference(offsets);
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
         int heapLength = heap.Length;
-        int start = (int)Widen(offsets[0]);
-        int i = 0;
-        for (; i < count; i++)
+        first = 0;
+        end = 0;
+
+        // Widened, a negative offset is larger than any heap, so one unsigned compare refuses both.
+        if (Widen(offsetRef) > (ulong)heapLength)
         {
-            int end = (int)Widen(offsets[i + 1]);
-            int size = end - start;
-            if ((uint)start > (uint)heapLength
-                || (uint)size > (uint)(heapLength - start)
-                || !Place(ref Unsafe.Add(ref viewRef, i * ViewSize), ref heapRef, start, size, heapLength, requireUtf8))
+            return false;
+        }
+
+        for (int row = 0; row < count; row += OffsetBlockRows)
+        {
+            int rows = Math.Min(OffsetBlockRows, count - row);
+            ref TOff block = ref Unsafe.Add(ref offsetRef, row);
+            if (!Survey(ref block, rows + 1, out TOff shortest, out TOff longest)
+                || Widen(Unsafe.Add(ref block, rows)) > (ulong)heapLength)
             {
-                break;
+                return false;
+            }
+
+            ref byte blockViews = ref Unsafe.Add(ref viewRef, (nint)row * ViewSize);
+            bool cut = requireUtf8
+                ? CutBlock<TOff, Utf8Starts>(
+                    ref block, rows, Widen(shortest), Widen(longest), ref heapRef, heapLength, ref blockViews)
+                : CutBlock<TOff, AnyStarts>(
+                    ref block, rows, Widen(shortest), Widen(longest), ref heapRef, heapLength, ref blockViews);
+            if (!cut)
+            {
+                return false;
+            }
+        }
+
+        first = (int)Widen(offsetRef);
+        end = (int)Widen(Unsafe.Add(ref offsetRef, count));
+        return true;
+    }
+
+    /// <summary>
+    /// Whether none of the <paramref name="length"/> values from <paramref name="first"/> is less
+    /// than the one before it; and the least and the greatest step between neighbours, which mean
+    /// something only when it is so.
+    /// </summary>
+    /// <remarks>
+    /// The shifted compares are ORed and the result tested once, rather than a branch per vector:
+    /// a block of offsets from a well-formed file never decreases, so there is nothing to stop
+    /// early for. At least two values.
+    /// </remarks>
+    private static bool Survey<T>(ref T first, int length, out T least, out T greatest)
+        where T : unmanaged, INumber<T>
+    {
+        least = Unsafe.Add(ref first, 1) - first;
+        greatest = least;
+        int i = 1;
+        if (Vector.IsHardwareAccelerated && length > Vector<T>.Count)
+        {
+            int lanes = Vector<T>.Count;
+            Vector<T> fell = Vector<T>.Zero;
+            Vector<T> low = new Vector<T>(least);
+            Vector<T> high = low;
+            for (; i <= length - lanes; i += lanes)
+            {
+                Vector<T> next = Vector.LoadUnsafe(ref first, (nuint)i);
+                Vector<T> previous = Vector.LoadUnsafe(ref first, (nuint)(i - 1));
+                Vector<T> step = next - previous;
+                fell |= Vector.LessThan(next, previous);
+                low = Vector.Min(low, step);
+                high = Vector.Max(high, step);
+            }
+
+            if (fell != Vector<T>.Zero)
+            {
+                return false;
+            }
+
+            for (int lane = 0; lane < lanes; lane++)
+            {
+                least = T.Min(least, low[lane]);
+                greatest = T.Max(greatest, high[lane]);
+            }
+        }
+
+        for (; i < length; i++)
+        {
+            T next = Unsafe.Add(ref first, i);
+            T previous = Unsafe.Add(ref first, i - 1);
+            if (next < previous)
+            {
+                return false;
+            }
+
+            least = T.Min(least, next - previous);
+            greatest = T.Max(greatest, next - previous);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Cuts one surveyed block by the loop its rows suit: every row out of line, every row inline,
+    /// or a mix; and byte-exact when a row lies too near the heap's end to be read as words.
+    /// </summary>
+    /// <remarks>
+    /// Each loop is the cheapest one for its rows, and none branches on a row. A row longer than
+    /// the inline limit has thirteen bytes of heap from its start, so a block of such rows only is
+    /// read as words wherever it lies; a block with a shorter row is, when its last row, and so
+    /// every row, starts twelve bytes or more before the heap's end.
+    /// </remarks>
+    private static bool CutBlock<TOff, TStarts>(
+        ref TOff offsets, int rows, ulong shortest, ulong longest, ref byte heap, int heapLength, ref byte views)
+        where TOff : unmanaged
+        where TStarts : struct, IStartCheck
+    {
+        if (shortest > Inline)
+        {
+            return CutOutOfLine<TOff, TStarts>(ref offsets, rows, ref heap, ref views);
+        }
+
+        if ((long)Widen(Unsafe.Add(ref offsets, rows - 1)) > (long)heapLength - Inline)
+        {
+            return CutExactly(ref offsets, rows, ref heap, heapLength, ref views, TStarts.Checked);
+        }
+
+        return longest <= Inline
+            ? CutInline<TOff, TStarts>(ref offsets, rows, ref heap, ref views)
+            : CutMixed<TOff, TStarts>(ref offsets, rows, ref heap, ref views);
+    }
+
+    /// <summary>
+    /// Cuts <paramref name="rows"/> rows of twelve bytes or fewer, each with twelve bytes of heap
+    /// from its start; false when a UTF-8 row starts off a character.
+    /// </summary>
+    /// <remarks>
+    /// A row is read as two words and masked down to its size, whatever the size: two loads, two
+    /// masks and two stores. Calls nothing, for <see cref="DenseFromLengths{TLen}"/>'s reason.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool CutInline<TOff, TStarts>(ref TOff offsets, int rows, ref byte heap, ref byte views)
+        where TOff : unmanaged
+        where TStarts : struct, IStartCheck
+    {
+        ref ulong lowMasks = ref MemoryMarshal.GetReference(InlineLowMasks);
+        ref uint highMasks = ref MemoryMarshal.GetReference(InlineHighMasks);
+        nint start = (nint)Widen(offsets);
+        int offChar = 0;
+        for (nint i = 0; i < rows; i++)
+        {
+            nint end = (nint)Widen(Unsafe.Add(ref offsets, i + 1));
+            nint size = end - start;
+            ref byte value = ref Unsafe.Add(ref heap, start);
+            ulong head = Unsafe.ReadUnaligned<ulong>(ref value) & Unsafe.Add(ref lowMasks, size);
+            uint tail = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref value, sizeof(ulong))) & Unsafe.Add(ref highMasks, size);
+            if (TStarts.Checked)
+            {
+                // Masked to the size, an empty row's first byte reads as zero, which starts nothing.
+                offChar |= ((int)head & 0xC0) == 0x80 ? 1 : 0;
+            }
+
+            ref byte view = ref Unsafe.Add(ref views, i * ViewSize);
+            Unsafe.WriteUnaligned(ref view, (ulong)size | (head << 32));
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), (head >> 32) | ((ulong)tail << 32));
+            start = end;
+        }
+
+        return offChar == 0;
+    }
+
+    /// <summary>
+    /// Cuts <paramref name="rows"/> rows each longer than the inline limit; false when a UTF-8 row
+    /// starts off a character.
+    /// </summary>
+    /// <remarks>
+    /// A view is the length, the first four bytes and the offset in buffer zero: one load and two
+    /// stores a row. Calls nothing, for <see cref="DenseFromLengths{TLen}"/>'s reason.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool CutOutOfLine<TOff, TStarts>(ref TOff offsets, int rows, ref byte heap, ref byte views)
+        where TOff : unmanaged
+        where TStarts : struct, IStartCheck
+    {
+        nint start = (nint)Widen(offsets);
+        int offChar = 0;
+        for (nint i = 0; i < rows; i++)
+        {
+            nint end = (nint)Widen(Unsafe.Add(ref offsets, i + 1));
+            uint prefix = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref heap, start));
+            if (TStarts.Checked)
+            {
+                offChar |= ((int)prefix & 0xC0) == 0x80 ? 1 : 0;
+            }
+
+            ref byte view = ref Unsafe.Add(ref views, i * ViewSize);
+            Unsafe.WriteUnaligned(ref view, (ulong)(end - start) | ((ulong)prefix << 32));
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), (ulong)start << 32);
+            start = end;
+        }
+
+        return offChar == 0;
+    }
+
+    /// <summary>
+    /// Cuts <paramref name="rows"/> rows of both kinds, each with twelve bytes of heap from its
+    /// start; false when a UTF-8 row starts off a character.
+    /// </summary>
+    /// <remarks>
+    /// A row is read as two words masked to its size, whatever its size, and both views are
+    /// composed from them: the inline one, and the out-of-line one of length, prefix and offset,
+    /// whose first word is the inline one's with the prefix unmasked. The second word is selected
+    /// by a mask made of the size's sign against the inline limit, and the size is clamped the same
+    /// way, rather than by a conditional: the compiler keeps a conditional inside a loop a branch,
+    /// and a column mixing short and long values mispredicts it. Calls nothing, for
+    /// <see cref="DenseFromLengths{TLen}"/>'s reason.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool CutMixed<TOff, TStarts>(ref TOff offsets, int rows, ref byte heap, ref byte views)
+        where TOff : unmanaged
+        where TStarts : struct, IStartCheck
+    {
+        ref ulong lowMasks = ref MemoryMarshal.GetReference(InlineLowMasks);
+        ref uint highMasks = ref MemoryMarshal.GetReference(InlineHighMasks);
+        nint start = (nint)Widen(offsets);
+        int offChar = 0;
+        for (nint i = 0; i < rows; i++)
+        {
+            nint end = (nint)Widen(Unsafe.Add(ref offsets, i + 1));
+            nint size = end - start;
+
+            // Negative exactly for a value too long to inline, so its sign is the out-of-line mask,
+            // and adding it back where negative clamps the size to the limit.
+            long room = Inline - (long)size;
+            long outOfLine = room >> 63;
+            nint kept = (nint)(size + (room & outOfLine));
+
+            ref byte value = ref Unsafe.Add(ref heap, start);
+            ulong head = Unsafe.ReadUnaligned<ulong>(ref value) & Unsafe.Add(ref lowMasks, kept);
+            uint tail = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref value, sizeof(ulong))) & Unsafe.Add(ref highMasks, kept);
+            if (TStarts.Checked)
+            {
+                offChar |= ((int)head & 0xC0) == 0x80 ? 1 : 0;
+            }
+
+            ulong inline = (head >> 32) | ((ulong)tail << 32);
+            ulong reference = (ulong)start << 32;
+            ref byte view = ref Unsafe.Add(ref views, i * ViewSize);
+            Unsafe.WriteUnaligned(ref view, (ulong)size | (head << 32));
+            Unsafe.WriteUnaligned(
+                ref Unsafe.Add(ref view, sizeof(ulong)), inline ^ ((inline ^ reference) & (ulong)outOfLine));
+            start = end;
+        }
+
+        return offChar == 0;
+    }
+
+    /// <summary>
+    /// Cuts <paramref name="rows"/> rows of which some lie within twelve bytes of the heap's end,
+    /// each by <see cref="Place"/>; false when a UTF-8 row starts off a character. The offsets were
+    /// checked by the caller.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool CutExactly<TOff>(
+        ref TOff offsets, int rows, ref byte heap, int heapLength, ref byte views, bool requireUtf8)
+        where TOff : unmanaged
+    {
+        int start = (int)Widen(offsets);
+        for (int i = 0; i < rows; i++)
+        {
+            int end = (int)Widen(Unsafe.Add(ref offsets, i + 1));
+            if (!Place(ref Unsafe.Add(ref views, (nint)i * ViewSize), ref heap, start, end - start, heapLength, requireUtf8))
+            {
+                return false;
             }
 
             start = end;
         }
 
-        if (i < count)
-        {
-            int size = (int)Widen(offsets[i + 1]) - start;
-            if ((uint)start > (uint)heapLength || (uint)size > (uint)(heapLength - start))
-            {
-                ThrowRowPastHeap(i, start, size, heapLength);
-            }
+        return true;
+    }
 
-            ThrowInvalidRow(i);
-        }
+    /// <summary>Whether a kernel checks that each row starts on a character, as a type.</summary>
+    private interface IStartCheck
+    {
+        static abstract bool Checked { get; }
+    }
+
+    /// <summary>A UTF-8 column's rows, each of which must start on a character.</summary>
+    private readonly struct Utf8Starts : IStartCheck
+    {
+        public static bool Checked => true;
+    }
+
+    /// <summary>A binary column's rows, which may start anywhere.</summary>
+    private readonly struct AnyStarts : IStartCheck
+    {
+        public static bool Checked => false;
     }
 
     /// <summary>
@@ -705,61 +984,93 @@ internal static class ViewKernels
     /// <summary>
     /// Cuts <paramref name="heap"/> into views by <c>offsets[i]..offsets[i + 1]</c>.
     /// </summary>
-    /// <param name="offsets">
-    /// <paramref name="count"/> + 1 offsets, already validated non-decreasing and inside the heap.
-    /// </param>
+    /// <param name="offsets"><paramref name="count"/> + 1 offsets, as the file holds them.</param>
     /// <param name="ptype">The offsets' physical type.</param>
     /// <param name="heap">The value bytes.</param>
     /// <param name="views">Exactly <paramref name="count"/> views of room; every byte is written.</param>
     /// <param name="count">Rows to build.</param>
     /// <param name="requireUtf8">Whether the dtype is Utf8.</param>
     /// <param name="mask">Per-row validity; null rows get an empty view and are not validated.</param>
-    /// <exception cref="VortexFormatException">A valid row is not valid UTF-8.</exception>
+    /// <param name="encodingId">The encoding asking, for the messages.</param>
+    /// <exception cref="VortexFormatException">
+    /// An offset a row is cut by decreases or leaves the heap, or a valid row is not valid UTF-8.
+    /// </exception>
+    /// <remarks>
+    /// With every row valid, every offset is checked here, which is the whole of an ascending walk
+    /// over them. With nulls in play a null row's offsets are not read at all, so a caller wanting
+    /// them checked walks them itself; a valid row is still checked against the heap as it is cut.
+    /// </remarks>
     internal static void BuildFromOffsets(
         ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, Span<byte> views,
-        int count, bool requireUtf8, in ValidityMask mask)
+        int count, bool requireUtf8, in ValidityMask mask, string encodingId)
     {
-        // The tiling argument needs every row to contribute its bytes. With nulls in play the rows
-        // this loop skips would be folded into a whole-heap check that the per-row check never
-        // applied, so the fast path is taken only when there are none.
-        bool wholeHeap = requireUtf8 && mask.AllValid;
-        if (wholeHeap)
+        if (mask.AllValid)
         {
-            int end = (int)CanonicalSupport.ReadInteger(offsets, ptype, count);
-            if (!Utf8.IsValid(heap[..end]))
+            if (!DenseFromOffsets(offsets, ptype, heap, views, count, requireUtf8, out int first, out int end))
             {
-                ThrowFirstInvalidOffsetRow(offsets, ptype, heap, count, in mask);
+                ThrowFirstBadOffsetRow(offsets, ptype, heap, count, requireUtf8, encodingId);
             }
+
+            // The tiling argument needs every row to contribute its bytes. With nulls in play the
+            // rows the loop skips would be folded into a whole-heap check that the per-row check
+            // never applied, so it is the all-valid arm's alone.
+            if (requireUtf8 && !Utf8.IsValid(heap[first..end]))
+            {
+                ThrowFirstInvalidOffsetRow(offsets, ptype, heap, count);
+            }
+
+            return;
         }
 
         switch (ptype)
         {
             case PType.U8:
-                FromOffsets<byte>(offsets, heap, views, count, requireUtf8, wholeHeap, in mask);
+                FromOffsets<byte>(offsets, heap, views, count, requireUtf8, in mask);
                 break;
             case PType.U16:
-                FromOffsets<ushort>(offsets, heap, views, count, requireUtf8, wholeHeap, in mask);
+                FromOffsets<ushort>(offsets, heap, views, count, requireUtf8, in mask);
                 break;
             case PType.U32:
-                FromOffsets<uint>(offsets, heap, views, count, requireUtf8, wholeHeap, in mask);
+                FromOffsets<uint>(offsets, heap, views, count, requireUtf8, in mask);
                 break;
             case PType.U64:
-                FromOffsets<ulong>(offsets, heap, views, count, requireUtf8, wholeHeap, in mask);
+                FromOffsets<ulong>(offsets, heap, views, count, requireUtf8, in mask);
                 break;
             case PType.I8:
-                FromOffsets<sbyte>(offsets, heap, views, count, requireUtf8, wholeHeap, in mask);
+                FromOffsets<sbyte>(offsets, heap, views, count, requireUtf8, in mask);
                 break;
             case PType.I16:
-                FromOffsets<short>(offsets, heap, views, count, requireUtf8, wholeHeap, in mask);
+                FromOffsets<short>(offsets, heap, views, count, requireUtf8, in mask);
                 break;
             case PType.I32:
-                FromOffsets<int>(offsets, heap, views, count, requireUtf8, wholeHeap, in mask);
+                FromOffsets<int>(offsets, heap, views, count, requireUtf8, in mask);
                 break;
             default:
-                FromOffsets<long>(offsets, heap, views, count, requireUtf8, wholeHeap, in mask);
+                FromOffsets<long>(offsets, heap, views, count, requireUtf8, in mask);
                 break;
         }
     }
+
+    /// <summary><see cref="DenseFromOffsets{TOff}"/> with the offsets' type resolved.</summary>
+    private static bool DenseFromOffsets(
+        ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, Span<byte> views, int count,
+        bool requireUtf8, out int first, out int end) =>
+        ptype switch
+        {
+            PType.U8 => DenseFromOffsets(OffsetsAs<byte>(offsets, count), heap, views, count, requireUtf8, out first, out end),
+            PType.U16 => DenseFromOffsets(OffsetsAs<ushort>(offsets, count), heap, views, count, requireUtf8, out first, out end),
+            PType.U32 => DenseFromOffsets(OffsetsAs<uint>(offsets, count), heap, views, count, requireUtf8, out first, out end),
+            PType.U64 => DenseFromOffsets(OffsetsAs<ulong>(offsets, count), heap, views, count, requireUtf8, out first, out end),
+            PType.I8 => DenseFromOffsets(OffsetsAs<sbyte>(offsets, count), heap, views, count, requireUtf8, out first, out end),
+            PType.I16 => DenseFromOffsets(OffsetsAs<short>(offsets, count), heap, views, count, requireUtf8, out first, out end),
+            PType.I32 => DenseFromOffsets(OffsetsAs<int>(offsets, count), heap, views, count, requireUtf8, out first, out end),
+            _ => DenseFromOffsets(OffsetsAs<long>(offsets, count), heap, views, count, requireUtf8, out first, out end),
+        };
+
+    /// <summary>The <paramref name="count"/> + 1 offsets that cut <paramref name="count"/> rows, typed.</summary>
+    private static ReadOnlySpan<T> OffsetsAs<T>(ReadOnlySpan<byte> offsets, int count)
+        where T : unmanaged =>
+        MemoryMarshal.Cast<byte, T>(offsets)[..(count + 1)];
 
     /// <summary>
     /// <see cref="BuildFromOffsets"/> for a selection: one view per entry of
@@ -858,26 +1169,20 @@ internal static class ViewKernels
         }
     }
 
+    /// <summary>
+    /// The arm of <see cref="BuildFromOffsets"/> with nulls in play: a null row gets the empty
+    /// view, and a valid row is checked against the heap, and as UTF-8, on its own.
+    /// </summary>
     private static void FromOffsets<TOff>(
         ReadOnlySpan<byte> offsets, ReadOnlySpan<byte> heap, Span<byte> views, int count,
-        bool requireUtf8, bool wholeHeap, in ValidityMask mask)
+        bool requireUtf8, in ValidityMask mask)
         where TOff : unmanaged
     {
         // Addressed by reference, so that slicing the heap and the views does not cost a bounds
         // check and a span construction per row for a method that takes the reference of each
         // immediately. `offsets` is sliced once to the count + 1 entries the caller promised, and
-        // the heap range is checked per row because the offsets come from the file: the ascending
-        // and in-heap properties are established elsewhere, and this check is what keeps them from
-        // being load-bearing here.
+        // the heap range is checked per row because the offsets come from the file.
         ReadOnlySpan<TOff> typed = MemoryMarshal.Cast<byte, TOff>(offsets)[..(count + 1)];
-        bool allValid = mask.AllValid;
-        if (allValid)
-        {
-            // Every row valid means a UTF-8 heap was checked whole, so a start check is all a row needs.
-            DenseFromOffsets(typed, heap, views, count, requireUtf8);
-            return;
-        }
-
         int start = (int)Widen(typed[0]);
 
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
@@ -889,7 +1194,7 @@ internal static class ViewKernels
             int end = (int)Widen(typed[i + 1]);
             ref byte view = ref Unsafe.Add(ref viewRef, i * ViewSize);
 
-            if (!allValid && !mask.IsValid(i))
+            if (!mask.IsValid(i))
             {
                 // The empty view, written out rather than inherited from the allocator.
                 Unsafe.WriteUnaligned(ref view, 0UL);
@@ -905,20 +1210,9 @@ internal static class ViewKernels
             }
 
             ref byte value = ref Unsafe.Add(ref heapRef, start);
-
-            if (requireUtf8)
+            if (requireUtf8 && !Utf8.IsValid(MemoryMarshal.CreateReadOnlySpan(ref value, size)))
             {
-                if (wholeHeap)
-                {
-                    if (size != 0 && (value & 0xC0) == 0x80)
-                    {
-                        ThrowInvalidRow(i);
-                    }
-                }
-                else if (!Utf8.IsValid(MemoryMarshal.CreateReadOnlySpan(ref value, size)))
-                {
-                    ThrowInvalidRow(i);
-                }
+                ThrowInvalidRow(i);
             }
 
             CanonicalSupport.WriteView(ref view, ref value, size, 0, start);
@@ -1005,17 +1299,15 @@ internal static class ViewKernels
             "tile the heap.");
     }
 
+    /// <summary>
+    /// The bytes a column's rows tile failed as a whole, every row valid and every offset checked,
+    /// so at least one row fails; finds which, one row at a time.
+    /// </summary>
     private static void ThrowFirstInvalidOffsetRow(
-        ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, int count,
-        in ValidityMask mask)
+        ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, int count)
     {
         for (int i = 0; i < count; i++)
         {
-            if (!mask.AllValid && !mask.IsValid(i))
-            {
-                continue;
-            }
-
             int start = (int)CanonicalSupport.ReadInteger(offsets, ptype, i);
             int end = (int)CanonicalSupport.ReadInteger(offsets, ptype, i + 1);
             if (!Utf8.IsValid(heap.Slice(start, end - start)))
@@ -1027,6 +1319,65 @@ internal static class ViewKernels
         throw new VortexFormatException(
             "A Utf8 array's value heap is not valid UTF-8, though every row is; its rows do not " +
             "tile the heap.");
+    }
+
+    /// <summary>
+    /// <see cref="DenseFromOffsets{TOff}"/> refused its rows; reports the first fault in the order
+    /// a row-at-a-time cut meets them: an offset out of order or outside the heap, then the heap's
+    /// UTF-8 as a whole, then a row starting off a character. An error path may cost whatever it
+    /// likes.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowFirstBadOffsetRow(
+        ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, int count, bool requireUtf8,
+        string encodingId)
+    {
+        long first = 0;
+        long previous = 0;
+        int offCharacter = -1;
+        for (int i = 0; i <= count; i++)
+        {
+            long offset = CanonicalSupport.ReadInteger(offsets, ptype, i);
+            if (i > 0 && offset < previous)
+            {
+                throw new VortexFormatException(
+                    $"{encodingId} offsets must not decrease; offset {i} is {offset} after {previous}.");
+            }
+
+            if (offset < 0 || offset > heap.Length)
+            {
+                throw new VortexFormatException(
+                    $"{encodingId} offset {i} is {offset}, outside the {heap.Length}-byte value heap.");
+            }
+
+            // Row i - 1 is [previous, offset), both now inside the heap.
+            if (i == 0)
+            {
+                first = offset;
+            }
+            else if (offCharacter < 0 && previous < offset && (heap[(int)previous] & 0xC0) == 0x80)
+            {
+                offCharacter = i - 1;
+            }
+
+            previous = offset;
+        }
+
+        if (requireUtf8)
+        {
+            if (!Utf8.IsValid(heap[(int)first..(int)previous]))
+            {
+                ThrowFirstInvalidOffsetRow(offsets, ptype, heap, count);
+            }
+
+            if (offCharacter >= 0)
+            {
+                ThrowInvalidRow(offCharacter);
+            }
+        }
+
+        throw new VortexFormatException(
+            $"{encodingId} rows were refused, though every offset and every row is well-formed.");
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

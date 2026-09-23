@@ -117,7 +117,7 @@ public class VarBinFormBenchmarks
 
         _views = new byte[Rows * ViewSize];
         ViewKernels.BuildFromOffsets(
-            _offsets, OffsetsType, _heap, _views, Rows, requireUtf8: false, default);
+            _offsets, OffsetsType, _heap, _views, Rows, requireUtf8: false, default, VarBinDecoder.Id);
 
         _taken = new byte[TakeRows * ViewSize];
         _wanted = new int[TakeRows];
@@ -135,7 +135,7 @@ public class VarBinFormBenchmarks
     public int BuildViews()
     {
         ViewKernels.BuildFromOffsets(
-            _offsets, OffsetsType, _heap, _views, Rows, requireUtf8: false, default);
+            _offsets, OffsetsType, _heap, _views, Rows, requireUtf8: false, default, VarBinDecoder.Id);
         return _views.Length;
     }
 

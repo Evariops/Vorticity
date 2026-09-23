@@ -51,7 +51,7 @@ public sealed class ViewKernelsTests
             CanonicalArena arena = new CanonicalArena();
             ValidityMask mask = ValidityMask.From(arena, Validity.NonNullable);
             ViewKernels.BuildFromOffsets(
-                Int32s(Offsets(sizes)), PType.I32, heap, byOffsets, rows, requireUtf8: false, in mask);
+                Int32s(Offsets(sizes)), PType.I32, heap, byOffsets, rows, requireUtf8: false, in mask, VarBinDecoder.Id);
             Assert.Equal(expected, byOffsets);
         }
     }
@@ -74,7 +74,7 @@ public sealed class ViewKernelsTests
         {
             ValidityMask mask = ValidityMask.From(arena, Validity.NonNullable);
             ViewKernels.BuildFromOffsets(
-                Int32s(Offsets(split)), PType.I32, heap, new byte[3 * 16], 3, requireUtf8: true, in mask);
+                Int32s(Offsets(split)), PType.I32, heap, new byte[3 * 16], 3, requireUtf8: true, in mask, VarBinDecoder.Id);
         });
     }
 
@@ -92,8 +92,124 @@ public sealed class ViewKernelsTests
         {
             ValidityMask mask = ValidityMask.From(arena, Validity.NonNullable);
             ViewKernels.BuildFromOffsets(
-                Int32s([0, 10, 5, 30]), PType.I32, heap, new byte[3 * 16], 3, requireUtf8: false, in mask);
+                Int32s([0, 10, 5, 30]), PType.I32, heap, new byte[3 * 16], 3, requireUtf8: false, in mask, VarBinDecoder.Id);
         });
+    }
+
+    /// <summary>
+    /// Enough rows for several blocks of offsets, sized so that every loop a block can be cut by is
+    /// taken: all inline, all out of line, both, twelve-byte rows among long ones, and the last
+    /// block, which ends at the heap's end, byte-exact.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 12)]
+    [InlineData(13, 40)]
+    [InlineData(12, 20)]
+    [InlineData(0, 30)]
+    public void ViewsCutFromManyBlocksOfOffsetsAreTheWritersViews(int shortest, int longest)
+    {
+        Random random = new Random(shortest * 100 + longest);
+        int[] sizes = new int[3_000];
+        for (int i = 0; i < sizes.Length; i++)
+        {
+            sizes[i] = random.Next(shortest, longest + 1);
+        }
+
+        byte[] heap = new byte[Offsets(sizes)[^1]];
+        for (int i = 0; i < heap.Length; i++)
+        {
+            heap[i] = (byte)random.Next(0x20, 0x7F);
+        }
+
+        byte[] expected = Expected(heap, sizes, out _);
+        CanonicalArena arena = new CanonicalArena();
+        ValidityMask mask = ValidityMask.From(arena, Validity.NonNullable);
+        PType[] types = heap.Length <= short.MaxValue
+            ? [PType.I16, PType.U16, PType.I32, PType.U32, PType.I64, PType.U64]
+            : [PType.I32, PType.U32, PType.I64, PType.U64];
+        foreach (PType ptype in types)
+        {
+            foreach (bool requireUtf8 in (bool[])[false, true])
+            {
+                byte[] views = new byte[sizes.Length * 16];
+                ViewKernels.BuildFromOffsets(
+                    Typed(Offsets(sizes), ptype), ptype, heap, views, sizes.Length, requireUtf8, in mask, VarBinDecoder.Id);
+                Assert.Equal(expected, views);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A row cut through a character is refused whichever loop cuts its block: all inline, all out
+    /// of line, or both.
+    /// </summary>
+    [Theory]
+    [InlineData(4, 12)]
+    [InlineData(13, 40)]
+    [InlineData(4, 30)]
+    public void AUtf8RowStartingOffACharacterIsRefusedInAnyBlock(int shortest, int longest)
+    {
+        Random random = new Random(longest);
+        int[] sizes = new int[3_000];
+        for (int i = 0; i < sizes.Length; i++)
+        {
+            sizes[i] = random.Next(shortest, longest + 1);
+        }
+
+        // Row 1500 ends with the first byte of a two-byte character, so row 1501 starts on the
+        // second: the heap is valid UTF-8, and the row starting off a character is reported.
+        int[] offsets = Offsets(sizes);
+        byte[] heap = new byte[offsets[^1]];
+        heap.AsSpan().Fill((byte)'a');
+        heap[offsets[1501] - 1] = 0xC3;
+        heap[offsets[1501]] = 0xA9;
+        Assert.True(System.Text.Unicode.Utf8.IsValid(heap));
+
+        CanonicalArena arena = new CanonicalArena();
+        VortexFormatException error = Assert.Throws<VortexFormatException>(() =>
+        {
+            ValidityMask mask = ValidityMask.From(arena, Validity.NonNullable);
+            ViewKernels.BuildFromOffsets(
+                Int32s(offsets), PType.I32, heap, new byte[sizes.Length * 16], sizes.Length, requireUtf8: true, in mask, VarBinDecoder.Id);
+        });
+        Assert.Contains("Row 1501 ", error.Message, StringComparison.Ordinal);
+
+        ValidityMask binary = ValidityMask.From(arena, Validity.NonNullable);
+        ViewKernels.BuildFromOffsets(
+            Int32s(offsets), PType.I32, heap, new byte[sizes.Length * 16], sizes.Length, requireUtf8: false, in binary, VarBinDecoder.Id);
+    }
+
+    /// <summary>
+    /// An offset that decreases, or that leaves the heap, is refused in a block past the first,
+    /// before any row of that block is read.
+    /// </summary>
+    [Fact]
+    public void AnOffsetOutOfOrderOrOutsideTheHeapIsRefusedInALaterBlock()
+    {
+        int[] sizes = new int[3_000];
+        sizes.AsSpan().Fill(5);
+        byte[] heap = new byte[sizes.Length * 5];
+        CanonicalArena arena = new CanonicalArena();
+
+        int[] fell = Offsets(sizes);
+        fell[2_000] = fell[1_999] - 1;
+        VortexFormatException decreasing = Assert.Throws<VortexFormatException>(() =>
+        {
+            ValidityMask mask = ValidityMask.From(arena, Validity.NonNullable);
+            ViewKernels.BuildFromOffsets(
+                Int32s(fell), PType.I32, heap, new byte[sizes.Length * 16], sizes.Length, requireUtf8: false, in mask, VarBinDecoder.Id);
+        });
+        Assert.Contains("must not decrease; offset 2000 ", decreasing.Message, StringComparison.Ordinal);
+
+        int[] outside = Offsets(sizes);
+        outside[2_100] = heap.Length + 1;
+        VortexFormatException past = Assert.Throws<VortexFormatException>(() =>
+        {
+            ValidityMask mask = ValidityMask.From(arena, Validity.NonNullable);
+            ViewKernels.BuildFromOffsets(
+                Int32s(outside), PType.I32, heap, new byte[sizes.Length * 16], sizes.Length, requireUtf8: false, in mask, VarBinDecoder.Id);
+        });
+        Assert.Contains("offset 2100 ", past.Message, StringComparison.Ordinal);
     }
 
     /// <summary>The views the byte-exact writer makes of rows tiling <paramref name="heap"/>.</summary>
@@ -129,6 +245,34 @@ public sealed class ViewKernelsTests
         for (int i = 0; i < values.Length; i++)
         {
             BinaryPrimitives.WriteInt32LittleEndian(bytes.AsSpan(i * sizeof(int)), values[i]);
+        }
+
+        return bytes;
+    }
+
+    /// <summary><paramref name="values"/> as <paramref name="ptype"/>, one of the 16-, 32- and 64-bit integers.</summary>
+    private static byte[] Typed(int[] values, PType ptype)
+    {
+        if (ptype is PType.I32 or PType.U32)
+        {
+            return Int32s(values);
+        }
+
+        if (ptype is PType.I16 or PType.U16)
+        {
+            byte[] narrow = new byte[values.Length * sizeof(short)];
+            for (int i = 0; i < values.Length; i++)
+            {
+                BinaryPrimitives.WriteUInt16LittleEndian(narrow.AsSpan(i * sizeof(short)), checked((ushort)values[i]));
+            }
+
+            return narrow;
+        }
+
+        byte[] bytes = new byte[values.Length * sizeof(long)];
+        for (int i = 0; i < values.Length; i++)
+        {
+            BinaryPrimitives.WriteInt64LittleEndian(bytes.AsSpan(i * sizeof(long)), values[i]);
         }
 
         return bytes;

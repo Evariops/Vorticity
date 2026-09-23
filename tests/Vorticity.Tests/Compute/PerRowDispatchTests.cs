@@ -76,7 +76,7 @@ public sealed partial class PerRowDispatchTests
         ("Arrays/Decoders/Canonical/ConstantCanonicalizer.cs", 1, 0, "legitimate: one write, then Tile"),
         ("Arrays/Decoders/Canonical/ListDecoder.cs", 2, 0, "legitimate: bounds"),
         ("Arrays/Decoders/Canonical/VarBinDecoder.cs", 2, 0, "legitimate: bounds"),
-        ("Arrays/Decoders/Canonical/ViewKernels.cs", 4, 0, "legitimate: one bound, three error paths"),
+        ("Arrays/Decoders/Canonical/ViewKernels.cs", 4, 0, "legitimate: four error paths"),
         ("Arrays/Decoders/Compressed/AlpRdDecoder.cs", 1, 1, "R4"),
         ("Arrays/Decoders/Compressed/CompressedValues.cs", 2, 0, "the definitions of ReadUnsigned/WriteInteger"),
         ("Arrays/Decoders/Compressed/DictDecoder.cs", 1, 0, "legitimate: an error message"),
