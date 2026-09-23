@@ -294,6 +294,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _cursor = plan.CreateCursor(reverse);
         _segments = new ScanSegments(degree);
 
+        // Before the first read, the file's reader learns whether the plan reads data, and chooses
+        // how to read it.
+        file.AnticipateReads(plan.ShareOf(file.RowCount, live, take));
+
         // Like the segments, the chunks decoded are the scan's and not a lane's: the lanes take
         // consecutive splits in turn, and a chunk of several splits would otherwise be decoded once
         // per lane that meets it.

@@ -116,6 +116,7 @@ internal sealed class TerminalScan
             : default;
         BlockMask? live = pruning.Live;
         ZonePruner? zones = (_tiers & TerminalTiers.FullBlock) != 0 ? pruning.Zones : null;
+        _file.AnticipateReads(plan.ShareOf(_file.RowCount, live, _take));
 
         long total = 0;
         long blockRows = Math.Max(live?.BlockRows ?? SplitPlan.NaturalBatchRows(_tree), 1);
@@ -493,6 +494,25 @@ internal sealed class TerminalScan
         {
             return best;
         }
+
+        long toDecode = 0;
+        if (undecided is not null)
+        {
+            foreach (RowRange split in undecided)
+            {
+                toDecode += split.Length;
+            }
+        }
+
+        if (candidates is not null)
+        {
+            foreach ((RowRange split, _) in candidates)
+            {
+                toDecode += split.Length;
+            }
+        }
+
+        _file.AnticipateReads((double)toDecode / Math.Max(_file.RowCount, 1));
 
         // Pass 2: the decodes -- the splits the bounds could not decide first, so that the best
         // is as good as it can be before a candidate is weighed against it. Each decode hands the

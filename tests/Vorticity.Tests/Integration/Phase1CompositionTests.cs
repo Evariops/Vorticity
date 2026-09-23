@@ -131,7 +131,10 @@ public sealed class Phase1CompositionTests
         string path = CorpusBlobs.Path(entry, ".vortex");
         SidecarLayout expectedRoot = SidecarLayoutTree(entry);
 
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        // Mapped from the start: a file opened from a path is mapped by its first scan, and this
+        // walk reads the segments without one.
+        await using VortexFile file = await VortexFile.OpenAsync(
+            MemoryMappedSegmentSource.Open(path), new VortexOpenOptions(), CancellationToken.None);
         using ScanContext scan = new ScanContext(file);
 
         // The scan's encoding table is file-open's, copied in - not a second resolution pass.

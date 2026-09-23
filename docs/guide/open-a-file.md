@@ -20,8 +20,10 @@ struct{Day: i32, Celsius: f64?, City: utf8}
 identity f6595d25-2b99-4160-9071-63ffd454d25f, metadata keys []
 ```
 
-`VortexFile.OpenAsync(path)` opens in `VortexSession.Default` and maps the file into memory. This is
-the one to use unless you have a reason not to.
+`VortexFile.OpenAsync(path)` opens in `VortexSession.Default`: it reads the file's tail, and the
+first scan that reads data maps the file into memory, which every read after it goes through. An
+open that asks for nothing but the schema, the statistics or a count they answer maps nothing,
+and costs a fifth less. This is the one to use unless you have a reason not to.
 
 What the file tells you before a scan:
 
@@ -61,13 +63,13 @@ bytes in memory   a full scan in 6.8 ms
 
 A session owns the memory pool, the segment cache, the bound on reads in flight and the degree of
 parallelism of every file opened through it ([threads.md](threads.md)). `OpenAsync(path)` on a
-session maps the file, as the static call does; `OpenAsync(ISegmentSource)` takes any source, and
+session reads a path as the static call does; `OpenAsync(ISegmentSource)` takes any source, and
 the file then owns it: disposing the file disposes the source. The three sources of
 `Vorticity.IO`:
 
 | source | reads by | when |
 |---|---|---|
-| `MemoryMappedSegmentSource` | pointers into one mapping of the whole file | the default: a file read more than once, or scanned several ways |
+| `MemoryMappedSegmentSource` | pointers into one mapping of the whole file, made at the open | a file you want mapped before its first scan; a path gives the same once a scan reads data |
 | `FileSegmentSource` | `RandomAccess` positional reads on one handle | a file too large to map, or a host that forbids mappings |
 | `MemorySegmentSource` | views into bytes you hold, pinned for the source's life | the file came over the wire, out of a cache, or from a test |
 

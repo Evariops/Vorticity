@@ -162,7 +162,9 @@ public sealed class PathAllocationTests
     /// </remarks>
     private static readonly (string Axis, string File, long Ceiling, Func<string, ValueTask<long>> Path)[] Axes =
     [
-        ("open, footer only", File, 14_216, FooterOnly),
+        // A file opened from a path reads its tail positionally and is mapped by the first scan
+        // that reads data: an open that reads nothing more makes no mapping, 328 bytes less.
+        ("open, footer only", File, 13_888, FooterOnly),
         // `VortexFile` holds one reference to the lazily parsed `LayoutTree` that every scan of
         // an open file shares instead of re-deriving: eight bytes once per OPEN, against a
         // layout-tree parse once per `ExecuteAsync`. This axis opens the file and reads one batch,
@@ -291,22 +293,25 @@ public sealed class PathAllocationTests
         // This ceiling also carries the read contract's per-scan state -- the mask of live blocks
         // and the metrics sink, a reference each on the enumerable, the enumerator and the lane's
         // context -- and the headroom the neighbouring axes have.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_240, FullScan),
+        //
+        // The mapping these scans read through is made by the scan rather than by the open, and
+        // the reader that makes it is smaller than the mapped source was: 48 bytes less on each.
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_192, FullScan),
         // The page sizes are read in place from the node's metadata rather than into a list a
         // chunk, and the chunk metadata with its ANS tables and the latent states are kept from one
         // decode to the next rather than built by each: 1 536 bytes less on this file's one chunk,
         // and on a column of many chunks of many-bin tables a few hundred kilobytes a chunk.
-        ("scan, vortex.pco", "encodings/pco", 3_192, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 3_144, FullScan),
         // A node's frames go through one decoder, reset between frames, rather than the one-shot
         // `ZstandardDecoder.TryDecompress`, which builds and tears down a native decompression
         // context per call; and the decoder is the process's, taken by the scan's context and
         // given back when it is disposed, so a warm scan builds none: 104 bytes and 96 KB of
         // native state less than one decoder a scan.
-        ("scan, vortex.zstd", "encodings/zstd", 3_192, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 3_144, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
-        ("scan, vortex.map", "encodings/map", 3_976, FullScan),
-        ("scan, vortex.variant", "encodings/variant", 3_616, FullScan),
+        ("scan, vortex.map", "encodings/map", 3_928, FullScan),
+        ("scan, vortex.variant", "encodings/variant", 3_568, FullScan),
     ];
 
     [Fact]

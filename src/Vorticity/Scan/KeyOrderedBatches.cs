@@ -332,6 +332,9 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             {
                 _slices.Reverse();
             }
+
+            // The windows read the plan's live rows one after another.
+            file.AnticipateReads(_scan.Plan.ShareOf(file.RowCount, _live, null));
         }
 
         /// <summary>The next window's rows, in key order; zero at the end.</summary>

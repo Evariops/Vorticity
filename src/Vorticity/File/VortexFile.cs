@@ -114,9 +114,10 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the open.</param>
     /// <returns>The open file. The caller disposes it.</returns>
     /// <remarks>
-    /// The file is memory-mapped, so segment reads are zero-copy. The source created here is always
-    /// owned by the returned file: <see cref="VortexOpenOptions.LeaveSourceOpen"/> applies only to
-    /// a source the caller supplied.
+    /// The open reads the tail positionally, and the file is mapped when a scan's plan announces
+    /// enough bytes to pay for it; from then on segment reads are zero-copy. The source created here
+    /// is always owned by the returned file: <see cref="VortexOpenOptions.LeaveSourceOpen"/> applies
+    /// only to a source the caller supplied.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> or <paramref name="options"/> is null.</exception>
     /// <exception cref="VortexFormatException">The file is not a well-formed Vortex file.</exception>
@@ -125,7 +126,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(options);
-        MemoryMappedSegmentSource source = MemoryMappedSegmentSource.Open(path);
+        LocalFileSource source = LocalFileSource.Open(path);
         ValueTask<VortexFile> open = OpenCoreAsync(source, options, ownsSource: true, cancellationToken);
         string? tokenPath = options.Read.IndexFragments.Count == 0 ? null : path;
         return tokenPath is null && !options.PreloadIndexes
@@ -994,6 +995,19 @@ public sealed partial class VortexFile : IAsyncDisposable
             tree = Layouts.LayoutTree.Parse(this);
             Volatile.Write(ref _layoutTree, tree);
             return tree;
+        }
+    }
+
+    /// <summary>
+    /// Tells the file's reader, before a scan reads any data segment, that its plan will read some:
+    /// a reader that chooses how to read from it is told, and no other.
+    /// </summary>
+    /// <param name="share">The share of the file's rows the plan reads, from 0 to 1.</param>
+    internal void AnticipateReads(double share)
+    {
+        if (share > 0 && _source is IReadAnticipation reader)
+        {
+            reader.AnticipateData();
         }
     }
 

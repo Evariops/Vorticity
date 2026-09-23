@@ -146,7 +146,10 @@ public sealed class VortexSession : IAsyncDisposable
         return new VortexSession(options);
     }
 
-    /// <summary>Opens the file at <paramref name="path"/>, mapped into memory.</summary>
+    /// <summary>
+    /// Opens the file at <paramref name="path"/>: its tail read positionally, the file mapped into
+    /// memory by the first scan that reads data.
+    /// </summary>
     /// <param name="path">A local file path.</param>
     /// <param name="options">What the open reads, trusts and refuses; null for the defaults.</param>
     /// <param name="cancellationToken">Cancels the open.</param>

@@ -48,9 +48,10 @@ use, is immutable and takes no cores it was not given: its parallelism is 1. See
 A Vortex file is read from the end. Its last bytes are a marker and a postscript; before them the
 footer, which holds the schema, the layout tree, the statistics of each column and the map of every
 segment. One read of the tail, 64 KiB by default, gets all of it for an ordinary file, so opening
-costs one round trip whatever the file's size, and a path is memory-mapped so that even that read
-is a page fault. Everything else is **segments**: aligned runs of bytes, 153 in this file, which
-the reader fetches only when something it needs lies in them.
+costs one round trip whatever the file's size, and a path is memory-mapped by the first scan that
+reads data, so that every read after it is a page fault. Everything else is **segments**: aligned
+runs of bytes, 153 in this file, which the reader fetches only when something it needs lies in
+them.
 
 ## A layout tree, and its encodings
 

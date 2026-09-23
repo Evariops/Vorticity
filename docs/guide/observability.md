@@ -129,8 +129,8 @@ await using (VortexFile file = await session.OpenAsync(new FileSegmentSource(pat
 cache: 17 hits, 27 misses, 0 bytes held
 ```
 
-A path handed to `OpenAsync` is memory-mapped, and a mapping has nothing to cache: its reads never
-reach the cache and never touch its counters. `SegmentCache` exposes `Capacity`, `Size`, `Hits` and
+A path handed to `OpenAsync` is memory-mapped by its first scan, and a mapping has nothing to
+cache: its reads never reach the cache and never touch its counters. `SegmentCache` exposes `Capacity`, `Size`, `Hits` and
 `Misses` for the session as a whole; a file's entries leave the cache when the file is disposed,
 which is why nothing is held at the end. [threads.md](threads.md) says when a cache is worth its
 memory.

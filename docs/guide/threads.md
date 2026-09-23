@@ -53,7 +53,8 @@ the session.` Two `await using` declarations in that order, as above, do it righ
 
 **The cache and the bound on reads apply to a source that does I/O**: a `FileSegmentSource`, as
 above, or your own `ISegmentSource` ([object-store.md](object-store.md)). A path opened with
-`session.OpenAsync(path)` is memory-mapped, and a mapping has nothing to bound or to cache. With the
+`session.OpenAsync(path)` is memory-mapped by its first scan, and a mapping has nothing to bound or
+to cache. With the
 cache, a fifth scan of the file made 51 requests and the cache served all 51; over the five scans
 it counted 201 hits and 54 misses, and held 1 459 KiB, the data segments of a 1.5 MB file. The
 concurrent scans missed a few more than the file's 51 segments: two scans that ask for one at the

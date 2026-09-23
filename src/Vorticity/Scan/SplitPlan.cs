@@ -49,6 +49,32 @@ internal sealed class SplitPlan
     /// <summary>The cap every split honours.</summary>
     internal long MaxRows => _maxRows;
 
+    /// <summary>
+    /// The share of a file of <paramref name="fileRows"/> rows the plan reads: its range, narrowed
+    /// by the share of blocks <paramref name="live"/> keeps, or by the share of splits a take of
+    /// <paramref name="take"/>'s rows can touch, each split being read whole.
+    /// </summary>
+    internal double ShareOf(long fileRows, Compute.BlockMask? live, RowSelection? take)
+    {
+        if (fileRows <= 0 || _count < 2)
+        {
+            return 0;
+        }
+
+        double share = (double)(_boundaries[_count - 1] - _boundaries[0]) / fileRows;
+        if (live is { BlockCount: > 0 })
+        {
+            share *= (double)live.LiveCount / live.BlockCount;
+        }
+
+        if (take is not null)
+        {
+            share *= Math.Min(1.0, (double)take.Count / (_count - 1));
+        }
+
+        return share;
+    }
+
     /// <summary>How many boundaries the layout contributed; there is one fewer span than this.</summary>
     internal int BoundaryCount => _count;
 
