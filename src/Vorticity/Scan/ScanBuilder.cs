@@ -521,7 +521,7 @@ internal sealed class ScanBuilder
         // Filter first, projection second: the scan reads the union so the filter has its columns,
         // and the enumerator trims back down to `keep` once the filter has decided.
         Projection read = _filter is null ? keep : Union(keep, _filterPaths!);
-        (RowRange rows, _, long cap) = Frame(tree);
+        (RowRange rows, long natural, long cap) = Frame(tree);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
         BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
@@ -531,6 +531,7 @@ internal sealed class ScanBuilder
             Compact = _compact,
             KeepEncodings = _keepEncodings,
             SinkDecodes = _sinkDecodes,
+            WidenRows = _orderPath is null ? (int)Capped(WindowBatch(natural)) : 0,
         };
 
         if (_orderPath is not null)
@@ -995,7 +996,9 @@ internal sealed class ScanBuilder
     /// cost of a batch is paid once a window, and a window of one batch is decoded straight into it
     /// rather than held decoded for the batches after it. A filter, a take and an order work zone
     /// by zone -- a zone is what is pruned, proven and kept -- and a batch of several zones would
-    /// read the ones they drop, so those scans are batched by the zone.
+    /// read the ones they drop, so those scans are batched by the zone; a filtered scan in file
+    /// order then reads a run of zones its zone maps prove whole as one batch, up to the window,
+    /// since nothing in them is dropped.
     /// </para>
     /// </remarks>
     private (RowRange Rows, long Natural, long Cap) Frame(LayoutTree tree)
@@ -1013,12 +1016,15 @@ internal sealed class ScanBuilder
             natural = int.MaxValue;
         }
 
-        long batch = _filter is null && _take is null && _orderPath is null
-            ? Math.Max(1, _windowRows / natural) * natural
-            : natural;
-        long cap = _maxBatchRows > 0 && _maxBatchRows < batch ? _maxBatchRows : batch;
-        return (rows, natural, cap);
+        long batch = _filter is null && _take is null && _orderPath is null ? WindowBatch(natural) : natural;
+        return (rows, natural, Capped(batch));
     }
+
+    /// <summary>As many of the file's zones as a window holds, and at least one.</summary>
+    private long WindowBatch(long natural) => Math.Max(1, _windowRows / natural) * natural;
+
+    /// <summary><paramref name="batch"/> under the caller's cap, which only ever lowers it.</summary>
+    private long Capped(long batch) => _maxBatchRows > 0 && _maxBatchRows < batch ? _maxBatchRows : batch;
 
     /// <summary>
     /// The terminal form of this scan: it reads the filter's columns, and the one an extreme is

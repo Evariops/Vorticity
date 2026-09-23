@@ -36,7 +36,7 @@ does not fit throws `ArgumentException` there, before a byte is written.
 
 | option | default | what it changes |
 |---|---|---|
-| `BlockRows` | 8 192 | rows per block: the unit of pruning, of a take and of a filtered scan's batch ([blocks-and-chunks.md](blocks-and-chunks.md)) |
+| `BlockRows` | 8 192 | rows per block: the unit of pruning, of a take and of a filtered scan's batch where the zone maps do not prove it whole ([blocks-and-chunks.md](blocks-and-chunks.md)) |
 | `ChunkTargetBytes` | 0, the writer's | the bytes gathered before whole blocks are sealed into a chunk; by default a megabyte of the widest column ([blocks-and-chunks.md](blocks-and-chunks.md)) |
 | `ColumnChunkTargetBytes` | empty | a chunk target of its own, by top-level column, for a column that wants larger chunks than the file's: its chunks span whole chunks of the file ([blocks-and-chunks.md](blocks-and-chunks.md)) |
 | `Compression` | `Auto` | what the encoder optimises for: `Auto`, `Fastest`, `Smallest`, `None` |

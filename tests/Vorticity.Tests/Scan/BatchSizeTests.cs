@@ -19,7 +19,7 @@ namespace Vorticity.Tests.Scan;
 
 /// <summary>
 /// The size of a batch: a window of whole zones when the scan only reads, the zone when it
-/// filters, never above a cap.
+/// filters, a window again over zones its zone maps prove whole, never above a cap.
 /// </summary>
 public sealed class BatchSizeTests
 {
@@ -80,12 +80,35 @@ public sealed class BatchSizeTests
         try
         {
             await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+
+            // Every zone holds values on both sides of the literal, so none is proven or pruned.
+            VortexExpr half = Expr.Gt(Expr.Field("v"), Expr.Literal(FilterLiteral.From(50_000L)));
+
+            List<int> sizes = await SizesAsync(file.ScanBuilder().Where(half));
+
+            Assert.Equal(Rows / Zone, sizes.Count);
+            Assert.All(sizes, size => Assert.True(size <= Zone));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task AFilteredScanReadsZonesItsZoneMapsProveWholeByTheWindow()
+    {
+        string path = await WriteAsync();
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
             VortexExpr all = Expr.Gt(Expr.Field("v"), Expr.Literal(FilterLiteral.From(-1L)));
 
             List<int> sizes = await SizesAsync(file.ScanBuilder().Where(all));
+            List<int> capped = await SizesAsync(file.ScanBuilder().Where(all).WithMaxBatchRows(Zone));
 
-            Assert.All(sizes, size => Assert.True(size <= Zone));
-            Assert.Equal(Rows, Sum(sizes));
+            Assert.Equal([FlatLayoutReader.WindowRows, FlatLayoutReader.WindowRows], sizes);
+            Assert.Equal(Rows / Zone, capped.Count);
         }
         finally
         {

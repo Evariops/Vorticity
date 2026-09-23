@@ -159,7 +159,15 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            zones: zones);
+            zones: zones, widenRows: WidenRows);
+
+    /// <summary>
+    /// The most rows a run of zones the zone maps prove whole is read in as one batch, rather than
+    /// a batch per zone: nothing in such a zone is pruned, evaluated or dropped, so the zone buys
+    /// the scan nothing there. The batch a scan that only reads would take, never past the window
+    /// the plan puts the run in; 0 reads every zone alone.
+    /// </summary>
+    internal int WidenRows { get; init; }
 
     /// <summary>
     /// Starts a scan whose filter an exact index has already answered: it reads exactly the rows
@@ -231,6 +239,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly FilterEvaluator? _evaluator;
     private readonly bool _filterProven;
     private readonly bool _compact;
+    private readonly int _widenRows;
     private readonly RowSelection? _take;
     private readonly BlockMask? _live;
     private readonly ScanMetrics? _metrics;
@@ -275,9 +284,14 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         bool compact = true,
         bool keepEncodings = false,
         bool sinkDecodes = false,
-        ZonePruner? zones = null)
+        ZonePruner? zones = null,
+        int widenRows = 0)
     {
         _compact = compact;
+        _widenRows = widenRows > plan.MaxRows && compact && !filterProven && !reverse && take is null &&
+            filter is not null && zones is not null
+            ? widenRows
+            : 0;
         _filterProven = filterProven;
         _sinkDecodes = sinkDecodes;
         _tree = tree;
@@ -509,11 +523,53 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             NotePruned(split);
             if (_live is null || _live.AnyLive(split))
             {
+                if (_widenRows != 0)
+                {
+                    Widen(ref split);
+                }
+
                 return true;
             }
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Extends a split the zone maps prove whole over the splits after it that they prove whole
+    /// too, up to <see cref="_widenRows"/> and the end of the window the plan puts it in, so the
+    /// run is read as one batch.
+    /// </summary>
+    /// <remarks>
+    /// The lanes take splits in turn, and a chunk read a zone at a time has every lane but one
+    /// waiting on the one that decodes it; read as one split, the chunk is one lane's work. The
+    /// window bounds the run as it bounds a scan's batch, and keeps it inside its span. Each split
+    /// taken in counts as proven, the unit the scan's counters are kept in.
+    /// </remarks>
+    private void Widen(ref RowRange split)
+    {
+        if (!_evaluator!.Zones!.MustMatch(split))
+        {
+            return;
+        }
+
+        ZonePruner zones = _evaluator.Zones;
+        _cursor.Plan.WindowOf(split.Start, out int lead, out int span);
+        long end = Math.Min(split.Start - lead + span, split.Start + _widenRows);
+        while (true)
+        {
+            SplitCursor probe = _cursor;
+            if (!probe.TryNext(out RowRange next) || next.Start != split.End || next.End > end ||
+                !zones.MustMatch(next))
+            {
+                return;
+            }
+
+            NotePruned(next);
+            _metrics?.AddSplitProven();
+            split = new RowRange(split.Start, next.End);
+            _cursor = probe;
+        }
     }
 
     private void NotePruned(RowRange split)
