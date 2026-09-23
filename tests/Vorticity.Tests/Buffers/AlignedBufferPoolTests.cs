@@ -532,4 +532,104 @@ public sealed class AlignedBufferPoolTests
             pool.Trim();
         }
     }
+
+    [Fact]
+    public void A_graded_class_keeps_as_many_blocks_as_were_rented_at_once()
+    {
+        AlignedBufferPool pool = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 64L * 1024 * 1024);
+        const int block = 128 * 1024;
+        try
+        {
+            NativeSegmentOwner[] held = RentAll(pool, block, 40);
+            ReturnAll(pool, held);
+            Assert.Equal(40, pool.ParkedCount(block));
+
+            // The next batch of the same width finds every block parked: no owner is allocated.
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < held.Length; i++)
+            {
+                held[i] = pool.Rent(block, 64);
+            }
+
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            ReturnAll(pool, held);
+            Assert.Equal(0, allocated);
+        }
+        finally
+        {
+            pool.Trim();
+        }
+    }
+
+    [Fact]
+    public void A_graded_class_widens_within_the_pools_budget_and_its_own_ceiling()
+    {
+        const int block = 128 * 1024;
+
+        // A budget of 2 MiB parks sixteen of these, the eight of the floor among them.
+        AlignedBufferPool tight = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 2L * 1024 * 1024);
+
+        // 4 MiB blocks keep 64 MiB of themselves at most: sixteen.
+        AlignedBufferPool wide = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 1L << 40);
+        const int big = 4 * 1024 * 1024;
+        try
+        {
+            ReturnAll(tight, RentAll(tight, block, 40));
+            Assert.Equal(16, tight.ParkedCount(block));
+
+            ReturnAll(wide, RentAll(wide, big, 20));
+            Assert.Equal(16, wide.ParkedCount(big));
+        }
+        finally
+        {
+            tight.Trim();
+            wide.Trim();
+        }
+    }
+
+    [Fact]
+    public void A_graded_class_parks_no_more_than_was_rented_at_once()
+    {
+        AlignedBufferPool pool = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 64L * 1024 * 1024);
+        const int block = 128 * 1024;
+        try
+        {
+            ReturnAll(pool, RentAll(pool, block, 40));
+            pool.Trim();
+            Assert.Equal(0, pool.ParkedCount(block));
+
+            // Rented one at a time, the class never has more than one out, and one is all it holds.
+            for (int i = 0; i < 20; i++)
+            {
+                pool.Return(pool.Rent(block, 64));
+            }
+
+            Assert.Equal(1, pool.ParkedCount(block));
+            ReturnAll(pool, RentAll(pool, block, 12));
+            Assert.Equal(12, pool.ParkedCount(block));
+        }
+        finally
+        {
+            pool.Trim();
+        }
+    }
+
+    private static NativeSegmentOwner[] RentAll(AlignedBufferPool pool, int length, int count)
+    {
+        NativeSegmentOwner[] owners = new NativeSegmentOwner[count];
+        for (int i = 0; i < count; i++)
+        {
+            owners[i] = pool.Rent(length, 64);
+        }
+
+        return owners;
+    }
+
+    private static void ReturnAll(AlignedBufferPool pool, NativeSegmentOwner[] owners)
+    {
+        foreach (NativeSegmentOwner owner in owners)
+        {
+            pool.Return(owner);
+        }
+    }
 }

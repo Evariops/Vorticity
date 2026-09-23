@@ -63,7 +63,28 @@ internal sealed class AlignedBufferPool
     /// <summary>Largest permissible <c>maxPooledLength</c>: keeps every rounded size an int.</summary>
     private const int MaxPoolableLength = 1 << 30;
 
+    /// <summary>
+    /// Bytes one class of the graded pool may keep parked when the demand it meets asks for more
+    /// than its base retention: a wide batch holds a block of each of its columns at once.
+    /// </summary>
+    private const long DemandClassBudget = 64L * 1024 * 1024;
+
+    /// <summary>Blocks a class widened to its demand keeps at most, however small they are.</summary>
+    private const int DemandBlocks = 4096;
+
+    /// <summary>
+    /// Bytes the pool keeps parked across every class past their base retention, whatever the
+    /// demand: what the base retention of every class of the shared pool already comes to.
+    /// </summary>
+    private const long DemandBudget = 256L * 1024 * 1024;
+
     private readonly Bucket[] _buckets;
+
+    /// <summary>The bytes this pool keeps parked past the base retention of its classes.</summary>
+    private readonly long _demandBudget;
+
+    /// <summary>Bytes parked across every class.</summary>
+    private long _parkedBytes;
 
     /// <summary>Blocks to retain in the class serving <paramref name="blockSize"/>.</summary>
     /// <param name="floor">The pool's base count, never reduced below <see cref="LargeBlockSize"/>.</param>
@@ -105,9 +126,11 @@ internal sealed class AlignedBufferPool
     /// </param>
     /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
     /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
+    /// <param name="demandBudget">Bytes kept parked past the base retention of the classes.</param>
     /// <summary>Creates a pool, optionally grading retention by size class.</summary>
-    private AlignedBufferPool(int maxPooledLength, int maxPerBucket, bool graded)
+    private AlignedBufferPool(int maxPooledLength, int maxPerBucket, bool graded, long demandBudget = DemandBudget)
     {
+        _demandBudget = demandBudget;
         ArgumentOutOfRangeException.ThrowIfLessThan(maxPooledLength, MinBlockSize);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(maxPooledLength, MaxPoolableLength);
         ArgumentOutOfRangeException.ThrowIfNegative(maxPerBucket);
@@ -120,12 +143,25 @@ internal sealed class AlignedBufferPool
         Bucket[] buckets = new Bucket[bucketCount];
         for (int i = 0; i < buckets.Length; i++)
         {
-            buckets[i] = new Bucket(
-                graded ? RetainedFor(maxPerBucket, MinBlockSize << i) : maxPerBucket);
+            int blockSize = MinBlockSize << i;
+            int floor = graded ? RetainedFor(maxPerBucket, blockSize) : maxPerBucket;
+            buckets[i] = new Bucket(floor, graded ? DemandFor(floor, blockSize) : floor);
         }
 
         _buckets = buckets;
     }
+
+    /// <summary>The most blocks the class serving <paramref name="blockSize"/> keeps when its demand asks.</summary>
+    /// <param name="floor">What it keeps whatever the demand.</param>
+    /// <param name="blockSize">The class's block size in bytes.</param>
+    /// <remarks>
+    /// A class of blocks larger than <see cref="LargeBlockSize"/> keeps its floor: a block that
+    /// large is a column chunk read once per column, not one of many held at once.
+    /// </remarks>
+    private static int DemandFor(int floor, int blockSize)
+        => blockSize > LargeBlockSize
+            ? floor
+            : (int)Math.Max(floor, Math.Min(DemandBlocks, DemandClassBudget / blockSize));
 
     /// <summary>A pool whose retention is bounded by bytes: each size class keeps its share of <paramref name="maxRetainedBytes"/>.</summary>
     /// <param name="maxRetainedBytes">The most bytes the pool keeps parked across every class.</param>
@@ -136,8 +172,8 @@ internal sealed class AlignedBufferPool
         long share = maxRetainedBytes / _buckets.Length;
         for (int i = 0; i < _buckets.Length; i++)
         {
-            long blocks = share / (MinBlockSize << i);
-            _buckets[i] = new Bucket((int)Math.Min(blocks, 64));
+            int blocks = (int)Math.Min(share / (MinBlockSize << i), 64);
+            _buckets[i] = new Bucket(blocks, blocks);
         }
     }
 
@@ -145,10 +181,20 @@ internal sealed class AlignedBufferPool
     public static AlignedBufferPool Shared { get; }
         = new AlignedBufferPool(32 * 1024 * 1024, 8, graded: true);
 
+    /// <summary>A pool graded as <see cref="Shared"/> is, with a budget of its own for the demand past the base retention.</summary>
+    /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
+    /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
+    /// <param name="demandBudget">Bytes the pool keeps parked past the base retention of its classes.</param>
+    internal static AlignedBufferPool Graded(int maxPooledLength, int maxPerBucket, long demandBudget) =>
+        new AlignedBufferPool(maxPooledLength, maxPerBucket, graded: true, demandBudget);
+
     /// <summary>Requests longer than this bypass the pool. A power of two.</summary>
     public int MaxPooledLength { get; }
 
-    /// <summary>Blocks retained per size class.</summary>
+    /// <summary>
+    /// Blocks retained per size class. <see cref="Shared"/> keeps more of a class while the blocks
+    /// of it rented at once outnumber that, within a budget in bytes per class and for the pool.
+    /// </summary>
     public int MaxPerBucket { get; }
 
     /// <summary>
@@ -183,6 +229,7 @@ internal sealed class AlignedBufferPool
         NativeSegmentOwner? parked = bucket.TryPop();
         if (parked is not null)
         {
+            Interlocked.Add(ref _parkedBytes, -capacity);
             parked.ResetForRent(length);
             return parked;
         }
@@ -230,6 +277,7 @@ internal sealed class AlignedBufferPool
                     break;
                 }
 
+                Interlocked.Add(ref _parkedBytes, -(MinBlockSize << i));
                 owner.FreeParked();
             }
         }
@@ -237,6 +285,11 @@ internal sealed class AlignedBufferPool
 
     /// <summary>Retains a released block, or refuses it when its bucket is full.</summary>
     /// <param name="owner">The block whose reference count just reached zero.</param>
+    /// <remarks>
+    /// Past its base retention a class keeps a block only while the pool as a whole is under its
+    /// demand budget; the budget is read before the push and counted after it, so
+    /// racing returns may overrun it by a block each, and no more.
+    /// </remarks>
     internal bool TryPark(NativeSegmentOwner owner)
     {
         int index = owner.BucketIndex;
@@ -245,7 +298,15 @@ internal sealed class AlignedBufferPool
             return false;
         }
 
-        return _buckets[index].TryPush(owner);
+        int blockSize = MinBlockSize << index;
+        bool widen = Volatile.Read(ref _parkedBytes) + blockSize <= _demandBudget;
+        if (!_buckets[index].TryPush(owner, widen))
+        {
+            return false;
+        }
+
+        Interlocked.Add(ref _parkedBytes, blockSize);
+        return true;
     }
 
     /// <summary>Number of blocks currently retained in the bucket serving <paramref name="length"/>.</summary>
@@ -286,10 +347,24 @@ internal sealed class AlignedBufferPool
     private sealed class Bucket
     {
         private readonly Lock _gate = new Lock();
-        private readonly NativeSegmentOwner?[] _items;
+        private readonly int _floor;
+        private readonly int _ceiling;
+        private NativeSegmentOwner?[] _items;
         private int _count;
 
-        internal Bucket(int capacity) => _items = new NativeSegmentOwner?[capacity];
+        /// <summary>
+        /// A class keeping <paramref name="floor"/> blocks, and up to <paramref name="ceiling"/>
+        /// while the pool's budget allows. What it parks is what was given back, so past its floor
+        /// it holds at most as many blocks as were rented at once.
+        /// </summary>
+        /// <param name="floor">Blocks kept whatever the budget.</param>
+        /// <param name="ceiling">Blocks kept at most.</param>
+        internal Bucket(int floor, int ceiling)
+        {
+            _floor = floor;
+            _ceiling = Math.Max(floor, ceiling);
+            _items = new NativeSegmentOwner?[floor];
+        }
 
         /// <summary>
         /// How many blocks the bucket holds, read without taking the gate.
@@ -318,13 +393,22 @@ internal sealed class AlignedBufferPool
             }
         }
 
-        internal bool TryPush(NativeSegmentOwner owner)
+        /// <summary>Parks a block given back, while the class holds fewer than it keeps.</summary>
+        /// <param name="owner">The block.</param>
+        /// <param name="widen">Whether the pool's budget lets the class keep more than its floor.</param>
+        /// <returns>Whether the block was parked.</returns>
+        internal bool TryPush(NativeSegmentOwner owner, bool widen)
         {
             lock (_gate)
             {
-                if (_count == _items.Length)
+                if (_count >= (widen ? _ceiling : _floor))
                 {
                     return false;
+                }
+
+                if (_count == _items.Length)
+                {
+                    Array.Resize(ref _items, Math.Min(Math.Max(_items.Length * 2, 8), _ceiling));
                 }
 
                 _items[_count++] = owner;
