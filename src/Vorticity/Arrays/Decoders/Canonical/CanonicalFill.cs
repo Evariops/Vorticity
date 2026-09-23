@@ -31,6 +31,46 @@ internal static class CanonicalFill
         ArrayDecodeContext context, DType dtype, int length, Validity validity) =>
         BuildZeroed(context, dtype, length, validity, depth: 1);
 
+    /// <summary>Whether <see cref="BuildZeroed(ArrayDecodeContext, DType, int, Validity)"/> can build <paramref name="dtype"/>.</summary>
+    /// <param name="dtype">The dtype.</param>
+    internal static bool CanBuild(DType dtype) => CanBuild(dtype, depth: 1);
+
+    private static bool CanBuild(DType dtype, int depth)
+    {
+        if (depth > VortexLimits.MaxDTypeDepth)
+        {
+            return false;
+        }
+
+        switch (dtype.Kind)
+        {
+            case DTypeKind.Null:
+            case DTypeKind.Bool:
+            case DTypeKind.Primitive:
+            case DTypeKind.Decimal:
+            case DTypeKind.Utf8:
+            case DTypeKind.Binary:
+                return true;
+            case DTypeKind.List:
+            case DTypeKind.FixedSizeList:
+                return CanBuild(dtype.ElementType, depth + 1);
+            case DTypeKind.Extension:
+                return CanBuild(dtype.StorageType, depth + 1);
+            case DTypeKind.Struct:
+                for (int i = 0; i < dtype.FieldCount; i++)
+                {
+                    if (!CanBuild(dtype.GetField(i), depth + 1))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            default:
+                return false;
+        }
+    }
+
     private static int BuildZeroed(
         ArrayDecodeContext context, DType dtype, int length, Validity validity, int depth)
     {

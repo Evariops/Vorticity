@@ -25,14 +25,17 @@ internal readonly struct FieldMask
     private const byte KindAll = 0;
     private const byte KindEmpty = 1;
     private const byte KindSubset = 2;
+    private const byte KindSingle = 3;
 
     private readonly FieldMaskNode? _node;
+    private readonly int _field;
     private readonly byte _kind;
 
-    private FieldMask(byte kind, FieldMaskNode? node)
+    private FieldMask(byte kind, FieldMaskNode? node, int field = 0)
     {
         _kind = kind;
         _node = node;
+        _field = field;
     }
 
     /// <summary>Every field, recursively. This is also <c>default(FieldMask)</c>.</summary>
@@ -40,6 +43,15 @@ internal readonly struct FieldMask
 
     /// <summary>No field at all. A struct read under it still yields its own rows and validity.</summary>
     public static FieldMask Empty => new FieldMask(KindEmpty, null);
+
+    /// <summary>One field of this level, whole, and nothing else: held in the mask itself, with no node.</summary>
+    /// <param name="fieldIndex">0-based field index.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="fieldIndex"/> is negative.</exception>
+    public static FieldMask Single(int fieldIndex)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(fieldIndex);
+        return new FieldMask(KindSingle, null, fieldIndex);
+    }
 
     /// <summary><see langword="true"/> when every field is wanted, recursively.</summary>
     public bool IsAll => _kind == KindAll;
@@ -64,6 +76,11 @@ internal readonly struct FieldMask
             return false;
         }
 
+        if (_kind == KindSingle)
+        {
+            return fieldIndex == _field;
+        }
+
         return _node!.IndexOf(fieldIndex) >= 0;
     }
 
@@ -82,6 +99,11 @@ internal readonly struct FieldMask
             return Empty;
         }
 
+        if (_kind == KindSingle)
+        {
+            return fieldIndex == _field ? All : Empty;
+        }
+
         int slot = _node!.IndexOf(fieldIndex);
         return slot < 0 ? Empty : _node.ChildAt(slot);
     }
@@ -94,6 +116,7 @@ internal readonly struct FieldMask
     {
         KindAll => -1,
         KindEmpty => 0,
+        KindSingle => 1,
         _ => _node!.Count,
     };
 
@@ -102,6 +125,11 @@ internal readonly struct FieldMask
     /// <exception cref="ArgumentOutOfRangeException">The mask is <see cref="All"/>, or the index is out of range.</exception>
     public int GetNamedField(int index)
     {
+        if (_kind == KindSingle && index == 0)
+        {
+            return _field;
+        }
+
         if (_kind != KindSubset)
         {
             throw new ArgumentOutOfRangeException(
@@ -119,9 +147,12 @@ internal readonly struct FieldMask
 internal sealed class FieldMaskNode
 {
     private readonly int[] _fields;
-    private readonly FieldMask[] _children;
+    private readonly FieldMask[]? _children;
 
-    internal FieldMaskNode(int[] fields, FieldMask[] children)
+    /// <summary>The wanted fields, ascending and distinct, and each one's mask.</summary>
+    /// <param name="fields">The field indices.</param>
+    /// <param name="children">One mask per field, or null when every field is wanted whole.</param>
+    internal FieldMaskNode(int[] fields, FieldMask[]? children)
     {
         _fields = fields;
         _children = children;
@@ -139,7 +170,7 @@ internal sealed class FieldMaskNode
         return _fields[index];
     }
 
-    internal FieldMask ChildAt(int slot) => _children[slot];
+    internal FieldMask ChildAt(int slot) => _children is null ? FieldMask.All : _children[slot];
 
     /// <summary>Binary search: the field list is built ascending and distinct.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -314,12 +345,28 @@ internal sealed class FieldMaskBuilder
                 return FieldMask.Empty;
             }
 
+            // The common masks hold no more than they say: one whole field is the mask alone, and
+            // fields all wanted whole need no mask of their own each.
+            bool wholes = true;
+            for (int i = 0; i < count; i++)
+            {
+                wholes &= _children[i].All;
+            }
+
+            if (wholes && count == 1)
+            {
+                return FieldMask.Single(_fields[0]);
+            }
+
             int[] fields = new int[count];
-            FieldMask[] masks = new FieldMask[count];
+            FieldMask[]? masks = wholes ? null : new FieldMask[count];
             for (int i = 0; i < count; i++)
             {
                 fields[i] = _fields[i];
-                masks[i] = _children[i].Build();
+                if (masks is not null)
+                {
+                    masks[i] = _children[i].Build();
+                }
             }
 
             return FieldMask.Subset(new FieldMaskNode(fields, masks));

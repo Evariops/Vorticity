@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Threading.Tasks.Sources;
 
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -572,9 +573,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
             else
             {
-                root = ExecuteWithTake(lane.Context, _pending, out bool proven);
-                lane.ReadRoot = root;
-                root = ApplyFilter(lane, root, proven || ZoneProven(_pending));
+                root = ExecuteFiltered(lane, _pending);
             }
 
             RecordBatch batch = Deliver(lane, root, _pending.Start);
@@ -590,25 +589,180 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>
-    /// Executes the split, pushing the take's rows down the layout tree rather than gathering them
-    /// back out afterwards -- <see cref="SplitExecution.Execute"/>, the one place that does it,
-    /// shared with the scan's terminals so that a count and a batch cannot disagree on which rows
-    /// a split yields.
+    /// Executes the split and applies the filter, in two passes when the filter can be answered on
+    /// its own -- by its column's encoding, or evaluated over its own columns -- and else in one, the
+    /// filter then gathering the rows it keeps out of every column. The take's rows are pushed down
+    /// the layout tree by <see cref="SplitExecution.Execute"/>, the one place that does it, shared
+    /// with the scan's terminals so that a count and a batch cannot disagree on which rows a split
+    /// yields.
     /// </summary>
-    /// <param name="context">The lane's context.</param>
-    /// <param name="split">The rows this batch covers.</param>
-    /// <param name="proven">
-    /// Set when the split was executed over rows an encoding already selected, so the filter has
-    /// nothing left to decide.
-    /// </param>
-    private int ExecuteWithTake(ScanContext context, RowRange split, out bool proven)
+    private int ExecuteFiltered(Lane lane, RowRange split)
     {
-        proven = false;
-        ComparisonExpr? pushable = _push == PushDeclined ? null : Pushable();
+        if (_push != PushDeclined && Pushable() is { } pushable)
+        {
+            int answered = ExecutePushed(lane, split, pushable);
+            if (answered >= 0)
+            {
+                return answered;
+            }
+        }
 
-        return pushable is null
-            ? SplitExecution.Execute(context, _tree, in _mask, split, _take)
-            : ExecutePushed(context, split, pushable, out proven);
+        if (FilterReadsAlone(out FieldMask columns))
+        {
+            if (!ZoneProven(split))
+            {
+                return ExecuteLate(lane, split, in columns);
+            }
+
+            int whole = SplitExecution.Execute(lane.Context, _tree, in _mask, split, null);
+            lane.ReadRoot = whole;
+            return ApplyFilter(lane, whole, proven: true);
+        }
+
+        int root = SplitExecution.Execute(lane.Context, _tree, in _mask, split, _take);
+        lane.ReadRoot = root;
+        return ApplyFilter(lane, root, ZoneProven(split));
+    }
+
+    /// <summary>Whether the filter is evaluated on its own columns, read in a pass of their own.</summary>
+    /// <param name="columns">The filter's columns.</param>
+    /// <remarks>
+    /// Not while a comparison may still be answered by its column's encoding, which decodes nothing
+    /// for the filter at all, nor with a take, whose rows are pushed down already.
+    /// </remarks>
+    private bool FilterReadsAlone(out FieldMask columns)
+    {
+        if (_evaluator is not { } evaluator || _take is not null || _filterProven ||
+            (_push != PushDeclined && Pushable() is not null))
+        {
+            columns = default;
+            return false;
+        }
+
+        return evaluator.TryOwnColumns(_tree.Root.DType, Shape, out columns);
+    }
+
+    /// <summary>The dtype of the batches: the file's own when the projection keeps everything.</summary>
+    private DType Shape => _keep.IsAll ? _tree.Root.DType : _schema;
+
+
+    /// <summary>
+    /// The split in two passes: the filter's columns, whole, then the projection over the rows the
+    /// filter kept, and nothing more when it kept none.
+    /// </summary>
+    /// <remarks>
+    /// A column both passes read is decoded once when its chunk spans several batches: the first
+    /// pass retains the window it decodes, and the second slices or gathers it there. A chunk read
+    /// whole, or through a selection, retains nothing, and the second pass decodes the kept rows of
+    /// it again: a cost bounded by the rows kept, and one only a chunk no larger than its batch
+    /// pays in full, which the writer cuts only for tables so wide that a filter column is a
+    /// sliver of what the projection reads.
+    /// </remarks>
+    private int ExecuteLate(Lane lane, RowRange split, in FieldMask columns)
+    {
+        ScanContext context = lane.Context;
+        CanonicalArena arena = context.Canonical;
+
+        // A filter of one column reads that column alone, not a struct of it, whose dtype would be
+        // derived per scan.
+        bool alone = columns.NamedFieldCount == 1;
+        int first;
+        if (alone)
+        {
+            LayoutNode column = _tree.Root.GetChild(columns.GetNamedField(0));
+            FieldMask whole = FieldMask.All;
+            first = LayoutReaderTable.Require(in column).Execute(in column, split, in whole, context);
+        }
+        else
+        {
+            first = SplitExecution.Execute(context, _tree, in columns, split, null);
+        }
+
+        int rows = arena.GetNode(first).Length;
+        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+
+        // Room for every row: the selection writes a slot per row before deciding.
+        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        try
+        {
+            Span<byte> window = states.AsSpan(0, rows);
+            if (alone)
+            {
+                _evaluator!.EvaluateColumn(arena, first, rows, window);
+            }
+            else
+            {
+                _evaluator!.Evaluate(arena, first, rows, window);
+            }
+
+            int count = CanonicalFilter.Select(window, kept);
+            return ExecuteKept(lane, split, kept, count, rows);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(states);
+            ArrayPool<int>.Shared.Return(kept);
+        }
+    }
+
+    /// <summary>
+    /// The projection over the rows the filter kept, the filter answered already: nothing read when
+    /// it kept none, the split read whole when it kept all, read whole and gathered when it kept
+    /// most, and read over the kept rows alone otherwise.
+    /// </summary>
+    /// <param name="lane">The lane the split decodes in.</param>
+    /// <param name="split">The split.</param>
+    /// <param name="kept">The kept rows, in the split's space; moved into the file's when pushed down.</param>
+    /// <param name="count">How many rows were kept.</param>
+    /// <param name="rows">The split's rows.</param>
+    /// <returns>The batch's root.</returns>
+    private int ExecuteKept(Lane lane, RowRange split, int[] kept, int count, int rows)
+    {
+        ScanContext context = lane.Context;
+        CanonicalArena arena = context.Canonical;
+        lane.Selection = default;
+        lane.Selected = 0;
+        int root;
+        if (count == 0)
+        {
+            root = CanonicalFill.BuildZeroed(context.Decode, Shape, 0, Validity.NonNullable);
+            lane.ReadRoot = root;
+            return root;
+        }
+
+        if (count == rows)
+        {
+            root = SplitExecution.Execute(context, _tree, in _keep, split, null);
+        }
+        else if (_evaluator!.KeepsMost(count, rows))
+        {
+            // A column read over most of its rows costs more than read whole and gathered, which
+            // touches each row once in a kernel's stride.
+            root = SplitExecution.Execute(context, _tree, in _keep, split, null);
+            root = CanonicalFilter.Apply(arena, root, kept.AsSpan(0, count));
+        }
+        else
+        {
+            // The projection reads the selection in the root's row space, which is the file's.
+            int origin = (int)split.Start;
+            for (int i = 0; i < count; i++)
+            {
+                kept[i] += origin;
+            }
+
+            ScanContext.SavedSelection saved = context.ExchangeSelection(kept, count);
+            try
+            {
+                root = SplitExecution.Execute(context, _tree, in _keep, split, null);
+            }
+            finally
+            {
+                context.RestoreSelection(in saved);
+            }
+        }
+
+        lane.ReadRoot = root;
+        return ProjectionTrim.Apply(arena, root, in _keep, in _keep, _schema);
     }
 
     /// <summary>Nobody has asked an encoding yet.</summary>
@@ -644,19 +798,20 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             : null;
 
     /// <summary>
-    /// Offers the comparison to the predicate's column, and reads the rest of the split over the
-    /// rows it selected.
+    /// Offers the comparison to the predicate's column and, when its encoding answers, reads the
+    /// projection over the rows it kept.
     /// </summary>
+    /// <returns>The batch's root, or -1 when the encoding declined.</returns>
     /// <remarks>
     /// Two passes, and the first one reads a single column. When the encoding answers, the second
-    /// pass decodes the projection over the surviving rows alone -- which is the take's own pushed
-    /// selection, reused -- and the filter has nothing left to do. When it declines, the first pass
-    /// has decoded that one column for nothing, once, and no split of this scan asks again.
+    /// is the one a filter evaluated over its own columns has, and the filter has nothing left to
+    /// do. When it declines, the first pass has decoded that one column for nothing, once, and no
+    /// split of this scan asks again.
     /// </remarks>
-    private int ExecutePushed(
-        ScanContext context, RowRange split, ComparisonExpr pushable, out bool proven)
+    private int ExecutePushed(Lane lane, RowRange split, ComparisonExpr pushable)
     {
-        proven = false;
+        ScanContext context = lane.Context;
+
         // Resolved against the layout's struct and not against the batch's schema, which is the
         // keep projection's: a filter-only column is absent from it, and a projected one can sit at
         // another index. A mask is a path through the file's fields, so the file's dtype is the
@@ -667,10 +822,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         if (field < 0 || !_mask.Includes(field))
         {
             _push = PushDeclined;
-            return SplitExecution.Execute(context, _tree, in _mask, split, _take);
+            return -1;
         }
 
-        FieldMask only = _evaluator!.OnlyField(field);
+        FieldMask only = FieldMask.Single(field);
         (byte[]? Field, ComparisonOp Op, FilterLiteral Literal) saved =
             context.ExchangePushedPredicate(name, pushable.Op, pushable.Value);
         int answer;
@@ -686,41 +841,34 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         if (!context.PredicateAnswered)
         {
             _push = PushDeclined;
-            return SplitExecution.Execute(context, _tree, in _mask, split, _take);
+            return -1;
         }
 
         _push = PushAnswered;
         context.PredicateAnswered = false;
 
         int rows = (int)(split.End - split.Start);
-        int[] selected = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
         try
         {
-            int count = Selected(context, answer, split.Start, selected);
-            ScanContext.SavedSelection previous = context.ExchangeSelection(selected, count);
-            try
-            {
-                proven = true;
-                return SplitExecution.Execute(context, _tree, in _mask, split, null);
-            }
-            finally
-            {
-                context.RestoreSelection(in previous);
-            }
+            return ExecuteKept(lane, split, kept, Selected(context, answer, kept), rows);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(selected);
+            ArrayPool<int>.Shared.Return(kept);
         }
     }
 
-    /// <summary>Reads the rows an answered comparison selects, in the file's coordinates.</summary>
+    /// <summary>Reads the rows an answered comparison selects, in the split's space.</summary>
     /// <param name="context">The context whose arena holds the answer.</param>
     /// <param name="answer">The struct the first pass produced, holding one boolean column.</param>
-    /// <param name="start">The split's first row, which the selection is expressed against.</param>
-    /// <param name="into">Receives the selected rows.</param>
+    /// <param name="into">Receives the selected rows; room for every row of the answer.</param>
     /// <returns>How many were selected.</returns>
-    private static int Selected(ScanContext context, int answer, long start, Span<int> into)
+    /// <remarks>
+    /// No branch on a row's answer: each row is written at the next slot and kept by its own bit,
+    /// true and valid.
+    /// </remarks>
+    private static int Selected(ScanContext context, int answer, Span<int> into)
     {
         CanonicalArena arena = context.Canonical;
         CanonicalNode node = arena.GetNode(answer);
@@ -731,16 +879,36 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         ReadOnlySpan<byte> bits = node.Bits.Span;
         int offset = node.BitOffset;
+        int rows = node.Length;
+        Span<int> slots = into[..rows];
         Arrays.Decoders.Canonical.ValidityMask valid =
             Arrays.Decoders.Canonical.ValidityMask.From(arena, node.Validity);
+        if (valid.AllInvalid)
+        {
+            return 0;
+        }
+
         int count = 0;
-        for (int row = 0; row < node.Length; row++)
+        if (valid.AllValid)
+        {
+            for (int row = 0; row < rows; row++)
+            {
+                int bit = offset + row;
+                slots[count] = row;
+                count += (bits[bit >> 3] >> (bit & 7)) & 1;
+            }
+
+            return count;
+        }
+
+        ReadOnlySpan<byte> validBits = valid.Bits;
+        int validOffset = valid.BitOffset;
+        for (int row = 0; row < rows; row++)
         {
             int bit = offset + row;
-            if ((bits[bit >> 3] & (1 << (bit & 7))) != 0 && valid.IsValid(row))
-            {
-                into[count++] = (int)start + row;
-            }
+            int validBit = validOffset + row;
+            slots[count] = row;
+            count += (bits[bit >> 3] >> (bit & 7)) & (validBits[validBit >> 3] >> (validBit & 7)) & 1;
         }
 
         return count;
@@ -1050,9 +1218,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 return ExecuteSelected(lane, rows);
             }
 
-            int root = ExecuteWithTake(context, rows, out bool proven);
-            lane.ReadRoot = root;
-            return ApplyFilter(lane, root, proven || ZoneProven(rows));
+            return ExecuteFiltered(lane, rows);
         }
         catch
         {

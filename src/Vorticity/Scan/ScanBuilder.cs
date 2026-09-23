@@ -1176,39 +1176,58 @@ internal sealed class ScanBuilder
     /// <summary>Every column a filter reads, in the order it names them.</summary>
     internal static void FieldsOf(VortexExpr filter, List<FieldExpr> into)
     {
+        Collector collector = new Collector(into);
+        VisitFields(filter, ref collector);
+    }
+
+    /// <summary>What a walk over the columns a filter reads does with each one.</summary>
+    internal interface IFieldVisitor
+    {
+        /// <summary>Takes one column.</summary>
+        /// <param name="field">The column, as the filter names it.</param>
+        /// <returns>Whether the walk goes on.</returns>
+        bool Visit(FieldExpr field);
+    }
+
+    /// <summary>Hands every column a filter reads to <paramref name="visitor"/>, in the order it names them.</summary>
+    /// <param name="filter">The filter.</param>
+    /// <param name="visitor">What takes each column.</param>
+    /// <returns>Whether the walk went to its end.</returns>
+    internal static bool VisitFields<TVisitor>(VortexExpr filter, ref TVisitor visitor)
+        where TVisitor : IFieldVisitor, allows ref struct
+    {
         switch (filter)
         {
             case FieldExpr field:
-                into.Add(field);
-                return;
+                return visitor.Visit(field);
             case ComparisonExpr comparison:
-                into.Add(comparison.Field);
-                return;
+                return visitor.Visit(comparison.Field);
             case ColumnComparisonExpr columns:
-                into.Add(columns.Left);
-                into.Add(columns.Right);
-                return;
+                return visitor.Visit(columns.Left) && visitor.Visit(columns.Right);
             case NullCheckExpr check:
-                into.Add(check.Field);
-                return;
+                return visitor.Visit(check.Field);
             case InExpr membership:
-                into.Add(membership.Field);
-                return;
+                return visitor.Visit(membership.Field);
             case StringMatchExpr match:
-                into.Add(match.Field);
-                return;
+                return visitor.Visit(match.Field);
             case ListContainsExpr contains:
-                into.Add(contains.Field);
-                return;
+                return visitor.Visit(contains.Field);
             case NotExpr negation:
-                FieldsOf(negation.Operand, into);
-                return;
+                return VisitFields(negation.Operand, ref visitor);
             case LogicalExpr logical:
-                FieldsOf(logical.Left, into);
-                FieldsOf(logical.Right, into);
-                return;
+                return VisitFields(logical.Left, ref visitor) && VisitFields(logical.Right, ref visitor);
             default:
-                return;
+                return true;
+        }
+    }
+
+    /// <summary>Lists the columns in the order the filter names them.</summary>
+    private readonly struct Collector(List<FieldExpr> into) : IFieldVisitor
+    {
+        public bool Visit(FieldExpr field)
+        {
+            into.Add(field);
+            return true;
         }
     }
 

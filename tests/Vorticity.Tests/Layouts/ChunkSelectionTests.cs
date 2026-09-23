@@ -115,4 +115,37 @@ public sealed class ChunkSelectionTests
             }
         }
     }
+
+    [Fact]
+    public void ASelectionInsideTheChunkMovesWholeIntoItsRows()
+    {
+        int[] selection = new int[37];
+        for (int i = 0; i < selection.Length; i++)
+        {
+            selection[i] = 1_000 + (i * 7);
+        }
+
+        int[] into = new int[selection.Length];
+        int count = ChunkedLayoutReader.Rebase(selection, 1_000, 500, into);
+
+        Assert.Equal(selection.Length, count);
+        for (int i = 0; i < count; i++)
+        {
+            Assert.Equal(i * 7, into[i]);
+        }
+    }
+
+    [Fact]
+    public void ASelectionAcrossChunksKeepsTheRowsOfThisOneInTheirOrder()
+    {
+        // Rows before the chunk, at both of its ends, past it, and inside it out of order: nine
+        // of them, so the vector pass meets a row outside and hands the rows to the row walk.
+        int[] selection = [5, 1_499, 999, 1_000, 1_500, 1_200, 3_000, 1_100, 1_001];
+        int[] into = new int[selection.Length];
+
+        int count = ChunkedLayoutReader.Rebase(selection, 1_000, 500, into);
+
+        Assert.Equal([499, 0, 200, 100, 1], into[..count]);
+        Assert.Equal(0, ChunkedLayoutReader.Rebase(selection, (long)int.MaxValue + 1, 500, into));
+    }
 }

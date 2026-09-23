@@ -1,5 +1,7 @@
 using System;
 using System.Buffers;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -200,21 +202,11 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context, long start)
     {
         ReadOnlySpan<int> selection = context.Selection;
-        long end = start + chunk.RowCount;
 
         int[] rebased = ArrayPool<int>.Shared.Rent(Math.Max(selection.Length, 1));
         try
         {
-            int count = 0;
-            for (int i = 0; i < selection.Length; i++)
-            {
-                long row = selection[i];
-                if (row >= start && row < end)
-                {
-                    rebased[count++] = (int)(row - start);
-                }
-            }
-
+            int count = Rebase(selection, start, chunk.RowCount, rebased);
             ScanContext.SavedSelection saved = context.ExchangeSelection(rebased, count);
             try
             {
@@ -229,6 +221,60 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         {
             ArrayPool<int>.Shared.Return(rebased);
         }
+    }
+
+    /// <summary>The selected rows that fall in a chunk, in the chunk's own row space.</summary>
+    /// <param name="selection">The rows, in the chunked node's space.</param>
+    /// <param name="start">The chunk's first row.</param>
+    /// <param name="rows">The chunk's row count.</param>
+    /// <param name="into">Room for every row of <paramref name="selection"/>.</param>
+    /// <returns>How many fall in the chunk.</returns>
+    /// <remarks>
+    /// Every column of a split walks the same selection, so the walk has no branch on a row: the
+    /// rows are moved a vector at a time and checked all at once, which is the whole answer when
+    /// the split lies in one chunk, and otherwise each row is written at the next slot and kept by
+    /// its own verdict.
+    /// </remarks>
+    internal static int Rebase(ReadOnlySpan<int> selection, long start, long rows, Span<int> into)
+    {
+        if (start > int.MaxValue)
+        {
+            return 0;
+        }
+
+        int origin = (int)start;
+        uint limit = (uint)Math.Min(rows, uint.MaxValue);
+        Span<int> slots = into[..selection.Length];
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && selection.Length >= Vector128<int>.Count)
+        {
+            Vector128<int> shift = Vector128.Create(origin);
+            Vector128<uint> bound = Vector128.Create(limit);
+            Vector128<uint> outside = Vector128<uint>.Zero;
+            ref int from = ref MemoryMarshal.GetReference(selection);
+            ref int to = ref MemoryMarshal.GetReference(slots);
+            for (; i <= selection.Length - Vector128<int>.Count; i += Vector128<int>.Count)
+            {
+                Vector128<int> local = Vector128.LoadUnsafe(ref from, (nuint)i) - shift;
+                local.StoreUnsafe(ref to, (nuint)i);
+                outside |= Vector128.GreaterThanOrEqual(local.AsUInt32(), bound);
+            }
+
+            if (outside != Vector128<uint>.Zero)
+            {
+                i = 0;
+            }
+        }
+
+        int count = i;
+        for (; i < selection.Length; i++)
+        {
+            int local = selection[i] - origin;
+            slots[count] = local;
+            count += (uint)local < limit ? 1 : 0;
+        }
+
+        return count;
     }
 
     /// <summary>

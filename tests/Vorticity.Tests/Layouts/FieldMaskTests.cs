@@ -117,4 +117,46 @@ public sealed class FieldMaskTests
         FieldMask mask = new FieldMaskBuilder().IncludeField(0).Build();
         Assert.Throws<ArgumentOutOfRangeException>(() => mask.GetNamedField(1));
     }
+
+    [Fact]
+    public void OneWholeFieldReadsAsASubsetOfOne()
+    {
+        FieldMask built = new FieldMaskBuilder().IncludeField(4).Build();
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        FieldMask single = FieldMask.Single(4);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(0, allocated);
+        foreach (FieldMask mask in new[] { built, single })
+        {
+            Assert.False(mask.IsAll);
+            Assert.False(mask.IsEmpty);
+            Assert.True(mask.Includes(4));
+            Assert.False(mask.Includes(3));
+            Assert.False(mask.Includes(5));
+            Assert.True(mask.Descend(4).IsAll);
+            Assert.True(mask.Descend(0).IsEmpty);
+            Assert.Equal(1, mask.NamedFieldCount);
+            Assert.Equal(4, mask.GetNamedField(0));
+            Assert.Throws<ArgumentOutOfRangeException>(() => mask.GetNamedField(1));
+        }
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => FieldMask.Single(-1));
+    }
+
+    [Fact]
+    public void FieldsWantedWholeReadWholeAndTheOthersKeepTheirPaths()
+    {
+        FieldMask wholes = new FieldMaskBuilder().IncludeField(1).IncludeField(3).Build();
+        Assert.True(wholes.Descend(1).IsAll);
+        Assert.True(wholes.Descend(3).IsAll);
+        Assert.True(wholes.Descend(2).IsEmpty);
+
+        FieldMask mixed = new FieldMaskBuilder().IncludeField(1).Include([3, 2]).Build();
+        Assert.True(mixed.Descend(1).IsAll);
+        Assert.False(mixed.Descend(3).IsAll);
+        Assert.True(mixed.Descend(3).Includes(2));
+        Assert.False(mixed.Descend(3).Includes(0));
+    }
 }

@@ -597,32 +597,29 @@ internal sealed class FlatLayoutReader : LayoutReader
                     return gathered;
                 }
 
-                if (!context.TryGetRetained(key, out CanonicalArena held, out int retained))
-                {
-                    Decoded(context, total);
-                    held = context.BeginRetainedDecode();
-                    retained = -1;
-                    try
-                    {
-                        retained = context.Decode.DecodeRoot(in chunkRoot, node.DType, total, context.KeepEncodings);
-                    }
-                    finally
-                    {
-                        context.EndRetainedDecode(retained);
-                    }
-                }
-
-                return Gather(held, retained, in fields, context, total);
+                return Gather(Retained(in chunkRoot, in node, context, total, key, out int retained), retained, in fields, context, total);
             }
 
             // A selection covering most of the rows it spans is a range to the encoding, even one
             // that takes rows without decoding: decoding the span and gathering out of it touches
             // each row once in a kernel's stride, where the selective route pays a positioned read
-            // of every row. The rows a partly pruned chunk wants are such a selection, contiguous.
-            if (Dense(context) && Windowed(context, total) &&
-                TryWindowSelected(in node, rows, in fields, context, total, length, mayDecode: true, ref chunkRoot, ref loaded, out gathered))
+            // of every row. The rows a partly pruned chunk wants are such a selection, contiguous,
+            // and so are the rows a filter keeps of most of its batches. With no window smaller
+            // than the chunk, the chunk is the window: decoded once, retained for the batches after
+            // this one, as an unselected batch would have it.
+            if (Dense(context))
             {
-                return gathered;
+                if (Windowed(context, total))
+                {
+                    if (TryWindowSelected(in node, rows, in fields, context, total, length, mayDecode: true, ref chunkRoot, ref loaded, out gathered))
+                    {
+                        return gathered;
+                    }
+                }
+                else
+                {
+                    return Gather(Retained(in chunkRoot, in node, context, total, key, out int whole), whole, in fields, context, total);
+                }
             }
 
             // The specialized route re-establishes its own invariants once per batch, and this is
@@ -900,6 +897,37 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// written out as indices.
     /// </para>
     /// </remarks>
+    /// <summary>The chunk decoded whole: found retained, or decoded now into the arena that retains it.</summary>
+    /// <param name="root">The chunk's parsed root.</param>
+    /// <param name="node">The flat layout node.</param>
+    /// <param name="context">The scan context.</param>
+    /// <param name="total">The node's row count.</param>
+    /// <param name="key">The chunk's retention key.</param>
+    /// <param name="retained">The chunk's node in the returned arena.</param>
+    /// <returns>The arena holding the chunk.</returns>
+    private static CanonicalArena Retained(
+        in ArrayNode root, in LayoutNode node, ScanContext context, int total, long key, out int retained)
+    {
+        if (context.TryGetRetained(key, out CanonicalArena held, out retained))
+        {
+            return held;
+        }
+
+        Decoded(context, total);
+        held = context.BeginRetainedDecode();
+        retained = -1;
+        try
+        {
+            retained = context.Decode.DecodeRoot(in root, node.DType, total, context.KeepEncodings);
+        }
+        finally
+        {
+            context.EndRetainedDecode(retained);
+        }
+
+        return held;
+    }
+
     private static int Gather(
         CanonicalArena held, int retained, in FieldMask fields, ScanContext context, int total)
     {

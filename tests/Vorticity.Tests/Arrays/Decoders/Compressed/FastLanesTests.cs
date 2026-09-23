@@ -163,6 +163,88 @@ public sealed class FastLanesTests
     }
 
     [Fact]
+    public void GatheredRowsAreTheValuesPackedAtThemWhateverTheirShare()
+    {
+        foreach (int width in new[] { 1, 3, 7 })
+        {
+            AssertGatherRows<byte>(width);
+        }
+
+        foreach (int width in new[] { 1, 9, 15 })
+        {
+            AssertGatherRows<ushort>(width);
+        }
+
+        foreach (int width in new[] { 1, 12, 31 })
+        {
+            AssertGatherRows<uint>(width);
+        }
+
+        foreach (int width in new[] { 1, 12, 17, 63 })
+        {
+            AssertGatherRows<ulong>(width);
+        }
+    }
+
+    private static void AssertGatherRows<T>(int bitWidth)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        const int blocks = 4;
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        int words = FastLanes.BlockSize / elementBits * bitWidth;
+        T[] values = new T[blocks * FastLanes.BlockSize];
+        T[] packed = new T[blocks * words];
+        Random random = new Random(bitWidth * 131 + elementBits);
+        ulong mask = bitWidth == 64 ? ulong.MaxValue : (1UL << bitWidth) - 1;
+        for (int i = 0; i < values.Length; i++)
+        {
+            values[i] = T.CreateTruncating((ulong)random.NextInt64() & mask);
+        }
+
+        for (int b = 0; b < blocks; b++)
+        {
+            FastLanes.PackBlock<T>(
+                values.AsSpan(b * FastLanes.BlockSize, FastLanes.BlockSize), bitWidth, packed.AsSpan(b * words, words));
+        }
+
+        // Sparse rows read one by one; dense rows read out of their block unpacked whole; a block
+        // dense, one skipped, one sparse, one whole; the dense rows out of order; rows shifted by
+        // an offset into the first block.
+        int[] sparse = [3, 700, 1030, 2100, 4000];
+        int[] dense = Rows(0, 4096, row => row % 3 != 0);
+        int[] mixed = [.. Rows(0, 1024, row => row % 2 == 0), 2050, 2051, 2900, .. Rows(3072, 4096, _ => true)];
+        int[] unordered = [.. dense];
+        new Random(7).Shuffle(unordered);
+        int[] shifted = Rows(0, 4096 - 100, row => row % 2 == 0);
+
+        foreach ((int[] wanted, int offset) in new[] { (sparse, 0), (dense, 0), (mixed, 0), (unordered, 0), (shifted, 100) })
+        {
+            T[] got = new T[wanted.Length];
+            FastLanes.GatherRows<T>(packed, bitWidth, offset, wanted, got);
+            for (int i = 0; i < wanted.Length; i++)
+            {
+                Assert.True(
+                    values[wanted[i] + offset] == got[i],
+                    $"{typeof(T).Name} at {bitWidth} bits, offset {offset}: row {wanted[i]} gathered {got[i]}, packed {values[wanted[i] + offset]}");
+            }
+        }
+    }
+
+    private static int[] Rows(int from, int to, Func<int, bool> keep)
+    {
+        System.Collections.Generic.List<int> rows = [];
+        for (int row = from; row < to; row++)
+        {
+            if (keep(row))
+            {
+                rows.Add(row);
+            }
+        }
+
+        return [.. rows];
+    }
+
+    [Fact]
     public void UnpackWithZeroBitWidthProducesZeros()
     {
         uint[] output = new uint[FastLanes.BlockSize];

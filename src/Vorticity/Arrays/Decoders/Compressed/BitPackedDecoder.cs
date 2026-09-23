@@ -96,7 +96,9 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         Span<byte> destination = default;
         if (total != 0)
         {
-            output = CompressedValues.Allocate(context, total, width, Id, out destination);
+            // Uninitialized: the gather writes every wanted value, and clears the span itself at
+            // bit width 0. Patches only overwrite.
+            output = CompressedValues.AllocateUninitialized(context, total, width, Id, out destination);
             Gather(packed.Span, bitWidth, offset, width, wanted, destination);
         }
 
@@ -249,21 +251,25 @@ internal sealed class BitPackedDecoder : ArrayDecoder
         int elementsPerBlock = FastLanes.BlockByteLength(bitWidth) / Unsafe.SizeOf<T>();
         int elementBits = Unsafe.SizeOf<T>() * 8;
         int lanes = FastLanes.BlockSize / elementBits;
+        ReadOnlySpan<int> rowOf = FastLanes.PackedRowTable(elementBits);
+        ReadOnlySpan<int> laneOf = FastLanes.PackedLaneTable(elementBits);
 
-        for (int i = 0; i < wanted.Length; i++)
+        if (bitWidth == elementBits)
         {
-            int encoded = wanted[i] + offset;
-            int block = encoded / FastLanes.BlockSize;
-            int within = encoded - (block * FastLanes.BlockSize);
-            ReadOnlySpan<T> source = packed.Slice(block * elementsPerBlock, elementsPerBlock);
-
-            // W == T is the copy-through case the bulk kernel branches out too: the packed word at
+            // The copy-through case the bulk kernel branches out too: the packed word at
             // (row, lane) IS the value, with no shift and no mask.
-            destination[i] = bitWidth == elementBits
-                ? source[(lanes * FastLanes.PackedRowTable(elementBits)[within])
-                    + FastLanes.PackedLaneTable(elementBits)[within]]
-                : FastLanes.UnpackOne(source, bitWidth, within);
+            for (int i = 0; i < wanted.Length; i++)
+            {
+                int encoded = wanted[i] + offset;
+                int block = encoded / FastLanes.BlockSize;
+                int within = encoded - (block * FastLanes.BlockSize);
+                destination[i] = packed[(block * elementsPerBlock) + (lanes * rowOf[within]) + laneOf[within]];
+            }
+
+            return;
         }
+
+        FastLanes.GatherRows(packed, bitWidth, offset, wanted, destination);
     }
 
     private static void Unpack(

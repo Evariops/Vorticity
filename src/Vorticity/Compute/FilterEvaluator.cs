@@ -48,15 +48,26 @@ internal sealed class FilterEvaluator
     private volatile Prepared[]? _prepared;
 
     /// <summary>
-    /// The mask that reads only the column a pushed comparison names, built by the first split
-    /// that pushes it rather than by every split: it is a few objects, and a split must allocate none.
+    /// The columns the filter reads, when it can be evaluated on them alone, planned by the first
+    /// split that asks rather than by every split.
     /// </summary>
     /// <remarks>
-    /// One reference, published whole, because the lanes of a scan race here: a field index and
-    /// a mask held apart could be read half-written, and a mask read as its default reads every
-    /// column, which the pushed pass must not.
+    /// One reference, published whole, because the lanes of a scan race here: a mask read half
+    /// written, or as its default, reads every column, which the filter's own pass must not.
     /// </remarks>
-    private volatile PushedField? _pushed;
+    private volatile FilterColumns? _columns;
+
+    /// <summary>The share of a split's rows the filter kept, per mille, smoothed over the splits so far; -1 before the first.</summary>
+    private int _keptShare = -1;
+
+    /// <summary>Whether the scan's second passes read the projection whole and gather what the filter kept.</summary>
+    private bool _keepsMost;
+
+    /// <summary>The smoothed share, per mille, from which a scan reading the kept rows alone reads them whole instead.</summary>
+    private const int EnterMostPerMille = 330;
+
+    /// <summary>The smoothed share, per mille, under which a scan reading whole goes back to the kept rows alone.</summary>
+    private const int LeaveMostPerMille = 270;
 
     /// <summary>Prepares an evaluator for one filter, for the length of one scan.</summary>
     /// <param name="filter">The expression every call will evaluate.</param>
@@ -75,22 +86,146 @@ internal sealed class FilterEvaluator
     /// <summary>The expression this evaluator answers.</summary>
     internal VortexExpr Filter => _filter;
 
-    /// <summary>The mask that reads field <paramref name="field"/> of the root struct and nothing else.</summary>
-    /// <param name="field">The index of the column the pushed comparison names.</param>
-    internal Layouts.FieldMask OnlyField(int field)
+    /// <summary>
+    /// The columns of the root struct the filter reads, when it can be evaluated on them alone and a
+    /// split it rejects whole can be delivered without reading anything else.
+    /// </summary>
+    /// <param name="root">The file's dtype.</param>
+    /// <param name="shape">The dtype of the batches the scan delivers.</param>
+    /// <param name="columns">The filter's columns, each whole.</param>
+    /// <returns>
+    /// Whether the filter reads only fields of a non-nullable root struct, each named by itself, and
+    /// every column of the batch has a zero-row form.
+    /// </returns>
+    internal bool TryOwnColumns(DType root, DType shape, out Layouts.FieldMask columns)
     {
-        PushedField? held = _pushed;
-        if (held is null || held.Field != field)
-        {
-            held = new PushedField(field, new Layouts.FieldMaskBuilder().IncludeField(field).Build());
-            _pushed = held;
-        }
-
-        return held.Mask;
+        FilterColumns planned = _columns ??= FilterColumns.Plan(_filter, root, shape);
+        columns = planned.Mask;
+        return !ReferenceEquals(planned, FilterColumns.None);
     }
 
-    /// <summary>A column index and the mask that reads it alone.</summary>
-    private sealed record PushedField(int Field, Layouts.FieldMask Mask);
+    /// <summary>
+    /// Whether the second pass of a split the filter kept <paramref name="count"/> of
+    /// <paramref name="rows"/> rows of reads the projection whole and gathers them, rather than
+    /// reading the kept rows alone.
+    /// </summary>
+    /// <param name="count">The rows the filter kept, neither none nor all.</param>
+    /// <param name="rows">The split's rows.</param>
+    /// <remarks>
+    /// <para>
+    /// Measured on 64 bit-packed integer columns, a filter keeping the same share of every split:
+    /// reading the kept rows alone takes 61 % less time than reading every row and gathering at
+    /// 5 %, 34 % less at 10 %, 8 % less at 20 %, as much at 25 to 30 %, and more from there up.
+    /// </para>
+    /// <para>
+    /// The choice is the scan's rather than each split's: made on the share kept so far, smoothed,
+    /// and changed only past a margin on either side of the crossing. Splits of one chunk read
+    /// both ways decode it twice -- the kept rows of the first ones block by block, then all of it
+    /// for the first one read whole -- which cost 14 % more than either way alone on a filter
+    /// keeping 30 % of every split. The lanes of a scan race on the two fields; a lost update moves
+    /// the share by one split's weight, and each lane reads a choice one of them made.
+    /// </para>
+    /// </remarks>
+    internal bool KeepsMost(int count, int rows)
+    {
+        int share = (int)(count * 1_000L / rows);
+        int held = _keptShare;
+        int smoothed = held < 0 ? share : ((held * 7) + share) / 8;
+        bool most = _keepsMost ? smoothed >= LeaveMostPerMille : smoothed >= EnterMostPerMille;
+        _keptShare = smoothed;
+        _keepsMost = most;
+        return most;
+    }
+
+    /// <summary>The columns a filter reads, or <see cref="None"/> when it is not evaluated on them alone.</summary>
+    private sealed class FilterColumns
+    {
+        internal static readonly FilterColumns None = new FilterColumns(default);
+
+        private const int StackFields = 256;
+
+        private FilterColumns(Layouts.FieldMask mask)
+        {
+            Mask = mask;
+        }
+
+        internal Layouts.FieldMask Mask { get; }
+
+        internal static FilterColumns Plan(VortexExpr filter, DType root, DType shape)
+        {
+            if (root.Kind != DTypeKind.Struct || root.IsNullable || !CanonicalFill.CanBuild(shape))
+            {
+                return None;
+            }
+
+            int fieldCount = root.FieldCount;
+            Span<bool> stack = stackalloc bool[StackFields];
+            Scratch<bool> named = new Scratch<bool>(fieldCount, stack);
+            try
+            {
+                Span<bool> marks = named.Span;
+                marks.Clear();
+                Marker marker = new Marker(root, marks);
+                if (!Scanning.ScanBuilder.VisitFields(filter, ref marker))
+                {
+                    return None;
+                }
+
+                int count = marks.Count(true);
+                if (count == 0)
+                {
+                    return None;
+                }
+
+                if (count == 1)
+                {
+                    return new FilterColumns(Layouts.FieldMask.Single(marks.IndexOf(true)));
+                }
+
+                int[] fields = new int[count];
+                int next = 0;
+                for (int f = 0; f < fieldCount; f++)
+                {
+                    if (marks[f])
+                    {
+                        fields[next++] = f;
+                    }
+                }
+
+                return new FilterColumns(Layouts.FieldMask.Subset(new Layouts.FieldMaskNode(fields, null)));
+            }
+            finally
+            {
+                named.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Marks the root fields a filter names, and stops at a path that is not one.</summary>
+    private ref struct Marker : Scanning.ScanBuilder.IFieldVisitor
+    {
+        private readonly DType _root;
+        private readonly Span<bool> _named;
+
+        internal Marker(DType root, Span<bool> named)
+        {
+            _root = root;
+            _named = named;
+        }
+
+        public bool Visit(FieldExpr field)
+        {
+            byte[][] segments = field.SegmentsUtf8;
+            int index = segments.Length == 1 ? _root.IndexOfField(segments[0]) : -1;
+            if (index < 0)
+            {
+                return false;
+            }
+
+            _named[index] = true;
+            return true;
+        }
+    }
 
     /// <summary>One <c>IN</c>'s candidates, hashed for the column they were met over.</summary>
     /// <param name="Node">The expression node the set belongs to.</param>
@@ -127,6 +262,23 @@ internal sealed class FilterEvaluator
     internal void Evaluate(CanonicalArena arena, int rootIndex, int rows, Span<byte> destination)
     {
         Evaluate(_filter, arena, rootIndex, rows, destination, 0);
+    }
+
+    /// <summary>
+    /// Evaluates this evaluator's filter over the one column it reads, decoded on its own rather
+    /// than as the field of a struct: every field the filter names is that column.
+    /// </summary>
+    /// <param name="arena">The arena holding the column.</param>
+    /// <param name="column">The column's node.</param>
+    /// <param name="rows">The column's row count.</param>
+    /// <param name="destination">Receives one <see cref="Trilean"/> state per row.</param>
+    /// <remarks>
+    /// A struct of the one column would need a dtype of its own, derived per scan in the scan's
+    /// dtype arena, whose first struct node makes it allocate its field tables.
+    /// </remarks>
+    internal void EvaluateColumn(CanonicalArena arena, int column, int rows, Span<byte> destination)
+    {
+        Evaluate(_filter, arena, ~column, rows, destination, 0);
     }
 
     /// <summary>
@@ -290,7 +442,10 @@ internal sealed class FilterEvaluator
     /// <paramref name="field"/> names.
     /// </summary>
     /// <param name="arena">The arena holding the decoded batch.</param>
-    /// <param name="rootIndex">The batch's root node.</param>
+    /// <param name="rootIndex">
+    /// The batch's root node, or the complement of the one column the filter reads when it was
+    /// decoded on its own.
+    /// </param>
     /// <param name="field">The path.</param>
     /// <param name="rows">The batch's row count, which the column must have.</param>
     /// <returns>The column's node.</returns>
@@ -302,6 +457,19 @@ internal sealed class FilterEvaluator
     /// </remarks>
     internal static int Resolve(CanonicalArena arena, int rootIndex, FieldExpr field, int rows)
     {
+        if (rootIndex < 0)
+        {
+            // The one column the filter reads, evaluated on its own: see EvaluateColumn.
+            int only = ~rootIndex;
+            if (arena.GetNode(only).Length != rows)
+            {
+                throw new ArgumentException(
+                    $"'{field.Path}' has {arena.GetNode(only).Length} rows in a batch of {rows}.", nameof(field));
+            }
+
+            return only;
+        }
+
         int current = rootIndex;
         byte[][] segments = field.SegmentsUtf8;
 

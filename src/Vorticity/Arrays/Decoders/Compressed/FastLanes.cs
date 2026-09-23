@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Threading;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
@@ -273,9 +274,7 @@ internal static class FastLanes
         // run in order, and `|=` is commutative, so the same bits land in the same words.
         if (Vectorizable<T>() && Vector128.IsHardwareAccelerated)
         {
-            Span<Row<T>> shapes = stackalloc Row<T>[elementBits];
-            BuildRows(bitWidth, elementBits, shapes);
-            PackVectorized(values, shapes, packed, lanes, bitWidth);
+            PackVectorized(values, ShapesOf<T>(bitWidth), packed, lanes, bitWidth);
             return;
         }
 
@@ -368,9 +367,7 @@ internal static class FastLanes
 
         if (Vectorizable<T>() && Vector128.IsHardwareAccelerated)
         {
-            Span<Row<T>> shapes = stackalloc Row<T>[elementBits];
-            BuildRows(bitWidth, elementBits, shapes);
-            Vectorized(packed, shapes, output, lanes, lanes * bitWidth, 1);
+            Vectorized(packed, ShapesOf<T>(bitWidth), output, lanes, lanes * bitWidth, 1);
             return;
         }
 
@@ -445,9 +442,156 @@ internal static class FastLanes
             return;
         }
 
-        Span<Row<T>> shapes = stackalloc Row<T>[elementBits];
-        BuildRows(bitWidth, elementBits, shapes);
-        Vectorized(packed, shapes, output, lanes, wordsPerBlock, blocks);
+        Vectorized(packed, ShapesOf<T>(bitWidth), output, lanes, wordsPerBlock, blocks);
+    }
+
+    /// <summary>
+    /// Rows of a block from which unpacking it whole and reading them out of it beats reading each
+    /// one where it lies.
+    /// </summary>
+    /// <remarks>
+    /// Measured on 64 columns of 12-bit values, a filter keeping a share of every block: at 51 rows
+    /// a block, the reads one by one take 45 % less time than the whole blocks, at 102 rows 23 %
+    /// less; at 154 the two tie; at 205 rows the whole blocks take 14 % less, at 256 rows 27 % less.
+    /// </remarks>
+    internal const int WholeBlockRows = 128;
+
+    /// <summary>
+    /// The values at <paramref name="wanted"/> rows of a run of packed blocks, each block read the
+    /// way its share of the rows pays for: unpacked whole into a scratch block that stays in the
+    /// first-level cache when it holds <see cref="WholeBlockRows"/> of them or more, read a value
+    /// at a time where each lies when it holds fewer, and not touched when it holds none.
+    /// </summary>
+    /// <typeparam name="T">The unsigned element type.</typeparam>
+    /// <param name="packed">The packed blocks.</param>
+    /// <param name="bitWidth">Bits per value, strictly between 0 and the element width.</param>
+    /// <param name="offset">The row of the first block that is row 0 of <paramref name="wanted"/>.</param>
+    /// <param name="wanted">The rows, in any order; rows of one block next to each other read it once.</param>
+    /// <param name="destination">One value per wanted row.</param>
+    internal static void GatherRows<T>(
+        ReadOnlySpan<T> packed, int bitWidth, int offset, ReadOnlySpan<int> wanted, Span<T> destination)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        int lanes = BlockSize / elementBits;
+        int wordsPerBlock = lanes * bitWidth;
+        ReadOnlySpan<int> rowOf = PackedRowTable(elementBits);
+        ReadOnlySpan<int> laneOf = PackedLaneTable(elementBits);
+        ReadOnlySpan<Row<T>> shapes = Vectorizable<T>() && Vector128.IsHardwareAccelerated
+            ? ShapesOf<T>(bitWidth)
+            : default;
+        Span<T> scratch = stackalloc T[BlockSize];
+
+        // One pass over the rows: whether a block is read whole is judged on the row a block's worth
+        // of rows ahead, which in an ascending selection is in the same block exactly when the block
+        // holds that many; each loop then runs while its rows stay in the block, whatever the order.
+        int i = 0;
+        while (i < wanted.Length)
+        {
+            int block = (wanted[i] + offset) / BlockSize;
+            int first = (block * BlockSize) - offset;
+            ReadOnlySpan<T> source = packed.Slice(block * wordsPerBlock, wordsPerBlock);
+            int ahead = i + WholeBlockRows - 1;
+            if (ahead < wanted.Length && (uint)(wanted[ahead] - first) < BlockSize)
+            {
+                if (!shapes.IsEmpty)
+                {
+                    Vectorized<T>(source, shapes, scratch, lanes, wordsPerBlock, 1);
+                }
+                else
+                {
+                    UnpackBlock(source, bitWidth, scratch);
+                }
+
+                i = FromBlock(scratch, wanted, i, first, destination);
+            }
+            else
+            {
+                i = OneByOne(source, bitWidth, rowOf, laneOf, wanted, i, first, destination);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The wanted rows of an unpacked block, from row <paramref name="i"/> while they stay in it.
+    /// </summary>
+    /// <returns>The first row past the block's.</returns>
+    /// <remarks>
+    /// A method of its own, so the loop has registers of its own: inlined into a body that also
+    /// calls the unpack, its spans would be reloaded from the stack at every row.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int FromBlock<T>(
+        ReadOnlySpan<T> block, ReadOnlySpan<int> wanted, int i, int first, Span<T> destination)
+        where T : unmanaged
+    {
+        for (; i < wanted.Length; i++)
+        {
+            uint within = (uint)(wanted[i] - first);
+            if (within >= (uint)block.Length)
+            {
+                break;
+            }
+
+            destination[i] = block[(int)within];
+        }
+
+        return i;
+    }
+
+    /// <summary>
+    /// The wanted rows of a packed block, each read where it lies, from row <paramref name="i"/>
+    /// while they stay in it.
+    /// </summary>
+    /// <returns>The first row past the block's.</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int OneByOne<T>(
+        ReadOnlySpan<T> packed, int bitWidth, ReadOnlySpan<int> rowOf, ReadOnlySpan<int> laneOf,
+        ReadOnlySpan<int> wanted, int i, int first, Span<T> destination)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        for (; i < wanted.Length; i++)
+        {
+            uint within = (uint)(wanted[i] - first);
+            if (within >= BlockSize)
+            {
+                break;
+            }
+
+            destination[i] = UnpackAt(packed, bitWidth, rowOf[(int)within], laneOf[(int)within]);
+        }
+
+        return i;
+    }
+
+    /// <summary>The row shapes of one bit width, built at the first use of that width and kept for the process.</summary>
+    /// <remarks>
+    /// A shape depends on the element width and the bit width alone, and building one is a few
+    /// divisions a row: a decode taking a block at a time would rebuild them per block.
+    /// </remarks>
+    private static Row<T>[] ShapesOf<T>(int bitWidth)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        Row<T>[]?[] widths = Volatile.Read(ref Shapes<T>.ByWidth)
+            ?? Interlocked.CompareExchange(ref Shapes<T>.ByWidth, new Row<T>[]?[elementBits + 1], null)
+            ?? Shapes<T>.ByWidth!;
+        Row<T>[]? shapes = Volatile.Read(ref widths[bitWidth]);
+        if (shapes is null)
+        {
+            shapes = new Row<T>[elementBits];
+            BuildRows(bitWidth, elementBits, shapes);
+            Volatile.Write(ref widths[bitWidth], shapes);
+        }
+
+        return shapes;
+    }
+
+    /// <summary>The row shapes of each bit width of one element type; no initializer, so no static constructor.</summary>
+    private static class Shapes<T>
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        internal static Row<T>[]?[]? ByWidth;
     }
 
     /// <summary>Fills the per-row shapes for one bit width.</summary>
@@ -534,10 +678,23 @@ internal static class FastLanes
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         int elementBits = Unsafe.SizeOf<T>() * 8;
-        int lanes = BlockSize / elementBits;
-        int row = PackedRowTable(elementBits)[index];
-        int lane = PackedLaneTable(elementBits)[index];
+        return UnpackAt(packed, bitWidth, PackedRowTable(elementBits)[index], PackedLaneTable(elementBits)[index]);
+    }
 
+    /// <summary>The value at <c>(row, lane)</c> of one packed block.</summary>
+    /// <typeparam name="T">The unsigned element type.</typeparam>
+    /// <param name="packed">Exactly <c>lanes * bitWidth</c> words: one block.</param>
+    /// <param name="bitWidth">Bits per packed value, in <c>(0, sizeof(T) * 8)</c>.</param>
+    /// <param name="row">The value's row, from <see cref="PackedRowTable"/>.</param>
+    /// <param name="lane">The value's lane, from <see cref="PackedLaneTable"/>.</param>
+    /// <returns>The value.</returns>
+    /// <remarks>For a caller taking many values, which looks the two tables up once rather than once a value.</remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static T UnpackAt<T>(ReadOnlySpan<T> packed, int bitWidth, int row, int lane)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        int lanes = BlockSize / elementBits;
         int currentWord = row * bitWidth / elementBits;
         int nextWord = ((row + 1) * bitWidth) / elementBits;
         int shift = (row * bitWidth) % elementBits;

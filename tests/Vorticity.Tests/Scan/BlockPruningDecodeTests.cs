@@ -45,18 +45,21 @@ public sealed class BlockPruningDecodeTests
     /// <param name="rowsPerBatch">Rows per batch; a multiple of the block for the many-chunk shape.</param>
     /// <param name="chunkBytes">The writer's byte target per chunk.</param>
     /// <param name="prunedDecodes">
-    /// The values a pruned scan materializes, exactly. Two parts. The zone maps' own rows: the
+    /// The values a pruned scan materializes, exactly. Three parts. The zone maps' own rows: the
     /// zones child of each column is a flat node the same reader decodes whole, one row per block
-    /// -- 98 for 100 000 rows, 96 for 98 304. And the live splits: one split of 1 024 rows in the
-    /// many-chunk shape, where a chunk is 8 blocks and divides evenly; TWO of 1 021 in the
-    /// one-chunk shape, because <c>SplitCursor</c> sub-divides a 100 000-row span evenly rather
-    /// than into blocks-plus-a-remainder, so its splits straddle blocks and the band's rows
-    /// (49 998 to 50 099) fall in two of them. Rows of the dead half of a straddling split are
-    /// decoded and filtered out, which is correct and is what the split geometry costs.
+    /// -- 98 for 100 000 rows, 96 for 98 304. The live splits, which the filter's own pass reads:
+    /// one split of 1 024 rows in the many-chunk shape, where a chunk is 8 blocks and divides
+    /// evenly; TWO of 1 021 in the one-chunk shape, because <c>SplitCursor</c> sub-divides a
+    /// 100 000-row span evenly rather than into blocks-plus-a-remainder, so its splits straddle
+    /// blocks and the band's rows (49 998 to 50 099) fall in two of them. Rows of the dead half of
+    /// a straddling split are decoded and filtered out, which is correct and is what the split
+    /// geometry costs. And the band's 100 rows again: the projection keeps the filtered column, and
+    /// its pass reads the kept rows of it, which a live split read through a selection does not
+    /// retain.
     /// </param>
     [Theory]
-    [InlineData(1, 100_000, 1_048_576, (2 * 1_021) + 98)]
-    [InlineData(12, 8_192, 65_536, 1_024 + 96)]
+    [InlineData(1, 100_000, 1_048_576, (2 * 1_021) + 98 + 100)]
+    [InlineData(12, 8_192, 65_536, 1_024 + 96 + 100)]
     public async Task APrunedScanMaterializesOnlyTheLiveBlocks(
         int batches, int rowsPerBatch, long chunkBytes, long prunedDecodes)
     {
