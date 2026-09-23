@@ -199,8 +199,16 @@ public sealed partial class VortexFileWriter
     {
         _started = true;
         _arrayEncodings.Seed(plan.ArrayEncodings);
-        _segments.AddRange(plan.Segments);
-        _chunkRows.AddRange(plan.KeptChunkRows);
+        foreach (SegmentSpec segment in plan.Segments)
+        {
+            AddSegment(segment);
+        }
+
+        foreach (long rows in plan.KeptChunkRows)
+        {
+            _chunkRows.Add(rows);
+        }
+
         _rowCount = plan.KeptRows;
         _acceptedRows = plan.KeptRows;
         _carriedRows = plan.Rows - plan.KeptRows;
@@ -215,8 +223,16 @@ public sealed partial class VortexFileWriter
         };
         for (int field = 0; field < _fieldCount; field++)
         {
-            _columnSegments[field].AddRange(plan.Columns[field].KeptSegments);
-            _written[field].AddRange(plan.Columns[field].KeptEncodings);
+            foreach (int segment in plan.Columns[field].KeptSegments)
+            {
+                _columnSegments[field].Add(segment);
+            }
+
+            IReadOnlyList<string> kept = plan.Columns[field].KeptEncodings;
+            for (int chunk = 0; chunk < kept.Count; chunk++)
+            {
+                _written[field].Add(kept[chunk]);
+            }
             _columns[field].Seed(plan.Columns[field].Blocks, Recut(plan.Columns[field].Strings, field));
             if (plan.Seeds[field] is { } seed)
             {

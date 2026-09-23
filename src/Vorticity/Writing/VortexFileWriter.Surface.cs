@@ -430,12 +430,19 @@ public sealed partial class VortexFileWriter
         _blobs?.Dispose();
         _blobs = null;
 
-        // What the columns kept per block, which the zone maps and the statistics have read: the
-        // arrays go back to the shared pools for the next writer.
+        // What the columns kept per block, which the zone maps and the statistics have read, and
+        // what the writer kept per chunk and per segment, which the layout, the footer and the
+        // report have read: the arrays go back to the shared pools for the next writer.
         for (int i = 0; i < _columns.Length; i++)
         {
             _columns[i].Release();
+            _columnSegments[i].Release();
+            _written[i].Release();
         }
+
+        _chunkRows.Release();
+        ReleaseSegments();
+        _segmentCount = 0;
 
         if (!_sinkClosed)
         {

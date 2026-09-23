@@ -41,16 +41,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     private readonly int _fieldCount;
     private readonly EncodingDictionary _arrayEncodings;
     private readonly EncodingDictionary _layoutEncodings;
-    private readonly List<SegmentSpec> _segments = [];
+
+    /// <summary>
+    /// Where every segment written so far lies, which the footer lists in one vector: a rented
+    /// array, grown in the shared pool and given back when the writer is disposed.
+    /// </summary>
+    private SegmentSpec[] _segments = [];
+    private int _segmentCount;
 
     /// <summary>Per root field, the segment index of each batch's column.</summary>
-    private readonly List<int>[] _columnSegments;
+    private readonly AppendList<int>[] _columnSegments;
 
     /// <summary>Per root field, what each chunk's values were written as, for the report.</summary>
-    private readonly List<string>[] _written;
+    private readonly AppendList<string>[] _written;
 
     /// <summary>Per batch, its row count; every field's chunk list has the same shape.</summary>
-    private readonly List<long> _chunkRows = [];
+    private readonly AppendList<long> _chunkRows = new();
 
     /// <summary>Per root field, the state machine that summarizes it block by block.</summary>
     private readonly ColumnWriter[] _columns;
@@ -269,14 +275,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
         // A non-struct root is one column whose layout IS the root, with no struct level above it.
         _fieldCount = _isTabular ? schema.FieldCount : 1;
-        _columnSegments = new List<int>[Math.Max(_fieldCount, 1)];
-        _written = new List<string>[Math.Max(_fieldCount, 1)];
+        _columnSegments = new AppendList<int>[Math.Max(_fieldCount, 1)];
+        _written = new AppendList<string>[Math.Max(_fieldCount, 1)];
         _columns = new ColumnWriter[Math.Max(_fieldCount, 1)];
         _fieldNodes = new int[Math.Max(_fieldCount, 1)];
         for (int i = 0; i < _columnSegments.Length; i++)
         {
-            _columnSegments[i] = [];
-            _written[i] = [];
+            _columnSegments[i] = new AppendList<int>();
+            _written[i] = new AppendList<string>();
             // The distinct table has a consumer only if the edition can write a dictionary.
             _columns[i] = new ColumnWriter
             {
@@ -1347,7 +1353,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         for (int field = 0; field < _fieldCount; field++)
         {
             ColumnWriter column = _columns[field];
-            reports[field] = new ColumnWriteReport(_isTabular ? _schema.GetFieldName(field) : string.Empty, [.. _written[field]])
+            AppendList<string> written = _written[field];
+            string[] chunks = written.Count == 0 ? [] : new string[written.Count];
+            for (int chunk = 0; chunk < chunks.Length; chunk++)
+            {
+                chunks[chunk] = written[chunk];
+            }
+
+            reports[field] = new ColumnWriteReport(
+                _isTabular ? _schema.GetFieldName(field) : string.Empty, ImmutableCollectionsMarshal.AsImmutableArray(chunks))
             {
                 PlansPriced = column.PlansPriced,
                 PlansHeld = column.PlansHeld,
@@ -1474,9 +1488,33 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         await _sink.WriteAsync(blob.Memory, cancellationToken).ConfigureAwait(false);
 
         // blob.Length, never the rented array's: the rental is longer than the blob.
-        _segments.Add(new SegmentSpec(
+        return AddSegment(new SegmentSpec(
             (ulong)aligned, (uint)blob.Length, (byte)VortexLimits.MaxAlignmentExponent, 0, 0));
-        return _segments.Count - 1;
+    }
+
+    /// <summary>Records where a segment lies and returns its index.</summary>
+    private int AddSegment(in SegmentSpec segment)
+    {
+        if (_segmentCount == _segments.Length)
+        {
+            SegmentSpec[] grown = ArrayPool<SegmentSpec>.Shared.Rent(Math.Max(64, _segmentCount * 2));
+            _segments.AsSpan(0, _segmentCount).CopyTo(grown);
+            ReleaseSegments();
+            _segments = grown;
+        }
+
+        _segments[_segmentCount] = segment;
+        return _segmentCount++;
+    }
+
+    /// <summary>Gives the segment table back to the shared pool; the count is kept for a growth.</summary>
+    private void ReleaseSegments()
+    {
+        if (_segments.Length != 0)
+        {
+            ArrayPool<SegmentSpec>.Shared.Return(_segments);
+            _segments = [];
+        }
     }
 
     /// <summary>Pads the sink to the format's widest alignment and returns where the next byte lands.</summary>
@@ -1509,31 +1547,39 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             new Arrays.Metadata.ChunkedLayoutMetadata(false), chunkedMetadata);
 
         Span<uint> segmentIds = stackalloc uint[1];
-        int[] fieldLayouts = new int[Math.Max(_fieldCount, 1)];
-        for (int field = 0; field < _fieldCount; field++)
+        int[] fieldLayouts = ArrayPool<int>.Shared.Rent(Math.Max(_fieldCount, 1));
+        int[] chunks = ArrayPool<int>.Shared.Rent(Math.Max(_chunkRows.Count, 1));
+        try
         {
-            List<int> segments = _columnSegments[field];
-            int[] chunks = new int[segments.Count];
-            for (int chunk = 0; chunk < segments.Count; chunk++)
+            for (int field = 0; field < _fieldCount; field++)
             {
-                segmentIds[0] = (uint)segments[chunk];
-                chunks[chunk] = LayoutWriter.Write(
-                    builder, flat, (ulong)_chunkRows[chunk], default, [], segmentIds);
+                AppendList<int> segments = _columnSegments[field];
+                for (int chunk = 0; chunk < segments.Count; chunk++)
+                {
+                    segmentIds[0] = (uint)segments[chunk];
+                    chunks[chunk] = LayoutWriter.Write(
+                        builder, flat, (ulong)_chunkRows[chunk], default, [], segmentIds);
+                }
+
+                int data = LayoutWriter.Write(
+                    builder, chunked, (ulong)_rowCount, chunkedMetadata[..metadataLength], chunks.AsSpan(0, segments.Count), []);
+
+                fieldLayouts[field] = Zone(builder, field, data, ref zoned);
             }
 
-            int data = LayoutWriter.Write(
-                builder, chunked, (ulong)_rowCount, chunkedMetadata[..metadataLength], chunks, []);
+            // A non-struct root has no struct level: its single chunked layout IS the root.
+            int root = _isTabular
+                ? LayoutWriter.Write(
+                    builder, structural, (ulong)_rowCount, default, fieldLayouts.AsSpan(0, _fieldCount), [])
+                : fieldLayouts[0];
 
-            fieldLayouts[field] = Zone(builder, field, data, ref zoned);
+            return builder.FinishToArray(root);
         }
-
-        // A non-struct root has no struct level: its single chunked layout IS the root.
-        int root = _isTabular
-            ? LayoutWriter.Write(
-                builder, structural, (ulong)_rowCount, default, fieldLayouts.AsSpan(0, _fieldCount), [])
-            : fieldLayouts[0];
-
-        return builder.FinishToArray(root);
+        finally
+        {
+            ArrayPool<int>.Shared.Return(fieldLayouts);
+            ArrayPool<int>.Shared.Return(chunks);
+        }
     }
 
     /// <summary>
@@ -1569,7 +1615,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     private byte[] BuildFooter() =>
-        Footer(_arrayEncodings.Ids, _layoutEncodings.Ids, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_segments));
+        Footer(_arrayEncodings.Ids, _layoutEncodings.Ids, _segments.AsSpan(0, _segmentCount));
 
     /// <summary>A footer over these encoding tables and segments.</summary>
     internal static byte[] Footer(IReadOnlyList<string> arrays, IReadOnlyList<string> layouts, ReadOnlySpan<SegmentSpec> segments)
