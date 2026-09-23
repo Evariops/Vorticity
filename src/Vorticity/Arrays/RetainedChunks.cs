@@ -35,18 +35,22 @@ namespace Vorticity.Arrays;
 /// </para>
 /// <para>
 /// Evicted entries keep their arena and are refilled, so a scan that walks many chunks allocates
-/// none per chunk; an entry claimed and given back without a decode never had one. The table
-/// allocates its dictionary at the first claim and nothing else, so a scan whose chunk is its batch
-/// pays the object alone, and it is its own lock, since a claim waits on it.
+/// none per chunk; an entry claimed and given back without a decode never had one. The entries are
+/// a dozen or two, held in a table the scans of the process take in turn and searched in order,
+/// so a scan allocates no table of its own. The table is its own lock, since a claim waits on it,
+/// and wakes the waiters only when there are some: a signal with none would still give the object
+/// a monitor, allocated for every scan.
 /// </para>
 /// </remarks>
 internal sealed class RetainedChunks : IDisposable
 {
     private readonly int _capacity;
     private readonly int _lendingCapacity;
-    private Dictionary<long, RetainedChunk>? _entries;
+    private RetainedChunk?[] _entries = [];
+    private int _count;
     private RetainedChunk? _spares;
     private long _floor;
+    private int _waiters;
     private bool _prepare;
     private bool _lending;
     private bool _disposed;
@@ -124,7 +128,7 @@ internal sealed class RetainedChunks : IDisposable
             while (true)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
-                if (_entries is not null && _entries.TryGetValue(key, out RetainedChunk? entry))
+                if (Find(key) is { } entry)
                 {
                     if (entry.NodeIndex >= 0)
                     {
@@ -148,7 +152,16 @@ internal sealed class RetainedChunks : IDisposable
                         return false;
                     }
 
-                    Monitor.Wait(this);
+                    _waiters++;
+                    try
+                    {
+                        Monitor.Wait(this);
+                    }
+                    finally
+                    {
+                        _waiters--;
+                    }
+
                     continue;
                 }
 
@@ -157,14 +170,18 @@ internal sealed class RetainedChunks : IDisposable
                 taken.Claimant = claimant;
                 taken.NodeIndex = -1;
                 taken.LastTouched = batch;
-                _entries ??= new Dictionary<long, RetainedChunk>(_capacity);
+                if (_entries.Length == 0)
+                {
+                    _entries = Tables.Rent(_capacity);
+                }
+
                 if (borrower is not null && !_lending)
                 {
                     _lending = true;
-                    _entries.EnsureCapacity(_lendingCapacity);
+                    Reserve(_lendingCapacity);
                 }
 
-                _entries[key] = taken;
+                Add(taken);
                 claim = taken;
                 arena = null!;
                 nodeIndex = -1;
@@ -183,7 +200,7 @@ internal sealed class RetainedChunks : IDisposable
     {
         lock (this)
         {
-            if (_entries is not null && _entries.TryGetValue(key, out RetainedChunk? entry) && entry.NodeIndex >= 0)
+            if (Find(key) is { NodeIndex: >= 0 } entry)
             {
                 if (entry.LastTouched < batch)
                 {
@@ -229,7 +246,7 @@ internal sealed class RetainedChunks : IDisposable
 
             claim.RetainSegments();
             borrower?.Borrow(claim);
-            Monitor.PulseAll(this);
+            Wake();
         }
     }
 
@@ -240,16 +257,12 @@ internal sealed class RetainedChunks : IDisposable
     {
         lock (this)
         {
-            if (_entries is not null && _entries.TryGetValue(claim.Key, out RetainedChunk? entry) && ReferenceEquals(entry, claim))
-            {
-                _entries.Remove(claim.Key);
-            }
-
+            Remove(claim);
             claim.Arena?.Reset();
             claim.Forget();
             ReturnLoans(claim);
             Recycle(claim);
-            Monitor.PulseAll(this);
+            Wake();
         }
     }
 
@@ -262,7 +275,7 @@ internal sealed class RetainedChunks : IDisposable
     {
         lock (this)
         {
-            if (_entries is null)
+            if (_count == 0)
             {
                 return;
             }
@@ -273,7 +286,7 @@ internal sealed class RetainedChunks : IDisposable
                 // one spare per chunk the first batch retained, made now, while the scan is in its
                 // first batch.
                 _prepare = false;
-                int retained = _entries.Count;
+                int retained = _count;
                 for (int i = 0; i < retained; i++)
                 {
                     RetainedChunk spare = RetainedChunkPool.Rent();
@@ -287,15 +300,15 @@ internal sealed class RetainedChunks : IDisposable
                 return;
             }
 
+            // From the last entry down, since a removal moves the last entry into the hole: an
+            // entry moved below the walk is seen once more, which only asks it again whether it is
+            // dead, and a lender the eviction frees is removed wherever it sits.
             _floor = batch;
-            foreach (KeyValuePair<long, RetainedChunk> held in _entries)
+            for (int i = _count - 1; i >= 0; i--)
             {
-                RetainedChunk entry = held.Value;
-                if (Dead(entry))
+                if (i < _count && _entries[i] is { } entry && Dead(entry))
                 {
-                    // Removing while enumerating is what a dictionary allows, the removal of a
-                    // lender the eviction frees included.
-                    _entries.Remove(held.Key);
+                    RemoveAt(i);
                     Evict(entry);
                 }
             }
@@ -323,27 +336,32 @@ internal sealed class RetainedChunks : IDisposable
             }
 
             _disposed = true;
-            if (_entries is not null)
+            for (int i = 0; i < _count; i++)
             {
-                foreach (RetainedChunk entry in _entries.Values)
+                RetainedChunk entry = _entries[i]!;
+                entry.Arena?.Reset();
+                if (entry.NodeIndex >= 0)
                 {
-                    entry.Arena?.Reset();
-                    if (entry.NodeIndex >= 0)
-                    {
-                        entry.ReleaseSegments();
-                    }
-                    else
-                    {
-                        entry.Forget();
-                    }
-
-                    entry.ForgetLoans();
-                    Recycle(entry);
-                    RetainedChunkPool.Return(entry);
+                    entry.ReleaseSegments();
+                }
+                else
+                {
+                    entry.Forget();
                 }
 
-                _entries.Clear();
+                entry.ForgetLoans();
+                Recycle(entry);
+                RetainedChunkPool.Return(entry);
             }
+
+            if (_entries.Length != 0)
+            {
+                Array.Clear(_entries, 0, _count);
+                Tables.Return(_entries);
+                _entries = [];
+            }
+
+            _count = 0;
 
             while (_spares is { } spare)
             {
@@ -352,7 +370,7 @@ internal sealed class RetainedChunks : IDisposable
                 RetainedChunkPool.Return(spare);
             }
 
-            Monitor.PulseAll(this);
+            Wake();
         }
     }
 
@@ -404,11 +422,120 @@ internal sealed class RetainedChunks : IDisposable
     private void Returned(RetainedChunk lender)
     {
         lender.Borrowers--;
-        if (Dead(lender) && _entries is not null &&
-            _entries.TryGetValue(lender.Key, out RetainedChunk? held) && ReferenceEquals(held, lender))
+        if (Dead(lender) && Remove(lender))
         {
-            _entries.Remove(lender.Key);
             Evict(lender);
+        }
+    }
+
+    /// <summary>The entry under <paramref name="key"/>, or null; the table's lock is held.</summary>
+    /// <remarks>A scan holds two entries a column or so, which a walk in order finds sooner than a hash would.</remarks>
+    private RetainedChunk? Find(long key)
+    {
+        RetainedChunk?[] entries = _entries;
+        for (int i = 0; i < _count; i++)
+        {
+            RetainedChunk entry = entries[i]!;
+            if (entry.Key == key)
+            {
+                return entry;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Adds <paramref name="entry"/>, doubling the table when it is full; the table's lock is held.</summary>
+    private void Add(RetainedChunk entry)
+    {
+        if (_count == _entries.Length)
+        {
+            Reserve(_count * 2);
+        }
+
+        _entries[_count++] = entry;
+    }
+
+    /// <summary>Removes <paramref name="entry"/> when the table holds it; the table's lock is held.</summary>
+    private bool Remove(RetainedChunk entry)
+    {
+        for (int i = 0; i < _count; i++)
+        {
+            if (ReferenceEquals(_entries[i], entry))
+            {
+                RemoveAt(i);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Removes the entry at <paramref name="index"/>, moving the last one into its place.</summary>
+    private void RemoveAt(int index)
+    {
+        _entries[index] = _entries[--_count];
+        _entries[_count] = null;
+    }
+
+    /// <summary>Grows the table to hold <paramref name="capacity"/> entries.</summary>
+    private void Reserve(int capacity)
+    {
+        if (_entries.Length < capacity)
+        {
+            RetainedChunk?[] grown = new RetainedChunk?[capacity];
+            Array.Copy(_entries, grown, _count);
+            _entries = grown;
+        }
+    }
+
+    /// <summary>Wakes the contexts waiting for a claim, when there are some; the table's lock is held.</summary>
+    private void Wake()
+    {
+        if (_waiters != 0)
+        {
+            Monitor.PulseAll(this);
+        }
+    }
+
+    /// <summary>
+    /// The entry tables scans gave back, for the scans that follow: a table grows once to what the
+    /// scans of the process hold, and a scan allocates none.
+    /// </summary>
+    private static class Tables
+    {
+        private const int Capacity = 16;
+
+        private static readonly RetainedChunk?[]?[] Kept = new RetainedChunk?[Capacity][];
+        private static readonly Lock Gate = new Lock();
+        private static int _count;
+
+        /// <summary>A kept table of at least <paramref name="length"/> entries, or a new one.</summary>
+        internal static RetainedChunk?[] Rent(int length)
+        {
+            RetainedChunk?[]? table = null;
+            lock (Gate)
+            {
+                if (_count > 0)
+                {
+                    table = Kept[--_count];
+                    Kept[_count] = null;
+                }
+            }
+
+            return table is not null && table.Length >= length ? table : new RetainedChunk?[length];
+        }
+
+        /// <summary>Keeps <paramref name="table"/>, emptied, for a later scan, or drops it past the bound.</summary>
+        internal static void Return(RetainedChunk?[] table)
+        {
+            lock (Gate)
+            {
+                if (_count < Capacity)
+                {
+                    Kept[_count++] = table;
+                }
+            }
         }
     }
 

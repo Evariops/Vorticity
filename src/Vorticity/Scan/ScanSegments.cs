@@ -36,10 +36,13 @@ namespace Vorticity.Scanning;
 /// <see cref="Release"/> drops it. What is held is bounded by the batches in flight, whose
 /// segments were live anyway, since every batch holds its own reference until it is released.
 /// </para>
+/// <para>
+/// The set is its own lock: a scan of one lane never contends for it, and an uncontended monitor
+/// allocates nothing.
+/// </para>
 /// </remarks>
 internal sealed class ScanSegments : IDisposable
 {
-    private readonly Lock _gate = new Lock();
     private readonly SegmentWaiter?[] _parked;
     private Entry[] _entries = [];
     private int _count;
@@ -69,7 +72,7 @@ internal sealed class ScanSegments : IDisposable
     /// </returns>
     internal bool Claim(SegmentRequestSet requests, long batch, SegmentWaiter? waiter)
     {
-        lock (_gate)
+        lock (this)
         {
             bool blocked = false;
             for (int i = 0; i < _count; i++)
@@ -125,7 +128,7 @@ internal sealed class ScanSegments : IDisposable
     /// <param name="batch">The batch's number.</param>
     internal void Publish(SegmentRequestSet requests, long batch)
     {
-        lock (_gate)
+        lock (this)
         {
             int kept = 0;
             for (int i = 0; i < _count; i++)
@@ -155,7 +158,7 @@ internal sealed class ScanSegments : IDisposable
     /// <param name="batch">The batch's number.</param>
     internal void Abandon(long batch)
     {
-        lock (_gate)
+        lock (this)
         {
             _failed = true;
             int kept = 0;
@@ -179,7 +182,7 @@ internal sealed class ScanSegments : IDisposable
     /// <param name="batch">The batch just delivered.</param>
     internal void Release(long batch)
     {
-        lock (_gate)
+        lock (this)
         {
             int kept = 0;
             for (int i = 0; i < _count; i++)
@@ -201,7 +204,7 @@ internal sealed class ScanSegments : IDisposable
     /// <summary>Releases everything held and gives the array back, once no batch runs.</summary>
     public void Dispose()
     {
-        lock (_gate)
+        lock (this)
         {
             for (int i = 0; i < _count; i++)
             {
