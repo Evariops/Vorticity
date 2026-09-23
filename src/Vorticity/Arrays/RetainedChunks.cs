@@ -276,7 +276,9 @@ internal sealed class RetainedChunks : IDisposable
                 int retained = _entries.Count;
                 for (int i = 0; i < retained; i++)
                 {
-                    Recycle(new RetainedChunk { Arena = new CanonicalArena() });
+                    RetainedChunk spare = RetainedChunkPool.Rent();
+                    spare.Arena ??= new CanonicalArena();
+                    Recycle(spare);
                 }
             }
 
@@ -307,7 +309,10 @@ internal sealed class RetainedChunks : IDisposable
     private bool Dead(RetainedChunk entry) =>
         entry.NodeIndex >= 0 && entry.Borrowers == 0 && entry.LastTouched < _floor;
 
-    /// <summary>Releases every entry and every spare arena.</summary>
+    /// <summary>
+    /// Releases every entry, and gives it and every spare to <see cref="RetainedChunkPool"/> for the
+    /// scans that follow.
+    /// </summary>
     public void Dispose()
     {
         lock (this)
@@ -334,12 +339,19 @@ internal sealed class RetainedChunks : IDisposable
 
                     entry.ForgetLoans();
                     Recycle(entry);
+                    RetainedChunkPool.Return(entry);
                 }
 
                 _entries.Clear();
             }
 
-            _spares = null;
+            while (_spares is { } spare)
+            {
+                _spares = spare.NextSpare;
+                spare.NextSpare = null;
+                RetainedChunkPool.Return(spare);
+            }
+
             Monitor.PulseAll(this);
         }
     }
@@ -349,7 +361,7 @@ internal sealed class RetainedChunks : IDisposable
         RetainedChunk? spare = _spares;
         if (spare is null)
         {
-            return new RetainedChunk();
+            return RetainedChunkPool.Rent();
         }
 
         _spares = spare.NextSpare;
@@ -533,5 +545,52 @@ internal sealed class RetainedChunk
     {
         Segment = null;
         MoreSegments?.Clear();
+    }
+}
+
+/// <summary>
+/// The entries scans give back when they end, for the scans that follow: an entry keeps its arena's
+/// record tables through a reset, so a scan taking one allocates none of what a retained chunk
+/// needs, the second set a chunk boundary claims included.
+/// </summary>
+/// <remarks>
+/// Process-wide, because an entry belongs to no file: its arena's storage went back to the memory
+/// pool with the reset, and what is kept is its managed tables, a few kilobytes an entry. The bound
+/// is what several scans of wide projections hold at once; an entry past it is left to the collector.
+/// </remarks>
+internal static class RetainedChunkPool
+{
+    private const int Capacity = 256;
+
+    private static readonly RetainedChunk?[] Entries = new RetainedChunk?[Capacity];
+    private static readonly Lock Gate = new Lock();
+    private static int _count;
+
+    /// <summary>An entry given back by an earlier scan, or a new one when none waits.</summary>
+    internal static RetainedChunk Rent()
+    {
+        lock (Gate)
+        {
+            if (_count > 0)
+            {
+                RetainedChunk entry = Entries[--_count]!;
+                Entries[_count] = null;
+                return entry;
+            }
+        }
+
+        return new RetainedChunk();
+    }
+
+    /// <summary>Keeps an entry for a later scan; its arena is reset and it holds no claim, segment or loan.</summary>
+    internal static void Return(RetainedChunk entry)
+    {
+        lock (Gate)
+        {
+            if (_count < Capacity)
+            {
+                Entries[_count++] = entry;
+            }
+        }
     }
 }
