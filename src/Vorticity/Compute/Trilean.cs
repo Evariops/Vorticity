@@ -158,17 +158,6 @@ internal static class Trilean
 
     /// <summary>How many rows the predicate selected.</summary>
     /// <param name="values">The evaluated predicate.</param>
-    internal static int CountTrue(ReadOnlySpan<byte> values)
-    {
-        int count = 0;
-        for (int i = 0; i < values.Length; i++)
-        {
-            if (values[i] == True)
-            {
-                count++;
-            }
-        }
-
-        return count;
-    }
+    /// <remarks>The library's count, which compares a vector of states at a time.</remarks>
+    internal static int CountTrue(ReadOnlySpan<byte> values) => values.Count(True);
 }
