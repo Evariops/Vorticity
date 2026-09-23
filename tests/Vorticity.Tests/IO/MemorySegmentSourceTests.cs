@@ -1,3 +1,4 @@
+using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity;
@@ -56,6 +57,62 @@ public sealed class MemorySegmentSourceTests
     }
 
     [Fact]
+    public async Task Bytes_off_a_boundary_are_copied_once_and_every_read_is_a_view_of_the_copy()
+    {
+        // Where a byte[] puts them: eight bytes past a 64-byte boundary.
+        ReadOnlyMemory<byte> bytes = Placed(Pattern(4096), 8);
+        ISegmentReader source = new MemorySegmentSource(bytes);
+
+        using SegmentOwner first = await source.ReadAsync(Spec(256, 512, alignmentExponent: 6), CancellationToken.None);
+        using SegmentOwner second = await source.ReadAsync(Spec(256, 512, alignmentExponent: 6), CancellationToken.None);
+
+        Assert.Equal(0u, AddressOf(first.Buffer) % 64);
+        Assert.Equal(AddressOf(first.Buffer), AddressOf(second.Buffer));
+        Assert.NotEqual(StartOf(bytes.Span) + 256, AddressOf(first.Buffer));
+        Assert.True(first.Buffer.Span.SequenceEqual(bytes.Span.Slice(256, 512)));
+    }
+
+    [Fact]
+    public async Task Bytes_on_a_boundary_are_read_where_they_lie()
+    {
+        ReadOnlyMemory<byte> bytes = Placed(Pattern(4096), 0);
+        ISegmentReader source = new MemorySegmentSource(bytes);
+
+        using SegmentOwner segment = await source.ReadAsync(Spec(128, 256, alignmentExponent: 6), CancellationToken.None);
+
+        Assert.Equal(StartOf(bytes.Span) + 128, AddressOf(segment.Buffer));
+    }
+
+    [Fact]
+    public async Task A_segment_the_file_lays_off_its_declared_boundary_is_copied_to_one()
+    {
+        // The tail an open reads starts anywhere; a well-formed file lays nothing else that way.
+        ReadOnlyMemory<byte> bytes = Placed(Pattern(4096), 0);
+        ISegmentReader source = new MemorySegmentSource(bytes);
+
+        using SegmentOwner segment = await source.ReadAsync(Spec(8, 256, alignmentExponent: 6), CancellationToken.None);
+
+        Assert.Equal(0u, AddressOf(segment.Buffer) % 64);
+        Assert.True(segment.Buffer.Span.SequenceEqual(bytes.Span.Slice(8, 256)));
+    }
+
+    [Fact]
+    public async Task A_read_allocates_nothing_the_size_of_its_segment()
+    {
+        ISegmentReader source = new MemorySegmentSource(Placed(Pattern(1 << 20), 8));
+        using (await source.ReadAsync(Spec(0, 1 << 20, alignmentExponent: 6), CancellationToken.None))
+        {
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        using (await source.ReadAsync(Spec(0, 1 << 20, alignmentExponent: 6), CancellationToken.None))
+        {
+        }
+
+        Assert.InRange(GC.GetAllocatedBytesForCurrentThread() - before, 0, 1_024);
+    }
+
+    [Fact]
     public async Task A_populated_set_is_left_alone()
     {
         // The early return the other three sources have: a second pass over a finished set is a
@@ -72,5 +129,28 @@ public sealed class MemorySegmentSourceTests
 
         Assert.Same(owner, set.GetOwner(slot));
         Assert.Equal(1, owner.RefCount);
+    }
+
+    /// <summary><paramref name="data"/> copied into pinned memory, <paramref name="past"/> bytes past a 64-byte boundary.</summary>
+    private static unsafe ReadOnlyMemory<byte> Placed(byte[] data, int past)
+    {
+        byte[] array = GC.AllocateArray<byte>(data.Length + 128, pinned: true);
+        nuint at;
+        fixed (byte* first = array)
+        {
+            at = (nuint)first;
+        }
+
+        int start = (int)((64 - (at % 64)) % 64) + past;
+        data.CopyTo(array.AsSpan(start));
+        return array.AsMemory(start, data.Length);
+    }
+
+    private static unsafe nuint StartOf(ReadOnlySpan<byte> span)
+    {
+        fixed (byte* at = span)
+        {
+            return (nuint)at;
+        }
     }
 }

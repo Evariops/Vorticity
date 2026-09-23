@@ -549,9 +549,9 @@ internal static class EncodingAdvisor
         VortexFile.OpenAsync(new MemorySegmentSource(bytes.Memory), VortexOpenOptions.Default, cancellationToken);
 
     /// <summary>
-    /// The bytes of a file in memory, from a boundary of the widest alignment a segment declares: a
-    /// segment whose address does not honour its alignment is copied on every read, and the copy
-    /// would be timed as the candidate's decode.
+    /// The bytes of a file in memory, from a boundary of the widest alignment a segment declares, so
+    /// that every open of them is a view: a source made over bytes off that boundary copies them
+    /// first, and a sample is opened once for every candidate.
     /// </summary>
     private readonly struct AlignedBytes
     {

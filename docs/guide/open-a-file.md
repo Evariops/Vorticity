@@ -55,10 +55,10 @@ await TimeAsync("bytes in memory", await session.OpenAsync(new MemorySegmentSour
 `TimeAsync` scans the whole file three times and prints the best:
 
 ```
-a path            a full scan in 6.6 ms
-a mapped source   a full scan in 6.7 ms
-positional reads  a full scan in 6.3 ms
-bytes in memory   a full scan in 6.8 ms
+a path            a full scan in 2.2 ms
+a mapped source   a full scan in 2.1 ms
+positional reads  a full scan in 2.3 ms
+bytes in memory   a full scan in 2.1 ms
 ```
 
 A session owns the memory pool, the segment cache, the bound on reads in flight and the degree of
@@ -71,11 +71,16 @@ the file then owns it: disposing the file disposes the source. The three sources
 |---|---|---|
 | `MemoryMappedSegmentSource` | pointers into one mapping of the whole file, made at the open | a file you want mapped before its first scan; a path gives the same once a scan reads data |
 | `FileSegmentSource` | `RandomAccess` positional reads on one handle | a file too large to map, or a host that forbids mappings |
-| `MemorySegmentSource` | views into bytes you hold, pinned for the source's life | the file came over the wire, out of a cache, or from a test |
+| `MemorySegmentSource` | views into bytes you hold, pinned for the source's life, or into one aligned copy of them | the file came over the wire, out of a cache, or from a test |
 
-A `MemorySegmentSource` copies nothing, except a segment whose address misses the alignment the
-file declares for it. For a file on an object store, implement `ISegmentSource` for your service: a
-length and two read methods ([object-store.md](object-store.md)). The demonstration file fits in
+A `MemorySegmentSource` keeps its bytes on a 64-byte boundary, the widest alignment a segment
+declares, so that every read is a view a decoder can take as it is. Bytes already on one are read
+where they lie; bytes that are not, which is where a `byte[]` puts them, are copied once, when the
+source is made, into memory the source owns and frees. To spare that copy, rent the memory from an
+`AlignedMemoryPool` and read the file into it.
+
+For a file on an object store, implement `ISegmentSource` for your service: a length and two read
+methods ([object-store.md](object-store.md)). The demonstration file fits in
 the page cache, and the four ways in scan it in the same time: the choice is about who holds the
 bytes, not about speed on a warm disk.
 

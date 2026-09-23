@@ -1,5 +1,8 @@
 using System;
 using System.Buffers;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -9,26 +12,54 @@ namespace Vorticity.IO;
 
 /// <summary>A source over bytes the caller already holds: a file read into memory, a buffer received whole.</summary>
 /// <remarks>
-/// The bytes are pinned once, for the source's life, and every lease is a view into them; a segment
-/// whose address does not honour the alignment its file declares is the one case that is copied.
-/// The caller keeps the memory valid until the source and every lease from it are disposed.
+/// <para>
+/// Every lease is a view, and a view honours the alignment its file declares for the segment, which a
+/// decoder that reads in place relies on. So the source keeps its bytes on a 64-byte boundary, the
+/// widest a segment declares: bytes that already lie on one are pinned where they are, for the
+/// source's life; bytes that do not, which is where a <c>byte[]</c> puts them, are copied once, when
+/// the source is made, into memory it owns. A copy per read instead would copy the file on every
+/// scan of it.
+/// </para>
+/// <para>
+/// The caller keeps the memory valid until the source and every lease from it are disposed. To spare
+/// the one copy, hand the source memory on a 64-byte boundary, as <see cref="AlignedMemoryPool"/>
+/// rents it.
+/// </para>
 /// </remarks>
 public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
 {
-    private readonly ReadOnlyMemory<byte> _bytes;
-    private readonly PinnedOwner _pinned;
+    private readonly long _length;
+    private readonly SegmentOwner _owner;
+    private readonly unsafe byte* _base;
     private int _disposed;
 
     /// <summary>A source over <paramref name="bytes"/>.</summary>
     /// <param name="bytes">The whole file.</param>
-    public MemorySegmentSource(ReadOnlyMemory<byte> bytes)
+    public unsafe MemorySegmentSource(ReadOnlyMemory<byte> bytes)
     {
-        _bytes = bytes;
-        _pinned = new PinnedOwner(bytes);
+        _length = bytes.Length;
+        MemoryHandle pin = bytes.Pin();
+        if (((nuint)pin.Pointer & (VortexLimits.MaxAlignment - 1)) == 0)
+        {
+            _owner = new PinnedOwner(pin);
+            _base = (byte*)pin.Pointer;
+            return;
+        }
+
+        try
+        {
+            PinnedArraySegmentOwner copy = PinnedArraySegmentOwner.CopyOf(bytes.Span, VortexLimits.MaxAlignment);
+            _owner = copy;
+            _base = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(copy.WritableSpan));
+        }
+        finally
+        {
+            pin.Dispose();
+        }
     }
 
     /// <inheritdoc/>
-    public long Length => _bytes.Length;
+    public long Length => _length;
 
     /// <inheritdoc/>
     public ValueTask<SegmentLease> ReadAsync(SegmentRange range, CancellationToken cancellationToken) =>
@@ -41,14 +72,14 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
     ValueTask<long> ISegmentReader.GetLengthAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return new ValueTask<long>(_bytes.Length);
+        return new ValueTask<long>(_length);
     }
 
     ValueTask<SegmentOwner> ISegmentReader.ReadAsync(SegmentSpec spec, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         SegmentIo.ValidateSpec(in spec, out long offset, out int length);
-        SegmentIo.CheckInFile(offset, length, _bytes.Length);
+        SegmentIo.CheckInFile(offset, length, _length);
         return new ValueTask<SegmentOwner>(View(offset, length, 1 << spec.AlignmentExponent));
     }
 
@@ -72,7 +103,7 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
 
                 SegmentSpec spec = requests.GetSpec(slot);
                 SegmentIo.ValidateSpec(in spec, out long offset, out int length);
-                SegmentIo.CheckInFile(offset, length, _bytes.Length);
+                SegmentIo.CheckInFile(offset, length, _length);
                 requests.SetResult(slot, View(offset, length, 1 << spec.AlignmentExponent));
             }
 
@@ -93,23 +124,27 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
 
         // A tail read asks for more than the file holds by design: the open path reads 64 KiB
         // whatever the file's size, so a short answer is the normal case and not an error.
-        int available = SegmentIo.ClampRange(offset, length, alignment, _bytes.Length);
+        int available = SegmentIo.ClampRange(offset, length, alignment, _length);
         return new ValueTask<SegmentOwner>(View(offset, available, alignment));
     }
 
-    /// <summary>Unpins the bytes once the last lease is disposed.</summary>
+    /// <summary>Releases the bytes once the last lease is disposed.</summary>
     /// <returns>A completed task.</returns>
     public ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            _pinned.Dispose();
+            _owner.Dispose();
         }
 
         return ValueTask.CompletedTask;
     }
 
-    private SegmentOwner View(long offset, int length, int alignment)
+    /// <summary>
+    /// A view of the segment where it lies, or a copy of it when the file itself lays it off the
+    /// boundary it declares, which a well-formed file does only for the tail an open reads.
+    /// </summary>
+    private unsafe SegmentOwner View(long offset, int length, int alignment)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         if (length == 0)
@@ -117,32 +152,19 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
             return new EmptySegmentOwner();
         }
 
-        ReadOnlySpan<byte> bytes = _bytes.Span.Slice((int)offset, length);
-        if (!_pinned.IsAligned(offset, alignment))
+        byte* at = _base + offset;
+        if (((nuint)at & (nuint)(alignment - 1)) != 0)
         {
-            return PinnedArraySegmentOwner.CopyOf(bytes, alignment);
+            return PinnedArraySegmentOwner.CopyOf(new ReadOnlySpan<byte>(at, length), alignment);
         }
 
-        return new SliceSegmentOwner(_pinned, _pinned.View(offset, length, alignment));
+        return new SliceSegmentOwner(_owner, VortexBuffer.FromPointer(at, length, BitOperations.TrailingZeroCount(alignment)));
     }
 
-    /// <summary>The pin, released when the source and every view of it are gone.</summary>
-    private sealed unsafe class PinnedOwner : SegmentOwner
+    /// <summary>The pin on the caller's bytes, released when the source and every view of it are gone.</summary>
+    private sealed class PinnedOwner(MemoryHandle handle) : SegmentOwner
     {
-        private MemoryHandle _handle;
-        private readonly byte* _base;
-
-        internal PinnedOwner(ReadOnlyMemory<byte> bytes)
-        {
-            _handle = bytes.Pin();
-            _base = (byte*)_handle.Pointer;
-        }
-
-        internal bool IsAligned(long offset, int alignment) =>
-            ((nuint)(_base + offset) & (nuint)(alignment - 1)) == 0;
-
-        internal VortexBuffer View(long offset, int length, int alignment) =>
-            VortexBuffer.FromPointer(_base + offset, length, System.Numerics.BitOperations.TrailingZeroCount(alignment));
+        private MemoryHandle _handle = handle;
 
         protected override void FreeCore() => _handle.Dispose();
     }
