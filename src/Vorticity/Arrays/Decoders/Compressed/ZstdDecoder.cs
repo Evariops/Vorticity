@@ -95,6 +95,10 @@ internal sealed class ZstdDecoder : ArrayDecoder
     public override bool SelectsWithoutFullDecodeOf(ArrayDecodeContext context, in ArrayNode node) =>
         DecodesRange(context, in node);
 
+    /// <inheritdoc/>
+    /// <remarks>A row is reached by inflating the frame that holds it, a block of the writer's rows.</remarks>
+    public override bool SelectsByRow => false;
+
     /// <summary>
     /// Decodes the wanted rows from the frames that hold their values, each frame once: the rows
     /// whose values lie in one frame are one range, decoded as <see cref="DecodeRange"/> decodes it,

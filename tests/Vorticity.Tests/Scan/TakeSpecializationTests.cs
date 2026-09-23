@@ -197,6 +197,37 @@ public sealed class TakeSpecializationTests
         Assert.True(specialized >= 10, $"only {specialized} specialized decoders were found");
     }
 
+    /// <summary>
+    /// An encoding selects by row only if it selects at all, and zstd, which reaches a row by
+    /// inflating the frame that holds it, does not: a dictionary then lends its zstd values, decoded
+    /// once, to every batch of a take, where narrowing them would inflate a frame for every batch.
+    /// </summary>
+    [Fact]
+    public void OnlyAnEncodingThatSelectsSelectsByRowAndZstdDoesNot()
+    {
+        Decoders.EnsureRegistered();
+
+        StringBuilder wrong = new StringBuilder();
+        foreach (ArrayEncodingId id in Enum.GetValues<ArrayEncodingId>())
+        {
+            if (id == ArrayEncodingId.Unknown || !ArrayDecoderTable.IsImplemented(id))
+            {
+                continue;
+            }
+
+            ArrayDecoder decoder = ArrayDecoderTable.Get(id, id.ToString());
+            if (decoder.SelectsByRow && !decoder.SelectsWithoutFullDecode)
+            {
+                wrong.Append(id.ToString()).Append(": selects by row without selecting\n");
+            }
+        }
+
+        Assert.Equal(string.Empty, wrong.ToString());
+        ArrayDecoder zstd = ArrayDecoderTable.Get(ArrayEncodingId.Zstd, nameof(ArrayEncodingId.Zstd));
+        Assert.True(zstd.SelectsWithoutFullDecode);
+        Assert.False(zstd.SelectsByRow);
+    }
+
     /// <summary>Awkward on purpose: block boundaries, both ends, and a prime stride between.</summary>
     /// <summary>
     /// A take of a few rows of text this writer wrote plain, whose offsets it bit-packs, reads only

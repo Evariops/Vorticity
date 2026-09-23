@@ -249,16 +249,17 @@ internal sealed class DictDecoder : ArrayDecoder
         ValidityReader codesValidity = ValidityReader.Of(context.Canonical, codesNode.Validity);
 
         // A take of a few rows names a few entries, and when the values' encoding reaches an entry
-        // without decoding the rest, only those are decoded and the rows' codes renumbered onto
-        // them: a row taken from each of a file's chunks otherwise decodes every chunk's whole
-        // dictionary for one of its entries. Otherwise the values are shared, and only when the
-        // codes are narrowed: a take that visits a hundred batches of one chunk would decode them a
-        // hundred times, and on the whole-node path the reader above has already retained the node
-        // itself, so asking again here would retain the same bytes twice.
+        // at about its own cost, only those are decoded and the rows' codes renumbered onto them: a
+        // row taken from each of a file's chunks otherwise decodes every chunk's whole dictionary
+        // for one of its entries. Otherwise the values are shared, and only when the codes are
+        // narrowed: a take that visits a hundred batches of one chunk would decode them a hundred
+        // times, and on the whole-node path the reader above has already retained the node itself,
+        // so asking again here would retain the same bytes twice. Values that reach an entry by
+        // inflating a frame of them are shared too, since each batch would inflate a frame again.
         int entries = valuesLength;
         int[]? narrowed = null;
         int valuesIndex;
-        if (selective && !keep && produced * NarrowedValues < valuesLength && context.ChildSelectsWithoutFullDecode(in node, 1))
+        if (selective && !keep && produced * NarrowedValues < valuesLength && context.ChildSelectsByRow(in node, 1))
         {
             narrowed = System.Buffers.ArrayPool<int>.Shared.Rent(2 * produced);
             entries = Narrow(codes, codesPType, in codesValidity, produced, valuesLength, narrowed);

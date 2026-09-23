@@ -164,6 +164,19 @@ internal abstract class ArrayDecoder
         SelectsWithoutFullDecode;
 
     /// <summary>
+    /// Whether a selection costs this encoding about the rows it names, rather than a block of rows
+    /// around each: what a parent that shares one decode of the whole node among many selections
+    /// weighs before selecting instead.
+    /// </summary>
+    /// <remarks>
+    /// A dictionary asks it of its values. Selecting the few entries a take names beats decoding
+    /// them all only when an entry costs about itself: an encoding that reaches a row by inflating
+    /// the block that holds it pays that block on every selection, where the whole values, decoded
+    /// once, are lent to every batch of the chunk.
+    /// </remarks>
+    public virtual bool SelectsByRow => SelectsWithoutFullDecode;
+
+    /// <summary>
     /// Whether <see cref="TryCompare"/> is overridden, i.e. whether this encoding can answer a
     /// comparison without materializing the whole node.
     /// </summary>
