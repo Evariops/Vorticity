@@ -15,7 +15,12 @@ namespace Vorticity.Writing;
 /// rather than the whole column. The stream holds only the valid values, nulls excluded, so the
 /// decoder scatters them back across the null slots.
 /// </summary>
-internal sealed class ZstdPlan
+/// <remarks>
+/// A value, since a trial is priced for every column of every chunk and most lose: the arrays it
+/// holds are rented, and whoever holds the plan last -- the trial that lost, or the blob that
+/// writes it -- gives them back, once.
+/// </remarks>
+internal readonly struct ZstdPlan
 {
     /// <summary>Numbers kept per frame: its end in <see cref="Data"/>, the bytes it decompresses to, its values.</summary>
     private const int FrameFields = 3;

@@ -218,7 +218,7 @@ internal readonly struct ColumnPlan
         ColumnScheme.Sequence =>
             $"sequence base={Sequence.GetValueOrDefault().BaseBits} step={Sequence.GetValueOrDefault().Step}",
         ColumnScheme.Fsst => $"fsst size={Fsst!.EncodedSize}",
-        ColumnScheme.Zstd => $"zstd bytes={Zstd!.CompressedLength} frames={Zstd.FrameCount}",
+        ColumnScheme.Zstd => $"zstd bytes={Zstd.GetValueOrDefault().CompressedLength} frames={Zstd.GetValueOrDefault().FrameCount}",
         ColumnScheme.Alp =>
             $"alp e={Alp!.ExponentE} f={Alp.ExponentF} size={Alp.EncodedSize} " +
             $"patches={Alp.PatchIndices.Length}",
@@ -985,9 +985,9 @@ internal static class ColumnCompressor
 
         if (cut is { } chosen)
         {
-            if (frame is not null)
+            if (frame is { } priced)
             {
-                return ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.CompressedLength };
+                return ColumnPlan.ForZstd(priced) with { PredictedBytes = priced.CompressedLength };
             }
 
             // The exact split can still miss the margin the estimate cleared, when the rows the
@@ -1016,9 +1016,9 @@ internal static class ColumnCompressor
             // flooring, which is exact because `encoded` is an integer. The two together are the
             // condition under which FSST takes the column when it is priced first.
             long ceiling = plain * 9 / 10;
-            if (frame is not null)
+            if (frame is { } priced)
             {
-                ceiling = Math.Min(ceiling, frame.CompressedLength * 10L / 9);
+                ceiling = Math.Min(ceiling, priced.CompressedLength * 10L / 9);
             }
 
             fsst = FsstPlan.TryBuild(arena, nodeIndex, ceiling);
@@ -1031,9 +1031,9 @@ internal static class ColumnCompressor
             return ColumnPlan.ForFsst(fsst) with { PredictedBytes = fsst.EncodedSize };
         }
 
-        if (frame is not null)
+        if (frame is { } kept)
         {
-            return ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.CompressedLength };
+            return ColumnPlan.ForZstd(kept) with { PredictedBytes = kept.CompressedLength };
         }
 
         return ColumnPlan.Canonical with { PredictedBytes = plain };
@@ -1678,10 +1678,9 @@ internal static class ColumnCompressor
                     return ColumnPlan.Canonical;
                 }
 
-                ZstdPlan? frame = ZstdPlan.TryBuild(arena, nodeIndex, plain, workspace);
-                return frame is null
-                    ? ColumnPlan.Canonical
-                    : ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.CompressedLength };
+                return ZstdPlan.TryBuild(arena, nodeIndex, plain, workspace) is { } frame
+                    ? ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.CompressedLength }
+                    : ColumnPlan.Canonical;
             }
 
             case ColumnScheme.Fsst:

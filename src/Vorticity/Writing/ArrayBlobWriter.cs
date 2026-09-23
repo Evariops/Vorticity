@@ -259,7 +259,7 @@ internal static class ArrayBlobWriter
 
         if (plan.Scheme == ColumnScheme.Zstd)
         {
-            return WriteZstd(blob, arena, nodeIndex, plan.Zstd!, encodings);
+            return WriteZstd(blob, arena, nodeIndex, plan.Zstd.GetValueOrDefault(), encodings);
         }
 
         if (plan.Scheme == ColumnScheme.Alp)
@@ -963,7 +963,7 @@ internal static class ArrayBlobWriter
         Workspace blob,
         CanonicalArena arena,
         int nodeIndex,
-        ZstdPlan plan,
+        in ZstdPlan plan,
         EncodingDictionary encodings)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
@@ -986,12 +986,12 @@ internal static class ArrayBlobWriter
         int childCount = Validity(blob, arena, node, encodings, children);
 
         int written = Node(
-            blob, encodings, "vortex.zstd"u8, ZstdBytes(blob, plan), children[..childCount], indices);
+            blob, encodings, "vortex.zstd"u8, ZstdBytes(blob, in plan), children[..childCount], indices);
         plan.ReleaseFrames();
         return written;
     }
 
-    private static ReadOnlySpan<byte> ZstdBytes(Workspace blob, ZstdPlan plan)
+    private static ReadOnlySpan<byte> ZstdBytes(Workspace blob, in ZstdPlan plan)
     {
         ref ProtoWriter writer = ref blob.Metadata();
         Span<ZstdFrameMetadata> stack = stackalloc ZstdFrameMetadata[16];
