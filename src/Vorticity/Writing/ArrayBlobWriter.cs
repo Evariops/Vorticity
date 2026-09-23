@@ -1681,14 +1681,15 @@ internal static class ArrayBlobWriter
     {
         result = 0;
         int rows = node.Length;
-        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        ValidityReader mask = ValidityReader.Of(arena, node.Validity);
+        ViewValues values = new ViewValues(node);
 
         long heapBytes = 0;
         for (int i = 0; i < rows; i++)
         {
             if (mask.IsValid(i))
             {
-                heapBytes += ViewLength(node, i);
+                heapBytes += values.At(i).Length;
             }
         }
 
@@ -1728,7 +1729,7 @@ internal static class ArrayBlobWriter
                     continue;
                 }
 
-                ReadOnlySpan<byte> value = ViewBytes(node, i);
+                ReadOnlySpan<byte> value = values.At(i);
                 value.CopyTo(heap.AsSpan(written));
                 written += value.Length;
             }
@@ -1760,23 +1761,6 @@ internal static class ArrayBlobWriter
         VarBinMetadata value = new VarBinMetadata(offsetsPType);
         VarBinMetadata.Write(ref writer, in value);
         return writer.WrittenSpan;
-    }
-
-    private static int ViewLength(CanonicalNode node, int row) =>
-        (int)BinaryPrimitives.ReadUInt32LittleEndian(node.Views.Span.Slice(row * ViewSize, 4));
-
-    private static ReadOnlySpan<byte> ViewBytes(CanonicalNode node, int row)
-    {
-        ReadOnlySpan<byte> view = node.Views.Span.Slice(row * ViewSize, ViewSize);
-        uint size = BinaryPrimitives.ReadUInt32LittleEndian(view);
-        if (size <= 12)
-        {
-            return view.Slice(4, (int)size);
-        }
-
-        uint buffer = BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
-        uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
-        return node.GetDataBuffer((int)buffer).Span.Slice((int)offset, (int)size);
     }
 
     /// <summary>Writes <c>vortex.map</c>: empty metadata, no buffers, one <c>vortex.listview</c> child.</summary>

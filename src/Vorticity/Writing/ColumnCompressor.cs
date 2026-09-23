@@ -1888,6 +1888,19 @@ internal static class ColumnCompressor
         /// </remarks>
         private readonly int _width;
 
+        /// <summary>The values of a fixed-width column, the bits of a Bool one, the strings of a VarBinView one.</summary>
+        /// <remarks>
+        /// Taken once, as the width is: the node's accessors look its record up and check its kind
+        /// at each call, and a comparer is asked about every row.
+        /// </remarks>
+        private readonly ReadOnlySpan<byte> _values;
+
+        private readonly ReadOnlySpan<byte> _bits;
+
+        private readonly int _bitOffset;
+
+        private readonly ViewValues _strings;
+
         internal RowComparer(CanonicalArena arena, int nodeIndex)
         {
             _arena = arena;
@@ -1899,6 +1912,20 @@ internal static class ColumnCompressor
                 CanonicalKind.Decimal => Types.Numerics.DecimalStorage.ByteWidth(_node.Storage),
                 _ => _node.PType.ByteWidth(),
             };
+
+            switch (_node.Kind)
+            {
+                case CanonicalKind.VarBinView:
+                    _strings = new ViewValues(_node);
+                    break;
+                case CanonicalKind.Bool:
+                    _bits = _node.Bits.Span;
+                    _bitOffset = _node.BitOffset;
+                    break;
+                default:
+                    _values = _node.Values.Span;
+                    break;
+            }
         }
 
         internal bool Equal(int a, int b)
@@ -1914,21 +1941,17 @@ internal static class ColumnCompressor
                 return true;
             }
 
-            // The zero-width kinds first, and not as a style choice: `CanonicalNode.Values` throws
-            // on a Bool or a VarBinView, so the span may not be taken before the width has ruled
-            // them out.
             if (_width == 0)
             {
                 return _node.Kind == CanonicalKind.Bool
-                    ? CanonicalSupport.BitAt(_node.Bits.Span, _node.BitOffset + a) ==
-                      CanonicalSupport.BitAt(_node.Bits.Span, _node.BitOffset + b)
-                    : Bytes(a).SequenceEqual(Bytes(b));
+                    ? CanonicalSupport.BitAt(_bits, _bitOffset + a) == CanonicalSupport.BitAt(_bits, _bitOffset + b)
+                    : _strings.At(a).SequenceEqual(_strings.At(b));
             }
 
             // The widths that are one load are read as one load. `SequenceEqual` over four bytes is
             // a call with a length check in front of it, and a handful of bytes is what the average
             // row actually is.
-            ReadOnlySpan<byte> values = _node.Values.Span;
+            ReadOnlySpan<byte> values = _values;
             return _width switch
             {
                 1 => values[a] == values[b],
@@ -1949,11 +1972,11 @@ internal static class ColumnCompressor
             if (_width == 0)
             {
                 return _node.Kind == CanonicalKind.Bool
-                    ? CanonicalSupport.BitAt(_node.Bits.Span, _node.BitOffset + row) ? 1 : 2
-                    : Hash(Bytes(row));
+                    ? CanonicalSupport.BitAt(_bits, _bitOffset + row) ? 1 : 2
+                    : Hash(_strings.At(row));
             }
 
-            ReadOnlySpan<byte> values = _node.Values.Span;
+            ReadOnlySpan<byte> values = _values;
             return _width switch
             {
                 1 => Mix(values[row]),
@@ -1981,21 +2004,7 @@ internal static class ColumnCompressor
         private static int Mix(ulong value) => (int)KeyHash.Mix(value);
 
         private ReadOnlySpan<byte> Fixed(int row) =>
-            _node.Values.Span.Slice(row * _width, _width);
-
-        private ReadOnlySpan<byte> Bytes(int row)
-        {
-            ReadOnlySpan<byte> view = _node.Views.Span.Slice(row * 16, 16);
-            int size = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view);
-            if (size <= 12)
-            {
-                return view.Slice(4, size);
-            }
-
-            int buffer = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
-            int offset = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
-            return _node.GetDataBuffer(buffer).Span.Slice(offset, size);
-        }
+            _values.Slice(row * _width, _width);
 
         /// <summary>
         /// The write path's one byte-string hash, <see cref="KeyHash.Bytes"/>: it lives there so

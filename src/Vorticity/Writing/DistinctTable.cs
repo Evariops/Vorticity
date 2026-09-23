@@ -566,6 +566,7 @@ internal sealed class DistinctTable
     private void ProbeViews(CanonicalNode node, in ValidityMask mask, int start, int count)
     {
         ReadOnlySpan<byte> views = node.Views.Span;
+        ViewValues values = new ViewValues(node);
         ReadOnlySpan<ulong> pairs = MemoryMarshal.Cast<byte, ulong>(views).Slice(start * 2, count * 2);
         Span<ulong> recent = stackalloc ulong[RecentViews * 2];
         Span<int> recentCode = stackalloc int[RecentViews];
@@ -608,10 +609,7 @@ internal sealed class DistinctTable
                 }
                 else
                 {
-                    ReadOnlySpan<byte> view = views.Slice(row * ViewSize, ViewSize);
-                    int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
-                    int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
-                    InsertBytes(node.GetDataBuffer(buffer).Span.Slice(offset, size));
+                    InsertBytes(values.At(row));
                 }
             }
 

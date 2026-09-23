@@ -111,12 +111,13 @@ internal sealed class FsstPlan
         }
 
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
+        ViewValues values = new ViewValues(node);
         long plain = 0;
         for (int i = 0; i < rows; i++)
         {
             if (valid.IsValid(i))
             {
-                plain += ValueOf(node, i).Length;
+                plain += values.At(i).Length;
             }
         }
 
@@ -150,7 +151,7 @@ internal sealed class FsstPlan
                     continue;
                 }
 
-                ReadOnlySpan<byte> value = ValueOf(node, i);
+                ReadOnlySpan<byte> value = values.At(i);
                 value.CopyTo(heap.AsSpan(at));
                 lengths[i] = value.Length;
                 at += value.Length;
@@ -268,20 +269,5 @@ internal sealed class FsstPlan
                     && (span[bit >> 3] & (1 << (bit & 7))) != 0;
             }
         }
-    }
-
-    /// <summary>The bytes of row <paramref name="row"/> of a canonical varbinview node: inline or in a data buffer.</summary>
-    internal static ReadOnlySpan<byte> ValueOf(CanonicalNode node, int row)
-    {
-        ReadOnlySpan<byte> view = node.Views.Span.Slice(row * 16, 16);
-        uint size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view);
-        if (size <= 12)
-        {
-            return view.Slice(4, (int)size);
-        }
-
-        uint buffer = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
-        uint offset = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
-        return node.GetDataBuffer((int)buffer).Span.Slice((int)offset, (int)size);
     }
 }

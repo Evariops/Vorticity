@@ -106,6 +106,7 @@ internal readonly struct ZstdPlan
         // The validity kind is a property of the node, so it is resolved once rather than switched
         // on per row.
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
+        ViewValues strings = new ViewValues(node);
         for (int i = 0; i < rows; i++)
         {
             if (!valid.IsValid(i))
@@ -114,7 +115,7 @@ internal readonly struct ZstdPlan
             }
 
             valueCount++;
-            streamBytes += sizeof(uint) + ValueOf(node, i).Length;
+            streamBytes += sizeof(uint) + strings.At(i).Length;
             if (streamBytes > int.MaxValue)
             {
                 return null;
@@ -149,7 +150,7 @@ internal readonly struct ZstdPlan
                         continue;
                     }
 
-                    ReadOnlySpan<byte> value = ValueOf(node, i);
+                    ReadOnlySpan<byte> value = strings.At(i);
                     BinaryPrimitives.WriteUInt32LittleEndian(stream.AsSpan(offset, sizeof(uint)), (uint)value.Length);
                     offset += sizeof(uint);
                     value.CopyTo(stream.AsSpan(offset));
@@ -368,6 +369,4 @@ internal readonly struct ZstdPlan
     private const int MarginNumerator = 9;
 
     private const int MarginDenominator = 10;
-
-    private static ReadOnlySpan<byte> ValueOf(CanonicalNode node, int row) => FsstPlan.ValueOf(node, row);
 }
