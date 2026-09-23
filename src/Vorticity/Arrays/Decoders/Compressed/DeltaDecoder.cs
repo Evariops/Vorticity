@@ -3,6 +3,8 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.X86;
 
 using Vorticity.Arrays.Decoders.Canonical;
 
@@ -234,6 +236,19 @@ internal sealed class DeltaDecoder : ArrayDecoder
             for (int b = firstBlock; b <= lastBlock; b++)
             {
                 ReadOnlySpan<T> deltaBlock = deltaValues.Slice(b * BlockSize, BlockSize);
+                int wholeStart = b * BlockSize;
+                if (typeof(T) == typeof(ulong) && Vector128.IsHardwareAccelerated && lanes == 16
+                    && wholeStart >= offset && wholeStart + BlockSize <= offset + length)
+                {
+                    // A whole block of 64-bit values: each lane's sums land in their place in the
+                    // output, with no block in between and no pass through the permutation.
+                    AccumulateUntransposed(
+                        MemoryMarshal.Cast<T, ulong>(baseValues.Slice(b * lanes, lanes)),
+                        MemoryMarshal.Cast<T, ulong>(deltaBlock),
+                        MemoryMarshal.Cast<T, ulong>(output.Slice(wholeStart - offset, BlockSize)));
+                    continue;
+                }
+
                 if (Vector128.IsHardwareAccelerated && lanes == 8 * Vector128<T>.Count)
                 {
                     AccumulateInRegisters(baseValues.Slice(b * lanes, lanes), deltaBlock, block, rowsPerLane);
@@ -320,6 +335,94 @@ internal sealed class DeltaDecoder : ArrayDecoder
             r7.StoreUnsafe(ref into, at + (7 * step));
         }
     }
+
+    /// <summary>
+    /// A whole block of 64-bit values, its prefix sums written where they belong in the output:
+    /// lane <c>l</c>'s sum at row <c>r</c> is output value <c>64 * l + r</c>, so each lane's sixty-four
+    /// sums are contiguous.
+    /// </summary>
+    /// <remarks>
+    /// Rows go two at a time. A register holds two lanes' sums, and interleaving the register of
+    /// row <c>r</c> with that of row <c>r + 1</c> gives each of the two lanes its two consecutive
+    /// sums, one store each: the transposition costs two interleaves a register, where the general
+    /// path stores the block and then walks the permutation, a table load, a load and a store a value.
+    /// </remarks>
+    private static void AccumulateUntransposed(ReadOnlySpan<ulong> bases, ReadOnlySpan<ulong> deltaBlock, Span<ulong> output)
+    {
+        ref ulong start = ref MemoryMarshal.GetReference(bases);
+        Vector128<ulong> r0 = Vector128.LoadUnsafe(ref start);
+        Vector128<ulong> r1 = Vector128.LoadUnsafe(ref start, 2);
+        Vector128<ulong> r2 = Vector128.LoadUnsafe(ref start, 4);
+        Vector128<ulong> r3 = Vector128.LoadUnsafe(ref start, 6);
+        Vector128<ulong> r4 = Vector128.LoadUnsafe(ref start, 8);
+        Vector128<ulong> r5 = Vector128.LoadUnsafe(ref start, 10);
+        Vector128<ulong> r6 = Vector128.LoadUnsafe(ref start, 12);
+        Vector128<ulong> r7 = Vector128.LoadUnsafe(ref start, 14);
+
+        ref ulong delta = ref MemoryMarshal.GetReference(deltaBlock);
+        ref ulong into = ref MemoryMarshal.GetReference(output);
+        ref byte order = ref MemoryMarshal.GetReference(FastLanes.Order);
+        for (int row = 0; row < 64; row += 2)
+        {
+            nuint first = (nuint)((Unsafe.Add(ref order, row >> 3) * 16) + ((row & 7) * 128));
+            nuint second = (nuint)((Unsafe.Add(ref order, (row + 1) >> 3) * 16) + (((row + 1) & 7) * 128));
+            nuint at = (nuint)row;
+
+            Vector128<ulong> a = r0 + Vector128.LoadUnsafe(ref delta, first);
+            r0 = a + Vector128.LoadUnsafe(ref delta, second);
+            Low(a, r0).StoreUnsafe(ref into, at);
+            High(a, r0).StoreUnsafe(ref into, at + 64);
+
+            a = r1 + Vector128.LoadUnsafe(ref delta, first + 2);
+            r1 = a + Vector128.LoadUnsafe(ref delta, second + 2);
+            Low(a, r1).StoreUnsafe(ref into, at + 128);
+            High(a, r1).StoreUnsafe(ref into, at + 192);
+
+            a = r2 + Vector128.LoadUnsafe(ref delta, first + 4);
+            r2 = a + Vector128.LoadUnsafe(ref delta, second + 4);
+            Low(a, r2).StoreUnsafe(ref into, at + 256);
+            High(a, r2).StoreUnsafe(ref into, at + 320);
+
+            a = r3 + Vector128.LoadUnsafe(ref delta, first + 6);
+            r3 = a + Vector128.LoadUnsafe(ref delta, second + 6);
+            Low(a, r3).StoreUnsafe(ref into, at + 384);
+            High(a, r3).StoreUnsafe(ref into, at + 448);
+
+            a = r4 + Vector128.LoadUnsafe(ref delta, first + 8);
+            r4 = a + Vector128.LoadUnsafe(ref delta, second + 8);
+            Low(a, r4).StoreUnsafe(ref into, at + 512);
+            High(a, r4).StoreUnsafe(ref into, at + 576);
+
+            a = r5 + Vector128.LoadUnsafe(ref delta, first + 10);
+            r5 = a + Vector128.LoadUnsafe(ref delta, second + 10);
+            Low(a, r5).StoreUnsafe(ref into, at + 640);
+            High(a, r5).StoreUnsafe(ref into, at + 704);
+
+            a = r6 + Vector128.LoadUnsafe(ref delta, first + 12);
+            r6 = a + Vector128.LoadUnsafe(ref delta, second + 12);
+            Low(a, r6).StoreUnsafe(ref into, at + 768);
+            High(a, r6).StoreUnsafe(ref into, at + 832);
+
+            a = r7 + Vector128.LoadUnsafe(ref delta, first + 14);
+            r7 = a + Vector128.LoadUnsafe(ref delta, second + 14);
+            Low(a, r7).StoreUnsafe(ref into, at + 896);
+            High(a, r7).StoreUnsafe(ref into, at + 960);
+        }
+    }
+
+    /// <summary>The first lanes of two registers side by side.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<ulong> Low(Vector128<ulong> a, Vector128<ulong> b) =>
+        AdvSimd.Arm64.IsSupported ? AdvSimd.Arm64.ZipLow(a, b)
+        : Sse2.IsSupported ? Sse2.UnpackLow(a, b)
+        : Vector128.Create(a.GetElement(0), b.GetElement(0));
+
+    /// <summary>The second lanes of two registers side by side.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<ulong> High(Vector128<ulong> a, Vector128<ulong> b) =>
+        AdvSimd.Arm64.IsSupported ? AdvSimd.Arm64.ZipHigh(a, b)
+        : Sse2.IsSupported ? Sse2.UnpackHigh(a, b)
+        : Vector128.Create(a.GetElement(1), b.GetElement(1));
 
     /// <summary>
     /// <c>running[l] += delta[l]</c> for every lane, publishing each sum into the block.
