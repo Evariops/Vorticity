@@ -567,21 +567,21 @@ software-emulated on NEON, which has no 64-bit lane multiply.
 
 ### 4.1 The fused pass and the second sweep
 
-| kernel | vector form | availability | gain | scalar fallback |
+| kernel | vector form | availability | time, against the scalar form | scalar fallback |
 |---|---|---|---|---|
-| min / max, fixed width | `Vector128.Min/Max` per lane, horizontal reduce per block; nullable: bitmap byte → lane mask, `ConditionalSelect` with the neutral element | portable | ×4 to ×8 over a scalar loop | one compare per value |
+| min / max, fixed width | `Vector128.Min/Max` per lane, horizontal reduce per block; nullable: bitmap byte → lane mask, `ConditionalSelect` with the neutral element | portable | 0,25× to 0,125× a scalar loop's | one compare per value |
 | floats with NaN | `IsNaN(v)` mask folded into the select | portable | same | same |
 | null count | `PopCount` per 64-bit word of the bitmap | scalar `BitOperations` (one per cycle) | no SIMD needed; the gain is leaving `IsValid` per row | — |
-| run boundaries | `Equals(v, v_shifted_by_one)` then `ExtractMostSignificantBits`, stored to the boundary bitmap, popcount for the count | portable | ×8 to ×16 | compare per value |
-| sorted / strict | `LessThanOrEqual(v, v_next)` all-true; `delta_min/max` by subtract then Min/Max | portable | ×4 | — |
-| bit-width histogram, raw and zigzag | lane lzcnt (`AdvSimd.LeadingZeroCount` for 32-bit lanes; `Avx512CD` for 64-bit; otherwise the float-exponent trick: `ConvertToDouble` and read the exponent field) into a byte buffer, then scalar increments | platform paths | ×2: the increments stay scalar; scalar cost is already ~0,5 ns/value | `BitOperations.LeadingZeroCount` per value |
+| run boundaries | `Equals(v, v_shifted_by_one)` then `ExtractMostSignificantBits`, stored to the boundary bitmap, popcount for the count | portable | 0,125× to 0,0625× | compare per value |
+| sorted / strict | `LessThanOrEqual(v, v_next)` all-true; `delta_min/max` by subtract then Min/Max | portable | 0,25× | — |
+| bit-width histogram, raw and zigzag | lane lzcnt (`AdvSimd.LeadingZeroCount` for 32-bit lanes; `Avx512CD` for 64-bit; otherwise the float-exponent trick: `ConvertToDouble` and read the exponent field) into a byte buffer, then scalar increments | platform paths | 0,5×: the increments stay scalar; scalar cost is already ~0,5 ns/value | `BitOperations.LeadingZeroCount` per value |
 | second sweep (FoR) | subtract the broadcast `min`, lane lzcnt, byte buffer, scalar increments — on an L1-resident block | as above | the sweep is ~0,3 ns/value | — |
 | zigzag domain | `(v << 1) ^ ShiftRightArithmetic(v, 63)` per lane before the lzcnt | portable | folded into the above | — |
-| string view compare (runs) | one `Vector128<byte>` equality per pair of 16-byte views; a byte compare only when views differ at equal length | portable | ×8 on the common case | `SequenceEqual` |
-| bounded `str_min`/`str_max` | prefix compare of 16 bytes: equality mask, first differing byte by `ExtractMostSignificantBits` and tzcnt | portable (what `SequenceCompareTo` does) | ×2 | `SequenceCompareTo` |
-| hashing, fixed width | mixer on 32-bit lanes with `Multiply<uint>`; for 64-bit lanes an xor-shift mixer (no NEON 64-bit multiply) or scalar `Crc32.ComputeCrc32` (`Arm.Crc32`, `Sse42`: one per cycle) | portable / platform | ×2 to ×4 | `Mix` |
-| hashing, strings (XxHash3-64) | short inputs take scalar dedicated paths (≤ 16, ≤ 128, ≤ 240 bytes: a handful of multiplies, no loop); above 240 bytes the stripe loop is vectorised (`Vector128` in the dotnet/runtime implementation) | portable | ×2 to ×3 over xxHash64 on short strings, which is the choice itself; a multi-buffer variant (four strings in lanes) is future work behind a measurement | — |
-| distinct table probe | Swiss-table group compare: `Vector128<byte>` equality of sixteen control bytes with the tag, `ExtractMostSignificantBits` → candidate slots; for strings the stored hash is compared before the bytes; the code is stored to the codes buffer in the same step | portable | one dependent load per probe instead of a chain walk: ~×2 on the probe, and one probe per row for the whole write | linear probe on bytes |
+| string view compare (runs) | one `Vector128<byte>` equality per pair of 16-byte views; a byte compare only when views differ at equal length | portable | 0,125× on the common case | `SequenceEqual` |
+| bounded `str_min`/`str_max` | prefix compare of 16 bytes: equality mask, first differing byte by `ExtractMostSignificantBits` and tzcnt | portable (what `SequenceCompareTo` does) | 0,5× | `SequenceCompareTo` |
+| hashing, fixed width | mixer on 32-bit lanes with `Multiply<uint>`; for 64-bit lanes an xor-shift mixer (no NEON 64-bit multiply) or scalar `Crc32.ComputeCrc32` (`Arm.Crc32`, `Sse42`: one per cycle) | portable / platform | 0,5× to 0,25× | `Mix` |
+| hashing, strings (XxHash3-64) | short inputs take scalar dedicated paths (≤ 16, ≤ 128, ≤ 240 bytes: a handful of multiplies, no loop); above 240 bytes the stripe loop is vectorised (`Vector128` in the dotnet/runtime implementation) | portable | 0,5× to 0,33× xxHash64's on short strings, which is the choice itself; a multi-buffer variant (four strings in lanes) is future work behind a measurement | — |
+| distinct table probe | Swiss-table group compare: `Vector128<byte>` equality of sixteen control bytes with the tag, `ExtractMostSignificantBits` → candidate slots; for strings the stored hash is compared before the bytes; the code is stored to the codes buffer in the same step | portable | one dependent load per probe instead of a chain walk: ~0,5× on the probe, and one probe per row for the whole write | linear probe on bytes |
 | Bloom build at block close | for each hash of the buffer: the eight Parquet salts as a `Vector256<uint>` (or two `Vector128<uint>`), `bits = 1 << ((h × salt) >> 27)` per lane, OR into the 256-bit block | portable on 128 bits, one instruction per step on AVX2 | ~3 ns per value per generation against eight scalar bit sets | scalar loop |
 
 *As delivered (step 28a): the step walk.* A progression is checked a register at a time for types
@@ -594,15 +594,15 @@ under `DOTNET_EnableHWIntrinsic=0`.
 
 ### 4.2 Encoding
 
-| kernel | vector form | availability | gain |
+| kernel | vector form | availability | time, against the scalar form |
 |---|---|---|---|
 | FoR subtract, zigzag | applied on the load feeding `PackBlock` | portable | folded into the pack |
-| patch detection | `GreaterThanOrEqual(v, 2^b)` mask per 1 024-block; indices extracted by tzcnt walks (rare by construction) | portable | ×8 on detection; extraction scalar |
+| patch detection | `GreaterThanOrEqual(v, 2^b)` mask per 1 024-block; indices extracted by tzcnt walks (rare by construction) | portable | 0,125× on detection; extraction scalar |
 | `PackBlock` | already vectorised (`FastLanes.cs:357`) | — | — |
-| ALP encode | multiply by `10^e`, `Vector128.Round` (or the magic-number add), `ConvertToInt64`, back-conversion and bit compare → exception mask; the integers' lzcnt for their histogram in the same loop | portable | ×2 to ×3, the paper's own design |
+| ALP encode | multiply by `10^e`, `Vector128.Round` (or the magic-number add), `ConvertToInt64`, back-conversion and bit compare → exception mask; the integers' lzcnt for their histogram in the same loop | portable | 0,5× to 0,33×, the paper's own design |
 | dictionary codes | no lookups at encode: the codes buffer is packed by `PackBlock` at one to four bytes per row; the first pass's tag compare is vectorised (§4.1) | — | — |
 | run-end | boundaries by tzcnt over the bitmap (the W-33 form); values gathered scalar | — | — |
-| varbin gather, inline views | a 12-byte inline value is one 16-byte load/store | portable | ×2 |
+| varbin gather, inline views | a 12-byte inline value is one 16-byte load/store | portable | 0,5× |
 | validity concat | word shifts | scalar | — |
 | postings and sorted runs (index) | delta then FastLanes pack of `u32` block ids or row positions | already vectorised | — |
 
@@ -620,10 +620,10 @@ sorted-runs index over a key column.
 | kernel | verdict | the measurement |
 |---|---|---|
 | sorted merge-join for `IN (...)` | **written** | an `IN` of a thousand keys planned in **117 ms**; the comparisons were never the cost. 100 ms of it was the slice union, which re-sorted everything found so far on every literal — gathered and merged once, that is gone. The pruner's own matching was the rest: it compared keys through their bytes, where a fixed-width key is one unsigned integer in the run's order (`KeyLayout.SortKey`); on 122 segments of 8 192 entries, a thousand keys take 13,6 ms through the bytes and 1,53 through the sort keys. Above roughly `entries / 2log₂(entries)` keys the searches cost more than one walk of the segment, and the pruner then merges: 0,28 ms on the same shape. Together: **117 ms → 51** |
-| Bloom probe, eight lanes | not written | the probe is **3,21 ns scalar and 1,81 in two registers**, a real 1,8×. A filtered scan probes about 140 times per literal — a root, a level, the live blocks — so it saves 0,2 µs of a 7 ms scan: 0,003 %. It pays at a million probes a query, which is the dataset over many objects ([13-dataset.md](13-dataset.md)), not a file |
+| Bloom probe, eight lanes | not written | the probe is **3,21 ns scalar and 1,81 in two registers**, a real 0,56×. A filtered scan probes about 140 times per literal — a root, a level, the live blocks — so it saves 0,2 µs of a 7 ms scan: 0,003 %. It pays at a million probes a query, which is the dataset over many objects ([13-dataset.md](13-dataset.md)), not a file |
 | zone map min/max over many zones | not written | the zone step of a 1M-row filtered plan reads one segment of 3 124 bytes and decides 123 zones in **0,3 ms**, decode included. There is no register's worth of work to save in front of the decode that feeds it |
 | postings unpack | already vectorised | the payloads are ordinary arrays, and `FastLanes` unpacks them with the same kernels a column uses |
-| Swiss-table group compare | not written | the distinct table probes at **1,46 ns a row at a hundred distinct values and 1,88 at ten thousand**, which is where it runs at all: a dictionary's column. The ×2 this row promises would save at most 0,7 ns a row, five per cent of a `dict` write, for a rewrite of the table that hands out the codes. At a million distinct values it costs 24,7 ns a row, and that is DRAM, which no group compare fixes — and there the dictionary loses and the table does not run |
+| Swiss-table group compare | not written | the distinct table probes at **1,46 ns a row at a hundred distinct values and 1,88 at ten thousand**, which is where it runs at all: a dictionary's column. The 0,5× this row promises would save at most 0,7 ns a row, five per cent of a `dict` write, for a rewrite of the table that hands out the codes. At a million distinct values it costs 24,7 ns a row, and that is DRAM, which no group compare fixes — and there the dictionary loses and the table does not run |
 
 What the `IN` measurement also found, and left to [10-indexes.md](10-indexes.md) §11's calibration:
 of the 51 ms that remain, about 39 are the two rank lookups a literal makes into the key source.
@@ -1049,7 +1049,7 @@ choice:
 - §6.3: the synchronous `MayMatch` reads statistics only; the Bloom check is `MayMatchAsync`.
 - §7.1: `Fastest` forces `WritePolicy.None` and nothing else; `IndexBudgetBytes` is
   `IndexBudgetPerMille` = 100; `PreferredBatchRows` is an instance property, the block length.
-- §4.2, §4.3: `FastLanes.cs:357` is now `:204`; the inline gather ×2 was withdrawn by 7n; the
+- §4.2, §4.3: `FastLanes.cs:357` is now `:204`; the inline gather's 0,5× was withdrawn by 7n; the
   "39 ms in two rank lookups" was the per-block `ProvesAbsent` slot search, fixed at step 33.
 - §2: the corpus bytes moved at R5b-1 and R6 (10 084 008 → 10 063 664), not only for the zone map.
 

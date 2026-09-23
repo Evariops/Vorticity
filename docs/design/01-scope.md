@@ -190,8 +190,8 @@ builder** — back-to-front construction, alignment, and vtable deduplication �
 Phase 0. Vtable dedup is not optional: without it, wide-schema metadata inflates and the 105%
 size target starts with a self-inflicted handicap.
 
-All three are built. The measured corpus write ratio is **1.044×**, inside the ≤105% target; the
-breakdown and what remains are in [90-registry.md](90-registry.md).
+All three are built. The measured corpus write ratio is **0.650×** (2026-09-23), inside the ≤105%
+target; the breakdown and what remains are in [90-registry.md](90-registry.md).
 
 ### Phase 3b — Row encoding (parallelizable)
 Independent of the file format and of I/O: it touches neither, so it can be built alongside any
@@ -220,10 +220,11 @@ other phase and is gated only by the `DType`/array model from Phase 0. See
 3. Zero managed allocations per batch in steady state on a full scan (excluding output buffers),
    measured with `MemoryDiagnoser`.
 4. Scan throughput within a stated factor of the Rust reader on the same machine and dataset
-   (target: ≤ 2×, see [05-benchmarks.md](05-benchmarks.md)). **Measured: 0.96×** on a full scan of
-   `containers/zoned_many_zones_nulls`, in one process against `vortex = 0.86.1` through
-   [`tools/vxbench-rs`](../../tools/vxbench-rs) — one file on one arm64 machine, not a general claim;
-   §1b states what it does and does not support.
+   (target: ≤ 2×, see [05-benchmarks.md](05-benchmarks.md)). **Measured: 0.333×** on a full scan of
+   `containers/zoned_many_zones_nulls`, in one process against `vortex = 0.86.1` built as upstream
+   builds its benchmarks, through [`tools/vxbench-rs`](../../tools/vxbench-rs) — one file on one
+   arm64 machine, not a general claim; [05-benchmarks.md](05-benchmarks.md) §2.2 states what it
+   does and does not support.
 5. AOT- and trimming-compatible, with no reflection and no `DynamicallyAccessedMembers`.
 6. A file whose *unprojected* columns use unknown encodings still scans successfully; a projected
    one fails with the component ID and kind in the message ([08-semantics.md](08-semantics.md) §4).

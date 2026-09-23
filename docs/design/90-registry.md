@@ -226,14 +226,14 @@ number that averaged it with everything else, which is what made it worth lookin
 what the FSST and OnPair rows above then closed.
 
 **Both are specialized now.** With `vortex.onpair` decoding selectively too, that scattered take is
-**452 µs, 0.34× a full scan**, and the `strs` residual is 206 µs rather than 825 — 2.4× on the axis
-and 4× on the column. The full scan did not move.
+**452 µs, 0.34× a full scan**, and the `strs` residual is 206 µs rather than 825 — 0.42× the axis's
+time and 0.25× the column's. The full scan did not move.
 
 **That residual was `vortex.onpair` alone, and this section used to say "onpair and fsst".** The
 correction came from a measurement that did not move: a `DecodeSelected` for `vortex.fsst` changed
 that take by no time and *zero bytes of allocation*, because FSST is not in the file. The pair had
 one member here all along, which also meant no axis in the suite could measure an FSST take — one
-exists now, over `encodings/fsst`, where the same change is worth 3.7×:
+exists now, over `encodings/fsst`, where the same change brings a take of 8 rows to 0.27× its time:
 
 | `encodings/fsst`, 4096 rows, one utf8 column | take 8 rows | full scan | ratio |
 |---|---|---|---|

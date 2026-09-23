@@ -414,8 +414,8 @@ sixteen values and the entry is 61 bytes:
 
 So the claim "a few hundred bytes" is not what a probe costs today: **a flat chunk is one segment**,
 so decoding the values child means reading the chunk's bytes — 538 604 for `label`'s one chunk —
-and only then are the codes skipped. The trade is that read against the whole scan: 13.7× less when
-the value is absent, 7 % more when it is present. It pays on this file because the probed column is
+and only then are the codes skipped. The trade is that read against the whole scan: 0.073× its bytes
+when the value is absent, 1.07× when it is present. It pays on this file because the probed column is
 one of six; it would break even on a file of one column, and it would become what §5.3 promised if
 a dictionary's values were given a segment of their own.
 

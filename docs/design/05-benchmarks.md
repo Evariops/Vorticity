@@ -21,64 +21,69 @@ correctness on both, but runs no benchmark (§6): the x64 targets are stated and
 
 ## 2. Where this stands
 
-Measured on 2026-09-23 at `592e053`: Apple M4 Pro (14 cores, ten of performance and four of
-efficiency), macOS 26.7, .NET 11.0.0-rc.1, and the reference at Vortex 0.86.1, **built as upstream
-builds its own benchmarks**: mimalloc as the allocator, `-C target-cpu=native -C
-force-frame-pointers=yes`, one codegen unit, no LTO. Absolutes are this machine's; the ratios are
-what carries. How to run each instrument, and what it costs, is [bench/README.md](../../bench/README.md).
+Measured on 2026-09-23 at `592e053`, the report at `df420cb`: Apple M4 Pro (14 cores, ten of
+performance and four of efficiency), macOS 26.7, .NET 11.0.0-rc.1, and the reference at Vortex
+0.86.1, **built as upstream builds its own benchmarks**: mimalloc as the allocator, `-C
+target-cpu=native -C force-frame-pointers=yes`, one codegen unit, no LTO. Absolutes are this
+machine's; the ratios are what carries. How to run each instrument, and what it costs, is
+[bench/README.md](../../bench/README.md).
+
+**Every ratio in this spec reads one way: the measured side's time, or bytes, over the side it is
+compared with** — ours over the reference's, after over before — **so under 1.00 the measured side
+took less.**
 
 ### 2.1 What a caller sees
 
 `--report` runs eight scenarios at 2^20 rows and at ten times that, **each side in its own
 process** (§3.2), **on one core and on all fourteen**, and on two files: the one our writer makes and
 the one the reference's writer makes from the same rows. Our side runs as the Native AOT build,
-which the ratio is taken against, and on one core again on the JIT. [The guide's benchmark
-page](../guide/benchmarks.md) is generated from it and carries every figure with its spread. **Its
-ratio is the reference's time over ours**, so above 1.00 we took less — the inverse of every
-in-process table below.
+whose time the ratio divides by the reference's, and on one core again on the JIT. [The guide's
+benchmark page](../guide/benchmarks.md) is generated from it and carries every figure with its
+spread. In bold below, where we took more.
 
 On one core, the reference on its single-threaded runtime and our scans at one lane:
 
 | scenario | 2^20 rows, our file | 2^20 rows, Rust's file | 10 × 2^20, our file | 10 × 2^20, Rust's file |
 |---|---|---|---|---|
-| open the file, read no rows | 3.48× | 3.32× | 2.80× | 3.23× |
-| scan every column | 1.22× | 1.43× | 1.15× | 1.28× |
-| project one column of four | 2.76× | 2.06× | 2.61× | 1.70× |
-| filter, a band of one row in a hundred | 1.33× | 1.76× | 2.29× | 3.88× |
-| filter, a band of half the rows | 1.31× | 1.52× | 1.23× | 1.51× |
-| take a thousand rows | **0.93×** | 1.67× | **0.88×** | 2.23× |
-| read the file and write it back | 1.85× | 2.06× | 1.92× | 2.09× |
+| open the file, read no rows | 0.29× | 0.30× | 0.28× | 0.27× |
+| scan every column | 0.82× | 0.66× | 0.87× | 0.72× |
+| project one column of four | 0.38× | 0.46× | 0.39× | 0.62× |
+| filter, a band of one row in a hundred | 0.78× | 0.60× | 0.45× | 0.25× |
+| filter, a band of half the rows | 0.80× | 0.65× | 0.83× | 0.63× |
+| take a thousand rows | **1.07×** | 0.58× | **1.14×** | 0.46× |
+| read the file and write it back | 0.56× | 0.50× | 0.52× | 0.47× |
 
 On all fourteen cores, the reference on a Tokio runtime of fourteen workers and our scans at
 fourteen lanes:
 
 | scenario | 2^20 rows, our file | 2^20 rows, Rust's file | 10 × 2^20, our file | 10 × 2^20, Rust's file |
 |---|---|---|---|---|
-| open the file, read no rows | 4.18× | 3.20× | 4.86× | 3.86× |
-| scan every column | 2.14× | 1.95× | 1.33× | 1.60× |
-| project one column of four | 2.66× | 2.49× | 3.37× | 1.95× |
-| filter, a band of one row in a hundred | 1.64× | 2.33× | 3.28× | 4.52× |
-| filter, a band of half the rows | **0.88×** | 1.34× | **0.38×** | **0.65×** |
-| take a thousand rows | **0.53×** | 1.89× | **0.31×** | 2.08× |
-| read the file and write it back | **0.63×** | **0.64×** | **0.42×** | **0.43×** |
+| open the file, read no rows | 0.25× | 0.27× | 0.25× | 0.24× |
+| scan every column | 0.46× | 0.40× | 0.68× | 0.60× |
+| project one column of four | 0.40× | 0.40× | 0.29× | 0.52× |
+| filter, a band of one row in a hundred | 0.54× | 0.42× | 0.35× | 0.24× |
+| filter, a band of half the rows | **1.09×** | 0.69× | **2.69×** | **1.45×** |
+| take a thousand rows | **1.90×** | 0.55× | **3.22×** | 0.48× |
+| read the file and write it back | **1.54×** | **1.63×** | **2.18×** | **2.28×** |
 
 How to read it:
 
 * **The reference was measured slower than it is until `592e053`**: on the system allocator, the
   baseline instruction set, one thread, and decoding in the loop that drained its stream. Built and
-  run as upstream runs it, it is 10 to 35 % faster on the in-process axes (§2.2), and the page's
-  `write` went from 7.87× to 1.92×. Every ratio before that commit is against the slower build.
+  run as upstream runs it, it takes 10 to 35 % less time on the in-process axes (§2.2), and the
+  page's `write` went from 0.13× to 0.52×. Every ratio before that commit is against the slower
+  build.
 * **The two files differ where it matters.** Our writer stores the `f64` column as `vortex.zstd`,
   the reference's as `vortex.alprd`; our file is 24.5 MB at ten million rows, the reference's 79.0 MB,
-  and a full scan of ours costs both readers about four times the scan of theirs (67.8 against
-  17.7 ms on our side). A take has to inflate a whole zstd frame for each row it wants, which is why
-  our only one-core losses are the take on our own file. What `Auto` should do there is a decision
+  and a full scan of ours costs our reader 3.98 times the scan of theirs and the reference's reader
+  3.28 times (67.3 against 16.9 ms on our side). A take has to inflate a whole zstd frame for each
+  row it wants, which is why our only one-core losses are the take on our own file. What `Auto` should do there is a decision
   of the writer's ([11-write-strategy.md](11-write-strategy.md) §3.4), not of the bench.
 * **Our writer is single-threaded**; the reference compresses its chunks on every core. On all
   cores, the `write` rows compare one core against fourteen, which is what a caller gets.
 * **Our lanes do not help a filter or a take as they help a scan**: from one core to fourteen, the
-  full scan of our file goes from 67.8 to 8.8 ms, the wide filter from 34.9 to 24.2, the take from
-  64.3 to 28.6, where the reference's take goes from 56.5 to 9.0.
+  full scan of our file goes from 67.3 to 8.5 ms, the wide filter from 34.6 to 24.1, the take from
+  64.7 to 28.3, where the reference's take goes from 56.9 to 8.8.
 
 Peak resident memory is lower than the reference's on most reads and on every write: 41 MiB
 against 427 on the one-core write of our file at ten million rows. **The JIT column makes another
@@ -400,7 +405,7 @@ keep the old question, labelled.
 
 ### 8.2 The full scan, commit by commit
 
-The full-scan row read **1.43× slower** than the lazy reference when it was first measured, and
+The full-scan row read **1.43×** against the lazy reference when it was first measured, and
 the figure stayed there through two commits that moved it. Rust was the control and did not move
 (1.312 → 1.343 ms, the run-to-run spread):
 
@@ -447,11 +452,11 @@ own floor across the easy encodings was 34–38 µs — so every ratio is pulled
 processes the variance was larger than the effects: three runs of effectively identical code on
 `encodings/fsst` returned 135, 146 and 202 µs, each with an error bar under ±3 µs, which describes the
 iterations inside one process and says nothing about the next. The clearest demonstration is
-`fastlanes.bitpacked`: its unpack kernel became 3.9× faster on i64 and 8.7× on i32, and its row moved
-from 1.26× to 1.18×. Both numbers are correct; only about 7 µs of the 42 is the kernel. The table
-decided what to work on, and a microbenchmark whether the work helped. `--throughput` answers the
-same question on files of a million rows, where the fixed cost is under a percent: FSST, published
-there as 1.74× rather than 10.6×, reads 1.11 in §2.2.
+`fastlanes.bitpacked`: its unpack kernel went to 0.26× its time on i64 and 0.11× on i32 (§8.5, 17
+bits a value), and its row moved from 1.26× to 1.18×. Both numbers are correct; only about 7 µs of
+the 42 is the kernel. The table decided what to work on, and a microbenchmark whether the work
+helped. `--throughput` answers the same question on files of a million rows, where the fixed cost is
+under a percent: FSST, published there as 1.74× rather than 10.6×, reads 1.08 in §2.2.
 
 ### 8.4 The FSST kernel, measured properly
 
@@ -468,13 +473,13 @@ because comparing across both at once produced two wrong numbers:
 | exact copy (what the library did) | 184.0 µs | 190.5 µs |
 | **wide store** (what it does since) | **38.7 µs** | **53.5 µs** |
 
-**4.7× faster like for like**, 3.6× with validation on both sides. The lessons:
+**0.21× the time like for like**, 0.28× with validation on both sides. The lessons:
 
 * A microbenchmark of the thing being changed beats an end-to-end one diluted by a fixed cost, and
   two candidates must be measured against one clock or thermal drift picks the winner.
 * **A benchmark that measures the library and labels the result "the old shape" has a shelf life of
   one commit.** The `exact copy` arm used to call `FsstSymbolTable.Decode`, and then the wide store
-  landed in that method: both arms ran the same shape and the table read 1.37×, with nothing
+  landed in that method: both arms ran the same shape and the table read 0.73×, with nothing
   regressed. The class now carries its own exact copy, as `FastLanesKernelBenchmarks` always carried
   its own scalar loop.
 * **Do not attribute a gap you have not measured.** The 14 µs between the two arms was once put on
@@ -482,7 +487,7 @@ because comparing across both at once produced two wrong numbers:
   code, 65 536 times, which the 2×2 prices at 14.8 µs on the wide path and 6.5 µs on the exact one.
 * **A figure that does not reproduce is said so.** The first exact-copy row read 306.8 µs where a
   faithful transplant of the pre-change `Decode` reads 190.5, under the same pinned SDK, while the
-  wide arm reproduced within 2 %. The reproducible number is 4.7×; 7.9× should not be quoted again.
+  wide arm reproduced within 2 %. The reproducible number is 0.21×; 0.13× should not be quoted again.
 
 The same trick applies to `vortex.onpair`, whose tokens are at most 16 bytes and take one
 `Vector128` store each; its decoder also stopped re-reading the token offsets through a
@@ -501,23 +506,23 @@ regression that was not one):
 
 | bits/value | i64 scalar | i64 vector | i32 scalar | i32 vector |
 |---|---|---|---|---|
-| 10 | 71.3 µs | **17.7 µs (4.0×)** | 77.5 µs | **9.4 µs (8.2×)** |
-| 17 | 76.0 µs | **19.6 µs (3.9×)** | 87.2 µs | **10.0 µs (8.7×)** |
-| 33 | 87.0 µs | **21.7 µs (4.0×)** | 105.1 µs | **11.7 µs (9.0×)** |
+| 10 | 71.3 µs | **17.7 µs (0.25×)** | 77.5 µs | **9.4 µs (0.12×)** |
+| 17 | 76.0 µs | **19.6 µs (0.26×)** | 87.2 µs | **10.0 µs (0.11×)** |
+| 33 | 87.0 µs | **21.7 µs (0.25×)** | 105.1 µs | **11.7 µs (0.11×)** |
 
-Two lanes per `Vector128` at i64 and four at i32, so the ceiling from width alone would be 2× and
-4×. Both beat it, because interchanging the loops also hoists the per-row arithmetic out of the lane
-loop: the scalar version recomputes four divisions and two masks per value, all of them constant
-across the 16 to 128 lanes of a row. A defect it also found: a decode class's parameter list named
+Two lanes per `Vector128` at i64 and four at i32, so width alone would take the scalar time to 0.50×
+and 0.25× at best. Both go under it, because interchanging the loops also hoists the per-row
+arithmetic out of the lane loop: the scalar version recomputes four divisions and two masks per
+value, all of them constant across the 16 to 128 lanes of a row. A defect it also found: a decode class's parameter list named
 `encodings/bitpacked`, `encodings/for` and `encodings/rle`, none of which exist — the corpus ids are
 `encodings/fastlanes_*` — so that class could never have run.
 
 ### 8.6 An empty band
 
-The selective filter once read 58 µs with pruning and 9.4× without, and that pair measured an empty
-band: `monotone` starts at 1 000 000 and steps by 3, so the filter `[1 000, 1 100)` matched
+The selective filter once read 58 µs with pruning, 0.11× its time without, and that pair measured an
+empty band: `monotone` starts at 1 000 000 and steps by 3, so the filter `[1 000, 1 100)` matched
 nothing, and the benchmark reported the cost of pruning away a whole file, the easy half of the
-claim. Fixed to a band that matches about a hundred rows, it read 74.2 µs against 546.3: **7.4× is
+claim. Fixed to a band that matches about a hundred rows, it read 74.2 µs against 546.3: **0.14× is
 pruning against rows that exist.** The correction was measured, not inferred: the code of the day
 against the old band returned 59.44 µs, against the 58 first recorded. And the trap it left: "the
 unpruned arm did not move and the pruned one did" looks like proof that code changed, but an arm
