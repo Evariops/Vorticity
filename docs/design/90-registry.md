@@ -339,9 +339,9 @@ representative rows, so a dictionary of strings shares the data buffers it came 
 16-byte views.
 
 **Where the size actually stands.** `WrittenSizeTests` rewrites the whole corpus and prints the
-figure, so it is measured by the suite rather than remembered here: **856 files, 10 265 948 bytes
-against the reference's 15 984 453 — ratio 0.642×** (2026-09-20), against the ≤ 105 % target of
-[05-benchmarks.md](05-benchmarks.md) §3 and a 0.65 ratchet the same test fails on.
+figure, so it is measured by the suite rather than remembered here: **856 files, 10 389 000 bytes
+against the reference's 15 984 453 — ratio 0.650×** (2026-09-23), against the ≤ 105 % target of
+[05-benchmarks.md](05-benchmarks.md) §3 and a 0.653 ratchet the same test fails on.
 
 Per-file figures are not listed here, for the reason the test's own header gives: a ratio written
 down in a document is a ratio nothing reproduces. The test prints the twelve worst **by bytes lost**

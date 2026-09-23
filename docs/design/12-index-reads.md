@@ -564,9 +564,9 @@ splits are cut into `n` contiguous groups decoded on their own contexts, and the
 referenced (`CanonicalArena.ReferenceFrom`) into the scan's context for the concatenation; the lanes
 are reset with the batch that borrows from them. Rows with a null key are delivered by no source
 and so by no key-ordered scan. `ScanMetrics.Windows` and `WindowSplits` count the windows and the
-splits they touched. A window allocates its `RecordBatch` when it reads its splits whole; a window
-across a split boundary pays what the take push-down pays per partial split on that column's
-encoding. `Explain` reports the source, the runs the range reaches and their entries since step 18
+splits they touched. A window that reads its splits whole allocates nothing: its `RecordBatch` is
+the previous window's, bound again, as every scan binds its batch; a window across a split
+boundary pays what the take push-down pays per partial split on that column's encoding. `Explain` reports the source, the runs the range reaches and their entries since step 18
 (`ScanPlan.Order`). Measured on 65 536 rows
 in 64 splits (`--ratio-check`): a 1 % band of a sorted column in key order at **0,70×** the
 reference's filtered scan; 64 rows of an uncorrelated column at **1,40×** the reference's take of

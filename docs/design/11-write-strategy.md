@@ -226,8 +226,8 @@ column probes every row **once** and encodes without a second probe.
 
 Per-chunk memory is a small multiple of the column's share of the pending chunk — the table at
 most three times its bytes, the key heap and the codes buffer at most once each — and the chunk
-threshold (`DataBlockTargetBytes`, 1 MiB) counts the whole batch, so the sum over a schema of any
-width stays a few times the chunk's bytes.
+threshold bounds the widest column (1 MiB of canonical values by default) and all of them together
+(64 MiB, §3.6), so the sum over a schema of any width stays a few times the chunk's bytes.
 
 #### 3.2.3 The second sweep: frame of reference, exactly
 
@@ -429,9 +429,13 @@ that is fully overwritten.
 
 ### 3.6 Emit: chunks, zones, segments, indexes, report
 
-- A chunk is emitted when at least `RowBlockSize` rows and `DataBlockTargetBytes` bytes are
-  pending, as whole blocks (today's rule; the remainder is carried); a batch that already meets
-  both and is a multiple of 8 192 rows goes out where it lies.
+- A chunk is emitted when at least `RowBlockSize` rows and a chunk's worth are pending, as whole
+  blocks (the remainder is carried); a batch that already meets both and is a multiple of 8 192
+  rows goes out where it lies. By default a chunk's worth is sized from what the rows hold: as
+  many whole blocks as keep the widest column within 1 MiB of canonical values and all the
+  columns within 64 MiB, between 1 and 128 blocks, measured on the batch before it is ingested so
+  that every chunk's running tables (§3.2.2) cover exactly its rows. `ChunkTargetBytes`, when
+  set, is a fixed target on the bytes of all the columns instead.
 - The zone map (from the closed blocks' statistics), the file statistics and the index runs are
   written at `CompleteAsync`, in that order, before the footer, as today.
 - `CompleteAsync` returns a **`WriteReport`** (§7.3): per column the encodings chosen and how often
@@ -451,6 +455,21 @@ every value, equal neighbours allowed by `is_sorted` and refused by `is_strict_s
 claiming nothing; the Rust cross-check holds every exact statistic written against the
 reference's recomputation over the canonical column. `VortexWriteOptions.FileStatistics` turns
 the segment off. A few dozen bytes per field; about two kilobytes of allocation per file.
+
+**The size of a chunk.** Four costs pull it apart. A read pays a fixed cost per chunk — the
+segment's fetch, its blob parse, the decoders' setup — which stops mattering between 65 536 and
+131 072 rows of an 8-byte column; a chunk's dictionary pays only when the chunk holds many times
+more rows than distinct values, so it wants larger chunks; a filtered or indexed read fetches the
+whole chunk of every column it keeps, so it wants smaller ones; an encoding that rides on local
+ranges (a frame of reference, a piecewise progression) loses when a chunk spans several of them.
+A megabyte of the widest column puts an 8-byte column at 131 072 rows, a text column at what its
+values weigh, and a narrow table at up to 128 blocks; the 64 MiB bound keeps a wide schema's
+pending rows in check. Measured against the fixed 1 MiB of all columns: the samples' million
+readings 1 564 708 → 1 508 212 bytes and 150 → 51 segment reads on a full scan, write time
+unchanged; the corpus +0,34 %, all of it on columns of local ranges. What it costs: a selective
+read through an index reads more bytes (the logs sample's `Status == 301` through postings,
+2 942 988 → 4 287 212), which `ChunkTargetBytes` answers until chunks are sized by the indexes
+they serve.
 
 ### 3.7 Memory and allocation model
 

@@ -23,6 +23,7 @@ bytes are, and the rest build on those two.
 | [12-index-reads.md](12-index-reads.md) | Index reads: the key cursor (seek / next / prev, rank, distinct), probes without rows (`Any`, `Count`, `Min`, `Max`), key-ordered delivery, `StartsWith` / `Contains` / `Like`, and the consumer surface — no change to a byte on disk |
 | [13-dataset.md](13-dataset.md) | The versioned dataset over an object store: commit objects, the prolly tree, compaction and vacuum |
 | [14-public-api.md](14-public-api.md) | Every public type a caller can name, the shape of the calls and the cost of each shape: the surface, the symbolic scan, the read and write cases |
+| [15-anticipated-decisions.md](15-anticipated-decisions.md) | Choices taken before the work from what is known: the read path a scan picks from its plan, and the encoding advisor that measures a sample of the data against the reads it will serve |
 | [90-registry.md](90-registry.md) | Full registry of encodings / layouts / dtypes and their status |
 | [99-sources.md](99-sources.md) | Primary sources and how to re-verify them |
 

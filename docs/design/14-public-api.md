@@ -127,15 +127,18 @@ What the session owns, and why it is not a static:
 | the index cache | `IndexCacheBytes` bounds what each open file keeps of decoded index runs; it is per file, because the runs die with the file, and 0 keeps nothing |
 
 The segment cache and the bound on reads apply to a source that does I/O: a `FileSegmentSource`, or
-an `ISegmentSource` of the caller's. A `MemorySegmentSource` or a `MemoryMappedSegmentSource`, and so
-a path, has nothing to bound or to cache, and is read directly.
+an `ISegmentSource` of the caller's. A `MemorySegmentSource` or a `MemoryMappedSegmentSource`, and a
+path, whose few positional reads come before its mapping, have nothing to bound or to cache, and
+are read directly.
 | parallelism | the degree every scan of the session starts from; `ScanOptions.DegreeOfParallelism` overrides it for one scan |
 | extensions | dtype ids this process knows beyond the frozen editions, so `Column<Money>` and a `Money` record member work |
 
 `VortexSession.Default` is what `VortexFile.OpenAsync(path)` uses. Its degree of parallelism is 1: a
 library does not take a host's cores without being asked, and the host asks once, on its session.
-A path is opened as a memory-mapped file, which is what the benchmarks measure; a caller who wants
-reads through `RandomAccess` instead passes a `FileSegmentSource` (§8).
+A path is opened by reading its tail positionally, and mapped into memory by the first scan whose
+plan reads data ([15-anticipated-decisions.md](15-anticipated-decisions.md) part A), which is what
+the benchmarks measure; a caller who wants every read through `RandomAccess` passes a
+`FileSegmentSource`, and one who wants the mapping from the open a `MemoryMappedSegmentSource` (§8).
 
 A registered extension is decoded as its storage, and the registered type reads the storage
 bytes; binding a member or a `Column<T>` to it checks that the file stores the extension as the
@@ -920,8 +923,10 @@ hands back exactly `n` values when `n` is positive, which the `IBufferWriter` co
 a block can be filled in one span. A list appended in one call that fails part way leaves nothing
 behind.
 
-What `WriteAsync` does with rows: they stay in the builder's own buffers until those hold
-`ChunkTargetBytes`, and whole blocks are then encoded from where they lie, without a copy.
+What `WriteAsync` does with rows: they stay in the builder's own buffers until those hold a
+chunk, as many whole blocks as keep the widest column within a megabyte of values, or
+`ChunkTargetBytes` when it is set, and whole blocks are then encoded from where they lie, without
+a copy.
 `FlushAsync` seals the whole blocks into a chunk and writes it; it is the only I/O before
 `CompleteAsync`, which writes the pending rows as the tail block. So a caller who wants an
 append-friendly file writes in multiples of `BlockRows` and it is exact, and a caller who does not
@@ -948,7 +953,7 @@ public sealed record VortexOpenOptions
 public sealed record VortexWriteOptions
 {
     public int BlockRows { get; init; } = 8_192;                                    // the unit of pruning, of a take, of a batch
-    public int ChunkTargetBytes { get; init; } = 1 << 20;                           // encoded bytes gathered before a chunk is sealed at Flush
+    public int ChunkTargetBytes { get; init; }                                      // 0: whole blocks while the widest column holds a megabyte, 1 to 128 of them; else the bytes of all columns gathered before a chunk is sealed
     public CompressionProfile Compression { get; init; } = CompressionProfile.Auto; // Auto, Fastest, Smallest, None
     public ImmutableDictionary<string, EncodingHint> Hints { get; init; }           // by column path; an unknown path throws at CreateWriter
     public VortexEdition TargetEdition { get; init; } = VortexEditions.Default;     // the edition the most deployed Rust reader accepts, not the newest
