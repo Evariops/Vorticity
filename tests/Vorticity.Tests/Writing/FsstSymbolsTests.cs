@@ -11,7 +11,10 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
+using Vorticity.Buffers;
+using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
 
@@ -209,6 +212,72 @@ public sealed class FsstSymbolsTests
                 $"symbol {i} has length {length} after a symbol of length {expected}");
             expected = length;
         }
+    }
+
+    [Fact]
+    public void ATableGivenBackTrainsAgainAsANewOneWould()
+    {
+        List<ReadOnlyMemory<byte>> first = Rows("aaaa bbbb cccc dddd", "aaaa bbbb", "cccc dddd aaaa", "dddd cccc");
+        List<ReadOnlyMemory<byte>> second = Rows("the quick brown fox", "jumps over the lazy dog", "the lazy fox");
+
+        // A training that keeps its table leaves no spare, so the next one builds a table of its own.
+        FsstSymbols.Train(first);
+        string expected = Describe(FsstSymbols.Train(second)!);
+
+        // Trained on the same corpus, so that symbols left in it would change how the next training
+        // counts its first generation.
+        FsstSymbols given = FsstSymbols.Train(second)!;
+        given.Recycle();
+        FsstSymbols again = FsstSymbols.Train(second)!;
+
+        Assert.Equal(expected, Describe(again));
+        foreach (ReadOnlyMemory<byte> row in second)
+        {
+            Assert.Equal(row.ToArray(), RoundTrip(again, row.Span));
+        }
+    }
+
+    [Fact]
+    public void APlanReleasedTwiceGivesItsTableBackOnce()
+    {
+        CanonicalArena arena = new CanonicalArena();
+        DTypeArena types = new DTypeArena();
+        string[] words = ["alpha beta", "beta gamma", "gamma alpha", "alpha alpha", "beta beta"];
+        const int count = 64;
+        VortexBuffer views = arena.Allocate(count * 16, 16, out Span<byte> bytes);
+        for (int row = 0; row < count; row++)
+        {
+            byte[] value = Encoding.UTF8.GetBytes(words[row % words.Length]);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes.Slice(row * 16, 4), value.Length);
+            value.CopyTo(bytes.Slice((row * 16) + 4));
+        }
+
+        int node = arena.AddVarBinView(
+            types.Utf8(Nullability.NonNullable), count, Validity.NonNullable, views, default);
+        FsstPlan plan = FsstPlan.TryBuild(arena, node, long.MaxValue)!;
+        Assert.NotNull(plan);
+
+        plan.Release();
+        Assert.Throws<InvalidOperationException>(() => plan.Table);
+        FsstSymbols taken = FsstSymbols.Train(Rows(words))!;
+
+        // Had the second release given the table back again, the next training would be handed
+        // the one the training above holds.
+        plan.Release();
+        FsstSymbols other = FsstSymbols.Train(Rows(words))!;
+        Assert.NotSame(taken, other);
+    }
+
+    private static string Describe(FsstSymbols table)
+    {
+        StringBuilder text = new StringBuilder();
+        for (int i = 0; i < table.Count; i++)
+        {
+            text.Append(table.SymbolBits(i).ToString("X16", System.Globalization.CultureInfo.InvariantCulture))
+                .Append('/').Append(table.SymbolLength(i)).Append(' ');
+        }
+
+        return text.ToString();
     }
 
     private static List<ReadOnlyMemory<byte>> Rows(params string[] values)

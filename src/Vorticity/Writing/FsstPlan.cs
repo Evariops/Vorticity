@@ -17,13 +17,14 @@ internal sealed class FsstPlan
     private byte[] _codes;
     private int[] _offsets;
     private int[] _lengths;
+    private FsstSymbols? _table;
     private readonly int _rows;
 
     private FsstPlan(
         FsstSymbols table, byte[] codes, int codeLength, int[] offsets, int[] lengths, int rows,
         long encodedSize)
     {
-        Table = table;
+        _table = table;
         _codes = codes;
         CodeLength = codeLength;
         _offsets = offsets;
@@ -32,7 +33,9 @@ internal sealed class FsstPlan
         EncodedSize = encodedSize;
     }
 
-    internal FsstSymbols Table { get; }
+    /// <summary>The trained table; read before <see cref="Release"/>, which gives it back.</summary>
+    /// <exception cref="InvalidOperationException">The plan was released.</exception>
+    internal FsstSymbols Table => _table ?? throw new InvalidOperationException("The FSST plan was released.");
 
     /// <summary>Bytes of the concatenated code stream.</summary>
     internal int CodeLength { get; }
@@ -57,19 +60,23 @@ internal sealed class FsstPlan
         return codes;
     }
 
-    /// <summary>Hands back every rental the plan still holds: the code stream, the row tables.</summary>
+    /// <summary>Hands back every rental the plan still holds: the code stream, the row tables, the symbol table.</summary>
     /// <remarks>
-    /// Called by the writer once the row tables are in its buffers, and by the chooser for a plan
-    /// nothing will write. Safe twice.
+    /// Called by the writer once the row tables and the symbols are in its buffers, and by the
+    /// chooser for a plan nothing will write. Safe twice: the plan forgets each rental before it
+    /// gives it back, so a second call has nothing left to give.
     /// </remarks>
     internal void Release()
     {
         byte[] codes = _codes;
         int[] offsets = _offsets;
         int[] lengths = _lengths;
+        FsstSymbols? table = _table;
         _codes = [];
         _offsets = [];
         _lengths = [];
+        _table = null;
+        table?.Recycle();
         if (codes.Length > 0)
         {
             ArrayPool<byte>.Shared.Return(codes);
@@ -136,6 +143,7 @@ internal sealed class FsstPlan
         int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
         byte[]? codes = null;
         int[]? offsets = null;
+        FsstSymbols? table = null;
         bool kept = false;
         try
         {
@@ -157,7 +165,7 @@ internal sealed class FsstPlan
                 at += value.Length;
             }
 
-            FsstSymbols? table = FsstSymbols.Train(
+            table = FsstSymbols.Train(
                 heap.AsSpan(0, heapBytes), starts.AsSpan(0, rows), lengths.AsSpan(0, rows));
             if (table is null)
             {
@@ -201,6 +209,7 @@ internal sealed class FsstPlan
         {
             if (!kept)
             {
+                table?.Recycle();
                 if (codes is not null)
                 {
                     ArrayPool<byte>.Shared.Return(codes);

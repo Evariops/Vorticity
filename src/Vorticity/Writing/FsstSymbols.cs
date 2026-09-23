@@ -129,9 +129,33 @@ internal sealed class FsstSymbols
 
     private int _count;
 
+    /// <summary>A table no plan reads any more, kept for the next training; null while none is.</summary>
+    /// <remarks>
+    /// A table's lookup of two-byte symbols alone is 128 KiB, an allocation of the large-object
+    /// heap, and pricing FSST trains one per column-chunk whether FSST wins or not. One is kept,
+    /// taken with an exchange that leaves null behind: a second trainer builds its own.
+    /// </remarks>
+    private static FsstSymbols? Spare;
+
     private FsstSymbols()
     {
         Clear();
+    }
+
+    /// <summary>Gives the table back for a later training, once nothing reads it.</summary>
+    internal void Recycle() => Volatile.Write(ref Spare, this);
+
+    /// <summary>A cleared table: the spare one, or a new one when there is none.</summary>
+    private static FsstSymbols Fresh()
+    {
+        FsstSymbols? spare = Interlocked.Exchange(ref Spare, null);
+        if (spare is null)
+        {
+            return new FsstSymbols();
+        }
+
+        spare.Clear();
+        return spare;
     }
 
     /// <summary>How many symbols the table holds, 0..255.</summary>
@@ -180,14 +204,20 @@ internal sealed class FsstSymbols
     internal static FsstSymbols? Train(
         ReadOnlySpan<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths)
     {
-        FsstSymbols table = new FsstSymbols();
+        FsstSymbols table = Fresh();
 
         TrainingTables tables = TrainingTables.Take();
         try
         {
             Span<Line> sample = tables.Sample;
             MakeSample(starts, lengths, sample, out int drawn, out bool sampled);
-            return drawn == 0 ? null : TrainCore(table, heap, sample[..drawn], sampled, tables);
+            FsstSymbols? trained = drawn == 0 ? null : TrainCore(table, heap, sample[..drawn], sampled, tables);
+            if (trained is null)
+            {
+                table.Recycle();
+            }
+
+            return trained;
         }
         finally
         {

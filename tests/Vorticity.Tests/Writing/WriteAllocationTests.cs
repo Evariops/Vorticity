@@ -122,12 +122,16 @@ public sealed class WriteAllocationTests
         // is built in one scratch -- arrays' arena, dtypes' arena, specs -- that completions share,
         // where each zone map made its own: 9 000 bytes a zoned column. The encoding tables look
         // their few ids up in order and take a known id's string from the registry: 360 to 2 000.
-        // A zstd trial is a value rather than an object: 40 bytes a column that tries zstd.
-        ("containers/zoned_many_zones_nulls", 98_864),   // 97 296 measured, including 40 bytes more on each batch it reads, the public writer and report, and its text column's string bounds; the read back decompresses through one zstd decoder a scan and, reading only, in batches of several zones
+        // A zstd trial is a value rather than an object: 40 bytes a column that tries zstd. The FSST
+        // symbol table a trial trains -- 128 KiB of lookup for two-byte symbols -- goes back to the
+        // trainer once its plan is written or loses, rather than to the collector: 136 KiB on a
+        // text column FSST loses on. The shared pool keeps what a batch rents at once: 28 000
+        // bytes of owners on the zoned file.
+        ("containers/zoned_many_zones_nulls", 70_900),   // 69 376 measured, including 40 bytes more on each batch it reads, the public writer and report, and its text column's string bounds; the read back decompresses through one zstd decoder a scan and, reading only, in batches of several zones
         ("distributions/high_cardinality_i64_r8193", 10_220),   // 9 864 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
         ("encodings/fsst", 9_040),   // 8 576 measured
         ("encodings/onpair", 9_976),   // 9 528 measured, including the public writer and report and the text column's string bounds
-        ("types/utf8_nullable_r1025", 150_880),   // 150 176 measured, its FSST tables reordered on the stack, including the public writer and report and the text column's string bounds
+        ("types/utf8_nullable_r1025", 14_100),   // 13 520 measured, its FSST tables reordered on the stack and the trained one reused, including the public writer and report and the text column's string bounds
 
         // THE REMAINING COMPONENTS, on the write side, so that each has an allocation ratchet:
         // `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant`. Note
@@ -140,7 +144,7 @@ public sealed class WriteAllocationTests
         ("encodings/pco", 8_960),   // 8 840 measured alone; in the suite with dynamic PGO the process-wide measurement adds the JIT's instrumentation, 72 bytes that are not the writer's
         // The read half of this axis keeps a `ZstandardDecoder` per node, so a change on the zstd
         // read path can move this ceiling while the write path stays put.
-        ("encodings/zstd", 145_580),   // 145 120 measured, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
+        ("encodings/zstd", 8_880),   // 8 464 measured, the FSST table its trial trains reused, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
         ("encodings/map", 11_588),   // 11 480 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
         ("encodings/variant", 10_336),   // 10 152 measured, including the file statistics segment and the public writer and report: per file, not per row
 
@@ -245,7 +249,7 @@ public sealed class WriteAllocationTests
 
     /// <summary>
     /// What one more column adds, in bytes: the ceiling that says the cost is a state and not a
-    /// scratch. The writer's block scratch is ~130 KiB and measured here is **2 052 B**, a
+    /// scratch. The writer's block scratch is ~130 KiB and measured here is **1 972 B**, a
     /// sixtieth of it, so the claim holds with room; the ceiling is set just above the measurement
     /// as a ratchet, not as a target. The blob a column's chunk becomes is assembled in the one
     /// workspace the writer keeps, and every column's zone map in the one scratch completions
@@ -258,10 +262,10 @@ public sealed class WriteAllocationTests
     /// Bloom builder it abandons at the first block. A thousand columns therefore cost about 2 MB
     /// to write once, against 130 KiB of scratch.
     /// </remarks>
-    private const double PerColumnCeiling = 2_200.0;
+    private const double PerColumnCeiling = 2_100.0;
 
-    /// <summary>The wide schema's own ratchet, in bytes. Measured at 2 055 344 B.</summary>
-    private const long WideCeiling = 2_200_000;
+    /// <summary>The wide schema's own ratchet, in bytes. Measured at 1 979 800 B.</summary>
+    private const long WideCeiling = 2_100_000;
 
     /// <summary>
     /// The schema axis: a schema of a thousand columns costs a thousand small states and one
