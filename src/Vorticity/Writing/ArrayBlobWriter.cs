@@ -2286,13 +2286,13 @@ internal static class ArrayBlobWriter
         /// </summary>
         internal int FrameRows { get; init; }
 
-        /// <summary>The threads a column's zstd frames may be compressed on, the writer's degree; one by default.</summary>
-        internal int Lanes { get; init; } = 1;
+        /// <summary>The writer's threads, which a column's zstd frames may be compressed on; none for one thread.</summary>
+        internal WorkFan? Fan { get; init; }
 
         private ZstdFrames? _frames;
 
-        /// <summary>The frames' fan-out over <see cref="Lanes"/> threads, rented by the first column that uses it.</summary>
-        internal ZstdFrames Frames => _frames ??= ZstdFrames.Rent(Lanes);
+        /// <summary>The frame table of a column compressed on <see cref="Fan"/>, rented by the first column that uses it.</summary>
+        internal ZstdFrames Frames => _frames ??= ZstdFrames.Rent();
 
         /// <summary>The zstd trials whose frames were compressed across threads.</summary>
         internal int ColumnsAcross => _frames?.Columns ?? 0;
@@ -2337,7 +2337,7 @@ internal static class ArrayBlobWriter
         /// <param name="target">The edition the measured node is written under.</param>
         internal (Workspace Blob, EncodingDictionary Encodings) Measure(VortexEdition target)
         {
-            _measure ??= new Workspace { FrameRows = FrameRows, Lanes = Lanes };
+            _measure ??= new Workspace { FrameRows = FrameRows, Fan = Fan };
             if (_measureEncodings is null || _measureEncodings.Target != target)
             {
                 _measureEncodings = new EncodingDictionary(ComponentKind.Array, target);
@@ -2361,7 +2361,7 @@ internal static class ArrayBlobWriter
             Builder.Clear();
         }
 
-        /// <summary>Hands the builder's and the metadata writer's rentals back, and the zstd encoder and fan-out to the process's.</summary>
+        /// <summary>Hands the builder's and the metadata writer's rentals back, and the zstd encoder and frame table to the process's.</summary>
         public void Dispose()
         {
             Builder.Dispose();

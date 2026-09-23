@@ -1229,7 +1229,7 @@ Vorticity:     method ValueTask<long> ValidLengthAsync(string, CancellationToken
 Vorticity: sealed class Vorticity.VortexFileStatistics
 Vorticity:     property FieldStatistics Item[int] { get; }
 Vorticity:     property int Count { get; }
-Vorticity: sealed class Vorticity.VortexFileWriter : IAsyncDisposable, IChunkLedger
+Vorticity: sealed class Vorticity.VortexFileWriter : IAsyncDisposable, IChunkLedger, IFanWork
 Vorticity:     method ColumnsBuilder Builder()
 Vorticity:     method ColumnsBuilder<TRecord> Builder<TRecord>()
 Vorticity:     method ValueTask DisposeAsync()

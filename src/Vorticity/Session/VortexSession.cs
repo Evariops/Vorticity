@@ -59,8 +59,8 @@ public sealed class VortexSessionOptions
     /// <summary>
     /// How many chunks a scan of the session decodes and aggregates at once, unless its
     /// <see cref="ScanOptions.DegreeOfParallelism"/> says otherwise, and how many threads a writer of
-    /// the session compresses a column's zstd frames on, unless its
-    /// <see cref="VortexWriteOptions.DegreeOfParallelism"/> does. 1 by default: a library does not
+    /// the session works on, unless its <see cref="VortexWriteOptions.DegreeOfParallelism"/> does.
+    /// 1 by default: a library does not
     /// take a host's cores without being asked.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>

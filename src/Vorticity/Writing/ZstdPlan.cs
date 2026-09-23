@@ -291,7 +291,7 @@ internal readonly struct ZstdPlan
             from = to;
         }
 
-        if (workspace is { Lanes: > 1 } && blocks > 1 && stream.Length >= AcrossBytes)
+        if (workspace is { Fan.Lanes: > 1 } && blocks > 1 && stream.Length >= AcrossBytes)
         {
             return CompressAcross(workspace, stream, frames, blocks, bound, canonicalSize, numerator, denominator);
         }
@@ -392,7 +392,7 @@ internal readonly struct ZstdPlan
             fixed (byte* input = stream)
             fixed (byte* output = destination)
             {
-                compressed = across.Compress(input, output, count, workspace.Zstd);
+                compressed = across.Compress(workspace.Fan!, input, output, count);
             }
 
             if (!compressed)

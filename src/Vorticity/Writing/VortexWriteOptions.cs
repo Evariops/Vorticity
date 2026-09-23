@@ -117,7 +117,8 @@ public sealed record VortexWriteOptions
     public CompressionProfile Compression { get; init; } = CompressionProfile.Auto;
 
     /// <summary>
-    /// How many threads a column's zstd frames are compressed on; 0 for the session's
+    /// How many threads the writer summarizes its columns on as the rows come in, and compresses a
+    /// column's zstd frames on; 0 for the session's
     /// <see cref="VortexSessionOptions.MaxDegreeOfParallelism"/>. The file is the same bytes
     /// whatever the degree.
     /// </summary>

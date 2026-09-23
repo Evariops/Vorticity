@@ -31,9 +31,10 @@ internal sealed class ColumnWriter
     private readonly AppendList<int[]?> _widths = new AppendList<int[]?>();
 
     /// <summary>
-    /// The row-aligned children, created on the first <see cref="Accumulate"/> and therefore always
-    /// before the first <see cref="CloseBlock"/>, which keeps every node's closed-block list the
-    /// same length as its parent's. Never reordered: the shape is the schema's and cannot change.
+    /// The row-aligned children, created on the first
+    /// <see cref="Accumulate(CanonicalArena, int, int, int)"/> and therefore always before the first
+    /// <see cref="CloseBlock()"/>, which keeps every node's closed-block list the same length as its
+    /// parent's. Never reordered: the shape is the schema's and cannot change.
     /// </summary>
     private ColumnWriter[]? _children;
 
@@ -124,46 +125,97 @@ internal sealed class ColumnWriter
     }
 
     /// <summary>
+    /// What a column's ingest accumulates, each into state of its own, so that each can run on a
+    /// thread of its own over the same rows and end as the others running beside it leave it.
+    /// </summary>
+    [Flags]
+    internal enum IngestParts
+    {
+        /// <summary>The block statistics and widths, and the columns under this one.</summary>
+        Statistics = 1,
+
+        /// <summary>The bounded string extremes.</summary>
+        Bounds = 2,
+
+        /// <summary>The distinct table.</summary>
+        Table = 4,
+
+        /// <summary>Everything, in one pass.</summary>
+        All = Statistics | Bounds | Table,
+    }
+
+    /// <summary>
+    /// The accumulators worth running apart from the statistics on rows of
+    /// <paramref name="kind"/>: the bounds of a text column that keeps them, the distinct table of
+    /// a column whose dictionary lives.
+    /// </summary>
+    internal IngestParts Apart(CanonicalKind kind) =>
+        (_stringZones is not null && kind == CanonicalKind.VarBinView ? IngestParts.Bounds : 0)
+        | (DictionaryLive && DistinctTable.Serves(kind) ? IngestParts.Table : 0);
+
+    /// <summary>
     /// Folds rows <c>[start, start + count)</c> of <paramref name="nodeIndex"/> into the open
     /// block. The caller has cut the range at the block boundary.
     /// </summary>
-    internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
+    internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count) =>
+        Accumulate(arena, nodeIndex, start, count, IngestParts.All);
+
+    /// <summary>
+    /// <see cref="Accumulate(CanonicalArena, int, int, int)"/> for the accumulators
+    /// <paramref name="parts"/> names; the columns under this one go with the statistics, whole.
+    /// </summary>
+    internal void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count, IngestParts parts)
     {
+        bool statistics = (parts & IngestParts.Statistics) != 0;
         if (count <= 0)
         {
             // A list range whose rows name no element: nothing to summarize, but the subtree still
             // has to exist before the block closes, so that every node closes as many blocks as its
             // parent.
-            Shape(arena, nodeIndex);
+            if (statistics)
+            {
+                Shape(arena, nodeIndex);
+            }
+
             return;
         }
 
         CanonicalNode node = arena.GetNode(nodeIndex);
-        if (_openWidths is null && _widthsLive
-            && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
+        if (statistics)
         {
-            // Rented on the first integer range of the block and not before, so that a schema of a
-            // thousand string columns rents nothing, and only while bit-packing is the remembered
-            // plan: an integer column whose plan is never a bit-packing would otherwise pay a
-            // leading-zero count and two increments per row for a candidate nobody prices.
-            _openWidths = ArrayPool<int>.Shared.Rent(BitPackWidths.Length);
-            _openWidths.AsSpan(0, BitPackWidths.Length).Clear();
+            if (_openWidths is null && _widthsLive
+                && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
+            {
+                // Rented on the first integer range of the block and not before, so that a schema of
+                // a thousand string columns rents nothing, and only while bit-packing is the
+                // remembered plan: an integer column whose plan is never a bit-packing would
+                // otherwise pay a leading-zero count and two increments per row for a candidate
+                // nobody prices.
+                _openWidths = ArrayPool<int>.Shared.Rent(BitPackWidths.Length);
+                _openWidths.AsSpan(0, BitPackWidths.Length).Clear();
+            }
+
+            Span<int> widths =
+                _openWidths is null ? default : _openWidths.AsSpan(0, BitPackWidths.Length);
+            BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous, widths);
         }
 
-        Span<int> widths =
-            _openWidths is null ? default : _openWidths.AsSpan(0, BitPackWidths.Length);
-        BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous, widths);
-        if (_stringZones is not null && node.Kind == CanonicalKind.VarBinView)
+        if ((parts & IngestParts.Bounds) != 0 && _stringZones is not null && node.Kind == CanonicalKind.VarBinView)
         {
             _stringZones.Accumulate(arena, node, start, count);
         }
 
-        // The distinct table runs on the same rows right after the statistics pass has loaded them,
-        // so the probe pays its hash and its compare and none of its loads.
-        if (DictionaryLive)
+        // In one pass, the distinct table runs on the same rows right after the statistics pass has
+        // loaded them, so the probe pays its hash and its compare and none of its loads.
+        if ((parts & IngestParts.Table) != 0 && DictionaryLive)
         {
             _table ??= DistinctTable.For(node);
             _table?.Probe(arena, node, start, count);
+        }
+
+        if (!statistics)
+        {
+            return;
         }
 
         switch (node.Kind)
@@ -601,8 +653,29 @@ internal sealed class ColumnWriter
     /// row has been seen, which is the moment its statistics are final; a block with no rows is
     /// never closed, since the caller only closes a boundary it has crossed.
     /// </summary>
-    internal void CloseBlock()
+    internal void CloseBlock() => CloseBlock(IngestParts.All);
+
+    /// <summary><see cref="CloseBlock()"/> for the accumulators <paramref name="parts"/> names.</summary>
+    internal void CloseBlock(IngestParts parts)
     {
+        if ((parts & IngestParts.Bounds) != 0)
+        {
+            _stringZones?.Close();
+        }
+
+        // A dead table records nothing, so that the chooser reads "no table" rather than a stale
+        // count.
+        if ((parts & IngestParts.Table) != 0)
+        {
+            _tableAtClose.Add(
+                _table is null || !DictionaryLive ? (-1, 0) : (_table.Distinct, _table.HeapBytes));
+        }
+
+        if ((parts & IngestParts.Statistics) == 0)
+        {
+            return;
+        }
+
         // A block whose widths are partial is stored as absent rather than as a wrong count, so the
         // chooser measures the column itself.
         if (_open.WidthsBroken && _openWidths is not null)
@@ -613,12 +686,6 @@ internal sealed class ColumnWriter
 
         _closed.Add(_open);
         _widths.Add(_openWidths);
-        _stringZones?.Close();
-
-        // A dead table records nothing, so that the chooser reads "no table" rather than a stale
-        // count.
-        _tableAtClose.Add(
-            _table is null || !DictionaryLive ? (-1, 0) : (_table.Distinct, _table.HeapBytes));
         _open = default;
         _openWidths = null;
 

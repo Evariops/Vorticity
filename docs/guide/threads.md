@@ -87,9 +87,12 @@ ScanOptions four = new ScanOptions { DegreeOfParallelism = 4 };   // 0, the defa
 ```
 
 A writer takes the session's degree too, and `VortexWriteOptions.DegreeOfParallelism` says
-otherwise for one file. It compresses a column's zstd frames side by side, a frame to a block, once
-the column holds a quarter of a megabyte of values, and chooses and writes every other encoding on
-the calling thread. The file is the same bytes whatever the degree.
+otherwise for one file. As a batch of a block or more comes in, it summarizes its columns side by
+side: each column's statistics, and apart from them a text column's bounds and the distinct values
+a dictionary is priced from. It compresses a column's zstd frames side by side too, a frame to a
+block, once the column holds a quarter of a megabyte of values, and chooses and writes the
+encodings on the calling thread. The file is the same bytes whatever the degree. A write that
+builds indexes summarizes its columns on one thread.
 
 Measured on the demonstration file, warmed, each variant run in turn, the best of fifteen rounds:
 

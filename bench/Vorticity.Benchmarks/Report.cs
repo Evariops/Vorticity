@@ -702,11 +702,12 @@ internal static class Report
         text.AppendLine("**Vorticity** runs as a Native AOT binary built for this machine's instruction set");
         text.AppendLine("(`IlcInstructionSet=native`), with the workstation garbage collector. On one core its");
         text.AppendLine("scans run at one lane, the library's default; on all cores at one lane per processor,");
-        text.AppendLine("`ScanBuilder.DefaultDegreeOfParallelism`, and its writer compresses a column's zstd frames on");
-        text.AppendLine("as many threads, `VortexWriteOptions.DegreeOfParallelism`, but chooses and writes every other");
-        text.AppendLine("encoding on one, where the reference compresses its chunks on every core. It also runs on one");
-        text.AppendLine("core as the framework-dependent build under `dotnet`, the **JIT** column, in which the action");
-        text.AppendLine("compiles its own code as it goes: what the first call costs in a fresh `dotnet` process.");
+        text.AppendLine("`ScanBuilder.DefaultDegreeOfParallelism`, and its writer summarizes its columns and compresses");
+        text.AppendLine("a column's zstd frames on as many threads, `VortexWriteOptions.DegreeOfParallelism`, but");
+        text.AppendLine("chooses and writes the encodings on one, where the reference compresses its chunks on every");
+        text.AppendLine("core. It also runs on one core as the framework-dependent build under `dotnet`, the **JIT**");
+        text.AppendLine("column, in which the action compiles its own code as it goes: what the first call costs in a");
+        text.AppendLine("fresh `dotnet` process.");
         text.AppendLine();
         text.AppendLine("**Both sides read the same two files**: the one Vorticity's writer makes, and the one Vortex");
         text.AppendLine("Rust's writer makes from the same rows, four columns of 2^20 and ten times as many rows: a");

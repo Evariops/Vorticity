@@ -25,8 +25,21 @@ public sealed class ZstdFramesTests
         // compresses them alone: a nullable column with a block of nulls, a text column, a dense
         // one written as it lies, and noise no frame beats the plain form on.
         Columns columns = Build(8 * BlockRows);
+        WorkFan fan = WorkFan.Rent(4);
+        try
+        {
+            Compare(columns, fan);
+        }
+        finally
+        {
+            WorkFan.Return(fan);
+        }
+    }
+
+    private static void Compare(Columns columns, WorkFan fan)
+    {
         using ArrayBlobWriter.Workspace alone = new ArrayBlobWriter.Workspace { FrameRows = BlockRows };
-        using ArrayBlobWriter.Workspace across = new ArrayBlobWriter.Workspace { FrameRows = BlockRows, Lanes = 4 };
+        using ArrayBlobWriter.Workspace across = new ArrayBlobWriter.Workspace { FrameRows = BlockRows, Fan = fan };
         int[] frameCounts = new int[columns.Nodes.Length];
         for (int column = 0; column < columns.Nodes.Length; column++)
         {

@@ -447,9 +447,15 @@ public sealed partial class VortexFileWriter
         _indexes?.Dispose();
         ReleaseBuilders();
 
-        // The blob workspace's builder and metadata writer rent from the shared pool.
+        // The blob workspace's builder and metadata writer rent from the shared pool, and the threads
+        // go back to the process's.
         _blobs?.Dispose();
         _blobs = null;
+        if (_fan is { } fan)
+        {
+            _fan = null;
+            WorkFan.Return(fan);
+        }
 
         // What the columns kept per block, which the zone maps and the statistics have read, and
         // what the writer kept per chunk and per segment, which the layout, the footer and the
