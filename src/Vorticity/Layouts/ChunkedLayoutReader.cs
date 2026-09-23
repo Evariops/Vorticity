@@ -1,7 +1,5 @@
 using System;
 using System.Buffers;
-using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -62,7 +60,7 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         ArgumentNullException.ThrowIfNull(context);
         CheckRange(in node, rows);
 
-        int length = context.HasSelection ? context.Selection.Length : BatchLength(rows);
+        int length = context.HasSelection ? context.SelectionCount : BatchLength(rows);
         ReadOnlySpan<long> offsets = node.ChunkOffsets;
         ChunkRange(offsets, rows, out int first, out int last);
 
@@ -138,11 +136,10 @@ internal sealed class ChunkedLayoutReader : LayoutReader
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The rows are contiguous, so the selection is a counted range written out row by row; teaching
-    /// the selection to carry <c>[start, start + length)</c> instead would buy nothing measurable.
-    /// The buffer is rented from the shared pool, so this allocates nothing once the pool is warm,
-    /// and the loop is bounded by one block because the splits are cut at the mask's block
-    /// boundaries.
+    /// The rows are contiguous, so the selection is set as the range <c>[start, start + length)</c>:
+    /// a reader that slices or decodes a range takes it as one, and the rows are written out into
+    /// the buffer only for a reader that takes them one by one. The buffer is rented from the
+    /// shared pool, so this allocates nothing once the pool is warm.
     /// </para>
     /// <para>
     /// An encoding that decodes a range of its rows decodes these rows as one, the selection being a
@@ -162,9 +159,7 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         int[] range = ArrayPool<int>.Shared.Rent(Math.Max(length, 1));
         try
         {
-            Ascending(range.AsSpan(0, length), (int)local.Start);
-
-            (int[]? Buffer, int Count) saved = context.ExchangeSelection(range, length);
+            ScanContext.SavedSelection saved = context.ExchangeSelectionRange(range, (int)local.Start, length);
             int lead = context.WindowLead;
             int span = context.WindowSpan;
             context.WindowLead = 0;
@@ -177,35 +172,12 @@ internal sealed class ChunkedLayoutReader : LayoutReader
             {
                 context.WindowLead = lead;
                 context.WindowSpan = span;
-                context.ExchangeSelection(saved.Buffer, saved.Count);
+                context.RestoreSelection(in saved);
             }
         }
         finally
         {
             ArrayPool<int>.Shared.Return(range);
-        }
-    }
-
-    /// <summary>Writes <paramref name="start"/>, <paramref name="start"/> + 1, … into <paramref name="destination"/>.</summary>
-    /// <remarks>A batch's rows are written once per column, so the fill runs four rows a store.</remarks>
-    private static void Ascending(Span<int> destination, int start)
-    {
-        int i = 0;
-        if (Vector128.IsHardwareAccelerated && destination.Length >= Vector128<int>.Count)
-        {
-            ref int first = ref MemoryMarshal.GetReference(destination);
-            Vector128<int> step = Vector128.Create(Vector128<int>.Count);
-            Vector128<int> next = Vector128.Create(start) + Vector128<int>.Indices;
-            for (; i <= destination.Length - Vector128<int>.Count; i += Vector128<int>.Count)
-            {
-                next.StoreUnsafe(ref first, (nuint)i);
-                next += step;
-            }
-        }
-
-        for (; i < destination.Length; i++)
-        {
-            destination[i] = start + i;
         }
     }
 
@@ -243,14 +215,14 @@ internal sealed class ChunkedLayoutReader : LayoutReader
                 }
             }
 
-            (int[]? Buffer, int Count) saved = context.ExchangeSelection(rebased, count);
+            ScanContext.SavedSelection saved = context.ExchangeSelection(rebased, count);
             try
             {
                 return ExecuteRowChild(in chunk, local, in fields, context);
             }
             finally
             {
-                context.ExchangeSelection(saved.Buffer, saved.Count);
+                context.RestoreSelection(in saved);
             }
         }
         finally

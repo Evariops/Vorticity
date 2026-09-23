@@ -76,7 +76,7 @@ internal sealed class StructLayoutReader : LayoutReader
         // With a selection in force every child produces one row per selected index, so that count
         // is the struct's length too. Taking it from the range instead would build a struct whose
         // declared length disagreed with its fields'.
-        int length = context.HasSelection ? context.Selection.Length : BatchLength(rows);
+        int length = context.HasSelection ? context.SelectionCount : BatchLength(rows);
         int validityChildren = dtype.IsNullable ? 1 : 0;
         int fieldCount = dtype.FieldCount;
 

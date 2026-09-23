@@ -398,19 +398,19 @@ internal sealed class FlatLayoutReader : LayoutReader
         bool mayDecode, ref ArrayNode root, ref bool loaded, out int result)
     {
         result = -1;
-        ReadOnlySpan<int> selection = context.Selection;
-        if (selection.Length == 0 || !WindowOf(context, rows, length, total, out int windowStart, out int windowLength))
+        if (!context.TryGetSelectionBounds(out int from, out int last) ||
+            !WindowOf(context, rows, length, total, out int windowStart, out int windowLength))
         {
             return false;
         }
 
-        int end = selection[^1] - windowStart + 1;
+        int end = last - windowStart + 1;
         long? key = windowLength > length ? ScanContext.WindowKey(node.Segments[0], windowStart) : null;
         if (key is long found &&
             context.TryPeekRetained(found, out CanonicalArena hit, out int hitNode) &&
             Holds(hit, hitNode, end))
         {
-            result = Narrowed(GatherRebased(context, WholeOf(hit, hitNode, context), windowStart, selection), in fields, context);
+            result = Narrowed(GatherRebased(context, WholeOf(hit, hitNode, context), windowStart), in fields, context);
             return true;
         }
 
@@ -419,55 +419,57 @@ internal sealed class FlatLayoutReader : LayoutReader
             return false;
         }
 
-        int from = selection[0];
-        int spanned = selection[^1] + 1 - from;
+        int spanned = last + 1 - from;
         if (key is long claimed && 2L * spanned >= length &&
             TryAcquireWindow(in root, in node, in fields, context, total, windowStart, windowLength, claimed, out CanonicalArena held, out int window) &&
             Holds(held, window, end))
         {
-            result = Narrowed(GatherRebased(context, WholeOf(held, window, context), windowStart, selection), in fields, context);
+            result = Narrowed(GatherRebased(context, WholeOf(held, window, context), windowStart), in fields, context);
             return true;
         }
 
         int decoded = DecodedDirect(in root, in node, in fields, context, total, from, spanned);
         result = Narrowed(
-            spanned == selection.Length ? decoded : GatherRebased(context, decoded, from, selection), in fields, context);
+            spanned == context.SelectionCount ? decoded : GatherRebased(context, decoded, from), in fields, context);
         return true;
     }
 
     /// <summary>
-    /// Whether a selection is every row between its first and its last, which a slice serves with
-    /// views where a gather would copy them one by one.
-    /// </summary>
-    private static bool Contiguous(ReadOnlySpan<int> selection) =>
-        selection.Length > 0 && selection[^1] - selection[0] + 1 == selection.Length;
-
-    /// <summary>
-    /// Whether a selection holds at least half the rows between its first and its last, and at
+    /// Whether the selection holds at least half the rows between its first and its last, and at
     /// least a block of them: below a block a range decode unpacks a whole block for a few rows,
     /// which the selective route does not.
     /// </summary>
-    private static bool Dense(ReadOnlySpan<int> selection) =>
-        selection.Length >= Arrays.Decoders.Compressed.FastLanes.BlockSize &&
-        2L * selection.Length >= (long)selection[^1] - selection[0] + 1;
+    private static bool Dense(ScanContext context) =>
+        context.SelectionCount >= Arrays.Decoders.Compressed.FastLanes.BlockSize &&
+        context.TryGetSelectionBounds(out int first, out int last) &&
+        2L * context.SelectionCount >= (long)last - first + 1;
+
+    /// <summary>
+    /// The selection's rows of <paramref name="nodeIndex"/>, a node of the batch's arena in the
+    /// selection's space: a slice, views and no copy, when they are a range, a gather otherwise.
+    /// </summary>
+    private static int Selected(ScanContext context, int nodeIndex) =>
+        context.TryGetSelectionRange(out int first, out int count)
+            ? CanonicalSlice.SliceAcross(context.Canonical, context.Canonical, nodeIndex, first, count)
+            : Compute.CanonicalFilter.Apply(context.Canonical, nodeIndex, context.Selection);
 
     /// <summary>The whole of a retained window, as records in the batch's arena viewing the retained storage.</summary>
     private static int WholeOf(CanonicalArena held, int retained, ScanContext context) =>
         CanonicalSlice.SliceAcross(held, context.Canonical, retained, 0, held.GetNode(retained).Length);
 
-    /// <summary>Gathers <paramref name="selection"/>, in the chunk's space, out of a node whose first row is <paramref name="origin"/>.</summary>
+    /// <summary>Gathers the selection, in the chunk's space, out of a node whose first row is <paramref name="origin"/>.</summary>
     /// <remarks>
-    /// The indices move by the node's start before the gather: a batch's selection is a few thousand
-    /// rows, rebased into a rented buffer.
+    /// A range is a slice of the node; other indices move by the node's start before the gather: a
+    /// batch's selection is a few thousand rows, rebased into a rented buffer.
     /// </remarks>
-    private static int GatherRebased(ScanContext context, int nodeIndex, int origin, ReadOnlySpan<int> selection)
+    private static int GatherRebased(ScanContext context, int nodeIndex, int origin)
     {
-        if (Contiguous(selection))
+        if (context.TryGetSelectionRange(out int first, out int count))
         {
-            return CanonicalSlice.SliceAcross(
-                context.Canonical, context.Canonical, nodeIndex, selection[0] - origin, selection.Length);
+            return CanonicalSlice.SliceAcross(context.Canonical, context.Canonical, nodeIndex, first - origin, count);
         }
 
+        ReadOnlySpan<int> selection = context.Selection;
         int[] rented = System.Buffers.ArrayPool<int>.Shared.Rent(selection.Length);
         try
         {
@@ -552,7 +554,7 @@ internal sealed class FlatLayoutReader : LayoutReader
                     in node, context, answerKey, total, out CanonicalArena answered, out int answer))
             {
                 int whole = CanonicalSlice.SliceAcross(answered, context.Canonical, answer, 0, total);
-                return Compute.CanonicalFilter.Apply(context.Canonical, whole, context.Selection);
+                return Selected(context, whole);
             }
         }
 
@@ -617,7 +619,7 @@ internal sealed class FlatLayoutReader : LayoutReader
             // that takes rows without decoding: decoding the span and gathering out of it touches
             // each row once in a kernel's stride, where the selective route pays a positioned read
             // of every row. The rows a partly pruned chunk wants are such a selection, contiguous.
-            if (Dense(context.Selection) && Windowed(context, total) &&
+            if (Dense(context) && Windowed(context, total) &&
                 TryWindowSelected(in node, rows, in fields, context, total, length, mayDecode: true, ref chunkRoot, ref loaded, out gathered))
             {
                 return gathered;
@@ -878,7 +880,7 @@ internal sealed class FlatLayoutReader : LayoutReader
     {
         // Counted like the whole-node decodes above: what a positional take materializes is its
         // selection, and a decode no instrument counts is a decode nobody sees.
-        Decoded(context, context.Selection.Length);
+        Decoded(context, context.SelectionCount);
         int taken = context.Decode.DecodeRootSelected(
             in root, node.DType, total, context.Selection, context.KeepEncodings);
         return MaskProjection.Apply(context.Decode, taken, in fields);
@@ -894,20 +896,17 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// the rest of this batch.
     /// </para>
     /// <para>
-    /// The pruned paths hand this a contiguous selection every time, and a contiguous selection is a
-    /// window that could be sliced rather than copied. It is not worth the branch: the copy is a few
-    /// per cent of a pruned scan, growing with the number of columns copied but staying well under
-    /// what a test for contiguity on every gather would have to earn back.
+    /// The pruned paths hand this a range every time, which is sliced rather than copied, and never
+    /// written out as indices.
     /// </para>
     /// </remarks>
     private static int Gather(
         CanonicalArena held, int retained, in FieldMask fields, ScanContext context, int total)
     {
-        ReadOnlySpan<int> selection = context.Selection;
-        if (Contiguous(selection))
+        if (context.TryGetSelectionRange(out int first, out int count))
         {
             return Narrowed(
-                CanonicalSlice.SliceAcross(held, context.Canonical, retained, selection[0], selection.Length), in fields, context);
+                CanonicalSlice.SliceAcross(held, context.Canonical, retained, first, count), in fields, context);
         }
 
         int whole = CanonicalSlice.SliceAcross(held, context.Canonical, retained, 0, total);

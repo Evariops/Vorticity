@@ -105,14 +105,14 @@ internal static class SplitExecution
                 indices[i] += (int)split.Start;
             }
 
-            (int[]? Buffer, int Count) saved = context.ExchangeSelection(indices, count);
+            ScanContext.SavedSelection saved = context.ExchangeSelection(indices, count);
             try
             {
                 return reader.Execute(in root, split, in mask, context);
             }
             finally
             {
-                context.ExchangeSelection(saved.Buffer, saved.Count);
+                context.RestoreSelection(in saved);
             }
         }
         finally

@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Text;
 using Vorticity.Buffers;
 using Vorticity.File;
@@ -169,6 +171,12 @@ internal sealed class ScanContext : IDisposable
     private int[]? _selection;
     private int _selectionCount;
 
+    /// <summary>
+    /// The first row of a selection set as a range and not written out yet, whose rows
+    /// <see cref="_selection"/> will hold once a reader asks for them one by one; -1 otherwise.
+    /// </summary>
+    private int _selectionStart = -1;
+
     /// <summary>The file being scanned.</summary>
     /// <exception cref="InvalidOperationException">The context was built detached from a file.</exception>
     public VortexFile File => _file ?? ThrowDetached();
@@ -289,11 +297,103 @@ internal sealed class ScanContext : IDisposable
     /// reader that passes `rows` through unchanged passes this through by doing nothing. Only
     /// `vortex.chunked` re-partitions rows; struct, zoned and flat do not.
     /// </remarks>
-    internal ReadOnlySpan<int> Selection =>
-        _selection is null ? default : _selection.AsSpan(0, _selectionCount);
+    internal ReadOnlySpan<int> Selection
+    {
+        get
+        {
+            if (_selectionStart >= 0)
+            {
+                WriteSelectionRange();
+            }
+
+            return _selection is null ? default : _selection.AsSpan(0, _selectionCount);
+        }
+    }
 
     /// <summary>Whether a selection is in force for this batch.</summary>
     internal bool HasSelection => _selection is not null;
+
+    /// <summary>How many rows the selection names, without writing out a selection set as a range.</summary>
+    internal int SelectionCount => _selectionCount;
+
+    /// <summary>
+    /// The selection as a range of rows, when it is one: set as a range, or written out and every
+    /// row between its first and its last. A reader that slices or decodes a range asks this before
+    /// <see cref="Selection"/>, so that a range is never written out for nothing.
+    /// </summary>
+    /// <param name="first">The first row.</param>
+    /// <param name="count">How many rows.</param>
+    /// <returns>Whether the selection is a range of at least one row.</returns>
+    internal bool TryGetSelectionRange(out int first, out int count)
+    {
+        count = _selectionCount;
+        if (_selectionStart >= 0)
+        {
+            first = _selectionStart;
+            return count > 0;
+        }
+
+        if (_selection is { } rows && count > 0 && rows[count - 1] - rows[0] + 1 == count)
+        {
+            first = rows[0];
+            return true;
+        }
+
+        first = 0;
+        return false;
+    }
+
+    /// <summary>The first and the last row the selection names, without writing out a range.</summary>
+    /// <param name="first">The first row.</param>
+    /// <param name="last">The last row.</param>
+    /// <returns>Whether the selection names any row.</returns>
+    internal bool TryGetSelectionBounds(out int first, out int last)
+    {
+        int count = _selectionCount;
+        if (count <= 0 || _selection is not { } rows)
+        {
+            first = 0;
+            last = -1;
+            return false;
+        }
+
+        if (_selectionStart >= 0)
+        {
+            first = _selectionStart;
+            last = _selectionStart + count - 1;
+            return true;
+        }
+
+        first = rows[0];
+        last = rows[count - 1];
+        return true;
+    }
+
+    /// <summary>Writes out the selection set as a range, into the buffer it came with.</summary>
+    private void WriteSelectionRange()
+    {
+        Span<int> rows = _selection.AsSpan(0, _selectionCount);
+        int start = _selectionStart;
+        int i = 0;
+        if (Vector128.IsHardwareAccelerated && rows.Length >= Vector128<int>.Count)
+        {
+            ref int first = ref MemoryMarshal.GetReference(rows);
+            Vector128<int> step = Vector128.Create(Vector128<int>.Count);
+            Vector128<int> next = Vector128.Create(start) + Vector128<int>.Indices;
+            for (; i <= rows.Length - Vector128<int>.Count; i += Vector128<int>.Count)
+            {
+                next.StoreUnsafe(ref first, (nuint)i);
+                next += step;
+            }
+        }
+
+        for (; i < rows.Length; i++)
+        {
+            rows[i] = start + i;
+        }
+
+        _selectionStart = -1;
+    }
 
     /// <summary>
     /// The scan's mask of live blocks, in the file's row coordinates, or
@@ -330,13 +430,57 @@ internal sealed class ScanContext : IDisposable
     /// </summary>
     /// <param name="rows">The new selection, or <see langword="null"/> to clear it.</param>
     /// <param name="count">How many entries of <paramref name="rows"/> are live.</param>
-    /// <returns>The previous buffer and count, to be restored by the caller.</returns>
-    internal (int[]? Buffer, int Count) ExchangeSelection(int[]? rows, int count)
+    /// <returns>The previous selection, to be restored by the caller with <see cref="RestoreSelection"/>.</returns>
+    internal SavedSelection ExchangeSelection(int[]? rows, int count)
     {
-        (int[]? Buffer, int Count) previous = (_selection, _selectionCount);
+        SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart);
         _selection = rows;
         _selectionCount = rows is null ? 0 : count;
+        _selectionStart = -1;
         return previous;
+    }
+
+    /// <summary>
+    /// Replaces the selection with the rows <c>[start, start + count)</c>, which are written into
+    /// <paramref name="buffer"/> only if a reader asks for them one by one.
+    /// </summary>
+    /// <param name="buffer">A buffer of at least <paramref name="count"/> entries, the caller's until it restores the selection.</param>
+    /// <param name="start">The first row.</param>
+    /// <param name="count">How many rows.</param>
+    /// <returns>The previous selection, to be restored by the caller with <see cref="RestoreSelection"/>.</returns>
+    internal SavedSelection ExchangeSelectionRange(int[] buffer, int start, int count)
+    {
+        SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart);
+        _selection = buffer;
+        _selectionCount = count;
+        _selectionStart = start;
+        return previous;
+    }
+
+    /// <summary>Puts back a selection an exchange displaced.</summary>
+    /// <param name="saved">What the exchange returned.</param>
+    internal void RestoreSelection(in SavedSelection saved)
+    {
+        _selection = saved.Buffer;
+        _selectionCount = saved.Count;
+        _selectionStart = saved.Start;
+    }
+
+    /// <summary>A selection an exchange displaced: its buffer, its count, and its first row while it is a range not yet written out.</summary>
+    internal readonly struct SavedSelection
+    {
+        internal SavedSelection(int[]? buffer, int count, int start)
+        {
+            Buffer = buffer;
+            Count = count;
+            Start = start;
+        }
+
+        internal int[]? Buffer { get; }
+
+        internal int Count { get; }
+
+        internal int Start { get; }
     }
 
     /// <summary>The pushed comparison, held behind one reference rather than in three fields.</summary>
@@ -986,6 +1130,7 @@ internal sealed class ScanContext : IDisposable
 
         _selection = null;
         _selectionCount = 0;
+        _selectionStart = -1;
         if (_pushed is not null)
         {
             _pushed.Field = null;

@@ -60,7 +60,7 @@ internal sealed class DictLayoutReader : LayoutReader
         // The selection applies to the codes and not to the values: this layout's whole point is
         // that the values are shared across the column, so a take reads every one of them and picks
         // a subset of the codes.
-        int length = context.HasSelection ? context.Selection.Length : BatchLength(rows);
+        int length = context.HasSelection ? context.SelectionCount : BatchLength(rows);
         LayoutNode valuesLayout = node.GetChild(0);
         LayoutNode codesLayout = node.GetChild(1);
 
@@ -86,7 +86,7 @@ internal sealed class DictLayoutReader : LayoutReader
 
         if (wholeLayout)
         {
-            (int[]? Buffer, int Count) once = context.ExchangeSelection(null, 0);
+            ScanContext.SavedSelection once = context.ExchangeSelection(null, 0);
             try
             {
                 valuesIndex = ExecuteChild(
@@ -94,14 +94,14 @@ internal sealed class DictLayoutReader : LayoutReader
             }
             finally
             {
-                context.ExchangeSelection(once.Buffer, once.Count);
+                context.RestoreSelection(in once);
             }
         }
         else
         {
             if (!context.TryGetRetained(valuesKey, out CanonicalArena held, out int retainedValues))
             {
-                (int[]? Buffer, int Count) saved = context.ExchangeSelection(null, 0);
+                ScanContext.SavedSelection saved = context.ExchangeSelection(null, 0);
                 held = context.BeginRetainedDecode();
                 retainedValues = -1;
                 try
@@ -112,7 +112,7 @@ internal sealed class DictLayoutReader : LayoutReader
                 finally
                 {
                     context.EndRetainedDecode(retainedValues);
-                    context.ExchangeSelection(saved.Buffer, saved.Count);
+                    context.RestoreSelection(in saved);
                 }
             }
 

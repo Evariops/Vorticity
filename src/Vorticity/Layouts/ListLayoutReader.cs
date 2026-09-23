@@ -93,7 +93,7 @@ internal sealed class ListLayoutReader : LayoutReader
         bool wholeLayout = rows.Start == 0 && span == NodeLength(in node);
         long elementsKey = ScanContext.LayoutKey(elementsLayout.Index);
 
-        (int[]? Buffer, int Count) saved = context.ExchangeSelection(null, 0);
+        ScanContext.SavedSelection saved = context.ExchangeSelection(null, 0);
         int elementsIndex;
         int offsetsIndex;
         try
@@ -128,7 +128,7 @@ internal sealed class ListLayoutReader : LayoutReader
         }
         finally
         {
-            context.ExchangeSelection(saved.Buffer, saved.Count);
+            context.RestoreSelection(in saved);
         }
 
         CanonicalNode offsets = context.Canonical.GetNode(offsetsIndex);

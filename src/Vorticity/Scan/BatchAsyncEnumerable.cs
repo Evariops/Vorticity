@@ -697,7 +697,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         try
         {
             int count = Selected(context, answer, split.Start, selected);
-            (int[]? Buffer, int Count) previous = context.ExchangeSelection(selected, count);
+            ScanContext.SavedSelection previous = context.ExchangeSelection(selected, count);
             try
             {
                 proven = true;
@@ -705,7 +705,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
             finally
             {
-                context.ExchangeSelection(previous.Buffer, previous.Count);
+                context.RestoreSelection(in previous);
             }
         }
         finally
