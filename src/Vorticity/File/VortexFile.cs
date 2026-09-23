@@ -1080,6 +1080,94 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>Number of entries in the footer's <c>array_specs</c> dictionary.</summary>
     internal int ArrayEncodingCount => _arrayEncodings.Length;
 
+    /// <summary>What scans decoded once and the file keeps for the next, made at the first of them.</summary>
+    private DecodedStructures? _decoded;
+
+    /// <summary>
+    /// The structures a scan decodes once and the file keeps: the index runs its cursors read, the
+    /// zone maps its filters prune with. One holder for both, made when the first is: a file read
+    /// without a filter or an index pays for neither, not even a field each.
+    /// </summary>
+    private sealed class DecodedStructures
+    {
+        /// <summary>The decoded index runs, made at the first index read.</summary>
+        internal Indexes.IndexRunCache? Runs;
+
+        /// <summary>The zone maps decoded so far, by the index of their zoned layout node; replaced whole, never written in place.</summary>
+        internal ZoneEntry[]? Zones;
+    }
+
+    /// <summary>One decoded zone map: the zoned node it belongs to, and its bounds.</summary>
+    private readonly record struct ZoneEntry(int Node, Compute.ZoneColumn Column);
+
+    private DecodedStructures Decoded
+    {
+        get
+        {
+            DecodedStructures? decoded = Volatile.Read(ref _decoded);
+            if (decoded is null)
+            {
+                Interlocked.CompareExchange(ref _decoded, new DecodedStructures(), null);
+                decoded = _decoded!;
+            }
+
+            return decoded;
+        }
+    }
+
+    /// <summary>The zone map of zoned node <paramref name="node"/>, when a scan has decoded it.</summary>
+    /// <param name="node">The zoned layout node's index.</param>
+    /// <remarks>
+    /// A zone map is a property of the file, so it is read and decoded once for every scan that
+    /// filters on the column: the next one reads nothing. A walk rather than a lookup, since a
+    /// file is filtered on a handful of columns.
+    /// </remarks>
+    internal Compute.ZoneColumn? DecodedZones(int node)
+    {
+        ZoneEntry[]? entries = Volatile.Read(ref _decoded)?.Zones;
+        if (entries is not null)
+        {
+            for (int i = 0; i < entries.Length; i++)
+            {
+                if (entries[i].Node == node)
+                {
+                    return entries[i].Column;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Keeps the zone map a scan decoded for zoned node <paramref name="node"/>, for the scans after it.</summary>
+    /// <param name="node">The zoned layout node's index.</param>
+    /// <param name="column">Its bounds.</param>
+    /// <remarks>Two scans that decode the same map at once keep the first: both are the same.</remarks>
+    internal void KeepZones(int node, Compute.ZoneColumn column)
+    {
+        DecodedStructures decoded = Decoded;
+        while (true)
+        {
+            ZoneEntry[]? seen = Volatile.Read(ref decoded.Zones);
+            int count = seen?.Length ?? 0;
+            for (int i = 0; i < count; i++)
+            {
+                if (seen![i].Node == node)
+                {
+                    return;
+                }
+            }
+
+            ZoneEntry[] grown = new ZoneEntry[count + 1];
+            seen?.CopyTo(grown, 0);
+            grown[count] = new ZoneEntry(node, column);
+            if (Interlocked.CompareExchange(ref decoded.Zones, grown, seen) == seen)
+            {
+                return;
+            }
+        }
+    }
+
     private int _largestArrayTree;
 
     /// <summary>

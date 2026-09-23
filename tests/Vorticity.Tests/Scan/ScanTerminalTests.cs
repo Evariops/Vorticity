@@ -201,16 +201,17 @@ public sealed class ScanTerminalTests
         Assert.Equal(Block, await file.ScanBuilder().Where(filter).WithMetrics(decoded)
             .WithTiers(TerminalTiers.All & ~TerminalTiers.FullBlock).CountAsync(ct));
 
-        // The proof asked the source for the zone maps and nothing else; the decode asked for the
-        // block's data on top, and materialized it.
-        Assert.Equal(zoneMaps, proven.SegmentRequests);
-        Assert.True(decoded.SegmentRequests > zoneMaps);
+        // The plan read the zone maps, and the open file keeps them: the proof asked the source for
+        // nothing at all, where the decode asked for the block's data, and materialized it.
+        Assert.True(zoneMaps > 0);
+        Assert.Equal(0, proven.SegmentRequests);
+        Assert.True(decoded.SegmentRequests > 0);
         Assert.True(decoded.ValuesDecoded > proven.ValuesDecoded);
 
         // Under a take the same proof serves, whole: every taken row of a block proven whole.
         ScanMetrics taken = new ScanMetrics();
         Assert.Equal(2, await file.ScanBuilder().Where(filter).Take([5_200L, 5_300L, 20_000L]).WithMetrics(taken).CountAsync(ct));
-        Assert.Equal(zoneMaps, taken.SegmentRequests);
+        Assert.Equal(0, taken.SegmentRequests);
     }
 
     [Fact]
@@ -228,8 +229,9 @@ public sealed class ScanTerminalTests
         Assert.False(await file.ScanBuilder().Where(filter).WithMetrics(metrics).AnyAsync(ct));
         Assert.Equal(0, await file.ScanBuilder().Where(filter).WithMetrics(metrics).CountAsync(ct));
 
-        // Two terminals, the zone maps each time, nothing else.
-        Assert.Equal(2 * plan.Pruning[0].SegmentsRead, metrics.SegmentRequests);
+        // Two terminals and nothing read: the zone maps the plan read stay with the open file.
+        Assert.True(plan.Pruning[0].SegmentsRead > 0);
+        Assert.Equal(0, metrics.SegmentRequests);
         Assert.Equal(0, metrics.Batches);
     }
 

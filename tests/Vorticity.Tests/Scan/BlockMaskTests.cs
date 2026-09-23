@@ -194,6 +194,158 @@ public sealed class BlockMaskTests
         Assert.Equal(mask.LiveCount, refined.LiveCount);
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    public async Task TheMaskKillsWhatTheRangeQuestionRefusesWhateverTheFilter(int seed)
+    {
+        Decoders.EnsureRegistered();
+
+        // The mask is answered sixty-four blocks at a time, from a table of the bounds for the
+        // numeric comparisons it can answer and block by block for the rest; the range question is
+        // asked block by block, one literal at a time. Filters of every shape over every column --
+        // negations, both connectives, bounds at and past the edges, NaN, infinities, constants of
+        // another kind, null, text, null tests and memberships -- over masks with dead blocks already,
+        // must leave live exactly the blocks the question does not refuse. The same file serves every
+        // filter, so the zone maps a filter decoded serve the next.
+        Random random = new Random(seed);
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+        LayoutTree tree = file.LayoutTree;
+        long blockRows = SplitPlan.NaturalBatchRows(tree);
+        int checkedFilters = 0;
+        for (int trial = 0; trial < 400; trial++)
+        {
+            VortexExpr filter = RandomFilter(random, depth: 3);
+            ZonePruner? pruner = await ZonePruningPlan.BuildAsync(file, tree, filter, CancellationToken.None);
+            if (pruner is null)
+            {
+                continue;
+            }
+
+            BlockMask mask = new BlockMask(tree.Root.RowCount, blockRows);
+            bool[] wasLive = new bool[mask.BlockCount];
+            for (int block = 0; block < mask.BlockCount; block++)
+            {
+                if (random.Next(4) == 0)
+                {
+                    mask.Kill(block);
+                }
+
+                wasLive[block] = mask.IsLive(block);
+            }
+
+            pruner.Refine(mask);
+            for (int block = 0; block < mask.BlockCount; block++)
+            {
+                bool expected = wasLive[block] && pruner.MayMatch(mask.BlockRange(block));
+                Assert.True(expected == mask.IsLive(block), $"block {block} of {filter}: the question says {expected}");
+            }
+
+            checkedFilters++;
+        }
+
+        Assert.True(checkedFilters > 300, $"only {checkedFilters} filters made a pruner");
+
+        // And the tables did answer: every numeric column's zones are the blocks, and its bounds are
+        // of one kind.
+        VortexExpr every = Expr.And(
+            Expr.And(
+                Expr.Ge(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(0L))),
+                Expr.Ge(Expr.Field("banded"), Expr.Literal(FilterLiteral.From(0L)))),
+            Expr.And(
+                Expr.Ge(Expr.Field("nulls"), Expr.Literal(FilterLiteral.From(0L))),
+                Expr.Ge(Expr.Field("nans"), Expr.Literal(FilterLiteral.From(0.0)))));
+        ZonePruner? all = await ZonePruningPlan.BuildAsync(file, tree, every, CancellationToken.None);
+        Assert.NotNull(all);
+        foreach ((string column, FilterLiteralKind kind) in new[]
+                 {
+                     ("monotone", FilterLiteralKind.Signed), ("banded", FilterLiteralKind.Signed),
+                     ("nulls", FilterLiteralKind.Signed), ("nans", FilterLiteralKind.Float),
+                 })
+        {
+            ZoneColumn zones = all.Column(column)!;
+            Assert.Equal(blockRows, zones.ZoneLength);
+            Assert.Equal(kind, zones.Table.Kind);
+        }
+    }
+
+    /// <summary>The numeric columns of <see cref="Zoned"/> and the range of their values.</summary>
+    private static readonly (string Column, long Low, long High)[] Ranges =
+    [
+        ("monotone", 1_000_000, 1_196_605),
+        ("banded", 0, 63),
+        ("nulls", 0, 64_511),
+        ("nans", 0, 32_767),
+    ];
+
+    private static VortexExpr RandomFilter(Random random, int depth) =>
+        (depth == 0 ? 0 : random.Next(5)) switch
+        {
+            1 => Expr.Not(RandomFilter(random, depth - 1)),
+            2 => Expr.And(RandomFilter(random, depth - 1), RandomFilter(random, depth - 1)),
+            3 => Expr.Or(RandomFilter(random, depth - 1), RandomFilter(random, depth - 1)),
+            _ => RandomLeaf(random),
+        };
+
+    private static VortexExpr RandomLeaf(Random random)
+    {
+        switch (random.Next(12))
+        {
+            case 0:
+                return random.Next(2) == 0 ? Expr.IsNull(Expr.Field("nulls")) : Expr.IsNotNull(Expr.Field("nulls"));
+            case 1:
+                return Expr.In(
+                    Expr.Field("banded"),
+                    FilterLiteral.From(random.Next(-2, 66)),
+                    FilterLiteral.From(random.Next(-2, 66)));
+            case 2:
+                string text = $"z{random.Next(0, 70):D4}-{random.Next(0, 1100):D4}";
+                return Compare(random, Expr.Field("strs"), FilterLiteral.From(text));
+            default:
+                (string column, long low, long high) = Ranges[random.Next(Ranges.Length)];
+                return Compare(random, Expr.Field(column), RandomLiteral(random, low, high));
+        }
+    }
+
+    private static ComparisonExpr Compare(Random random, FieldExpr field, FilterLiteral value)
+    {
+        LiteralExpr literal = Expr.Literal(value);
+        return random.Next(6) switch
+        {
+            0 => Expr.Eq(field, literal),
+            1 => Expr.Ne(field, literal),
+            2 => Expr.Lt(field, literal),
+            3 => Expr.Le(field, literal),
+            4 => Expr.Gt(field, literal),
+            _ => Expr.Ge(field, literal),
+        };
+    }
+
+    private static FilterLiteral RandomLiteral(Random random, long low, long high)
+    {
+        long near = random.Next(3) switch
+        {
+            0 => low + random.Next(-2, 3),
+            1 => high + random.Next(-2, 3),
+            _ => random.NextInt64(low, high + 1),
+        };
+
+        return random.Next(12) switch
+        {
+            0 => FilterLiteral.From((ulong)Math.Max(near, 0)),
+            1 => FilterLiteral.From(near + 0.5),
+            2 => FilterLiteral.From((double)near),
+            3 => FilterLiteral.From(double.NaN),
+            4 => FilterLiteral.From(random.Next(2) == 0 ? double.PositiveInfinity : double.NegativeInfinity),
+            5 => FilterLiteral.Null,
+            6 => FilterLiteral.From(random.Next(2) == 0 ? long.MinValue : long.MaxValue),
+            7 => FilterLiteral.From(-0.0),
+            _ => FilterLiteral.From(near),
+        };
+    }
+
     [Fact]
     public async Task AFilterNoZoneMapCanAnswerLeavesNoMaskAtAll()
     {

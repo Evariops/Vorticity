@@ -70,6 +70,19 @@ internal sealed class BlockMask
     /// <summary>Whether nothing is left to read.</summary>
     internal bool IsEmpty => LiveCount == 0;
 
+    /// <summary>The bits, block <c>b</c> at bit <c>b % 64</c> of word <c>b / 64</c>; the bits past the last block are clear.</summary>
+    internal ReadOnlySpan<ulong> Words => _bits;
+
+    /// <summary>Kills every block whose bit in <paramref name="words"/> is clear.</summary>
+    /// <param name="words">One bit per block, as <see cref="Words"/> lays them out.</param>
+    internal void Keep(ReadOnlySpan<ulong> words)
+    {
+        for (int i = 0; i < _bits.Length; i++)
+        {
+            _bits[i] &= words[i];
+        }
+    }
+
     /// <summary>How many blocks are live both here and in <paramref name="scope"/>.</summary>
     /// <param name="scope">A mask over the same blocks, live where a scan's rows reach.</param>
     internal int LiveCountWithin(BlockMask scope)

@@ -12,10 +12,11 @@ using Vorticity.Types;
 namespace Vorticity.Compute;
 
 /// <summary>
-/// Builds the zone-map pruner for one scan, by reading the zones child of each
-/// <c>vortex.zoned</c> layout the filter touches: a struct with one column per aggregate and one
-/// row per zone. It happens once, before the first batch, in a scan context of its own that is
-/// disposed straight afterwards, which is why the bounds are copied out of its arena.
+/// Builds the zone-map pruner for one scan, from the zones child of each <c>vortex.zoned</c>
+/// layout the filter touches: a struct with one column per aggregate and one row per zone. A zones
+/// child is read the first time a scan of the file needs it, in a scan context of its own that is
+/// disposed straight afterwards, which is why the bounds are copied out of its arena; the file then
+/// keeps them, and the scans after it read nothing.
 /// </summary>
 /// <remarks>
 /// Every step contributes nothing rather than failing: no zoned layout on a column's path, a zone
@@ -190,11 +191,44 @@ internal static class ZonePruningPlan
             return (null, 0, 0);
         }
 
+        // A zone map a scan of this file has decoded is the file's, and is not read again.
+        ZoneColumn[] columns = new ZoneColumn[candidates.Count];
+        int missing = 0;
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            if (file.DecodedZones(candidates[i].Node.Index) is { } decoded)
+            {
+                columns[i] = decoded;
+            }
+            else
+            {
+                missing++;
+            }
+        }
+
+        int segments = 0;
+        long bytes = 0;
+        if (missing > 0)
+        {
+            (segments, bytes) = await DecodeAsync(file, candidates, columns, metrics, cancellationToken).ConfigureAwait(false);
+        }
+
+        ZonePruner pruner = new ZonePruner(filter, columns);
+        return (pruner.IsUseful ? pruner : null, segments, bytes);
+    }
+
+    /// <summary>
+    /// Reads and decodes the zone maps of the candidates <paramref name="columns"/> lacks, fills
+    /// them in and keeps them on the file; returns the segments and bytes asked for.
+    /// </summary>
+    private static async ValueTask<(int Segments, long Bytes)> DecodeAsync(
+        VortexFile file, List<Candidate> candidates, ZoneColumn[] columns, Scanning.ScanMetrics? metrics,
+        CancellationToken cancellationToken)
+    {
         // Sized for metadata rather than for a batch, and that choice is most of what pruning
         // costs: this context reads one zone map per filtered column -- a struct of a few
         // aggregates, one row per zone -- and is disposed as soon as the bounds are out, so arenas
         // dimensioned for millions of rows would allocate for a handful of bounds.
-        ZoneColumn[] columns = new ZoneColumn[candidates.Count];
         using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
         // The zone maps' own rows are values the flat reader materializes, and the sink counts
         // them like any other value it decodes.
@@ -205,8 +239,12 @@ internal static class ZonePruningPlan
         // five columns to one round trip rather than five.
         for (int i = 0; i < candidates.Count; i++)
         {
-            Candidate candidate = candidates[i];
-            LayoutNode zones = candidate.Node.GetChild(1);
+            if (columns[i] is not null)
+            {
+                continue;
+            }
+
+            LayoutNode zones = candidates[i].Node.GetChild(1);
             FieldMask all = FieldMask.All;
             LayoutReaderTable.Require(in zones)
                 .RegisterSegments(in zones, new RowRange(0, zones.RowCount), in all, context.Segments);
@@ -220,6 +258,11 @@ internal static class ZonePruningPlan
 
         for (int i = 0; i < candidates.Count; i++)
         {
+            if (columns[i] is not null)
+            {
+                continue;
+            }
+
             Candidate candidate = candidates[i];
             LayoutNode zones = candidate.Node.GetChild(1);
             FieldMask all = FieldMask.All;
@@ -227,10 +270,10 @@ internal static class ZonePruningPlan
                 .Execute(in zones, new RowRange(0, zones.RowCount), in all, context);
 
             columns[i] = Extract(context, root, candidate, candidate.Node.RowCount);
+            file.KeepZones(candidate.Node.Index, columns[i]);
         }
 
-        ZonePruner pruner = new ZonePruner(filter, columns);
-        return (pruner.IsUseful ? pruner : null, segments, bytes);
+        return (segments, bytes);
     }
 
     /// <summary>
@@ -380,7 +423,11 @@ internal static class ZonePruningPlan
         // column says so, because those bytes order as numbers and not as strings.
         bool isDecimal = IsDecimal(candidate.Node.DType);
         int count = zones.Length;
-        ZoneBounds[] bounds = new ZoneBounds[count];
+
+        // A numeric column's zones go straight into columns of their own; a bound of another kind
+        // than the column's, which no writer makes, sends them back to one summary per zone.
+        ZoneTable? table = isDecimal ? null : NumericKind(candidate.Node.DType) is { } kind ? new ZoneTable(kind, count) : null;
+        ZoneBounds[]? bounds = table is null ? new ZoneBounds[count] : null;
         for (int z = 0; z < count; z++)
         {
             FilterLiteral min = default;
@@ -408,7 +455,7 @@ internal static class ZonePruningPlan
                 hasNans = TryCount(nanCount, out nans);
             }
 
-            bounds[z] = ZoneBounds.Create(
+            ZoneBounds zone = ZoneBounds.Create(
                 min, hasMin,
                 max, hasMax,
                 exact,
@@ -416,20 +463,63 @@ internal static class ZonePruningPlan
                 hasNulls,
                 nans,
                 hasNans);
+            if (table is not null && !table.TrySet(z, zone, ZoneColumn.RowsInZone(z, map.ZoneLength, rowCount)))
+            {
+                bounds = new ZoneBounds[count];
+                for (int earlier = 0; earlier < z; earlier++)
+                {
+                    bounds[earlier] = table.Bounds(earlier);
+                }
+
+                table = null;
+            }
+
+            if (bounds is not null)
+            {
+                bounds[z] = zone;
+            }
         }
 
-        return new ZoneColumn(candidate.Field, map.ZoneLength, rowCount, bounds, isDecimal);
+        return table is not null
+            ? new ZoneColumn(candidate.Field, map.ZoneLength, rowCount, table)
+            : new ZoneColumn(candidate.Field, map.ZoneLength, rowCount, bounds!, isDecimal);
     }
 
     /// <summary>Whether a column's dtype is a decimal, through any extension over one.</summary>
     private static bool IsDecimal(DType dtype)
+    {
+        dtype = Storage(dtype);
+        return !dtype.IsDefault && dtype.Kind == DTypeKind.Decimal;
+    }
+
+    /// <summary>
+    /// The kind a numeric column's bounds are read as -- signed, unsigned or float -- through any
+    /// extension over one, or null for any other column.
+    /// </summary>
+    private static FilterLiteralKind? NumericKind(DType dtype)
+    {
+        dtype = Storage(dtype);
+        if (dtype.IsDefault || dtype.Kind != DTypeKind.Primitive)
+        {
+            return null;
+        }
+
+        PType ptype = dtype.PType;
+        return ptype.IsSignedInteger() ? FilterLiteralKind.Signed
+            : ptype.IsUnsignedInteger() ? FilterLiteralKind.Unsigned
+            : ptype.IsFloat() ? FilterLiteralKind.Float
+            : null;
+    }
+
+    /// <summary>The dtype an extension stores its values as, through any number of them.</summary>
+    private static DType Storage(DType dtype)
     {
         for (int i = 0; i < VortexLimits.MaxDTypeDepth && !dtype.IsDefault && dtype.Kind == DTypeKind.Extension; i++)
         {
             dtype = dtype.StorageType;
         }
 
-        return !dtype.IsDefault && dtype.Kind == DTypeKind.Decimal;
+        return dtype;
     }
 
     /// <summary>

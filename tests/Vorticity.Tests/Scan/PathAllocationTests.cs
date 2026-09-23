@@ -221,7 +221,11 @@ public sealed class PathAllocationTests
         // A context holds the zstd decoder it builds for its frames, whether or not it meets one: 8
         // bytes for the lane's and 8 for the one the pruning reads the zone map through, which the
         // 41 KB the full scan and the take no longer spend on decoders more than pay for.
-        ("selective filter, pruning on", File, 141_728, PrunedFilter),
+        //
+        // A numeric column's zones are held as columns rather than one summary each, a third of
+        // the bytes, and the file keeps them for its next scan in a holder it makes then: 139 376
+        // measured, 2 352 bytes under what the summaries cost.
+        ("selective filter, pruning on", File, 139_376, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and

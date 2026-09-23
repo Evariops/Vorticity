@@ -1,4 +1,6 @@
 using System;
+using System.Buffers;
+using System.Numerics;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Types.Numerics;
@@ -121,20 +123,114 @@ internal sealed class ZonePruner : IBlockPruner
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Block by block through the same range question, so that the mask says of every block
-    /// exactly what a per-split question would say of the rows it covers. A block that is already
-    /// dead is not asked again: another structure may have killed it, and the zones cannot revive
-    /// it.
+    /// The mask says of every block exactly what the range question says of the rows it covers,
+    /// sixty-four blocks at a time: a comparison on a numeric column whose zones are the blocks is
+    /// answered from its <see cref="ZoneTable"/>, any other leaf block by block, and the filter's
+    /// AND, OR and NOT combine the words as the question combines its answers. A block that is
+    /// already dead is not asked again: another structure may have killed it, and the zones cannot
+    /// revive it.
     /// </remarks>
     public void Refine(BlockMask live)
     {
-        int blocks = live.BlockCount;
-        for (int block = 0; block < blocks; block++)
+        ReadOnlySpan<ulong> scope = live.Words;
+        ulong[] rented = ArrayPool<ulong>.Shared.Rent(scope.Length);
+        try
         {
-            if (live.IsLive(block) && !MayMatch(live.BlockRange(block)))
+            Span<ulong> may = rented.AsSpan(0, scope.Length);
+            MayWords(_filter, negated: false, live, scope, may);
+            live.Keep(may);
+        }
+        finally
+        {
+            ArrayPool<ulong>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Sets in <paramref name="words"/> the blocks of <paramref name="scope"/> where
+    /// <paramref name="expr"/> may match; a bit outside the scope says nothing.
+    /// </summary>
+    /// <param name="expr">The predicate.</param>
+    /// <param name="negated">Whether a negation above it is pushed into its comparisons.</param>
+    /// <param name="live">The mask, for its blocks' rows.</param>
+    /// <param name="scope">
+    /// The blocks whose answer matters: live, and not already settled by the other side of an AND or
+    /// an OR, which is what the range question's short circuit skips.
+    /// </param>
+    /// <param name="words">The answer, one bit per block.</param>
+    private void MayWords(VortexExpr expr, bool negated, BlockMask live, ReadOnlySpan<ulong> scope, Span<ulong> words)
+    {
+        switch (expr.Kind)
+        {
+            case ExprKind.Comparison:
             {
-                live.Kill(block);
+                ComparisonExpr comparison = (ComparisonExpr)expr;
+                ComparisonOp op = negated ? Negate(comparison.Op) : comparison.Op;
+                bool nanMatches = negated && IsOrdering(comparison.Op);
+                if (comparison.Value.Kind != FilterLiteralKind.Null &&
+                    Find(comparison.Field) is { HasStatistics: true } column &&
+                    column.ZoneLength == live.BlockRows && column.RowCount == live.RowCount &&
+                    column.Table.TryMayMatch(op, comparison.Value, nanMatches, words))
+                {
+                    return;
+                }
+
+                break;
             }
+
+            case ExprKind.Not:
+                MayWords(((NotExpr)expr).Operand, !negated, live, scope, words);
+                return;
+
+            case ExprKind.Logical:
+            {
+                // De Morgan, as the range question applies it: under a negation an AND behaves as
+                // an OR and the other way round.
+                LogicalExpr logical = (LogicalExpr)expr;
+                bool isAnd = logical.IsAnd != negated;
+                MayWords(logical.Left, negated, live, scope, words);
+                ulong[] rented = ArrayPool<ulong>.Shared.Rent(2 * words.Length);
+                try
+                {
+                    Span<ulong> rightScope = rented.AsSpan(0, words.Length);
+                    Span<ulong> right = rented.AsSpan(words.Length, words.Length);
+                    ulong flip = isAnd ? 0 : ulong.MaxValue;
+                    for (int i = 0; i < words.Length; i++)
+                    {
+                        rightScope[i] = scope[i] & (words[i] ^ flip);
+                    }
+
+                    MayWords(logical.Right, negated, live, rightScope, right);
+                    for (int i = 0; i < words.Length; i++)
+                    {
+                        words[i] = isAnd ? words[i] & right[i] : words[i] | (right[i] & rightScope[i]);
+                    }
+                }
+                finally
+                {
+                    ArrayPool<ulong>.Shared.Return(rented);
+                }
+
+                return;
+            }
+        }
+
+        // Every other shape, and a comparison the table cannot answer, is asked block by block.
+        for (int w = 0; w < words.Length; w++)
+        {
+            ulong pending = scope[w];
+            ulong answer = 0;
+            while (pending != 0)
+            {
+                int bit = BitOperations.TrailingZeroCount(pending);
+                pending &= pending - 1;
+                if (MayMatch(expr, live.BlockRange((w << 6) + bit), negated))
+                {
+                    answer |= 1UL << bit;
+                }
+            }
+
+            words[w] = answer;
         }
     }
 

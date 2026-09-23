@@ -84,8 +84,11 @@ public sealed class ScanExplainTests
         Assert.Equal(rows, metrics.Rows);
         Assert.True(metrics.Batches >= batches, "the enumerator produces at least the batches the caller sees");
         Assert.Equal(FlatLayoutReader.ValuesDecoded, metrics.ValuesDecoded);
-        Assert.True(metrics.SegmentRequests >= plan.SegmentsToRead, $"{metrics.SegmentRequests} requests against {plan.SegmentsToRead} planned segments");
-        Assert.True(metrics.BytesRequested >= plan.BytesToRead);
+
+        // The zone map the plan read stays with the open file, so the scan asks for the data alone.
+        long data = plan.SegmentsToRead - plan.Pruning[0].SegmentsRead;
+        Assert.True(metrics.SegmentRequests >= data, $"{metrics.SegmentRequests} requests against {data} planned data segments");
+        Assert.True(metrics.BytesRequested >= plan.BytesToRead - plan.Pruning[0].BytesRead);
 
         // And the asking is what the source saw: every request the scan made went to it.
         Assert.True(

@@ -107,7 +107,6 @@ public sealed partial class VortexFile
         .Origins[origin];
 
     private IndexState? _indexState;
-    private IndexRunCache? _runCache;
 
     /// <summary>
     /// The decoded runs this file keeps for its cursors, created on first use and bounded by
@@ -117,11 +116,12 @@ public sealed partial class VortexFile
     {
         get
         {
-            IndexRunCache? cache = _runCache;
+            DecodedStructures decoded = Decoded;
+            IndexRunCache? cache = Volatile.Read(ref decoded.Runs);
             if (cache is null)
             {
-                Interlocked.CompareExchange(ref _runCache, new IndexRunCache(ReadOptions.IndexCacheBytes), null);
-                cache = _runCache!;
+                Interlocked.CompareExchange(ref decoded.Runs, new IndexRunCache(ReadOptions.IndexCacheBytes), null);
+                cache = decoded.Runs!;
             }
 
             return cache;

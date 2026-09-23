@@ -70,10 +70,12 @@ public sealed class ReadContractTests
     {
         CountingSource source = new CountingSource(new MemoryMappedSegmentSource(await ContractFile.PathAsync()));
         await using VortexFile file = await VortexSession.Default.OpenAsync(source, cancellationToken: TestContext.Current.CancellationToken);
+        await using VortexFile planning = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
 
-        // What the plan reads to work itself out is not the scan's; the scan starts after it.
+        // The plan works itself out on a file of its own: an open file keeps the zone maps it
+        // decoded, so a scan after a plan on the same file would not ask for them again.
         int planned = 0;
-        (ScanPlan plan, ScanStatistics statistics) = await RunAsync(file, query, () => planned = source.Ranges.Length);
+        (ScanPlan plan, ScanStatistics statistics) = await RunAsync(file, planning, query, () => planned = source.Ranges.Length);
         SegmentRange[] asked = source.Ranges[planned..];
 
         Assert.True(asked.Length > 0, $"{query}: the scan asked for nothing, so there is nothing to count");
@@ -130,8 +132,9 @@ public sealed class ReadContractTests
     public async Task WhatAScanRequestsIsWhatItsPlanSaid(string query)
     {
         await using VortexFile file = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
+        await using VortexFile planning = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
 
-        (ScanPlan plan, ScanStatistics statistics) = await RunAsync(file, query);
+        (ScanPlan plan, ScanStatistics statistics) = await RunAsync(file, planning, query);
 
         Assert.Equal(plan.Segments, statistics.Requests);
         Assert.Equal(plan.BytesToRead, statistics.BytesRequested);
@@ -143,7 +146,7 @@ public sealed class ReadContractTests
     {
         await using VortexFile file = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
 
-        (ScanPlan plan, ScanStatistics statistics) = await RunAsync(file, query);
+        (ScanPlan plan, ScanStatistics statistics) = await RunAsync(file, file, query);
 
         Assert.Equal(plan.LiveBlocks, statistics.BlocksDecoded);
         Assert.Equal(plan.Blocks, plan.LiveBlocks + plan.Pruning.Sum(step => step.BlocksPruned));
@@ -156,8 +159,8 @@ public sealed class ReadContractTests
     {
         await using VortexFile file = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
 
-        (ScanPlan pruned, _) = await RunAsync(file, "filtered, pruned");
-        (ScanPlan unpruned, _) = await RunAsync(file, "filtered, not pruned");
+        (ScanPlan pruned, _) = await RunAsync(file, file, "filtered, pruned");
+        (ScanPlan unpruned, _) = await RunAsync(file, file, "filtered, not pruned");
 
         Assert.True(pruned.LiveBlocks > 0 && pruned.LiveBlocks < pruned.Blocks, $"the pruned query keeps {pruned.LiveBlocks} of {pruned.Blocks} blocks");
         Assert.Equal(unpruned.Blocks, unpruned.LiveBlocks);
@@ -244,13 +247,15 @@ public sealed class ReadContractTests
     /// <param name="file">The open file.</param>
     /// <param name="query">The query's name, one of <see cref="Queries"/>.</param>
     /// <param name="planned">Called between the plan and the run, when given.</param>
-    private static async Task<(ScanPlan Plan, ScanStatistics Statistics)> RunAsync(VortexFile file, string query, Action? planned = null)
+    /// <summary>The plan of <paramref name="query"/> over <paramref name="planning"/>, then its scan over <paramref name="file"/>.</summary>
+    private static async Task<(ScanPlan Plan, ScanStatistics Statistics)> RunAsync(
+        VortexFile file, VortexFile planning, string query, Action? planned = null)
     {
         if (query == "projection")
         {
-            Vorticity.Scan tool = file.Scan("City");
-            ScanPlan toolPlan = await tool.ExplainAsync(TestContext.Current.CancellationToken);
+            ScanPlan toolPlan = await planning.Scan("City").ExplainAsync(TestContext.Current.CancellationToken);
             planned?.Invoke();
+            Vorticity.Scan tool = file.Scan("City");
             await foreach (BatchView batch in tool.WithCancellation(TestContext.Current.CancellationToken))
             {
                 Assert.Single(batch.Schema);
@@ -259,20 +264,9 @@ public sealed class ReadContractTests
             return (toolPlan, tool.Statistics);
         }
 
-        Scan<Reading> scan = query switch
-        {
-            "unfiltered" => file.Scan<Reading>(),
-            "filtered, pruned" => file.Scan<Reading>().Where(r => r.Day < 20),
-            "filtered, not pruned" => file.Scan<Reading>().Where(r => r.Celsius > 30.0),
-            "range" => file.Scan<Reading>().Rows(new RowRange(10_000, 90_000)),
-            "take" => file.Scan<Reading>().Rows(5, 70_000, 150_001, 249_999),
-            "ordered" => file.Scan<Reading>().OrderBy(r => r.Day),
-            "ordered, filtered" => file.Scan<Reading>().OrderBy(r => r.Day).Where(r => r.Day < 20),
-            _ => throw new ArgumentOutOfRangeException(nameof(query), query, "no such query"),
-        };
-
-        ScanPlan plan = await scan.ExplainAsync(TestContext.Current.CancellationToken);
+        ScanPlan plan = await Query(planning, query).ExplainAsync(TestContext.Current.CancellationToken);
         planned?.Invoke();
+        Scan<Reading> scan = Query(file, query);
         await foreach (Columns<Reading> columns in scan.WithCancellation(TestContext.Current.CancellationToken))
         {
             Assert.True(columns.RowCount > 0);
@@ -280,4 +274,16 @@ public sealed class ReadContractTests
 
         return (plan, scan.Statistics);
     }
+
+    private static Scan<Reading> Query(VortexFile file, string query) => query switch
+    {
+        "unfiltered" => file.Scan<Reading>(),
+        "filtered, pruned" => file.Scan<Reading>().Where(r => r.Day < 20),
+        "filtered, not pruned" => file.Scan<Reading>().Where(r => r.Celsius > 30.0),
+        "range" => file.Scan<Reading>().Rows(new RowRange(10_000, 90_000)),
+        "take" => file.Scan<Reading>().Rows(5, 70_000, 150_001, 249_999),
+        "ordered" => file.Scan<Reading>().OrderBy(r => r.Day),
+        "ordered, filtered" => file.Scan<Reading>().OrderBy(r => r.Day).Where(r => r.Day < 20),
+        _ => throw new ArgumentOutOfRangeException(nameof(query), query, "no such query"),
+    };
 }
