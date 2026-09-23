@@ -683,9 +683,8 @@ internal sealed class TerminalScan
 
                 if (count < rows)
                 {
-                    Span<int> kept = list.AsSpan(0, count);
-                    CanonicalFilter.Select(evaluated, kept);
-                    selected = kept;
+                    CanonicalFilter.Select(evaluated, list);
+                    selected = list.AsSpan(0, count);
                     listed = true;
                 }
             }

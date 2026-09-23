@@ -809,10 +809,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
             else if (count != rows)
             {
-                selected = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
-                Span<int> indices = selected.AsSpan(0, count);
-                CanonicalFilter.Select(window, indices);
-                root = CanonicalFilter.Apply(context.Canonical, root, indices);
+                // Room for every row: the selection writes a slot per row before deciding.
+                selected = ArrayPool<int>.Shared.Rent(rows);
+                CanonicalFilter.Select(window, selected);
+                root = CanonicalFilter.Apply(context.Canonical, root, selected.AsSpan(0, count));
             }
         }
         finally

@@ -1,9 +1,11 @@
 using System;
 using System.Buffers;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Buffers;
 using Vorticity.Types;
 
@@ -23,17 +25,23 @@ internal static class CanonicalFilter
     /// Turns a per-row truth table into the list of selected row indices.
     /// </summary>
     /// <param name="states">One <see cref="Trilean"/> state per row.</param>
-    /// <param name="indices">Receives the selected rows, ascending; must hold every row.</param>
+    /// <param name="indices">
+    /// Receives the selected rows, ascending; must have room for every row, selected or not,
+    /// because each row is written at the next free slot before the state decides whether it keeps it.
+    /// </param>
     /// <returns>How many rows were selected.</returns>
+    /// <remarks>
+    /// No branch on the state: a filter's verdicts follow the data, and a branch taken on a row's
+    /// verdict is mispredicted as often as the data is irregular.
+    /// </remarks>
     internal static int Select(ReadOnlySpan<byte> states, Span<int> indices)
     {
+        Span<int> slots = indices[..states.Length];
         int count = 0;
         for (int i = 0; i < states.Length; i++)
         {
-            if (states[i] == Trilean.True)
-            {
-                indices[count++] = i;
-            }
+            slots[count] = i;
+            count += states[i] == Trilean.True ? 1 : 0;
         }
 
         return count;
@@ -278,6 +286,12 @@ internal static class CanonicalFilter
     }
 
     /// <summary>Gathers fixed-width elements into a fresh buffer.</summary>
+    /// <remarks>
+    /// The width is dispatched once, to a loop that moves each row with one load and one store.
+    /// The buffer is left uninitialized: the gather writes every row, or throws before the buffer
+    /// reaches a node.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">An index lies past the source's rows.</exception>
     private static VortexBuffer Gather(
         CanonicalArena arena, ReadOnlySpan<byte> source, ReadOnlySpan<int> indices, int width)
     {
@@ -287,14 +301,20 @@ internal static class CanonicalFilter
             return VortexBuffer.Empty;
         }
 
-        VortexBuffer buffer = arena.Allocate(count * width, width, out Span<byte> destination);
-        for (int i = 0; i < count; i++)
+        VortexBuffer buffer = arena.AllocateUninitialized(count * width, width, out Span<byte> destination);
+        int outside = RowKernels.Gather(
+            MemoryMarshal.AsBytes(indices), PType.I32, source, width, source.Length / width, destination, count);
+        if (outside >= 0)
         {
-            source.Slice(indices[i] * width, width).CopyTo(destination.Slice(i * width, width));
+            ThrowOutside(indices[outside]);
         }
 
         return buffer;
     }
+
+    [DoesNotReturn]
+    private static void ThrowOutside(int index) =>
+        throw new ArgumentOutOfRangeException(nameof(index), index, "A selected row lies past the rows it selects from.");
 
     /// <summary>
     /// Gathers a validity, collapsing the result: a selection that happens to contain no null
