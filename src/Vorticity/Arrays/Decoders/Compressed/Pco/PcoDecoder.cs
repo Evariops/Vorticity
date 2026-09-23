@@ -67,26 +67,14 @@ internal sealed class PcoDecoder : ArrayDecoder
         VortexBuffer output = CompressedValues.Allocate(
             context, length * width, width, Id, out Span<byte> destination);
 
-        // The two page buffers, rented once for the whole node rather than allocated per page: a
-        // large column runs to many hundreds of pages, and a decode path must not allocate once
-        // per page.
-        int widestPage = 0;
-        foreach (int[] pages in wrapper.Chunks)
-        {
-            foreach (int pageValues in pages)
-            {
-                widestPage = Math.Max(widestPage, pageValues);
-            }
-        }
-
         bool signed = ptype.IsSignedInteger();
-        Scratch<ulong> primaryScratch = new Scratch<ulong>(widestPage, default);
-        Scratch<ulong> secondaryScratch = new Scratch<ulong>(widestPage, default);
 
-        // A batch's three working buffers, rented here for the same reason the two page buffers
-        // are: they are fixed at one batch of values and every page must not allocate its own.
-        // They belong to this decode and to nothing wider; PcoBatchScratch says why sharing them
-        // beyond it is not an option.
+        // A batch's working buffers and the secondary latent variable's, rented once for the whole
+        // node rather than allocated per page: a large column runs to many hundreds of pages, and a
+        // decode path must not allocate once per page. The primary is decoded into the output
+        // itself. They belong to this decode and to nothing wider; PcoBatchScratch says why sharing
+        // them beyond it is not an option.
+        Scratch<ulong> secondaryScratch = new Scratch<ulong>(PcoPageDecoder.BatchSize, default);
         Scratch<ulong> batchValues = new Scratch<ulong>(PcoPageDecoder.BatchSize, default);
         Scratch<int> batchOffsetBits = new Scratch<int>(PcoPageDecoder.BatchSize, default);
         Scratch<long> batchOffsetCumulative = new Scratch<long>(PcoPageDecoder.BatchSize, default);
@@ -111,27 +99,16 @@ internal sealed class PcoDecoder : ArrayDecoder
 
                 foreach (int pageValues in wrapper.Chunks[chunk])
                 {
-                    ReadOnlySpan<ulong> latents = PcoPageDecoder.DecodeJoined(
-                        meta, node.GetBuffer(pageBuffer).Span, pageValues,
-                        primaryScratch.Span, secondaryScratch.Span, in batchScratch);
-                    pageBuffer++;
-
-                    // The ordered latent form: shifted so the type's minimum is zero. For an
-                    // unsigned type it is the value itself, so the shift is a single addition of
-                    // the midpoint rather than a sign test -- and it is pointwise, so it costs one
-                    // vector add per lane group rather than a bounds-checked eight-byte write per
-                    // value.
+                    // The ordered latent form is shifted so the type's minimum is zero. For an
+                    // unsigned type it is the value itself, and for a signed one the shift back is
+                    // a single addition of the midpoint rather than a sign test, made as the page's
+                    // latents are joined into the output.
                     Span<ulong> target = MemoryMarshal.Cast<byte, ulong>(
                         destination.Slice(written * width, pageValues * width));
-                    if (signed)
-                    {
-                        Bias(latents, target);
-                    }
-                    else
-                    {
-                        latents.CopyTo(target);
-                    }
-
+                    PcoPageDecoder.DecodeJoined(
+                        meta, node.GetBuffer(pageBuffer).Span, pageValues,
+                        secondaryScratch.Span, in batchScratch, target, signed ? 1UL << 63 : 0);
+                    pageBuffer++;
                     written += pageValues;
                 }
             }
@@ -142,30 +119,9 @@ internal sealed class PcoDecoder : ArrayDecoder
             batchOffsetBits.Dispose();
             batchValues.Dispose();
             secondaryScratch.Dispose();
-            primaryScratch.Dispose();
         }
 
         Validity validity = context.DecodeValidity(in node, 0, dtype.Nullability, length);
         return context.Canonical.AddPrimitive(dtype, length, validity, ptype, output);
-    }
-
-    /// <summary>Adds 2^63 to every latent, turning the ordered form back into two's complement.</summary>
-    private static void Bias(ReadOnlySpan<ulong> latents, Span<ulong> destination)
-    {
-        int i = 0;
-        if (Vector.IsHardwareAccelerated && latents.Length >= Vector<ulong>.Count)
-        {
-            Vector<ulong> mid = new Vector<ulong>(1UL << 63);
-            int lanes = Vector<ulong>.Count;
-            for (; i <= latents.Length - lanes; i += lanes)
-            {
-                (Vector.LoadUnsafe(in latents[i]) + mid).StoreUnsafe(ref destination[i]);
-            }
-        }
-
-        for (; i < latents.Length; i++)
-        {
-            destination[i] = unchecked(latents[i] + (1UL << 63));
-        }
     }
 }

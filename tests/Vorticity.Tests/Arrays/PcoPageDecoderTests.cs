@@ -44,12 +44,12 @@ public sealed class PcoPageDecoderTests
             new int[PcoPageDecoder.BatchSize],
             new long[PcoPageDecoder.BatchSize],
             states);
+        ulong[] secondary = new ulong[PcoPageDecoder.BatchSize];
         for (int page = 0; page < vector.Pages.Length; page++)
         {
-            ulong[] primary = new ulong[vector.PerPage[page]];
-            ulong[] secondary = new ulong[vector.PerPage[page]];
-            ReadOnlySpan<ulong> latents = PcoPageDecoder.DecodeJoined(
-                chunk, vector.Pages[page], vector.PerPage[page], primary, secondary, in scratch);
+            ulong[] latents = new ulong[vector.PerPage[page]];
+            PcoPageDecoder.DecodeJoined(
+                chunk, vector.Pages[page], vector.PerPage[page], secondary, in scratch, latents, shift: 0);
             foreach (ulong latent in latents)
             {
                 // i64's ordered latent form: the unsigned value shifted so that long.MinValue is 0.
@@ -64,6 +64,56 @@ public sealed class PcoPageDecoderTests
             {
                 Assert.Fail(
                     $"{name}: value {i} decoded to {decoded[i]}, expected {vector.Values[i]}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// A batch described as a constant or a ramp joins, and shifts, to what its values written out
+    /// would, in every combination the page decoder composes, wrapping included.
+    /// </summary>
+    [Theory]
+    [InlineData(13)]
+    [InlineData(PcoPageDecoder.BatchSize)]
+    public void EveryShapeJoinsAsItsValuesWrittenOut(int batch)
+    {
+        Random random = new Random(batch);
+        ulong NextWord() => (ulong)random.NextInt64() ^ ((ulong)random.Next() << 40);
+
+        foreach (PcoBatchShape primaryShape in (PcoBatchShape[])[PcoBatchShape.Written, PcoBatchShape.Constant, PcoBatchShape.Ramp])
+        {
+            foreach (PcoBatchShape secondaryShape in (PcoBatchShape[])[PcoBatchShape.Written, PcoBatchShape.Constant])
+            {
+                ulong first = NextWord();
+                ulong step = NextWord();
+                ulong secondaryValue = NextWord();
+                ulong modeBase = NextWord();
+                ulong shift = 1UL << 63;
+                ulong[] written = new ulong[batch];
+                ulong[] secondary = new ulong[batch];
+                for (int i = 0; i < batch; i++)
+                {
+                    written[i] = NextWord();
+                    secondary[i] = secondaryShape == PcoBatchShape.Written ? NextWord() : 0;
+                }
+
+                ulong[] classic = (ulong[])written.Clone();
+                ulong[] joined = (ulong[])written.Clone();
+                PcoPageDecoder.Shift(classic, primaryShape, first, step, shift);
+                PcoPageDecoder.Join(joined, primaryShape, first, step, secondary, secondaryShape, secondaryValue, modeBase, shift);
+
+                for (int i = 0; i < batch; i++)
+                {
+                    ulong p = primaryShape switch
+                    {
+                        PcoBatchShape.Constant => first,
+                        PcoBatchShape.Ramp => unchecked(first + ((ulong)i * step)),
+                        _ => written[i],
+                    };
+                    ulong s = secondaryShape == PcoBatchShape.Constant ? secondaryValue : secondary[i];
+                    Assert.Equal(unchecked(p + shift), classic[i]);
+                    Assert.Equal(unchecked((p * modeBase) + s + shift), joined[i]);
+                }
             }
         }
     }

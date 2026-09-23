@@ -32,26 +32,47 @@ internal static class PcoPageDecoder
     /// <summary>Values per batch. Also the size of the buffers in <see cref="PcoBatchScratch"/>.</summary>
     internal const int BatchSize = 256;
 
-    /// <summary>Decodes a page of 64-bit latents.</summary>
+    /// <summary>Decodes a page of 64-bit latents, joins them and writes them shifted by <paramref name="shift"/>.</summary>
     /// <param name="chunk">The chunk's metadata.</param>
     /// <param name="page">The page's bytes.</param>
     /// <param name="valueCount">Values in this page.</param>
-    /// <param name="primaryOut">At least <paramref name="valueCount"/> slots, caller-owned.</param>
-    /// <param name="secondaryOut">
-    /// At least <paramref name="valueCount"/> slots, caller-owned; unread when the chunk has no
-    /// secondary latent variable.
+    /// <param name="secondaryBatch">
+    /// At least <see cref="BatchSize"/> slots, caller-owned, for a batch of the secondary latent
+    /// variable; unread when the chunk has none.
     /// </param>
     /// <param name="scratch">
     /// A batch's working buffers, caller-owned so that every page of a node shares one rental.
     /// </param>
-    /// <returns>
-    /// The decoded latents, joined by the chunk's mode. A view over one of the two buffers, valid
-    /// until the next call.
-    /// </returns>
-    internal static ReadOnlySpan<ulong> DecodeJoined(
-        PcoChunkMeta chunk, ReadOnlySpan<byte> page, int valueCount, Span<ulong> primaryOut,
-        Span<ulong> secondaryOut, in PcoBatchScratch scratch)
+    /// <param name="target">
+    /// Exactly <paramref name="valueCount"/> slots: the primary latents are decoded into them and
+    /// joined there, a batch at a time.
+    /// </param>
+    /// <param name="shift">
+    /// Added to every joined latent: 2^63 turns a signed type's ordered form back into two's
+    /// complement, zero leaves an unsigned type's as it is.
+    /// </param>
+    /// <remarks>
+    /// A batch of a latent variable is not always written: one that is a single value, or that
+    /// value's prefix sum -- a ramp -- is described instead (<see cref="PcoBatchShape"/>), and the
+    /// join composes the descriptions. A delta-encoded arithmetic ramp, the commonest shape a pco
+    /// column has, is a ramp primary joined to a constant secondary, which is a ramp again: the
+    /// batch is then written once, a vector at a time, and nothing else is.
+    /// </remarks>
+    internal static void DecodeJoined(
+        PcoChunkMeta chunk, ReadOnlySpan<byte> page, int valueCount, Span<ulong> secondaryBatch,
+        in PcoBatchScratch scratch, Span<ulong> target, ulong shift)
     {
+        bool classic = chunk.Mode == PcoModeKind.Classic;
+        if (!classic && chunk.Mode != PcoModeKind.IntMult)
+        {
+            CompressedThrow.Format($"pco mode {chunk.Mode} is not decoded yet.");
+        }
+
+        if (!classic && chunk.Secondary is null)
+        {
+            CompressedThrow.Format("A pco IntMult chunk has no secondary latent variable.");
+        }
+
         PcoBitReader reader = new PcoBitReader(page);
 
         // The latent states are the caller's and are reset, not built. Each one owns two small
@@ -74,27 +95,45 @@ internal static class PcoPageDecoder
 
         reader.DrainEmptyByte("page metadata");
 
-        // The page arrays are the caller's too: a large column runs to many hundreds of pages, and
-        // a decode path must not allocate a value-sized array for each of them.
-        primaryOut = primaryOut[..valueCount];
-        secondaryOut = secondary is null ? default : secondaryOut[..valueCount];
-
+        target = target[..valueCount];
+        ulong modeBase = chunk.ModeBase;
         int done = 0;
         while (done < valueCount)
         {
             int remaining = valueCount - done;
             int batch = Math.Min(BatchSize, remaining);
+            Span<ulong> values = target.Slice(done, batch);
 
-            delta?.ReadBatch(ref reader, remaining, batch, default, in scratch);
-            primary.ReadBatch(
-                ref reader, remaining, batch, primaryOut.Slice(done, batch), in scratch);
-            secondary?.ReadBatch(
-                ref reader, remaining, batch, secondaryOut.Slice(done, batch), in scratch);
+            delta?.ReadBatch(ref reader, remaining, batch, default, in scratch, out _, out _);
+            PcoBatchShape primaryShape = primary.ReadBatch(
+                ref reader, remaining, batch, values, in scratch, out ulong primaryFirst, out ulong primaryStep);
+
+            // Read whatever the mode, so the reader moves past it; a classic chunk has none.
+            Span<ulong> second = secondary is null ? default : secondaryBatch[..batch];
+            PcoBatchShape secondaryShape = PcoBatchShape.Written;
+            ulong secondaryFirst = 0;
+            if (secondary is not null)
+            {
+                secondaryShape = secondary.ReadBatch(
+                    ref reader, remaining, batch, second, in scratch, out secondaryFirst, out ulong secondaryStep);
+                if (secondaryShape == PcoBatchShape.Ramp)
+                {
+                    Ramp(second, secondaryFirst, secondaryStep);
+                    secondaryShape = PcoBatchShape.Written;
+                }
+            }
+
+            if (classic)
+            {
+                Shift(values, primaryShape, primaryFirst, primaryStep, shift);
+            }
+            else
+            {
+                Join(values, primaryShape, primaryFirst, primaryStep, second, secondaryShape, secondaryFirst, modeBase, shift);
+            }
 
             done += batch;
         }
-
-        return Join(chunk, primaryOut, secondaryOut);
     }
 
     /// <summary>The delta order applied to one latent variable.</summary>
@@ -112,35 +151,159 @@ internal static class PcoPageDecoder
         return primary || chunk.SecondaryUsesDelta ? chunk.DeltaOrder : 0;
     }
 
-    private static ReadOnlySpan<ulong> Join(
-        PcoChunkMeta chunk, Span<ulong> primary, Span<ulong> secondary)
+    /// <summary>
+    /// A classic batch: the primary, as its shape describes it, plus <paramref name="shift"/>, into
+    /// <paramref name="values"/>, which hold the primary when it is written.
+    /// </summary>
+    internal static void Shift(Span<ulong> values, PcoBatchShape shape, ulong first, ulong step, ulong shift)
     {
-        if (chunk.Mode == PcoModeKind.Classic)
+        switch (shape)
         {
-            return primary;
+            case PcoBatchShape.Constant:
+                values.Fill(unchecked(first + shift));
+                break;
+            case PcoBatchShape.Ramp:
+                Ramp(values, unchecked(first + shift), step);
+                break;
+            default:
+                Add(values, shift);
+                break;
         }
-
-        if (chunk.Mode != PcoModeKind.IntMult)
-        {
-            CompressedThrow.Format($"pco mode {chunk.Mode} is not decoded yet.");
-        }
-
-        if (secondary.IsEmpty)
-        {
-            CompressedThrow.Format("A pco IntMult chunk has no secondary latent variable.");
-        }
-
-        // In place, into the primary: nothing reads it again, and a third array per page would be
-        // the allocation the other two already avoid.
-        Span<ulong> joined = primary;
-        for (int i = 0; i < primary.Length; i++)
-        {
-            // Both operands come off the wire, so both operations wrap, exactly as upstream's do.
-            joined[i] = unchecked((primary[i] * chunk.ModeBase) + secondary[i]);
-        }
-
-        return joined;
     }
+
+    /// <summary>
+    /// An IntMult batch: primary times the base plus secondary, plus <paramref name="shift"/>, into
+    /// <paramref name="values"/>, which hold the primary when it is written. The secondary is
+    /// written or a constant.
+    /// </summary>
+    /// <remarks>
+    /// Every operand comes off the wire, so every operation wraps, exactly as upstream's do; a ramp
+    /// times the base is then the ramp of the first value and the step, each times the base.
+    /// </remarks>
+    internal static void Join(
+        Span<ulong> values, PcoBatchShape primary, ulong primaryFirst, ulong primaryStep,
+        ReadOnlySpan<ulong> secondary, PcoBatchShape secondaryShape, ulong secondaryValue, ulong modeBase, ulong shift)
+    {
+        unchecked
+        {
+            if (secondaryShape == PcoBatchShape.Constant)
+            {
+                ulong added = secondaryValue + shift;
+                switch (primary)
+                {
+                    case PcoBatchShape.Constant:
+                        values.Fill((primaryFirst * modeBase) + added);
+                        break;
+                    case PcoBatchShape.Ramp:
+                        Ramp(values, (primaryFirst * modeBase) + added, primaryStep * modeBase);
+                        break;
+                    default:
+                        for (int i = 0; i < values.Length; i++)
+                        {
+                            values[i] = (values[i] * modeBase) + added;
+                        }
+
+                        break;
+                }
+
+                return;
+            }
+
+            secondary = secondary[..values.Length];
+            switch (primary)
+            {
+                case PcoBatchShape.Constant:
+                    values.Fill((primaryFirst * modeBase) + shift);
+                    Add(values, secondary);
+                    break;
+                case PcoBatchShape.Ramp:
+                    Ramp(values, (primaryFirst * modeBase) + shift, primaryStep * modeBase);
+                    Add(values, secondary);
+                    break;
+                default:
+                    for (int i = 0; i < values.Length; i++)
+                    {
+                        values[i] = (values[i] * modeBase) + secondary[i] + shift;
+                    }
+
+                    break;
+            }
+        }
+    }
+
+    /// <summary>Writes <paramref name="start"/> plus i <paramref name="step"/>s into slot i, wrapping.</summary>
+    internal static void Ramp(Span<ulong> values, ulong start, ulong step)
+    {
+        int i = 0;
+        if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
+        {
+            int lanes = Vector<ulong>.Count;
+            Vector<ulong> ramp = (Vector<ulong>.Indices * step) + new Vector<ulong>(start);
+            Vector<ulong> stride = new Vector<ulong>(unchecked((ulong)lanes * step));
+            for (; i <= values.Length - lanes; i += lanes)
+            {
+                ramp.StoreUnsafe(ref values[i]);
+                ramp += stride;
+            }
+        }
+
+        for (; i < values.Length; i++)
+        {
+            values[i] = unchecked(start + ((ulong)i * step));
+        }
+    }
+
+    /// <summary>Adds <paramref name="by"/> to every value, one vector add per lane group.</summary>
+    private static void Add(Span<ulong> values, ulong by)
+    {
+        int i = 0;
+        if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
+        {
+            Vector<ulong> added = new Vector<ulong>(by);
+            int lanes = Vector<ulong>.Count;
+            for (; i <= values.Length - lanes; i += lanes)
+            {
+                (Vector.LoadUnsafe(in values[i]) + added).StoreUnsafe(ref values[i]);
+            }
+        }
+
+        for (; i < values.Length; i++)
+        {
+            values[i] = unchecked(values[i] + by);
+        }
+    }
+
+    /// <summary>Adds <paramref name="other"/> to <paramref name="values"/> slot by slot, a vector at a time.</summary>
+    private static void Add(Span<ulong> values, ReadOnlySpan<ulong> other)
+    {
+        int i = 0;
+        if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
+        {
+            int lanes = Vector<ulong>.Count;
+            for (; i <= values.Length - lanes; i += lanes)
+            {
+                (Vector.LoadUnsafe(in values[i]) + Vector.LoadUnsafe(in other[i])).StoreUnsafe(ref values[i]);
+            }
+        }
+
+        for (; i < values.Length; i++)
+        {
+            values[i] = unchecked(values[i] + other[i]);
+        }
+    }
+}
+
+/// <summary>What a batch of a latent variable is, when it is not written out.</summary>
+internal enum PcoBatchShape : byte
+{
+    /// <summary>Written, value by value.</summary>
+    Written,
+
+    /// <summary>Every value is one value, not written.</summary>
+    Constant,
+
+    /// <summary>Value i is a first value plus i steps, wrapping; not written.</summary>
+    Ramp,
 }
 
 /// <summary>The three per-batch working buffers of a page decode, owned by the caller.</summary>
@@ -245,41 +408,65 @@ internal sealed class PcoLatentState
         return state;
     }
 
-    /// <summary>Decodes one batch into <paramref name="destination"/>.</summary>
+    /// <summary>Decodes one batch into <paramref name="destination"/>, or describes it.</summary>
     /// <param name="reader">The page reader.</param>
     /// <param name="remaining">Values left in the page before this batch.</param>
     /// <param name="batch">Values this batch produces.</param>
     /// <param name="destination">Where to put them; empty for a delta variable.</param>
     /// <param name="scratchBuffers">The decode's working buffers; see <see cref="PcoBatchScratch"/>.</param>
-    internal void ReadBatch(
+    /// <param name="first">The one value, or the ramp's first, when the batch is not written.</param>
+    /// <param name="step">The ramp's step, when the batch is a ramp.</param>
+    /// <returns>
+    /// How the batch is given: written into <paramref name="destination"/> (the batch buffer when
+    /// that is empty), or, not written, as one value <paramref name="first"/>, or as the ramp from
+    /// <paramref name="first"/> by <paramref name="step"/> that a first-order delta makes of one.
+    /// </returns>
+    internal PcoBatchShape ReadBatch(
         ref PcoBitReader reader, int remaining, int batch, Span<ulong> destination,
-        in PcoBatchScratch scratchBuffers)
+        in PcoBatchScratch scratchBuffers, out ulong first, out ulong step)
     {
+        // A variable whose values are kept is decoded straight into them; the batch buffer takes
+        // the values of one nothing keeps.
+        Span<ulong> values = destination.IsEmpty ? scratchBuffers.Values[..batch] : destination[..batch];
+
         // The values that come from the delta moments are not on the wire, so the symbol pass is
         // shorter than the batch by the delta order - but only at the end of the page.
-        Span<ulong> scratch = scratchBuffers.Values;
         int preDelta = Math.Min(batch, Math.Max(0, remaining - _deltaOrder));
-        ReadPreDelta(ref reader, preDelta, in scratchBuffers);
+        bool constant = ReadPreDelta(ref reader, preDelta, values, in scratchBuffers, out ulong lower);
+        first = lower;
+        step = 0;
 
-        if (_deltaOrder > 0)
+        if (_deltaOrder == 0)
         {
-            UndoConsecutiveDelta(batch, in scratchBuffers);
+            return constant ? PcoBatchShape.Constant : PcoBatchShape.Written;
         }
 
-        if (!destination.IsEmpty)
+        if (constant && _deltaOrder == 1)
         {
-            scratch[..batch].CopyTo(destination);
+            // The prefix sum of one value, biased, from the moment: see `UndoConsecutiveDelta`.
+            step = unchecked(lower + (1UL << 63));
+            first = _deltaMoments[0];
+            _deltaMoments[0] = unchecked(first + ((ulong)batch * step));
+            return PcoBatchShape.Ramp;
         }
+
+        UndoConsecutiveDelta(values, constant, lower);
+        return PcoBatchShape.Written;
     }
 
-    private void ReadPreDelta(ref PcoBitReader reader, int count, in PcoBatchScratch scratchBuffers)
+    /// <summary>
+    /// Reads <paramref name="count"/> values before their delta is undone; true, with nothing
+    /// written, when every one of them is <paramref name="lower"/>.
+    /// </summary>
+    private bool ReadPreDelta(
+        ref PcoBitReader reader, int count, Span<ulong> scratch, in PcoBatchScratch scratchBuffers, out ulong lower)
     {
+        lower = 0;
         if (count == 0)
         {
-            return;
+            return false;
         }
 
-        Span<ulong> scratch = scratchBuffers.Values;
         Span<int> offsetBits = scratchBuffers.OffsetBits;
         Span<long> offsetCumulative = scratchBuffers.OffsetCumulative;
         long offsetBitTotal = 0;
@@ -304,18 +491,17 @@ internal sealed class PcoLatentState
             // A single bin means every value is that bin, and the ANS stream is skipped entirely
             // rather than read as zero-width symbols. Every value then has the same width, so the
             // per-value width and cumulative-position arrays describe nothing -- the position of
-            // value i is `base + i * offsetBits`, and the fill is one vectorized store.
+            // value i is `base + i * offsetBits`.
             int uniformBits = _table.Nodes[0].OffsetBits;
-            ulong lower = _table.StateLowers[0];
-            scratch[..count].Fill(lower);
+            lower = _table.StateLowers[0];
 
             if (uniformBits == 0)
             {
                 // A bin that needs no offset bits reads nothing at all: the whole batch is the
                 // bin's lower bound and the reader does not move. That is what a delta-encoded
-                // arithmetic ramp becomes, which is the commonest shape a pco column has, so it
-                // is worth leaving before the per-value bookkeeping starts.
-                return;
+                // arithmetic ramp becomes, which is the commonest shape a pco column has, so the
+                // values are not even written: the bound describes them.
+                return true;
             }
 
             long uniformBase = reader.BitPosition;
@@ -326,7 +512,7 @@ internal sealed class PcoLatentState
             }
 
             reader.SeekBits(uniformBase + ((long)count * uniformBits));
-            return;
+            return false;
         }
 
         // The offsets live in their own stream starting where the symbols ended.
@@ -343,38 +529,66 @@ internal sealed class PcoLatentState
         }
 
         reader.SeekBits(basePosition + offsetBitTotal);
+        return false;
     }
 
     /// <summary>Undoes a consecutive delta over the batch, consuming the page's moments.</summary>
+    /// <param name="values">The batch, read before the delta; the values, after.</param>
+    /// <param name="constant">
+    /// Whether every value read is <paramref name="lower"/>, in which case none was written.
+    /// </param>
+    /// <param name="lower">That value.</param>
     /// <remarks>
+    /// <para>
     /// Each order is one prefix sum that writes the running moment into a slot before reading what
     /// was there, so the first values of a page come from the moments themselves. The moments are
     /// carried across batches, which is why they live on this object rather than on the batch.
+    /// </para>
+    /// <para>
+    /// A prefix sum is a chain, a dependent add a value. Over a constant it is a ramp, the moment
+    /// plus i steps, which has no chain and is written a vector at a time: so the highest order is
+    /// undone in closed form when the batch read was constant, which a delta-encoded arithmetic
+    /// ramp's always is (a first-order one is not even written: <see cref="ReadBatch"/> describes
+    /// it). The values past the wire at a page's end are then that constant too rather than
+    /// whatever the buffer held; either way they reach only the moment, which the page ends with.
+    /// </para>
     /// </remarks>
-    private void UndoConsecutiveDelta(int batch, in PcoBatchScratch scratchBuffers)
+    private void UndoConsecutiveDelta(Span<ulong> values, bool constant, ulong lower)
     {
-        // The 2^63 bias is pointwise and contiguous, so it is one vector add per lane group.
-        Span<ulong> values = scratchBuffers.Values[..batch];
-        int biased = 0;
-        if (Vector.IsHardwareAccelerated && batch >= Vector<ulong>.Count)
+        int order = _deltaOrder - 1;
+        if (constant)
         {
-            Vector<ulong> bias = new Vector<ulong>(1UL << 63);
-            int lanes = Vector<ulong>.Count;
-            for (; biased <= batch - lanes; biased += lanes)
+            // The 2^63 bias of the ordered form, on the one value.
+            ulong step = unchecked(lower + (1UL << 63));
+            ulong moment = _deltaMoments[order];
+            PcoPageDecoder.Ramp(values, moment, step);
+            _deltaMoments[order] = unchecked(moment + ((ulong)values.Length * step));
+            order--;
+        }
+        else
+        {
+            // The 2^63 bias is pointwise and contiguous, so it is one vector add per lane group.
+            int biased = 0;
+            if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
             {
-                (Vector.LoadUnsafe(in values[biased]) + bias).StoreUnsafe(ref values[biased]);
+                Vector<ulong> bias = new Vector<ulong>(1UL << 63);
+                int lanes = Vector<ulong>.Count;
+                for (; biased <= values.Length - lanes; biased += lanes)
+                {
+                    (Vector.LoadUnsafe(in values[biased]) + bias).StoreUnsafe(ref values[biased]);
+                }
+            }
+
+            for (; biased < values.Length; biased++)
+            {
+                values[biased] = unchecked(values[biased] + (1UL << 63));
             }
         }
 
-        for (; biased < batch; biased++)
-        {
-            values[biased] = unchecked(values[biased] + (1UL << 63));
-        }
-
-        for (int order = _deltaOrder - 1; order >= 0; order--)
+        for (; order >= 0; order--)
         {
             ulong moment = _deltaMoments[order];
-            for (int i = 0; i < batch; i++)
+            for (int i = 0; i < values.Length; i++)
             {
                 ulong previous = values[i];
                 values[i] = moment;
