@@ -6,10 +6,13 @@ using Vorticity.Editions;
 namespace Vorticity.Writing;
 
 /// <summary>Interns component ids into the u16 indices a file's nodes refer to.</summary>
+/// <remarks>
+/// A file names a couple of dozen distinct ids at most, so the ids are looked up in order rather
+/// than hashed, and the list starts at that size.
+/// </remarks>
 internal sealed class EncodingDictionary
 {
-    private readonly Dictionary<string, ushort> _indices = new Dictionary<string, ushort>(StringComparer.Ordinal);
-    private readonly List<string> _ids = [];
+    private readonly List<string> _ids = new List<string>(16);
     private readonly ComponentKind _kind;
     private readonly VortexEdition _target;
 
@@ -31,9 +34,10 @@ internal sealed class EncodingDictionary
     /// <summary>
     /// The index of <paramref name="idUtf8"/>, assigning one if it is new. The scan is linear and
     /// compares against the strings already kept, because a file names only a couple of dozen
-    /// distinct ids and a string is then built only on a genuine miss. The ASCII comparison is a
-    /// fast path rather than an assumption: an id with a byte above 0x7F falls through to the
-    /// decoding route, which compares it properly.
+    /// distinct ids. On a miss the id is the registry's own string when the registry knows it, and
+    /// a new string only when it does not. The ASCII comparison is a fast path rather than an
+    /// assumption: an id with a byte above 0x7F falls through to the decoding route, which
+    /// compares it properly.
     /// </summary>
     internal ushort Intern(ReadOnlySpan<byte> idUtf8)
     {
@@ -45,7 +49,9 @@ internal sealed class EncodingDictionary
             }
         }
 
-        return Intern(Encoding.UTF8.GetString(idUtf8));
+        return EditionRegistry.TryGetId(_kind, idUtf8, out string? known)
+            ? Intern(known)
+            : Intern(Encoding.UTF8.GetString(idUtf8));
     }
 
     /// <summary>
@@ -62,17 +68,20 @@ internal sealed class EncodingDictionary
 
         foreach (string id in ids)
         {
-            _indices.TryAdd(id, (ushort)_ids.Count);
             _ids.Add(id);
         }
     }
 
     /// <summary>The index of <paramref name="id"/>, assigning one if it is new.</summary>
+    /// <remarks>An id the file names twice, which a seed can bring, is found at its first index.</remarks>
     internal ushort Intern(string id)
     {
-        if (_indices.TryGetValue(id, out ushort index))
+        for (int i = 0; i < _ids.Count; i++)
         {
-            return index;
+            if (string.Equals(_ids[i], id, StringComparison.Ordinal))
+            {
+                return (ushort)i;
+            }
         }
 
         if (_ids.Count > ushort.MaxValue)
@@ -83,9 +92,8 @@ internal sealed class EncodingDictionary
 
         RequireInTarget(id);
 
-        index = (ushort)_ids.Count;
+        ushort index = (ushort)_ids.Count;
         _ids.Add(id);
-        _indices.Add(id, index);
         return index;
     }
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Frozen;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Vorticity.Editions;
 
@@ -163,6 +164,29 @@ internal static class EditionRegistry
         VortexEdition.Core20260803 => "0.85.0",
         _ => throw new ArgumentOutOfRangeException(nameof(edition), edition, "Unknown edition."),
     };
+
+    /// <summary>
+    /// The registry's own string for the id <paramref name="idUtf8"/> spells, when it knows the id:
+    /// a caller holding an id as bytes then needs no string of its own for it.
+    /// </summary>
+    /// <param name="kind">Which namespace the id belongs to.</param>
+    /// <param name="idUtf8">The component id, as UTF-8.</param>
+    /// <param name="known">The registry's string, when it has one.</param>
+    /// <remarks>A walk over a few dozen ids, for a caller that asks once an id.</remarks>
+    internal static bool TryGetId(ComponentKind kind, ReadOnlySpan<byte> idUtf8, [NotNullWhen(true)] out string? known)
+    {
+        foreach (string id in Table(kind).Keys)
+        {
+            if (System.Text.Ascii.Equals(idUtf8, id))
+            {
+                known = id;
+                return true;
+            }
+        }
+
+        known = null;
+        return false;
+    }
 
     private static FrozenDictionary<string, VortexEdition> Table(ComponentKind kind) => kind switch
     {
