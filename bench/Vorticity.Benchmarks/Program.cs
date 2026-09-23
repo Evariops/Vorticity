@@ -105,16 +105,20 @@ internal static class Program
                 ? lanes
                 : 0;
 
+            // `--rebase-from <binary>` swallows its path the same way.
+            int fromFlag = Array.IndexOf(args, "--rebase-from");
+            string? rebaseFrom = fromFlag >= 0 && fromFlag + 1 < args.Length ? args[fromFlag + 1] : null;
+
             string[] axes =
             [
                 .. args.Where((a, i) =>
-                    i > 0 && i != counted && i != lanesFlag + 1 &&
+                    i > 0 && i != counted && i != lanesFlag + 1 && (fromFlag < 0 || i != fromFlag + 1) &&
                     !a.StartsWith("--", StringComparison.Ordinal))
             ];
             bool rebase = Array.IndexOf(args, "--rebase") >= 0;
             bool abSame = Array.IndexOf(args, "--ab-same") >= 0;
             bool onePass = Array.IndexOf(args, RatioCheck.PassFlag) >= 0;
-            return await RatioCheck.RunAsync(axes, recalibrate, rebase, abSame, onePass)
+            return await RatioCheck.RunAsync(axes, recalibrate, rebase, abSame, onePass, rebaseFrom)
                 .ConfigureAwait(false);
         }
 
@@ -216,17 +220,21 @@ internal static class Program
                 tpCounted = given ? tpFlag + 1 : -1;
             }
 
+            int tpFrom = Array.IndexOf(args, "--rebase-from");
+            string? tpRebaseFrom = tpFrom >= 0 && tpFrom + 1 < args.Length ? args[tpFrom + 1] : null;
             string[] only =
             [
                 .. args.Where((a, i) =>
-                    i > 0 && i != tpCounted && !a.StartsWith("--", StringComparison.Ordinal))
+                    i > 0 && i != tpCounted && (tpFrom < 0 || i != tpFrom + 1) &&
+                    !a.StartsWith("--", StringComparison.Ordinal))
             ];
             return await ThroughputCheck.RunAsync(
                 check,
                 only,
                 tpPasses,
                 Array.IndexOf(args, "--rebase") >= 0,
-                Array.IndexOf(args, "--hold") >= 0).ConfigureAwait(false);
+                Array.IndexOf(args, "--hold") >= 0,
+                tpRebaseFrom).ConfigureAwait(false);
         }
 
         if (args.Length > 0 && args[0] == "--tradeoffs")
@@ -429,8 +437,13 @@ internal static class Program
                                      says why; a ratio against native code must not.
                                      --recalibrate N   N processes, prints the table to paste
                                      --rebase          let a reference rise, only where k moved
+                                                       or under a new reference binary
                                      --ab-same         with --rebase, let it rise where ab.sh
                                                        reports no change in our own time
+                                     --rebase-from B   with --recalibrate, carry every reference
+                                                       over to the running binary: each pass runs
+                                                       under B and under it, and a reference moves
+                                                       by what the binary moved the ratio
                                      --lanes N         adds `full scan, N lanes`, threads pinned
           --throughput [family…]   57 encodings at a million rows, ~55 s
                                      --check           hold each ratio to its ceiling. Refused
@@ -440,6 +453,7 @@ internal static class Program
                                      --take            64 rows spread over each file
                                      --write           read back out to a discarding sink, ~8 min
                                      --recalibrate N   as above
+                                     --rebase-from B   as above
                                      --hold            with --recalibrate, print every reference
                                                        back unchanged and refresh only the
                                                        dispersion each encoding measured
@@ -450,15 +464,17 @@ internal static class Program
                                      --advise          the encoding advice on each shape instead,
                                                        under five goals, the choice and its reason
           --ffi-check             rows AND decoded values agree with the reference, < 1 s
-          --report                 the published comparison: eight high-level scenarios at a
-                                     million rows and ten million, EACH SIDE IN ITS OWN PROCESS,
-                                     reporting wall time, peak resident memory and rows rendered.
-                                     Our side runs as the Native AOT runner, which the ratio is
-                                     taken against, and as this host on the JIT; the reference is
-                                     the vxbench binary rather than the cdylib, because those
-                                     figures belong to a process. Build the runner first:
+          --report                 the published comparison: eight high-level scenarios at 2^20
+                                     rows and ten times that, EACH SIDE IN ITS OWN PROCESS, on one
+                                     core and on all of them, on our file and on the reference's,
+                                     reporting the action's time, peak resident memory and rows
+                                     rendered. Our side runs as the Native AOT runner, which the
+                                     ratio is taken against, and as this host on the JIT; the
+                                     reference is the vxbench binary rather than the cdylib,
+                                     because those figures belong to a process. Build both first:
                                      dotnet publish -c Release bench/Vorticity.Benchmarks.Runner
-                                     ~40 s
+                                     cd tools/vxbench-rs && cargo build --release
+                                     ~75 s
                                      --runs N          runs per scenario, default 5, one more
                                                        discarded before them
                                      --markdown        the table as the guide's page

@@ -25,14 +25,14 @@ dotnet run -c Release PROJ -- <arguments>
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust. **Reports, never gates**: a run of one file is +32% on our side, the JIT not finished with it |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 57 files |
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 57 files, against Rust |
-| a lane, or the degree of parallelism | `-- LanesBench` (`--full` walks 1, 2, 4, 8) | 15 s | ours at n lanes against the reference's pool at n workers, threads pinned both sides |
+| a lane, or the degree of parallelism | `-- LanesBench` (`--full` walks 1, 2, 4, 8) | 15 s | ours at n lanes against the reference on a Tokio runtime of n workers, threads pinned both sides |
 | the compressor's decision | `-- CompressorBench` | 12 s | `Choose` and one arm per candidate; `--full` adds the utf8 and f64 columns |
-| the writer, per encoding | `-- --throughput --write --check` | 9 min | each file read back out to a discarding sink, against Rust. **A gate** — 56 references, median **0.290**, nothing above ×2 and the slowest axis `parquet_variant` at 1.01. Three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`): re-run before believing a red. Only `zstd_nullable` produces no ratio, and that is **the reference** refusing to write it |
+| the writer, per encoding | `-- --throughput --write --check` | ~2 min | each file read back out to a discarding sink, against Rust, both writers given decoded rows. **A gate** — 56 references, median **0.300**, one encoding above 1, `zstd` at 1.43. Three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`): re-run before believing a red. Only `parquet_variant` produces no ratio, and that is **the reference** refusing to write it |
 | every file we write, read by Rust | `bench/crosscheck.sh` | 80 s | 854 files compared scalar by scalar, 2 538 751 rows; needs cargo. `gate.sh --crosscheck` folds it in |
 | **anything, before you push** | `bench/gate.sh` | 68 s | the nine ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, ratio per round |
 | the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
-| **what a user would see**, for the published page | `-- --report` | ~40 s | eight high-level scenarios at a million rows and ten million, **each side in its own process**: wall time with its spread, peak resident memory, rows rendered. Our side runs twice, as the **Native AOT runner** (`dotnet publish -c Release bench/Vorticity.Benchmarks.Runner`), which the ratio is taken against, and as this framework-dependent host on the JIT. The reference is the `vxbench` **binary** (`cargo build --release` in `tools/vxbench-rs`). Build both first. `--markdown --out docs/guide/benchmarks.md` writes the page. Every figure here includes starting a process, which the in-process ratios above do not — the `open` row is that floor, and the JIT column's is the runtime and the compiler |
+| **what a user would see**, for the published page | `-- --report` | ~75 s | eight high-level scenarios at 2^20 rows and ten times that, **each side in its own process**, **on one core and on all of them**, on the file our writer makes and on the one the reference's writer makes from the same rows: the action's time with its spread, peak resident memory, rows rendered, and each file's chunks and encodings per column. Our side runs as the **Native AOT runner** built for the machine's instruction set (`dotnet publish -c Release bench/Vorticity.Benchmarks.Runner`), which the ratio is taken against, and on one core also as this framework-dependent host on the JIT. The reference is the `vxbench` **binary** (`cargo build --release` in `tools/vxbench-rs`), built as upstream builds its benchmarks: mimalloc, `target-cpu=native`, one codegen unit, no LTO. On all cores, `--threads all` gives our scans a lane per processor and the reference a Tokio worker per processor. Build both first. `--markdown --out docs/guide/benchmarks.md` writes the page. The fixtures are written again on every run |
 | a hot path you want to profile | `-- --profile <scenario> [seconds]` | as asked | a bare loop for `dotnet-trace`, no harness in the profile |
 | where a report scenario spends its cycles, line by line | `bench/profile.sh cycles <scenario> <file> <rows>` (macOS, Xcode) | 15 s | the **Native AOT runner** sampled every 25–30 µs by Instruments' CPU Profiler, weighed in cycles: self time per function and **per source line, inlined code included**, and every sample charged to the innermost line of this repository. Run from the command line, no Instruments window |
 | what a report scenario allocates, and where | `bench/profile.sh allocations <scenario> <file> <rows>` (macOS) | 15 s–5 min | **every** allocation of three rounds of the Native AOT runner, stopped on under lldb: type, size, stack to the line, managed and native (the C allocator and `mmap`). Not sampled — the managed totals per round equal the runner's own `allocated_bytes` |
@@ -209,10 +209,12 @@ journals and in the commits.
   it is one file whose encodings all have the override.
 
   **`--write`** reads each file back out into a sink that keeps nothing, against `vxbench_write`,
-  which does the same into a `Vec<u8>`: the read is inside the measurement on both sides, so
-  subtract the scan axis before reading the quotient as a statement about writers. It has its own
-  ratchet table of 56 references, and it reports an encoding it cannot write rather
-  than dying on it — today that is `zstd_nullable` alone, and it is the reference that declines.
+  which gives the reference's writer the rows decoded, as our reader gives ours, and writes into a
+  `Vec<u8>`: the read is inside the measurement on both sides, so subtract the scan axis before
+  reading the quotient as a statement about writers. It has its own ratchet table of 56
+  references, and it reports an encoding it cannot write rather than dying on it — today that is
+  `parquet_variant` alone, and it is the reference that declines: its variant, decoded, keeps a
+  lazy slice its writer cannot serialize.
 
   `--quick` (23 s instead of 70) shortens the warm-up and the per-file budget: a direction, not a
   gate. `--recalibrate N` prints a replacement reference table, as it does for `--ratio-check`.
@@ -256,9 +258,27 @@ flagged `HELD`: the command lowers ratchets and never raises one. If such an axi
 regression, plain `--ratio-check` says `OVER`, and the answer is the code, not the number.
 
 `--rebase` is the one exception and it is deliberately awkward: it lets a reference rise, and only on
-an axis whose `k > 1`, because grouping calls into a round changes what is being measured — k calls
-in a row are a *warm* path where a single timed call was cache-cold. Use it when the harness changed,
-never when the number did, and say which change in the commit message.
+an axis whose `k` moved, because grouping calls into a round changes what is being measured — k calls
+in a row are a *warm* path where a single timed call was cache-cold — or under a reference binary
+other than the one the table records. Use it when the harness changed, never when the number did,
+and say which change in the commit message.
+
+**A new reference binary is carried, not recalibrated.** Both gates record the fingerprint of the
+`vxbench` build their tables were set under (`CalibratedShim`) and refuse to gate under another: a
+ratio through a different denominator is a number about the rebuild. After rebuilding
+`tools/vxbench-rs` — a new `vortex` pin, a new toolchain, a changed entry point — keep the previous
+build and carry the tables over:
+
+```
+dotnet run -c Release PROJ -- --ratio-check --recalibrate 3 --rebase-from <previous libvxbench.dylib>
+dotnet run -c Release PROJ -- --throughput [--take|--write] --recalibrate 3 --rebase-from <previous libvxbench.dylib>
+```
+
+Each pass is a pair of processes, one under each binary, and each reference moves by what the new
+binary moved its ratio. Our side is the same build under both, so an axis the table held over its
+ceiling, or stale under it, is still over or stale after the carry: a plain `--rebase` to the new
+measurement would have absorbed it. Paste the tables and the `CalibratedShim` line they print
+together, the three throughput tables before the fingerprint.
 
 **A red gate is not believed on the first run.** Measured run-to-run spread is +12 to +22 % on four
 of the nine axes the dataset then had, and two invocations in four were red with no byte changed.

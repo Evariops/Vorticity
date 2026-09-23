@@ -148,16 +148,16 @@ internal static partial class RustReader
     internal static partial long ScanChecksum(string path);
 
     /// <summary>
-    /// Scans <paramref name="path"/> canonically on the reference's worker pool with exactly
-    /// <paramref name="threads"/> workers.
+    /// Scans <paramref name="path"/> canonically on a multi-threaded Tokio runtime of exactly
+    /// <paramref name="threads"/> workers, each split decoded on its own task.
     /// </summary>
     /// <param name="path">The file.</param>
     /// <param name="threads">Worker threads; must be positive.</param>
     /// <returns>Rows, or a negative error code.</returns>
     /// <remarks>
-    /// The thread count is pinned on both sides: a ratio between an n-lane reader and
-    /// a reference free to use every core measures a threading model, not a decoder. At 1 this is
-    /// NOT <see cref="ScanCanonical"/> -- it still pays the pool hand-off, which is the point.
+    /// The thread count is pinned on both sides: a ratio between an n-lane reader and a reference
+    /// free to use every core measures a threading model, not a decoder. At 1 this is not
+    /// <see cref="ScanCanonical"/>: it still hands the work to a worker.
     /// </remarks>
     [LibraryImport(Library, EntryPoint = "vxbench_scan_canonical_threads", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long ScanCanonicalThreads(string path, long threads);
@@ -229,11 +229,9 @@ internal static partial class RustReader
     /// does not describe it: it dates the generator and the `vortex` pin, which say what the files
     /// are, not what they are measured against.
     ///
-    /// It is not a stable denominator. `tools/vxbench-rs` builds with `lto = true` and
-    /// `codegen-units = 1`, so adding a function no reader calls still rebuilds the crate and can
-    /// move the inlining inside one that readers do call. An additive change to `lib.rs` took the
-    /// reference's `dict_u64_codes` scan from 804 to 592 us with our own side unchanged, which is
-    /// a 29 % move in every ratio over that file and looks exactly like a regression.
+    /// It is not a stable denominator. `tools/vxbench-rs` is one codegen unit, so adding a function
+    /// no reader calls still rebuilds the crate and can move the inlining inside one that readers
+    /// do call, which reads exactly like a regression of ours.
     ///
     /// Hashing the artefact rather than its sources, because the artefact is what ran. A release
     /// build of unchanged sources is bit-identical on this toolchain, so this does not fire on a
@@ -243,14 +241,11 @@ internal static partial class RustReader
 
     private static string? _fingerprint;
 
-    private static string? ComputeFingerprint()
-    {
-        string? path = Locate();
-        if (path is null)
-        {
-            return null;
-        }
+    private static string? ComputeFingerprint() => Locate() is { } path ? FingerprintOf(path) : null;
 
+    /// <summary>The first twelve hex digits of the SHA-256 of the binary at <paramref name="path"/>, or null.</summary>
+    internal static string? FingerprintOf(string path)
+    {
         try
         {
             using FileStream file = System.IO.File.OpenRead(path);

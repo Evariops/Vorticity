@@ -93,6 +93,10 @@ dotnet run -c Release --project bench/Vorticity.Benchmarks -- --filter '*Compari
 `VORTICITY_VXBENCH` points the loader at a prebuilt library; otherwise the resolver walks up from
 the benchmark assembly to `tools/vxbench-rs/target/release/`.
 
+The in-process gates record the fingerprint of the build their references were set under, and refuse
+to gate under another. Keep the previous `libvxbench.dylib` when you rebuild, and carry the references
+over with `--rebase-from` (see `bench/README.md`).
+
 The comparison benchmarks **fail loudly** when the library is missing, naming this command. Skipping
 quietly would produce a run that reports no ratio and looks exactly like one that reported a good
 one.

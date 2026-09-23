@@ -387,35 +387,43 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Dictionary<string, Reference> References = new()
     {
-        ["full scan"] = new(0.307, 2, 0.007),   // 3 passes, spread 0.305-0.307; was 0.335, -8.3%
-        ["full scan, upstream lazy"] = new(0.419, 2, 0.012),   // 3 passes, spread 0.414-0.419; was 0.426, -1.7%
-        ["projected scan, 1 of 5 columns"] = new(0.366, 9, 0.013),   // 3 passes, spread 0.362-0.366; was 0.370, -1.0%
-        ["projected scan, upstream lazy"] = new(0.406, 9, 0.019),   // 3 passes, spread 0.399-0.406; was 0.409, -0.6%
-        ["open to first batch"] = new(0.076, 10, 0.032),   // 3 passes, spread 0.074-0.076; was 0.085, -10.1%
-        ["open, footer only"] = new(0.706, 29, 0.016),   // 3 passes, spread 0.695-0.706; was 0.776, -9.0%
-        ["read and write back"] = new(0.297, 1, 0.009),   // 3 passes, spread 0.294-0.297; was 0.322, -7.9%
-        ["filtered scan, 1% band"] = new(0.197, 10, 0.055),   // 3 passes, spread 0.186-0.197; was 0.204, -3.3%
-        ["filtered scan, half the rows"] = new(0.251, 5, 0.029),   // 3 passes, spread 0.244-0.251; was 0.254, -1.2%
-        ["scattered take, 64 of 64 splits"] = new(0.191, 3, 0.035),   // 3 passes, spread 0.185-0.191; was 0.202, -5.2%
-        ["rewritten zoned, reference's"] = new(0.307, 2, 0.004),   // 3 passes, spread 0.306-0.307; was 0.330, -6.9%
-        ["rewritten zoned, ours"] = new(1.070, 2, 0.006),   // 3 passes, spread 1.063-1.070; was 1.077, -0.7%
-        ["rewritten high card, reference's"] = new(0.850, 27, 0.009),   // 3 passes, spread 0.843-0.850; was 0.858, -0.9%
-        ["rewritten high card, ours"] = new(0.915, 22, 0.049),   // 3 passes, spread 0.871-0.915; HELD at 0.915: 3 passes peaked at 0.915, no loosening
-        ["key order, sorted column, 1% band"] = new(0.627, 11, 0.029),   // 3 passes, spread 0.608-0.627; was 0.658, -4.8%
-        ["key order, uncorrelated, 64 rows"] = new(1.077, 8, 0.091),   // 3 passes, spread 0.979-1.077; was 1.148, -6.2%
-        ["count, exact cover, 1% band"] = new(0.615, 6, 0.062),   // 3 passes, spread 0.577-0.615; was 0.633, -2.9%
-        ["filtered scan, string equality, fsst"] = new(0.923, 4, 0.031),   // 3 passes, spread 0.894-0.923; was 1.131, -18.4%
-        ["filtered scan, string prefix, fsst"] = new(1.264, 2, 0.040),   // 3 passes, spread 1.214-1.264; was 1.269, -0.4%
-        // Nine passes, not three: three read 0.024 and this axis swings sixteen times that. It is
-        // the shortest of the four string axes, and the only one whose dispersion needs more
-        // processes than the default to show itself at all.
-        ["filtered scan, string equality, dict"] = new(1.713, 7, 0.051),   // 3 passes, spread 1.625-1.713; was 2.084, -17.8%; and 2.473 before the dictionary answered the equality from its values
-        ["filtered scan, string prefix, dict"] = new(1.444, 6, 0.016),   // 3 passes, spread 1.442-1.465; HELD at 1.444: 3 passes peaked at 1.465, no loosening
-        ["filtered scan, band, runend"] = new(1.117, 11, 0.009),   // 3 passes, spread 1.106-1.117; was 1.134, -1.5%
-        ["filtered scan, band, bitpacked"] = new(1.113, 12, 0.014),   // 3 passes, spread 1.097-1.113; was 1.142, -2.6%
-        ["full scan, 1M table"] = new(0.057, 1, 0.017),   // 3 passes, spread 0.056-0.057; was 0.057, -0.1%
-        ["projected scan, 1 of 50 columns"] = new(0.095, 9, 0.068),   // 3 passes, spread 0.089-0.095; was 0.102, -6.6%
+        ["full scan"] = new(0.344, 2, 0.055),   // 3 passes, spread 0.318-0.337; carried from 0.307, +12.1% under the new binary (0.300 -> 0.337, k 2 -> 2)
+        ["full scan, upstream lazy"] = new(0.500, 2, 0.020),   // 3 passes, spread 0.462-0.472; carried from 0.419, +19.4% under the new binary (0.395 -> 0.472, k 2 -> 2)
+        ["projected scan, 1 of 5 columns"] = new(0.442, 9, 0.128),   // 3 passes, spread 0.386-0.443; carried from 0.366, +20.8% under the new binary (0.367 -> 0.443, k 9 -> 9)
+        ["projected scan, upstream lazy"] = new(0.484, 10, 0.131),   // 3 passes, spread 0.430-0.495; carried from 0.406, +19.2% under the new binary (0.415 -> 0.495, k 9 -> 10)
+        ["open to first batch"] = new(0.090, 10, 0.035),   // 3 passes, spread 0.084-0.087; carried from 0.076, +18.7% under the new binary (0.074 -> 0.087, k 10 -> 10)
+        ["open, footer only"] = new(0.724, 34, 0.015),   // 3 passes, spread 0.605-0.614; carried from 0.706, +2.6% under the new binary (0.599 -> 0.614, k 34 -> 34)
+        ["read and write back"] = new(0.321, 1, 0.009),   // 3 passes, spread 0.392-0.396; carried from 0.297, +8.0% under the new binary (0.367 -> 0.396, k 1 -> 1)
+        ["filtered scan, 1% band"] = new(0.258, 11, 0.025),   // 3 passes, spread 0.243-0.249; carried from 0.197, +30.9% under the new binary (0.190 -> 0.249, k 10 -> 11)
+        ["filtered scan, half the rows"] = new(0.294, 6, 0.017),   // 3 passes, spread 0.264-0.269; carried from 0.251, +16.9% under the new binary (0.230 -> 0.269, k 6 -> 6)
+        ["scattered take, 64 of 64 splits"] = new(0.228, 3, 0.009),   // 3 passes, spread 0.225-0.227; carried from 0.191, +19.3% under the new binary (0.190 -> 0.227, k 3 -> 3)
+        ["rewritten zoned, reference's"] = new(0.356, 2, 0.027),   // 3 passes, spread 0.330-0.339; carried from 0.307, +15.9% under the new binary (0.293 -> 0.339, k 2 -> 2)
+        ["rewritten zoned, ours"] = new(1.089, 2, 0.005),   // 3 passes, spread 0.948-0.952; carried from 1.070, +1.8% under the new binary (0.935 -> 0.952, k 2 -> 2)
+        ["rewritten high card, reference's"] = new(0.920, 28, 0.043),   // 3 passes, spread 0.851-0.889; carried from 0.850, +8.3% under the new binary (0.821 -> 0.889, k 27 -> 28)
+        ["rewritten high card, ours"] = new(1.001, 21, 0.010),   // 3 passes, spread 0.952-0.962; carried from 0.915, +9.4% under the new binary (0.880 -> 0.962, k 21 -> 21)
+        ["key order, sorted column, 1% band"] = new(0.754, 12, 0.019),   // 3 passes, spread 0.737-0.751; carried from 0.627, +20.2% under the new binary (0.625 -> 0.751, k 12 -> 12)
+        ["key order, uncorrelated, 64 rows"] = new(1.262, 8, 0.065),   // 3 passes, spread 1.145-1.225; carried from 1.077, +17.1% under the new binary (1.046 -> 1.225, k 7 -> 8)
+        ["count, exact cover, 1% band"] = new(0.687, 10, 0.177),   // 3 passes, spread 0.547-0.665; carried from 0.615, +11.7% under the new binary (0.595 -> 0.665, k 7 -> 10)
+        ["filtered scan, string equality, fsst"] = new(0.898, 4, 0.139),   // 3 passes, spread 0.809-0.940; carried from 0.923, -2.7% under the new binary (0.966 -> 0.940, k 4 -> 4)
+        ["filtered scan, string prefix, fsst"] = new(1.237, 2, 0.038),   // 3 passes, spread 1.165-1.212; carried from 1.264, -2.1% under the new binary (1.239 -> 1.212, k 2 -> 2)
+        ["filtered scan, string equality, dict"] = new(1.933, 7, 0.151),   // 3 passes, spread 1.638-1.930; carried from 1.713, +12.8% under the new binary (1.710 -> 1.930, k 9 -> 7)
+        ["filtered scan, string prefix, dict"] = new(1.573, 8, 0.023),   // 3 passes, spread 1.408-1.440; carried from 1.444, +9.0% under the new binary (1.322 -> 1.440, k 7 -> 8)
+        ["filtered scan, band, runend"] = new(1.301, 13, 0.039),   // 3 passes, spread 0.993-1.032; carried from 1.117, +16.5% under the new binary (0.886 -> 1.032, k 13 -> 13)
+        ["filtered scan, band, bitpacked"] = new(1.257, 12, 0.028),   // 3 passes, spread 1.087-1.117; carried from 1.113, +12.9% under the new binary (0.989 -> 1.117, k 11 -> 12)
+        ["full scan, 1M table"] = new(0.060, 1, 0.012),   // 3 passes, spread 0.060-0.061; carried from 0.057, +5.0% under the new binary (0.058 -> 0.061, k 1 -> 1)
+        ["projected scan, 1 of 50 columns"] = new(0.088, 9, 0.170),   // 3 passes, spread 0.067-0.081; carried from 0.095, -6.9% under the new binary (0.087 -> 0.081, k 10 -> 9)
     };
+
+    /// <summary>
+    /// The reference binary <see cref="References"/> was calibrated against, or null when none was
+    /// recorded. <see cref="RustReader.Fingerprint"/> names the one a run loaded.
+    /// </summary>
+    /// <remarks>
+    /// A ratio measured through another binary is a number about the rebuild, so the check refuses
+    /// to gate on one; and a recalibration under another binary may raise a reference with
+    /// <c>--rebase</c>, because the denominator changed, as a new k changes it.
+    /// </remarks>
+    private static readonly string? CalibratedShim = "5235c667a60b";
 
     /// <summary>
     /// How far under its reference a ratio may sit before it is called stale.
@@ -482,17 +490,24 @@ internal static class RatioCheck
     /// </param>
     /// <returns>0 when every axis is inside its ceiling, 1 when one is not, 2 with no harness.</returns>
     /// <param name="rebase">
-    /// Let <c>--recalibrate</c> raise a reference. THE ONE LEGITIMATE USE is an estimator change --
-    /// when the harness stops measuring what the old numbers describe, holding them is not a ratchet,
-    /// it is a comparison between two different measurements. It is a flag rather than a default so
-    /// that a raise is always a deliberate act with a commit message behind it.
+    /// Let <c>--recalibrate</c> raise a reference. The one legitimate use is an estimator change, a
+    /// new k or a new reference binary: when the harness stops measuring what the old numbers
+    /// describe, holding them is not a ratchet, it is a comparison between two different
+    /// measurements. It is a flag rather than a default so that a raise is always a deliberate act
+    /// with a commit message behind it.
     /// </param>
     /// <param name="onePass">
     /// Set by <see cref="PassFlag"/>: measure once and print machine-readable lines for the parent
     /// process that spawned this one. Not a user-facing mode.
     /// </param>
+    /// <param name="rebaseFrom">
+    /// With <paramref name="recalibrate"/>, the reference binary the table was set under: every pass
+    /// runs under it and under the running one, and each reference moves by what the binary moved
+    /// its ratio, our code being the same in both. A regression of ours that the table holds stays
+    /// in it, which a rebase to the running measurement would absorb.
+    /// </param>
     internal static async Task<int> RunAsync(
-        string[] only, int recalibrate, bool rebase, bool abSame, bool onePass)
+        string[] only, int recalibrate, bool rebase, bool abSame, bool onePass, string? rebaseFrom = null)
     {
         if (!RustReader.Available)
         {
@@ -576,6 +591,8 @@ internal static class RatioCheck
 
             return onePass
                 ? await PassOnceAsync(path, axes).ConfigureAwait(false)
+                : recalibrate > 0 && rebaseFrom is not null
+                    ? await CarryAsync(axes, recalibrate, rebaseFrom).ConfigureAwait(false)
                 : recalibrate > 0
                     ? await RecalibrateAsync(path, axes, recalibrate, rebase, abSame).ConfigureAwait(false)
                     : await CheckAsync(path, axes).ConfigureAwait(false);
@@ -601,11 +618,25 @@ internal static class RatioCheck
             "  OVER needs the whole interval above the ceiling; STALE needs it all under " +
             $"{StaleBelow.ToString("F2", CultureInfo.InvariantCulture)} x reference. " +
             "mde = smallest change this axis can currently see.");
-        // Every ratio below has this binary as its denominator, and it is not pinned: the crate
-        // builds with whole-program optimization, so a change that adds a function no axis calls
-        // can still move one that they do. Naming it is what makes such a move attributable after
-        // the fact instead of only by rebuilding the old one and measuring again.
-        Console.Out.WriteLine($"  reference binary: {RustReader.Fingerprint ?? "unknown"}");
+        // Every ratio below has this binary as its denominator, and a rebuild can move it: the crate
+        // is one codegen unit, so a function no axis calls can still change the inlining of one
+        // they do.
+        string running = RustReader.Fingerprint ?? "unknown";
+        Console.Out.WriteLine(CalibratedShim is null
+            ? $"  reference binary: {running}; the references record none"
+            : string.Equals(running, CalibratedShim, StringComparison.Ordinal)
+                ? $"  reference binary: {running}, the one the references were calibrated against"
+                : $"  reference binary: {running}, but the references were calibrated against {CalibratedShim}");
+        if (CalibratedShim is not null && !string.Equals(running, CalibratedShim, StringComparison.Ordinal))
+        {
+            Console.Error.WriteLine(
+                $"REFUSED: the references were calibrated against reference binary {CalibratedShim} and " +
+                $"this process loaded {running}. Recalibrate under the one in the tree " +
+                "(`--ratio-check --recalibrate 3 --rebase`) and record its fingerprint, or restore the " +
+                "binary the references name.");
+            return 2;
+        }
+
         Console.Out.WriteLine(
             "  axis                             ours      rust     ratio  [   95% interval]  reference  ceiling   n  k     mde");
 
@@ -735,8 +766,8 @@ internal static class RatioCheck
         if (rebase)
         {
             Console.Out.WriteLine(
-                "  --rebase: references may RISE. Only for an estimator change, or with --ab-same " +
-                "for a measurement that moved under code that did not.");
+                "  --rebase: references may RISE. Only for an estimator change, a new k or a new " +
+                "reference binary, or with --ab-same for a measurement that moved under code that did not.");
         }
 
         if (abSame)
@@ -763,6 +794,9 @@ internal static class RatioCheck
             }
         }
 
+        // A reference binary other than the one the table names is a new denominator under every
+        // axis, which a rebase may follow as it follows a new k.
+        bool newBinary = !string.Equals(RustReader.Fingerprint, CalibratedShim, StringComparison.Ordinal);
         int held = 0;
         foreach (Axis axis in axes)
         {
@@ -786,7 +820,7 @@ internal static class RatioCheck
             // may absorb. The test was `k > 1` until k came from the faster side, which made k > 1
             // the ordinary case on nearly every axis, at which point it stopped discriminating and
             // started rubber-stamping.
-            bool changedEstimator = rebase && known && repeats != entry.Repeats;
+            bool changedEstimator = rebase && known && (repeats != entry.Repeats || newBinary);
 
             // THE SECOND WAY UP, and the only objective one. A measurement can move while the code
             // stands still -- a heavier neighbour in the same process, a machine that is not the one
@@ -804,7 +838,7 @@ internal static class RatioCheck
                 : changedEstimator && known && max >= current
                     ? string.Create(
                         CultureInfo.InvariantCulture,
-                        $"REBASED UP from {current:F3} (k {entry.Repeats}->{repeats}): " +
+                        $"REBASED UP from {current:F3} ({(repeats != entry.Repeats ? $"k {entry.Repeats}->{repeats}" : "a new reference binary")}): " +
                         $"{(max / current) - 1:+0.0%}")
                 : attested
                     ? string.Create(
@@ -827,6 +861,10 @@ internal static class RatioCheck
                 $"// {passes} passes, spread {min:F3}-{max:F3}; {movement}"));
         }
 
+        // The table and the binary it was measured through belong to the same paste.
+        Console.Out.WriteLine(
+            $"\nPaste alongside it, into RatioCheck.CalibratedShim:\n" +
+            $"    private static readonly string? CalibratedShim = \"{RustReader.Fingerprint ?? "unknown"}\";");
         if (held > 0)
         {
             Console.Out.WriteLine(
@@ -871,14 +909,85 @@ internal static class RatioCheck
         return (await MeasureAsync(file, axis).ConfigureAwait(false), 0);
     }
 
+    /// <summary>
+    /// Carries every reference over from the binary at <paramref name="from"/> to the running one,
+    /// and prints the table to paste.
+    /// </summary>
+    /// <remarks>
+    /// Each pass is a pair of processes, one under each binary, the first of them alternating, and
+    /// each reference is multiplied by the running binary's peak ratio over the old one's. Both run
+    /// the same build of ours, so the factor is the binary's alone, and whatever the table held
+    /// against our code, an axis over its ceiling or one stale under it, it still holds.
+    /// </remarks>
+    private static async Task<int> CarryAsync(Axis[] axes, int passes, string from)
+    {
+        if (RustReader.FingerprintOf(from) is not { } old)
+        {
+            Console.Error.WriteLine($"--rebase-from: no reference binary at {from}.");
+            return 2;
+        }
+
+        Console.Out.WriteLine(
+            $"CARRY: {passes} pairs of processes over {axes.Length} axis/axes, under {old} and under the " +
+            $"running {RustReader.Fingerprint ?? "unknown"}. Nothing is gated; paste the table below " +
+            "into RatioCheck.References.");
+        Dictionary<string, List<double>> before = [];
+        Dictionary<string, List<double>> after = [];
+        Dictionary<string, int> groupedBefore = [];
+        Dictionary<string, int> grouped = [];
+        for (int pass = 1; pass <= passes; pass++)
+        {
+            bool oldFirst = pass % 2 == 1;
+            foreach (bool underOld in (bool[])[oldFirst, !oldFirst])
+            {
+                if (await PassAsync(
+                        axes, pass, passes, underOld ? before : after, underOld ? groupedBefore : grouped,
+                        underOld ? from : null).ConfigureAwait(false) is int bad)
+                {
+                    return bad;
+                }
+            }
+        }
+
+        foreach (Axis axis in axes)
+        {
+            List<double> seen = after[axis.Name];
+            double max = seen.Max();
+            double min = seen.Min();
+            double was = before[axis.Name].Max();
+            int repeats = grouped.GetValueOrDefault(axis.Name, 1);
+            bool known = References.TryGetValue(axis.Name, out Reference entry);
+            double factor = was > 0 ? max / was : 1;
+            double value = known ? entry.Ratio * factor : max;
+            double spread = max > 0 ? (max - min) / max : 0;
+            string movement = known
+                ? string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"carried from {entry.Ratio:F3}, {factor - 1:+0.0%;-0.0%;0.0%} under the new binary " +
+                    $"({was:F3} -> {max:F3}, k {groupedBefore.GetValueOrDefault(axis.Name, 1)} -> {repeats})")
+                : "new";
+            Console.Out.WriteLine(string.Create(
+                CultureInfo.InvariantCulture,
+                $"        [\"{axis.Name}\"] = new({value:F3}, {repeats}, {spread:F3}),   " +
+                $"// {passes} passes, spread {min:F3}-{max:F3}; {movement}"));
+        }
+
+        Console.Out.WriteLine(
+            $"\nPaste alongside it, into RatioCheck.CalibratedShim:\n" +
+            $"    private static readonly string? CalibratedShim = \"{RustReader.Fingerprint ?? "unknown"}\";");
+        return 0;
+    }
+
     /// <summary>Runs one recalibration pass in a CHILD PROCESS and folds its result in.</summary>
+    /// <param name="binary">The reference binary the pass loads, or null for the running one.</param>
     /// <returns>Null on success, or an exit code.</returns>
     private static async Task<int?> PassAsync(
         Axis[] axes,
         int pass,
         int passes,
         Dictionary<string, List<double>> ratios,
-        Dictionary<string, int> grouped)
+        Dictionary<string, int> grouped,
+        string? binary = null)
     {
         string self = Environment.ProcessPath
             ?? throw new InvalidOperationException("No process path; cannot re-run for a pass.");
@@ -887,6 +996,11 @@ internal static class RatioCheck
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
+        if (binary is not null)
+        {
+            start.Environment["VORTICITY_VXBENCH"] = binary;
+        }
+
         start.ArgumentList.Add("--ratio-check");
         foreach (Axis axis in axes)
         {
