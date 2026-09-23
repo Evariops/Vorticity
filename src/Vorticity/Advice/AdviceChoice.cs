@@ -102,45 +102,34 @@ internal static class AdviceChoice
     }
 
     /// <summary>
-    /// The chunk target for the file: the one that makes the columns' best candidates least costly
-    /// together, a column with nothing written at a target counting at its best at the writer's own
-    /// size, and a larger one only when it saves <see cref="Margin"/> or more.
+    /// The candidate to take for a column: the one to take at the writer's own chunk size, unless
+    /// the one to take at a larger target of the column's own costs <see cref="Margin"/> less, the
+    /// least costly of those when several do.
     /// </summary>
-    internal static int ChooseTarget(IReadOnlyList<IReadOnlyList<MeasuredCandidate>> columns, EncodingGoal goal, long rows)
+    /// <returns>Its index, or -1 when nothing was measured.</returns>
+    internal static int Recommend(IReadOnlyList<MeasuredCandidate> candidates, EncodingGoal goal, long rows)
     {
-        double own = 0;
-        List<int> targets = [];
-        foreach (IReadOnlyList<MeasuredCandidate> column in columns)
+        int chosen = Recommend(candidates, 0, goal, rows);
+        double own = chosen < 0 ? double.PositiveInfinity : Cost(candidates[chosen], goal, rows);
+        double least = own;
+        for (int i = 0; i < candidates.Count; i++)
         {
-            own += BestCost(column, 0, goal, rows);
-            foreach (MeasuredCandidate candidate in column)
+            int target = candidates[i].ChunkTargetBytes;
+            if (target == 0)
             {
-                if (candidate.ChunkTargetBytes != 0 && !targets.Contains(candidate.ChunkTargetBytes))
-                {
-                    targets.Add(candidate.ChunkTargetBytes);
-                }
+                continue;
+            }
+
+            int atTarget = Recommend(candidates, target, goal, rows);
+            double cost = Cost(candidates[atTarget], goal, rows);
+            if (cost <= own * (1 - Margin) && cost < least)
+            {
+                chosen = atTarget;
+                least = cost;
             }
         }
 
-        int chosen = 0;
-        double chosenCost = own;
-        foreach (int target in targets)
-        {
-            double cost = 0;
-            foreach (IReadOnlyList<MeasuredCandidate> column in columns)
-            {
-                double atTarget = BestCost(column, target, goal, rows);
-                cost += double.IsPositiveInfinity(atTarget) ? BestCost(column, 0, goal, rows) : atTarget;
-            }
-
-            if (cost < chosenCost)
-            {
-                chosen = target;
-                chosenCost = cost;
-            }
-        }
-
-        return chosenCost <= own * (1 - Margin) ? chosen : 0;
+        return chosen;
     }
 
     /// <summary>
@@ -241,20 +230,6 @@ internal static class AdviceChoice
         double costA = Cost(a, goal, rows);
         double costB = Cost(b, goal, rows);
         return costA < costB || (costA == costB && a.ScanNanosecondsPerValue < b.ScanNanosecondsPerValue);
-    }
-
-    private static double BestCost(IReadOnlyList<MeasuredCandidate> column, int target, EncodingGoal goal, long rows)
-    {
-        double best = double.PositiveInfinity;
-        foreach (MeasuredCandidate candidate in column)
-        {
-            if (candidate.ChunkTargetBytes == target)
-            {
-                best = Math.Min(best, Cost(candidate, goal, rows));
-            }
-        }
-
-        return best;
     }
 
     private static string Describe(in MeasuredCandidate candidate)

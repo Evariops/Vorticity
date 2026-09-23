@@ -85,16 +85,15 @@ public sealed class AdviceChoiceTests
     }
 
     [Fact]
-    public void ALargerChunkIsTakenOnlyWhenTheColumnsSaveTheMarginTogether()
+    public void ALargerChunkIsTakenOnlyWhenItSavesTheColumnTheMargin()
     {
-        // The second column was not tried at 16 MiB, and counts there at its best at its own size.
-        List<MeasuredCandidate> other = [Candidate(EncodingHint.Auto, bytes: 10, scan: 1)];
-        List<MeasuredCandidate> little = [Candidate(EncodingHint.Auto, bytes: 10, scan: 1), Candidate(EncodingHint.Auto, bytes: 9.2, scan: 1, target: 16 << 20)];
-        List<MeasuredCandidate> enough = [Candidate(EncodingHint.Auto, bytes: 10, scan: 1), Candidate(EncodingHint.Auto, bytes: 8.9, scan: 1, target: 16 << 20)];
+        // 9.6 against 10 is 4 %; 9.4 is 6 %. Each column weighs its own targets: the writer gives a
+        // column a target alone, so another column's is no concern of this one's.
+        List<MeasuredCandidate> little = [Candidate(EncodingHint.Auto, bytes: 10, scan: 1), Candidate(EncodingHint.Auto, bytes: 9.6, scan: 1, target: 16 << 20)];
+        List<MeasuredCandidate> enough = [Candidate(EncodingHint.Auto, bytes: 10, scan: 1), Candidate(EncodingHint.Auto, bytes: 9.4, scan: 1, target: 16 << 20)];
 
-        // 19.2 against 20 is 4 %; 18.9 is 5.5 %.
-        Assert.Equal(0, AdviceChoice.ChooseTarget([little, other], EncodingGoal.Smallest, Rows));
-        Assert.Equal(16 << 20, AdviceChoice.ChooseTarget([enough, other], EncodingGoal.Smallest, Rows));
+        Assert.Equal(0, AdviceChoice.Recommend(little, EncodingGoal.Smallest, Rows));
+        Assert.Equal(1, AdviceChoice.Recommend(enough, EncodingGoal.Smallest, Rows));
     }
 
     [Fact]
@@ -107,7 +106,7 @@ public sealed class AdviceChoiceTests
             Candidate(EncodingHint.Dictionary, bytes: 7, scan: 1, target: 16 << 20),
         ];
 
-        Assert.Equal(16 << 20, AdviceChoice.ChooseTarget([column], EncodingGoal.Smallest, Rows));
+        Assert.Equal(2, AdviceChoice.Recommend(column, EncodingGoal.Smallest, Rows));
     }
 
     [Fact]
@@ -158,26 +157,30 @@ public sealed class AdviceChoiceTests
     }
 
     [Fact]
-    public void TheOptionsCarryTheHintsTheChunkTargetAndTheProfile()
+    public void TheOptionsCarryTheHintsTheColumnsChunkTargetsAndTheProfile()
     {
         VortexWriteOptions baseline = new VortexWriteOptions
         {
             BlockRows = 4_096,
             Hints = ImmutableDictionary<string, EncodingHint>.Empty.Add("kept", EncodingHint.Zstd),
             ChunkTargetBytes = 2 << 20,
+            ColumnChunkTargetBytes = ImmutableDictionary<string, int>.Empty.Add("kept", 4 << 20),
         };
 
         VortexWriteOptions scans = Advice(EncodingGoal.Default, 16 << 20).ToWriteOptions(baseline);
         VortexWriteOptions size = Advice(EncodingGoal.Smallest, 0).ToWriteOptions(baseline);
 
         Assert.Equal(CompressionProfile.Auto, scans.Compression);
-        Assert.Equal(16 << 20, scans.ChunkTargetBytes);
+        Assert.Equal(16 << 20, scans.ColumnChunkTargetBytes["text"]);
+        Assert.False(scans.ColumnChunkTargetBytes.ContainsKey("number"));
+        Assert.Equal(4 << 20, scans.ColumnChunkTargetBytes["kept"]);
+        Assert.Equal(2 << 20, scans.ChunkTargetBytes);
         Assert.Equal(4_096, scans.BlockRows);
         Assert.Equal(EncodingHint.Fsst, scans.Hints["text"]);
         Assert.Equal(EncodingHint.Zstd, scans.Hints["kept"]);
         Assert.False(scans.Hints.ContainsKey("number"));
         Assert.Equal(CompressionProfile.Smallest, size.Compression);
-        Assert.Equal(2 << 20, size.ChunkTargetBytes);
+        Assert.Equal(baseline.ColumnChunkTargetBytes, size.ColumnChunkTargetBytes);
     }
 
     [Fact]
@@ -231,16 +234,16 @@ public sealed class AdviceChoiceTests
         EncodingHint hint, double bytes, double scan, int target = 0, double lookup = 0, double chunkBytes = 0) =>
         new MeasuredCandidate(hint, target, ["Canonical x1"], bytes, scan, lookup, chunkBytes);
 
-    private static EncodingAdvice Advice(EncodingGoal goal, int chunkTarget)
+    /// <summary>Text advised as FSST at <paramref name="textTarget"/>, a number at the writer's own choice and size.</summary>
+    private static EncodingAdvice Advice(EncodingGoal goal, int textTarget)
     {
         ColumnProfile profile = new ColumnProfile(100, 0, 10, 10, 1, false, 8);
-        EncodingCandidate fsst = new EncodingCandidate(EncodingHint.Fsst, chunkTarget, ["Fsst x1"], 9, 2, 1, 11, null);
-        EncodingCandidate auto = new EncodingCandidate(EncodingHint.Auto, chunkTarget, ["BitPacked x1"], 1, 1, 1, 2, null);
+        EncodingCandidate fsst = new EncodingCandidate(EncodingHint.Fsst, textTarget, ["Fsst x1"], 9, 2, 1, 11, null);
+        EncodingCandidate auto = new EncodingCandidate(EncodingHint.Auto, 0, ["BitPacked x1"], 1, 1, 1, 2, null);
         return new EncodingAdvice(
             goal,
             100,
             100,
-            chunkTarget,
             [
                 new ColumnEncodingAdvice("text", profile, [fsst], fsst, "text"),
                 new ColumnEncodingAdvice("number", profile, [auto], auto, "number"),

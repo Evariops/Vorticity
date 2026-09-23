@@ -116,7 +116,7 @@ internal static class EncodingTradeoffs
                     ColumnEncodingAdvice advised = advice.Columns[0];
                     EncodingCandidate chosen = advised.Recommended;
                     text.Append(CultureInfo.InvariantCulture,
-                        $"| {name} | {chosen.Hint} | {string.Join(", ", chosen.WrittenAs)} | {advice.ChunkTargetBytes >> 20} MiB | {chosen.BytesPerValue:F2} | {chosen.ScanNanosecondsPerValue:F2} | {chosen.LookupMicroseconds:F1} | {seconds:F1} | {advised.Reason} |\n");
+                        $"| {name} | {chosen.Hint} | {string.Join(", ", chosen.WrittenAs)} | {chosen.ChunkTargetBytes >> 20} MiB | {chosen.BytesPerValue:F2} | {chosen.ScanNanosecondsPerValue:F2} | {chosen.LookupMicroseconds:F1} | {seconds:F1} | {advised.Reason} |\n");
                 }
             }
 

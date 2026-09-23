@@ -183,29 +183,18 @@ internal static class EncodingAdvisor
             columns.Add((name, NameOf(kind), profile, measured));
         }
 
-        List<IReadOnlyList<MeasuredCandidate>> all = [];
-        foreach ((_, _, _, List<MeasuredCandidate> measured) in columns)
-        {
-            all.Add(measured);
-        }
-
-        // The costs are per row of a scan of the data, which is what the goal's lookups are counted against.
-        int chunkTarget = AdviceChoice.ChooseTarget(all, goal, rows);
+        // The costs are per row of a scan of the data, which is what the goal's lookups are counted
+        // against. Each column takes its own chunk target, which the writer gives it alone.
         ImmutableArray<ColumnEncodingAdvice>.Builder advice = ImmutableArray.CreateBuilder<ColumnEncodingAdvice>(columns.Count);
         foreach ((string name, string kind, ColumnProfile profile, List<MeasuredCandidate> measured) in columns)
         {
-            int recommended = AdviceChoice.Recommend(measured, chunkTarget, goal, rows);
-            if (recommended < 0)
-            {
-                recommended = AdviceChoice.Recommend(measured, 0, goal, rows);
-            }
-
+            int recommended = AdviceChoice.Recommend(measured, goal, rows);
             ImmutableArray<EncodingCandidate> ranked = AdviceChoice.Rank(measured, recommended, goal, rows);
             advice.Add(new ColumnEncodingAdvice(
                 name, profile, ranked, ranked[0], AdviceChoice.Reason(kind, profile, measured, recommended, goal)));
         }
 
-        return new EncodingAdvice(goal, rows, sampled, chunkTarget, advice.MoveToImmutable());
+        return new EncodingAdvice(goal, rows, sampled, advice.MoveToImmutable());
     }
 
     /// <summary>

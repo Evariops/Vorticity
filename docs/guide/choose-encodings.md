@@ -17,9 +17,12 @@ VortexWriteOptions lookedUp = new()
     Hints = ImmutableDictionary<string, EncodingHint>.Empty.Add("Message", EncodingHint.Fsst),
 };
 
-// A column whose values repeat across the file more than within a chunk: larger chunks let a
-// dictionary pay for its entries.
-VortexWriteOptions repeating = new() { ChunkTargetBytes = 16 << 20 };
+// A column whose values repeat across the file more than within a chunk: larger chunks of its
+// own let a dictionary pay for its entries, and the other columns keep theirs.
+VortexWriteOptions repeating = new()
+{
+    ColumnChunkTargetBytes = ImmutableDictionary<string, int>.Empty.Add("CustomerId", 16 << 20),
+};
 ```
 
 ## How the figures were made
@@ -113,8 +116,9 @@ as the text holds, and is the largest file every time.
 * **How a column is read.** A column read by row, through a take, a key or a join, wants neither
   zstd nor a large dictionary: `Fsst` for its text, and chunks of the default size.
 * **How often values repeat, against the chunk.** A column whose values come back across the file
-  more often than within a chunk takes a dictionary only with larger chunks. `ChunkTargetBytes` sets
-  them for the whole file, which a selective read then pays for in larger reads
+  more often than within a chunk takes a dictionary only with larger chunks. `ColumnChunkTargetBytes`
+  sets them for that column alone, and the others keep theirs, which is what a selective read of
+  them fetches; `ChunkTargetBytes` sets them for the whole file
   ([blocks-and-chunks.md](blocks-and-chunks.md)).
 * **What a hint cannot do.** A hint is tried first and falls back when it does not apply: a
   `Dictionary` hint on the repeating floats still gave zstd, because a chunk held too few repeats
@@ -155,11 +159,13 @@ the rows it samples. Per column of numbers, booleans, text or binary, the advice
 * **ranks** them by the time a scan of the data would take: the decode, the bytes at
   `StorageBytesPerSecond`, and for each lookup its decode and the chunk it reads. `Objective.Size`
   ranks by bytes alone, under `Smallest`. The writer's own choice stands unless another is 5 %
-  cheaper, and a larger chunk is taken only when it saves 5 % over all the columns together.
+  cheaper, and a larger chunk is taken only when it saves the column 5 %: the writer gives it to
+  that column alone.
 
 `Reason` says why in one sentence with the numbers. Each candidate carries its bytes, its scan and
 lookup times, its cost, and the throughput at which it and the recommended one cross.
-`ToWriteOptions` returns the hints, the chunk target and the profile, over a baseline of yours.
+`ToWriteOptions` returns the hints, each column's chunk target and the profile, over a baseline of
+yours.
 
 On the twenty shapes above, the advice departs from `Auto` here and nowhere else:
 

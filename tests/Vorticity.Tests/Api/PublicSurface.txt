@@ -516,7 +516,7 @@ Vorticity:     property Column<T> Values { get; }
 Vorticity:     property ReadOnlySpan<uint> Codes { get; }
 Vorticity:     property int Cardinality { get; }
 Vorticity: sealed class Vorticity.EncodingAdvice : IEquatable<EncodingAdvice>
-Vorticity:     ctor EncodingAdvice(EncodingGoal, long, long, int, ImmutableArray<ColumnEncodingAdvice>)
+Vorticity:     ctor EncodingAdvice(EncodingGoal, long, long, ImmutableArray<ColumnEncodingAdvice>)
 Vorticity:     method EncodingAdvice <Clone>$()
 Vorticity:     method VortexWriteOptions ToWriteOptions(VortexWriteOptions = default)
 Vorticity:     method bool Equals(EncodingAdvice)
@@ -525,10 +525,9 @@ Vorticity:     method bool op_Equality(EncodingAdvice, EncodingAdvice)
 Vorticity:     method bool op_Inequality(EncodingAdvice, EncodingAdvice)
 Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
-Vorticity:     method void Deconstruct(out EncodingGoal, out long, out long, out int, out ImmutableArray<ColumnEncodingAdvice>)
+Vorticity:     method void Deconstruct(out EncodingGoal, out long, out long, out ImmutableArray<ColumnEncodingAdvice>)
 Vorticity:     property EncodingGoal Goal { get; init; }
 Vorticity:     property ImmutableArray<ColumnEncodingAdvice> Columns { get; init; }
-Vorticity:     property int ChunkTargetBytes { get; init; }
 Vorticity:     property long Rows { get; init; }
 Vorticity:     property long SampledRows { get; init; }
 Vorticity: sealed class Vorticity.EncodingCandidate : IEquatable<EncodingCandidate>

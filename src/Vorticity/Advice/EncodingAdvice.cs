@@ -59,16 +59,16 @@ public sealed record ColumnEncodingAdvice(
 /// <param name="Goal">The goal the candidates were ranked by.</param>
 /// <param name="Rows">The rows of the data advised on.</param>
 /// <param name="SampledRows">The rows each column was profiled on, and its candidates measured on unless it was tried at larger chunks.</param>
-/// <param name="ChunkTargetBytes">The chunk target to write with; 0 for the writer's own.</param>
 /// <param name="Columns">The advice for each column the advice could measure, in the schema's order.</param>
 public sealed record EncodingAdvice(
-    EncodingGoal Goal, long Rows, long SampledRows, int ChunkTargetBytes, ImmutableArray<ColumnEncodingAdvice> Columns)
+    EncodingGoal Goal, long Rows, long SampledRows, ImmutableArray<ColumnEncodingAdvice> Columns)
 {
     /// <summary>
     /// <paramref name="baseline"/> with the advice taken: the profile the candidates were written
     /// under, <see cref="CompressionProfile.Smallest"/> for <see cref="EncodingObjective.Size"/> and
     /// <see cref="CompressionProfile.Auto"/> otherwise; a hint for each column whose recommendation
-    /// is not the writer's own choice; and the chunk target when it is not the writer's.
+    /// is not the writer's own choice; and a chunk target of its own for each column whose
+    /// recommendation was written at one.
     /// </summary>
     /// <param name="baseline">The options to start from; null for the defaults.</param>
     /// <returns>The options.</returns>
@@ -76,11 +76,17 @@ public sealed record EncodingAdvice(
     {
         VortexWriteOptions options = baseline ?? VortexWriteOptions.Default;
         ImmutableDictionary<string, EncodingHint> hints = options.Hints;
+        ImmutableDictionary<string, int> targets = options.ColumnChunkTargetBytes;
         foreach (ColumnEncodingAdvice column in Columns)
         {
             if (column.Recommended.Hint != EncodingHint.Auto)
             {
                 hints = hints.SetItem(column.Path, column.Recommended.Hint);
+            }
+
+            if (column.Recommended.ChunkTargetBytes != 0)
+            {
+                targets = targets.SetItem(column.Path, column.Recommended.ChunkTargetBytes);
             }
         }
 
@@ -88,7 +94,7 @@ public sealed record EncodingAdvice(
         {
             Compression = AdviceChoice.ProfileFor(Goal.Objective),
             Hints = hints,
-            ChunkTargetBytes = ChunkTargetBytes != 0 ? ChunkTargetBytes : options.ChunkTargetBytes,
+            ColumnChunkTargetBytes = targets,
         };
     }
 }
