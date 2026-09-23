@@ -422,7 +422,7 @@ internal static class Program
 
           (nothing)                every class, fast profile, ~2 min 40
           <word> [<word>…]         bare words become a filter: `fsst` is `--filter *fsst*`
-          --ratio-check [axis…]    24 axes, ours over the reference, one clock, ~55 s
+          --ratio-check [axis…]    25 axes, ours over the reference, one clock, ~55 s
                                      NEVER under DOTNET_TieredCompilation=0: the pin costs our
                                      side dynamic PGO and the native reference nothing, which
                                      turns nine green axes red. ab.sh pins both its sides and
@@ -458,7 +458,7 @@ internal static class Program
                                      the vxbench binary rather than the cdylib, because those
                                      figures belong to a process. Build the runner first:
                                      dotnet publish -c Release bench/Vorticity.Benchmarks.Runner
-                                     ~6 min
+                                     ~40 s
                                      --runs N          runs per scenario, default 5, one more
                                                        discarded before them
                                      --markdown        the table as the guide's page
