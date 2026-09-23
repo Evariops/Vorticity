@@ -29,8 +29,8 @@ namespace Vorticity.Arrays;
 /// </remarks>
 internal sealed class ScanContext : IDisposable
 {
-    private readonly VortexFile? _file;
-    private readonly ArrayEncodingId[] _arrayEncodings;
+    private VortexFile? _file;
+    private ArrayEncodingId[] _arrayEncodings;
     private readonly string[] _arrayEncodingIds;
     private bool _disposed;
 
@@ -182,7 +182,7 @@ internal sealed class ScanContext : IDisposable
     public VortexFile File => _file ?? ThrowDetached();
 
     /// <summary>Read-time policy for this scan.</summary>
-    public VortexReadOptions Options { get; }
+    public VortexReadOptions Options { get; private set; }
 
     /// <summary>
     /// The arena every DType derived during decoding is built in: the validity child's
@@ -196,7 +196,7 @@ internal sealed class ScanContext : IDisposable
     /// DType built here compares equal to the schema's. It is not cleared per batch: the arena
     /// deduplicates, and the set of derivable dtypes is bounded by the schema's shape.
     /// </remarks>
-    public DTypeArena Types { get; }
+    public DTypeArena Types { get; private set; }
 
     /// <summary>
     /// The batch's scalar store. Cleared by <see cref="ResetBatch"/>, so a
@@ -1152,6 +1152,75 @@ internal sealed class ScanContext : IDisposable
         _batchCanonical.Reset();
         Scalars.Clear();
         Decode.ResetBatch();
+    }
+
+    /// <summary>
+    /// Readies a context a scan gave back for a scan of <paramref name="file"/>: the file's
+    /// encoding table and read options, and an arena of its own for the dtypes the scan derives.
+    /// </summary>
+    /// <remarks>
+    /// The dtype arena is the one thing not kept. A batch its caller owns may hold dtypes the last
+    /// scan derived, which a cleared arena would make throw; a new one leaves them theirs. The node
+    /// and canonical arenas, the scalars, the segment set and the zstd decoder were reset when the
+    /// context came back, and keep the capacity they grew to.
+    /// </remarks>
+    /// <param name="file">The file the next scan reads.</param>
+    internal void Rebind(VortexFile file)
+    {
+        _file = file;
+        Options = file.ReadOptions;
+        int count = file.ArrayEncodingCount;
+        if (_arrayEncodings.Length != count)
+        {
+            _arrayEncodings = count == 0 ? [] : new ArrayEncodingId[count];
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            _arrayEncodings[i] = file.GetArrayEncoding(i);
+        }
+
+        Types = new DTypeArena(Math.Min(ScanCapacity, 16));
+    }
+
+    /// <summary>
+    /// Undoes everything a scan set on this context, so that a later scan of any file may take it:
+    /// the batch, the retained chunks it owns, the node checks it remembered -- facts about one
+    /// file's bytes -- and every switch the scan set once.
+    /// </summary>
+    internal void Recycle()
+    {
+        ResetBatch();
+        AbandonRetained();
+        if (_ownsRetained)
+        {
+            _retained?.Dispose();
+        }
+
+        _retained = null;
+        _ownsRetained = true;
+        _building = null;
+        _child = null;
+        if (_nodeChecks is { } checks)
+        {
+            Array.Clear(checks);
+        }
+
+        if (_pushed is { } pushed)
+        {
+            pushed.Field = null;
+            pushed.Op = default;
+            pushed.Literal = default;
+            pushed.Fields = Layouts.FieldMask.All;
+            pushed.FieldsHonoured = false;
+        }
+
+        LiveBlocks = null;
+        Metrics = null;
+        KeepEncodings = false;
+        Batch = 0;
+        _file = null;
+        Options = VortexReadOptions.Default;
     }
 
     /// <summary>Releases the batch's segments and the blocks the canonical arena rented.</summary>

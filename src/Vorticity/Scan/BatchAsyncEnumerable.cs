@@ -315,7 +315,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _lanes = new Lane[degree];
         for (int i = 0; i < degree; i++)
         {
-            _lanes[i] = new Lane(new ScanContext(file));
+            _lanes[i] = new Lane(ScanContexts.Rent(file));
             // The mask, the metrics sink and the encoded delivery outlive every batch of the scan,
             // so they are set once here and never by `ResetBatch`; the readers read the mask in
             // file coordinates and add what they materialize to the sink.
@@ -1168,7 +1168,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         for (int i = 0; i < _lanes.Length; i++)
         {
             _lanes[i].Stop();
-            _lanes[i].Context.Dispose();
+            ScanContexts.Return(_lanes[i].Context);
         }
 
         // Once no lane runs: the held segments and the retained chunks carry references of their own.
