@@ -12,9 +12,10 @@ compiled by the build and run by the page's name:
 dotnet run -c Release --project samples/Vorticity.Samples -- filter-rows
 ```
 
-With no argument it runs every case. The numbers a page quotes come from a Release run, over two
-demonstration files it writes and deletes when it ends: a million readings and a hundred thousand
-visits, of these three records.
+With no argument it runs every case, and the numbers a page quotes come from such a Release run: a
+page's case runs after the others, on code they have already compiled, where a case run alone also
+pays for compiling what it runs first. The run writes two demonstration files and deletes them when
+it ends: a million readings and a hundred thousand visits, of these three records.
 
 ```csharp
 [VortexRecord] public partial record struct Reading(int Day, double? Celsius, string City);

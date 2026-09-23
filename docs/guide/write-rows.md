@@ -32,9 +32,9 @@ that yields the same rows and awaits every ten thousand, as a source reading pag
 ## What it costs
 
 ```
-a span of 1000000 rows: 1508212 bytes, best of three 94 ms
+a span of 1000000 rows: 1508212 bytes, best of three 79 ms
   chunk rows: 65536 x15, 16384, 576
-a stream of 1000000 rows: 1508212 bytes, best of three 99 ms
+a stream of 1000000 rows: 1508212 bytes, best of three 92 ms
   chunk rows: 65536 x15, 16384, 576
 ```
 
@@ -68,4 +68,5 @@ arrived. [blocks-and-chunks.md](blocks-and-chunks.md) shows where that width com
 dotnet run -c Release --project samples/Vorticity.Samples -- write-rows
 ```
 
-The figures above come from that run.
+The figures above come from a run of every case, in which this one follows the others
+([README.md](README.md)).

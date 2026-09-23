@@ -54,12 +54,12 @@ each flush and at completion. After the sample's two filtered scans, a count on 
 a small write:
 
 ```
-total vortex.cache.hits = 17
+total vortex.cache.hits = 16
 total vortex.cache.misses = 27
 total vortex.scan.blocks_decoded = 151
 total vortex.scan.blocks_pruned = 218
-total vortex.scan.bytes_requested = 761856
-total vortex.scan.requests = 44
+total vortex.scan.bytes_requested = 759732
+total vortex.scan.requests = 43
 total vortex.scan.rows = 200000
 total vortex.write.bytes = 3012
 ```
@@ -104,13 +104,14 @@ Console.WriteLine($"scan {run}: {stats.Rows} rows in {stats.Batches} batches, {s
 
 ```
 scan 1: 100000 rows in 14 batches, 13 requests, 210980 bytes, 14 blocks decoded, 109 pruned, 0 cache hits
-scan 2: 100000 rows in 14 batches, 13 requests, 210980 bytes, 14 blocks decoded, 109 pruned, 12 cache hits
+scan 2: 100000 rows in 14 batches, 12 requests, 208856 bytes, 14 blocks decoded, 109 pruned, 12 cache hits
 ```
 
 `ScanStatistics` is a `readonly record struct` of seven `long`s: `Rows`, `Batches`, `Requests`,
 `BytesRequested`, `BlocksDecoded`, `BlocksPruned` and `CacheHits`. `Requests` counts the segments
-the scan asked for, each once, the ones the cache then served included, which is why the second
-scan asks as much as the first and finds 12 of its 13 in the cache, where the first found none. The same
+the scan asked for, each once, the ones the cache then served included: the second scan finds all
+12 of its requests in the cache, where the first found none, and asks one fewer, because the file
+kept the zone maps the first one read. The same
 record is on the tool scan and on a grouped aggregation. What the scan was going to do, before it
 runs, is `ExplainAsync`: [statistics-and-pruning.md](statistics-and-pruning.md) puts the two side
 by side.
@@ -126,7 +127,7 @@ await using (VortexFile file = await session.OpenAsync(new FileSegmentSource(pat
 ```
 
 ```
-cache: 17 hits, 27 misses, 0 bytes held
+cache: 16 hits, 27 misses, 0 bytes held
 ```
 
 A path handed to `OpenAsync` is memory-mapped by its first scan, and a mapping has nothing to

@@ -67,7 +67,7 @@ dotnet publish tools/vxdump -c Release -r linux-x64
 tools/vxdump/bin/Release/net11.0/linux-x64/publish/vxdump readings.vortex --all
 ```
 
-What it buys is startup. On the shared runtime, vxdump spends about 60 ms from start to exit on
+What it buys is startup. On the shared runtime, vxdump spends about 55 ms from start to exit on
 `--schema` over the demonstration file, most of it the runtime starting and the first calls being
 compiled. That is nothing inside a server and everything in a tool that runs once per file over a
 directory of ten thousand; a native binary starts without either.

@@ -51,20 +51,18 @@ the record is the projection, so the scan reads two columns and the target has t
 
 ```
 source: 1000000 rows, 1508212 bytes
-a copy: 1000000 rows, 1244772 bytes, 18 chunks, in 21 ms
-re-encoded under Smallest: 248388 bytes, in 55 ms; Day RunEnd x18, Celsius Zstd x18, City Zstd x18
-a filtered copy, Day >= 900: 100000 rows, 155756 bytes, in 3 ms
-a typed filtered copy, Day >= 900 and City == Paris: 12502 rows, 19932 bytes, in 5 ms
-a projected copy, Day and Celsius: 1000000 rows, 1153396 bytes, in 14 ms
+a copy: 1000000 rows, 1507228 bytes, 16 chunks, in 21 ms
+re-encoded under Smallest: 245628 bytes, in 49 ms; Day RunEnd x16, Celsius Zstd x16, City Zstd x16
+a filtered copy, Day >= 900: 100000 rows, 157452 bytes, in 3 ms
+a typed filtered copy, Day >= 900 and City == Paris: 12502 rows, 19932 bytes, in 2 ms
+a projected copy, Day and Celsius: 1000000 rows, 1153396 bytes, in 15 ms
 the projected copy reads back: struct{Day: i32, Celsius: f64?}, 1000000 rows, mean 30.0000
 ```
 
 The times are from a run in which earlier samples had already compiled the code paths. Each column
 is decoded once and encoded once; the target chooses its encodings afresh and cuts its own chunks,
 by the width of the rows it is handed ([blocks-and-chunks.md](blocks-and-chunks.md)). The copy came
-out 263 KB smaller than its source: its chunks of seven blocks, 57 344 rows, are a multiple of the
-seven rows a city lasts, so the ends of the city's runs form a progression where the source's
-chunks of eight blocks cut a run each and store them packed. A copy is also how a file that has
+out within a kilobyte of its source, in 16 chunks where the source has 17. A copy is also how a file that has
 taken many appends gets its space back ([append-and-repair.md](append-and-repair.md)). `Smallest`
 made it six times smaller than the source, for more than twice the time spent writing: the
 temperatures and the cities went to zstd frames, which a read then inflates block by block. A
@@ -92,4 +90,7 @@ filtered copy reads only the blocks the filter keeps, by the same pruning as any
 dotnet run -c Release --project samples/Vorticity.Samples -- copy-a-file
 ```
 
-The figures above come from that run.
+The sizes above come from that run, which prints them the same whichever way it is run; the times
+from a run of every sample, `dotnet run -c Release --project samples/Vorticity.Samples`, in which
+this one comes after the others. On its own, compiling the copy's code paths as it goes, the first
+copy takes about 130 ms.

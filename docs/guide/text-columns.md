@@ -47,14 +47,14 @@ transcoding. It is borrowed like everything else from a scan: valid inside the l
 The same two counts, once over spans and once with `city.GetString(i)`:
 
 ```
-UTF-8 spans           40.1 ms,      43240 bytes allocated: 125006 rows in Paris, 249999 starting with L
-GetString             57.2 ms,   37043200 bytes allocated: 125006 rows in Paris, 249999 starting with L
-the scan alone         2.0 ms,      43168 bytes allocated: 1000000 rows
-CountDistinctAsync     8.2 ms,      46808 bytes allocated: 8 cities
+UTF-8 spans           39.9 ms,       7256 bytes allocated: 125006 rows in Paris, 249999 starting with L
+GetString             54.8 ms,   37007216 bytes allocated: 125006 rows in Paris, 249999 starting with L
+the scan alone         3.6 ms,       7184 bytes allocated: 1000000 rows
+CountDistinctAsync    10.3 ms,      10584 bytes allocated: 8 cities
 ```
 
-A million strings are 37 MB of garbage for the collector, where the spans allocate nothing beyond
-what the scan itself does. Keep `GetString` for the values that leave the loop: a dictionary key, a
+A million strings are 37 MB of garbage for the collector, where the spans allocate a few bytes more
+than the scan itself does. Keep `GetString` for the values that leave the loop: a dictionary key, a
 log line, a result.
 
 ## Distinct values, and filters on text

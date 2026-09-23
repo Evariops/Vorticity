@@ -125,14 +125,14 @@ what makes the parallel run correct. `T` is the column's storage primitive, exac
 What the encoded steps are worth, against `CanonicalWelford<T>`, the same fold with `Step` only:
 
 ```
-Welford(Celsius), encoded          7.5 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
-Welford(Celsius), canonical        7.3 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
-Welford(Day), encoded              1.0 ms  1000000 values, mean 499.5000, variance 83333.3333, 1 blocks decoded
-Welford(Day), canonical            5.0 ms  1000000 values, mean 499.5000, variance 83333.3333, 123 blocks decoded
+Welford(Celsius), encoded          4.8 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
+Welford(Celsius), canonical        4.8 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
+Welford(Day), encoded              0.3 ms  1000000 values, mean 499.5000, variance 83333.3333, 1 blocks decoded
+Welford(Day), canonical            4.4 ms  1000000 values, mean 499.5000, variance 83333.3333, 123 blocks decoded
 ```
 
-`Day` is stored as runs: `StepRunEnd` sees 1 121 runs instead of a million values, five times
-faster. `Celsius` is a dictionary whose distinct values include the null, and such a block is
+`Day` is stored as runs: `StepRunEnd` sees 1 121 runs instead of a million values, more than ten
+times faster. `Celsius` is a dictionary whose distinct values include the null, and such a block is
 handed to `Step` decoded, so the two are equal ([encoded-forms.md](encoded-forms.md)).
 `BlocksDecoded` counts the blocks where a column reached the canonical form: every block of
 `Celsius`, and of `Day` only the one block the reader delivers canonical, the other 122 going to
@@ -146,14 +146,14 @@ await using VortexFile shared = await parallel.OpenAsync(path);
 ```
 
 ```
-GroupBy(City, Day), degree 1      40.3 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
-GroupBy(City, Day), degree 14     11.5 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
-Welford(Celsius), degree 14        1.6 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
+GroupBy(City, Day), degree 1      32.3 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
+GroupBy(City, Day), degree 14      9.3 ms  8000 groups, the widest spread Lille on day 13, variance 144.07
+Welford(Celsius), degree 14        1.3 ms  980000 values, mean 30.0000, variance 133.2501, 123 blocks decoded
 ```
 
 Parallelism is the session's, 1 by default: a library does not take a host's cores without being
 asked. With it, chunks aggregate concurrently, one state per group per chunk, and `Merge` joins
-them: the same answers, 3.5 times faster for the composite group by on 14 cores, 4.7 times for the
+them: the same answers, 3.5 times faster for the composite group by on 14 cores, 3.7 times for the
 Welford fold. `ScanOptions.DegreeOfParallelism` overrides the session for one scan
 ([threads.md](threads.md)).
 

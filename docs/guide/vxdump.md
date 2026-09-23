@@ -191,6 +191,6 @@ and `--scan` exits 3.
 dotnet run --project tools/vxdump -c Release -- <file.vortex> --all
 ```
 
-On the shared runtime, `--schema` on the demonstration file takes about 60 ms from start to exit,
+On the shared runtime, `--schema` on the demonstration file takes about 55 ms from start to exit,
 most of it the runtime starting. Published ahead of time it needs no runtime at all, which is what
 you want from a tool that runs once per file over a directory: see [native-aot.md](native-aot.md).

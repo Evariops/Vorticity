@@ -63,7 +63,7 @@ The report is the only place that says what was chosen. The sample prints it, gr
 per-chunk encodings:
 
 ```
-1000000 rows in blocks of 8192, 17 chunks, 1508212 bytes, in 131 ms
+1000000 rows in blocks of 8192, 17 chunks, 1508212 bytes, in 117 ms
   data 1495924, statistics 200, zone maps 8264, indexes 0, footer 3824
   chunk rows: 65536 x15, 16384, 576
   Day: RunEnd x16, Sequence
@@ -87,7 +87,8 @@ none here, since the default is `IndexPolicy.None` ([indexes.md](indexes.md)).
 
 ## What it costs
 
-The million rows took 131 ms in this run, first-use compilation included, and 1.51 MB on disk. The
+The million rows took 117 ms in this run and 1.51 MB on disk; run alone, compiling the writer as it
+goes, the sample takes about 200 ms. The
 same rows stored without encoding take 20.8 MB ([writer-options.md](writer-options.md)). The
 columns are encoded on the thread that calls `WriteAsync`. The builder holds up to a chunk's worth
 of rows, a megabyte of the widest column by default, before whole blocks are encoded and released.
@@ -119,4 +120,5 @@ destination ([stream-to-an-object.md](stream-to-an-object.md)).
 dotnet run -c Release --project samples/Vorticity.Samples -- write-a-file
 ```
 
-The figures above come from that run.
+The figures above come from a run of every case, in which this one follows the others
+([README.md](README.md)).

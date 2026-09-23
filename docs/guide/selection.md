@@ -45,9 +45,9 @@ sum reads, and with a filter that keeps 2 % of the rows:
 
 | record, filter | rows kept | whole blocks | compacted |
 |---|---|---|---|
-| `Reading`, `Celsius > 20` | 735 000 | 11.1 ms | 59.7 ms |
-| `Temperature`, `Celsius > 20` | 735 000 | 8.3 ms | 19.5 ms |
-| `Reading`, `Celsius > 49` | 22 500 | 8.9 ms | 18.1 ms |
+| `Reading`, `Celsius > 20` | 735 000 | 11.2 ms | 21.9 ms |
+| `Temperature`, `Celsius > 20` | 735 000 | 9.5 ms | 17.3 ms |
+| `Reading`, `Celsius > 49` | 22 500 | 9.7 ms | 20.0 ms |
 
 ```csharp
 [VortexRecord]
@@ -58,7 +58,7 @@ The compaction copies every column the record names, whether the loop reads it o
 `Reading` it copies `Day` and `City` too, and `City` is text stored as runs, which is why the gap is
 widest there. Narrowing the record ([project-columns.md](project-columns.md)) shrinks the copy, and
 a filter that keeps few rows copies few, but the compacted scan still walks every live block to
-build them. Both modes allocated between 0.1 and 0.2 MB per scan, the scan's own.
+build them. Both modes allocated about 10 KB per scan, the scan's own.
 
 ## Which to use
 

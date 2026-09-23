@@ -55,9 +55,9 @@ column of every batch to its plain form with `Canonical()`:
 
 | profile | bytes | written in | decoded in | encodings |
 |---|---|---|---|---|
-| `Auto` | 1 508 212 | 33 ms | 1 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
+| `Auto` | 1 508 212 | 34 ms | 1 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
 | `Fastest` | 1 508 212 | 33 ms | 1 ms | the same |
-| `Smallest` | 247 124 | 63 ms | 2 ms | `Day` runs, `Celsius` and `City` zstd |
+| `Smallest` | 247 124 | 66 ms | 2 ms | `Day` runs, `Celsius` and `City` zstd |
 | `None` | 20 929 820 | 28 ms | 4 ms | every column `Canonical`, the plain form |
 
 Encoding is what makes the file fourteen times smaller than its plain form. `Auto` prices each
@@ -148,4 +148,5 @@ reads in flight, parallelism) to [threads.md](threads.md).
 dotnet run -c Release --project samples/Vorticity.Samples -- writer-options
 ```
 
-The figures above come from that run.
+The figures above come from a run of every case, in which this one follows the others
+([README.md](README.md)).

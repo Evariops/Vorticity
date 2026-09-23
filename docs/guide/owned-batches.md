@@ -98,10 +98,10 @@ twenty rounds:
 
 | | time | managed allocation |
 |---|---|---|
-| borrowed columns, typed scan | 6.0 ms | 42 KiB |
-| borrowed columns, tool scan | 4.5 ms | 39 KiB |
-| `ToBatchesAsync` | 5.3 ms | 157 KiB |
-| `ToOwned()` on every borrowed batch | 6.3 ms | 157 KiB |
+| borrowed columns, typed scan | 6.6 ms | 6 KiB |
+| borrowed columns, tool scan | 4.8 ms | 4 KiB |
+| `ToBatchesAsync` | 5.6 ms | 123 KiB |
+| `ToOwned()` on every borrowed batch | 7.1 ms | 121 KiB |
 
 Two things differ between these rows, the copy and the form of the columns:
 
@@ -109,7 +109,7 @@ Two things differ between these rows, the copy and the form of the columns:
   run-end, `Celsius` dictionary. Reading `Values` or a text length decodes them in your loop
   ([encoded-forms.md](encoded-forms.md)). `ToBatchesAsync` and the tool scan decode them in the
   scan, and deliver them canonical.
-* So the tool scan against `ToBatchesAsync` is the copy alone: **0.8 ms, 18 % of the canonical
+* So the tool scan against `ToBatchesAsync` is the copy alone: **0.7 ms, 16 % of the canonical
   scan** in this run; timings this short move from run to run.
 
 `ToOwned()` copies what it is given as it is, the encoded form included, which is why it adds little

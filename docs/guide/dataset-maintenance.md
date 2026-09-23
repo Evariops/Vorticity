@@ -124,7 +124,7 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 |---|---|---|
 | `PlanCompactionAsync` | 0 | the header the handle holds |
 | `CompactAsync` | 56 | every input object read, one object written, one commit |
-| `VerifyAsync` | 13 | every object hashed, every page read |
+| `VerifyAsync` | 11 | every object hashed, every page read |
 | `VerifyAsync(since)` | 12 | what the earlier version does not share |
 | `VacuumAsync` | 28 to 30 | a listing, a head per commit object, the retained trees, the deletes in batches |
 

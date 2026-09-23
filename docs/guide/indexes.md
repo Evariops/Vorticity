@@ -37,9 +37,9 @@ The sample asks each filter for its plan with and without the indexes (`ScanOpti
 
 | filter | rows | blocks read, with | bytes read, with | without |
 |---|---|---|---|---|
-| `Session == ` a value that exists | 1 | 1 of 49 | 1 163 616 | 49 blocks, 4 367 836 bytes |
-| `Session == ` a value that does not | 0 | 0 of 49 | 805 704 | 49 blocks, 4 367 836 bytes |
-| `Path.Contains("checkout")` | 10 | 10 of 49 | 3 681 912 | 49 blocks, 4 367 892 bytes |
+| `Session == ` a value that exists | 1 | 1 of 49 | 1 163 616 | 49 blocks, 4 365 728 bytes |
+| `Session == ` a value that does not | 0 | 0 of 49 | 803 596 | 49 blocks, 4 365 728 bytes |
+| `Path.Contains("checkout")` | 10 | 10 of 49 | 3 681 912 | 49 blocks, 4 365 728 bytes |
 
 A skipping index does not find rows; it proves that a block cannot hold them, so the block is never
 read. The Bloom filters on `Session` cost 820 KB against 4.4 MB of data and cut the read almost four
@@ -66,9 +66,9 @@ The locating kinds, measured on the same rows:
 
 ```
 Postings on Status, SortedRuns on Score, budget 3000 per mille: 6232421 bytes, 1853905 of them indexes
-  Status == 301: 16 rows; 16 of 49 blocks and 4287212 bytes with the indexes (… locating index pruned 33 reading 1184 bytes), 49 blocks and 4366684 bytes without
-  Score == a value that exists: 1 rows; 1 of 49 blocks and 692068 bytes with the indexes (… locating index pruned 48 reading 333200 bytes), 49 blocks and 4366684 bytes without
-  Score between 1000 and 1100: 38 rows; 36 of 49 blocks and 4366684 bytes with the indexes (… sorted runs pruned 13 reading 0 bytes), 49 blocks and 4366684 bytes without
+  Status == 301: 16 rows; 16 of 49 blocks and 4287212 bytes with the indexes (… locating index pruned 33 reading 1184 bytes), 49 blocks and 4365728 bytes without
+  Score == a value that exists: 1 rows; 1 of 49 blocks and 692068 bytes with the indexes (… locating index pruned 48 reading 333200 bytes), 49 blocks and 4365728 bytes without
+  Score between 1000 and 1100: 38 rows; 36 of 49 blocks and 4365728 bytes with the indexes (… sorted runs pruned 13 reading 0 bytes), 49 blocks and 4365728 bytes without
   a key cursor on Score: the first key at or after 1000 is 1001, at row 280415; 382 rows hold a smaller one
 ```
 

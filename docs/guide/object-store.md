@@ -134,8 +134,8 @@ await using (VortexFile opened = await VortexSession.Default.OpenAsync(new Store
 ```
 open from the store: 1000000 rows; 2 requests (1 get, 1 head, 0 put, 0 list), 2 dependent steps, 65536 bytes read, 0 written
 mean of Celsius for Day >= 900: 30.000; 9 requests (9 get, 0 head, 0 put, 0 list), 9 dependent steps, 175228 bytes read, 0 written
-a full scan, 1000000 rows: 51 requests (51 get, 0 head, 0 put, 0 list), 43 dependent steps, 1494044 bytes read, 0 written
-a full scan through a session with a segment cache, 1000000 rows: 51 requests (51 get, 0 head, 0 put, 0 list), 49 dependent steps, 1494044 bytes read, 0 written
+a full scan, 1000000 rows: 51 requests (51 get, 0 head, 0 put, 0 list), 44 dependent steps, 1494044 bytes read, 0 written
+a full scan through a session with a segment cache, 1000000 rows: 51 requests (51 get, 0 head, 0 put, 0 list), 43 dependent steps, 1494044 bytes read, 0 written
 ```
 
 The open costs one ranged read of the tail, plus the head the sample asks for the length. From

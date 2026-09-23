@@ -61,7 +61,7 @@ a view.
 The sample times the appends alone, a million per form, on a column of city names and numbers:
 
 ```
-per value, 1000000 appends: UTF-8 bytes 6.1 ns, a string 8.9 ns, an int formatted 7.7 ns
+per value, 1000000 appends: UTF-8 bytes 4.4 ns, a string 6.2 ns, an int formatted 5.9 ns
 ```
 
 Keeping the names as UTF-8 byte arrays saves the transcoding, about 30 % of the append here.
@@ -90,4 +90,5 @@ Formatting a number in place costs about what copying its bytes would, and alloc
 dotnet run -c Release --project samples/Vorticity.Samples -- write-text
 ```
 
-The figures above come from that run.
+The figures above come from a run of every case, in which this one follows the others
+([README.md](README.md)).

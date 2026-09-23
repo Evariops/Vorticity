@@ -72,7 +72,7 @@ appended in bulk (`Append(ReadOnlySpan<Guid>)`, `Append(ReadOnlySpan<DateTime>)`
 through `GetSpan` and the rest row by row:
 
 ```
-100000 visits column by column: 2169236 bytes, best of three 44 ms
+100000 visits column by column: 2169236 bytes, best of three 36 ms
   Id: Canonical x5
   StartedAt: Sequence x5
   DurationMs: Sequence x4, BitPacked
@@ -111,4 +111,5 @@ fields of a row before moving to the next. Filling one column at a time is what 
 dotnet run -c Release --project samples/Vorticity.Samples -- write-lists-and-records
 ```
 
-The figures above come from that run.
+The figures above come from a run of every case, in which this one follows the others
+([README.md](README.md)).

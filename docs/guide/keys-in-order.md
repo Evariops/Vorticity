@@ -83,7 +83,7 @@ Two sources serve a cursor with rows:
 
 * **A sorted column.** The file's statistics say the column is sorted, so the column is its own
   index. It costs nothing to write: order the rows by the column. A seek is a binary search over
-  the zone maps and one block decoded; a thousand seeks took 2.8 ms here.
+  the zone maps and one block decoded; a thousand seeks took 3.6 ms here.
 * **A sorted-runs index**, which the writer builds when asked:
 
   ```csharp

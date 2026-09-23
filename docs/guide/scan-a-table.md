@@ -20,7 +20,7 @@ await foreach (var (_, celsius, _) in scan)
 ```
 
 ```
-the loop: mean 29.4001 over 1000000 rows, 2.9 ms
+the loop: mean 29.4001 over 1000000 rows, 5.4 ms
   17 batches, 123 blocks decoded, 51 requests, 1494044 bytes
 ```
 
@@ -86,7 +86,7 @@ double? mean = await file.Scan<Reading>().AvgAsync(r => r.Celsius);
 ```
 
 ```
-AvgAsync: mean 30.0000, 1.7 ms
+AvgAsync: mean 30.0000, 1.8 ms
   1 blocks decoded, 17 requests, 1150428 bytes
 ```
 
@@ -110,7 +110,7 @@ the column. [aggregates.md](aggregates.md) has the rest of the operators.
   request, [open-a-file.md](open-a-file.md) shows what a `SegmentCache` on the session saves.
 * **Memory.** One batch is decoded ahead of the one you hold (`ScanOptions.Prefetch`, 1 by
   default), in buffers that alternate rather than accumulate.
-* **Allocations.** A whole scan allocated 43 120 bytes over its 17 batches, and 43 584 bytes over
+* **Allocations.** A whole scan allocated 7 136 bytes over its 17 batches, and 7 224 bytes over
   123 batches of a block as over 245 of half a block: a scan pays for its start and then nothing
   per batch, a little less when each batch holds a whole chunk, which then need not stay decoded
   from one batch to the next. Counted process-wide with `GC.GetTotalAllocatedBytes`, so the thread
@@ -125,7 +125,7 @@ the column. [aggregates.md](aggregates.md) has the rest of the operators.
   this one ([threads.md](threads.md)).
 
 The figures come from one run of the sample on the demonstration file of a million rows; the
-timings are the best of three passes.
+timings are the third of three passes.
 
 ## Run it
 

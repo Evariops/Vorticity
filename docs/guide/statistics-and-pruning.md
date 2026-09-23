@@ -18,7 +18,7 @@ Print("Day >= 900", scan.Statistics);
 plan, Day >= 900: 1000000 rows, 14 of 123 blocks live, 13 segments, 210980 bytes to read, may match True
   zone map: 109 blocks pruned, 1 segments and 2124 bytes read to decide
   count: exact True, 100000 rows, 109 pruned, 13 proven, 1 decoded
-ran, Day >= 900: 100000 rows in 14 batches, 13 requests, 210980 bytes, 14 blocks decoded, 109 pruned
+ran, Day >= 900: 100000 rows in 14 batches, 12 requests, 208856 bytes, 14 blocks decoded, 109 pruned
 ```
 
 `Print` writes the fields of the two records; the sample has it. 2 124 bytes of zone maps decided
@@ -50,9 +50,10 @@ by them, or left to decode.
 delivered, `Requests` and `BytesRequested` made to the source, `BlocksDecoded`, `BlocksPruned`,
 and `CacheHits` from the session's segment cache ([threads.md](threads.md)).
 
-**The plan's bytes and the run's agree.** The plan counts each segment once, 13 of them and
-210 980 bytes with the zone maps; the run made 13 requests for 210 980 bytes. A segment here holds
-several blocks of one column, and the scan reads it once for all the blocks that need it. A second
+**The plan's bytes and the run's differ by the zone maps.** The plan counts each segment once, 13 of
+them and 210 980 bytes with the 2 124 bytes of zone maps it consulted; the run made 12 requests for
+208 856 bytes, because the file kept the zone maps the plan had read. A segment here holds several
+blocks of one column, and the scan reads it once for all the blocks that need it. A second
 scan reads it again; over a `FileSegmentSource` or a remote source, a session `SegmentCache` is
 what keeps it from reaching the disk or the network again. `BlocksDecoded` matches `LiveBlocks`:
 14.
@@ -64,15 +65,15 @@ Measured on the demonstration file, 1 508 212 bytes:
 | | live blocks | requests | bytes requested | rows |
 |---|---|---|---|---|
 | no filter | 123 of 123 | 51 | 1 494 044 | 1 000 000 |
-| `Day >= 900` | 14 of 123 | 13 | 210 980 | 100 000 |
-| `Celsius > 45` | 123 of 123 | 52 | 1 497 152 | 122 500 |
+| `Day >= 900` | 14 of 123 | 12 | 208 856 | 100 000 |
+| `Celsius > 45` | 123 of 123 | 51 | 1 494 044 | 122 500 |
 | `Day >= 5000` | 0 of 123 | 0 | 0 | 0 |
 
 The rows are in `Day` order, so 109 blocks are provably outside `Day >= 900`: a seventh of the
 reading for a tenth of the rows, since a column is read by the chunk, eight blocks here, and the
 live blocks bring in the chunks they fall in. `Celsius` walks its whole range inside every block, so no block can be
-excluded, and the predicate costs one request more than no filter: the 3 108 bytes of zone maps read
-to find that out. `Day >= 5000` lies above the file's own maximum, and `MayMatch` says so: the file
+excluded: finding that out cost the 3 108 bytes of its zone maps, which the plan read here, and the
+run then read what no filter reads. `Day >= 5000` lies above the file's own maximum, and `MayMatch` says so: the file
 statistics are in memory once the file is open, so the plan and the run read nothing at all, and
 count every block pruned by the file statistics.
 
