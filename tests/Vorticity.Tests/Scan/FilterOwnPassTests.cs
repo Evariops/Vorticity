@@ -135,6 +135,33 @@ public sealed class FilterOwnPassTests
         }
     }
 
+    /// <summary>
+    /// On four lanes, a filter the zone maps cannot answer keeps what one lane keeps and decodes what
+    /// one lane decodes: the filter's column once for its window, whatever the lanes' first splits
+    /// ask of its encoding, and the projection a zone at a time on each lane.
+    /// </summary>
+    [Theory]
+    [InlineData("half")]
+    [InlineData("sparse")]
+    [InlineData("none")]
+    public async Task OnLanesAFilterKeepsAndDecodesWhatOneLaneDoes(string filter)
+    {
+        Decoders.EnsureRegistered();
+        string path = Write();
+        try
+        {
+            (List<long> oneLane, long oneLaneDecoded) = await ReadAsync(path, filter, 1);
+            (List<long> fourLanes, long fourLanesDecoded) = await ReadAsync(path, filter, 4);
+
+            Assert.Equal(oneLane, fourLanes);
+            Assert.Equal(oneLaneDecoded, fourLanesDecoded);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Fact]
     public async Task ARunKeptOfEveryZoneReadsEachChunkOnceAndSlicesIt()
     {
@@ -267,6 +294,29 @@ public sealed class FilterOwnPassTests
         "half" => c1 < 2_000,
         _ => c1 != 7,
     };
+
+    /// <summary>Every column of every row the filter keeps, at a degree, and the values the scan decoded.</summary>
+    private static async Task<(List<long> Values, long Decoded)> ReadAsync(string path, string filter, int degree)
+    {
+        FlatLayoutReader.ValuesDecoded = 0;
+        List<long> values = [];
+        await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None))
+        {
+            await foreach (RecordBatch batch in file.ScanBuilder().Where(Filter(filter)).WithDegreeOfParallelism(degree)
+                .ExecuteAsync().WithCancellation(CancellationToken.None))
+            {
+                for (int row = 0; row < batch.RowCount; row++)
+                {
+                    foreach (string column in Names)
+                    {
+                        values.Add(batch.Column(Encoding.UTF8.GetBytes(column)).AsPrimitive<long>().Values[row]);
+                    }
+                }
+            }
+        }
+
+        return (values, FlatLayoutReader.ValuesDecoded);
+    }
 
     private static string Write()
     {

@@ -698,6 +698,29 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
 
     /// <summary>
+    /// On the lanes, has the filter's own columns read in the window the plan puts the split in, as
+    /// one lane reads them: decoded once for the window's splits and kept, so the projection read
+    /// split by split after it finds them there, and the first splits the lanes start together do
+    /// not each decode them for a comparison the encoding then declines.
+    /// </summary>
+    private void FilterWindow(ScanContext context, RowRange split)
+    {
+        if (_lanes.Length > 1)
+        {
+            SplitExecution.Window(context, _cursor.Plan, split);
+        }
+    }
+
+    /// <summary>On the lanes, puts the split back in a window of its own for what it reads next.</summary>
+    private void ProjectionWindow(ScanContext context, RowRange split)
+    {
+        if (_lanes.Length > 1)
+        {
+            SplitExecution.Alone(context, split);
+        }
+    }
+
+    /// <summary>
     /// The split in two passes: the filter's columns, whole, then the projection over the rows the
     /// filter kept, and nothing more when it kept none.
     /// </summary>
@@ -718,6 +741,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // derived per scan.
         bool alone = columns.NamedFieldCount == 1;
         int first;
+        FilterWindow(context, split);
         if (alone)
         {
             LayoutNode column = _tree.Root.GetChild(columns.GetNamedField(0));
@@ -728,6 +752,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             first = SplitExecution.Execute(context, _tree, in columns, split, null);
         }
+
+        ProjectionWindow(context, split);
 
         int rows = arena.GetNode(first).Length;
         byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
@@ -880,6 +906,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         (byte[]? Field, ComparisonOp Op, FilterLiteral Literal) saved =
             context.ExchangePushedPredicate(name, pushable.Op, pushable.Value);
         int answer;
+        FilterWindow(context, split);
         try
         {
             answer = SplitExecution.Execute(context, _tree, in only, split, null);
@@ -887,6 +914,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         finally
         {
             context.ExchangePushedPredicate(saved.Field, saved.Op, saved.Literal);
+            ProjectionWindow(context, split);
         }
 
         if (!context.PredicateAnswered)
@@ -1249,7 +1277,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         RowRange rows = lane.Rows;
         long batch = lane.Sequence;
         context.Batch = batch;
-        SplitExecution.Window(context, _cursor.Plan, rows);
+
+        // Each split is a window of its own on the lanes. Grouped as one lane would group them, the
+        // splits of a window decode it once for all of them, and the lanes holding its other splits
+        // wait for that decode: with a zone per split, fourteen lanes did the work of two. Alone, a
+        // chunk whose encoding decodes a range is decoded split by split, each by its own lane, and
+        // no row twice; one that decodes whole is still decoded once and shared.
+        SplitExecution.Alone(context, rows);
         try
         {
             Register(context, rows);
