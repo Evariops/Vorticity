@@ -1,4 +1,5 @@
 using System;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -436,6 +437,20 @@ internal static class RowKernels
             return -1;
         }
 
+        // Nullable codes: sixty-four rows of the codes' validity at a time, when every access can be
+        // proven before the loop, as above.
+        if (!codesAllValid
+            && limit > 0
+            && codes.Length >= target.Length
+            && (long)codeBits.Length * 8 >= (long)codeBitOffset + target.Length
+            && (!tracked || outputBits.Length >= (target.Length + 7) / 8)
+            && (valuesAllValid || (!valueBits.IsEmpty && (long)valueBits.Length * 8 >= (long)valueBitOffset + valuesLength)))
+        {
+            return MaskedWords(
+                codes[..target.Length], source, target, codeBits, codeBitOffset,
+                valueBits, valueBitOffset, valuesAllValid, limit, tracked ? outputBits : default);
+        }
+
         for (int row = 0; row < target.Length; row++)
         {
             if (!codesAllValid &&
@@ -466,6 +481,161 @@ internal static class RowKernels
         }
 
         return -1;
+    }
+
+    /// <summary>
+    /// The gather with nullable codes, sixty-four rows of their validity at a time and no branch on
+    /// a row.
+    /// </summary>
+    /// <returns>The row of the first out-of-range code under a valid row, or -1.</returns>
+    /// <remarks>
+    /// <para>
+    /// A row's validity decides whether its code is read, and a branch on it mispredicts as often
+    /// as the nulls fall irregularly. Here every row is gathered: a null row's code, and a code
+    /// past the dictionary, reads entry zero instead, which a dictionary that is not empty holds,
+    /// and the null rows are emptied once their word is done. A code past the dictionary under a
+    /// valid row is the one fault; it is noted as the word goes and its row found after.
+    /// </para>
+    /// <para>
+    /// A row is valid when its code is and its value is: the codes' own word when every value is
+    /// valid, and otherwise each row's bit ANDed with its value's flag, a byte per dictionary
+    /// entry expanded once. The output takes a word at a time.
+    /// </para>
+    /// </remarks>
+    private static int MaskedWords<TCode, TValue>(
+        ReadOnlySpan<TCode> codes, ReadOnlySpan<TValue> source, Span<TValue> target,
+        ReadOnlySpan<byte> codeBits, int codeBitOffset,
+        ReadOnlySpan<byte> valueBits, int valueBitOffset, bool valuesAllValid, uint limit,
+        Span<byte> outputBits)
+        where TCode : unmanaged
+        where TValue : unmanaged
+    {
+        int entries = (int)limit;
+        Scratch<byte> flagScratch = new Scratch<byte>(valuesAllValid ? 0 : entries, default);
+        try
+        {
+            Span<byte> flags = flagScratch.Span;
+            if (!valuesAllValid)
+            {
+                for (int entry = 0; entry < entries; entry++)
+                {
+                    int at = valueBitOffset + entry;
+                    flags[entry] = (byte)((valueBits[at >> 3] >> (at & 7)) & 1);
+                }
+            }
+
+            ref TCode codeRef = ref MemoryMarshal.GetReference(codes);
+            ref TValue sourceRef = ref MemoryMarshal.GetReference(source);
+            ref TValue targetRef = ref MemoryMarshal.GetReference(target);
+            ref byte flagRef = ref MemoryMarshal.GetReference(flags);
+            for (int row = 0; row < target.Length; row += 64)
+            {
+                int span = Math.Min(64, target.Length - row);
+                ulong all = BitWords.Mask(span);
+                ulong valid = BitWords.Load(codeBits, codeBitOffset + row) & all;
+                ref TValue rows = ref Unsafe.Add(ref targetRef, row);
+                bool faulted;
+                ulong output = valuesAllValid
+                    ? GatherWord<TCode, TValue, AllValuesValid>(
+                        ref Unsafe.Add(ref codeRef, row), ref sourceRef, ref rows, ref flagRef, span, valid, limit, out faulted)
+                    : GatherWord<TCode, TValue, ValuesFlagged>(
+                        ref Unsafe.Add(ref codeRef, row), ref sourceRef, ref rows, ref flagRef, span, valid, limit, out faulted);
+                if (faulted)
+                {
+                    return FirstFault(codes, valid, limit, row, span);
+                }
+
+                for (ulong nulls = ~valid & all; nulls != 0; nulls &= nulls - 1)
+                {
+                    Unsafe.Add(ref rows, BitOperations.TrailingZeroCount(nulls)) = default;
+                }
+
+                if (!outputBits.IsEmpty)
+                {
+                    Span<byte> bytes = outputBits.Slice(row >> 3, (span + 7) >> 3);
+                    for (int b = 0; b < bytes.Length; b++)
+                    {
+                        bytes[b] = (byte)(output >> (b * 8));
+                    }
+                }
+            }
+
+            return -1;
+        }
+        finally
+        {
+            flagScratch.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Gathers <paramref name="count"/> rows whose codes' validity is <paramref name="valid"/>,
+    /// without a branch on a row; the rows' validity, and whether a valid row's code is past the
+    /// dictionary.
+    /// </summary>
+    /// <remarks>
+    /// Calls nothing, so that its state stays in registers. The null rows' slots are left holding
+    /// entry zero, for the caller to empty.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ulong GatherWord<TCode, TValue, TValidity>(
+        ref TCode codes, ref TValue source, ref TValue target, ref byte flags, int count, ulong valid,
+        uint limit, out bool faulted)
+        where TCode : unmanaged
+        where TValue : unmanaged
+        where TValidity : struct, IValueValidity
+    {
+        ulong output = 0;
+        uint fault = 0;
+        for (int k = 0; k < count; k++)
+        {
+            uint bit = (uint)(valid >> k) & 1;
+            uint raw = WidenCode(Unsafe.Add(ref codes, k));
+            uint inside = raw < limit ? 1u : 0u;
+            fault |= bit & (inside ^ 1);
+            uint code = raw & (0u - (bit & inside));
+            Unsafe.Add(ref target, k) = Unsafe.Add(ref source, (nint)code);
+            if (TValidity.Flagged)
+            {
+                output |= (ulong)(bit & Unsafe.Add(ref flags, (nint)code)) << k;
+            }
+        }
+
+        faulted = fault != 0;
+        return TValidity.Flagged ? output : valid;
+    }
+
+    /// <summary>The first valid row of a word whose code is past the dictionary; an error path.</summary>
+    private static int FirstFault<TCode>(ReadOnlySpan<TCode> codes, ulong valid, uint limit, int row, int span)
+        where TCode : unmanaged
+    {
+        for (int k = 0; k < span; k++)
+        {
+            if (((valid >> k) & 1) != 0 && WidenCode(codes[row + k]) >= limit)
+            {
+                return row + k;
+            }
+        }
+
+        return row;
+    }
+
+    /// <summary>Whether a gather's values carry validity of their own, as a type.</summary>
+    private interface IValueValidity
+    {
+        static abstract bool Flagged { get; }
+    }
+
+    /// <summary>Every value valid: a row is valid when its code is.</summary>
+    private readonly struct AllValuesValid : IValueValidity
+    {
+        public static bool Flagged => false;
+    }
+
+    /// <summary>Values with validity: a row is valid when its code and its value are.</summary>
+    private readonly struct ValuesFlagged : IValueValidity
+    {
+        public static bool Flagged => true;
     }
 
     private static int MaskedWide<TCode>(
