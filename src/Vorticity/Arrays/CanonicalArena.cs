@@ -1318,7 +1318,20 @@ internal sealed partial class CanonicalArena
     /// before the block is compressed. A shared buffer is counted once per reference: the figure is
     /// a budget, not an allocation report.
     /// </remarks>
-    internal long ByteSize(int nodeIndex)
+    internal long ByteSize(int nodeIndex) => Size(nodeIndex, named: false);
+
+    /// <summary>
+    /// <see cref="ByteSize"/>, counting of a <see cref="CanonicalKind.VarBinView"/>'s data buffers
+    /// only the bytes its views name: a window of a larger batch keeps that batch's whole heap, of
+    /// which its own rows name a part. It reads every view, where <see cref="ByteSize"/> reads the
+    /// buffers' lengths alone.
+    /// </summary>
+    /// <param name="nodeIndex">The node to size.</param>
+    /// <returns>The bytes its rows hold.</returns>
+    /// <exception cref="VortexFormatException"><paramref name="nodeIndex"/> is out of range.</exception>
+    internal long NamedBytes(int nodeIndex) => Size(nodeIndex, named: true);
+
+    private long Size(int nodeIndex, bool named)
     {
         if ((uint)nodeIndex >= (uint)_recordCount)
         {
@@ -1328,22 +1341,46 @@ internal sealed partial class CanonicalArena
         CanonicalRecord record = _records[nodeIndex];
         long total = record.BufferA.Length + record.BufferB.Length;
 
-        for (int i = 0; i < record.DataBufferCount; i++)
+        if (named && record.Kind == CanonicalKind.VarBinView)
         {
-            total += _dataBuffers[record.DataBufferStart + i].Length;
+            total += ViewedBytes(record.BufferA.Span, record.Length);
+        }
+        else
+        {
+            for (int i = 0; i < record.DataBufferCount; i++)
+            {
+                total += _dataBuffers[record.DataBufferStart + i].Length;
+            }
         }
 
         if (record.Validity.Kind == ValidityKind.Bitmap)
         {
-            total += ByteSize(record.Validity.CanonicalNodeIndex);
+            total += Size(record.Validity.CanonicalNodeIndex, named);
         }
 
         for (int i = 0; i < record.ChildCount; i++)
         {
-            total += ByteSize(_children[record.ChildStart + i]);
+            total += Size(_children[record.ChildStart + i], named);
         }
 
         return total;
+    }
+
+    /// <summary>The heap bytes <paramref name="rows"/> views name: the length of each that is not inline.</summary>
+    private static long ViewedBytes(ReadOnlySpan<byte> views, int rows)
+    {
+        const int ViewSize = Decoders.Canonical.CanonicalSupport.ViewSize;
+        const uint MaxInline = Decoders.Canonical.CanonicalSupport.MaxInlineViewLength;
+
+        ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(views[..(rows * ViewSize)]);
+        long bytes = 0;
+        for (int row = 0; row < words.Length; row += ViewSize / sizeof(uint))
+        {
+            uint length = words[row];
+            bytes += length > MaxInline ? length : 0u;
+        }
+
+        return bytes;
     }
 
     /// <summary>

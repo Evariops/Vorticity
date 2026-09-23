@@ -756,7 +756,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         // Nothing pending and already big enough: write it where it lies, with no transit copy.
         if (_pending.Count == 0 &&
             rows >= _rowBlock &&
-            (seal || arena.ByteSize(root) >= _blockBytes) &&
+            (seal || arena.NamedBytes(root) >= _blockBytes) &&
             rows % _rowBlock == 0)
         {
             await EmitChunkAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
@@ -842,12 +842,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         return Math.Max(1, blocks) * _rowBlock;
     }
 
-    /// <summary>The canonical bytes of the widest column of <paramref name="root"/>, and of all its columns.</summary>
+    /// <summary>
+    /// The canonical bytes of the widest column of <paramref name="root"/>, and of all its columns:
+    /// of a text column, the bytes its rows name, since a batch cut from a larger one keeps that
+    /// one's whole heap and would otherwise be sized as holding it.
+    /// </summary>
     private (long Widest, long Total) ColumnBytes(CanonicalArena arena, int root)
     {
         if (!_isTabular)
         {
-            long bytes = arena.ByteSize(root);
+            long bytes = arena.NamedBytes(root);
             return (bytes, bytes);
         }
 
@@ -856,7 +860,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         long total = 0;
         for (int field = 0; field < _fieldCount; field++)
         {
-            long bytes = arena.ByteSize(node.GetFieldIndex(field));
+            long bytes = arena.NamedBytes(node.GetFieldIndex(field));
             widest = Math.Max(widest, bytes);
             total += bytes;
         }

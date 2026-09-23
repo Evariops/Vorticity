@@ -12,14 +12,19 @@
 using System;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.File;
+using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
+using Vorticity.Types;
 using Vorticity.Writing;
 using Xunit;
 
@@ -61,6 +66,66 @@ public sealed class BatchingSizeTests
         Console.Out.WriteLine(report);
 
         Assert.True(ratio <= FragmentationCeiling, report);
+    }
+
+    [Fact]
+    public async Task AWindowOfALargerBatchIsSizedByTheRowsItNames()
+    {
+        // A window keeps its batch's whole text heap, of which its views name a part; sized by the
+        // heap, it would cut the file's chunks at a block. The same rows handed over as windows and
+        // as batches of their own write the same file.
+        Decoders.EnsureRegistered();
+        const int rows = 60_000;
+        DTypeArena types = new DTypeArena();
+        DType utf8 = types.Utf8(Nullability.NonNullable);
+        DType schema = types.Struct(["text"], [utf8], Nullability.NonNullable);
+        CanonicalArena whole = new CanonicalArena();
+        VortexBuffer views = whole.Allocate(rows * 16, 16, out Span<byte> viewBytes);
+        VortexBuffer heap = whole.Allocate(rows * 24, 8, out Span<byte> heapBytes);
+        for (int row = 0; row < rows; row++)
+        {
+            Span<byte> value = heapBytes.Slice(row * 24, 24);
+            Encoding.ASCII.GetBytes(string.Create(CultureInfo.InvariantCulture, $"text-{row * 7_919 % 100_003:D19}"), value);
+            Span<byte> view = viewBytes.Slice(row * 16, 16);
+            MemoryMarshal.Write(view, 24);
+            value[..4].CopyTo(view[4..]);
+            MemoryMarshal.Write(view[8..], 0);
+            MemoryMarshal.Write(view[12..], row * 24);
+        }
+
+        int column = whole.AddVarBinView(utf8, rows, Validity.NonNullable, views, [heap]);
+        int root = whole.AddStruct(schema, rows, Validity.NonNullable, [column]);
+
+        byte[] windows = await WriteAsync(schema, whole, root, rows, own: false);
+        byte[] owned = await WriteAsync(schema, whole, root, rows, own: true);
+
+        Assert.Equal(owned, windows);
+    }
+
+    private static async Task<byte[]> WriteAsync(DType schema, CanonicalArena whole, int root, int rows, bool own)
+    {
+        using MemoryStream stream = new MemoryStream();
+        VortexWriteOptions options = new VortexWriteOptions { Identity = new Guid("29292929-2929-4929-8929-292929292929") };
+        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream), schema, options))
+        {
+            CanonicalArena apart = new CanonicalArena();
+            for (int start = 0; start < rows; start += 5_000)
+            {
+                int window = CanonicalSlice.SliceAcross(whole, whole, root, start, 5_000);
+                using (RecordBatch batch = own
+                    ? new RecordBatch(apart, apart.CopyFrom(whole, window), start)
+                    : new RecordBatch(whole, window, start))
+                {
+                    await writer.WriteAsync(batch, CancellationToken.None);
+                }
+
+                apart.Reset();
+            }
+
+            await writer.CompleteAsync(CancellationToken.None);
+        }
+
+        return stream.ToArray();
     }
 
     /// <summary>Reads the entry and writes it back, optionally forcing a batch size.</summary>
