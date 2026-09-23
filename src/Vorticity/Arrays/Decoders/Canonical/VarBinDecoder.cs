@@ -41,11 +41,12 @@ internal sealed class VarBinDecoder : ArrayDecoder
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The offsets child is still decoded and validated whole: it is a <c>vortex.primitive</c> read
-    /// zero-copy, so decoding it is a buffer wrap, and
-    /// <see cref="ArrayDecodeContext.IsNodeChecked"/> keeps the offset walk to once per node per
-    /// scan rather than once per batch. What this skips is the per-row work: sixteen bytes of view,
-    /// and a UTF-8 check, for every row of the node when a take wants a few of them.
+    /// A take much sparser than the node decodes only the offsets its rows need, which a
+    /// bit-packed offsets child unpacks block by block, and checks only those pairs. A denser take
+    /// decodes and validates the offsets child whole, and
+    /// <see cref="ArrayDecodeContext.IsNodeChecked"/> keeps that walk to once per node per scan
+    /// rather than once per batch. Either way what is skipped is the per-row work: sixteen bytes of
+    /// view, and a UTF-8 check, for every row of the node when a take wants a few of them.
     /// </para>
     /// <para>
     /// It exists because <c>vortex.parquet.variant</c> declares itself selective. A root that
@@ -79,7 +80,6 @@ internal sealed class VarBinDecoder : ArrayDecoder
 
         int offsetCount = ArrayDecodeContext.CheckedLength((ulong)length + 1, Id + " offset count");
         DType offsetsDType = context.Types.Primitive(offsetsPType, Nullability.NonNullable);
-        int offsetsIndex = context.DecodeChild(in node, 0, offsetsDType, offsetCount);
 
         // Index 1 when present; DecodeValidity rejects any other child count for us.
         Validity validity = context.DecodeValidity(in node, 1, dtype.Nullability, length);
@@ -88,12 +88,18 @@ internal sealed class VarBinDecoder : ArrayDecoder
             validity = Compute.CanonicalFilter.FilterValidity(context.Canonical, validity, wanted);
         }
 
+        VortexBuffer bytes = node.GetBuffer(0);
+        ValidityMask mask = ValidityMask.From(context, validity);
+        if (selective && (long)wanted.Length * SparseRows < length && !mask.AllInvalid
+            && TrySparse(context, in node, offsetsDType, offsetsPType, offsetCount, wanted, bytes, dtype, validity, in mask, out int sparse))
+        {
+            return sparse;
+        }
+
+        int offsetsIndex = context.DecodeChild(in node, 0, offsetsDType, offsetCount);
         CanonicalNode offsets = CanonicalSupport.RequirePrimitiveChild(
             context, offsetsIndex, offsetsPType, offsetCount, Id + " offsets");
-
-        VortexBuffer bytes = node.GetBuffer(0);
         ReadOnlySpan<byte> offsetBytes = offsets.Values.Span;
-        ValidityMask mask = ValidityMask.From(context, validity);
 
         // "The offsets start at zero, never decrease and stay inside the heap" is a property of the
         // node, and a selective read visits the same node once per batch of the take, so the walk
@@ -154,6 +160,77 @@ internal sealed class VarBinDecoder : ArrayDecoder
         Span<VortexBuffer> single = stackalloc VortexBuffer[1];
         single[0] = bytes;
         return context.Canonical.AddVarBinView(dtype, produced, validity, views, single);
+    }
+
+    /// <summary>
+    /// A take of under a quarter of the node's rows reads its offsets apart. Measured on ten million
+    /// texts of 12 to 16 bytes, bit-packed offsets: a pair per row is the faster at every density up
+    /// to a fifth of the rows, 3.3 ms against 13 for a thousand, 58 against 63 for a fifth, and the
+    /// two are even from a third on.
+    /// </summary>
+    private const int SparseRows = 4;
+
+    /// <summary>
+    /// A take of a few rows reads only the offsets its rows need -- the first, which must be zero,
+    /// and each wanted row's and the next -- and checks only those pairs, as it cuts the views.
+    /// </summary>
+    /// <remarks>
+    /// The whole-node walk it skips is a property of rows the take does not read; the pairs it
+    /// reads are held to the heap and, for text, to UTF-8, which is all a view needs. A pair that
+    /// fails gives the rows back to the whole read, which reports the fault by its row.
+    /// </remarks>
+    /// <returns>Whether the views were cut; the node's index in <paramref name="produced"/> when they were.</returns>
+    private static bool TrySparse(
+        ArrayDecodeContext context, in ArrayNode node, DType offsetsDType, PType offsetsPType, int offsetCount,
+        ReadOnlySpan<int> wanted, VortexBuffer bytes, DType dtype, Validity validity, in ValidityMask mask,
+        out int produced)
+    {
+        // Wanted rows ascend, so each row's first offset is the one the row before it ended at or
+        // a new one, and its second always follows its first: row k spans offsets pairs[k] and
+        // pairs[k] + 1 of those decoded, which is the selection the child is asked for.
+        int count = wanted.Length;
+        Span<int> neededStack = stackalloc int[129];
+        Span<int> pairsStack = stackalloc int[64];
+        using Scratch<int> needed = new Scratch<int>((2 * count) + 1, neededStack);
+        using Scratch<int> pairs = new Scratch<int>(count, pairsStack);
+        Span<int> rows = needed.Span;
+        Span<int> starts = pairs.Span;
+        int used = 1;
+        rows[0] = 0;
+        for (int k = 0; k < count; k++)
+        {
+            int row = wanted[k];
+            if (row != rows[used - 1])
+            {
+                rows[used++] = row;
+            }
+
+            starts[k] = used - 1;
+            rows[used++] = row + 1;
+        }
+
+        int offsetsIndex = context.DecodeChildSelected(in node, 0, offsetsDType, offsetCount, rows[..used]);
+        CanonicalNode offsets = CanonicalSupport.RequirePrimitiveChild(
+            context, offsetsIndex, offsetsPType, used, Id + " offsets");
+        ReadOnlySpan<byte> offsetBytes = offsets.Values.Span;
+        RequireZeroStart(offsetBytes, offsetsPType);
+
+        int viewBytes = ArrayDecodeContext.CheckedMultiply(count, CanonicalSupport.ViewSize, Id + " views");
+        VortexBuffer views = CanonicalSupport.AllocateUninitialized(
+            context, viewBytes, CanonicalSupport.ViewSize, out Span<byte> writable);
+        if (!ViewKernels.TryBuildFromPairs(
+            offsetBytes, offsetsPType, bytes.Span, writable, starts, dtype.Kind == DTypeKind.Utf8, in mask))
+        {
+            produced = -1;
+            return false;
+        }
+
+        Span<VortexBuffer> single = stackalloc VortexBuffer[1];
+        single[0] = bytes;
+        produced = bytes.Length == 0
+            ? context.Canonical.AddVarBinView(dtype, count, validity, views, default)
+            : context.Canonical.AddVarBinView(dtype, count, validity, views, single);
+        return true;
     }
 
     /// <summary>Offsets must start at zero.</summary>

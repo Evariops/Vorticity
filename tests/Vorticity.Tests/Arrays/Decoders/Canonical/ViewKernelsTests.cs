@@ -240,6 +240,51 @@ public sealed class ViewKernelsTests
         });
     }
 
+    /// <summary>
+    /// A take's rows cut from offsets decoded apart: each row spans the pair its entry names, a null
+    /// row is the empty view whatever its pair says, and a valid row whose pair leaves the heap, goes
+    /// back, or is not UTF-8 makes the cut refuse rather than throw.
+    /// </summary>
+    [Fact]
+    public void PairsCutTheirRowsAndRefuseWhatAViewCannotHold()
+    {
+        // Offsets as a take decodes them: row zero's, then 3..3, 3..8 and 8..12 shared end to start.
+        byte[] heap = Encoding.UTF8.GetBytes("abcdefghéxy");
+        int[] offsets = [0, 3, 3, 8, 12];
+        int[] pairs = [0, 1, 2, 3];
+        CanonicalArena arena = new CanonicalArena();
+        ValidityMask all = ValidityMask.From(arena, Validity.NonNullable);
+        byte[] views = new byte[4 * 16];
+        Assert.True(ViewKernels.TryBuildFromPairs(Int32s(offsets), PType.I32, heap, views, pairs, requireUtf8: true, in all));
+        Assert.Equal("abc", Text(views, 0, heap));
+        Assert.Equal("", Text(views, 1, heap));
+        Assert.Equal("defgh", Text(views, 2, heap));
+        Assert.Equal("éxy", Text(views, 3, heap));
+
+        // A null row's pair is never read, even when it could not be cut.
+        int[] wild = [0, 3, 99, 2, 12];
+        ValidityMask second = ValidityMask.From(arena, Bitmap(arena, [true, false, false, true]));
+        byte[] nulls = new byte[4 * 16];
+        Assert.True(ViewKernels.TryBuildFromPairs(Int32s(wild), PType.I32, heap, nulls, pairs, requireUtf8: true, in second));
+        Assert.All(nulls.AsSpan(16, 32).ToArray(), b => Assert.Equal(0, b));
+
+        // Past the heap, backwards, and through a character, under a valid row.
+        Assert.False(ViewKernels.TryBuildFromPairs(Int32s([0, 3, 13]), PType.I32, heap, new byte[32], [0, 1], requireUtf8: false, in all));
+        Assert.False(ViewKernels.TryBuildFromPairs(Int32s([0, 5, 2]), PType.I32, heap, new byte[32], [0, 1], requireUtf8: false, in all));
+        Assert.False(ViewKernels.TryBuildFromPairs(Int32s([0, 9, 12]), PType.I32, heap, new byte[32], [0, 1], requireUtf8: true, in all));
+        Assert.True(ViewKernels.TryBuildFromPairs(Int32s([0, 9, 12]), PType.I32, heap, new byte[32], [0, 1], requireUtf8: false, in all));
+    }
+
+    /// <summary>The bytes view <paramref name="row"/> of <paramref name="views"/> names.</summary>
+    private static string Text(byte[] views, int row, byte[] heap)
+    {
+        ReadOnlySpan<byte> view = views.AsSpan(row * 16, 16);
+        int size = BinaryPrimitives.ReadInt32LittleEndian(view);
+        return size <= 12
+            ? Encoding.UTF8.GetString(view.Slice(4, size))
+            : Encoding.UTF8.GetString(heap, BinaryPrimitives.ReadInt32LittleEndian(view[12..]), size);
+    }
+
     /// <summary>A validity bitmap of <paramref name="valid"/> in <paramref name="arena"/>.</summary>
     private static Validity Bitmap(CanonicalArena arena, bool[] valid)
     {

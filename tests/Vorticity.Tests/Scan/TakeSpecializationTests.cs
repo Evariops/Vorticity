@@ -198,6 +198,94 @@ public sealed class TakeSpecializationTests
     }
 
     /// <summary>Awkward on purpose: block boundaries, both ends, and a prime stride between.</summary>
+    /// <summary>
+    /// A take of a few rows of text this writer wrote plain, whose offsets it bit-packs, reads only
+    /// the offsets of the rows it wants: rows that share an offset, row zero, the last row, empty
+    /// values, nulls, a chunk's first and last rows, and the same rows as a full scan put there.
+    /// </summary>
+    [Fact]
+    public async Task ASparseTakeOfWrittenTextReadsWhatAFullScanReads()
+    {
+        Decoders.EnsureRegistered();
+        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-sparse-take-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            const int rows = 100_000;
+            await WriteTextAsync(path, rows);
+            List<string> all = await ReadAll(path);
+            long[] wanted = [0, 1, 2, 3, 699, 700, 1023, 1024, 5000, 5001, 65_535, 65_536, 99_998, 99_999];
+            List<string> expected = [];
+            foreach (long index in wanted)
+            {
+                expected.Add(all[(int)index]);
+            }
+
+            Assert.Equal(expected, await ReadTake(path, wanted));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>A nullable text column of <paramref name="rows"/> rows, written plain: a null row in seven, and every length from none to twenty.</summary>
+    private static async Task WriteTextAsync(string path, int rows)
+    {
+        DTypeArena types = new DTypeArena();
+        DType text = types.Utf8(Nullability.Nullable);
+        DType schema = types.Struct(["t"], [text], Nullability.NonNullable);
+        await using VortexFileWriter writer = VortexFileWriter.Create(
+            path, schema, new VortexWriteOptions { Compression = CompressionProfile.None });
+        const int batch = 16_384;
+        for (int start = 0; start < rows; start += batch)
+        {
+            int count = Math.Min(batch, rows - start);
+            CanonicalArena arena = new CanonicalArena();
+            Vorticity.Buffers.VortexBuffer heap = arena.Allocate(count * 20, 8, out Span<byte> heapBytes);
+            Vorticity.Buffers.VortexBuffer views = arena.Allocate(count * 16, 16, out Span<byte> viewBytes);
+            Vorticity.Buffers.VortexBuffer bits = arena.Allocate((count + 7) / 8, 8, out Span<byte> bitBytes);
+            viewBytes.Clear();
+            bitBytes.Clear();
+            int used = 0;
+            for (int i = 0; i < count; i++)
+            {
+                int row = start + i;
+                if (row % 7 == 3)
+                {
+                    continue;
+                }
+
+                bitBytes[i >> 3] |= (byte)(1 << (i & 7));
+                int length = row % 21;
+                for (int b = 0; b < length; b++)
+                {
+                    heapBytes[used + b] = (byte)('a' + ((row + b) % 26));
+                }
+
+                Span<byte> view = viewBytes.Slice(i * 16, 16);
+                System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(view, length);
+                if (length <= 12)
+                {
+                    heapBytes.Slice(used, length).CopyTo(view[4..]);
+                }
+                else
+                {
+                    heapBytes.Slice(used, 4).CopyTo(view[4..]);
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(view[12..], used);
+                    used += length;
+                }
+            }
+
+            int validity = arena.AddBool(types.Bool(Nullability.NonNullable), count, Validity.NonNullable, bits, 0);
+            int column = arena.AddVarBinView(text, count, Validity.Bitmap(validity), views, [heap.Slice(0, Math.Max(used, 1))]);
+            int root = arena.AddStruct(schema, count, Validity.NonNullable, [column]);
+            using RecordBatch record = new RecordBatch(arena, root, start);
+            await writer.WriteAsync(record, CancellationToken.None);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None);
+    }
+
     private static long[] Indices(int rowCount)
     {
         SortedSet<long> wanted = [0, rowCount - 1];

@@ -1588,6 +1588,70 @@ internal static class ViewKernels
     }
 
     /// <summary>
+    /// Views for a few rows whose offsets were decoded apart from the rest: row <c>i</c> of the
+    /// output spans <c>offsets[pairs[i]]</c> to <c>offsets[pairs[i] + 1]</c>.
+    /// </summary>
+    /// <returns>
+    /// Whether every valid row fits the heap and, for text, is UTF-8; false at the first that does
+    /// not, for a read of the whole offsets to report it by its row.
+    /// </returns>
+    internal static bool TryBuildFromPairs(
+        ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, Span<byte> views,
+        ReadOnlySpan<int> pairs, bool requireUtf8, in ValidityMask mask) =>
+        ptype switch
+        {
+            PType.U8 => FromPairs<byte>(offsets, heap, views, pairs, requireUtf8, in mask),
+            PType.U16 => FromPairs<ushort>(offsets, heap, views, pairs, requireUtf8, in mask),
+            PType.U32 => FromPairs<uint>(offsets, heap, views, pairs, requireUtf8, in mask),
+            PType.U64 => FromPairs<ulong>(offsets, heap, views, pairs, requireUtf8, in mask),
+            PType.I8 => FromPairs<sbyte>(offsets, heap, views, pairs, requireUtf8, in mask),
+            PType.I16 => FromPairs<short>(offsets, heap, views, pairs, requireUtf8, in mask),
+            PType.I32 => FromPairs<int>(offsets, heap, views, pairs, requireUtf8, in mask),
+            _ => FromPairs<long>(offsets, heap, views, pairs, requireUtf8, in mask),
+        };
+
+    private static bool FromPairs<TOff>(
+        ReadOnlySpan<byte> offsets, ReadOnlySpan<byte> heap, Span<byte> views,
+        ReadOnlySpan<int> pairs, bool requireUtf8, in ValidityMask mask)
+        where TOff : unmanaged
+    {
+        ReadOnlySpan<TOff> typed = MemoryMarshal.Cast<byte, TOff>(offsets);
+        bool allValid = mask.AllValid;
+        ref byte heapRef = ref MemoryMarshal.GetReference(heap);
+        ref byte viewRef = ref MemoryMarshal.GetReference(views);
+        int heapLength = heap.Length;
+        for (int i = 0; i < pairs.Length; i++)
+        {
+            ref byte view = ref Unsafe.Add(ref viewRef, i * ViewSize);
+            if (!allValid && !mask.IsValid(i))
+            {
+                Unsafe.WriteUnaligned(ref view, 0UL);
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), 0UL);
+                continue;
+            }
+
+            int pair = pairs[i];
+            ulong start = Widen(typed[pair]);
+            ulong end = Widen(typed[pair + 1]);
+            if (end < start || end > (ulong)heapLength)
+            {
+                return false;
+            }
+
+            int size = (int)(end - start);
+            ref byte value = ref Unsafe.Add(ref heapRef, (nint)start);
+            if (requireUtf8 && !Utf8.IsValid(MemoryMarshal.CreateReadOnlySpan(ref value, size)))
+            {
+                return false;
+            }
+
+            CanonicalSupport.WriteView(ref view, ref value, size, 0, (int)start);
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// The arm of <see cref="BuildFromOffsets"/> with nulls in play: a null row gets the empty
     /// view, and a valid row is checked against the heap, and as UTF-8, on its own.
     /// </summary>
