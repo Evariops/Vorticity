@@ -289,7 +289,7 @@ internal sealed class RetainedChunks : IDisposable
                 int retained = _count;
                 for (int i = 0; i < retained; i++)
                 {
-                    RetainedChunk spare = RetainedChunkPool.Rent();
+                    RetainedChunk spare = RetainedChunkPool.Shared.Rent();
                     spare.Arena ??= new CanonicalArena();
                     Recycle(spare);
                 }
@@ -351,7 +351,7 @@ internal sealed class RetainedChunks : IDisposable
 
                 entry.ForgetLoans();
                 Recycle(entry);
-                RetainedChunkPool.Return(entry);
+                RetainedChunkPool.Shared.Return(entry);
             }
 
             if (_entries.Length != 0)
@@ -367,7 +367,7 @@ internal sealed class RetainedChunks : IDisposable
             {
                 _spares = spare.NextSpare;
                 spare.NextSpare = null;
-                RetainedChunkPool.Return(spare);
+                RetainedChunkPool.Shared.Return(spare);
             }
 
             Wake();
@@ -379,7 +379,7 @@ internal sealed class RetainedChunks : IDisposable
         RetainedChunk? spare = _spares;
         if (spare is null)
         {
-            return RetainedChunkPool.Rent();
+            return RetainedChunkPool.Shared.Rent();
         }
 
         _spares = spare.NextSpare;
@@ -682,26 +682,52 @@ internal sealed class RetainedChunk
 /// </summary>
 /// <remarks>
 /// Process-wide, because an entry belongs to no file: its arena's storage went back to the memory
-/// pool with the reset, and what is kept is its managed tables, a few kilobytes an entry. The bound
-/// is what several scans of wide projections hold at once; an entry past it is left to the collector.
+/// pool with the reset, and what is kept is its managed tables, a few kilobytes an entry. The pool
+/// keeps as many as it is given back, which is what the widest scans so far held at once -- two a
+/// column or so -- up to a bound past which an entry is left to the collector. A fixed 256 made
+/// every scan of 256 columns build the entries past it anew, 1.8 MB a scan; the bound now lets
+/// scans of a couple of thousand columns keep theirs, a few megabytes for the process.
 /// </remarks>
-internal static class RetainedChunkPool
+internal sealed class RetainedChunkPool
 {
-    private const int Capacity = 256;
+    private readonly int _maxCapacity;
+    private readonly Lock _gate = new Lock();
+    private RetainedChunk?[] _entries;
+    private int _count;
 
-    private static readonly RetainedChunk?[] Entries = new RetainedChunk?[Capacity];
-    private static readonly Lock Gate = new Lock();
-    private static int _count;
+    /// <summary>Creates a pool.</summary>
+    /// <param name="initialCapacity">The entries it has room for before it first grows.</param>
+    /// <param name="maxCapacity">The most entries it keeps.</param>
+    internal RetainedChunkPool(int initialCapacity, int maxCapacity)
+    {
+        _entries = new RetainedChunk?[initialCapacity];
+        _maxCapacity = maxCapacity;
+    }
+
+    /// <summary>The pool the scans of the process share.</summary>
+    internal static RetainedChunkPool Shared { get; } = new RetainedChunkPool(256, 4096);
+
+    /// <summary>The entries it keeps now.</summary>
+    internal int Count
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _count;
+            }
+        }
+    }
 
     /// <summary>An entry given back by an earlier scan, or a new one when none waits.</summary>
-    internal static RetainedChunk Rent()
+    internal RetainedChunk Rent()
     {
-        lock (Gate)
+        lock (_gate)
         {
             if (_count > 0)
             {
-                RetainedChunk entry = Entries[--_count]!;
-                Entries[_count] = null;
+                RetainedChunk entry = _entries[--_count]!;
+                _entries[_count] = null;
                 return entry;
             }
         }
@@ -710,14 +736,21 @@ internal static class RetainedChunkPool
     }
 
     /// <summary>Keeps an entry for a later scan; its arena is reset and it holds no claim, segment or loan.</summary>
-    internal static void Return(RetainedChunk entry)
+    internal void Return(RetainedChunk entry)
     {
-        lock (Gate)
+        lock (_gate)
         {
-            if (_count < Capacity)
+            if (_count == _entries.Length)
             {
-                Entries[_count++] = entry;
+                if (_count == _maxCapacity)
+                {
+                    return;
+                }
+
+                Array.Resize(ref _entries, Math.Min(_count * 2, _maxCapacity));
             }
+
+            _entries[_count++] = entry;
         }
     }
 }

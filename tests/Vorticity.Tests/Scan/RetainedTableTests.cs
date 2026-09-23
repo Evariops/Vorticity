@@ -34,6 +34,36 @@ public sealed class RetainedTableTests
         Assert.Equal(empty, retaining);
     }
 
+    /// <summary>
+    /// The pool keeps every entry a wide scan gives back, past the room it started with, and hands
+    /// the same entries to the next scan; past its bound it keeps none.
+    /// </summary>
+    [Fact]
+    public void ThePoolKeepsWhatAWideScanGivesBackUpToItsBound()
+    {
+        RetainedChunkPool pool = new RetainedChunkPool(initialCapacity: 4, maxCapacity: 24);
+        RetainedChunk[] given = new RetainedChunk[20];
+        for (int i = 0; i < given.Length; i++)
+        {
+            given[i] = new RetainedChunk();
+            pool.Return(given[i]);
+        }
+
+        Assert.Equal(20, pool.Count);
+        for (int i = given.Length - 1; i >= 0; i--)
+        {
+            Assert.Same(given[i], pool.Rent());
+        }
+
+        Assert.Equal(0, pool.Count);
+        for (int i = 0; i < 30; i++)
+        {
+            pool.Return(new RetainedChunk());
+        }
+
+        Assert.Equal(24, pool.Count);
+    }
+
     [Fact]
     public void AnEntryIsFoundUntilItsBatchesAreDeadAndThenEvicted()
     {
