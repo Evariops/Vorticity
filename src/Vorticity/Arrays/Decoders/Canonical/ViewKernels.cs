@@ -65,9 +65,10 @@ internal static class ViewKernels
         // loop reading one length at a time through a bounds check. Widening into 64-bit lanes
         // keeps the total exact for every unsigned width: the widest length and the largest row
         // count a 32-bit array can hold still multiply to less than a `ulong` holds, and the
-        // narrower types only leave more room. The signed types keep the scalar loop, because their
-        // answer is not the sum but the index of the first negative length, which a reduction
-        // discards.
+        // narrower types only leave more room. A signed type's answer is also the index of the
+        // first negative length, which a reduction discards: 32-bit lengths, the signed type files
+        // use, are summed as a reduction that notes whether any is negative, and only then does the
+        // scalar loop run, to name it. The other signed types keep the scalar loop.
         if (!selective)
         {
             switch (ptype)
@@ -78,6 +79,13 @@ internal static class ViewKernels
                     return (SumWidening(MemoryMarshal.Cast<byte, ushort>(lengths)[..count]), 0, -1);
                 case PType.U32:
                     return (SumWidening(MemoryMarshal.Cast<byte, uint>(lengths)[..count]), 0, -1);
+                case PType.I32:
+                    if (SumWidening(MemoryMarshal.Cast<byte, int>(lengths)[..count], out long signedTotal))
+                    {
+                        return (signedTotal, 0, -1);
+                    }
+
+                    break;
                 default:
                     break;
             }
@@ -205,6 +213,49 @@ internal static class ViewKernels
         }
 
         return (long)total;
+    }
+
+    /// <summary>
+    /// Sums 32-bit signed lengths widened to 64-bit lanes; false when one is negative, for the
+    /// scalar loop to name it.
+    /// </summary>
+    /// <remarks>
+    /// A negative length is found by ORing every length and testing the signs once, rather than by
+    /// a compare and a branch a length: a file's lengths are never negative, so there is nothing to
+    /// stop early for. Every length below 2^31, the sum of a 32-bit array of them cannot wrap.
+    /// </remarks>
+    private static bool SumWidening(ReadOnlySpan<int> values, out long total)
+    {
+        long sum = 0;
+        int signs = 0;
+        int i = 0;
+
+        if (Vector.IsHardwareAccelerated)
+        {
+            int lanes = Vector<int>.Count;
+            ref int source = ref MemoryMarshal.GetReference(values);
+            Vector<long> wide = Vector<long>.Zero;
+            Vector<int> ored = Vector<int>.Zero;
+            for (; i <= values.Length - lanes; i += lanes)
+            {
+                Vector<int> chunk = Vector.LoadUnsafe(ref source, (nuint)i);
+                ored |= chunk;
+                Vector.Widen(chunk, out Vector<long> low, out Vector<long> high);
+                wide += low + high;
+            }
+
+            sum = Vector.Sum(wide);
+            signs = Vector.LessThanAny(ored, Vector<int>.Zero) ? -1 : 0;
+        }
+
+        for (; i < values.Length; i++)
+        {
+            signs |= values[i];
+            sum += values[i];
+        }
+
+        total = sum;
+        return signs >= 0;
     }
 
     /// <summary>Sums 16-bit lengths, widening in two rungs so nothing can wrap.</summary>
@@ -456,7 +507,7 @@ internal static class ViewKernels
     private static bool FromLengths<TLen>(
         ReadOnlySpan<byte> lengths, ReadOnlySpan<int> wanted, ReadOnlySpan<byte> heap,
         Span<byte> views, int count, bool requireUtf8)
-        where TLen : unmanaged
+        where TLen : unmanaged, INumber<TLen>
     {
         ReadOnlySpan<TLen> typed = MemoryMarshal.Cast<byte, TLen>(lengths);
         bool referenced = false;
@@ -497,58 +548,168 @@ internal static class ViewKernels
     /// <paramref name="lengths"/>, its bytes the next ones of the heap.
     /// </summary>
     /// <returns><see langword="true"/> when any view references the heap rather than inlining.</returns>
+    /// <exception cref="VortexFormatException">
+    /// A row runs past the heap, or a UTF-8 row starts off a character.
+    /// </exception>
     /// <remarks>
     /// <para>
-    /// The loop calls nothing, so that what it holds stays in registers: a call in it, even one
-    /// only an error takes, has every row store and reload its state around it. A row that runs
-    /// past the heap, or does not start on a character of a UTF-8 heap, ends the loop instead,
-    /// and is reported after it.
+    /// The rows are taken a block at a time, as <see cref="DenseFromOffsets{TOff}"/> takes them. A
+    /// block's lengths are surveyed in vector passes before any of its rows is read: the shortest
+    /// and the longest, each inside the heap (a negative one, widened, is not), and their sum, which
+    /// must end inside it. A length is checked because it comes from the file: the sum of the
+    /// lengths is what the caller allocated the heap from, so a row running past the end means the
+    /// two disagree. The block is then cut by the loop its rows suit, each row starting where the
+    /// one before it ends.
     /// </para>
     /// <para>
-    /// A row is checked against the heap because its length comes from the file: the sum of the
-    /// lengths is what the caller allocated the heap from, so a row running past the end means the
-    /// two disagree. The whole heap is already known valid UTF-8, so a row is valid exactly when it
-    /// starts on a code-point boundary; the last row ends at the heap's end, a boundary by
-    /// construction, so only the starts are tested.
+    /// The whole heap is already known valid UTF-8, so a row is valid exactly when it starts on a
+    /// code-point boundary; the last row ends at the heap's end, a boundary by construction, so
+    /// only the starts are tested.
     /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static bool DenseFromLengths<TLen>(
         ReadOnlySpan<TLen> lengths, ReadOnlySpan<byte> heap, Span<byte> views, bool requireUtf8)
-        where TLen : unmanaged
+        where TLen : unmanaged, INumber<TLen>
     {
+        ref TLen lengthRef = ref MemoryMarshal.GetReference(lengths);
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
         int heapLength = heap.Length;
         int count = lengths.Length;
         bool referenced = false;
-        int offset = 0;
-        int i = 0;
-        for (; i < count; i++)
+        long start = 0;
+        for (int row = 0; row < count; row += OffsetBlockRows)
         {
-            int size = (int)Widen(lengths[i]);
-            if ((uint)size > (uint)(heapLength - offset)
-                || !Place(ref Unsafe.Add(ref viewRef, i * ViewSize), ref heapRef, offset, size, heapLength, requireUtf8))
+            int rows = Math.Min(OffsetBlockRows, count - row);
+            ref TLen block = ref Unsafe.Add(ref lengthRef, row);
+            Extremes(ref block, rows, out TLen least, out TLen greatest);
+            ulong shortest = Widen(least);
+            ulong longest = Widen(greatest);
+            if (shortest > (ulong)heapLength || longest > (ulong)heapLength)
             {
-                break;
+                ThrowFirstBadLengthRow(lengths, heap, requireUtf8);
             }
 
-            referenced |= size > Inline;
-            offset += size;
-        }
-
-        if (i < count)
-        {
-            int size = (int)Widen(lengths[i]);
-            if ((uint)size > (uint)(heapLength - offset))
+            long end = start + BlockSum(ref block, rows);
+            if (end > heapLength)
             {
-                ThrowRowPastHeap(i, offset, size, heapLength);
+                ThrowFirstBadLengthRow(lengths, heap, requireUtf8);
             }
 
-            ThrowInvalidRow(i);
+            nint lastStart = (nint)(end - (long)Widen(Unsafe.Add(ref block, rows - 1)));
+            ref byte blockViews = ref Unsafe.Add(ref viewRef, (nint)row * ViewSize);
+            bool cut = requireUtf8
+                ? CutBlock<TLen, ByLengths, Utf8Starts>(
+                    ref block, (nint)start, rows, shortest, longest, lastStart, ref heapRef, heapLength, ref blockViews)
+                : CutBlock<TLen, ByLengths, AnyStarts>(
+                    ref block, (nint)start, rows, shortest, longest, lastStart, ref heapRef, heapLength, ref blockViews);
+            if (!cut)
+            {
+                ThrowFirstBadLengthRow(lengths, heap, requireUtf8);
+            }
+
+            referenced |= longest > Inline;
+            start = end;
         }
 
         return referenced;
+    }
+
+    /// <summary>The least and the greatest of the <paramref name="count"/> values from <paramref name="first"/>.</summary>
+    private static void Extremes<T>(ref T first, int count, out T least, out T greatest)
+        where T : unmanaged, INumber<T>
+    {
+        least = first;
+        greatest = first;
+        int i = 0;
+        if (Vector.IsHardwareAccelerated && count >= Vector<T>.Count)
+        {
+            int lanes = Vector<T>.Count;
+            Vector<T> low = Vector.LoadUnsafe(ref first);
+            Vector<T> high = low;
+            for (i = lanes; i <= count - lanes; i += lanes)
+            {
+                Vector<T> values = Vector.LoadUnsafe(ref first, (nuint)i);
+                low = Vector.Min(low, values);
+                high = Vector.Max(high, values);
+            }
+
+            for (int lane = 0; lane < lanes; lane++)
+            {
+                least = T.Min(least, low[lane]);
+                greatest = T.Max(greatest, high[lane]);
+            }
+        }
+
+        for (; i < count; i++)
+        {
+            least = T.Min(least, Unsafe.Add(ref first, i));
+            greatest = T.Max(greatest, Unsafe.Add(ref first, i));
+        }
+    }
+
+    /// <summary>
+    /// The sum of <paramref name="count"/> lengths from <paramref name="first"/>, every one of them
+    /// already known to lie between zero and the heap's length, so that a signed one reads as the
+    /// unsigned one of the same width and nothing can wrap.
+    /// </summary>
+    private static long BlockSum<T>(ref T first, int count)
+        where T : unmanaged
+    {
+        if (typeof(T) == typeof(byte) || typeof(T) == typeof(sbyte))
+        {
+            return SumWidening(MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<T, byte>(ref first), count));
+        }
+
+        if (typeof(T) == typeof(ushort) || typeof(T) == typeof(short))
+        {
+            return SumWidening(MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<T, ushort>(ref first), count));
+        }
+
+        if (typeof(T) == typeof(uint) || typeof(T) == typeof(int))
+        {
+            return SumWidening(MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<T, uint>(ref first), count));
+        }
+
+        ref ulong wide = ref Unsafe.As<T, ulong>(ref first);
+        ulong total = 0;
+        for (nint i = 0; i < count; i++)
+        {
+            total += Unsafe.Add(ref wide, i);
+        }
+
+        return (long)total;
+    }
+
+    /// <summary>
+    /// <see cref="DenseFromLengths{TLen}"/> refused its rows; reports the first that runs past the
+    /// heap or starts off a character, the way a row-at-a-time cut meets them. An error path may cost
+    /// whatever it likes.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowFirstBadLengthRow<TLen>(ReadOnlySpan<TLen> lengths, ReadOnlySpan<byte> heap, bool requireUtf8)
+        where TLen : unmanaged
+    {
+        int offset = 0;
+        for (int i = 0; i < lengths.Length; i++)
+        {
+            int size = (int)Widen(lengths[i]);
+            if ((uint)size > (uint)(heap.Length - offset))
+            {
+                ThrowRowPastHeap(i, offset, size, heap.Length);
+            }
+
+            if (requireUtf8 && size != 0 && (heap[offset] & 0xC0) == 0x80)
+            {
+                ThrowInvalidRow(i);
+            }
+
+            offset += size;
+        }
+
+        throw new VortexFormatException(
+            "A row's length was refused, though every row lies inside the decoded heap.");
     }
 
     /// <summary>Rows whose offsets <see cref="DenseFromOffsets{TOff}"/> checks before cutting any of them.</summary>
@@ -569,7 +730,7 @@ internal static class ViewKernels
     /// surveyed before any of its rows is read, never decreasing and ending inside the heap, which
     /// puts every row of the block inside the heap, so that its rows are then cut with no check of
     /// their own. The survey is a vector pass, a lane per offset, and it also finds the block's
-    /// shortest and longest row, by which <see cref="CutBlock{TOff, TStarts}"/> picks the loop that
+    /// shortest and longest row, by which <see cref="CutBlock{T, TSizes, TStarts}"/> picks the loop that
     /// cuts it.
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -601,12 +762,14 @@ internal static class ViewKernels
                 return false;
             }
 
+            nint start = (nint)Widen(block);
+            nint lastStart = (nint)Widen(Unsafe.Add(ref block, rows - 1));
             ref byte blockViews = ref Unsafe.Add(ref viewRef, (nint)row * ViewSize);
             bool cut = requireUtf8
-                ? CutBlock<TOff, Utf8Starts>(
-                    ref block, rows, Widen(shortest), Widen(longest), ref heapRef, heapLength, ref blockViews)
-                : CutBlock<TOff, AnyStarts>(
-                    ref block, rows, Widen(shortest), Widen(longest), ref heapRef, heapLength, ref blockViews);
+                ? CutBlock<TOff, ByOffsets, Utf8Starts>(
+                    ref block, start, rows, Widen(shortest), Widen(longest), lastStart, ref heapRef, heapLength, ref blockViews)
+                : CutBlock<TOff, ByOffsets, AnyStarts>(
+                    ref block, start, rows, Widen(shortest), Widen(longest), lastStart, ref heapRef, heapLength, ref blockViews);
             if (!cut)
             {
                 return false;
@@ -686,49 +849,62 @@ internal static class ViewKernels
     /// Each loop is the cheapest one for its rows, and none branches on a row. A row longer than
     /// the inline limit has thirteen bytes of heap from its start, so a block of such rows only is
     /// read as words wherever it lies; a block with a shorter row is, when its last row, and so
-    /// every row, starts twelve bytes or more before the heap's end.
+    /// every row, starts twelve bytes or more before the heap's end. The caller has checked that
+    /// every row of the block lies inside the heap.
     /// </remarks>
-    private static bool CutBlock<TOff, TStarts>(
-        ref TOff offsets, int rows, ulong shortest, ulong longest, ref byte heap, int heapLength, ref byte views)
-        where TOff : unmanaged
+    /// <param name="rows">The block's offsets or lengths, as <typeparamref name="TSizes"/> reads them.</param>
+    /// <param name="start">Where the block's first row starts.</param>
+    /// <param name="count">Rows in the block.</param>
+    /// <param name="shortest">The block's shortest row.</param>
+    /// <param name="longest">The block's longest row.</param>
+    /// <param name="lastStart">Where the block's last row starts.</param>
+    /// <param name="heap">The value bytes.</param>
+    /// <param name="heapLength">Their length.</param>
+    /// <param name="views">The block's first view.</param>
+    private static bool CutBlock<T, TSizes, TStarts>(
+        ref T rows, nint start, int count, ulong shortest, ulong longest, nint lastStart, ref byte heap,
+        int heapLength, ref byte views)
+        where T : unmanaged
+        where TSizes : struct, IRowSizes
         where TStarts : struct, IStartCheck
     {
         if (shortest > Inline)
         {
-            return CutOutOfLine<TOff, TStarts>(ref offsets, rows, ref heap, ref views);
+            return CutOutOfLine<T, TSizes, TStarts>(ref rows, start, count, ref heap, ref views);
         }
 
-        if ((long)Widen(Unsafe.Add(ref offsets, rows - 1)) > (long)heapLength - Inline)
+        if (lastStart > heapLength - Inline)
         {
-            return CutExactly(ref offsets, rows, ref heap, heapLength, ref views, TStarts.Checked);
+            return CutExactly<T, TSizes>(ref rows, start, count, ref heap, heapLength, ref views, TStarts.Checked);
         }
 
         return longest <= Inline
-            ? CutInline<TOff, TStarts>(ref offsets, rows, ref heap, ref views)
-            : CutMixed<TOff, TStarts>(ref offsets, rows, ref heap, ref views);
+            ? CutInline<T, TSizes, TStarts>(ref rows, start, count, ref heap, ref views)
+            : CutMixed<T, TSizes, TStarts>(ref rows, start, count, ref heap, ref views);
     }
 
     /// <summary>
-    /// Cuts <paramref name="rows"/> rows of twelve bytes or fewer, each with twelve bytes of heap
+    /// Cuts <paramref name="count"/> rows of twelve bytes or fewer, each with twelve bytes of heap
     /// from its start; false when a UTF-8 row starts off a character.
     /// </summary>
     /// <remarks>
     /// A row is read as two words and masked down to its size, whatever the size: two loads, two
-    /// masks and two stores. Calls nothing, for <see cref="DenseFromLengths{TLen}"/>'s reason.
+    /// masks and two stores. The loop calls nothing, so that what it holds stays in registers: a
+    /// call in it, even one only an error takes, has every row store and reload its state around
+    /// it. A fault is ORed into a flag instead and reported once the loop is done.
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static bool CutInline<TOff, TStarts>(ref TOff offsets, int rows, ref byte heap, ref byte views)
-        where TOff : unmanaged
+    private static bool CutInline<T, TSizes, TStarts>(ref T rows, nint start, int count, ref byte heap, ref byte views)
+        where T : unmanaged
+        where TSizes : struct, IRowSizes
         where TStarts : struct, IStartCheck
     {
         ref ulong lowMasks = ref MemoryMarshal.GetReference(InlineLowMasks);
         ref uint highMasks = ref MemoryMarshal.GetReference(InlineHighMasks);
-        nint start = (nint)Widen(offsets);
         int offChar = 0;
-        for (nint i = 0; i < rows; i++)
+        for (nint i = 0; i < count; i++)
         {
-            nint end = (nint)Widen(Unsafe.Add(ref offsets, i + 1));
-            nint size = end - start;
+            nint size = TSizes.SizeAt(ref rows, i, start);
             ref byte value = ref Unsafe.Add(ref heap, start);
             ulong head = Unsafe.ReadUnaligned<ulong>(ref value) & Unsafe.Add(ref lowMasks, size);
             uint tail = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref value, sizeof(ulong))) & Unsafe.Add(ref highMasks, size);
@@ -741,30 +917,30 @@ internal static class ViewKernels
             ref byte view = ref Unsafe.Add(ref views, i * ViewSize);
             Unsafe.WriteUnaligned(ref view, (ulong)size | (head << 32));
             Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), (head >> 32) | ((ulong)tail << 32));
-            start = end;
+            start += size;
         }
 
         return offChar == 0;
     }
 
     /// <summary>
-    /// Cuts <paramref name="rows"/> rows each longer than the inline limit; false when a UTF-8 row
+    /// Cuts <paramref name="count"/> rows each longer than the inline limit; false when a UTF-8 row
     /// starts off a character.
     /// </summary>
     /// <remarks>
     /// A view is the length, the first four bytes and the offset in buffer zero: one load and two
-    /// stores a row. Calls nothing, for <see cref="DenseFromLengths{TLen}"/>'s reason.
+    /// stores a row. Calls nothing, for <see cref="CutInline{T, TSizes, TStarts}"/>'s reason.
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static bool CutOutOfLine<TOff, TStarts>(ref TOff offsets, int rows, ref byte heap, ref byte views)
-        where TOff : unmanaged
+    private static bool CutOutOfLine<T, TSizes, TStarts>(ref T rows, nint start, int count, ref byte heap, ref byte views)
+        where T : unmanaged
+        where TSizes : struct, IRowSizes
         where TStarts : struct, IStartCheck
     {
-        nint start = (nint)Widen(offsets);
         int offChar = 0;
-        for (nint i = 0; i < rows; i++)
+        for (nint i = 0; i < count; i++)
         {
-            nint end = (nint)Widen(Unsafe.Add(ref offsets, i + 1));
+            nint size = TSizes.SizeAt(ref rows, i, start);
             uint prefix = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref heap, start));
             if (TStarts.Checked)
             {
@@ -772,16 +948,16 @@ internal static class ViewKernels
             }
 
             ref byte view = ref Unsafe.Add(ref views, i * ViewSize);
-            Unsafe.WriteUnaligned(ref view, (ulong)(end - start) | ((ulong)prefix << 32));
+            Unsafe.WriteUnaligned(ref view, (ulong)size | ((ulong)prefix << 32));
             Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), (ulong)start << 32);
-            start = end;
+            start += size;
         }
 
         return offChar == 0;
     }
 
     /// <summary>
-    /// Cuts <paramref name="rows"/> rows of both kinds, each with twelve bytes of heap from its
+    /// Cuts <paramref name="count"/> rows of both kinds, each with twelve bytes of heap from its
     /// start; false when a UTF-8 row starts off a character.
     /// </summary>
     /// <remarks>
@@ -791,21 +967,20 @@ internal static class ViewKernels
     /// by a mask made of the size's sign against the inline limit, and the size is clamped the same
     /// way, rather than by a conditional: the compiler keeps a conditional inside a loop a branch,
     /// and a column mixing short and long values mispredicts it. Calls nothing, for
-    /// <see cref="DenseFromLengths{TLen}"/>'s reason.
+    /// <see cref="CutInline{T, TSizes, TStarts}"/>'s reason.
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static bool CutMixed<TOff, TStarts>(ref TOff offsets, int rows, ref byte heap, ref byte views)
-        where TOff : unmanaged
+    private static bool CutMixed<T, TSizes, TStarts>(ref T rows, nint start, int count, ref byte heap, ref byte views)
+        where T : unmanaged
+        where TSizes : struct, IRowSizes
         where TStarts : struct, IStartCheck
     {
         ref ulong lowMasks = ref MemoryMarshal.GetReference(InlineLowMasks);
         ref uint highMasks = ref MemoryMarshal.GetReference(InlineHighMasks);
-        nint start = (nint)Widen(offsets);
         int offChar = 0;
-        for (nint i = 0; i < rows; i++)
+        for (nint i = 0; i < count; i++)
         {
-            nint end = (nint)Widen(Unsafe.Add(ref offsets, i + 1));
-            nint size = end - start;
+            nint size = TSizes.SizeAt(ref rows, i, start);
 
             // Negative exactly for a value too long to inline, so its sign is the out-of-line mask,
             // and adding it back where negative clamps the size to the limit.
@@ -827,35 +1002,58 @@ internal static class ViewKernels
             Unsafe.WriteUnaligned(ref view, (ulong)size | (head << 32));
             Unsafe.WriteUnaligned(
                 ref Unsafe.Add(ref view, sizeof(ulong)), inline ^ ((inline ^ reference) & (ulong)outOfLine));
-            start = end;
+            start += size;
         }
 
         return offChar == 0;
     }
 
     /// <summary>
-    /// Cuts <paramref name="rows"/> rows of which some lie within twelve bytes of the heap's end,
-    /// each by <see cref="Place"/>; false when a UTF-8 row starts off a character. The offsets were
-    /// checked by the caller.
+    /// Cuts <paramref name="count"/> rows of which some lie within twelve bytes of the heap's end,
+    /// each by <see cref="Place"/>; false when a UTF-8 row starts off a character.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static bool CutExactly<TOff>(
-        ref TOff offsets, int rows, ref byte heap, int heapLength, ref byte views, bool requireUtf8)
-        where TOff : unmanaged
+    private static bool CutExactly<T, TSizes>(
+        ref T rows, nint start, int count, ref byte heap, int heapLength, ref byte views, bool requireUtf8)
+        where T : unmanaged
+        where TSizes : struct, IRowSizes
     {
-        int start = (int)Widen(offsets);
-        for (int i = 0; i < rows; i++)
+        for (nint i = 0; i < count; i++)
         {
-            int end = (int)Widen(Unsafe.Add(ref offsets, i + 1));
-            if (!Place(ref Unsafe.Add(ref views, (nint)i * ViewSize), ref heap, start, end - start, heapLength, requireUtf8))
+            nint size = TSizes.SizeAt(ref rows, i, start);
+            if (!Place(ref Unsafe.Add(ref views, i * ViewSize), ref heap, (int)start, (int)size, heapLength, requireUtf8))
             {
                 return false;
             }
 
-            start = end;
+            start += size;
         }
 
         return true;
+    }
+
+    /// <summary>How a kernel reads the size of a row, as a type.</summary>
+    private interface IRowSizes
+    {
+        /// <summary>The size of row <paramref name="row"/> of a block, which starts at <paramref name="start"/>.</summary>
+        static abstract nint SizeAt<T>(ref T rows, nint row, nint start)
+            where T : unmanaged;
+    }
+
+    /// <summary>Rows cut by offsets: row i ends where offset i + 1 says.</summary>
+    private readonly struct ByOffsets : IRowSizes
+    {
+        public static nint SizeAt<T>(ref T rows, nint row, nint start)
+            where T : unmanaged =>
+            (nint)Widen(Unsafe.Add(ref rows, row + 1)) - start;
+    }
+
+    /// <summary>Rows cut by lengths: row i is length i long.</summary>
+    private readonly struct ByLengths : IRowSizes
+    {
+        public static nint SizeAt<T>(ref T rows, nint row, nint start)
+            where T : unmanaged =>
+            (nint)Widen(Unsafe.Add(ref rows, row));
     }
 
     /// <summary>Whether a kernel checks that each row starts on a character, as a type.</summary>
@@ -882,7 +1080,7 @@ internal static class ViewKernels
     /// them; the rows built, fewer when a length or a value runs past the stream.
     /// </summary>
     /// <remarks>
-    /// Calls nothing, for <see cref="DenseFromLengths{TLen}"/>'s reason; a row that runs past the
+    /// Calls nothing, for <see cref="CutInline{T, TSizes, TStarts}"/>'s reason; a row that runs past the
     /// stream ends the loop, and the caller walks the rows again to say which.
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]

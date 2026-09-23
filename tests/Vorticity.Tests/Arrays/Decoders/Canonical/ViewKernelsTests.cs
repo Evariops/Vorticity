@@ -97,16 +97,16 @@ public sealed class ViewKernelsTests
     }
 
     /// <summary>
-    /// Enough rows for several blocks of offsets, sized so that every loop a block can be cut by is
-    /// taken: all inline, all out of line, both, twelve-byte rows among long ones, and the last
-    /// block, which ends at the heap's end, byte-exact.
+    /// Enough rows for several blocks, cut by offsets and by lengths, sized so that every loop a
+    /// block can be cut by is taken: all inline, all out of line, both, twelve-byte rows among long
+    /// ones, and the last block, which ends at the heap's end, byte-exact.
     /// </summary>
     [Theory]
     [InlineData(0, 12)]
     [InlineData(13, 40)]
     [InlineData(12, 20)]
     [InlineData(0, 30)]
-    public void ViewsCutFromManyBlocksOfOffsetsAreTheWritersViews(int shortest, int longest)
+    public void ViewsCutFromManyBlocksAreTheWritersViews(int shortest, int longest)
     {
         Random random = new Random(shortest * 100 + longest);
         int[] sizes = new int[3_000];
@@ -121,21 +121,65 @@ public sealed class ViewKernelsTests
             heap[i] = (byte)random.Next(0x20, 0x7F);
         }
 
-        byte[] expected = Expected(heap, sizes, out _);
+        byte[] expected = Expected(heap, sizes, out bool referenced);
         CanonicalArena arena = new CanonicalArena();
         ValidityMask mask = ValidityMask.From(arena, Validity.NonNullable);
-        PType[] types = heap.Length <= short.MaxValue
+        PType[] offsetTypes = heap.Length <= short.MaxValue
             ? [PType.I16, PType.U16, PType.I32, PType.U32, PType.I64, PType.U64]
             : [PType.I32, PType.U32, PType.I64, PType.U64];
-        foreach (PType ptype in types)
+        foreach (bool requireUtf8 in (bool[])[false, true])
         {
-            foreach (bool requireUtf8 in (bool[])[false, true])
+            foreach (PType ptype in offsetTypes)
             {
                 byte[] views = new byte[sizes.Length * 16];
                 ViewKernels.BuildFromOffsets(
                     Typed(Offsets(sizes), ptype), ptype, heap, views, sizes.Length, requireUtf8, in mask, VarBinDecoder.Id);
                 Assert.Equal(expected, views);
             }
+
+            foreach (PType ptype in (PType[])[PType.I8, PType.U8, PType.I16, PType.U16, PType.I32, PType.U32, PType.I64, PType.U64])
+            {
+                byte[] views = new byte[sizes.Length * 16];
+                bool reported = ViewKernels.BuildFromLengths(
+                    Typed(sizes, ptype), ptype, default, heap, views, sizes.Length, requireUtf8);
+                Assert.Equal(expected, views);
+                Assert.Equal(referenced, reported);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The sum of 32-bit signed lengths is a reduction, and the first negative one is still named,
+    /// in the vector part and in the tail.
+    /// </summary>
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(1_777)]
+    [InlineData(2_998)]
+    public void SignedLengthsAreSummedAndTheFirstNegativeOneIsNamed(int negativeAt)
+    {
+        Random random = new Random(negativeAt + 2);
+        int[] sizes = new int[2_999];
+        long total = 0;
+        for (int i = 0; i < sizes.Length; i++)
+        {
+            sizes[i] = random.Next(0, 1_000_000);
+            total += sizes[i];
+        }
+
+        // One negative length only: a second one in the tail would be seen there whatever the
+        // vector part missed.
+        if (negativeAt >= 0)
+        {
+            sizes[negativeAt] = -3;
+        }
+
+        (long sum, _, int negative) = ViewKernels.SumLengths(Int32s(sizes), PType.I32, default, sizes.Length);
+        Assert.Equal(negativeAt >= 0 ? negativeAt : -1, negative);
+        if (negativeAt < 0)
+        {
+            Assert.Equal(total, sum);
         }
     }
 
@@ -174,9 +218,36 @@ public sealed class ViewKernelsTests
         });
         Assert.Contains("Row 1501 ", error.Message, StringComparison.Ordinal);
 
+        VortexFormatException byLengths = Assert.Throws<VortexFormatException>(() => ViewKernels.BuildFromLengths(
+            Int32s(sizes), PType.I32, default, heap, new byte[sizes.Length * 16], sizes.Length, requireUtf8: true));
+        Assert.Contains("Row 1501 ", byLengths.Message, StringComparison.Ordinal);
+
         ValidityMask binary = ValidityMask.From(arena, Validity.NonNullable);
         ViewKernels.BuildFromOffsets(
             Int32s(offsets), PType.I32, heap, new byte[sizes.Length * 16], sizes.Length, requireUtf8: false, in binary, VarBinDecoder.Id);
+        ViewKernels.BuildFromLengths(
+            Int32s(sizes), PType.I32, default, heap, new byte[sizes.Length * 16], sizes.Length, requireUtf8: false);
+    }
+
+    /// <summary>
+    /// A negative length, or lengths that run past the heap, are refused in a block past the first,
+    /// before any row of that block is read.
+    /// </summary>
+    [Fact]
+    public void ALengthNegativeOrPastTheHeapIsRefusedInALaterBlock()
+    {
+        int[] sizes = new int[3_000];
+        sizes.AsSpan().Fill(5);
+
+        int[] negative = (int[])sizes.Clone();
+        negative[2_000] = -1;
+        VortexFormatException refused = Assert.Throws<VortexFormatException>(() => ViewKernels.BuildFromLengths(
+            Int32s(negative), PType.I32, default, new byte[sizes.Length * 5], new byte[sizes.Length * 16], sizes.Length, requireUtf8: false));
+        Assert.Contains("Row 2000 ", refused.Message, StringComparison.Ordinal);
+
+        VortexFormatException past = Assert.Throws<VortexFormatException>(() => ViewKernels.BuildFromLengths(
+            Int32s(sizes), PType.I32, default, new byte[2_100 * 5], new byte[sizes.Length * 16], sizes.Length, requireUtf8: false));
+        Assert.Contains("Row 2100 ", past.Message, StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -250,12 +321,23 @@ public sealed class ViewKernelsTests
         return bytes;
     }
 
-    /// <summary><paramref name="values"/> as <paramref name="ptype"/>, one of the 16-, 32- and 64-bit integers.</summary>
+    /// <summary><paramref name="values"/> as <paramref name="ptype"/>, an integer of any width.</summary>
     private static byte[] Typed(int[] values, PType ptype)
     {
         if (ptype is PType.I32 or PType.U32)
         {
             return Int32s(values);
+        }
+
+        if (ptype is PType.I8 or PType.U8)
+        {
+            byte[] bytes8 = new byte[values.Length];
+            for (int i = 0; i < values.Length; i++)
+            {
+                bytes8[i] = checked((byte)values[i]);
+            }
+
+            return bytes8;
         }
 
         if (ptype is PType.I16 or PType.U16)
