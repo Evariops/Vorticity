@@ -49,6 +49,7 @@ public sealed record VortexWriteOptions
     private readonly int _stringBoundBytes = 16;
     private readonly IndexPolicy _indexes = IndexPolicy.None;
     private readonly ImmutableDictionary<string, EncodingHint> _hints = ImmutableDictionary<string, EncodingHint>.Empty.WithComparers(StringComparer.Ordinal);
+    private readonly ImmutableDictionary<string, int> _columnChunkTargets = ImmutableDictionary<string, int>.Empty.WithComparers(StringComparer.Ordinal);
     private readonly ImmutableDictionary<string, ReadOnlyMemory<byte>> _metadata = ImmutableDictionary<string, ReadOnlyMemory<byte>>.Empty.WithComparers(StringComparer.Ordinal);
     private bool _oneChunkPerWrite;
     private bool _noByteTarget;
@@ -91,6 +92,24 @@ public sealed record VortexWriteOptions
             ArgumentOutOfRangeException.ThrowIfNegative(value);
             _chunkTargetBytes = value;
         }
+    }
+
+    /// <summary>
+    /// The bytes a column's chunks gather, by top-level column name, for a column that wants larger
+    /// chunks than the file's: a dictionary, say, paid once for more rows. Its chunks span whole
+    /// chunks of the file, and the other columns keep theirs, which is what a read of them fetches.
+    /// </summary>
+    /// <remarks>
+    /// A target no larger than what the column holds in one of the file's chunks changes nothing.
+    /// The column's rows wait, as canonical values, until they reach its target, and a flush or the
+    /// completion writes what waits. A file whose columns are chunked apart cannot be appended to.
+    /// A name that is no top-level column, or a target that is not positive, throws at
+    /// <c>CreateWriter</c>.
+    /// </remarks>
+    public ImmutableDictionary<string, int> ColumnChunkTargetBytes
+    {
+        get => _columnChunkTargets;
+        init => _columnChunkTargets = value ?? throw new ArgumentNullException(nameof(value));
     }
 
     /// <summary>What the writer optimises for; <see cref="CompressionProfile.None"/> writes every column canonically.</summary>

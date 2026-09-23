@@ -96,6 +96,7 @@ public sealed class RoundTripSweepTests
         int stringBounded = 0;
         int tables = 0;
         int compacted = 0;
+        int apart = 0;
         Dictionary<string, int> built = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
@@ -173,6 +174,22 @@ public sealed class RoundTripSweepTests
                 continue;
             }
 
+            // THE OTHER TABLES OF THE WRITE-ONCE THIRD CHUNK EVERY OTHER COLUMN APART, so that Rust
+            // reads columns whose chunks end at different rows: chunks of the file a few blocks
+            // long, and every other column gathering many of them into chunks of its own.
+            if (mode == 0 && source.DType.FieldCount > 1)
+            {
+                System.Collections.Immutable.ImmutableDictionary<string, int> targets =
+                    System.Collections.Immutable.ImmutableDictionary<string, int>.Empty;
+                for (int field = 1; field < source.DType.FieldCount; field += 2)
+                {
+                    targets = targets.Add(source.DType.GetFieldName(field), 64 << 10);
+                }
+
+                options = options with { BlockRows = 256, ChunkTargetBytes = 4 << 10, ColumnChunkTargetBytes = targets };
+                apart++;
+            }
+
             IReadOnlyList<IndexWriteReport> indexes;
             int columns;
             long split = mode == 1 ? (source.RowCount / 2) + 1 : long.MaxValue;
@@ -238,7 +255,8 @@ public sealed class RoundTripSweepTests
             .Append(appended.ToString(CultureInfo.InvariantCulture)).Append(" appended, ")
             .Append(afterTheFact.ToString(CultureInfo.InvariantCulture)).Append(" indexed after the fact, ")
             .Append(stringBounded.ToString(CultureInfo.InvariantCulture)).Append(" with string zone bounds, ")
-            .Append(compacted.ToString(CultureInfo.InvariantCulture)).Append(" compacted from three dataset objects;");
+            .Append(compacted.ToString(CultureInfo.InvariantCulture)).Append(" compacted from three dataset objects, ")
+            .Append(apart.ToString(CultureInfo.InvariantCulture)).Append(" with columns chunked apart;");
         foreach ((string kind, int files) in built)
         {
             line.Append(' ').Append(kind).Append(": ").Append(files.ToString(CultureInfo.InvariantCulture)).Append(';');
@@ -250,6 +268,7 @@ public sealed class RoundTripSweepTests
         Assert.True(appended > 15 && afterTheFact > 15, $"{appended} appended, {afterTheFact} indexed after the fact");
         Assert.True(stringBounded > 50, $"only {stringBounded} files carry string zone bounds");
         Assert.True(compacted > 10, $"only {compacted} files are compacted dataset objects");
+        Assert.True(apart > 10, $"only {apart} files chunk their columns apart");
 
         // Enough files with payload regions between their chunks that the rule is tested, not assumed.
         foreach (string kind in new[] { IndexKinds.BloomSbbf, IndexKinds.PostingsBlocks, IndexKinds.SortedRuns })

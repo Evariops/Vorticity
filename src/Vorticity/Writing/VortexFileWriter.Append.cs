@@ -482,6 +482,12 @@ public sealed partial class VortexFileWriter
                 throw Refused("its root is not a struct of columns");
             }
 
+            // An append keeps the columns chunked alike, which is what it can append to.
+            if (options is { ColumnChunkTargetBytes.IsEmpty: false })
+            {
+                throw Refused("the options give columns chunks of their own, and an append chunks them alike");
+            }
+
             LayoutTree tree = file.LayoutTree;
             int fields = schema.FieldCount;
             List<(LayoutNode Flat, long Start)>[] chunks = new List<(LayoutNode, long)>[fields];

@@ -43,6 +43,10 @@ completed: chunk rows 8192, 1808, 22708 bytes
   what a read fetches of a column, so that bounds what a selective read brings in, and at eight bytes
   a value it is sixteen blocks, enough for a scan to pay the cost of a chunk seldom.
   `ChunkTargetBytes` sets a fixed target in bytes of all the columns instead.
+  `ColumnChunkTargetBytes` gives one column a target of its own: its rows wait across the file's
+  chunks until they hold that many bytes, and go out as one chunk of that column, which a dictionary
+  then pays for once. The other columns keep the file's chunks, and so what a selective read of them
+  fetches. `WriteReport.ChunkRowsOf` gives each column's chunks.
 * `FlushAsync` seals every whole block pending into a chunk and hands the encoded chunks to the file.
   A partial block stays pending: the first flush above, with 5 000 rows, wrote nothing.
 * `CompleteAsync` seals the whole blocks, writes what remains as the tail, a chunk shorter than a
@@ -91,7 +95,8 @@ cut there however they arrive.
   their chunk.
 * **Flush when you need the bytes out**, to bound memory or to feed a slow sink
   ([stream-to-an-object.md](stream-to-an-object.md)), not after every write.
-* **An append keeps the file's block size**, whatever its options say.
+* **An append keeps the file's block size**, whatever its options say, and chunks its columns
+  alike: a file whose columns have chunks of their own is rewritten, not appended to.
 * [11-write-strategy.md](../design/11-write-strategy.md) is the design of the ingest, the chunking
   and the append.
 

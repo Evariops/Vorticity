@@ -76,6 +76,23 @@ public sealed record WriteReport(
     ImmutableArray<ColumnWriteReport> Columns,
     ImmutableArray<IndexWriteReport> Indexes)
 {
+    /// <summary>
+    /// The rows of each chunk of column <paramref name="column"/>, in order: <see cref="ChunkRows"/>,
+    /// or the column's own when <see cref="VortexWriteOptions.ColumnChunkTargetBytes"/> gave it a
+    /// target, each of its chunks then spanning whole chunks of the file.
+    /// </summary>
+    /// <param name="column">The column's position in <see cref="Columns"/>.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="column"/> names no column.</exception>
+    public ImmutableArray<int> ChunkRowsOf(int column)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(column);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(column, Columns.Length);
+        return ColumnChunkRows?[column] is { IsDefault: false } own ? own : ChunkRows;
+    }
+
+    /// <summary>By column, the rows of its own chunks, default for a column chunked with the file; null when every column is.</summary>
+    internal ImmutableArray<int>[]? ColumnChunkRows { get; init; }
+
     /// <summary>The report of one column's index of one kind, or null when the policy never asked for it.</summary>
     internal IndexWriteReport? Index(string column, string kind)
     {

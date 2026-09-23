@@ -205,6 +205,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <summary>Whether every leaf of the schema is fixed-width, which sets the rows a batch waits below: <see cref="StageBelow"/>.</summary>
     private readonly bool _fixedWidth;
 
+    /// <summary>
+    /// By column, the rows a column with a chunk target of its own gathers across the file's chunks,
+    /// null for a column chunked with the file; null when every column is.
+    /// </summary>
+    private Gathering?[]? _gathering;
+
     /// <summary>The rows past which the batches waiting go through the writer, as one.</summary>
     private const int StagedRows = 256;
 
@@ -500,7 +506,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         WritePolicy indexes = options.Profile == WriteProfile.Fastest ? WritePolicy.None : options.WritePolicy;
         ArgumentOutOfRangeException.ThrowIfNegative(options.IndexBudgetPerMille, nameof(options));
         ArgumentOutOfRangeException.ThrowIfNegative(options.StringBoundBytes, nameof(options));
-        return new VortexFileWriter(
+        VortexFileWriter writer = new VortexFileWriter(
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
@@ -510,6 +516,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             _metadata = UserMetadata.Ordered(options.Metadata),
             _automaticChunks = options.AutomaticChunks,
         };
+
+        // The entries rather than Keys, whose enumerator is an allocated iterator.
+        foreach (KeyValuePair<string, int> target in options.ColumnChunkTargetBytes)
+        {
+            (writer._gathering ??= new Gathering?[writer._fieldCount])[schema.IndexOfField(target.Key)] = new Gathering(target.Value);
+        }
+
+        return writer;
     }
 
     /// <summary>
@@ -541,6 +555,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             if (!Names(schema, tabular, path))
             {
                 throw new ArgumentException($"The index policy names '{path}', which is no column of the schema {schema}.", nameof(options));
+            }
+        }
+
+        foreach (KeyValuePair<string, int> target in options.ColumnChunkTargetBytes)
+        {
+            if (!tabular || schema.IndexOfField(target.Key) < 0)
+            {
+                throw new ArgumentException($"The chunk target '{target.Key}' names no top-level column of the schema {schema}.", nameof(options));
+            }
+
+            if (target.Value <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options), target.Value, $"The chunk target of '{target.Key}' must be positive.");
             }
         }
 
@@ -1061,6 +1088,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         int rows = root.Length;
         for (int field = 0; field < _fieldCount; field++)
         {
+            // A column still gathering kept its table, which has seen these rows already.
+            if (_gathering?[field] is { Rows: > 0 })
+            {
+                continue;
+            }
+
             int node = _isTabular ? root.GetFieldIndex(field) : rootIndex;
             _columns[field].Reprobe(arena, node, 0, rows);
         }
@@ -1273,7 +1306,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         {
             int node = _isTabular ? arena.GetNode(rootIndex).GetFieldIndex(field) : rootIndex;
 
-
             // A chunk cut from a batch shares that batch's list elements whole, and what the blob
             // writer is handed is what lands in the file: the calls below must see the narrowed
             // node, or the zone map would summarise rows the segment has dropped.
@@ -1282,39 +1314,25 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
                 node = ChunkCompactor.Compact(arena, node);
             }
 
-            // The chunk's statistics, computed at ingest over exactly these rows. The chooser
-            // checks the row count against the node it is given and measures the column again when
-            // they disagree, so a mismatch costs a pass and never a wrong plan.
-            ChunkStats stats = new ChunkStats(_columns[field], _emittedBlocks, blocks, this);
-            if (stats.Stats.Rows != rows)
+            if (_gathering?[field] is { } gathering)
             {
-                _chunksWithoutStatistics++;
+                // Its per-block summaries and its distinct table stay until its own chunk goes out:
+                // they are that chunk's, and the table runs over all of its rows.
+                if (gathering.Rows + rows > int.MaxValue)
+                {
+                    await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
+                }
+
+                Gather(gathering, arena, node, rows, blocks);
+                if (gathering.Bytes >= gathering.Target)
+                {
+                    await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
+                }
+
+                continue;
             }
 
-            // A table plan memory turned off was never expected to serve, and is not a fallback;
-            // a table that was running and cannot answer is.
-            if (DistinctTable.Serves(arena.GetNode(node).Kind) && stats.TableExpected)
-            {
-                if (stats.TableServes(checked((int)rows)))
-                {
-                    _chunksFromTable++;
-                }
-                else
-                {
-                    _chunksWithoutTable++;
-                }
-            }
-
-            using ArrayBlobWriter.BlobLease blob =
-                ArrayBlobWriter.Write(Blobs, arena, node, _arrayEncodings, _compress, stats);
-            _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
-            int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
-            _columnSegments[field].Add(segment);
-            _indexes?.AddColumnBytes(field, _segments[segment].Length);
-
-            // The compact summaries stay -- the zone map wants them at completion -- and only the
-            // sized buffers go back to the pool.
-            _columns[field].ReleaseChunk(_emittedBlocks, blocks);
+            await EmitColumnChunkAsync(field, arena, node, rows, _emittedBlocks, blocks, cancellationToken).ConfigureAwait(false);
         }
 
         // The chunk's locating runs close with it and go out right behind it, and the builders are
@@ -1325,6 +1343,122 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         _chunkRows.Add(rows);
         _rowCount += rows;
         await FlushIndexesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Writes node <paramref name="node"/> of <paramref name="arena"/> as one chunk of column
+    /// <paramref name="field"/>: <paramref name="rows"/> rows, <paramref name="blocks"/> blocks from
+    /// <paramref name="firstBlock"/>.
+    /// </summary>
+    private async ValueTask EmitColumnChunkAsync(
+        int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, CancellationToken cancellationToken)
+    {
+        // The chunk's statistics, computed at ingest over exactly these rows. The chooser checks the
+        // row count against the node it is given and measures the column again when they disagree,
+        // so a mismatch costs a pass and never a wrong plan.
+        ChunkStats stats = new ChunkStats(_columns[field], firstBlock, blocks, this);
+        if (stats.Stats.Rows != rows)
+        {
+            _chunksWithoutStatistics++;
+        }
+
+        // A table plan memory turned off was never expected to serve, and is not a fallback; a
+        // table that was running and cannot answer is.
+        if (DistinctTable.Serves(arena.GetNode(node).Kind) && stats.TableExpected)
+        {
+            if (stats.TableServes(checked((int)rows)))
+            {
+                _chunksFromTable++;
+            }
+            else
+            {
+                _chunksWithoutTable++;
+            }
+        }
+
+        using ArrayBlobWriter.BlobLease blob =
+            ArrayBlobWriter.Write(Blobs, arena, node, _arrayEncodings, _compress, stats);
+        _written[field].Add(WrittenAs.Of(blob.Memory.Span, _arrayEncodings.Ids, _isTabular ? _schema.GetField(field) : _schema));
+        int segment = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+        _columnSegments[field].Add(segment);
+        _indexes?.AddColumnBytes(field, _segments[segment].Length);
+
+        // The compact summaries stay -- the zone map wants them at completion -- and only the sized
+        // buffers go back to the pool.
+        _columns[field].ReleaseChunk(firstBlock, blocks);
+    }
+
+    /// <summary>Copies a column's share of one of the file's chunks in with the rows it gathers.</summary>
+    private void Gather(Gathering gathering, CanonicalArena arena, int node, long rows, int blocks)
+    {
+        CanonicalArena into = (gathering.Context ??= TransitContexts.Rent()).Canonical;
+        if (gathering.Rows == 0)
+        {
+            gathering.FirstBlock = _emittedBlocks;
+        }
+
+        int owned = into.CopyFrom(arena, node);
+        gathering.Nodes.Add(owned);
+        gathering.Rows += rows;
+        gathering.Blocks += blocks;
+        gathering.Bytes += into.ByteSize(owned);
+    }
+
+    /// <summary>Writes what column <paramref name="field"/> has gathered as one chunk of its own.</summary>
+    private async ValueTask EmitGatheredAsync(int field, Gathering gathering, CancellationToken cancellationToken)
+    {
+        ScanContext context = gathering.Context!;
+        int rows = checked((int)gathering.Rows);
+        int node = gathering.Nodes.Count == 1
+            ? gathering.Nodes[0]
+            : CanonicalConcat.Concat(
+                context.Decode, _isTabular ? _schema.GetField(field) : _schema, rows,
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(gathering.Nodes));
+        int firstBlock = gathering.FirstBlock;
+        int blocks = gathering.Blocks;
+        gathering.Nodes.Clear();
+        gathering.Rows = 0;
+        gathering.Bytes = 0;
+        gathering.Blocks = 0;
+        try
+        {
+            await EmitColumnChunkAsync(field, context.Canonical, node, rows, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+            gathering.ChunkRows.Add(rows);
+        }
+        finally
+        {
+            context.Canonical.Reset();
+        }
+    }
+
+    /// <summary>Writes what every column with a target of its own has gathered, at a flush or the completion.</summary>
+    private async ValueTask EmitGatheredAsync(CancellationToken cancellationToken)
+    {
+        if (_gathering is not { } gathering)
+        {
+            return;
+        }
+
+        for (int field = 0; field < gathering.Length; field++)
+        {
+            if (gathering[field] is { Rows: > 0 } column)
+            {
+                await EmitGatheredAsync(field, column, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>The rows a column with a chunk target of its own holds until they reach it, and the chunks it has written.</summary>
+    private sealed class Gathering(long target)
+    {
+        internal readonly long Target = target;
+        internal readonly List<int> Nodes = [];
+        internal readonly AppendList<long> ChunkRows = new();
+        internal ScanContext? Context;
+        internal long Rows;
+        internal long Bytes;
+        internal int FirstBlock;
+        internal int Blocks;
     }
 
     /// <summary>
@@ -1384,6 +1518,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             await EmitChunkAsync(from.Canonical, whole, total, cancellationToken).ConfigureAwait(false);
             ResetTransit();
         }
+
+        await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
 
         // The last runs, after the last data segment and before the zone maps: the generation the
         // end of the data left open, and the file-level filter.
@@ -1502,7 +1638,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             ? [.. writer.Reports]
             : ImmutableArray<IndexWriteReport>.Empty;
         return new WriteReport(
-            _rowCount, _blockRows, ImmutableCollectionsMarshal.AsImmutableArray(chunks), _reportBytes, ReportColumns(), indexes);
+            _rowCount, _blockRows, ImmutableCollectionsMarshal.AsImmutableArray(chunks), _reportBytes, ReportColumns(), indexes)
+        {
+            ColumnChunkRows = ReportColumnChunkRows(),
+        };
     }
 
     private ImmutableArray<ColumnWriteReport> ReportColumns()
@@ -1527,6 +1666,34 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         }
 
         return ImmutableCollectionsMarshal.AsImmutableArray(reports);
+    }
+
+    /// <summary>By column, the rows of its own chunks, for the columns that gathered theirs; null when none did.</summary>
+    private ImmutableArray<int>[]? ReportColumnChunkRows()
+    {
+        if (_gathering is not { } gathering)
+        {
+            return null;
+        }
+
+        ImmutableArray<int>[] columns = new ImmutableArray<int>[gathering.Length];
+        for (int field = 0; field < gathering.Length; field++)
+        {
+            if (gathering[field] is not { } column)
+            {
+                continue;
+            }
+
+            int[] chunks = new int[column.ChunkRows.Count];
+            for (int chunk = 0; chunk < chunks.Length; chunk++)
+            {
+                chunks[chunk] = checked((int)column.ChunkRows[chunk]);
+            }
+
+            columns[field] = ImmutableCollectionsMarshal.AsImmutableArray(chunks);
+        }
+
+        return columns;
     }
 
     /// <summary>
@@ -1718,11 +1885,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             for (int field = 0; field < _fieldCount; field++)
             {
                 AppendList<int> segments = _columnSegments[field];
+                AppendList<long> chunkRows = _gathering?[field]?.ChunkRows ?? _chunkRows;
                 for (int chunk = 0; chunk < segments.Count; chunk++)
                 {
                     segmentIds[0] = (uint)segments[chunk];
                     chunks[chunk] = LayoutWriter.Write(
-                        builder, flat, (ulong)_chunkRows[chunk], default, [], segmentIds);
+                        builder, flat, (ulong)chunkRows[chunk], default, [], segmentIds);
                 }
 
                 int data = LayoutWriter.Write(

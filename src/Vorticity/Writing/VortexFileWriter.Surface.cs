@@ -294,6 +294,7 @@ public sealed partial class VortexFileWriter
         }
 
         await SealAsync(cancellationToken).ConfigureAwait(false);
+        await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
         await FlushSinkAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -426,6 +427,20 @@ public sealed partial class VortexFileWriter
         {
             TransitContexts.Return(staging.Context);
             _staging = null;
+        }
+
+        if (_gathering is { } gathering)
+        {
+            foreach (Gathering? column in gathering)
+            {
+                if (column?.Context is { } context)
+                {
+                    TransitContexts.Return(context);
+                    column.Context = null;
+                }
+
+                column?.ChunkRows.Release();
+            }
         }
 
         // The index builders hold pooled hash sets and a payload arena; their results survive.

@@ -38,6 +38,7 @@ does not fit throws `ArgumentException` there, before a byte is written.
 |---|---|---|
 | `BlockRows` | 8 192 | rows per block: the unit of pruning, of a take and of a filtered scan's batch ([blocks-and-chunks.md](blocks-and-chunks.md)) |
 | `ChunkTargetBytes` | 0, the writer's | the bytes gathered before whole blocks are sealed into a chunk; by default a megabyte of the widest column ([blocks-and-chunks.md](blocks-and-chunks.md)) |
+| `ColumnChunkTargetBytes` | empty | a chunk target of its own, by top-level column, for a column that wants larger chunks than the file's: its chunks span whole chunks of the file ([blocks-and-chunks.md](blocks-and-chunks.md)) |
 | `Compression` | `Auto` | what the encoder optimises for: `Auto`, `Fastest`, `Smallest`, `None` |
 | `Hints` | empty | an encoding to try first, by column path |
 | `TargetEdition` | `VortexEditions.Default` | the edition every component must belong to ([editions.md](editions.md)) |

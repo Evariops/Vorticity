@@ -1503,6 +1503,7 @@ Vorticity:     method string ToString()
 Vorticity:     property CompressionProfile Compression { get; init; }
 Vorticity:     property ImmutableDictionary<string, EncodingHint> Hints { get; init; }
 Vorticity:     property ImmutableDictionary<string, ReadOnlyMemory<byte>> Metadata { get; init; }
+Vorticity:     property ImmutableDictionary<string, int> ColumnChunkTargetBytes { get; init; }
 Vorticity:     property IndexPolicy Indexes { get; init; }
 Vorticity:     property Nullable<Guid> Identity { get; init; }
 Vorticity:     property VortexEdition TargetEdition { get; init; }
@@ -1527,6 +1528,7 @@ Vorticity:     property long Total { get; init; }
 Vorticity:     property long ZoneMaps { get; init; }
 Vorticity: sealed class Vorticity.WriteReport : IEquatable<WriteReport>
 Vorticity:     ctor WriteReport(long, int, ImmutableArray<int>, WriteBytes, ImmutableArray<ColumnWriteReport>, ImmutableArray<IndexWriteReport>)
+Vorticity:     method ImmutableArray<int> ChunkRowsOf(int)
 Vorticity:     method WriteReport <Clone>$()
 Vorticity:     method bool Equals(WriteReport)
 Vorticity:     method bool Equals(object)
