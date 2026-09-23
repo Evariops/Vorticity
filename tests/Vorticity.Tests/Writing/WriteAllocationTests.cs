@@ -141,7 +141,7 @@ public sealed class WriteAllocationTests
         // re-elects the same encoding is a different question and `bench/crosscheck.sh` is where
         // it is asked.
         ("encodings/fastlanes_delta", 7_436),   // 7 352 measured, including the file statistics segment: per file, not per row
-        ("encodings/pco", 8_960),   // 8 840 measured alone; in the suite with dynamic PGO the process-wide measurement adds the JIT's instrumentation, 72 bytes that are not the writer's
+        ("encodings/pco", 7_424),   // 7 304 measured in the suite, where dynamic PGO adds the JIT's instrumentation, 72 bytes that are not the writer's; the read half reads its page sizes in place and keeps the chunk metadata, its ANS tables and the latent states from one decode to the next
         // The read half of this axis keeps a `ZstandardDecoder` per node, so a change on the zstd
         // read path can move this ceiling while the write path stays put.
         ("encodings/zstd", 8_880),   // 8 464 measured, the FSST table its trial trains reused, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more

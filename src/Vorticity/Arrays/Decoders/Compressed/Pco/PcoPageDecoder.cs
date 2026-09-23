@@ -472,13 +472,15 @@ internal sealed class PcoLatentState
         long offsetBitTotal = 0;
         if (_binCount > 1)
         {
+            ReadOnlySpan<PcoAnsNode> nodes = _table.Nodes;
+            ReadOnlySpan<ulong> lowers = _table.StateLowers;
             for (int i = 0; i < count; i++)
             {
                 int slot = _stateIndices[i % 4];
-                PcoAnsNode node = _table.Nodes[slot];
+                PcoAnsNode node = nodes[slot];
                 ulong ansValue = reader.ReadUInt(node.BitsToRead);
 
-                scratch[i] = _table.StateLowers[slot];
+                scratch[i] = lowers[slot];
                 offsetBits[i] = node.OffsetBits;
                 offsetCumulative[i] = offsetBitTotal;
                 offsetBitTotal += node.OffsetBits;

@@ -1,7 +1,6 @@
 using System;
-using System.Collections.Generic;
-using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Threading;
 
 using Vorticity.Arrays.Decoders.Canonical;
 
@@ -50,11 +49,11 @@ internal sealed class PcoDecoder : ArrayDecoder
 
         PcoWrapperMetadata wrapper = PcoWrapperMetadata.Read(node.Metadata);
 
-        int expected = wrapper.Chunks.Count + wrapper.PageCount;
+        int expected = wrapper.ChunkCount + wrapper.PageCount;
         if (node.BufferCount != expected)
         {
             CompressedThrow.Format(
-                $"{Id} declares {wrapper.Chunks.Count} chunks and {wrapper.PageCount} pages, " +
+                $"{Id} declares {wrapper.ChunkCount} chunks and {wrapper.PageCount} pages, " +
                 $"needing {expected} buffers; the node has {node.BufferCount}.");
         }
 
@@ -78,26 +77,26 @@ internal sealed class PcoDecoder : ArrayDecoder
         Scratch<ulong> batchValues = new Scratch<ulong>(PcoPageDecoder.BatchSize, default);
         Scratch<int> batchOffsetBits = new Scratch<int>(PcoPageDecoder.BatchSize, default);
         Scratch<long> batchOffsetCumulative = new Scratch<long>(PcoPageDecoder.BatchSize, default);
+
+        // The latent states are reset by each page, and the chunk metadata with its tables refilled
+        // by each chunk, rather than rebuilt, for the same reason as the buffers above; and both are
+        // kept for the next decode rather than built by each, since neither holds a file's data
+        // past the page or the chunk that refills it.
+        Reused reused = Interlocked.Exchange(ref Spare, null) ?? new Reused();
         try
         {
-            // The latent states are built once for the whole node and reset by each page rather
-            // than rebuilt, for the same reason as the buffers above.
-            PcoLatentState[] states = new PcoLatentState[PcoPageDecoder.MaxLatentVars];
-            for (int i = 0; i < states.Length; i++)
-            {
-                states[i] = new PcoLatentState();
-            }
-
             PcoBatchScratch batchScratch = new PcoBatchScratch(
-                batchValues.Span, batchOffsetBits.Span, batchOffsetCumulative.Span, states);
-            int pageBuffer = wrapper.Chunks.Count;
+                batchValues.Span, batchOffsetBits.Span, batchOffsetCumulative.Span, reused.States);
+            int pageBuffer = wrapper.ChunkCount;
             int written = 0;
-            for (int chunk = 0; chunk < wrapper.Chunks.Count; chunk++)
+            int chunk = 0;
+            foreach (PcoWrapperMetadata.PageEnumerator pages in wrapper.GetChunks())
             {
-                PcoChunkMeta meta = PcoChunkMeta.Read(
+                PcoChunkMeta meta = reused.Meta.Refill(
                     wrapper.Header, node.GetBuffer(chunk).Span, latentBits: 64);
+                chunk++;
 
-                foreach (int pageValues in wrapper.Chunks[chunk])
+                foreach (int pageValues in pages)
                 {
                     // The ordered latent form is shifted so the type's minimum is zero. For an
                     // unsigned type it is the value itself, and for a signed one the shift back is
@@ -115,6 +114,7 @@ internal sealed class PcoDecoder : ArrayDecoder
         }
         finally
         {
+            Volatile.Write(ref Spare, reused);
             batchOffsetCumulative.Dispose();
             batchOffsetBits.Dispose();
             batchValues.Dispose();
@@ -123,5 +123,30 @@ internal sealed class PcoDecoder : ArrayDecoder
 
         Validity validity = context.DecodeValidity(in node, 0, dtype.Nullability, length);
         return context.Canonical.AddPrimitive(dtype, length, validity, ptype, output);
+    }
+
+    /// <summary>
+    /// What no decode holds, taken by the next; a decode that finds nothing builds its own, and the
+    /// last to finish leaves what it used here.
+    /// </summary>
+    private static Reused? Spare;
+
+    /// <summary>What a decode keeps for the next: the latent states, and the chunk metadata with its tables.</summary>
+    private sealed class Reused
+    {
+        internal PcoLatentState[] States { get; } = NewStates();
+
+        internal PcoChunkMeta Meta { get; } = new PcoChunkMeta();
+
+        private static PcoLatentState[] NewStates()
+        {
+            PcoLatentState[] states = new PcoLatentState[PcoPageDecoder.MaxLatentVars];
+            for (int i = 0; i < states.Length; i++)
+            {
+                states[i] = new PcoLatentState();
+            }
+
+            return states;
+        }
     }
 }

@@ -1,6 +1,8 @@
 using System;
 using System.Numerics;
 
+using Vorticity.Arrays.Decoders.Canonical;
+
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 
 /// <summary>One table slot: where the next state starts, and what it costs to get there.</summary>
@@ -14,27 +16,29 @@ internal readonly record struct PcoAnsNode(int NextStateIndexBase, int OffsetBit
 /// and the node table have to match the encoder exactly and neither is self-checking, so any
 /// departure from the published order decodes silently to different symbols rather than failing.
 /// </summary>
+/// <remarks>
+/// A table is refilled chunk after chunk rather than built for each: it runs to 2^14 slots, a few
+/// hundred kilobytes of arrays past the large-object threshold, which a scan of a column of many
+/// chunks would otherwise allocate once a chunk. Its arrays grow to the largest table asked of it
+/// and are read to its current size only.
+/// </remarks>
 internal sealed class PcoAnsTable
 {
-    private PcoAnsTable(int sizeLog, uint[] stateSymbols, PcoAnsNode[] nodes, ulong[] stateLowers)
-    {
-        SizeLog = sizeLog;
-        StateSymbols = stateSymbols;
-        Nodes = nodes;
-        StateLowers = stateLowers;
-    }
+    private uint[] _stateSymbols = [];
+    private PcoAnsNode[] _nodes = [];
+    private ulong[] _stateLowers = [];
 
     /// <summary>Log2 of the table size.</summary>
-    internal int SizeLog { get; }
+    internal int SizeLog { get; private set; }
 
     /// <summary>The symbol owning each table slot, in slot order.</summary>
-    internal uint[] StateSymbols { get; }
+    internal ReadOnlySpan<uint> StateSymbols => _stateSymbols.AsSpan(0, Size);
 
     /// <summary>One node per table slot.</summary>
-    internal PcoAnsNode[] Nodes { get; }
+    internal ReadOnlySpan<PcoAnsNode> Nodes => _nodes.AsSpan(0, Size);
 
     /// <summary>The bin lower bound at each table slot, hoisted out of the bin list.</summary>
-    internal ulong[] StateLowers { get; }
+    internal ReadOnlySpan<ulong> StateLowers => _stateLowers.AsSpan(0, Size);
 
     /// <summary>Table slots.</summary>
     internal int Size => 1 << SizeLog;
@@ -45,6 +49,14 @@ internal sealed class PcoAnsTable
     /// <returns>The symbol owning each slot.</returns>
     /// <exception cref="VortexFormatException">The weights do not sum to the table size.</exception>
     internal static uint[] Spread(int sizeLog, ReadOnlySpan<uint> weights)
+    {
+        uint[] symbols = new uint[1 << sizeLog];
+        SpreadInto(sizeLog, weights, symbols);
+        return symbols;
+    }
+
+    /// <summary><see cref="Spread"/> into the first 2^<paramref name="sizeLog"/> slots of <paramref name="symbols"/>.</summary>
+    private static void SpreadInto(int sizeLog, ReadOnlySpan<uint> weights, Span<uint> symbols)
     {
         int tableSize = 1 << sizeLog;
         long total = 0;
@@ -59,7 +71,6 @@ internal sealed class PcoAnsTable
                 $"A pco ANS table of size log {sizeLog} needs weights summing to {tableSize}; they sum to {total}.");
         }
 
-        uint[] symbols = new uint[tableSize];
         int stride = ChooseStride(tableSize);
         int mask = tableSize - 1;
         int step = 0;
@@ -72,22 +83,41 @@ internal sealed class PcoAnsTable
                 step++;
             }
         }
-
-        return symbols;
     }
 
     /// <summary>Builds the decoding table for one latent variable.</summary>
     /// <param name="sizeLog">The ANS size log from the chunk metadata.</param>
     /// <param name="bins">The latent variable's bins.</param>
     /// <returns>The table.</returns>
-    internal static PcoAnsTable Build(int sizeLog, ReadOnlySpan<PcoBin> bins)
+    internal static PcoAnsTable Build(int sizeLog, ReadOnlySpan<PcoBin> bins) =>
+        new PcoAnsTable().Refill(sizeLog, bins);
+
+    /// <summary>Rebuilds this table for one latent variable, in the arrays it already has where they are large enough.</summary>
+    /// <param name="sizeLog">The ANS size log from the chunk metadata.</param>
+    /// <param name="bins">The latent variable's bins.</param>
+    /// <returns>This table.</returns>
+    internal PcoAnsTable Refill(int sizeLog, ReadOnlySpan<PcoBin> bins)
     {
+        int tableSize = 1 << sizeLog;
+        if (_nodes.Length < tableSize)
+        {
+            _stateSymbols = new uint[tableSize];
+            _nodes = new PcoAnsNode[tableSize];
+            _stateLowers = new ulong[tableSize];
+        }
+
         // A latent with no bins still gets a one-slot table: upstream's degenerate case, where the
         // single slot reads no bits and carries no offset.
-        uint[] weights = new uint[Math.Max(1, bins.Length)];
+        int symbolCount = Math.Max(1, bins.Length);
+        Span<uint> stackWeights = stackalloc uint[64];
+        using Scratch<uint> weightScratch = new Scratch<uint>(symbolCount, stackWeights);
+        Span<uint> stackRunning = stackalloc uint[64];
+        using Scratch<uint> runningScratch = new Scratch<uint>(symbolCount, stackRunning);
+        Span<uint> weights = weightScratch.Span[..symbolCount];
+        Span<uint> running = runningScratch.Span[..symbolCount];
         if (bins.Length == 0)
         {
-            weights[0] = (uint)(1 << sizeLog);
+            weights[0] = (uint)tableSize;
         }
         else
         {
@@ -97,17 +127,17 @@ internal sealed class PcoAnsTable
             }
         }
 
-        uint[] stateSymbols = Spread(sizeLog, weights);
-        int tableSize = 1 << sizeLog;
+        Span<uint> stateSymbols = _stateSymbols.AsSpan(0, tableSize);
+        SpreadInto(sizeLog, weights, stateSymbols);
+        weights.CopyTo(running);
+        SizeLog = sizeLog;
 
-        PcoAnsNode[] nodes = new PcoAnsNode[tableSize];
-        ulong[] lowers = new ulong[tableSize];
-        uint[] running = (uint[])weights.Clone();
-
+        Span<PcoAnsNode> nodes = _nodes.AsSpan(0, tableSize);
+        Span<ulong> lowers = _stateLowers.AsSpan(0, tableSize);
         for (int slot = 0; slot < tableSize; slot++)
         {
             uint symbol = stateSymbols[slot];
-            uint nextStateBase = running[symbol];
+            uint nextStateBase = running[(int)symbol];
 
             // The bits that distinguish the states this symbol owns: how much `nextStateBase` must
             // be shifted to land inside [tableSize, 2 * tableSize).
@@ -118,10 +148,10 @@ internal sealed class PcoAnsTable
             int offsetBits = symbol < (uint)bins.Length ? bins[(int)symbol].OffsetBits : 0;
             nodes[slot] = new PcoAnsNode((int)(shifted - tableSize), offsetBits, bitsToRead);
             lowers[slot] = symbol < (uint)bins.Length ? bins[(int)symbol].Lower : 0;
-            running[symbol]++;
+            running[(int)symbol]++;
         }
 
-        return new PcoAnsTable(sizeLog, stateSymbols, nodes, lowers);
+        return this;
     }
 
     /// <summary>About three fifths of the table size, forced odd so it is coprime with it.</summary>

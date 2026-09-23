@@ -71,14 +71,14 @@ public sealed class PcoChunkMetaTests
         Assert.Null(chunk.DeltaLatent);
 
         Assert.Equal(0, chunk.Primary.AnsSizeLog);
-        PcoBin primary = Assert.Single(chunk.Primary.Bins);
+        PcoBin primary = Assert.Single(chunk.Primary.Bins.ToArray());
         Assert.Equal(1u, primary.Weight);
         Assert.Equal(9223372036854775809UL, primary.Lower);
         Assert.Equal(0, primary.OffsetBits);
 
         Assert.NotNull(chunk.Secondary);
         Assert.Equal(0, chunk.Secondary!.Value.AnsSizeLog);
-        PcoBin secondary = Assert.Single(chunk.Secondary!.Value.Bins);
+        PcoBin secondary = Assert.Single(chunk.Secondary!.Value.Bins.ToArray());
         Assert.Equal(1u, secondary.Weight);
         Assert.Equal(1UL, secondary.Lower);
         Assert.Equal(0, secondary.OffsetBits);

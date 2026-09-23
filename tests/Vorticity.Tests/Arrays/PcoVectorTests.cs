@@ -168,4 +168,42 @@ public sealed class PcoVectorTests
             Assert.Equal((int)chunk.Primary.Bins[i].Weight, counted[i]);
         }
     }
+
+    /// <summary>
+    /// Metadata refilled vector after vector -- a 20-bin table, then single bins, then 20 bins
+    /// again -- reads each as metadata read afresh would, tables included.
+    /// </summary>
+    [Fact]
+    public void RefilledMetadataReadsAsFreshMetadata()
+    {
+        Vector[] vectors = Load();
+        PcoChunkMeta refilled = PcoChunkMeta.Read(vectors[0].Header, vectors[0].Meta, latentBits: 64);
+        foreach (Vector vector in (Vector[])[.. vectors, .. vectors])
+        {
+            refilled.Refill(vector.Header, vector.Meta, latentBits: 64);
+            PcoChunkMeta fresh = PcoChunkMeta.Read(vector.Header, vector.Meta, latentBits: 64);
+
+            Assert.Equal(fresh.Mode, refilled.Mode);
+            Assert.Equal(fresh.ModeBase, refilled.ModeBase);
+            Assert.Equal(fresh.Delta, refilled.Delta);
+            Assert.Equal(fresh.DeltaOrder, refilled.DeltaOrder);
+            Assert.Equal(fresh.SecondaryUsesDelta, refilled.SecondaryUsesDelta);
+            Assert.Equal(fresh.Secondary is null, refilled.Secondary is null);
+            AssertSameVar(fresh.Primary, refilled.Primary);
+            if (fresh.Secondary is { } secondary)
+            {
+                AssertSameVar(secondary, refilled.Secondary!.Value);
+            }
+        }
+    }
+
+    private static void AssertSameVar(PcoLatentVar expected, PcoLatentVar actual)
+    {
+        Assert.Equal(expected.AnsSizeLog, actual.AnsSizeLog);
+        Assert.Equal(expected.Bins.ToArray(), actual.Bins.ToArray());
+        Assert.Equal(expected.Table.Size, actual.Table.Size);
+        Assert.Equal(expected.Table.StateSymbols.ToArray(), actual.Table.StateSymbols.ToArray());
+        Assert.Equal(expected.Table.Nodes.ToArray(), actual.Table.Nodes.ToArray());
+        Assert.Equal(expected.Table.StateLowers.ToArray(), actual.Table.StateLowers.ToArray());
+    }
 }

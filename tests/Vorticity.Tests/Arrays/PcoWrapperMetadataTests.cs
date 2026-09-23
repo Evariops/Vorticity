@@ -67,10 +67,12 @@ public sealed class PcoWrapperMetadataTests
     {
         PcoWrapperMetadata wrapper = PcoWrapperMetadata.Read(Build());
 
-        Assert.Equal<byte>([0x04, 0x01], wrapper.Header);
-        Assert.Equal(2, wrapper.Chunks.Count);
-        Assert.Equal<int>([1024, 512], wrapper.Chunks[0]);
-        Assert.Equal<int>([1024], wrapper.Chunks[1]);
+        Assert.Equal<byte>([0x04, 0x01], wrapper.Header.ToArray());
+        Assert.Equal(2, wrapper.ChunkCount);
+        List<int[]> chunks = Chunks(wrapper);
+        Assert.Equal(2, chunks.Count);
+        Assert.Equal<int>([1024, 512], chunks[0]);
+        Assert.Equal<int>([1024], chunks[1]);
 
         // The two totals the decoder checks the node against: one buffer per page after the metas,
         // and one value per row.
@@ -86,9 +88,28 @@ public sealed class PcoWrapperMetadataTests
     public void AnEmptyMessageIsEmptyRatherThanAnError()
     {
         PcoWrapperMetadata wrapper = PcoWrapperMetadata.Read([]);
-        Assert.Empty(wrapper.Header);
-        Assert.Empty(wrapper.Chunks);
+        Assert.True(wrapper.Header.IsEmpty);
+        Assert.Equal(0, wrapper.ChunkCount);
+        Assert.Empty(Chunks(wrapper));
         Assert.Equal(0, wrapper.PageCount);
         Assert.Equal(0L, wrapper.ValueCount);
+    }
+
+    /// <summary>The chunks' page sizes, walked the way the decoder walks them.</summary>
+    private static List<int[]> Chunks(PcoWrapperMetadata wrapper)
+    {
+        List<int[]> chunks = [];
+        foreach (PcoWrapperMetadata.PageEnumerator pages in wrapper.GetChunks())
+        {
+            List<int> sizes = [];
+            foreach (int page in pages)
+            {
+                sizes.Add(page);
+            }
+
+            chunks.Add([.. sizes]);
+        }
+
+        return chunks;
     }
 }
