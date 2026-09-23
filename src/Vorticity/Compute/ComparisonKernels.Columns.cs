@@ -406,8 +406,8 @@ internal static partial class ComparisonKernels
         CanonicalNode left, CanonicalNode right, in BothValid valid, Span<byte> destination)
         where TOp : struct, IOrderOp
     {
-        ReadOnlySpan<byte> leftViews = left.Views.Span;
-        ReadOnlySpan<byte> rightViews = right.Views.Span;
+        ViewValues leftValues = new ViewValues(left);
+        ViewValues rightValues = new ViewValues(right);
         bool allValid = valid.AllValid;
         for (int i = 0; i < destination.Length; i++)
         {
@@ -417,7 +417,7 @@ internal static partial class ComparisonKernels
                 continue;
             }
 
-            int order = Value(left, leftViews, i).SequenceCompareTo(Value(right, rightViews, i));
+            int order = leftValues.At(i).SequenceCompareTo(rightValues.At(i));
             destination[i] = TOp.Holds(order, 0) ? Trilean.True : Trilean.False;
         }
     }

@@ -240,7 +240,7 @@ internal static partial class ComparisonKernels
         Span<byte> destination)
         where TMatch : struct, IBytesMatch
     {
-        ReadOnlySpan<byte> views = node.Views.Span;
+        ViewValues values = new ViewValues(node);
         bool allValid = mask.AllValid;
         for (int i = 0; i < destination.Length; i++)
         {
@@ -252,7 +252,7 @@ internal static partial class ComparisonKernels
                 continue;
             }
 
-            destination[i] = TMatch.Holds(Value(node, views, i), pattern, escape)
+            destination[i] = TMatch.Holds(values.At(i), pattern, escape)
                 ? Trilean.True
                 : Trilean.False;
         }
@@ -1127,7 +1127,7 @@ internal static partial class ComparisonKernels
         CanonicalNode node, ValidityMask mask, ReadOnlySpan<byte> wanted, Span<byte> destination)
         where TOp : struct, IOrderOp
     {
-        ReadOnlySpan<byte> views = node.Views.Span;
+        ViewValues values = new ViewValues(node);
         bool allValid = mask.AllValid;
         for (int i = 0; i < destination.Length; i++)
         {
@@ -1137,27 +1137,11 @@ internal static partial class ComparisonKernels
                 continue;
             }
 
-            ReadOnlySpan<byte> value = Value(node, views, i);
+            ReadOnlySpan<byte> value = values.At(i);
             destination[i] = TOp.Holds(value.SequenceCompareTo(wanted), 0)
                 ? Trilean.True
                 : Trilean.False;
         }
-    }
-
-    /// <summary>Resolves one 16-byte view, inline or by reference.</summary>
-    private static ReadOnlySpan<byte> Value(
-        CanonicalNode node, ReadOnlySpan<byte> views, int index)
-    {
-        ReadOnlySpan<byte> view = views.Slice(index * ViewSize, ViewSize);
-        int size = BinaryPrimitives.ReadInt32LittleEndian(view);
-        if (size <= MaxInlineLength)
-        {
-            return view.Slice(4, size);
-        }
-
-        int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
-        int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
-        return node.GetDataBuffer(buffer).Span.Slice(offset, size);
     }
 
     /// <summary>
