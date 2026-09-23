@@ -51,12 +51,12 @@ scan stops, and nothing throws.
 on them too. They check it at a batch boundary:
 
 ```
-rows: cancelled after 32768 rows
+rows: cancelled after 65536 rows
 owned batches: cancelled after 3, each disposed by its using
 ```
 
 The rows of the batch in hand are still yielded, so the cancellation above, asked at the 10 000th
-row, surfaced at the end of the batch that held it, the first, of 32 768 rows. An owned batch
+row, surfaced at the end of the batch that held it, the first, of 65 536 rows. An owned batch
 already handed out stays yours to dispose ([owned-batches.md](owned-batches.md)).
 
 ## A token cancelled before the call
@@ -99,7 +99,7 @@ and `KeyCountAsync` throw `InvalidOperationException` until a move succeeds. See
 | `CompleteAsync` | throws, and the writer is done: a second `CompleteAsync` throws `ObjectDisposedException` |
 
 A writer that is disposed without completing abandons the file. A created file is deleted — it did
-not exist afterwards — and an append is truncated back to what the file was: 5 324 bytes and 50 000
+not exist afterwards — and an append is truncated back to what the file was: 4 532 bytes and 50 000
 rows before, the same after a cancelled `CompleteAsync` of an append that had flushed 50 000 more.
 `Abandon()` says the same explicitly. A file whose tail a crash tore is another case,
 [append-and-repair.md](append-and-repair.md).

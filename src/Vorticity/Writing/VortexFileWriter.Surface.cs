@@ -471,6 +471,14 @@ public sealed partial class VortexFileWriter
             return HandOffAsync(committed, seal: false, cancellationToken);
         }
 
+        if (_automaticChunks)
+        {
+            long chunk = ChunkRows(root);
+            return committed >= chunk
+                ? HandOffAsync((int)(committed / chunk * chunk), seal: true, cancellationToken)
+                : ValueTask.CompletedTask;
+        }
+
         return committed >= _rowBlock && root.CommittedBytes >= _blockBytes
             ? HandOffAsync(committed / _rowBlock * _rowBlock, seal: true, cancellationToken)
             : ValueTask.CompletedTask;
@@ -506,9 +514,24 @@ public sealed partial class VortexFileWriter
         root.Discard(rows);
     }
 
-    /// <summary>Rows per chunk, whole blocks, for the chunk target in bytes at the rows' present width.</summary>
+    /// <summary>
+    /// Rows per chunk, whole blocks: when the writer sizes the chunks, what the rows' widest column
+    /// and all of them hold at their present width allow; otherwise the chunk target in bytes at
+    /// that width.
+    /// </summary>
     private long ChunkRows(StructStore root)
     {
+        if (_automaticChunks)
+        {
+            long widest = 0;
+            foreach (ColumnStore column in root.Children)
+            {
+                widest = Math.Max(widest, column.CommittedBytes);
+            }
+
+            return AutomaticChunkRows(widest, root.CommittedBytes, root.Committed);
+        }
+
         if (_blockBytes <= 0 || root.Committed == 0)
         {
             return int.MaxValue;

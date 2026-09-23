@@ -11,10 +11,10 @@ tools/vxdump/bin/Release/net11.0/vxdump readings.vortex --schema --stats
 ```
 file      readings.vortex
 edition   core2026.08.0
-bytes     1564708
+bytes     1508212
 rows      1000000
 tabular   yes
-identity  82a442c0f8354e23a57c73bea051a968
+identity  5f97a64e440b4eb993aa283d83870dc4
 
 schema
   Day: i32
@@ -64,25 +64,27 @@ layout
   vortex.struct  rows=1000000  dtype=struct{Day: i32, Celsius: f64?, City: utf8}
     vortex.zoned  rows=1000000  zones=123x8192  dtype=i32
       vortex.chunked  rows=1000000  dtype=i32
-        vortex.flat  rows=32768  segments=[0]  dtype=i32  encoding=vortex.runend(vortex.primitive,vortex.primitive)
-        vortex.flat  rows=8192  segments=[3]  dtype=i32  encoding=vortex.runend(vortex.primitive,vortex.primitive)
+        vortex.flat  rows=65536  segments=[0]  dtype=i32  encoding=vortex.runend(vortex.primitive,vortex.sequence)
+        vortex.flat  rows=65536  segments=[3]  dtype=i32  encoding=vortex.runend(vortex.primitive,vortex.sequence)
         …
-        vortex.flat  rows=576  segments=[147]  dtype=i32  encoding=vortex.sequence
-      vortex.flat  rows=123  segments=[150]  dtype=struct{vortex.min(): i32?, vortex.max(): i32?, vortex.null_count(): u64?}  encoding=vortex.struct(vortex.primitive,vortex.primitive,vortex.primitive)
+        vortex.flat  rows=16384  segments=[45]  dtype=i32  encoding=vortex.runend(vortex.primitive,vortex.primitive)
+        vortex.flat  rows=576  segments=[48]  dtype=i32  encoding=vortex.sequence
+      vortex.flat  rows=123  segments=[51]  dtype=struct{vortex.min(): i32?, vortex.max(): i32?, vortex.null_count(): u64?}  encoding=vortex.struct(vortex.primitive,vortex.primitive,vortex.primitive)
     vortex.zoned  rows=1000000  zones=123x8192  dtype=f64?
       vortex.chunked  rows=1000000  dtype=f64?
-        vortex.flat  rows=32768  segments=[1]  dtype=f64?  encoding=vortex.dict(fastlanes.for(fastlanes.bitpacked),vortex.alp(fastlanes.for(fastlanes.bitpacked(vortex.bool))))
+        vortex.flat  rows=65536  segments=[1]  dtype=f64?  encoding=vortex.dict(fastlanes.for(fastlanes.bitpacked),vortex.alp(fastlanes.for(fastlanes.bitpacked(vortex.bool))))
         …
 ```
 
 Read it downwards: a struct of three columns; each column wrapped in a zone map of 123 zones of
 8 192 rows, the minimum, maximum and null count of each block, which are what make pruning work;
 under it the chunks, and under those the flat nodes that hold the bytes, each naming its encoding
-as a nest of transforms. `vortex.runend(vortex.primitive,vortex.primitive)` is a run-end encoding
-of plain run ends and plain values: `Day` changes once every thousand rows, so a chunk of 32 768
-rows is 33 or 34 runs. The last chunk, 576 rows of an arithmetic progression, is a `vortex.sequence`:
-two numbers. `Celsius` is a dictionary whose values are ALP-encoded doubles. The zone map of `City`
-holds text bounds truncated to 16 bytes, `vortex.bounded_min(16)`, which is how text columns prune.
+as a nest of transforms. `vortex.runend(vortex.primitive,vortex.sequence)` is a run-end encoding
+of plain run ends and values that form a progression: `Day` changes once every thousand rows, one
+day after the other, so a chunk of 65 536 rows is 66 or 67 runs of consecutive days. The last
+chunk, 576 rows of an arithmetic progression, is a `vortex.sequence`: two numbers. `Celsius` is a
+dictionary whose values are ALP-encoded doubles. The zone map of `City` holds text bounds
+truncated to 16 bytes, `vortex.bounded_min(16)`, which is how text columns prune.
 [how-it-works.md](how-it-works.md) walks through the same tree.
 
 ## Explaining a query without running it
@@ -97,7 +99,7 @@ explain   Day >= 900
   rows             1000000
   blocks           14 live of 123
     zone map: 109 pruned, 1 segments / 2124 bytes read
-  to read          22 segments, 165424 bytes of 1564708
+  to read          13 segments, 210980 bytes of 1508212
   count tiers      exact (100000), 109 pruned, 13 proven, 1 decoded
   count            100000
 ```
@@ -106,7 +108,7 @@ The figures `ExplainAsync` returns in code, for a file you did not write and an 
 still writing; only the last line reads data. The count is settled in tiers: 109 blocks pruned by
 the zone map, 13 proven whole by it, and one decoded to count its survivors. The expression is the
 grammar the tool path parses: comparisons, `and`, `or`, `not`, `in`, `is null`, `like`, with text in
-single quotes. `"Day >= 900 and City = 'Paris'"` reads 23 segments and counts 12 502 rows. See
+single quotes. `"Day >= 900 and City = 'Paris'"` reads 14 segments and counts 12 502 rows. See
 [statistics-and-pruning.md](statistics-and-pruning.md) and [untyped-files.md](untyped-files.md).
 
 ## Indexes, and checking them
@@ -125,7 +127,7 @@ explain   City = 'Nice'
   blocks           123 live of 123
     zone map: 0 pruned, 1 segments / 2940 bytes read
     bloom filter: 0 pruned, 10 segments / 5760 bytes read
-  to read          86 segments, 1499048 bytes of 1513461
+  to read          62 segments, 1502744 bytes of 1514700
   count tiers      0 pruned, 0 proven, 123 decoded
   count            124999
 
@@ -148,18 +150,18 @@ also checks the fragment's record of the file's hash against the file.
 ```
 file      torn-copy.vortex
 edition   core2026.08.0
-bytes     1564708
+bytes     1508212
 rows      1000000
 tabular   yes
-identity  82a442c0f8354e23a57c73bea051a968
-torn      128 bytes after the last whole version, of 1564836 (Malformed file: the EOF marker's magic is 0x00000000, expected 'VTXF'.); --repair truncates them
+identity  5f97a64e440b4eb993aa283d83870dc4
+torn      128 bytes after the last whole version, of 1508340 (Malformed file: the EOF marker's magic is 0x00000000, expected 'VTXF'.); --repair truncates them
 ```
 
 ```
 vxdump torn-copy.vortex --repair
-repaired  torn-copy.vortex: 1564836 -> 1564708 bytes (128 torn bytes removed)
+repaired  torn-copy.vortex: 1508340 -> 1508212 bytes (128 torn bytes removed)
 vxdump torn-copy.vortex --repair
-valid     torn-copy.vortex: 1564708 bytes, nothing to repair
+valid     torn-copy.vortex: 1508212 bytes, nothing to repair
 ```
 
 A file whose last append did not finish opens at its last whole version, and the header says how

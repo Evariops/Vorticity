@@ -66,15 +66,15 @@ The same million rows, written to each edition:
 
 | target | bytes | zone maps | the file reads as | `Day >= 900` reads |
 |---|---|---|---|---|
-| core2025.05.0 | 1 551 068 | 0 | core2025.05.0 | 123 of 123 blocks |
-| core2025.06.0 | 1 513 596 | 0 | core2025.06.0 | 123 of 123 blocks |
-| core2025.10.0 | 1 513 596 | 0 | core2025.06.0 | 123 of 123 blocks |
-| core2026.08.0 to core2026.08.3 | 1 522 396 | 8 264 | core2026.08.0 | 14 of 123 blocks |
+| core2025.05.0 | 1 544 292 | 0 | core2025.05.0 | 123 of 123 blocks |
+| core2025.06.0 | 1 499 396 | 0 | core2025.06.0 | 123 of 123 blocks |
+| core2025.10.0 | 1 499 396 | 0 | core2025.06.0 | 123 of 123 blocks |
+| core2026.08.0 to core2026.08.3 | 1 508 212 | 8 264 | core2026.08.0 | 14 of 123 blocks |
 
 **Before core2026.08.0 a file carries no zone maps.** The zoned layout arrived in that edition, and
 a file written for an older one prunes nothing by block: the filter that reads 14 blocks of the
 default file reads all 123 of the old one. The encodings barely change: the file written for
-core2025.05.0, which lacks the progression and zstd, is 37 KB larger, and from core2025.06.0 on the
+core2025.05.0, which lacks the progression and zstd, is 45 KB larger, and from core2025.06.0 on the
 only difference is the zone maps.
 
 `file.Edition` is the oldest edition that contains every component the file declares, so the

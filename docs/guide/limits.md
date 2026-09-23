@@ -27,7 +27,7 @@ catch (VortexFormatException e)
 ```
 
 ```
-ceiling 4096: VortexFormatException: Decoding fastlanes.bitpacked would materialize 65536 bytes, above the 4096-byte decompression ceiling.
+ceiling 4096: VortexFormatException: Decoding fastlanes.bitpacked would materialize 131072 bytes, above the 4096-byte decompression ceiling.
 ceiling 1048576: 1000000 rows
 ceiling 268435456: 1000000 rows
 ```
@@ -76,16 +76,16 @@ A file past any of them is malformed, and says so with `VortexFormatException`.
 
 ## The ceiling you set
 
-`VortexOpenOptions.MaxDecompressedSize` bounds what one decode may produce, and a decode is a
-block. The default is `VortexLimits.DefaultMaxDecompressedSize`, 268 435 456 bytes. It is a
-refusal, not a truncation, and it is the defence against a decompression bomb: a few bytes on
+`VortexOpenOptions.MaxDecompressedSize` bounds what one decode may produce, and a decode is at most
+a chunk of one column. The default is `VortexLimits.DefaultMaxDecompressedSize`, 268 435 456 bytes.
+It is a refusal, not a truncation, and it is the defence against a decompression bomb: a few bytes on
 disk that claim to expand to gigabytes.
 
-The right value is small. A block holds `BlockRows` rows, 8 192 by default, so the widest honest
-block is `BlockRows` times the widest row: 65 536 bytes for one `f64` or `i64` column of the
-demonstration file, which is why 4 096 is refused above and 1 MiB is plenty. Lower the ceiling for
-input you did not write; raise it only for a file you trust whose blocks are genuinely large, such
-as long text values.
+The right value is small. A chunk this library writes holds about a megabyte of its widest column
+([blocks-and-chunks.md](blocks-and-chunks.md)), so an honest decode is a few megabytes at most; the
+first decode the sample makes produces 131 072 bytes, which is why 4 096 is refused above and 1 MiB
+is plenty. Lower the ceiling for input you did not write; raise it only for a file you trust whose
+chunks are genuinely large, such as long text values.
 
 ## Statistics are claims
 

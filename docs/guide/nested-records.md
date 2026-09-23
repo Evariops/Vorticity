@@ -60,8 +60,8 @@ segments are read:
 [VortexRecord] public partial record struct CountryOnly(string Country);
 ```
 
-Every column of `Visit` requested 2 120 512 bytes; `VisitCountry`, which reads `Origin.Country`
-alone, 70 156. See [project-columns.md](project-columns.md) for the projection in general.
+Every column of `Visit` requested 2 162 496 bytes; `VisitCountry`, which reads `Origin.Country`
+alone, 65 580. See [project-columns.md](project-columns.md) for the projection in general.
 
 ## A list column is its elements and their ranges
 

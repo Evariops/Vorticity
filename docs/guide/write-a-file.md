@@ -63,13 +63,13 @@ The report is the only place that says what was chosen. The sample prints it, gr
 per-chunk encodings:
 
 ```
-1000000 rows in blocks of 8192, 50 chunks, 1564708 bytes, in 245 ms
-  data 1548084, statistics 200, zone maps 8264, indexes 0, footer 8160
-  chunk rows: 32768 x24, 8192 x24, 16384, 576
-  Day: RunEnd x49, Sequence
-  Celsius: Dictionary x49, Alp
-  City: RunEnd x50
-read back: 1000000 rows, 1564708 bytes on disk, mean 30.0000 °C
+1000000 rows in blocks of 8192, 17 chunks, 1508212 bytes, in 131 ms
+  data 1495924, statistics 200, zone maps 8264, indexes 0, footer 3824
+  chunk rows: 65536 x15, 16384, 576
+  Day: RunEnd x16, Sequence
+  Celsius: Dictionary x16, Alp
+  City: RunEnd x17
+read back: 1000000 rows, 1508212 bytes on disk, mean 30.0000 °C
 ```
 
 `report.Columns` gives one encoding per chunk and per column. A day lasts a thousand rows, so `Day`
@@ -81,15 +81,16 @@ how.
 
 `report.Bytes` sums to the file's length. `report.ChunkRows` says how the rows were cut into chunks,
 and [blocks-and-chunks.md](blocks-and-chunks.md) explains why a write of one block at a time comes
-out as alternating chunks of 32 768 and 8 192 rows. `report.Indexes` lists every index the policy
-asked for: none here, since the default is `IndexPolicy.None` ([indexes.md](indexes.md)).
+out as chunks of 65 536 rows: the writer sizes a chunk by its widest column, here the city's
+sixteen-byte views, a megabyte of them. `report.Indexes` lists every index the policy asked for:
+none here, since the default is `IndexPolicy.None` ([indexes.md](indexes.md)).
 
 ## What it costs
 
-The million rows took 245 ms in this run, first-use compilation included, and 1.56 MB on disk. The
+The million rows took 131 ms in this run, first-use compilation included, and 1.51 MB on disk. The
 same rows stored without encoding take 20.8 MB ([writer-options.md](writer-options.md)). The
 columns are encoded on the thread that calls `WriteAsync`. The builder holds up to a chunk's worth
-of rows, about 1 MiB by default, before whole blocks are encoded and released.
+of rows, a megabyte of the widest column by default, before whole blocks are encoded and released.
 
 ## Watch out
 

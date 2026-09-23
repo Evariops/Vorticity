@@ -45,11 +45,11 @@ before anything decodes them. The sample counts it for every batch of both files
 
 | batches of | column | canonical | dictionary | run-end | constant |
 |---|---|---|---|---|---|
-| readings | `Day` | 1 | 0 | 49 | 0 |
-| readings | `Celsius` | 1 | 49 | 0 | 0 |
-| readings | `City` | 0 | 0 | 50 | 0 |
-| visits | `Referrer` | 0 | 13 | 0 | 0 |
-| visits | the six other leaves | 13 each | 0 | 0 | 0 |
+| readings | `Day` | 1 | 0 | 16 | 0 |
+| readings | `Celsius` | 1 | 16 | 0 | 0 |
+| readings | `City` | 0 | 0 | 17 | 0 |
+| visits | `Referrer` | 0 | 5 | 0 | 0 |
+| visits | the six other leaves | 5 each | 0 | 0 | 0 |
 | readings, `Where(r => r.Day == 500)` | `Day`, `City` | 1 each | 0 | 0 | 0 |
 | readings, `Where(r => r.Day == 500)` | `Celsius` | 0 | 1 | 0 | 0 |
 
@@ -110,16 +110,16 @@ It is one line, it treats a null key as a group of its own, and it takes the ses
 ([aggregates.md](aggregates.md)). Measured against the loops above:
 
 ```
-City by run, by hand        8 groups,   16.3 ms
-GroupBy(r => r.City)        8 groups,   49.9 ms
+City by run, by hand        8 groups,   12.5 ms
+GroupBy(r => r.City)        8 groups,   45.8 ms
   8 of 8 cities agree, Paris 3659129.4; the GroupBy decoded 1 blocks
-Referrer by code, by hand  14 groups,    1.4 ms
-GroupBy(v => v.Referrer)   14 groups,    0.9 ms
+Referrer by code, by hand  14 groups,    0.7 ms
+GroupBy(v => v.Referrer)   14 groups,    0.5 ms
   14 of 14 groups agree, null referrers 25000; the GroupBy decoded 13 blocks
 ```
 
 Both give the same answers. On the dictionary key the operator wins; on the run-end key, runs of
-seven rows, the loop by hand won by a factor of three in this run. Write the loop when a
+seven rows, the loop by hand won by a factor of almost four in this run. Write the loop when a
 measurement says so, not before. "Decoded" counts the blocks where a column reached the canonical
 form: the one block of readings whose `Celsius` arrives canonical, and all 13 of the visits, whose
 `DurationMs` always does.

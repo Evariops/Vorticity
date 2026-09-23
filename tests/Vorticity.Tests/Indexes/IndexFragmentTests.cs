@@ -401,9 +401,12 @@ public sealed class IndexFragmentTests
 
     private static async Task<byte[]> WriteAsync(Guid? identity, WritePolicy indexes)
     {
+        // One chunk for the whole file, whose rows fit a megabyte: each half's fragment is then one
+        // run of it, which is the shape the coverage tests describe.
         VortexWriteOptions options = new VortexWriteOptions
         {
             RowBlockSize = BlockRows,
+            ChunkTargetBytes = 1 << 20,
             WritePolicy = indexes,
             Identity = identity,
             IndexBudgetPerMille = 1_000,

@@ -67,8 +67,8 @@ ulong imported = await dataset.ImportAsync("imports/days-100-119.vortex");
 
 ```
 imported: version 4, 120000 rows, 3 objects, lag 0
-  data/4960f1bc51154336b9c12abaa641c39b.vortex: level 0, rows 0 to 50000, 85147 bytes
-  data/8f1d43cdfb9d4d4ab7a10cc02baf54cb.vortex: level 0, rows 50000 to 100000, 75803 bytes
+  data/4960f1bc51154336b9c12abaa641c39b.vortex: level 0, rows 0 to 50000, 82371 bytes
+  data/8f1d43cdfb9d4d4ab7a10cc02baf54cb.vortex: level 0, rows 50000 to 100000, 82371 bytes
   imports/days-100-119.vortex: level 0, rows 100000 to 120000, 37828 bytes
 ```
 

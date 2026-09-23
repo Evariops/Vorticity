@@ -85,18 +85,18 @@ long hot = await file.Scan<Reading>().Where(r => r.Celsius > 45.0 && r.City == "
 It prints:
 
 ```
-wrote 100000 rows in 158508 bytes
+wrote 100000 rows in 157980 bytes
 struct{Day: i32, Celsius: f64?, City: utf8}, 100000 rows
-4 batches, 100000 rows, 2000 without a temperature
+3 batches, 100000 rows, 2000 without a temperature
 mean 30.00 degrees
 3039 readings above 45 degrees in Paris
 ```
 
 ## What happened
 
-* **The rows became columns.** About 1.85 MB of values became a file of 158 508 bytes, because the
+* **The rows became columns.** About 1.85 MB of values became a file of 157 980 bytes, because the
   writer chose an encoding per column and per chunk instead of storing what it was handed.
-* **The scan came back in batches, not rows**: 4 of them, one per chunk the writer made of the
+* **The scan came back in batches, not rows**: 3 of them, one per chunk the writer made of the
   file's 8 192-row blocks. `day`, `celsius` and `city` are `Column<T>` values over the decoded
   batch. They are borrowed: valid inside the loop body, and the compiler refuses to let one outlive
   it ([scan-a-table.md](scan-a-table.md)).

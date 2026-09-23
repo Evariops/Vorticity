@@ -72,15 +72,15 @@ appended in bulk (`Append(ReadOnlySpan<Guid>)`, `Append(ReadOnlySpan<DateTime>)`
 through `GetSpan` and the rest row by row:
 
 ```
-100000 visits column by column: 2129876 bytes, best of three 29 ms
-  Id: Canonical x13
-  StartedAt: Sequence x13
-  DurationMs: Sequence x12, BitPacked
-  Referrer: Dictionary x13
-  Pages: BitPacked x13
-  Origin: {Country: Dictionary, City: Dictionary} x13
-the same visits as rows: 2129876 bytes, best of three 17 ms
-read back: 100000 visits, 100000 lists holding 200000 pages, 9091 origins without a city, 2129876 bytes
+100000 visits column by column: 2169236 bytes, best of three 44 ms
+  Id: Canonical x5
+  StartedAt: Sequence x5
+  DurationMs: Sequence x4, BitPacked
+  Referrer: Dictionary x5
+  Pages: BitPacked x5
+  Origin: {Country: Dictionary, City: Dictionary} x5
+the same visits as rows: 2169236 bytes, best of three 24 ms
+read back: 100000 visits, 100000 lists holding 200000 pages, 9091 origins without a city, 2169236 bytes
 ```
 
 The report reads each chunk's encoding from what was written: a list by its elements, a timestamp

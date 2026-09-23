@@ -32,10 +32,10 @@ that yields the same rows and awaits every ten thousand, as a source reading pag
 ## What it costs
 
 ```
-a span of 1000000 rows: 1522396 bytes, best of three 110 ms
-  chunk rows: 32768 x30, 16384, 576
-a stream of 1000000 rows: 1564708 bytes, best of three 171 ms
-  chunk rows: 32768 x24, 8192 x24, 16384, 576
+a span of 1000000 rows: 1508212 bytes, best of three 94 ms
+  chunk rows: 65536 x15, 16384, 576
+a stream of 1000000 rows: 1508212 bytes, best of three 99 ms
+  chunk rows: 65536 x15, 16384, 576
 ```
 
 Rows cost a field copy per row, and a `string` member is transcoded once per row; a list member is
@@ -44,10 +44,9 @@ touches one column at a time, which is also why it can beat a hand-written loop 
 column of a row before moving to the next ([write-lists-and-records.md](write-lists-and-records.md)
 measures one).
 
-The stream was slower by the enumeration and 42 KB larger. The difference in size is the chunks: rows
-that arrive one block at a time are sealed as alternating chunks of four blocks and one, where a single
-call over the whole span gives chunks of four. [blocks-and-chunks.md](blocks-and-chunks.md) shows the
-same effect with the builder.
+The stream costs the enumeration and nothing else: both calls cut the rows into the same chunks, and
+the same bytes, because the writer sizes a chunk by the width of the rows it holds and not by how they
+arrived. [blocks-and-chunks.md](blocks-and-chunks.md) shows where that width comes from.
 
 ## Watch out
 

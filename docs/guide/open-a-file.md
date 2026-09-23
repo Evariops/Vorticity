@@ -16,7 +16,7 @@ await using (VortexFile file = await VortexFile.OpenAsync(path))
 
 ```
 struct{Day: i32, Celsius: f64?, City: utf8}
-1000000 rows, 1564708 bytes, edition Core20260800
+1000000 rows, 1508212 bytes, edition Core20260800
 identity f6595d25-2b99-4160-9071-63ffd454d25f, metadata keys []
 ```
 
@@ -131,16 +131,16 @@ await using VortexSession cached = VortexSession.Create(options => options.Segme
 ```
 
 ```
-a full scan: the plan names 150 segments, 1540608 bytes; the source served 150 requests, 1540608 bytes
-with a segment cache, scan 1: the source served 150 requests, 1540608 bytes; 0 cache hits
-with a segment cache, scan 2: the source served 0 requests, 0 bytes; 150 cache hits
+a full scan: the plan names 51 segments, 1494044 bytes; the source served 51 requests, 1494044 bytes
+with a segment cache, scan 1: the source served 51 requests, 1494044 bytes; 0 cache hits
+with a segment cache, scan 2: the source served 0 requests, 0 bytes; 51 cache hits
 ```
 
-The plan of a full scan names 150 segments, 1.54 MB, about the whole file, and the source serves
-exactly that: 150 requests for 1.54 MB. A scan reads each segment once, and a segment that spans
+The plan of a full scan names 51 segments, 1.49 MB, about the whole file, and the source serves
+exactly that: 51 requests for 1.49 MB. A scan reads each segment once, and a segment that spans
 several batches is shared by them rather than read again for each. The cache works across scans:
-the first scan of a session with a `SegmentCache` reads the same 150 segments and finds none in the
-cache, and a second scan of the same file reads nothing, the 150 segments coming from the cache.
+the first scan of a session with a `SegmentCache` reads the same 51 segments and finds none in the
+cache, and a second scan of the same file reads nothing, the 51 segments coming from the cache.
 Over a source where a read is a request, that is the reason to give the session one.
 
 ## Watch out

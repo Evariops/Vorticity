@@ -32,7 +32,7 @@ record to it as it would to a file.
 ```
 through a Pipe: 1603156 bytes in 25 parts of up to 65536 bytes; 61 flushes waited 52 ms for the upload in all
 read back from the uploaded bytes: 1000000 rows, mean 30.0000
-through PipeWriter.Create(stream): 1522396 bytes, 1000000 rows
+through PipeWriter.Create(stream): 1508212 bytes, 1000000 rows
 ```
 
 ## What happens

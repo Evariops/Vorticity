@@ -72,8 +72,10 @@ internal static class ReadingSymbols
 /// Its shape is the demo's, chosen for what each gate needs: <c>Day</c> sorted, in runs of a
 /// thousand rows, so that it is written run-end and its zone maps prune; <c>Celsius</c> nullable,
 /// every fiftieth row null, over a range every block spans, so that a filter on it prunes nothing;
-/// <c>City</c> one of eight names in no run, so that it is written as a dictionary. The writer cuts
-/// the rows into chunks larger than a batch and chunks of one batch, so a scan walks both a chunk
+/// <c>City</c> one of eight names in no run, so that it is written as a dictionary. The rows are
+/// cut into chunks of a megabyte rather than the writer's own, sixteen blocks, which would make the
+/// quarter of a million rows three chunks: a gate that counts per batch or per read needs a dozen,
+/// and these are chunks larger than a batch and chunks of one batch, so a scan walks both a chunk
 /// it decodes once and slices, and a chunk it decodes whole into the batch.
 /// </remarks>
 internal static class ContractFile
@@ -83,13 +85,16 @@ internal static class ContractFile
     internal static readonly string[] Cities =
         ["Paris", "Lyon", "Marseille", "Toulouse", "Nice", "Nantes", "Strasbourg", "Lille"];
 
-    private static readonly Lazy<Task<string>> Written = new Lazy<Task<string>>(() => WriteAsync("readings", null));
+    private const int ChunkBytes = 1 << 20;
+
+    private static readonly Lazy<Task<string>> Written = new Lazy<Task<string>>(() => WriteAsync(
+        "readings", new VortexWriteOptions { ChunkTargetBytes = ChunkBytes }));
 
     // The columns compress to a few bytes a row, which a run listing every key does not, so the
     // budget is set far above the default rather than the index being dropped for its size.
     private static readonly Lazy<Task<string>> Indexed = new Lazy<Task<string>>(() => WriteAsync(
         "readings-indexed",
-        new VortexWriteOptions { Indexes = IndexPolicy.None.SortedRuns("City").WithBudgetPerMille(20_000) }));
+        new VortexWriteOptions { ChunkTargetBytes = ChunkBytes, Indexes = IndexPolicy.None.SortedRuns("City").WithBudgetPerMille(20_000) }));
 
     /// <summary>The path of the file, written on first use.</summary>
     internal static Task<string> PathAsync() => Written.Value;

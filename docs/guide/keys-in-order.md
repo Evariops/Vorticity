@@ -92,7 +92,7 @@ Two sources serve a cursor with rows:
 
   On a 100 000-row copy of the readings whose `City` cycles row by row, that index is two runs
   and 100 000 entries, and the cursor walks the eight cities in order, each with the rank of its
-  first entry. It is not free: it took 212 880 bytes against 155 156 bytes of data. The default
+  first entry. It is not free: it took 212 880 bytes against 154 708 bytes of data. The default
   budget of 100 per mille abandoned it, and the write report said so; it was built only once the
   budget was raised with `WithBudgetPerMille(20_000)`. The budget weighs the index before it is
   encoded, 2 637 485 bytes here, so the figure to raise it by is the report's, not the file's.

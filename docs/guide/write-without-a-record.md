@@ -26,7 +26,7 @@ await using (VortexFileWriter writer = session.CreateWriter(path, schema))
 ```
 
 ```
-100000 rows, 226508 bytes; id Sequence x13; payload Zstd x13; origin {country: Dictionary} x13
+100000 rows, 222388 bytes; id Sequence x7; payload Zstd x7; origin {country: Dictionary} x7
 schema struct{id: i64, payload: binary?, origin: struct{country: utf8}}
 read back by name: ids summing to 104999950000, 33334 null payloads, 2666523 payload bytes
 ```

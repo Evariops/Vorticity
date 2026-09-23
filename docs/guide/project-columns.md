@@ -39,16 +39,16 @@ the layout alone, and `Statistics` after the scan ran.
 
 | record | columns | segments | bytes to read | requests | bytes read |
 |---|---|---|---|---|---|
-| `Visit` | 7 | 78 | 2 120 512 | 78 | 2 120 512 |
-| `VisitTiming` | 2 | 26 | 19 560 | 26 | 19 560 |
-| `VisitOrigin` | 1 | 13 | 70 156 | 13 | 70 156 |
-| `VisitId` | 1 | 13 | 1 601 612 | 13 | 1 601 612 |
+| `Visit` | 7 | 30 | 2 162 496 | 30 | 2 162 496 |
+| `VisitTiming` | 2 | 10 | 53 096 | 10 | 53 096 |
+| `VisitOrigin` | 1 | 5 | 65 580 | 5 | 65 580 |
+| `VisitId` | 1 | 5 | 1 600 620 | 5 | 1 600 620 |
 
 Each column lives in its own segments, so a column the record does not name is a branch of the
 layout the scan never walks: not read and discarded, not read at all. The saving follows the
 columns you drop, weighted by their size, not by their number: the timestamp and the duration of
-`VisitTiming` compress to almost nothing and cost less than 1 % of the whole record, while the
-sixteen bytes of each `Id`, stored as they are, make three quarters of it.
+`VisitTiming` compress to little and cost under 3 % of the whole record, while the sixteen bytes
+of each `Id`, stored as they are, make three quarters of it.
 
 ## Nested records project too
 
@@ -61,7 +61,7 @@ public partial record struct VisitOrigin(OriginCountry Origin);
 ```
 
 A struct column is reached through a nested record, and the projection is over leaves: `Origin` in
-`VisitOrigin` names only `Country`, so the scan reads that field's 13 segments and not those of
+`VisitOrigin` names only `Country`, so the scan reads that field's 5 segments and not those of
 its sibling `City`.
 
 ## How a record binds to a file

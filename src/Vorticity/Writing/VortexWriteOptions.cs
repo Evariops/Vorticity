@@ -43,7 +43,7 @@ public enum CompressionProfile : byte
 public sealed record VortexWriteOptions
 {
     private readonly int _blockRows = 8_192;
-    private readonly int _chunkTargetBytes = 1 << 20;
+    private readonly int _chunkTargetBytes;
     private readonly int _stringBoundBytes = 16;
     private readonly IndexPolicy _indexes = IndexPolicy.None;
     private readonly ImmutableDictionary<string, EncodingHint> _hints = ImmutableDictionary<string, EncodingHint>.Empty.WithComparers(StringComparer.Ordinal);
@@ -58,7 +58,7 @@ public sealed record VortexWriteOptions
     /// <summary>The defaults.</summary>
     internal static VortexWriteOptions Default { get; } = new VortexWriteOptions();
 
-    /// <summary>Rows per block: the unit of pruning, of a take, and of a batch a scan delivers.</summary>
+    /// <summary>Rows per block: the unit of pruning, of a take, and of a filtered scan's batch.</summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
     public int BlockRows
     {
@@ -70,7 +70,16 @@ public sealed record VortexWriteOptions
         }
     }
 
-    /// <summary>The bytes gathered before a chunk of whole blocks is sealed at a flush.</summary>
+    /// <summary>
+    /// The bytes gathered before a chunk of whole blocks is sealed at a flush; 0, the default, lets
+    /// the writer size its chunks by what they hold.
+    /// </summary>
+    /// <remarks>
+    /// Sized by the writer, a chunk holds as many whole blocks as keep its widest column within a
+    /// megabyte of values, between one block and 128, and its rows within 64 MiB. A chunk of a column
+    /// is what a read fetches of it, so a selective read fetches little more than it wants, and at
+    /// eight bytes a value that is sixteen blocks, which amortizes what a reader pays per chunk.
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     public int ChunkTargetBytes
     {
@@ -229,6 +238,9 @@ public sealed record VortexWriteOptions
             }
         }
     }
+
+    /// <summary>Whether the writer sizes the chunks, no byte target having been set.</summary>
+    internal bool AutomaticChunks => !_noByteTarget && _chunkTargetBytes == 0;
 
     /// <summary>These options with <see cref="Identity"/> pinned to <paramref name="identity"/>.</summary>
     internal VortexWriteOptions WithIdentity(Guid identity) => this with { Identity = identity };

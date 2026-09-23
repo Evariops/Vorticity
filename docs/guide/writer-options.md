@@ -22,11 +22,11 @@ await using (VortexFileWriter writer = session.CreateWriter<Reading>(path, optio
 ```
 
 ```
-Day: RunEnd x31, Sequence
-Celsius: Zstd x31, Alp
-City: RunEnd x32
+Day: RunEnd x16, Sequence
+Celsius: Zstd x16, Alp
+City: RunEnd x17
 metadata keys producer; producer = acme/1.4
-identity 0199f0c4-7d2a-7c3e-9a51-3f6b2c1d4e5f, edition core2026.08.0, 499196 bytes
+identity 0199f0c4-7d2a-7c3e-9a51-3f6b2c1d4e5f, edition core2026.08.0, 564052 bytes
 written again with the same identity: the same bytes; without one: different bytes
 ```
 
@@ -37,7 +37,7 @@ does not fit throws `ArgumentException` there, before a byte is written.
 | option | default | what it changes |
 |---|---|---|
 | `BlockRows` | 8 192 | rows per block: the unit of pruning, of a take and of a filtered scan's batch ([blocks-and-chunks.md](blocks-and-chunks.md)) |
-| `ChunkTargetBytes` | 1 MiB | the bytes gathered before whole blocks are sealed into a chunk |
+| `ChunkTargetBytes` | 0, the writer's | the bytes gathered before whole blocks are sealed into a chunk; by default a megabyte of the widest column ([blocks-and-chunks.md](blocks-and-chunks.md)) |
 | `Compression` | `Auto` | what the encoder optimises for: `Auto`, `Fastest`, `Smallest`, `None` |
 | `Hints` | empty | an encoding to try first, by column path |
 | `TargetEdition` | `VortexEditions.Default` | the edition every component must belong to ([editions.md](editions.md)) |
@@ -54,16 +54,16 @@ column of every batch to its plain form with `Canonical()`:
 
 | profile | bytes | written in | decoded in | encodings |
 |---|---|---|---|---|
-| `Auto` | 1 522 396 | 56 ms | 9 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
-| `Fastest` | 1 522 396 | 36 ms | 8 ms | the same |
-| `Smallest` | 1 290 036 | 75 ms | 7 ms | `Day` and `City` zstd, `Celsius` ALP |
-| `None` | 20 848 260 | 45 ms | 3 ms | every column `Canonical`, the plain form |
+| `Auto` | 1 508 212 | 35 ms | 1 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
+| `Fastest` | 1 508 212 | 35 ms | 1 ms | the same |
+| `Smallest` | 1 298 700 | 64 ms | 2 ms | `Day` and `City` zstd, `Celsius` ALP |
+| `None` | 20 929 820 | 30 ms | 1 ms | every column `Canonical`, the plain form |
 
 Encoding is what makes the file fourteen times smaller than its plain form. `Auto` prices each
 column's size and decode speed together; `Fastest` spends less time choosing and builds no index,
 and on this data chose the same encodings; `Smallest` prices bytes alone and tries zstd, FSST and ALP
 on every chunk. It is not always the smallest there is: a zstd hint on `Celsius` under `Auto` gives
-499 196 bytes, where `Smallest` chose ALP for that column.
+563 988 bytes, where `Smallest` chose ALP for that column.
 
 ## Hints
 
@@ -72,13 +72,13 @@ at a time, the rest left to the chooser:
 
 | hint | bytes | written as |
 |---|---|---|
-| none | 1 522 396 | `Celsius` a dictionary, `City` runs |
-| `City` as `Dictionary`, `Zstd`, `Fsst` or `Canonical` | 1 522 396 | `City` runs, every time |
-| `Celsius` as `Alp` | 1 605 660 | ALP |
-| `Celsius` as `Zstd` | 499 132 | zstd (ALP on the 576-row tail) |
-| `Celsius` as `BitPacked` | 1 522 396 | a dictionary: bit-packing does not apply to floats |
-| `Celsius` as `Canonical` | 8 476 100 | `Canonical`, the plain form |
-| `Celsius` as `Canonical`, under `Smallest` | 1 290 036 | ALP |
+| none | 1 508 212 | `Celsius` a dictionary, `City` runs |
+| `City` as `Dictionary`, `Zstd`, `Fsst` or `Canonical` | 1 508 212 | `City` runs, every time |
+| `Celsius` as `Alp` | 1 611 636 | ALP |
+| `Celsius` as `Zstd` | 563 988 | zstd (ALP on the 576-row tail) |
+| `Celsius` as `BitPacked` | 1 508 212 | a dictionary: bit-packing does not apply to floats |
+| `Celsius` as `Canonical` | 8 483 996 | `Canonical`, the plain form |
+| `Celsius` as `Canonical`, under `Smallest` | 1 298 700 | ALP |
 
 A hint is a preference, and the report is where you find out whether it held:
 
@@ -99,9 +99,9 @@ that text filters prune by block. On the same rows with the cities in eight runs
 
 | `StringBoundBytes` | bytes | zone maps | `City == "Nice"` reads |
 |---|---|---|---|
-| 0 | 1 207 836 | 6 440 | 123 of 123 blocks |
-| 16 | 1 210 212 | 8 752 | 20 of 123 blocks |
-| 32 | 1 210 212 | 8 752 | 20 of 123 blocks |
+| 0 | 1 173 236 | 6 440 | 123 of 123 blocks |
+| 16 | 1 175 612 | 8 752 | 20 of 123 blocks |
+| 32 | 1 175 612 | 8 752 | 20 of 123 blocks |
 
 Bounds cost 2 376 bytes here and cut the scan six times. 32 bytes changed nothing because no city
 name is longer than 16; longer bounds matter for values that share a long prefix, such as URLs.
@@ -110,7 +110,7 @@ block holds all of them and no bound can rule one out.
 
 ## Statistics, metadata, identity
 
-* **`Statistics = false`** saved 224 bytes of 1 522 396, and `file.Statistics.Count` is then 0: a
+* **`Statistics = false`** saved 224 bytes of 1 508 212, and `file.Statistics.Count` is then 0: a
   question the statistics would answer at open, such as a minimum or a sum, reads the zone maps or
   the data instead. The zone maps are kept, so `Day > 2000` still reads 0 of 123 blocks.
 * **`Metadata`** holds at most 14 entries, with keys of at most 64 UTF-8 bytes, besides the library's
@@ -122,7 +122,7 @@ block holds all of them and no bound can rule one out.
   twice, and a write without it gave different bytes. Each write draws a fresh identity otherwise,
   appends included.
 * **`TargetEdition`** decides which readers can open the file, and which structures the writer may
-  use: under `core2025.05.0` this file is 1 551 068 bytes and carries no zone maps. [editions.md](editions.md)
+  use: under `core2025.05.0` this file is 1 544 292 bytes and carries no zone maps. [editions.md](editions.md)
   is that subject.
 
 ## The options that are not the writer's

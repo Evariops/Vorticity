@@ -50,22 +50,25 @@ the record is the projection, so the scan reads two columns and the target has t
 ## What it costs
 
 ```
-source: 1000000 rows, 1564708 bytes
-a copy: 1000000 rows, 1506964 bytes, 25 chunks, in 25 ms
-re-encoded under Smallest: 1285228 bytes, in 48 ms; Day Zstd x25, Celsius Alp x25, City Zstd x25
-a filtered copy, Day >= 900: 100000 rows, 158148 bytes, in 2 ms
-a typed filtered copy, Day >= 900 and City == Paris: 12502 rows, 19932 bytes, in 1 ms
-a projected copy, Day and Celsius: 1000000 rows, 1154876 bytes, in 12 ms
+source: 1000000 rows, 1508212 bytes
+a copy: 1000000 rows, 1244772 bytes, 18 chunks, in 24 ms
+re-encoded under Smallest: 1299068 bytes, in 60 ms; Day Zstd x18, Celsius Alp x18, City Zstd x18
+a filtered copy, Day >= 900: 100000 rows, 155756 bytes, in 3 ms
+a typed filtered copy, Day >= 900 and City == Paris: 12502 rows, 19932 bytes, in 4 ms
+a projected copy, Day and Celsius: 1000000 rows, 1153396 bytes, in 14 ms
 the projected copy reads back: struct{Day: i32, Celsius: f64?}, 1000000 rows, mean 30.0000
 ```
 
 The times are from a run in which earlier samples had already compiled the code paths. Each column
-is decoded once and encoded once; the target chooses its encodings afresh and cuts its own chunks.
-The copy came out 57 KB smaller than its source, in 25 chunks against 50, because the source was
-written one block at a time ([blocks-and-chunks.md](blocks-and-chunks.md)); a copy is also how a file
-that has taken many appends gets its space back ([append-and-repair.md](append-and-repair.md)).
-`Smallest` made it 18 % smaller than the source, for more time spent writing. A filtered copy reads
-only the blocks the filter keeps, by the same pruning as any scan ([filter-rows.md](filter-rows.md)).
+is decoded once and encoded once; the target chooses its encodings afresh and cuts its own chunks,
+by the width of the rows it is handed ([blocks-and-chunks.md](blocks-and-chunks.md)). The copy came
+out 263 KB smaller than its source: its chunks of seven blocks, 57 344 rows, are a multiple of the
+seven rows a city lasts, so the ends of the city's runs form a progression where the source's
+chunks of eight blocks cut a run each and store them packed. A copy is also how a file that has
+taken many appends gets its space back ([append-and-repair.md](append-and-repair.md)). `Smallest`
+made it 14 % smaller than the source, for more time spent writing, which on this file the plain
+copy's aligned runs beat. A filtered copy reads only the blocks the filter keeps, by the same
+pruning as any scan ([filter-rows.md](filter-rows.md)).
 
 ## Watch out
 

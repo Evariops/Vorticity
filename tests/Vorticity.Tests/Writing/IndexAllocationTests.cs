@@ -123,10 +123,13 @@ public sealed class IndexAllocationTests
             batches[b] = (arena.AddStruct(schema, count, Validity.NonNullable, columns), count);
         }
 
+        // The chunk size is pinned rather than the writer's to decide: at N rows and at 2N the
+        // largest chunk must be the same, or the buffers that grow once per file to it would read
+        // as a cost per row.
         long before = GC.GetAllocatedBytesForCurrentThread();
         await using (VortexFileWriter writer = VortexFileWriter.Create(
             new StreamSegmentSink(System.IO.Stream.Null), schema,
-            new VortexWriteOptions { WritePolicy = policy, IndexBudgetPerMille = 1_000_000 }))
+            new VortexWriteOptions { WritePolicy = policy, IndexBudgetPerMille = 1_000_000, ChunkTargetBytes = 1 << 20 }))
         {
             long offset = 0;
             foreach ((int root, int count) in batches)

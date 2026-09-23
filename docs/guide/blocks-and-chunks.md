@@ -36,9 +36,13 @@ completed: chunk rows 8192, 1808, 22708 bytes
 
 ## What each call does
 
-* `WriteAsync` accepts any number of rows and keeps them in the builder's buffers. Once they hold
-  about `ChunkTargetBytes` (1 MiB by default), the whole blocks among them are encoded as chunks;
-  the rest stays pending. It writes nothing to the file.
+* `WriteAsync` accepts any number of rows and keeps them in the builder's buffers. Once they hold a
+  chunk, the whole blocks among them are encoded; the rest stays pending. It writes nothing to the
+  file. By default the writer sizes a chunk by what its rows hold: as many whole blocks as keep the
+  widest column within a megabyte, between one block and 128, the rows within 64 MiB. A chunk is
+  what a read fetches of a column, so that bounds what a selective read brings in, and at eight bytes
+  a value it is sixteen blocks, enough for a scan to pay the cost of a chunk seldom.
+  `ChunkTargetBytes` sets a fixed target in bytes of all the columns instead.
 * `FlushAsync` seals every whole block pending into a chunk and hands the encoded chunks to the file.
   A partial block stays pending: the first flush above, with 5 000 rows, wrote nothing.
 * `CompleteAsync` seals the whole blocks, writes what remains as the tail, a chunk shorter than a
@@ -51,14 +55,14 @@ it would resume:
 
 | written as | chunks | bytes | an append resumes at |
 |---|---|---|---|
-| 98 304 rows, writes of 8 192 | 5 (32 768 x2, 8 192 x2, 16 384) | 160 756 | 98 304 of 98 304 |
+| 98 304 rows, writes of 8 192 | 2 (65 536, 32 768) | 154 612 | 98 304 of 98 304 |
 | 98 304 rows, writes of 8 192, a flush after each | 12 (8 192 x12) | 177 628 | 98 304 of 98 304 |
-| 98 304 rows, one write | 3 (32 768 x3) | 155 308 | 98 304 of 98 304 |
-| 100 000 rows, writes of 5 000 | 5 (32 768 x2, 8 192, 24 576, 1 696) | 163 404 | 98 304 of 100 000 |
+| 98 304 rows, one write | 2 (65 536, 32 768) | 154 612 | 98 304 of 98 304 |
+| 100 000 rows, writes of 5 000 | 3 (65 536, 32 768, 1 696) | 160 036 | 98 304 of 100 000 |
 | 100 000 rows, writes of 5 000, a flush after each | 13 (8 192 x12, 1 696) | 183 052 | 98 304 of 100 000 |
 | 98 304 rows, `ChunkTargetBytes` 64 KiB | 12 (8 192 x12) | 177 628 | 98 304 of 98 304 |
 | 98 304 rows, `ChunkTargetBytes` 16 MiB | 1 (98 304) | 152 452 | 98 304 of 98 304 |
-| 98 304 rows, `BlockRows` 1 024 | 5 (36 864 x2, 4 096 x2, 16 384) | 166 092 | 98 304 of 98 304 |
+| 98 304 rows, `BlockRows` 1 024 | 2 (65 536, 32 768) | 159 788 | 98 304 of 98 304 |
 
 What decides where an append resumes is the file's row count, not how the rows arrived. A file of
 98 304 rows ends on a block, and an append continues after it without rewriting anything. A file of
@@ -69,14 +73,16 @@ appends cost each way.
 ## What it costs
 
 Chunks are not free. Each one chooses its encodings again and carries its own framing, so a flush
-after every block made the file 14 % larger than one write (177 628 bytes against 155 308), and a
-16 MiB target, one chunk, made it 2 % smaller. Blocks eight times smaller cost 3 % here (166 092
-bytes against 160 756 for the same writes) and buy pruning eight times finer, which
-[filter-rows.md](filter-rows.md) is about.
+after every block made the file 15 % larger than one write (177 628 bytes against 154 612), and a
+16 MiB target, one chunk, made it 1.4 % smaller. Blocks eight times smaller cost 3 % here (159 788
+bytes against 154 612 for the same writes) and buy pruning eight times finer, which
+[filter-rows.md](filter-rows.md) is about. Chunks are not free for a reader either: a selective read
+fetches the chunk of every column it reads for each block it keeps, which is why the writer bounds
+them by the widest column rather than growing them as far as a scan would like.
 
-A write of one block at a time comes out in alternating chunks: the builder reaches the chunk
-target at five blocks, and seals them as one chunk of four blocks and one of a single block. The
-same rows in one call give chunks of four.
+A write of one block at a time comes out as one call does: the chunk is sized by the rows' widest
+column, here the city's sixteen-byte views, a megabyte of which is eight blocks, and the rows are
+cut there however they arrive.
 
 ## Watch out
 

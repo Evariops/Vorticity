@@ -38,10 +38,10 @@ rewritten. Four appends each way, against the same rows written once:
 
 | | resumes at | after four appends | the same rows written once |
 |---|---|---|---|
-| appends of 8 192 onto 16 384 | 16 384, 24 576, 32 768, 40 960 | 49 152 rows, 101 485 bytes | 80 204 bytes |
+| appends of 8 192 onto 16 384 | 16 384, 24 576, 32 768, 40 960 | 49 152 rows, 101 485 bytes | 77 468 bytes |
 | appends of 5 000 onto 20 000 | 16 384, four times | 40 000 rows, 153 621 bytes | 67 892 bytes |
 
-Appends that end on a block rewrite nothing, and the file is 1.27 times the size of the same rows
+Appends that end on a block rewrite nothing, and the file is 1.31 times the size of the same rows
 written once: every version's footer stays in the file, and each append's rows form chunks of their
 own. Appends that do not end on a block keep resuming
 at 16 384: the tail chunk grows by each append's rows and is rewritten whole every time, with its
@@ -52,7 +52,7 @@ since nothing else reclaims what they leave behind.
 ## Giving an append up
 
 ```
-an append abandoned after a flush: 106436 bytes on disk before Abandon, 29316 after, 29316 before the append
+an append abandoned after a flush: 103836 bytes on disk before Abandon, 29316 after, 29316 before the append
 an append disposed without CompleteAsync: 29316 bytes, 29316 before
 a created file abandoned: exists False
 a created file disposed without CompleteAsync: exists False

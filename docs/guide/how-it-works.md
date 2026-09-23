@@ -25,13 +25,13 @@ await using VortexFile file = await VortexFile.OpenAsync(path);
 ```
 
 ```
-written: 1000000 rows in blocks of 8192, 50 chunks of 32768, 8192, 16384, 576 rows; 1564708 bytes: data 1548084, statistics 200, zone maps 8264, indexes 0, footer 8160
+written: 1000000 rows in blocks of 8192, 17 chunks of 65536, 16384, 576 rows; 1508212 bytes: data 1495924, statistics 200, zone maps 8264, indexes 0, footer 3824
   Day: RunEnd, Sequence
   Celsius: Dictionary, Alp
   City: RunEnd
-opened: struct{Day: i32, Celsius: f64?, City: utf8}, 1000000 rows, 1564708 bytes, 153 segments, edition core2026.08.0
+opened: struct{Day: i32, Celsius: f64?, City: utf8}, 1000000 rows, 1508212 bytes, 54 segments, edition core2026.08.0
 layout: vortex.struct of vortex.zoned(123 zones of 8192), vortex.zoned(123 zones of 8192), vortex.zoned(123 zones of 8192)
-plan: 14 of 123 blocks live, 22 segments, 165424 bytes; ran: 100000 rows, 14 blocks decoded, 109 pruned; the lambda ran 1 time
+plan: 14 of 123 blocks live, 13 segments, 210980 bytes; ran: 100000 rows, 14 blocks decoded, 109 pruned; the lambda ran 1 time
 ```
 
 ## The session
@@ -77,7 +77,7 @@ built, over a probe whose members are symbols: `r.Day >= 900` records a predicat
 comparing anything, which is why the sample counts one call for a million rows, and why what
 cannot be pushed down does not compile. The predicate is planned before a byte of data is read:
 the file's statistics may settle it, the zone maps prune blocks, an index prunes more, and the
-plan lists the segments the live blocks need: here 14 of 123 blocks, 22 segments.
+plan lists the segments the live blocks need: here 14 of 123 blocks, 13 segments.
 
 Then a pipeline reads those segments, decodes one block per batch into buffers from the session's
 pool, overlapping the next decode with your work on the current one, and hands you a

@@ -39,15 +39,15 @@ A million rows, with `Celsius` written five ways:
 
 | `Celsius` | bytes | null count in the statistics | batches carrying a bitmap |
 |---|---|---|---|
-| no null, `Append(values)` | 1 552 228 | 0 | 0 of 50 |
-| no null, `Append(values, validity)` with every bit set | 1 552 228 | 0 | 0 of 50 |
-| one null, at row 500 000 | 1 552 356 | 1 | 1 of 50 |
-| one row in fifty | 1 564 708 | 20 000 | 50 of 50 |
-| every row, `AppendNulls` | 371 124 | 1 000 000 | 50 of 50 |
+| no null, `Append(values)` | 1 504 820 | 0 | 0 of 17 |
+| no null, `Append(values, validity)` with every bit set | 1 504 820 | 0 | 0 of 17 |
+| one null, at row 500 000 | 1 504 948 | 1 | 1 of 17 |
+| one row in fifty | 1 508 212 | 20 000 | 17 of 17 |
+| every row, `AppendNulls` | 358 980 | 1 000 000 | 17 of 17 |
 
 A nullable column with no null costs exactly what a column without nulls does. One null costs 128
 bytes, and only the chunk that holds it carries a bitmap, read here as a single batch. A column
-that is entirely null is written as runs, and most of the remaining 371 KB is the other two columns.
+that is entirely null is written as runs, and most of the remaining 359 KB is the other two columns.
 
 The null count comes back three ways: from the file's statistics (`file.Statistics[1].TryGetNullCount`),
 per batch from `Column<T>.NullCount`, and as `IsAllValid` on a batch without a bitmap. Reading

@@ -128,8 +128,8 @@ public sealed class FlatLayoutDecodeCountTests
             long rows = 0;
             await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
-                await foreach (RecordBatch batch in opened.ScanBuilder().ExecuteAsync()
-                    .WithCancellation(CancellationToken.None))
+                await foreach (RecordBatch batch in opened.ScanBuilder().WithMaxBatchRows((int)SplitPlan.DefaultBatchRows)
+                    .ExecuteAsync().WithCancellation(CancellationToken.None))
                 {
                     batches++;
                     rows += batch.RowCount;

@@ -47,12 +47,12 @@ CompactionResult? compacted = await dataset.CompactAsync();
 ```
 
 ```
-compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128962 bytes in and 82950 out, 50000 rows
-  cost: 56 requests (42 get, 10 head, 2 put, 0 delete, 2 list), 56 dependent steps, 232716 bytes read, 83563 written
+compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128962 bytes in and 79866 out, 50000 rows
+  cost: 56 requests (42 get, 10 head, 2 put, 0 delete, 2 list), 56 dependent steps, 230796 bytes read, 80479 written
 now: 1 objects, lag 0; again: nothing to do
 ```
 
-**Ten objects became one, and 128 962 bytes became 82 950**: the same 50 000 rows in two thirds of
+**Ten objects became one, and 128 962 bytes became 79 866**: the same 50 000 rows in two thirds of
 the space, because a column encoder does more with 50 000 rows than with 5 000 at a time. Small
 appends cost size, and compaction is what gets it back.
 
@@ -72,7 +72,7 @@ DatasetVerification since = await dataset.VerifyAsync(since: checkedAt);
 ```
 
 ```
-verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 13 requests (10 get, 3 head, 0 put, 0 delete, 0 list), 13 dependent steps, 150615 bytes read, 0 written
+verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 11 requests (8 get, 3 head, 0 put, 0 delete, 0 list), 11 dependent steps, 147323 bytes read, 0 written
 verify since 12: holds True, 1 objects, 1 pages; cost: 12 requests (9 get, 3 head, 0 put, 0 delete, 0 list), 12 dependent steps, 28850 bytes read, 0 written
 ```
 
@@ -81,7 +81,7 @@ references promise, and names every problem instead of throwing: `Problems` is a
 sentences, empty when `Holds` is true. An object is hashed against the hash its entry records;
 `Unhashed` counts the imported objects whose entry records none, whose length is checked instead.
 `since` skips what an earlier, trusted version shares with this one: after one more append, it
-read 28 850 bytes where a full verification read 150 615.
+read 28 850 bytes where a full verification read 147 323.
 
 ## Vacuum
 

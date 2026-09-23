@@ -22,7 +22,7 @@ is the free kind of pruning.
 ## What the report says
 
 ```
-Bloom on Session, NgramBloom on Path, budget 300 per mille: 6219196 bytes, 932416 of them indexes
+Bloom on Session, NgramBloom on Path, budget 300 per mille: 5310908 bytes, 932416 of them indexes
   Session vorticity.bloom.sbbf.v1: Built, 820056 bytes
   Path vorticity.bloom.ngram3.v1: Built, 111448 bytes
 ```
@@ -37,15 +37,20 @@ The sample asks each filter for its plan with and without the indexes (`ScanOpti
 
 | filter | rows | blocks read, with | bytes read, with | without |
 |---|---|---|---|---|
-| `Session == ` a value that exists | 1 | 1 of 49 | 1 022 008 | 49 blocks, 5 271 956 bytes |
-| `Session == ` a value that does not | 0 | 0 of 49 | 805 704 | 49 blocks, 5 271 956 bytes |
-| `Path.Contains("checkout")` | 10 | 10 of 49 | 2 272 840 | 49 blocks, 5 272 012 bytes |
+| `Session == ` a value that exists | 1 | 1 of 49 | 1 163 616 | 49 blocks, 4 367 836 bytes |
+| `Session == ` a value that does not | 0 | 0 of 49 | 805 704 | 49 blocks, 4 367 836 bytes |
+| `Path.Contains("checkout")` | 10 | 10 of 49 | 3 681 912 | 49 blocks, 4 367 892 bytes |
 
 A skipping index does not find rows; it proves that a block cannot hold them, so the block is never
-read. The Bloom filters on `Session` cost 820 KB against 5.3 MB of data and cut the read five times
-for a hit and six and a half for a miss; the filters are read whole, 804 KB of the million bytes.
-The n-gram filters are cheaper and serve `Contains` and `Like`. `plan.Pruning` names
-the structure that pruned each block: `bloom filter pruned 48 reading 803596 bytes`.
+read. The Bloom filters on `Session` cost 820 KB against 4.4 MB of data and cut the read almost four
+times for a hit and five times for a miss; the filters are read whole, 804 KB of the 1.16 million
+bytes. The n-gram filters are cheaper and serve `Contains` and `Like`. `plan.Pruning` names the
+structure that pruned each block: `bloom filter pruned 48 reading 803596 bytes`.
+
+A block an index keeps is read by its chunk: the writer seals whole blocks into chunks, four here,
+and a column's chunk is one segment. The ten blocks `Contains` keeps fall in ten of the file's
+thirteen chunks, which is why it reads most of the file. A file read mostly for a few rows at a time
+is one to write with smaller chunks, `ChunkTargetBytes` ([blocks-and-chunks.md](blocks-and-chunks.md)).
 
 ## The kinds
 
@@ -60,15 +65,16 @@ the structure that pruned each block: `bloom filter pruned 48 reading 803596 byt
 The locating kinds, measured on the same rows:
 
 ```
-Postings on Status, SortedRuns on Score, budget 3000 per mille: 7140709 bytes, 1853905 of them indexes
-  Status == 301: 16 rows; 16 of 49 blocks and 3461108 bytes with the indexes (… locating index pruned 33 reading 1184 bytes), 49 blocks and 5270804 bytes without
-  Score == a value that exists: 1 rows; 1 of 49 blocks and 550460 bytes with the indexes (… locating index pruned 48 reading 333200 bytes), 49 blocks and 5270804 bytes without
-  Score between 1000 and 1100: 38 rows; 36 of 49 blocks and 5270804 bytes with the indexes (… sorted runs pruned 13 reading 0 bytes), 49 blocks and 5270804 bytes without
+Postings on Status, SortedRuns on Score, budget 3000 per mille: 6232421 bytes, 1853905 of them indexes
+  Status == 301: 16 rows; 16 of 49 blocks and 4287212 bytes with the indexes (… locating index pruned 33 reading 1184 bytes), 49 blocks and 4366684 bytes without
+  Score == a value that exists: 1 rows; 1 of 49 blocks and 692068 bytes with the indexes (… locating index pruned 48 reading 333200 bytes), 49 blocks and 4366684 bytes without
+  Score between 1000 and 1100: 38 rows; 36 of 49 blocks and 4366684 bytes with the indexes (… sorted runs pruned 13 reading 0 bytes), 49 blocks and 4366684 bytes without
   a key cursor on Score: the first key at or after 1000 is 1001, at row 280415; 382 rows hold a smaller one
 ```
 
-Postings on four statuses take 1 184 bytes and find the sixteen rows of a rare one. Sorted runs take
-1.85 MB, a third of the data: they list every row. They prune an equality, and they are what lets
+Postings on four statuses take 1 184 bytes and find the sixteen rows of a rare one, in sixteen
+blocks that spread over nearly every chunk. Sorted runs take 1.85 MB, two fifths of the data: they
+list every row. They prune an equality, and they are what lets
 `Scan<Hit>().Keys(r => r.Score)` open a cursor over a column that is not sorted; without them
 `OpenAsync` throws `VortexUnsupportedException` naming the index to build
 ([keys-in-order.md](keys-in-order.md)). They prune a range filter too: `Between` kept the 36 blocks
@@ -84,12 +90,12 @@ IReadOnlyList<IndexWriteReport> added = await VortexFileIndexer.AppendIndexesAsy
 ```
 
 ```
-  added afterwards: vorticity.sorted.runs.v1 Built, 1850040 bytes; the file grew from 5286740 to 7145223 bytes; the cursor finds 1001 at row 280415
+  added afterwards: vorticity.sorted.runs.v1 Built, 1850040 bytes; the file grew from 4378452 to 6234823 bytes; the cursor finds 1001 at row 280415
 ```
 
 The data stays where it is; the file's tail is written again with the index regions after the last
 chunk, and the file takes a new identity. The index is the one the write would have built, 1 850 040
-bytes, and the file grew by 1 858 483: the directory and the tail written again are the difference.
+bytes, and the file grew by 1 856 371: the directory and the tail written again are the difference.
 `VortexFileIndexer.BuildFragmentAsync`
 builds the same index into an `IndexFragment` instead and leaves the file untouched: a reader passes
 it with `VortexOpenOptions.IndexFragments`, which is how an index reaches a file that cannot be
@@ -103,7 +109,7 @@ Indexes = IndexPolicy.None
     .WithBudgetPerMille(3_000),
 ```
 
-It was built, 1.79 MB. No scan of the typed surface reads it: `Status == 301 & Score >= 1000` read
+It was built, 1.40 MB. No scan of the typed surface reads it: `Status == 301 & Score >= 1000` read
 49 of 49 blocks, and `Keys` takes one column. It is how a dataset's clustering key is written
 ([datasets.md](datasets.md)). Without an encoder the key is abandoned: *no key encoder: declare the
 key with IndexPolicy.ForKey(columns, kind, encoder), e.g. with the RowKeyEncoder of
@@ -115,21 +121,22 @@ Vorticity.RowEncoding*. [row-keys.md](row-keys.md) is the encoding.
 and its share of the budget say they pay. On these rows:
 
 ```
-IndexPolicy.Auto: 5286905 bytes, 101 of them indexes
+IndexPolicy.Auto: 4378617 bytes, 101 of them indexes
   Session vorticity.bloom.sbbf.v1: Abandoned, 0 bytes -- Auto gave it up: 16384 bytes of filters against 229376 raw bytes of column, over its share of 20‰. An explicit Bloom policy overrides the share
   Status vorticity.dict.probe.v1: Built, 0 bytes
   Status vorticity.bloom.sbbf.v1: Abandoned, 0 bytes -- Auto gave it up: the first 16 blocks hold 4 distinct values, under the floor of 8 the policy asks before a filter pays
 ```
 
-It built dictionary probes, which cost nothing since the dictionary is already in the file, and
-pruned 17 blocks of 49 for `Status == 301` with them; it gave up the Bloom filter the session lookup
-needed. Ask for that one by name.
+It built dictionary probes, which cost nothing since the dictionary is already in the file; a probe
+answers for the chunk its dictionary covers, and with a 301 in all but one of the file's chunks it
+pruned one block of 49 for `Status == 301`. It gave up the Bloom filter the session lookup needed.
+Ask for that one by name.
 
 `WithBudgetPerMille` bounds the bytes the indexes may take together, per thousand bytes of data, 100
 by default. The same Bloom and n-gram policy under the default budget:
 
 ```
-  Session vorticity.bloom.sbbf.v1: Abandoned, 0 bytes -- the file's indexes reached 296960 bytes against 1729668 bytes of data, over the budget of 100‰ (IndexPolicy.WithBudgetPerMille)
+  Session vorticity.bloom.sbbf.v1: Abandoned, 0 bytes -- the file's indexes reached 296960 bytes against 1430532 bytes of data, over the budget of 100‰ (IndexPolicy.WithBudgetPerMille)
 ```
 
 **An abandoned index leaves no bytes.** The file was 106 bytes larger than one without a policy, the
@@ -139,7 +146,7 @@ already in the file is kept even past the budget.
 ## Required
 
 ```
-a required index over its budget: VortexException: The vorticity.bloom.sbbf.v1 index on 'Session' is required and was not built: the required indexes take 3277420 bytes against 5274028 bytes of data, over the budget of 50‰; raise it with IndexPolicy.WithBudgetPerMille. The file is not completed.
+a required index over its budget: VortexException: The vorticity.bloom.sbbf.v1 index on 'Session' is required and was not built: the required indexes take 3277420 bytes against 4367852 bytes of data, over the budget of 50‰; raise it with IndexPolicy.WithBudgetPerMille. The file is not completed.
   the file is left behind: False
 ```
 

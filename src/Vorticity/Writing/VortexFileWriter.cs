@@ -150,6 +150,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <summary>Canonical bytes to accumulate before emitting, or 0 for no byte threshold.</summary>
     private readonly long _blockBytes;
 
+    /// <summary>
+    /// The canonical bytes of its widest column a chunk the writer sizes holds, about what the
+    /// reference writes a column chunk as. A chunk of a column is what a read fetches of it, so a
+    /// selective read, or one over a remote source, brings in little more than it wants; and at
+    /// eight bytes a value it is sixteen blocks, past the knee of the fixed cost a reader pays per
+    /// chunk and column -- the blob parsed, the decoders set up, a dictionary's values decoded.
+    /// </summary>
+    internal const long AutomaticColumnBytes = 1L << 20;
+
+    /// <summary>
+    /// The most blocks a chunk the writer sizes holds, however narrow its columns: a chunk that an
+    /// encoding without ranges decodes whole for one row stays bounded.
+    /// </summary>
+    internal const int AutomaticChunkMaxBlocks = 128;
+
+    /// <summary>
+    /// The canonical bytes of all its columns a chunk the writer sizes holds at most: what the
+    /// writer keeps in transit stays bounded however many columns a row has.
+    /// </summary>
+    internal const long AutomaticChunkBytes = 64L << 20;
+
+    /// <summary>Whether the writer sizes the chunks, the options having set no byte target.</summary>
+    private bool _automaticChunks;
+
     /// <summary>Whether the schema holds a list or a map, so a chunk may share a batch's children.</summary>
     private readonly bool _mayShareChildren;
 
@@ -291,10 +315,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     }
 
     /// <summary>
-    /// The row count a caller should batch in multiples of: such a batch, carrying at least
-    /// <see cref="VortexWriteOptions.DataBlockTargetBytes"/> bytes, is written where it lies and
-    /// pays no transit copy. Any other batch waits in transit for the rows completing its last
-    /// block.
+    /// The row count a caller should batch in multiples of: such a batch, holding a chunk --
+    /// <see cref="VortexWriteOptions.DataBlockTargetBytes"/> bytes, or when the writer sizes the
+    /// chunks <see cref="AutomaticColumnBytes"/> of its widest column -- is written where it lies
+    /// and pays no transit copy. Any other batch waits in transit for the rows completing its chunk.
     /// </summary>
     internal int PreferredBatchRows => _rowBlock > 0 ? _rowBlock : 1;
 
@@ -456,6 +480,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _metadata = UserMetadata.Ordered(options.Metadata),
+            _automaticChunks = options.AutomaticChunks,
         };
     }
 
@@ -627,16 +652,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         root = arena.DecodedTree(root);
         await StartAsync(cancellationToken).ConfigureAwait(false);
 
-        // The statistics pass runs before any copy or emission: the decode that produced the batch
-        // has just touched every byte, and a row's block does not depend on where the row ends up.
-        Ingest(arena, root);
-
         if (_rowBlock == 0)
         {
             // One call, one chunk.
+            Ingest(arena, root);
             await EmitChunkAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
             return;
         }
+
+        // The writer's own builder hands its chunks over already cut, whole blocks with nothing in
+        // transit, and those go out as they are, like any sealed batch.
+        if (_automaticChunks && !(seal && _pending.Count == 0 && rows % _rowBlock == 0))
+        {
+            await WriteInChunksAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
+            while (seal && _pendingRows >= _rowBlock)
+            {
+                await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        // The statistics pass runs before any copy or emission: the decode that produced the batch
+        // has just touched every byte, and a row's block does not depend on where the row ends up.
+        Ingest(arena, root);
 
         // Nothing pending and already big enough: write it where it lies, with no transit copy.
         if (_pending.Count == 0 &&
@@ -652,6 +691,136 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         while (_pendingRows >= _rowBlock && (seal || _pendingBytes >= _blockBytes))
         {
             await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Takes a batch into chunks the writer sizes, cutting it where its chunks end before anything
+    /// reads it: every chunk it holds whole is written where it lies, and the rest waits in transit
+    /// for the rows that complete its chunk, which then goes out whole with nothing carried.
+    /// </summary>
+    /// <remarks>
+    /// The cut comes first because the statistics pass feeds the distinct tables the chooser prices
+    /// a chunk's dictionary from, and a table that saw rows of two chunks serves neither: the
+    /// chooser would walk each column of each chunk again. A chunk's size follows from the batch's
+    /// width -- its widest column and all of them, per row -- and the rows already in transit keep
+    /// theirs until their chunk goes out.
+    /// </remarks>
+    private async ValueTask WriteInChunksAsync(CanonicalArena arena, int root, int rows, CancellationToken cancellationToken)
+    {
+        (long widest, long total) = ColumnBytes(arena, root);
+        long chunk = AutomaticChunkRows(widest, total, rows);
+        int offset = 0;
+        while (offset < rows)
+        {
+            if (_pendingRows >= chunk)
+            {
+                await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            int left = rows - offset;
+            if (_pendingRows == 0 && left >= chunk)
+            {
+                int whole = (int)chunk;
+                int piece = whole == rows ? root : CanonicalSlice.SliceAcross(arena, arena, root, offset, whole);
+                Ingest(arena, piece);
+                await EmitChunkAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
+                offset += whole;
+                continue;
+            }
+
+            int take = (int)Math.Min(left, chunk - _pendingRows);
+            int part = take == rows ? root : CanonicalSlice.SliceAcross(arena, arena, root, offset, take);
+            Ingest(arena, part);
+            Hold(arena, part);
+            offset += take;
+        }
+
+        if (_pendingRows >= chunk)
+        {
+            await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The rows of a chunk the writer sizes, for rows whose widest column holds
+    /// <paramref name="widest"/> canonical bytes and whose columns hold <paramref name="total"/>
+    /// over <paramref name="rows"/> rows: as many whole blocks as keep the widest column within
+    /// <see cref="AutomaticColumnBytes"/> and all of them within <see cref="AutomaticChunkBytes"/>,
+    /// one block at least and <see cref="AutomaticChunkMaxBlocks"/> at most.
+    /// </summary>
+    private long AutomaticChunkRows(long widest, long total, long rows)
+    {
+        long blocks = AutomaticChunkMaxBlocks;
+        if (widest > 0)
+        {
+            blocks = Math.Min(blocks, AutomaticColumnBytes * rows / widest / _rowBlock);
+        }
+
+        if (total > 0)
+        {
+            blocks = Math.Min(blocks, AutomaticChunkBytes * rows / total / _rowBlock);
+        }
+
+        return Math.Max(1, blocks) * _rowBlock;
+    }
+
+    /// <summary>The canonical bytes of the widest column of <paramref name="root"/>, and of all its columns.</summary>
+    private (long Widest, long Total) ColumnBytes(CanonicalArena arena, int root)
+    {
+        if (!_isTabular)
+        {
+            long bytes = arena.ByteSize(root);
+            return (bytes, bytes);
+        }
+
+        CanonicalNode node = arena.GetNode(root);
+        long widest = 0;
+        long total = 0;
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            long bytes = arena.ByteSize(node.GetFieldIndex(field));
+            widest = Math.Max(widest, bytes);
+            total += bytes;
+        }
+
+        return (widest, total);
+    }
+
+    /// <summary>
+    /// Writes whole blocks as one chunk or, when the writer sizes the chunks and they are more than
+    /// a chunk holds, as several chunks of as nearly equal blocks as whole blocks allow, each a
+    /// slice of <paramref name="node"/> rather than a copy.
+    /// </summary>
+    /// <param name="arena">The arena holding the rows.</param>
+    /// <param name="node">The rows' node, whole blocks of them.</param>
+    /// <param name="rows">The node's rows.</param>
+    /// <param name="cancellationToken">Cancels the writes.</param>
+    private async ValueTask EmitWholeBlocksAsync(CanonicalArena arena, int node, int rows, CancellationToken cancellationToken)
+    {
+        int blocks = rows / _rowBlock;
+        int most = blocks;
+        if (_automaticChunks)
+        {
+            (long widest, long total) = ColumnBytes(arena, node);
+            most = (int)(AutomaticChunkRows(widest, total, rows) / _rowBlock);
+        }
+
+        if (blocks <= most)
+        {
+            await EmitChunkAsync(arena, node, rows, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        int chunks = (blocks + most - 1) / most;
+        int start = 0;
+        for (int chunk = 0; chunk < chunks; chunk++)
+        {
+            int length = (blocks - (start / _rowBlock)) / (chunks - chunk) * _rowBlock;
+            int slice = CanonicalSlice.SliceAcross(arena, arena, node, start, length);
+            await EmitChunkAsync(arena, slice, length, cancellationToken).ConfigureAwait(false);
+            start += length;
         }
     }
 
@@ -847,7 +1016,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
                 : CanonicalConcat.Concat(
                     from.Decode, _schema, total,
                     System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
-            await EmitChunkAsync(from.Canonical, all, emit, cancellationToken).ConfigureAwait(false);
+            await EmitWholeBlocksAsync(from.Canonical, all, emit, cancellationToken).ConfigureAwait(false);
             ResetTransit();
             return;
         }
@@ -888,7 +1057,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             : CanonicalConcat.Concat(
                 from.Decode, _schema, emit,
                 System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending)[..going]);
-        await EmitChunkAsync(from.Canonical, head, emit, cancellationToken).ConfigureAwait(false);
+        await EmitWholeBlocksAsync(from.Canonical, head, emit, cancellationToken).ConfigureAwait(false);
 
         // The remainder moves to the other arena before this one is reset, because a slice is a
         // view onto the storage the reset would hand back.

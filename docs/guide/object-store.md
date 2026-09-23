@@ -20,8 +20,8 @@ await memory.DeleteAsync(["logs/00", "logs/01", "logs/99"], ct);
 ```
 
 ```
-put: Created, then Exists; the store holds 1 object, 1564708 bytes
-head: 1564708 bytes, token 1; a missing key: null
+put: Created, then Exists; the store holds 1 object, 1508212 bytes
+head: 1508212 bytes, token 1; a missing key: null
 range: asked 64 bytes 8 before the end, got 8, token 1, contiguous True
 list under logs/ after logs/01, first two: logs/02, logs/03
 deleted a batch of three keys, one absent: 4 objects left
@@ -133,17 +133,17 @@ await using (VortexFile opened = await VortexSession.Default.OpenAsync(new Store
 
 ```
 open from the store: 1000000 rows; 2 requests (1 get, 1 head, 0 put, 0 list), 2 dependent steps, 65536 bytes read, 0 written
-mean of Celsius for Day >= 900: 30.000; 15 requests (15 get, 0 head, 0 put, 0 list), 13 dependent steps, 134204 bytes read, 0 written
-a full scan, 1000000 rows: 150 requests (150 get, 0 head, 0 put, 0 list), 150 dependent steps, 1540608 bytes read, 0 written
-a full scan through a session with a segment cache, 1000000 rows: 150 requests (150 get, 0 head, 0 put, 0 list), 149 dependent steps, 1540608 bytes read, 0 written
+mean of Celsius for Day >= 900: 30.000; 9 requests (9 get, 0 head, 0 put, 0 list), 9 dependent steps, 175228 bytes read, 0 written
+a full scan, 1000000 rows: 51 requests (51 get, 0 head, 0 put, 0 list), 43 dependent steps, 1494044 bytes read, 0 written
+a full scan through a session with a segment cache, 1000000 rows: 51 requests (51 get, 0 head, 0 put, 0 list), 49 dependent steps, 1494044 bytes read, 0 written
 ```
 
 The open costs one ranged read of the tail, plus the head the sample asks for the length. From
 there every projection and filter of the guide works, and each saves requests, not just bytes: a
-filtered mean reads 15 ranges of the file's 150 segments. The session's `MaxConcurrentReads` bounds
+filtered mean reads 9 ranges of the file's 51 segments. The session's `MaxConcurrentReads` bounds
 the reads in flight across every file it opens this way, and its segment cache applies too. A
-scan fetches each segment once, even a chunk that spans several blocks: 150 requests and 1.54 MB
-for a 1.56 MB file, with a cache or without. The cache pays across scans: a second scan through
+scan fetches each segment once, even a chunk that spans several blocks: 51 requests and 1.49 MB
+for a 1.51 MB file, with a cache or without. The cache pays across scans: a second scan through
 the same session fetches nothing ([open-a-file.md](open-a-file.md)).
 
 The source receives the ranges of a batch together, so a source over a network store can coalesce
