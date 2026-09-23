@@ -249,11 +249,12 @@ public sealed class PathAllocationTests
         // context -- and the headroom the neighbouring axes have.
         ("scan, fastlanes.delta", "encodings/fastlanes_delta", 28_008, FullScan),
         ("scan, vortex.pco", "encodings/pco", 29_496, FullScan),
-        // A node's frames go through one decoder per node, reset between frames, rather than the
-        // one-shot `ZstandardDecoder.TryDecompress`, which builds and tears down a native
-        // decompression context per call: this ceiling pays for one managed decoder per scan so
-        // that the scan does not pay for a native context per frame.
-        ("scan, vortex.zstd", "encodings/zstd", 28_056, FullScan),
+        // A node's frames go through one decoder, reset between frames, rather than the one-shot
+        // `ZstandardDecoder.TryDecompress`, which builds and tears down a native decompression
+        // context per call; and the decoder is the process's, taken by the scan's context and
+        // given back when it is disposed, so a warm scan builds none: 104 bytes and 96 KB of
+        // native state less than one decoder a scan.
+        ("scan, vortex.zstd", "encodings/zstd", 27_952, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
         ("scan, vortex.map", "encodings/map", 28_504, FullScan),

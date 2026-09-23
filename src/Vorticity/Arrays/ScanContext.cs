@@ -645,11 +645,12 @@ internal sealed class ScanContext : IDisposable
     private System.IO.Compression.ZstandardDecoder? _zstd;
 
     /// <summary>
-    /// The zstd decoder this context decompresses frames without a dictionary with, built at the
-    /// first and reset before each: its native state is costly to build, and a scan meets an array
-    /// once per window of it, not once.
+    /// The zstd decoder this context decompresses frames without a dictionary with, taken from
+    /// the process's at the first, reset before each, and given back when the context is disposed:
+    /// its native state is costly to build, and a scan meets an array once per window of it, not
+    /// once.
     /// </summary>
-    internal System.IO.Compression.ZstandardDecoder Zstd => _zstd ??= new System.IO.Compression.ZstandardDecoder();
+    internal System.IO.Compression.ZstandardDecoder Zstd => _zstd ??= ZstdDecoders.Rent();
 
     /// <summary>The retained decode for <paramref name="key"/>, if one is published; no claim is made.</summary>
     /// <param name="key">From <see cref="SegmentKey"/>, <see cref="LayoutKey"/> or <see cref="ChildKey"/>.</param>
@@ -1169,7 +1170,12 @@ internal sealed class ScanContext : IDisposable
             _retained?.Dispose();
         }
 
-        _zstd?.Dispose();
+        if (_zstd is { } zstd)
+        {
+            _zstd = null;
+            ZstdDecoders.Return(zstd);
+        }
+
         Segments.Dispose();
     }
 
