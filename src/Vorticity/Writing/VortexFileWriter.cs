@@ -1270,13 +1270,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         await WriteZoneMapsAsync(cancellationToken).ConfigureAwait(false);
         long zoneMapsEnd = _sink.Position;
 
+        // Every FlatBuffer of the tail is built in the one builder the blobs were, idle now, and
+        // written from its buffer: each is written before the next one clears it.
+        FlatBufferBuilder builder = Blobs.Builder;
+
         // The file statistics: the merge of every closed block per top-level field.
         long statisticsOffset = 0;
         int statisticsLength = 0;
         if (_fileStatistics)
         {
             statisticsOffset = _sink.Position;
-            byte[] statistics = BuildFileStatistics();
+            builder.Clear();
+            ReadOnlyMemory<byte> statistics = BuildFileStatistics(builder);
             statisticsLength = statistics.Length;
             await _sink.WriteAsync(statistics, cancellationToken).ConfigureAwait(false);
         }
@@ -1291,25 +1296,34 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         }
 
         long dtypeOffset = _sink.Position;
-        byte[] dtype = DTypeFlatBuffers.Serialize(_schema);
+        builder.Clear();
+        ReadOnlyMemory<byte> dtype = builder.FinishMemory(DTypeFlatBuffers.Write(builder, _schema));
+        int dtypeLength = dtype.Length;
         await _sink.WriteAsync(dtype, cancellationToken).ConfigureAwait(false);
 
         long layoutOffset = _sink.Position;
-        byte[] layout = BuildLayout();
+        builder.Clear();
+        ReadOnlyMemory<byte> layout = BuildLayout(builder);
+        int layoutLength = layout.Length;
         await _sink.WriteAsync(layout, cancellationToken).ConfigureAwait(false);
 
         long footerOffset = _sink.Position;
-        byte[] footer = BuildFooter();
+        builder.Clear();
+        ReadOnlyMemory<byte> footer = Footer(
+            builder, _arrayEncodings.Ids, _layoutEncodings.Ids, _segments.AsSpan(0, _segmentCount));
+        int footerLength = footer.Length;
         await _sink.WriteAsync(footer, cancellationToken).ConfigureAwait(false);
 
+        builder.Clear();
         await WriteEndAsync(
             _sink,
             new PostscriptPlacement(
-                dtypeOffset, dtype.Length, layoutOffset, layout.Length, footerOffset, footer.Length,
+                dtypeOffset, dtypeLength, layoutOffset, layoutLength, footerOffset, footerLength,
                 statisticsOffset, statisticsLength, directoryOffset, directory?.Length ?? 0),
             _identity,
             _metadata,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            builder).ConfigureAwait(false);
 
         await FlushSinkAsync(cancellationToken).ConfigureAwait(false);
 
@@ -1531,11 +1545,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         return aligned;
     }
 
-    /// <summary>struct -> per field chunked -> per batch flat.</summary>
-    private byte[] BuildLayout()
+    /// <summary>struct -> per field chunked -> per batch flat, built in <paramref name="builder"/>, whose bytes it lends.</summary>
+    private ReadOnlyMemory<byte> BuildLayout(FlatBufferBuilder builder)
     {
-        using FlatBufferBuilder builder = new FlatBufferBuilder();
-
         ushort flat = _layoutEncodings.Intern("vortex.flat");
         ushort chunked = _layoutEncodings.Intern("vortex.chunked");
         ushort zoned = 0;
@@ -1573,7 +1585,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
                     builder, structural, (ulong)_rowCount, default, fieldLayouts.AsSpan(0, _fieldCount), [])
                 : fieldLayouts[0];
 
-            return builder.FinishToArray(root);
+            return builder.FinishMemory(root);
         }
         finally
         {
@@ -1614,26 +1626,38 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             builder, zoned, (ulong)_rowCount, _zoneMetadata[field], children, []);
     }
 
-    private byte[] BuildFooter() =>
-        Footer(_arrayEncodings.Ids, _layoutEncodings.Ids, _segments.AsSpan(0, _segmentCount));
-
     /// <summary>A footer over these encoding tables and segments.</summary>
     internal static byte[] Footer(IReadOnlyList<string> arrays, IReadOnlyList<string> layouts, ReadOnlySpan<SegmentSpec> segments)
     {
         using FlatBufferBuilder builder = new FlatBufferBuilder();
+        return Footer(builder, arrays, layouts, segments).ToArray();
+    }
 
-        int[] arraySpecs = CreateStrings(builder, arrays);
-        int[] layoutSpecs = CreateStrings(builder, layouts);
+    /// <summary>A footer over these encoding tables and segments, built in <paramref name="builder"/>, whose bytes it lends.</summary>
+    private static ReadOnlyMemory<byte> Footer(
+        FlatBufferBuilder builder, IReadOnlyList<string> arrays, IReadOnlyList<string> layouts, ReadOnlySpan<SegmentSpec> segments)
+    {
+        int[] arraySpecs = ArrayPool<int>.Shared.Rent(Math.Max(arrays.Count, 1));
+        int[] layoutSpecs = ArrayPool<int>.Shared.Rent(Math.Max(layouts.Count, 1));
+        try
+        {
+            CreateStrings(builder, arrays, arraySpecs);
+            CreateStrings(builder, layouts, layoutSpecs);
+            int table = FooterWriter.Write(
+                builder,
+                arraySpecs.AsSpan(0, arrays.Count),
+                layoutSpecs.AsSpan(0, layouts.Count),
+                segments,
+                [],
+                0);
 
-        int table = FooterWriter.Write(
-            builder,
-            arraySpecs,
-            layoutSpecs,
-            segments,
-            [],
-            0);
-
-        return builder.FinishToArray(table);
+            return builder.FinishMemory(table);
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(arraySpecs);
+            ArrayPool<int>.Shared.Return(layoutSpecs);
+        }
     }
 
     /// <summary>Where the segments a postscript names lie; a length of 0 is an absent segment.</summary>
@@ -1651,15 +1675,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <param name="identity">The identity the options pinned, or null for a fresh one.</param>
     /// <param name="metadata">The user metadata, each value a segment the postscript names by its key.</param>
     /// <param name="cancellationToken">Cancels the writes.</param>
+    /// <param name="cleared">A builder the caller lends, cleared, for the postscript; one of its own otherwise.</param>
     /// <remarks>
     /// The metadata and the identity go last before the postscript, so the tail every open reads
     /// covers them.
     /// </remarks>
     internal static async ValueTask WriteEndAsync(
         ISegmentSink sink, PostscriptPlacement placement, Guid? identity,
-        IReadOnlyList<KeyValuePair<string, ReadOnlyMemory<byte>>> metadata, CancellationToken cancellationToken)
+        IReadOnlyList<KeyValuePair<string, ReadOnlyMemory<byte>>> metadata, CancellationToken cancellationToken,
+        FlatBufferBuilder? cleared = null)
     {
-        long[] metadataOffsets = new long[metadata.Count];
+        long[] metadataOffsets = metadata.Count == 0 ? [] : new long[metadata.Count];
         for (int i = 0; i < metadata.Count; i++)
         {
             metadataOffsets[i] = sink.Position;
@@ -1670,7 +1696,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         await FileIdentity.WriteAsync(sink, identity, cancellationToken).ConfigureAwait(false);
 
         int postscriptLength;
-        using (FlatBufferBuilder builder = new FlatBufferBuilder())
+        FlatBufferBuilder builder = cleared ?? new FlatBufferBuilder();
+        try
         {
             ReadOnlyMemory<byte> postscript = BuildPostscript(builder, placement, identityOffset, metadata, metadataOffsets);
             if (postscript.Length > VortexLimits.MaxPostscriptSize)
@@ -1682,6 +1709,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
             postscriptLength = postscript.Length;
             await sink.WriteAsync(postscript, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // A builder the caller lent stays the caller's.
+            if (cleared is null)
+            {
+                builder.Dispose();
+            }
         }
 
         // EOF: u16 version, u16 postscript length, then the magic. Read backwards by every reader.
@@ -1760,12 +1795,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// otherwise, because an absent statistic licenses nothing while a wrong one lies. The reader
     /// needs exactly one entry per field.
     /// </remarks>
-    private byte[] BuildFileStatistics()
+    private ReadOnlyMemory<byte> BuildFileStatistics(FlatBufferBuilder builder)
     {
-        using FlatBufferBuilder builder = new FlatBufferBuilder();
-        ScalarStore scalars = new ScalarStore();
+        ScalarStore scalars = Blobs.Scalars();
         int fields = _isTabular ? _fieldCount : 1;
-        int[] entries = new int[fields];
+        int[] entries = ArrayPool<int>.Shared.Rent(Math.Max(fields, 1));
         for (int field = 0; field < fields; field++)
         {
             DType column = _isTabular ? _schema.GetField(field) : _schema;
@@ -1794,11 +1828,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             entries[field] = ArrayWriter.WriteStats(builder, in values);
         }
 
-        int vector = builder.CreateOffsetVector(entries);
+        int vector = builder.CreateOffsetVector(entries.AsSpan(0, fields));
+        ArrayPool<int>.Shared.Return(entries);
         builder.StartTable();
         builder.AddOffset(SchemaFieldIds.FileStatisticsFieldStats, vector);
         int table = builder.EndTable();
-        return builder.FinishToArray(table);
+        return builder.FinishMemory(table);
     }
 
     /// <summary>
@@ -1825,15 +1860,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         };
     }
 
-    private static int[] CreateStrings(FlatBufferBuilder builder, IReadOnlyList<string> ids)
+    private static void CreateStrings(FlatBufferBuilder builder, IReadOnlyList<string> ids, int[] offsets)
     {
-        int[] offsets = new int[ids.Count];
         for (int i = 0; i < ids.Count; i++)
         {
             offsets[i] = builder.CreateString(ids[i]);
         }
-
-        return offsets;
     }
 
     private void RequireMatchingSchema(DType batchSchema)
