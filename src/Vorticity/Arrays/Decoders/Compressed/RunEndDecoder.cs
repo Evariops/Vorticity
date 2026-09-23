@@ -94,8 +94,8 @@ internal sealed class RunEndDecoder : ArrayDecoder
                 $"{metadata.EndsPType.Name()}.");
         }
 
-        int runCount = ArrayDecodeContext.CheckedLength(metadata.NumRuns, $"{Id} num_runs");
-        int offset = ArrayDecodeContext.CheckedLength(metadata.Offset, $"{Id} offset");
+        int runCount = ArrayDecodeContext.CheckedLength(metadata.NumRuns, Id, "num_runs");
+        int offset = ArrayDecodeContext.CheckedLength(metadata.Offset, Id, "offset");
 
         // The ends and values are one entry per run and every range or batch of the node reads all
         // of them, so anything short of the whole node decodes them once for every visit.

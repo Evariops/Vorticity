@@ -79,7 +79,7 @@ internal sealed class DictDecoder : ArrayDecoder
                 $"{Id} codes must be an integer physical type, not {metadata.CodesPType.Name()}.");
         }
 
-        int valuesLength = ArrayDecodeContext.CheckedLength(metadata.ValuesLength, $"{Id} values_len");
+        int valuesLength = ArrayDecodeContext.CheckedLength(metadata.ValuesLength, Id, "values_len");
         if (valuesLength >= length)
         {
             return false;
@@ -208,7 +208,7 @@ internal sealed class DictDecoder : ArrayDecoder
                 $"{Id} codes must be an integer physical type, not {metadata.CodesPType.Name()}.");
         }
 
-        int valuesLength = ArrayDecodeContext.CheckedLength(metadata.ValuesLength, $"{Id} values_len");
+        int valuesLength = ArrayDecodeContext.CheckedLength(metadata.ValuesLength, Id, "values_len");
 
         Nullability codesNullability = metadata.IsNullableCodes switch
         {

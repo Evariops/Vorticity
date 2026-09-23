@@ -431,7 +431,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         {
             Span<long> sorted = _sorted.AsSpan(0, count);
             _rows.AsSpan(0, count).CopyTo(sorted);
-            sorted.Sort();
+            SpanSort.Sort(sorted);
 
             // A source holds a row once; a lying one may not, and the take collapses duplicates.
             int distinct = 1;

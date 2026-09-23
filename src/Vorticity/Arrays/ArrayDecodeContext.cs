@@ -641,6 +641,27 @@ internal sealed class ArrayDecodeContext
     }
 
     /// <summary>
+    /// <see cref="CheckedLength(ulong, string)"/> for a value an encoding names: the message joins
+    /// <paramref name="encodingId"/> and <paramref name="what"/> when it throws and never before, so
+    /// a check that passes builds no string whatever the id.
+    /// </summary>
+    /// <param name="value">The wire value.</param>
+    /// <param name="encodingId">The encoding the value belongs to.</param>
+    /// <param name="what">What the value counts, after the id: <c>patch count</c>.</param>
+    /// <returns>The narrowed length.</returns>
+    /// <exception cref="VortexFormatException">The value does not fit an <see cref="int"/>.</exception>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int CheckedLength(ulong value, string encodingId, string what)
+    {
+        if (value > int.MaxValue)
+        {
+            ThrowLength(value, encodingId, what);
+        }
+
+        return (int)value;
+    }
+
+    /// <summary>
     /// Multiplies two non-negative lengths. Every <c>len * width</c> goes through this: upstream
     /// leaves several of them unchecked and a wrap produces a short buffer that reads out of bounds.
     /// </summary>
@@ -799,6 +820,12 @@ internal sealed class ArrayDecodeContext
     private static void ThrowLength(ulong value, string what) =>
         throw new VortexFormatException(
             $"{what} is {value}, which does not fit a 32-bit length.");
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
+    private static void ThrowLength(ulong value, string encodingId, string what) =>
+        throw new VortexFormatException(
+            $"{encodingId} {what} is {value}, which does not fit a 32-bit length.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]

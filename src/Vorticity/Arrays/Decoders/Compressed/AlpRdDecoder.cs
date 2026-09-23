@@ -384,7 +384,7 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         int produced)
     {
         PatchesMetadata patchesMetadata = metadata.Patches;
-        int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, $"{Id} patch count");
+        int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, Id, "patch count");
 
         // Anything short of the whole array reads the whole patch set, so it is decoded once for
         // every visit of the node -- every window of a scan, every batch of a take -- as ALP's is.

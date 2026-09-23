@@ -53,11 +53,11 @@ internal sealed class FastLanesRleDecoder : ArrayDecoder
                 $"{metadata.ValuesIdxOffsetsPType.Name()}.");
         }
 
-        int valuesLength = ArrayDecodeContext.CheckedLength(metadata.ValuesLength, $"{Id} values_len");
-        int indicesLength = ArrayDecodeContext.CheckedLength(metadata.IndicesLength, $"{Id} indices_len");
+        int valuesLength = ArrayDecodeContext.CheckedLength(metadata.ValuesLength, Id, "values_len");
+        int indicesLength = ArrayDecodeContext.CheckedLength(metadata.IndicesLength, Id, "indices_len");
         int offsetsLength = ArrayDecodeContext.CheckedLength(
             metadata.ValuesIdxOffsetsLength, $"{Id} values_idx_offsets_len");
-        int offset = ArrayDecodeContext.CheckedLength(metadata.Offset, $"{Id} offset");
+        int offset = ArrayDecodeContext.CheckedLength(metadata.Offset, Id, "offset");
 
         if (indicesLength % FastLanes.BlockSize != 0)
         {

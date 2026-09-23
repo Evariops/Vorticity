@@ -95,7 +95,7 @@ public sealed class Scan
         }
 
         long[] sorted = indices.ToArray();
-        Array.Sort(sorted);
+        Compute.SpanSort.Sort(sorted);
         int distinct = 0;
         for (int i = 0; i < sorted.Length; i++)
         {

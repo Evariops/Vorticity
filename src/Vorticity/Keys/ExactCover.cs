@@ -225,7 +225,7 @@ internal sealed class ExactCover : IAsyncDisposable
         }
 
         Array.Resize(ref rows, kept);
-        Array.Sort(rows);
+        Compute.SpanSort.Sort(rows);
         return rows;
     }
 

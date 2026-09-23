@@ -53,7 +53,7 @@ internal sealed class RowSelection
         }
 
         long[] sorted = rows.ToArray();
-        Array.Sort(sorted);
+        Compute.SpanSort.Sort(sorted);
 
         int kept = 1;
         CheckRow(sorted[0], rowCount);
@@ -66,7 +66,8 @@ internal sealed class RowSelection
             }
         }
 
-        return new RowSelection(kept == sorted.Length ? sorted : sorted[..kept]);
+        // The duplicates' slots stay at the end, past the count, rather than cost a second array.
+        return new RowSelection(sorted) { _count = kept };
     }
 
     /// <summary>

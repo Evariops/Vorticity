@@ -178,7 +178,7 @@ internal sealed class AlpDecoder : ArrayDecoder
         int count)
     {
         PatchesMetadata patchesMetadata = metadata.Patches;
-        int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, $"{Id} patch count");
+        int patchCount = ArrayDecodeContext.CheckedLength(patchesMetadata.Length, Id, "patch count");
         bool whole = !selective && start == 0 && count == length;
 
         DType indicesType = context.Types.Primitive(

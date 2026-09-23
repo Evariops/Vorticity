@@ -382,8 +382,8 @@ internal readonly ref struct Patches
     {
         ArgumentNullException.ThrowIfNull(ctx);
 
-        int count = ArrayDecodeContext.CheckedLength(metadata.Length, $"{encodingId} patch count");
-        int offset = ArrayDecodeContext.CheckedLength(metadata.Offset, $"{encodingId} patch offset");
+        int count = ArrayDecodeContext.CheckedLength(metadata.Length, encodingId, "patch count");
+        int offset = ArrayDecodeContext.CheckedLength(metadata.Offset, encodingId, "patch offset");
 
         // An empty patch set is malformed rather than a no-op, so a file carrying one is refused
         // instead of being decoded as an unpatched array.

@@ -1,6 +1,7 @@
 using System;
 
 using Vorticity.Arrays;
+using Vorticity.Compute;
 using Vorticity.Layouts;
 using Vorticity.Types;
 
@@ -350,7 +351,7 @@ internal sealed class SplitPlan
                 return count;
             }
 
-            Array.Sort(items, 0, count);
+            SpanSort.Sort(items.AsSpan(0, count));
 
             int write = 1;
             for (int read = 1; read < count; read++)
