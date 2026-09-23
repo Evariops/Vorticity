@@ -96,6 +96,57 @@ public sealed class BlockMaskTests
         Assert.False(mask.HasDeadBlocks(new RowRange(65_536, 70_000)), "past the file there are no blocks");
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(7)]
+    [InlineData(42)]
+    public void TheRangeQuestionsAnswerAsTheBlocksOneByOneWould(int seed)
+    {
+        // Ranges that start and end inside a word, on its edges, and across several words, over
+        // masks dense and sparse: the questions are asked a word at a time and must say what a walk
+        // over the blocks says.
+        Random random = new Random(seed);
+        const long BlockRows = 100;
+        BlockMask mask = new BlockMask(300 * BlockRows + 37, BlockRows);
+        double deadShare = random.NextDouble();
+        for (int block = 0; block < mask.BlockCount; block++)
+        {
+            if (random.NextDouble() < deadShare)
+            {
+                mask.Kill(block);
+            }
+        }
+
+        for (int trial = 0; trial < 2_000; trial++)
+        {
+            long start = random.NextInt64(0, mask.RowCount + 200);
+            long end = start + random.NextInt64(0, 20_000);
+            RowRange rows = new RowRange(start, end);
+
+            bool anyLive = false;
+            bool anyDead = false;
+            long clipped = Math.Min(end, mask.RowCount);
+            for (long block = start / BlockRows; start < clipped && block * BlockRows < clipped; block++)
+            {
+                anyLive |= mask.IsLive((int)block);
+                anyDead |= !mask.IsLive((int)block);
+            }
+
+            Assert.Equal(anyLive, mask.AnyLive(rows));
+            Assert.Equal(anyDead, mask.HasDeadBlocks(rows));
+
+            long first = random.NextInt64(-3, mask.BlockCount + 3);
+            long past = first + random.NextInt64(0, 200);
+            bool anyLiveBlock = false;
+            for (long block = Math.Max(first, 0); block < Math.Min(past, mask.BlockCount); block++)
+            {
+                anyLiveBlock |= mask.IsLive((int)block);
+            }
+
+            Assert.Equal(anyLiveBlock, mask.AnyLiveBlocks(first, past));
+        }
+    }
+
     [Fact]
     public void EveryBlockCanBeKilledAndTheMaskIsThenEmpty()
     {

@@ -281,13 +281,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                 // counted here, once, as the plan counts them.
                 if (_live is { } live && _scan.Metrics is { } metrics)
                 {
-                    long dead = 0;
-                    for (int block = 0; block < live.BlockCount; block++)
-                    {
-                        dead += live.IsLive(block) ? 0 : 1;
-                    }
-
-                    metrics.AddBlocksPruned(dead);
+                    metrics.AddBlocksPruned(live.BlockCount - live.LiveCount);
                 }
             }
 

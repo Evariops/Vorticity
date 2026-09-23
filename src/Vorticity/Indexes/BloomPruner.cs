@@ -347,19 +347,7 @@ internal sealed class BloomPruner
         }
     }
 
-    private static bool AnyLive(BlockMask live, long start, long end)
-    {
-        end = Math.Min(end, live.BlockCount);
-        for (long block = Math.Max(start, 0); block < end; block++)
-        {
-            if (live.IsLive((int)block))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    private static bool AnyLive(BlockMask live, long start, long end) => live.AnyLiveBlocks(start, end);
 
     // ------------------------------------------------------------------------------ the proof
 

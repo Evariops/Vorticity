@@ -316,19 +316,8 @@ internal sealed class KeyIndexPruner
         return true;
     }
 
-    private static bool AnyLive(BlockMask live, IndexRun run)
-    {
-        long end = Math.Min((long)run.EndBlock, live.BlockCount);
-        for (long block = (long)run.FirstBlock; block < end; block++)
-        {
-            if (live.IsLive((int)block))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    private static bool AnyLive(BlockMask live, IndexRun run) =>
+        live.AnyLiveBlocks((long)run.FirstBlock, (long)run.EndBlock);
 
     // ------------------------------------------------------------------------------ the proof
 

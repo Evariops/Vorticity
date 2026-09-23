@@ -147,17 +147,50 @@ internal sealed class BlockMask
             return false;
         }
 
-        int first = (int)(rows.Start / BlockRows);
-        int last = (int)((end - 1) / BlockRows);
-        for (int block = first; block <= last; block++)
+        return !AllLive((int)(rows.Start / BlockRows), (int)((end - 1) / BlockRows));
+    }
+
+    /// <summary>Whether every block from <paramref name="first"/> to <paramref name="last"/>, both included, is live.</summary>
+    /// <remarks>A word at a time: a chunk's blocks are asked about once per batch and per column.</remarks>
+    private bool AllLive(int first, int last)
+    {
+        int word = first >> 6;
+        int lastWord = last >> 6;
+        ulong head = ulong.MaxValue << (first & 63);
+        ulong tail = ulong.MaxValue >> (63 - (last & 63));
+        if (word == lastWord)
         {
-            if (!IsLive(block))
-            {
-                return true;
-            }
+            return (~_bits[word] & head & tail) == 0;
         }
 
-        return false;
+        ulong dead = ~_bits[word] & head;
+        for (word++; word < lastWord; word++)
+        {
+            dead |= ~_bits[word];
+        }
+
+        return (dead | (~_bits[lastWord] & tail)) == 0;
+    }
+
+    /// <summary>Whether some block from <paramref name="first"/> to <paramref name="last"/>, both included, is live.</summary>
+    private bool AnyLive(int first, int last)
+    {
+        int word = first >> 6;
+        int lastWord = last >> 6;
+        ulong head = ulong.MaxValue << (first & 63);
+        ulong tail = ulong.MaxValue >> (63 - (last & 63));
+        if (word == lastWord)
+        {
+            return (_bits[word] & head & tail) != 0;
+        }
+
+        ulong live = _bits[word] & head;
+        for (word++; word < lastWord; word++)
+        {
+            live |= _bits[word];
+        }
+
+        return (live | (_bits[lastWord] & tail)) != 0;
     }
 
     /// <summary>
@@ -173,16 +206,16 @@ internal sealed class BlockMask
             return false;
         }
 
-        int first = (int)(rows.Start / BlockRows);
-        int last = (int)((end - 1) / BlockRows);
-        for (int block = first; block <= last; block++)
-        {
-            if (IsLive(block))
-            {
-                return true;
-            }
-        }
+        return AnyLive((int)(rows.Start / BlockRows), (int)((end - 1) / BlockRows));
+    }
 
-        return false;
+    /// <summary>Whether some block from <paramref name="start"/> up to <paramref name="end"/>, excluded, is live; blocks past the file are not.</summary>
+    /// <param name="start">The first block.</param>
+    /// <param name="end">The block past the last.</param>
+    internal bool AnyLiveBlocks(long start, long end)
+    {
+        start = Math.Max(start, 0);
+        end = Math.Min(end, BlockCount);
+        return start < end && AnyLive((int)start, (int)end - 1);
     }
 }
