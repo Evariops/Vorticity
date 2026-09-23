@@ -1034,7 +1034,7 @@ internal static class ThroughputCheck
         new("varbinview", 0.048, 0.030),   // 3 passes, spread 0.049-0.050; carried from 0.044, +8.5% under the new binary (0.046 -> 0.050)
         new("variant", 1.08, 0.052),   // 3 passes, spread 1.06-1.11; carried from 0.93, +15.8% under the new binary (0.96 -> 1.11)
         new("zigzag", 0.51, 0.014),   // 3 passes, spread 0.52-0.52; carried from 0.50, +2.9% under the new binary (0.51 -> 0.52)
-        new("zstd", 1.05, 0.016),   // 3 passes, spread 0.23-0.24; carried from 1.08, -3.0% under the new binary (0.24 -> 0.24)
+        new("zstd", 0.19, 0.014),   // 3 passes, spread 0.19-0.19; was 1.05, -81.8%
         new("zstd_buffers", 0.14, 0.090),   // 3 passes, spread 0.14-0.15; carried from 0.14, +2.3% under the new binary (0.15 -> 0.15)
         new("chunked_bool", 0.57, 0.040),   // 3 passes, spread 0.56-0.58; carried from 0.51, +12.5% under the new binary (0.52 -> 0.58)
         new("chunked_decimal", 0.31, 0.094),   // 3 passes, spread 0.21-0.23; carried from 0.31, -0.3% under the new binary (0.23 -> 0.23)
@@ -1042,7 +1042,7 @@ internal static class ThroughputCheck
         new("chunked_varbinview", 0.062, 0.045),   // 3 passes, spread 0.060-0.063; carried from 0.058, +7.1% under the new binary (0.058 -> 0.063)
         new("table_mixed", 0.064, 0.028),   // 3 passes, spread 0.062-0.063; carried from 0.060, +7.4% under the new binary (0.059 -> 0.063)
         new("table_wide", 0.18, 0.111),   // 3 passes, spread 0.088-0.099; carried from 0.18, -0.5% under the new binary (0.099 -> 0.099)
-        new("zstd_nullable", 0.61, 0.023),   // 3 passes, spread 0.54-0.56; carried from 0.61, -0.1% under the new binary (0.56 -> 0.56)
+        new("zstd_nullable", 0.47, 0.018),   // 3 passes, spread 0.46-0.47; was 0.61, -22.6%
     ];
 
     private const double StaleBelow = 0.70;

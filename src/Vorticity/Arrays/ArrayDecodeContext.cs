@@ -229,8 +229,13 @@ internal sealed class ArrayDecodeContext
     internal bool ChildSelectsWithoutFullDecode(in ArrayNode node, int childIndex)
     {
         ArrayNode child = node.GetChild(childIndex);
-        return ArrayDecoderTable.Require(_scan, child.Encoding, child.EncodingSpecIndex).SelectsWithoutFullDecode;
+        return SelectsWithoutFullDecode(in child);
     }
+
+    /// <summary>Whether <paramref name="node"/> reaches a selection of its rows without decoding the rest.</summary>
+    /// <param name="node">The node.</param>
+    internal bool SelectsWithoutFullDecode(in ArrayNode node) =>
+        ArrayDecoderTable.Require(_scan, node.Encoding, node.EncodingSpecIndex).SelectsWithoutFullDecodeOf(this, in node);
 
     /// <summary>Whether child <paramref name="childIndex"/> of <paramref name="node"/> decodes a range of its rows.</summary>
     /// <param name="node">The parent node.</param>

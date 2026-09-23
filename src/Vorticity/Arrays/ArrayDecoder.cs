@@ -149,6 +149,21 @@ internal abstract class ArrayDecoder
     public virtual bool SelectsWithoutFullDecode => false;
 
     /// <summary>
+    /// Whether <see cref="DecodeSelected"/> reaches <paramref name="node"/>'s wanted rows without
+    /// materializing the node: <see cref="SelectsWithoutFullDecode"/>, for every node of an encoding
+    /// whose route does not depend on the node's shape.
+    /// </summary>
+    /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
+    /// <param name="node">The serialized node.</param>
+    /// <remarks>
+    /// The readers ask this rather than the flag once the node is in hand: an encoding that selects
+    /// only on some nodes, and decodes the others whole, sends those to the retained chunk like any
+    /// encoding on the fallback.
+    /// </remarks>
+    public virtual bool SelectsWithoutFullDecodeOf(ArrayDecodeContext context, in ArrayNode node) =>
+        SelectsWithoutFullDecode;
+
+    /// <summary>
     /// Whether <see cref="TryCompare"/> is overridden, i.e. whether this encoding can answer a
     /// comparison without materializing the whole node.
     /// </summary>

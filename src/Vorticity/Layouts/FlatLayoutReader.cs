@@ -523,8 +523,8 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// It is gated, because for the encodings that override <c>DecodeSelected</c> it would be a
     /// regression rather than a cure: they reach one row without materializing a node at all, and
     /// forcing a full decode on them throws that away.
-    /// <see cref="ArrayDecoder.SelectsWithoutFullDecode"/> is the question, asked of the root
-    /// decoder - a specialized root pushes the selection into its own children, and what those
+    /// <see cref="ArrayDecoder.SelectsWithoutFullDecodeOf"/> is the question, asked of the root
+    /// node - a specialized root pushes the selection into its own children, and what those
     /// children are is its business, not this reader's.
     /// </para>
     /// <para>
@@ -585,9 +585,7 @@ internal sealed class FlatLayoutReader : LayoutReader
                 chunkRoot = LoadRoot(in node, context);
             }
 
-            if (!ArrayDecoderTable
-                    .Require(context, chunkRoot.Encoding, chunkRoot.EncodingSpecIndex)
-                    .SelectsWithoutFullDecode)
+            if (!context.Decode.SelectsWithoutFullDecode(in chunkRoot))
             {
                 // Where the whole chunk would be decoded to gather a few rows out of it, a window of
                 // it, or the range the selection spans, is decoded instead when the encoding can.
@@ -783,7 +781,7 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// <remarks>
     /// Asked here because this is where the decoder and the serialized node are both in hand and
     /// the blob has been parsed anyway, which is the same reason
-    /// <see cref="ArrayDecoder.SelectsWithoutFullDecode"/> is asked a few lines below. The answer
+    /// <see cref="ArrayDecoder.SelectsWithoutFullDecodeOf"/> is asked a few lines below. The answer
     /// travels as a <c>Bool</c> column with validity, which is three-valued logic in the canonical
     /// model and needs no new form: true selects, false rejects, null is unknown.
     /// </remarks>

@@ -83,18 +83,135 @@ internal sealed class ZstdDecoder : ArrayDecoder
         return Core(context, in node, dtype, length, start, count);
     }
 
+    /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// A node of several frames, the ones <see cref="DecodesRange"/> answers for: over one frame a
+    /// selection decompresses the whole array, which the reader's retained chunk does once for
+    /// every batch rather than once per batch.
+    /// </remarks>
+    public override bool SelectsWithoutFullDecodeOf(ArrayDecodeContext context, in ArrayNode node) =>
+        DecodesRange(context, in node);
+
+    /// <summary>
+    /// Decodes the wanted rows from the frames that hold their values, each frame once: the rows
+    /// whose values lie in one frame are one range, decoded as <see cref="DecodeRange"/> decodes it,
+    /// and what is gathered out of each range is put back together in order.
+    /// </summary>
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Which frame holds a row's value is its rank among the valid rows, counted forward from one
+    /// wanted row to the next over the validity decoded once. A null row has no value and goes with
+    /// the frame of the value after it; the rows past the last value go with the last range. A node
+    /// of one frame has nothing to skip, and is decoded whole.
+    /// </remarks>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (wanted.IsEmpty || !DecodesRange(context, in node))
+        {
+            return base.DecodeSelected(context, in node, dtype, length, wanted);
+        }
+
+        bool isPrimitive = dtype.Kind == DTypeKind.Primitive;
+        int byteWidth = isPrimitive ? dtype.PType.ByteWidth() : 1;
+        Span<ZstdFrameMetadata> stack = stackalloc ZstdFrameMetadata[16];
+        using Scratch<ZstdFrameMetadata> scratch = new Scratch<ZstdFrameMetadata>(node.BufferCount, stack);
+        ZstdMetadata metadata = Read(in node, dtype, scratch.Span);
+        ReadOnlySpan<ZstdFrameMetadata> frames = scratch.Span[..metadata.FrameCount];
+
+        ReadOnlySpan<byte> bits = default;
+        int bitOffset = 0;
+        bool nullable = node.ChildCount != 0;
+        if (nullable)
+        {
+            int index = context.DecodeWholeChild(in node, 0, context.Types.Bool(Nullability.NonNullable), length);
+            CanonicalNode validity = context.Canonical.GetNode(index);
+            if (validity.Kind != CanonicalKind.Bool || validity.Length != length)
+            {
+                CompressedThrow.Format(
+                    $"{Id}'s validity decoded to {validity.Length} rows of {validity.Kind} for an array of {length}.");
+            }
+
+            bits = validity.Bits.Span;
+            bitOffset = validity.BitOffset;
+        }
+
+        Span<int> partStack = stackalloc int[16];
+        using Scratch<int> parts = new Scratch<int>(wanted.Length, partStack);
+        Span<int> rebasedStack = stackalloc int[64];
+        using Scratch<int> rebased = new Scratch<int>(wanted.Length, rebasedStack);
+
+        int count = 0;
+        int frame = 0;
+        long frameStart = 0;
+        long frameEnd = FrameValues(frames, 0, dtype, isPrimitive, byteWidth, 0);
+        long rank = 0;
+        int rankedTo = 0;
+        int i = 0;
+        while (i < wanted.Length)
+        {
+            int first = wanted[i];
+            rank += nullable ? BitmapKernels.CountSet(bits, bitOffset + rankedTo, first - rankedTo) : first - rankedTo;
+            rankedTo = first;
+            while (frame < frames.Length && rank >= frameEnd)
+            {
+                frame++;
+                frameStart = frameEnd;
+                if (frame < frames.Length)
+                {
+                    frameEnd += FrameValues(frames, frame, dtype, isPrimitive, byteWidth, 0);
+                }
+            }
+
+            int firstValue = (int)rank;
+            int j = i + 1;
+            while (j < wanted.Length)
+            {
+                int next = wanted[j];
+                long nextRank = rank +
+                    (nullable ? BitmapKernels.CountSet(bits, bitOffset + rankedTo, next - rankedTo) : next - rankedTo);
+                if (frame < frames.Length && nextRank >= frameEnd)
+                {
+                    break;
+                }
+
+                rank = nextRank;
+                rankedTo = next;
+                j++;
+            }
+
+            int span = wanted[j - 1] - first + 1;
+            int decoded = Rows(context, in node, dtype, length, first, span, metadata, frames, firstValue, frame, frameStart);
+            if (span == j - i)
+            {
+                parts.Span[count++] = decoded;
+            }
+            else
+            {
+                Span<int> local = rebased.Span[..(j - i)];
+                for (int k = i; k < j; k++)
+                {
+                    local[k - i] = wanted[k] - first;
+                }
+
+                parts.Span[count++] = Compute.CanonicalFilter.Apply(context.Canonical, decoded, local);
+            }
+
+            i = j;
+        }
+
+        return count == 1
+            ? parts.Span[0]
+            : CanonicalConcat.Concat(context, dtype, wanted.Length, parts.Span[..count]);
+    }
+
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
     {
-        // 0 or 1 child; the one child, when present, is the validity bitmap.
-        ArrayDecodeContext.RequireChildCount(node.ChildCount, 0, 1, Id);
-        bool isPrimitive = dtype.Kind == DTypeKind.Primitive;
-        if (!isPrimitive && dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary))
-        {
-            CompressedThrow.Format(
-                $"{Id} stores primitive, utf8 or binary values; this node's dtype is {dtype}.");
-        }
-
         // The frame table is sized by the file, and a wide column can declare a great many frames,
         // so it never becomes a managed array: every consumer below takes a span. Small counts fit
         // the stack, which is the common shape, and the pool takes the tail. `ZstdFrameMetadata` is
@@ -105,26 +222,61 @@ internal sealed class ZstdDecoder : ArrayDecoder
         // metadata to count it first -- a pass a windowed scan would pay once per window.
         Span<ZstdFrameMetadata> stack = stackalloc ZstdFrameMetadata[16];
         using Scratch<ZstdFrameMetadata> scratch = new Scratch<ZstdFrameMetadata>(node.BufferCount, stack);
-        ZstdMetadata metadata = ZstdMetadata.Read(node.Metadata, scratch.Span);
-        int frameCount = metadata.FrameCount;
-        Span<ZstdFrameMetadata> frames = scratch.Span[..frameCount];
+        ZstdMetadata metadata = Read(in node, dtype, scratch.Span);
+        ReadOnlySpan<ZstdFrameMetadata> frames = scratch.Span[..metadata.FrameCount];
+        bool ranged = start != 0 || count != length;
+        int firstValue = ranged ? ValuesBefore(context, in node, length, start) : 0;
+        return Rows(context, in node, dtype, length, start, count, metadata, frames, firstValue, 0, 0);
+    }
+
+    /// <summary>The node's metadata, read into <paramref name="table"/> and checked against its children, dtype and buffers.</summary>
+    private static ZstdMetadata Read(in ArrayNode node, DType dtype, Span<ZstdFrameMetadata> table)
+    {
+        // 0 or 1 child; the one child, when present, is the validity bitmap.
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 0, 1, Id);
+        if (dtype.Kind is not (DTypeKind.Primitive or DTypeKind.Utf8 or DTypeKind.Binary))
+        {
+            CompressedThrow.Format(
+                $"{Id} stores primitive, utf8 or binary values; this node's dtype is {dtype}.");
+        }
+
+        ZstdMetadata metadata = ZstdMetadata.Read(node.Metadata, table);
 
         // `validate`: the dictionary buffer is present exactly when the metadata declares one, and
         // the frame buffers match the frame metadata one for one.
-        bool hasDictionary = metadata.DictionarySize != 0;
-        int expectedBuffers = frameCount + (hasDictionary ? 1 : 0);
+        int expectedBuffers = metadata.FrameCount + (metadata.DictionarySize != 0 ? 1 : 0);
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, expectedBuffers, Id);
+        return metadata;
+    }
 
+    /// <summary>
+    /// Rows <c>[start, start + count)</c>, whose first value is <paramref name="firstValue"/>, out of
+    /// the frames from <paramref name="fromFrame"/> on, which <paramref name="covered"/> values precede.
+    /// </summary>
+    private static int Rows(
+        ArrayDecodeContext context,
+        in ArrayNode node,
+        DType dtype,
+        int length,
+        int start,
+        int count,
+        ZstdMetadata metadata,
+        ReadOnlySpan<ZstdFrameMetadata> frames,
+        int firstValue,
+        int fromFrame,
+        long covered)
+    {
+        bool isPrimitive = dtype.Kind == DTypeKind.Primitive;
+        bool hasDictionary = metadata.DictionarySize != 0;
         bool ranged = start != 0 || count != length;
         Validity validity = ranged
             ? context.DecodeValidityRange(in node, 0, dtype.Nullability, length, start, count)
             : context.DecodeValidity(in node, 0, dtype.Nullability, length);
         int valueCount = CountValid(context, validity, count);
-        int firstValue = ranged ? ValuesBefore(context, in node, length, start) : 0;
         int byteWidth = isPrimitive ? dtype.PType.ByteWidth() : 1;
 
         int total = PlanFrames(
-            frames, dtype, isPrimitive, byteWidth, firstValue, valueCount,
+            frames, dtype, isPrimitive, byteWidth, firstValue, valueCount, fromFrame, covered,
             out int firstFrame, out int usedFrames, out int skipped);
 
         // The UTF-8 shortcut is decided frame by frame, inside the decompression loop, rather than
@@ -224,6 +376,8 @@ internal sealed class ZstdDecoder : ArrayDecoder
     /// <param name="byteWidth">That width.</param>
     /// <param name="firstValue">The first value wanted.</param>
     /// <param name="valueCount">How many are wanted.</param>
+    /// <param name="fromFrame">The frame the walk starts at, none before it holding a wanted value.</param>
+    /// <param name="covered">The values of the frames before <paramref name="fromFrame"/>.</param>
     /// <param name="firstFrame">The first frame that holds one.</param>
     /// <param name="usedFrames">How many frames from it hold them.</param>
     /// <param name="skipped">The values of the first frame that precede the first wanted.</param>
@@ -240,45 +394,22 @@ internal sealed class ZstdDecoder : ArrayDecoder
         int byteWidth,
         int firstValue,
         int valueCount,
+        int fromFrame,
+        long covered,
         out int firstFrame,
         out int usedFrames,
         out int skipped)
     {
         long total = 0;
-        long covered = 0;
         long end = (long)firstValue + valueCount;
-        firstFrame = 0;
+        firstFrame = fromFrame;
         usedFrames = 0;
         skipped = 0;
 
-        for (int i = 0; i < frames.Length && covered < end; i++)
+        for (int i = fromFrame; i < frames.Length && covered < end; i++)
         {
-            ZstdFrameMetadata frame = frames[i];
-            long uncompressed = CheckedSize(frame.UncompressedSize, i, "uncompressed size");
-            long frameValues;
-            if (frame.ValueCount != 0)
-            {
-                frameValues = CheckedSize(frame.ValueCount, i, "value count");
-            }
-            else if (isPrimitive)
-            {
-                // Older primitive-only metadata omitted the count; a fixed width makes the byte
-                // count an exact value count.
-                frameValues = uncompressed / byteWidth;
-            }
-            else if (frames.Length == 1)
-            {
-                // The same fallback would read a byte count as a value count for variable-width
-                // values. One frame holds everything, so that case is still recoverable.
-                frameValues = valueCount;
-            }
-            else
-            {
-                return CompressedThrow.Format<int>(
-                    $"{Id} frame {i} of a {dtype.Kind} array declares no value count, and the " +
-                    "array has more than one frame, so its values cannot be attributed.");
-            }
-
+            long uncompressed = CheckedSize(frames[i].UncompressedSize, i, "uncompressed size");
+            long frameValues = FrameValues(frames, i, dtype, isPrimitive, byteWidth, valueCount);
             if (covered + frameValues <= firstValue)
             {
                 covered += frameValues;
@@ -303,6 +434,41 @@ internal sealed class ZstdDecoder : ArrayDecoder
         }
 
         return (int)total;
+    }
+
+    /// <summary>The values frame <paramref name="index"/> holds.</summary>
+    /// <param name="frames">The frame table.</param>
+    /// <param name="index">The frame.</param>
+    /// <param name="dtype">The array's dtype, for a message.</param>
+    /// <param name="isPrimitive">Whether the values have a fixed width.</param>
+    /// <param name="byteWidth">That width.</param>
+    /// <param name="valueCount">The values of the whole array, which a lone frame of variable width holds.</param>
+    private static long FrameValues(
+        ReadOnlySpan<ZstdFrameMetadata> frames, int index, DType dtype, bool isPrimitive, int byteWidth, int valueCount)
+    {
+        ZstdFrameMetadata frame = frames[index];
+        if (frame.ValueCount != 0)
+        {
+            return CheckedSize(frame.ValueCount, index, "value count");
+        }
+
+        if (isPrimitive)
+        {
+            // Older primitive-only metadata omitted the count; a fixed width makes the byte count
+            // an exact value count.
+            return CheckedSize(frame.UncompressedSize, index, "uncompressed size") / byteWidth;
+        }
+
+        if (frames.Length == 1)
+        {
+            // The same fallback would read a byte count as a value count for variable-width
+            // values. One frame holds everything, so that case is still recoverable.
+            return valueCount;
+        }
+
+        return CompressedThrow.Format<long>(
+            $"{Id} frame {index} of a {dtype.Kind} array declares no value count, and the " +
+            "array has more than one frame, so its values cannot be attributed.");
     }
 
     /// <summary>
