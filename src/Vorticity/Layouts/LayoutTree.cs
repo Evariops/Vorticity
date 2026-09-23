@@ -1,6 +1,8 @@
 using System;
+using System.Buffers;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 
 using Vorticity.Arrays;
@@ -69,12 +71,18 @@ internal sealed class LayoutTree
     {
         ArgumentNullException.ThrowIfNull(file);
 
+        // The file's own copy of the layout is retained as it is: it lives as long as the file,
+        // which the tree holds, and nothing writes it.
         LayoutTree tree = ParseCore(
             file,
             detachedEncodingIds: null,
             file.RootLayoutBytes.Span,
             file.DType,
-            file.SegmentSpecs.Length);
+            file.SegmentSpecs.Length,
+            MemoryMarshal.TryGetArray(file.RootLayoutBytes, out ArraySegment<byte> owned) &&
+            owned.Offset == 0 && owned.Count == owned.Array!.Length
+                ? owned.Array
+                : null);
 
         long rootRows = tree.GetNode(0).RowCount;
         if (rootRows != file.RowCount)
@@ -207,7 +215,8 @@ internal sealed class LayoutTree
         string[]? detachedEncodingIds,
         ReadOnlySpan<byte> layoutBytes,
         DType schema,
-        int segmentCount)
+        int segmentCount,
+        byte[]? owned = null)
     {
         if (schema.IsDefault)
         {
@@ -215,19 +224,25 @@ internal sealed class LayoutTree
         }
 
         // The tree retains the buffer, so every node's metadata and segment ids stay as offsets
-        // into it and the parse copies nothing per node. One copy also decouples the tree from the
-        // caller's span, which the detached overload does not own.
-        byte[] retained = layoutBytes.ToArray();
+        // into it and the parse copies nothing per node. A caller's span is copied once, which
+        // decouples the tree from it; an array the caller owns for the tree's life is not.
+        byte[] retained = owned ?? layoutBytes.ToArray();
         Builder builder = new Builder(file, detachedEncodingIds, segmentCount, retained);
+        try
+        {
+            // The budget lives for the whole traversal: forward-only uoffsets exclude cycles but
+            // not sharing, and a small buffer whose children are shared between parents is an
+            // acyclic graph with exponentially many root-to-leaf paths.
+            int tableBudget = VortexLimits.MaxFlatBufferTables;
+            LayoutView root = LayoutView.Root(retained, ref tableBudget);
+            LayoutParser.ParseNode(builder, in root, schema, depth: 1);
 
-        // The budget lives for the whole traversal: forward-only uoffsets exclude cycles but not
-        // sharing, and a small buffer whose children are shared between parents is an acyclic graph
-        // with exponentially many root-to-leaf paths.
-        int tableBudget = VortexLimits.MaxFlatBufferTables;
-        LayoutView root = LayoutView.Root(retained, ref tableBudget);
-        LayoutParser.ParseNode(builder, in root, schema, depth: 1);
-
-        return builder.Freeze();
+            return builder.Freeze();
+        }
+        finally
+        {
+            builder.ReturnScratch();
+        }
     }
 
     /// <summary>Mutable state for one parse. Discarded once <see cref="Freeze"/> has run.</summary>
@@ -332,13 +347,16 @@ internal sealed class LayoutTree
 
         internal AggregateSpecList Specs { get; } = new AggregateSpecList();
 
-        internal LayoutNodeRecord[] Records = new LayoutNodeRecord[16];
+        // The parse grows these in rented arrays, and the tree keeps exact copies of them: a tree's
+        // size is known only once it is parsed, and growing its own arrays by doubling left three
+        // or four discarded generations of each behind every open.
+        internal LayoutNodeRecord[] Records = ArrayPool<LayoutNodeRecord>.Shared.Rent(64);
         internal int RecordCount;
-        internal int[] ChildIndices = new int[16];
+        internal int[] ChildIndices = ArrayPool<int>.Shared.Rent(64);
         internal int ChildIndexCount;
-        internal ZoneMap[] ZoneMaps = new ZoneMap[2];
+        internal ZoneMap[] ZoneMaps = ArrayPool<ZoneMap>.Shared.Rent(16);
         internal int ZoneMapCount;
-        internal long[] ChunkOffsets = new long[8];
+        internal long[] ChunkOffsets = ArrayPool<long>.Shared.Rent(64);
         internal int ChunkOffsetCount;
 
         /// <summary>
@@ -374,11 +392,44 @@ internal sealed class LayoutTree
 
             if (RecordCount == Records.Length)
             {
-                Array.Resize(ref Records, Records.Length * 2);
+                Grow(ref Records, RecordCount + 1);
             }
 
             Records[RecordCount] = default;
             return RecordCount++;
+        }
+
+        /// <summary>Moves <paramref name="array"/> into a rented array of at least <paramref name="needed"/> entries and returns the old one.</summary>
+        private static void Grow<T>(ref T[] array, int needed)
+        {
+            int capacity = Math.Max(array.Length, 1);
+            while (capacity < needed)
+            {
+                capacity *= 2;
+            }
+
+            T[] grown = ArrayPool<T>.Shared.Rent(capacity);
+            array.AsSpan().CopyTo(grown);
+            ArrayPool<T>.Shared.Return(array, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+            array = grown;
+        }
+
+        /// <summary>Gives the rented arrays back; the tree holds copies of what they held. Safe to call twice.</summary>
+        internal void ReturnScratch()
+        {
+            Return(ref Records);
+            Return(ref ChildIndices);
+            Return(ref ZoneMaps);
+            Return(ref ChunkOffsets);
+        }
+
+        private static void Return<T>(ref T[] array)
+        {
+            if (array.Length != 0)
+            {
+                ArrayPool<T>.Shared.Return(array, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+                array = [];
+            }
         }
 
         internal int ReserveChildren(int count)
@@ -392,13 +443,7 @@ internal sealed class LayoutTree
             int needed = ChildIndexCount + count;
             if (needed > ChildIndices.Length)
             {
-                int capacity = ChildIndices.Length;
-                while (capacity < needed)
-                {
-                    capacity *= 2;
-                }
-
-                Array.Resize(ref ChildIndices, capacity);
+                Grow(ref ChildIndices, needed);
             }
 
             ChildIndexCount = needed;
@@ -409,7 +454,7 @@ internal sealed class LayoutTree
         {
             if (ZoneMapCount == ZoneMaps.Length)
             {
-                Array.Resize(ref ZoneMaps, ZoneMaps.Length * 2);
+                Grow(ref ZoneMaps, ZoneMapCount + 1);
             }
 
             ZoneMaps[ZoneMapCount] = zoneMap;
@@ -423,30 +468,25 @@ internal sealed class LayoutTree
             int needed = ChunkOffsetCount + count;
             if (needed > ChunkOffsets.Length)
             {
-                int capacity = ChunkOffsets.Length;
-                while (capacity < needed)
-                {
-                    capacity *= 2;
-                }
-
-                Array.Resize(ref ChunkOffsets, capacity);
+                Grow(ref ChunkOffsets, needed);
             }
 
             ChunkOffsetCount = needed;
             return start;
         }
 
+        /// <summary>The tree, holding exact copies of what the parse gathered.</summary>
         internal LayoutTree Freeze() =>
             new LayoutTree(
                 File,
                 DetachedEncodingIds,
                 Types,
                 Buffer,
-                Records,
+                Records.AsSpan(0, RecordCount).ToArray(),
                 RecordCount,
-                ChildIndices,
-                ZoneMaps,
-                ChunkOffsets);
+                ChildIndices.AsSpan(0, ChildIndexCount).ToArray(),
+                ZoneMaps.AsSpan(0, ZoneMapCount).ToArray(),
+                ChunkOffsets.AsSpan(0, ChunkOffsetCount).ToArray());
     }
 }
 
