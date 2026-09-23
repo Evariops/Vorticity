@@ -22,6 +22,17 @@ internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
+        int threads;
+        try
+        {
+            (args, threads) = ScenarioSet.TakeThreads(args);
+        }
+        catch (ArgumentException error)
+        {
+            Console.Error.WriteLine(error.Message);
+            return 2;
+        }
+
         int repeat = 1;
         if (args.Length < 4 || args[0] != "--scenario"
             || !long.TryParse(args[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out long rows)
@@ -30,7 +41,7 @@ internal static class Program
                 || repeat < 1)))
         {
             Console.Error.WriteLine(
-                "usage: Vorticity.Benchmarks.Runner --scenario <name> <file.vortex> <rows> [--repeat <n>]");
+                "usage: Vorticity.Benchmarks.Runner --scenario <name> <file.vortex> <rows> [--repeat <n>] [--threads <n>|all]");
             return 2;
         }
 
@@ -73,7 +84,7 @@ internal static class Program
         (long cpuMs, long rssBytes) = ProcessCost.Read();
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"rows={delivered[^1]} work_us={workMicros[^1]} cpu_ms={cpuMs} rss_bytes={rssBytes}"));
+            $"rows={delivered[^1]} work_us={workMicros[^1]} cpu_ms={cpuMs} rss_bytes={rssBytes} threads={threads}"));
         return 0;
     }
 

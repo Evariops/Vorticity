@@ -1,32 +1,49 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Vortex's Rust reader behind a C ABI, so the benchmarks can compare the right way: both
-// implementations measured IN ONE PROCESS, on the same bytes, with the same clock and the same
+// implementations measured in one process, on the same bytes, with the same clock and the same
 // page-cache state. Cross-process comparison is what makes a 1.4x ratio unreadable.
 //
-// WHY THIS IS NOT `vortex-ffi`. The design once named it, but `vortex-ffi` is `publish = false`
+// Why this is not `vortex-ffi`: the design once named it, but `vortex-ffi` is `publish = false`
 // upstream, so using it would mean a second git dependency; and it is a general-purpose C API with
 // its own object model, whose per-call overhead would land inside the measurement. A shim built
 // against the same crates.io pin the corpus was generated with (`vortex = "=0.86.1"`) measures the
 // scan path and nothing else, which is the thing being compared.
 //
-// SINGLE-THREADED ON PURPOSE. `vortex::io::runtime::single::block_on` is the one-thread runtime,
-// matching our own reader, which has no worker pool. The thread count has to be pinned on
-// both sides - otherwise the ratio measures a threading-model difference rather than
-// implementation quality.
+// Built and run as upstream's own benchmarks are: mimalloc as the global allocator, and the target
+// CPU, frame pointers and release profile of `vortex-bench` (see Cargo.toml and .cargo/config.toml).
 //
-// EVERY ENTRY POINT RETURNS A COUNT OR A NEGATIVE ERROR. No out-parameters, no allocation handed
+// Two runtimes, and the thread count is pinned on both sides. With no thread count set, every call
+// runs on `vortex::io::runtime::single`, all work on the calling thread: one core, against our
+// reader at one lane. `vxbench_set_threads(n)` runs them on a multi-threaded Tokio runtime of `n`
+// workers under `with_tokio`, which is how upstream's benchmarks use every core. A ratio between a
+// reader held to one core and one free to use all of them measures a threading model, not a decoder.
+//
+// A scan decodes each split to its canonical form on the split's own task, through
+// `ScanBuilder::map`, as upstream's Arrow conversion does: decoded in the loop that drains the
+// stream, the splits would be read on every core and decoded on one.
+//
+// Every entry point returns a count or a negative error. No out-parameters, no allocation handed
 // across the boundary, no object lifetime to manage: the whole surface is `path in, rows out`, so
 // nothing in the harness can leak and nothing in the measurement is FFI bookkeeping.
+use std::collections::HashMap;
 use std::ffi::CStr;
+use std::future::Future;
 use std::os::raw::c_char;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
+use futures::Stream;
 use futures::StreamExt;
 use futures::pin_mut;
 use vortex::VortexSessionDefault;
+use vortex::array::ArrayRef;
+use vortex::array::IntoArray;
 use vortex::array::RecursiveCanonical;
 use vortex::array::VortexSessionExecute;
 use vortex::buffer::Buffer;
@@ -44,10 +61,9 @@ use vortex::expr::root;
 use vortex::expr::select;
 use vortex::file::OpenOptionsSessionExt;
 use vortex::file::WriteOptionsSessionExt;
-use vortex::io::runtime::BlockingRuntime;
-use vortex::io::runtime::current::CurrentThreadRuntime;
 use vortex::io::runtime::single::block_on;
 use vortex::io::session::RuntimeSessionExt;
+use vortex::layout::scan::scan_builder::ScanBuilder;
 use vortex::array::stream::ArrayStreamExt;
 use vortex::dtype::DType;
 use vortex::scalar::DecimalValue;
@@ -65,6 +81,106 @@ const ERR_FAILED: i64 = -2;
 /// The reader panicked. Reported rather than allowed to unwind across the ABI, which is UB.
 const ERR_PANIC: i64 = -3;
 
+/// The allocator upstream's benchmarks run with.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+/// Workers of the multi-threaded runtime every call runs on, or 0 for the single-threaded one.
+static THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// The multi-threaded runtimes, one per worker count asked for, each built once: a runtime built per
+/// call would charge every call for starting its threads.
+static RUNTIMES: OnceLock<Mutex<HashMap<usize, Arc<tokio::runtime::Runtime>>>> = OnceLock::new();
+
+/// Sets the runtime every later call runs on: 0 for the single-threaded one, the calling thread
+/// doing all the work, or `threads` workers of a multi-threaded Tokio runtime.
+///
+/// # Safety
+/// None; takes a count and returns 0, or a negative error for a negative count.
+#[unsafe(no_mangle)]
+pub extern "C" fn vxbench_set_threads(threads: i64) -> i64 {
+    if threads < 0 {
+        return ERR_BAD_PATH;
+    }
+
+    THREADS.store(threads as usize, Ordering::Relaxed);
+    0
+}
+
+/// The multi-threaded runtime of `workers` workers.
+fn runtime(workers: usize) -> VortexResult<Arc<tokio::runtime::Runtime>> {
+    let mut runtimes = RUNTIMES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(runtime) = runtimes.get(&workers) {
+        return Ok(Arc::clone(runtime));
+    }
+
+    let runtime = Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .enable_all()
+            .build()?,
+    );
+    runtimes.insert(workers, Arc::clone(&runtime));
+    Ok(runtime)
+}
+
+/// Runs `body` on the runtime the thread count names: the single-threaded one, or the Tokio runtime
+/// of that many workers, with the session bound to it.
+fn drive<F, Fut>(session: VortexSession, body: F) -> VortexResult<i64>
+where
+    F: FnOnce(VortexSession) -> Fut,
+    Fut: Future<Output = VortexResult<i64>>,
+{
+    match THREADS.load(Ordering::Relaxed) {
+        0 => block_on(|handle| body(session.with_handle(handle))),
+        workers => runtime(workers)?.block_on(body(session.with_tokio())),
+    }
+}
+
+/// The scan's splits, each decoded to its canonical form on its own task, as row counts.
+///
+/// Decoding on the split's task rather than in the loop that drains the stream is what lets a
+/// multi-threaded runtime decode on every core; on the single-threaded one it is the same work on
+/// the one thread. A context per split, as upstream's Arrow conversion makes one per chunk.
+fn decoded(
+    scan: ScanBuilder<ArrayRef>,
+    session: &VortexSession,
+) -> VortexResult<impl Stream<Item = VortexResult<i64>> + Send + 'static> {
+    let session = session.clone();
+    scan.map(move |array: ArrayRef| {
+        let mut ctx = session.create_execution_ctx();
+        let rows = array.len() as i64;
+        let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
+        Ok(rows)
+    })
+    .into_stream()
+}
+
+/// The scan's splits, each decoded to its canonical form on its own task, as arrays: what a writer
+/// is given to encode, the rows as our reader delivers them to ours.
+fn canonical(scan: ScanBuilder<ArrayRef>, session: &VortexSession) -> ScanBuilder<ArrayRef> {
+    let session = session.clone();
+    scan.map(move |array: ArrayRef| {
+        let mut ctx = session.create_execution_ctx();
+        let canonical: RecursiveCanonical = array.execute(&mut ctx)?;
+        Ok(canonical.0.into_array())
+    })
+}
+
+/// The rows a stream of decoded splits counted.
+async fn total(stream: impl Stream<Item = VortexResult<i64>>) -> VortexResult<i64> {
+    pin_mut!(stream);
+    let mut rows: i64 = 0;
+    while let Some(split) = stream.next().await {
+        rows += split?;
+    }
+
+    Ok(rows)
+}
+
 /// The empty call: the FFI floor, so it can be subtracted when it matters.
 ///
 /// # Safety
@@ -81,19 +197,16 @@ pub extern "C" fn vxbench_noop() -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vxbench_scan_all(path: *const c_char) -> i64 {
     run(path, |session, path| {
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let file = session.open_options().open_path(path).await?;
-                let stream = file.scan()?.into_array_stream()?;
-                pin_mut!(stream);
-                let mut rows: i64 = 0;
-                while let Some(array) = stream.next().await {
-                    rows += array?.len() as i64;
-                }
-
-                Ok(rows)
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(path).await?;
+            let stream = file.scan()?.into_array_stream()?;
+            pin_mut!(stream);
+            let mut rows: i64 = 0;
+            while let Some(array) = stream.next().await {
+                rows += array?.len() as i64;
             }
+
+            Ok(rows)
         })
     })
 }
@@ -134,46 +247,31 @@ pub unsafe extern "C" fn vxbench_scan_all(path: *const c_char) -> i64 {
 /// The day `ConstantForm` becomes our default, this call would charge Rust for an expansion we no
 /// longer pay, and the bench would be wrong in the other direction.
 ///
-/// The result is dropped rather than accumulated: the decode has already happened by then, and
-/// holding a million rows of it would measure the allocator.
+/// The decoded splits are dropped as they are counted: the decode has already happened by then,
+/// and holding a million rows of it would measure the allocator.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vxbench_scan_canonical(path: *const c_char) -> i64 {
     run(path, |session, path| {
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let mut ctx = session.create_execution_ctx();
-                let file = session.open_options().open_path(&path).await?;
-                let stream = file.scan()?.into_array_stream()?;
-                pin_mut!(stream);
-                let mut rows: i64 = 0;
-                while let Some(array) = stream.next().await {
-                    let array = array?;
-                    rows += array.len() as i64;
-                    let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
-                }
-
-                Ok(rows)
-            }
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(&path).await?;
+            total(decoded(file.scan()?, &session)?).await
         })
     })
 }
 
-/// Scans `path` canonically on upstream's multi-threaded runtime with exactly `threads` workers.
+/// Scans `path` canonically on a multi-threaded Tokio runtime of exactly `threads` workers,
+/// whatever `vxbench_set_threads` said.
 ///
-/// THE CONTENTION FAMILY HAD NO NUMBER AT ALL. Our reader
-/// has `WithDegreeOfParallelism` and nothing measured it; the reference side was single-threaded by
-/// construction here, so a ratio at more than one lane could not exist. It can now, and the thread
-/// count is PINNED on both sides, because a ratio between an `n`-lane reader
-/// and a reference free to use every core measures a threading model, not a decoder.
+/// The lane axis: our reader's `WithDegreeOfParallelism` against the reference at the same number
+/// of threads, pinned on both sides, because a ratio between an `n`-lane reader and a reference
+/// free to use every core measures a threading model, not a decoder.
 ///
-/// `threads = 1` is NOT the same measurement as `vxbench_scan_canonical`: this one still hands the
-/// work to a worker pool and pays for the hand-off, where the single-thread runtime drives the
-/// future on the calling thread. Comparing lanes against lanes is the point; comparing this at 1
-/// against the single-threaded entry point prices the pool itself.
+/// `threads = 1` is not the same measurement as `vxbench_scan_canonical` on the single-threaded
+/// runtime: this one still hands the work to a worker and pays for the hand-off, where the
+/// single-threaded runtime drives it on the calling thread.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
@@ -184,23 +282,10 @@ pub unsafe extern "C" fn vxbench_scan_canonical_threads(path: *const c_char, thr
     }
 
     run(path, move |session, path| {
-        let runtime = CurrentThreadRuntime::new();
-        let pool = runtime.new_pool();
-        pool.set_workers(threads as usize);
-        let session = session.with_handle(runtime.handle());
-        runtime.block_on(async move {
-            let mut ctx = session.create_execution_ctx();
+        runtime(threads as usize)?.block_on(async move {
+            let session = session.with_tokio();
             let file = session.open_options().open_path(&path).await?;
-            let stream = file.scan()?.into_array_stream()?;
-            pin_mut!(stream);
-            let mut rows: i64 = 0;
-            while let Some(array) = stream.next().await {
-                let array = array?;
-                rows += array.len() as i64;
-                let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
-            }
-
-            Ok(rows)
+            total(decoded(file.scan()?, &session)?).await
         })
     })
 }
@@ -216,25 +301,21 @@ pub unsafe extern "C" fn vxbench_scan_projected(path: *const c_char, field: *con
     };
 
     run(path, move |session, path| {
-        let field = field.clone();
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let file = session.open_options().open_path(path).await?;
-                // Bound against the file's own dtype, the way the reference's own tests do it:
-                // an unbound expression is refused by the scan builder's signature.
-                let projection = select([field.as_str()], root())
-                    .optimize_recursive(file.dtype())
-                    .and_then(|expr| expr.bind(file.dtype()))?;
-                let stream = file.scan()?.with_projection(projection).into_array_stream()?;
-                pin_mut!(stream);
-                let mut rows: i64 = 0;
-                while let Some(array) = stream.next().await {
-                    rows += array?.len() as i64;
-                }
-
-                Ok(rows)
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(path).await?;
+            // Bound against the file's own dtype, the way the reference's own tests do it: an
+            // unbound expression is refused by the scan builder's signature.
+            let projection = select([field.as_str()], root())
+                .optimize_recursive(file.dtype())
+                .and_then(|expr| expr.bind(file.dtype()))?;
+            let stream = file.scan()?.with_projection(projection).into_array_stream()?;
+            pin_mut!(stream);
+            let mut rows: i64 = 0;
+            while let Some(array) = stream.next().await {
+                rows += array?.len() as i64;
             }
+
+            Ok(rows)
         })
     })
 }
@@ -258,26 +339,12 @@ pub unsafe extern "C" fn vxbench_scan_projected_canonical(
     };
 
     run(path, move |session, path| {
-        let field = field.clone();
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let mut ctx = session.create_execution_ctx();
-                let file = session.open_options().open_path(path).await?;
-                let projection = select([field.as_str()], root())
-                    .optimize_recursive(file.dtype())
-                    .and_then(|expr| expr.bind(file.dtype()))?;
-                let stream = file.scan()?.with_projection(projection).into_array_stream()?;
-                pin_mut!(stream);
-                let mut rows: i64 = 0;
-                while let Some(array) = stream.next().await {
-                    let array = array?;
-                    rows += array.len() as i64;
-                    let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
-                }
-
-                Ok(rows)
-            }
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(path).await?;
+            let projection = select([field.as_str()], root())
+                .optimize_recursive(file.dtype())
+                .and_then(|expr| expr.bind(file.dtype()))?;
+            total(decoded(file.scan()?.with_projection(projection), &session)?).await
         })
     })
 }
@@ -289,16 +356,13 @@ pub unsafe extern "C" fn vxbench_scan_projected_canonical(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vxbench_open_first_batch(path: *const c_char) -> i64 {
     run(path, |session, path| {
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let file = session.open_options().open_path(path).await?;
-                let stream = file.scan()?.into_array_stream()?;
-                pin_mut!(stream);
-                match stream.next().await {
-                    Some(array) => Ok(array?.len() as i64),
-                    None => Ok(0),
-                }
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(path).await?;
+            let stream = file.scan()?.into_array_stream()?;
+            pin_mut!(stream);
+            match stream.next().await {
+                Some(array) => Ok(array?.len() as i64),
+                None => Ok(0),
             }
         })
     })
@@ -316,23 +380,54 @@ pub unsafe extern "C" fn vxbench_open_first_batch(path: *const c_char) -> i64 {
 /// The output goes to an in-memory sink rather than to disk, matching the .NET side's `DiscardSink`:
 /// a write benchmark that measures the filesystem measures the filesystem.
 ///
+/// The writer is given each split decoded to its canonical form, which is what our reader hands
+/// ours: re-encoding from the file's own encodings is not the work our side does. Given them as
+/// stored, the reference's writer also refuses a numeric column stored as zstd, which it cannot
+/// append to a builder.
+///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vxbench_write(path: *const c_char) -> i64 {
     run(path, |session, path| {
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let file = session.open_options().open_path(&path).await?;
-                let rows = file.row_count() as i64;
-                let stream = file.scan()?.into_array_stream()?;
-                session
-                    .write_options()
-                    .write(Vec::<u8>::new(), stream)
-                    .await?;
-                Ok(rows)
-            }
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(&path).await?;
+            let rows = file.row_count() as i64;
+            let stream = canonical(file.scan()?, &session).into_array_stream()?;
+            session
+                .write_options()
+                .write(Vec::<u8>::new(), stream)
+                .await?;
+            Ok(rows)
+        })
+    })
+}
+
+/// Reads `path` and writes it to `destination` with the default strategy, returning the rows
+/// written: the same rows in the reference writer's own bytes, so that the read scenarios also run
+/// on a file whose encodings the reference chose.
+///
+/// The writer is given the rows decoded, as `vxbench_write` gives them, which is also how upstream
+/// writes its benchmark files, from Arrow. Not a timing axis; the bytes land in memory and go to
+/// disk once the write is done.
+///
+/// # Safety
+/// `path` and `destination` must be valid NUL-terminated C strings for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_rewrite(path: *const c_char, destination: *const c_char) -> i64 {
+    let Some(destination) = (unsafe { text(destination) }) else {
+        return ERR_BAD_PATH;
+    };
+
+    run(path, move |session, path| {
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(&path).await?;
+            let rows = file.row_count() as i64;
+            let stream = canonical(file.scan()?, &session).into_array_stream()?;
+            let mut bytes = Vec::<u8>::new();
+            session.write_options().write(&mut bytes, stream).await?;
+            std::fs::write(&destination, &bytes)?;
+            Ok(rows)
         })
     })
 }
@@ -354,28 +449,15 @@ pub unsafe extern "C" fn vxbench_take(path: *const c_char, count: i64, stride: i
     }
 
     run(path, move |session, path| {
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let mut ctx = session.create_execution_ctx();
-                let file = session.open_options().open_path(&path).await?;
-                let rows_in_file = file.row_count();
-                let indices: Buffer<u64> = (0..count as u64)
-                    .map(|i| (i * stride as u64) + (stride as u64 / 2))
-                    .filter(|&row| row < rows_in_file)
-                    .collect();
-                let selection = StrictSortedBuffer::try_new(indices)?;
-                let stream = file.scan()?.with_row_indices(selection).into_array_stream()?;
-                pin_mut!(stream);
-                let mut rows: i64 = 0;
-                while let Some(array) = stream.next().await {
-                    let array = array?;
-                    rows += array.len() as i64;
-                    let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
-                }
-
-                Ok(rows)
-            }
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(&path).await?;
+            let rows_in_file = file.row_count();
+            let indices: Buffer<u64> = (0..count as u64)
+                .map(|i| (i * stride as u64) + (stride as u64 / 2))
+                .filter(|&row| row < rows_in_file)
+                .collect();
+            let selection = StrictSortedBuffer::try_new(indices)?;
+            total(decoded(file.scan()?.with_row_indices(selection), &session)?).await
         })
     })
 }
@@ -405,30 +487,16 @@ pub unsafe extern "C" fn vxbench_scan_filtered(
     };
 
     run(path, move |session, path| {
-        let field = field.clone();
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let mut ctx = session.create_execution_ctx();
-                let file = session.open_options().open_path(&path).await?;
-                let predicate = and(
-                    gt_eq(get_item(field.as_str(), root()), lit(lo)),
-                    lt(get_item(field.as_str(), root()), lit(lo + width)),
-                );
-                let filter = predicate
-                    .optimize_recursive(file.dtype())
-                    .and_then(|expr| expr.bind(file.dtype()))?;
-                let stream = file.scan()?.with_filter(filter).into_array_stream()?;
-                pin_mut!(stream);
-                let mut rows: i64 = 0;
-                while let Some(array) = stream.next().await {
-                    let array = array?;
-                    rows += array.len() as i64;
-                    let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
-                }
-
-                Ok(rows)
-            }
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(&path).await?;
+            let predicate = and(
+                gt_eq(get_item(field.as_str(), root()), lit(lo)),
+                lt(get_item(field.as_str(), root()), lit(lo + width)),
+            );
+            let filter = predicate
+                .optimize_recursive(file.dtype())
+                .and_then(|expr| expr.bind(file.dtype()))?;
+            total(decoded(file.scan()?.with_filter(filter), &session)?).await
         })
     })
 }
@@ -505,33 +573,18 @@ where
     F: Fn(Expression) -> Expression + Send + 'static,
 {
     run(path, move |session, path| {
-        let field = field.clone();
-        let build = &build;
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let mut ctx = session.create_execution_ctx();
-                let file = session.open_options().open_path(&path).await?;
-                let column = if field.is_empty() {
-                    root()
-                } else {
-                    get_item(field.as_str(), root())
-                };
-                let predicate = build(column);
-                let filter = predicate
-                    .optimize_recursive(file.dtype())
-                    .and_then(|expr| expr.bind(file.dtype()))?;
-                let stream = file.scan()?.with_filter(filter).into_array_stream()?;
-                pin_mut!(stream);
-                let mut rows: i64 = 0;
-                while let Some(array) = stream.next().await {
-                    let array = array?;
-                    rows += array.len() as i64;
-                    let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
-                }
-
-                Ok(rows)
-            }
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(&path).await?;
+            let column = if field.is_empty() {
+                root()
+            } else {
+                get_item(field.as_str(), root())
+            };
+            let predicate = build(column);
+            let filter = predicate
+                .optimize_recursive(file.dtype())
+                .and_then(|expr| expr.bind(file.dtype()))?;
+            total(decoded(file.scan()?.with_filter(filter), &session)?).await
         })
     })
 }
@@ -568,21 +621,18 @@ where
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vxbench_scan_checksum(path: *const c_char) -> i64 {
     run(path, |session, path| {
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let mut ctx = session.create_execution_ctx();
-                let file = session.open_options().open_path(&path).await?;
-                let array = file.scan()?.into_array_stream()?.read_all().await?;
-                let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-                let dtype = array.dtype().clone();
-                for row in 0..array.len() {
-                    let scalar: Scalar = array.execute_scalar(row, &mut ctx)?;
-                    hash_value(&dtype, scalar.value(), &mut hash);
-                }
-
-                Ok(hash as i64)
+        drive(session, |session| async move {
+            let mut ctx = session.create_execution_ctx();
+            let file = session.open_options().open_path(&path).await?;
+            let array = file.scan()?.into_array_stream()?.read_all().await?;
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            let dtype = array.dtype().clone();
+            for row in 0..array.len() {
+                let scalar: Scalar = array.execute_scalar(row, &mut ctx)?;
+                hash_value(&dtype, scalar.value(), &mut hash);
             }
+
+            Ok(hash as i64)
         })
     })
 }
@@ -706,12 +756,9 @@ fn hash_decimal(value: &DecimalValue, hash: &mut u64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vxbench_open_only(path: *const c_char) -> i64 {
     run(path, |session, path| {
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let file = session.open_options().open_path(path).await?;
-                Ok(file.row_count() as i64)
-            }
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(path).await?;
+            Ok(file.row_count() as i64)
         })
     })
 }
@@ -740,20 +787,17 @@ static SESSION: OnceLock<VortexSession> = OnceLock::new();
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vxbench_batch_count(path: *const c_char) -> i64 {
     run(path, |session, path| {
-        block_on(|handle| {
-            let session = session.with_handle(handle);
-            async move {
-                let file = session.open_options().open_path(path).await?;
-                let stream = file.scan()?.into_array_stream()?;
-                pin_mut!(stream);
-                let mut batches: i64 = 0;
-                while let Some(array) = stream.next().await {
-                    array?;
-                    batches += 1;
-                }
-
-                Ok(batches)
+        drive(session, |session| async move {
+            let file = session.open_options().open_path(path).await?;
+            let stream = file.scan()?.into_array_stream()?;
+            pin_mut!(stream);
+            let mut batches: i64 = 0;
+            while let Some(array) = stream.next().await {
+                array?;
+                batches += 1;
             }
+
+            Ok(batches)
         })
     })
 }

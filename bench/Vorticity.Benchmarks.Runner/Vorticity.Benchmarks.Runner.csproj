@@ -11,6 +11,11 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <PublishAot>true</PublishAot>
+
+    <!-- Code for the machine it runs on, as the reference is built with -C target-cpu=native: a
+         native binary held to the baseline instruction set against one that is not would measure
+         the build. -->
+    <IlcInstructionSet>native</IlcInstructionSet>
     <PublishTrimmed>true</PublishTrimmed>
     <TrimMode>full</TrimMode>
     <IsAotCompatible>true</IsAotCompatible>

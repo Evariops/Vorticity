@@ -8,20 +8,38 @@ use std::process::ExitCode;
 /// Every scenario calls the same function the in-process harness calls, so the two ways of
 /// measuring Rust cannot drift apart.
 fn main() -> ExitCode {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || args[0] == "--help" {
-        eprintln!("usage: vxbench <scenario> <file.vortex> [argument]...");
+        eprintln!("usage: vxbench <scenario> <file.vortex> [argument]... [--threads <n>|all]");
         eprintln!("  scan <file>                  read every column of every row");
         eprintln!("  project <file> <field>       read one column");
         eprintln!("  filter <file> <field> <lo> <width>   read rows where lo <= field < lo+width");
         eprintln!("  take <file> <count> <stride> read count rows, one every stride");
         eprintln!("  write <file>                 read it and encode it back out");
         eprintln!("  open <file>                  open it and read nothing");
-        eprintln!("prints `rows=<n> work_us=<action time inside the process>` and exits 0, or a reason and exits 1.");
+        eprintln!("  rewrite <file> <out>         write it to <out> with the reference writer");
+        eprintln!("--threads: a multi-threaded runtime of <n> workers, or of one per processor; without it,");
+        eprintln!("the single-threaded runtime, all work on the calling thread.");
+        eprintln!("prints `rows=<n> work_us=<action time inside the process> threads=<workers>` and exits 0,");
+        eprintln!("or a reason and exits 1.");
         return ExitCode::from(2);
     }
 
-    let scenario = args[0].as_str();
+    let threads = match take_threads(&mut args) {
+        Ok(threads) => threads,
+        Err(code) => return code,
+    };
+
+    if vxbench::vxbench_set_threads(threads) != 0 {
+        eprintln!("--threads: {threads} is not a thread count");
+        return ExitCode::FAILURE;
+    }
+
+    let Some(scenario) = args.first().map(String::as_str) else {
+        eprintln!("a scenario is required");
+        return ExitCode::from(2);
+    };
+
     let Some(path) = args.get(1) else {
         eprintln!("{scenario}: a file is required");
         return ExitCode::FAILURE;
@@ -41,6 +59,10 @@ fn main() -> ExitCode {
         "scan" => unsafe { vxbench::vxbench_scan_canonical(path.as_ptr()) },
         "open" => unsafe { vxbench::vxbench_open_only(path.as_ptr()) },
         "write" => unsafe { vxbench::vxbench_write(path.as_ptr()) },
+        "rewrite" => match field(&args, 2) {
+            Ok(destination) => unsafe { vxbench::vxbench_rewrite(path.as_ptr(), destination.as_ptr()) },
+            Err(code) => return code,
+        },
         "project" => match field(&args, 2) {
             Ok(field) => unsafe {
                 vxbench::vxbench_scan_projected_canonical(path.as_ptr(), field.as_ptr())
@@ -77,8 +99,34 @@ fn main() -> ExitCode {
     }
 
     let (cpu_ms, rss_bytes) = cost();
-    println!("rows={rows} work_us={work_us} cpu_ms={cpu_ms} rss_bytes={rss_bytes}");
+    println!("rows={rows} work_us={work_us} cpu_ms={cpu_ms} rss_bytes={rss_bytes} threads={threads}");
     ExitCode::SUCCESS
+}
+
+/// Takes `--threads <n>` or `--threads all` out of the arguments: the workers of the multi-threaded
+/// runtime, one per processor for `all`, or 0 for the single-threaded runtime when it is absent.
+fn take_threads(args: &mut Vec<String>) -> Result<i64, ExitCode> {
+    let Some(at) = args.iter().position(|arg| arg == "--threads") else {
+        return Ok(0);
+    };
+
+    let Some(value) = args.get(at + 1).cloned() else {
+        eprintln!("--threads: expected a count or `all`");
+        return Err(ExitCode::FAILURE);
+    };
+
+    args.drain(at..at + 2);
+    if value == "all" {
+        return Ok(std::thread::available_parallelism().map_or(1, |n| n.get()) as i64);
+    }
+
+    match value.parse::<i64>() {
+        Ok(threads) if threads > 0 => Ok(threads),
+        _ => {
+            eprintln!("--threads: '{value}' is not a positive count");
+            Err(ExitCode::FAILURE)
+        }
+    }
 }
 
 /// The processor time and the peak resident set of this process, the two figures the report pairs

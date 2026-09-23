@@ -23,10 +23,15 @@ target/release/vxbench filter <file.vortex> <i64 field> <lo> <width>
 target/release/vxbench take <file.vortex> <count> <stride>
 target/release/vxbench write <file.vortex>
 target/release/vxbench open <file.vortex>
+target/release/vxbench rewrite <file.vortex> <out.vortex>
 ```
 
 Each prints `rows=<n>` and exits 0, or a reason on standard error and exits 1. `filter` wants an
 `i64` field: the predicate's literal is one, and an `i32` column is refused rather than coerced.
+`--threads <n>` or `--threads all` runs any of them on a multi-threaded runtime of that many
+workers, or of one per processor; without it they run on the single-threaded runtime. `rewrite` is
+not a timing axis: it writes the same rows as the reference's writer makes them, for the read
+scenarios to run on a file of its own.
 
 ## Why this is not `vortex-ffi`
 
@@ -43,21 +48,37 @@ surface to measure except the scan. The empty-call floor is 2.5 ns.
 
 ## Fairness, item by item
 
+* **Built as upstream's benchmarks are built.** mimalloc as the global allocator, which upstream's
+  benchmarks all run with and its README recommends; `-C target-cpu=native -C
+  force-frame-pointers=yes` (`.cargo/config.toml`); one codegen unit, no LTO, full debug
+  information (`Cargo.toml`), upstream's `release_debug` profile. A reference built otherwise is
+  not the one upstream measures. The .NET side is built for the machine too: the Native AOT runner
+  has `IlcInstructionSet=native`.
+* **One core, or all of them, on both sides.** Without a thread count every call runs on
+  `vortex::io::runtime::single`, all the work on the calling thread, against our reader at one lane.
+  `vxbench_set_threads(n)`, or `--threads`, runs them on a multi-threaded Tokio runtime of `n`
+  workers under `with_tokio`, which is how upstream's benchmarks use every core, against our reader
+  at `n` lanes. The count is the same on both sides; a ratio between a reader held to one core and
+  one free to use them all measures a threading model.
+* **Decoded where the work is split.** Each split is decoded to its canonical form on its own task,
+  through `ScanBuilder::map`, as upstream's Arrow conversion does. Decoded in the loop that drains
+  the stream instead, the splits would be read on every core and decoded on one.
+* **The writer is given decoded rows**, which is what our reader hands our writer. Given the file's
+  own encodings, the reference's writer re-encodes from them, which is not the work our side does,
+  and refuses a numeric column stored as zstd, which it cannot append to a builder.
 * **The session is built once.** `VortexSession::default()` registers every edition and initializes
   the arrow and parquet-variant integrations. An earlier version paid that per call — about 90 µs —
   which nothing on the .NET side pays per open, since `EncodingRegistry` is static. It read as
   Rust being slow to open a file.
 * **The file is opened from scratch on every call**, on both sides, so neither gets a warm segment
   cache the other is not offered.
-* **Single-threaded on both sides.** The shim uses `vortex::io::runtime::single::block_on` rather
-  than the default multi-threaded runtime; our reader has no worker pool. Otherwise the ratio
-  measures a threading-model difference (docs/design/05 §5).
 * **Panics are caught** at the boundary: unwinding across a C ABI is undefined behaviour. Every
   entry point returns a count, or a negative status.
 
 ## Building and running
 
-Not built by CI: it is a three-minute Rust build producing a 36 MB artifact.
+Not built by CI: it is a five-minute Rust build. The target CPU is the build machine's, so the
+library is built on the machine that measures.
 
 ```sh
 cd tools/vxbench-rs && cargo build --release

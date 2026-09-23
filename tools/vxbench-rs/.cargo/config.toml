@@ -1,0 +1,5 @@
+# The RUSTFLAGS of upstream's benchmarks: code for the machine it runs on, and frame pointers kept.
+# Built otherwise, the reference is not the one upstream measures, and a ratio against it is a ratio
+# against a build nobody publishes.
+[build]
+rustflags = ["-C", "target-cpu=native", "-C", "force-frame-pointers=yes"]

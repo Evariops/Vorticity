@@ -114,6 +114,33 @@ public static class ScenarioSet
         _ => null,
     };
 
+    /// <summary>
+    /// Takes <c>--threads &lt;n&gt;</c> or <c>--threads all</c> out of <paramref name="args"/> and
+    /// gives every scan that many lanes, one per processor for <c>all</c>: the reader's counterpart
+    /// of the reference's multi-threaded runtime. Absent, scans keep the library's default of one.
+    /// The writer has no lanes to give.
+    /// </summary>
+    /// <param name="args">The arguments, the option anywhere among them.</param>
+    /// <returns>The arguments without the option, and the lanes every scan now has.</returns>
+    /// <exception cref="ArgumentException">The option names no positive count.</exception>
+    public static (string[] Remaining, int Threads) TakeThreads(string[] args)
+    {
+        int at = Array.IndexOf(args, "--threads");
+        if (at < 0)
+        {
+            return (args, ScanBuilder.DefaultDegreeOfParallelism);
+        }
+
+        string? value = at + 1 < args.Length ? args[at + 1] : null;
+        int threads = value == "all"
+            ? Environment.ProcessorCount
+            : int.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out int count) && count > 0
+                ? count
+                : throw new ArgumentException($"--threads: '{value}' is neither a positive count nor 'all'.", nameof(args));
+        ScanBuilder.DefaultDegreeOfParallelism = threads;
+        return ([.. args[..at], .. args[(at + 2)..]], threads);
+    }
+
     /// <summary>What an open costs on its own: the footer, and no row read.</summary>
     /// <param name="path">The file.</param>
     public static async Task<long> FooterOnly(string path)
