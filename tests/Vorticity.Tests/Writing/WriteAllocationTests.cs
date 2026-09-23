@@ -304,6 +304,101 @@ public sealed class WriteAllocationTests
             string.Create(CultureInfo.InvariantCulture, $"{wide} B against a ceiling of {WideCeiling}\n{report}"));
     }
 
+    /// <summary>Rows of the degree axis below: two chunks of sixteen blocks.</summary>
+    private const int DegreeRows = 262_144;
+
+    /// <summary>
+    /// The degree axis: a column's zstd frames compressed on four threads cost nothing one thread
+    /// does not. The fan-out, its helpers and the helpers' encoders are the process's, rented by a
+    /// writer and given back, and every column queues the same helpers again.
+    /// </summary>
+    /// <remarks>
+    /// The counter is process-wide, so what the helpers allocate on the pool's threads is counted.
+    /// The batch and the options are built outside the measured region, once for every write.
+    /// </remarks>
+    [Fact]
+    public async Task AWriteOnFourThreadsAllocatesWhatAWriteOnOneDoes()
+    {
+        ReleaseOnlyCeilings.Require();
+        Decoders.EnsureRegistered();
+        (DType schema, CanonicalArena arena, int root) = Dense(DegreeRows);
+        Dictionary<string, EncodingHint> hints = new Dictionary<string, EncodingHint>
+        {
+            ["k"] = EncodingHint.Zstd,
+            ["x"] = EncodingHint.Zstd,
+        };
+        VortexWriteOptions alone = new VortexWriteOptions { EncodingHints = hints, DegreeOfParallelism = 1 };
+        VortexWriteOptions across = alone with { DegreeOfParallelism = 4 };
+        Assert.Equal(0, await WriteDense(schema, arena, root, alone));
+        Assert.True(await WriteDense(schema, arena, root, across) > 0, "the axis must compress its columns across threads");
+
+        long one = await MeasureDegree(schema, arena, root, alone);
+        long four = await MeasureDegree(schema, arena, root, across);
+        string report = string.Create(
+            CultureInfo.InvariantCulture,
+            $"DEGREE: {DegreeRows} rows of zstd frames, one thread {one} B, four threads {four} B\n");
+        Console.Out.Write(report);
+        Assert.True(four <= one, report);
+    }
+
+    /// <summary>The floor of several writes of the degree axis's batch under <paramref name="options"/>.</summary>
+    private static async Task<long> MeasureDegree(DType schema, CanonicalArena arena, int root, VortexWriteOptions options)
+    {
+        for (int i = 0; i < Warmup; i++)
+        {
+            await WriteDense(schema, arena, root, options);
+        }
+
+        long floor = long.MaxValue;
+        for (int i = 0; i < Runs; i++)
+        {
+            long before = GC.GetTotalAllocatedBytes(precise: true);
+            await WriteDense(schema, arena, root, options);
+            floor = Math.Min(floor, GC.GetTotalAllocatedBytes(precise: true) - before);
+        }
+
+        return floor;
+    }
+
+    /// <summary>Writes the degree axis's batch and returns the zstd trials compressed across threads.</summary>
+    private static async Task<int> WriteDense(DType schema, CanonicalArena arena, int root, VortexWriteOptions options)
+    {
+        await using VortexFileWriter writer = VortexFileWriter.Create(new NullSink(), schema, options);
+        using (RecordBatch batch = new RecordBatch(arena, root, 0))
+        {
+            await writer.WriteAsync(batch, CancellationToken.None);
+        }
+
+        await writer.CompleteAsync(CancellationToken.None);
+        return writer.ColumnsCompressedAcross;
+    }
+
+    /// <summary>Keys scattered over twenty bits and sevenths: columns zstd keeps.</summary>
+    private static (DType Schema, CanonicalArena Arena, int Root) Dense(int rows)
+    {
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
+        DType schema = types.Struct(["k", "x"], [i64, f64], Nullability.NonNullable);
+        CanonicalArena arena = new CanonicalArena();
+        VortexBuffer keys = arena.Allocate(rows * sizeof(long), sizeof(long), out Span<byte> keyBytes);
+        VortexBuffer values = arena.Allocate(rows * sizeof(double), sizeof(double), out Span<byte> valueBytes);
+        Span<long> k = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(keyBytes);
+        Span<double> x = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, double>(valueBytes);
+        for (int row = 0; row < rows; row++)
+        {
+            k[row] = (row * 7_919L) % 1_000_003;
+            x[row] = row / 7.0;
+        }
+
+        int[] children =
+        [
+            arena.AddPrimitive(i64, rows, Validity.NonNullable, PType.I64, keys),
+            arena.AddPrimitive(f64, rows, Validity.NonNullable, PType.F64, values),
+        ];
+        return (schema, arena, arena.AddStruct(schema, rows, Validity.NonNullable, children));
+    }
+
     /// <summary>The floor of several writes of a schema of <paramref name="columns"/> i64 columns.</summary>
     /// <param name="columns">The columns.</param>
     private static async Task<long> MeasureWide(int columns)

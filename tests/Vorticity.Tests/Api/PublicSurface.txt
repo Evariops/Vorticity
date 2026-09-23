@@ -1510,6 +1510,7 @@ Vorticity:     property VortexEdition TargetEdition { get; init; }
 Vorticity:     property bool Statistics { get; init; }
 Vorticity:     property int BlockRows { get; init; }
 Vorticity:     property int ChunkTargetBytes { get; init; }
+Vorticity:     property int DegreeOfParallelism { get; init; }
 Vorticity:     property int StringBoundBytes { get; init; }
 Vorticity: struct Vorticity.WriteBytes : IEquatable<WriteBytes>
 Vorticity:     ctor WriteBytes(long, long, long, long, long, long)

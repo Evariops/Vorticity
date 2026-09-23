@@ -10,12 +10,13 @@ namespace Vorticity.Writing;
 /// </summary>
 /// <remarks>
 /// An encoder comes back reset, and every trial resets it again before it compresses, so nothing
-/// of one file reaches the next. The bound is what a few writers at once hold, one each; an
-/// encoder past it is disposed, since each one kept is a megabyte held.
+/// of one file reaches the next. The bound is what a few writers at once hold, one each, or one
+/// writer compressing a column's frames on every processor, one each; an encoder past it is
+/// disposed, since each one kept is a megabyte held.
 /// </remarks>
 internal static class ZstdEncoders
 {
-    private const int Capacity = 8;
+    private static readonly int Capacity = System.Math.Max(8, System.Environment.ProcessorCount + 1);
 
     private static readonly ZstandardEncoder?[] Encoders = new ZstandardEncoder?[Capacity];
     private static readonly Lock Gate = new Lock();

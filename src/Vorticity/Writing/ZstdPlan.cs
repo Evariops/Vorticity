@@ -291,6 +291,11 @@ internal readonly struct ZstdPlan
             from = to;
         }
 
+        if (workspace is { Lanes: > 1 } && blocks > 1 && stream.Length >= AcrossBytes)
+        {
+            return CompressAcross(workspace, stream, frames, blocks, bound, canonicalSize, numerator, denominator);
+        }
+
         byte[] destination = ArrayPool<byte>.Shared.Rent(checked((int)bound));
         bool kept = false;
         try
@@ -341,6 +346,97 @@ internal readonly struct ZstdPlan
             }
         }
     }
+
+    /// <summary>
+    /// <see cref="Compress"/> on the workspace's threads: each frame compressed into a room of its
+    /// own, sized for its worst case, then the frames closed up in order and described as one thread
+    /// describes them, so the bytes and the table are the ones one thread writes.
+    /// </summary>
+    private static unsafe ZstdPlan? CompressAcross(
+        ArrayBlobWriter.Workspace workspace, ReadOnlySpan<byte> stream, int[] frames, int blocks, long bound,
+        long canonicalSize, int numerator, int denominator)
+    {
+        ZstdFrames across = workspace.Frames;
+        Span<int> plan = across.Plan(blocks);
+        int count = 0;
+        long at = 0;
+        for (int block = 0, from = 0, before = 0; block < blocks; block++)
+        {
+            int to = frames[(block * FrameFields) + 1];
+            int through = frames[(block * FrameFields) + 2];
+            if (through == before)
+            {
+                // A block of nulls stores no value, and a frame of none would cost its header.
+                continue;
+            }
+
+            int room = (int)ZstandardEncoder.GetMaxCompressedLength(to - from);
+            int slot = count * ZstdFrames.Fields;
+            plan[slot] = from;
+            plan[slot + 1] = to;
+            plan[slot + 2] = (int)at;
+            plan[slot + 3] = room;
+            plan[slot + 4] = 0;
+            plan[slot + 5] = through - before;
+            at += room;
+            count++;
+            from = to;
+            before = through;
+        }
+
+        byte[] destination = ArrayPool<byte>.Shared.Rent(checked((int)bound));
+        bool kept = false;
+        try
+        {
+            bool compressed;
+            fixed (byte* input = stream)
+            fixed (byte* output = destination)
+            {
+                compressed = across.Compress(input, output, count, workspace.Zstd);
+            }
+
+            if (!compressed)
+            {
+                return null;
+            }
+
+            // Closed up left to right: a frame's room starts at or after the end of the frames
+            // before it, so each move reads what no earlier move has written over.
+            int written = 0;
+            for (int frame = 0; frame < count; frame++)
+            {
+                int slot = frame * ZstdFrames.Fields;
+                int produced = plan[slot + 4];
+                destination.AsSpan(plan[slot + 2], produced).CopyTo(destination.AsSpan(written));
+                written += produced;
+                frames[frame * FrameFields] = written;
+                frames[(frame * FrameFields) + 1] = plan[slot + 1] - plan[slot];
+                frames[(frame * FrameFields) + 2] = plan[slot + 5];
+            }
+
+            if (written * (long)denominator >= canonicalSize * (long)numerator)
+            {
+                return null;
+            }
+
+            kept = true;
+            return new ZstdPlan(destination, frames, count);
+        }
+        finally
+        {
+            if (!kept)
+            {
+                ArrayPool<byte>.Shared.Return(destination);
+                ArrayPool<int>.Shared.Return(frames);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The values below which a column's frames are compressed on the calling thread alone: a
+    /// frame's worth of work is a few tens of microseconds, the hand-off to the pool about as much.
+    /// </summary>
+    private const int AcrossBytes = 256 << 10;
 
     /// <summary>
     /// One frame of <paramref name="input"/> into <paramref name="destination"/>, which holds the

@@ -41,6 +41,7 @@ does not fit throws `ArgumentException` there, before a byte is written.
 | `ColumnChunkTargetBytes` | empty | a chunk target of its own, by top-level column, for a column that wants larger chunks than the file's: its chunks span whole chunks of the file ([blocks-and-chunks.md](blocks-and-chunks.md)) |
 | `Compression` | `Auto` | what the encoder optimises for: `Auto`, `Fastest`, `Smallest`, `None` |
 | `Hints` | empty | an encoding to try first, by column path |
+| `DegreeOfParallelism` | 0, the session's | the threads a column's zstd frames are compressed on; the file is the same bytes whatever the degree ([threads.md](threads.md)) |
 | `TargetEdition` | `VortexEditions.Default` | the edition every component must belong to ([editions.md](editions.md)) |
 | `Statistics` | `true` | the per-column minimum, maximum, sum, null count and order the open reads back |
 | `StringBoundBytes` | 16 | the length of the bounds a text or binary column's zones carry; 0 for none |

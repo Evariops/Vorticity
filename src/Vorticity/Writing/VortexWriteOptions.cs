@@ -47,6 +47,7 @@ public sealed record VortexWriteOptions
     private readonly int _blockRows = 8_192;
     private readonly int _chunkTargetBytes;
     private readonly int _stringBoundBytes = 16;
+    private readonly int _degreeOfParallelism;
     private readonly IndexPolicy _indexes = IndexPolicy.None;
     private readonly ImmutableDictionary<string, EncodingHint> _hints = ImmutableDictionary<string, EncodingHint>.Empty.WithComparers(StringComparer.Ordinal);
     private readonly ImmutableDictionary<string, int> _columnChunkTargets = ImmutableDictionary<string, int>.Empty.WithComparers(StringComparer.Ordinal);
@@ -114,6 +115,22 @@ public sealed record VortexWriteOptions
 
     /// <summary>What the writer optimises for; <see cref="CompressionProfile.None"/> writes every column canonically.</summary>
     public CompressionProfile Compression { get; init; } = CompressionProfile.Auto;
+
+    /// <summary>
+    /// How many threads a column's zstd frames are compressed on; 0 for the session's
+    /// <see cref="VortexSessionOptions.MaxDegreeOfParallelism"/>. The file is the same bytes
+    /// whatever the degree.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    public int DegreeOfParallelism
+    {
+        get => _degreeOfParallelism;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _degreeOfParallelism = value;
+        }
+    }
 
     /// <summary>
     /// The encoding to write a column with, by column path, for a caller who knows. A hint is priced

@@ -117,8 +117,8 @@ public static class ScenarioSet
     /// <summary>
     /// Takes <c>--threads &lt;n&gt;</c> or <c>--threads all</c> out of <paramref name="args"/> and
     /// gives every scan that many lanes, one per processor for <c>all</c>: the reader's counterpart
-    /// of the reference's multi-threaded runtime. Absent, scans keep the library's default of one.
-    /// The writer has no lanes to give.
+    /// of the reference's multi-threaded runtime, and the write-back's writer as many threads.
+    /// Absent, both keep the library's default of one.
     /// </summary>
     /// <param name="args">The arguments, the option anywhere among them.</param>
     /// <returns>The arguments without the option, and the lanes every scan now has.</returns>
@@ -616,10 +616,12 @@ public static class ScenarioSet
 
     private static async Task<long> ReadAndWrite(string path, VortexWriteOptions? options)
     {
+        // The writer compresses on as many threads as the scan reads on.
         await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await using VortexFileWriter writer = options is null
-            ? VortexFileWriter.Create(new DiscardSink(), source.DType)
-            : VortexFileWriter.Create(new DiscardSink(), source.DType, options);
+        await using VortexFileWriter writer = VortexFileWriter.Create(
+            new DiscardSink(),
+            source.DType,
+            (options ?? new VortexWriteOptions()) with { DegreeOfParallelism = ScanBuilder.DefaultDegreeOfParallelism });
 
         long rows = 0;
         await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()

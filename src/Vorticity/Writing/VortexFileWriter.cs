@@ -134,6 +134,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
     private long _chunksFromTable;
 
+    /// <summary>Zstd trials whose frames were compressed on several threads, kept or not, until the writer is disposed.</summary>
+    internal int ColumnsCompressedAcross => _blobs?.ColumnsAcross ?? 0;
+
     /// <summary>
     /// (Column chunk, field) pairs whose bit-packing was priced from the ingested width histograms
     /// rather than from a walk of the chunk, the columns' children included. The width counterpart
@@ -264,6 +267,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
     /// <summary>What every blob of the file is assembled in, created with the first one.</summary>
     private ArrayBlobWriter.Workspace? _blobs;
+
+    /// <summary>The threads a column's zstd frames are compressed on.</summary>
+    private int _lanes = 1;
     private WriteBytes _reportBytes;
 
     /// <summary>The sink position the write meter has counted to; an append starts it at the file's length.</summary>
@@ -516,6 +522,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _metadata = UserMetadata.Ordered(options.Metadata),
             _automaticChunks = options.AutomaticChunks,
+            _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
         };
 
         // The entries rather than Keys, whose enumerator is an allocated iterator.
@@ -1174,7 +1181,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// The workspace every blob is assembled in, one after the other: a column's chunk, a zone map,
     /// an index payload.
     /// </summary>
-    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace { FrameRows = _rowBlock };
+    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace { FrameRows = _rowBlock, Lanes = _lanes };
 
     /// <summary>The arena the pending rows live in, created on first use.</summary>
     private CanonicalArena Transit()

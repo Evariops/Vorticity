@@ -151,7 +151,7 @@ public sealed partial class VortexFileWriter
             }
 
             pipe = new FilePipeWriter(handle, plan.FileLength, session.Options.MemoryPool);
-            VortexFileWriter writer = Create(new PipeSegmentSink(pipe, plan.FileLength), plan.Schema, options);
+            VortexFileWriter writer = Create(new PipeSegmentSink(pipe, plan.FileLength), plan.Schema, options, session);
             writer._filePipe = pipe;
             return writer;
         }

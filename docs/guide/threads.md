@@ -38,7 +38,7 @@ A `VortexSession` holds what would otherwise be process-wide state, so that a ho
 | `MemoryPool` | `AlignedMemoryPool.Shared` | every batch, segment and builder buffer; disposing the session returns them |
 | `SegmentCache` | none | segments kept across scans, one budget for every file of the session |
 | `MaxConcurrentReads` | 16 | reads in flight across every scan of every file of the session |
-| `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once |
+| `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer compresses on |
 | `IndexCacheBytes` | 64 MiB | decoded index runs |
 | `Extensions` | empty | extension types the session reads beyond the editions |
 
@@ -85,6 +85,11 @@ asks once, with `MaxDegreeOfParallelism` on its session, and one scan can say ot
 ```csharp
 ScanOptions four = new ScanOptions { DegreeOfParallelism = 4 };   // 0, the default, is the session's
 ```
+
+A writer takes the session's degree too, and `VortexWriteOptions.DegreeOfParallelism` says
+otherwise for one file. It compresses a column's zstd frames side by side, a frame to a block, once
+the column holds a quarter of a megabyte of values, and chooses and writes every other encoding on
+the calling thread. The file is the same bytes whatever the degree.
 
 Measured on the demonstration file, warmed, each variant run in turn, the best of fifteen rounds:
 
