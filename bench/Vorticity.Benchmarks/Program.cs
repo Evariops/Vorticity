@@ -229,6 +229,22 @@ internal static class Program
                 Array.IndexOf(args, "--hold") >= 0).ConfigureAwait(false);
         }
 
+        if (args.Length > 0 && args[0] == "--tradeoffs")
+        {
+            // What each compression profile and hint costs, per column nature: bytes, write, scan,
+            // take. `--rows N` sets the volume (ten million by default); bare words pick columns.
+            int rowsFlag = Array.IndexOf(args, "--rows");
+            long rows = rowsFlag >= 0 && rowsFlag + 1 < args.Length
+                && long.TryParse(args[rowsFlag + 1], CultureInfo.InvariantCulture, out long given) && given > 0
+                ? given
+                : 10_000_000;
+            string[] columns =
+            [
+                .. args.Where((a, i) => i > 0 && i != rowsFlag + 1 && !a.StartsWith("--", StringComparison.Ordinal))
+            ];
+            return await EncodingTradeoffs.RunAsync(rows, columns).ConfigureAwait(false);
+        }
+
         if (args.Length > 0 && args[0] == "--tree")
         {
             // The shape of the dataset tree's two boundary rules, side by side.
@@ -425,6 +441,10 @@ internal static class Program
                                      --hold            with --recalibrate, print every reference
                                                        back unchanged and refresh only the
                                                        dispersion each encoding measured
+          --tradeoffs [column…]    every compression profile and hint on twenty column shapes:
+                                     bytes, write, scan, take, and the storage throughput at which
+                                     each crosses Auto; Markdown tables
+                                     --rows N          rows a column, default ten million
           --ffi-check              rows AND decoded values agree with the reference, < 1 s
           --report                 the published comparison: eight high-level scenarios at a
                                      million rows and ten million, EACH SIDE IN ITS OWN PROCESS,

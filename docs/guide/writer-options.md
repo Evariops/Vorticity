@@ -64,6 +64,8 @@ column's size and decode speed together; `Fastest` spends less time choosing and
 and on this data chose the same encodings; `Smallest` prices bytes alone, tries zstd, FSST, ALP and
 ALP-RD on every chunk and keeps the smallest: zstd for `Celsius` and `City`, a file six times
 smaller than `Auto`'s, which a full decode pays for with a millisecond more.
+[choose-encodings.md](choose-encodings.md) measures what each choice costs on ten million rows of
+other shapes, and where it turns.
 
 ## Hints
 

@@ -71,6 +71,7 @@ and never repeats it.
 | [blocks-and-chunks.md](blocks-and-chunks.md) | what a block and a chunk are, and the write sizes that make a file append-friendly |
 | [append-and-repair.md](append-and-repair.md) | add rows to a file, give a write up, and read or repair a file whose tail was torn |
 | [writer-options.md](writer-options.md) | compression, encoding hints, text bounds, metadata, a pinned identity, and the report that says what the writer chose |
+| [choose-encodings.md](choose-encodings.md) | what each profile and hint costs on ten million rows of twenty column shapes, and the storage speeds at which the choice turns |
 | [indexes.md](indexes.md) | the indexes you can ask for, what each costs, the budget, and an index the write must not lose |
 | [editions.md](editions.md) | target an edition so that older readers, and Vortex Rust, can read what you write |
 | [stream-to-an-object.md](stream-to-an-object.md) | write to any `PipeWriter`, a socket or a multipart upload, with its backpressure |
