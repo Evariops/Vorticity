@@ -10,7 +10,7 @@
 // only when the whole zone falls outside the band, so as the band widens the number of skippable
 // zones falls to zero and the pruned path converges on the unpruned one plus the cost of having
 // checked. Where that crossover sits is a property of the file's zone length and of nothing else,
-// and until it is measured, "pruning is worth 7.4x" is a sentence about one predicate.
+// and until it is measured, "pruning takes 0.14x the time" is a sentence about one predicate.
 using System;
 using System.Threading;
 using System.Threading.Tasks;

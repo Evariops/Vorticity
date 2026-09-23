@@ -19,7 +19,7 @@
 // MEASURED AT THE KERNEL AND NOT END TO END, because an end-to-end run puts tens of microseconds
 // of open-and-walk in front of the kernel and leaves the answer inside the run-to-run spread.
 // That mistake has already been made once in this repository, on the FSST kernel, and it
-// produced a confident negative result about a change that was in fact 7.9x faster.
+// produced a confident negative result about a change that in fact took 0.21x the time.
 //
 using System;
 using System.Collections.Generic;

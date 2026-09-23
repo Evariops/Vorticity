@@ -4,9 +4,9 @@
 // The reason is arithmetic. Its files are 4096 rows, and ~35 us of every row in it is the fixed
 // open-and-walk cost both implementations pay before a single value is decoded. `fastlanes.bitpacked`
 // reads 40.9 us against Rust's 35.4 -- five microseconds of decode under thirty-five of overhead --
-// which is why that row moved from 1.26x to 1.18x while its kernel got 3.6x faster. Every ratio in
-// that table is pulled toward 1.0 by a constant neither side can avoid, and the smaller the real
-// difference the harder it is pulled.
+// which is why that row moved from 1.26x to 1.18x while its kernel went to 0.28x its time. Every
+// ratio in that table is pulled toward 1.0 by a constant neither side can avoid, and the smaller the
+// real difference the harder it is pulled.
 //
 // One million rows per file changes the arithmetic rather than the estimator: the fixed cost is
 // unchanged, so its SHARE falls by roughly the row ratio, and what is left is the decoder.

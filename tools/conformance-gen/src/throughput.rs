@@ -7,7 +7,7 @@
 //! a ranking, not a measurement", because ~35 µs of every row in it is the fixed open-and-walk cost
 //! both implementations pay before a single value is decoded. `fastlanes.bitpacked` reads 40.9 µs
 //! against Rust's 35.4 — five microseconds of signal under thirty-five of noise, which is why that
-//! row barely moved when its kernel got 3.6x faster.
+//! row barely moved when its kernel went to 0.28x its time.
 //!
 //! So these files are BIG and have NO SIDECAR. A 1M-row sidecar would be hundreds of megabytes of
 //! JSON to answer a question the 4096-row file already answers. Correctness is the corpus's job;
