@@ -422,6 +422,12 @@ public sealed partial class VortexFileWriter
             }
         }
 
+        if (_staging is { } staging)
+        {
+            TransitContexts.Return(staging.Context);
+            _staging = null;
+        }
+
         // The index builders hold pooled hash sets and a payload arena; their results survive.
         _indexes?.Dispose();
         ReleaseBuilders();

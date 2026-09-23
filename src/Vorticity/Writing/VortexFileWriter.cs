@@ -194,6 +194,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
 
     /// <summary>Scratch for the nodes a block carries forward; reused so a block allocates none.</summary>
     private readonly List<int> _carry = [];
+
+    /// <summary>
+    /// The small batches waiting, made at the first one. Held one by one, a chunk that comes as
+    /// one-row batches would be a node a row in transit: records its arena keeps for good, and that
+    /// many nodes to concatenate when the chunk goes out.
+    /// </summary>
+    private Staging? _staging;
+
+    /// <summary>Whether every leaf of the schema is fixed-width, which sets the rows a batch waits below: <see cref="StageBelow"/>.</summary>
+    private readonly bool _fixedWidth;
+
+    /// <summary>The rows past which the batches waiting go through the writer, as one.</summary>
+    private const int StagedRows = 256;
+
+    /// <summary>The bytes past which they go whatever their rows, so that batches of large values wait for few others.</summary>
+    private const long StagedBytes = 64 << 10;
+
     private long _pendingRows;
     private long _pendingBytes;
     private int[]? _zoneSegments;
@@ -268,6 +285,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         _rowBlock = rowBlock;
         _blockBytes = blockBytes;
         _mayShareChildren = ChunkCompactor.MayShareChildren(schema);
+        _fixedWidth = FixedWidth(schema);
         _arrayEncodings = new EncodingDictionary(ComponentKind.Array, target);
         _layoutEncodings = new EncodingDictionary(ComponentKind.Layout, target);
         _isTabular = schema.Kind == DTypeKind.Struct;
@@ -329,10 +347,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     internal int PreferredBatchRows => _rowBlock > 0 ? _rowBlock : 1;
 
     /// <summary>
-    /// Whether any batch has waited in the transit arena, which is what
+    /// Whether any batch has waited in the transit arena or with the small batches, which is what
     /// <see cref="PreferredBatchRows"/> exists to avoid.
     /// </summary>
-    internal bool Buffered => _transit is not null;
+    internal bool Buffered => _transit is not null || _staging is not null;
+
+    /// <summary>How many nodes wait in transit for their chunk.</summary>
+    /// <remarks>Nothing in the library asks; the count exists for the tests of the small batches.</remarks>
+    internal int HeldNodes => _pending.Count;
 
     /// <summary>
     /// Pins the scheme of every column the caller named, before the first batch, since the ingest
@@ -658,6 +680,27 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
         root = arena.DecodedTree(root);
         await StartAsync(cancellationToken).ConfigureAwait(false);
 
+        // A small batch waits with the ones after it until together they make a batch worth the
+        // work every batch costs below: its statistics, its chunk's sizing, its copy in transit,
+        // and a node more to concatenate when its chunk goes out.
+        if (!seal && _rowBlock > 0 && rows < StageBelow(_fixedWidth))
+        {
+            Staging staging = Stage(arena, root, rows);
+            if (staging.Rows >= StagedRows || staging.Bytes >= StagedBytes || CompletesABlock(staging))
+            {
+                await UnstageAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        await UnstageAsync(cancellationToken).ConfigureAwait(false);
+        await WriteDecodedAsync(arena, root, rows, seal, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary><see cref="WriteCoreAsync"/> for rows checked against the schema and decoded, which go out now or wait in transit.</summary>
+    private async ValueTask WriteDecodedAsync(CanonicalArena arena, int root, int rows, bool seal, CancellationToken cancellationToken)
+    {
         if (_rowBlock == 0)
         {
             // One call, one chunk.
@@ -833,23 +876,123 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     /// <summary>Copies the rows of node <paramref name="root"/> into the transit arena, where they wait for their chunk.</summary>
     private void Hold(CanonicalArena arena, int root)
     {
-        // Materialized, not borrowed: the batch's arena is the scan's and is reset as soon as the
-        // caller asks for the next batch, so held rows must own their bytes. Narrowed before it is
-        // owned, since a batch cut from a large list chunk shares that chunk's elements whole and
-        // copying it as it comes would materialize the whole child; referencing then compacting
-        // works on views, so the copy pays for the window alone. Narrowing here also keeps the
-        // concatenation tight, because rebasing uses each chunk's whole child length.
         CanonicalArena transit = Transit();
-        _pending.Add(_mayShareChildren
-            ? transit.CopyFrom(transit, ChunkCompactor.Compact(transit, transit.ReferenceFrom(arena, root)))
-            : transit.CopyFrom(arena, root));
+        _pending.Add(Owned(transit, arena, root));
         _pendingRows += arena.GetNode(root).Length;
         _pendingBytes += transit.ByteSize(_pending[^1]);
+    }
+
+    /// <summary>A copy of the rows of node <paramref name="root"/> in <paramref name="into"/>, owning their bytes.</summary>
+    private int Owned(CanonicalArena into, CanonicalArena arena, int root) =>
+        // Materialized, not borrowed: the batch's arena is the scan's and is reset as soon as the
+        // caller asks for the next batch, so rows that wait must own their bytes. Narrowed before
+        // it is owned, since a batch cut from a large list chunk shares that chunk's elements whole
+        // and copying it as it comes would materialize the whole child; referencing then compacting
+        // works on views, so the copy pays for the window alone. Narrowing here also keeps the
+        // concatenation tight, because rebasing uses each chunk's whole child length.
+        _mayShareChildren
+            ? into.CopyFrom(into, ChunkCompactor.Compact(into, into.ReferenceFrom(arena, root)))
+            : into.CopyFrom(arena, root);
+
+    /// <summary>
+    /// The rows below which a batch waits with the next ones rather than going through the writer
+    /// alone. A batch costs the writer about the same whatever its rows, and one that waits is
+    /// copied twice more: in, and into the batch the waiting ones make. Where every leaf is
+    /// fixed-width a copy moves blocks, and waiting pays up to 48 to 64 rows, the more columns the
+    /// fewer; a leaf of values of their own length walks its rows at every copy, and waiting pays up
+    /// to 6.
+    /// </summary>
+    private static int StageBelow(bool fixedWidth) => fixedWidth ? 64 : 6;
+
+    /// <summary>Whether every leaf of <paramref name="dtype"/> holds its values at a fixed width.</summary>
+    private static bool FixedWidth(DType dtype)
+    {
+        switch (dtype.Kind)
+        {
+            case DTypeKind.Null:
+            case DTypeKind.Bool:
+            case DTypeKind.Primitive:
+            case DTypeKind.Decimal:
+                return true;
+            case DTypeKind.FixedSizeList:
+                return FixedWidth(dtype.ElementType);
+            case DTypeKind.Extension:
+                return FixedWidth(dtype.StorageType);
+            case DTypeKind.Struct:
+                for (int i = 0; i < dtype.FieldCount; i++)
+                {
+                    if (!FixedWidth(dtype.GetField(i)))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether the rows waiting, with the ones in transit, would have the writer emit a block: they
+    /// go through then, so that the blocks fall where the batches one by one would have put them. A
+    /// writer that sizes its chunks cuts them at the same rows however late they come.
+    /// </summary>
+    private bool CompletesABlock(Staging staging) =>
+        !_automaticChunks && _pendingRows + staging.Rows >= _rowBlock && _pendingBytes + staging.Bytes >= _blockBytes;
+
+    /// <summary>Copies a small batch in with the ones waiting before it.</summary>
+    private Staging Stage(CanonicalArena arena, int root, int rows)
+    {
+        Staging staging = _staging ??= new Staging(TransitContexts.Rent());
+        CanonicalArena into = staging.Context.Canonical;
+        int owned = Owned(into, arena, root);
+        staging.Nodes.Add(owned);
+        staging.Rows += rows;
+        staging.Bytes += into.ByteSize(owned);
+        return staging;
+    }
+
+    /// <summary>Writes the small batches waiting, as one batch of all their rows, and drops them.</summary>
+    private async ValueTask UnstageAsync(CancellationToken cancellationToken)
+    {
+        if (_staging is not { Rows: > 0 } staging)
+        {
+            return;
+        }
+
+        ScanContext context = staging.Context;
+        int rows = staging.Rows;
+        int node = staging.Nodes.Count == 1
+            ? staging.Nodes[0]
+            : CanonicalConcat.Concat(
+                context.Decode, _schema, rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(staging.Nodes));
+        staging.Nodes.Clear();
+        staging.Rows = 0;
+        staging.Bytes = 0;
+        try
+        {
+            await WriteDecodedAsync(context.Canonical, node, rows, seal: false, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            context.Canonical.Reset();
+        }
+    }
+
+    /// <summary>The context small batches wait in, their nodes, their rows and their bytes.</summary>
+    private sealed class Staging(ScanContext context)
+    {
+        internal readonly ScanContext Context = context;
+        internal readonly List<int> Nodes = [];
+        internal int Rows;
+        internal long Bytes;
     }
 
     /// <summary>Seals the whole blocks waiting in transit into a chunk, whatever their bytes.</summary>
     private async ValueTask SealAsync(CancellationToken cancellationToken)
     {
+        await UnstageAsync(cancellationToken).ConfigureAwait(false);
         if (_rowBlock > 0 && _pendingRows >= _rowBlock)
         {
             await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
@@ -1199,6 +1342,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger
     {
         // A file with no batches still has to start with the magic.
         await StartAsync(cancellationToken).ConfigureAwait(false);
+        await UnstageAsync(cancellationToken).ConfigureAwait(false);
 
         bool direct = false;
         int tailRows = tailArena is null ? 0 : tailArena.GetNode(tailRoot).Length;

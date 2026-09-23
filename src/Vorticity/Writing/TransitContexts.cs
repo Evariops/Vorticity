@@ -11,8 +11,8 @@ namespace Vorticity.Writing;
 /// <remarks>
 /// A context comes back reset, its canonical arena's storage returned to the memory pool, and its
 /// dtypes cleared: the next writer may write another schema, and a context kept across schemas would
-/// otherwise hold every dtype it ever copied. The bound is what a few writers at once hold, two
-/// contexts each; a context past it is disposed.
+/// otherwise hold every dtype it ever copied. The bound is what a few writers at once hold, three
+/// contexts each at most; a context past it is disposed.
 /// </remarks>
 internal static class TransitContexts
 {
