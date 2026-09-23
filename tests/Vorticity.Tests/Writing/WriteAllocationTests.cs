@@ -112,11 +112,13 @@ public sealed class WriteAllocationTests
         // front and its children, bytes and variant dtypes at the first value that has some, and
         // the read back's open sizes the schema's arena and the statistics' store for what they
         // hold: 800 to 1 900 bytes less. The read back's segments are their own lock: 128 bytes.
-        ("containers/zoned_many_zones_nulls", 160_664),   // 159 096 measured, including 40 bytes more on each batch it reads, the public writer and report, and its text column's string bounds; the read back decompresses through one zstd decoder a scan and, reading only, in batches of several zones
-        ("distributions/high_cardinality_i64_r8193", 24_452),   // 24 096 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
-        ("encodings/fsst", 24_120),   // 23 656 measured
-        ("encodings/onpair", 25_136),   // 24 688 measured, including the public writer and report and the text column's string bounds
-        ("types/utf8_nullable_r1025", 168_608),   // 167 904 measured, including the public writer and report and the text column's string bounds
+        // Its split plan gathers the boundaries in a rented array and keeps an exact copy of them:
+        // 272 bytes less, 7 544 on the zoned file's many chunks.
+        ("containers/zoned_many_zones_nulls", 153_120),   // 151 552 measured, including 40 bytes more on each batch it reads, the public writer and report, and its text column's string bounds; the read back decompresses through one zstd decoder a scan and, reading only, in batches of several zones
+        ("distributions/high_cardinality_i64_r8193", 24_180),   // 23 824 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
+        ("encodings/fsst", 23_848),   // 23 384 measured
+        ("encodings/onpair", 24_864),   // 24 416 measured, including the public writer and report and the text column's string bounds
+        ("types/utf8_nullable_r1025", 168_336),   // 167 632 measured, including the public writer and report and the text column's string bounds
 
         // THE REMAINING COMPONENTS, on the write side, so that each has an allocation ratchet:
         // `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant`. Note
@@ -125,13 +127,13 @@ public sealed class WriteAllocationTests
         // this SHAPE of data cost", which is the question a ratchet can answer. Whether our writer
         // re-elects the same encoding is a different question and `bench/crosscheck.sh` is where
         // it is asked.
-        ("encodings/fastlanes_delta", 21_724),   // 21 640 measured, including the file statistics segment: per file, not per row
-        ("encodings/pco", 23_240),   // 23 120 measured alone; in the suite with dynamic PGO the process-wide measurement adds the JIT's instrumentation, 72 bytes that are not the writer's
+        ("encodings/fastlanes_delta", 21_452),   // 21 368 measured, including the file statistics segment: per file, not per row
+        ("encodings/pco", 22_968),   // 22 848 measured alone; in the suite with dynamic PGO the process-wide measurement adds the JIT's instrumentation, 72 bytes that are not the writer's
         // The read half of this axis keeps a `ZstandardDecoder` per node, so a change on the zstd
         // read path can move this ceiling while the write path stays put.
-        ("encodings/zstd", 161_892),   // 161 432 measured, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
-        ("encodings/map", 27_124),   // 27 016 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
-        ("encodings/variant", 25_032),   // 24 848 measured, including the file statistics segment and the public writer and report: per file, not per row
+        ("encodings/zstd", 161_620),   // 161 160 measured, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
+        ("encodings/map", 26_852),   // 26 744 measured, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
+        ("encodings/variant", 24_760),   // 24 576 measured, including the file statistics segment and the public writer and report: per file, not per row
 
         // THE TWO ALP SHAPES, so that the ALP write path is watched on both of its cases:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
@@ -140,8 +142,8 @@ public sealed class WriteAllocationTests
         // ALP-RD, `alprd` is written as ALP-RD rather than plain, its column about an eighth
         // smaller: the ceiling rose by 552 bytes for it, the file's encoding table growing once more
         // for its two extra ids and the plan and its two packed children.
-        ("encodings/alp", 23_052),   // 22 616 measured
-        ("encodings/alprd", 23_036),   // 22 528 measured
+        ("encodings/alp", 22_780),   // 22 344 measured
+        ("encodings/alprd", 22_764),   // 22 256 measured
     ];
 
     // Pricing FSST means training a table and compressing the whole column, and on a column it

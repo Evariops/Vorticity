@@ -227,12 +227,16 @@ public sealed class PathAllocationTests
         //
         // The segments a scan holds are their own lock, which a scan of one lane never contends
         // for, rather than a lock object of their own.
-        ("open, first batch", File, 51_856, FirstBatch),
-        ("full scan", File, 59_416, FullScan),
-        ("projected scan, 1 of 5 columns", File, 55_680, ProjectedScan),
+        //
+        // The split plan gathers its boundaries in a rented array and keeps an exact copy of the
+        // ones the sort leaves: on this file of many chunks the list no longer doubles its way
+        // there, 7 544 bytes less on every axis that plans the whole file.
+        ("open, first batch", File, 44_312, FirstBatch),
+        ("full scan", File, 51_872, FullScan),
+        ("projected scan, 1 of 5 columns", File, 54_328, ProjectedScan),
         // A take or a filter goes through the filtered delivery, whose enumerable and enumerator hold
         // one more field each: 16 bytes a scan.
-        ("take 64 rows from 64 splits", File, 60_664, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 53_120, ScatteredTake),
         // The filter's field references hold one more field each, and the zone column the pruning
         // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
         // context that reads the zone map.
@@ -249,7 +253,7 @@ public sealed class PathAllocationTests
         // A numeric column's zones are held as columns rather than one summary each, a third of
         // the bytes, and the file keeps them for its next scan in a holder it makes then: 2 352
         // bytes under what the summaries cost.
-        ("selective filter, pruning on", File, 57_640, PrunedFilter),
+        ("selective filter, pruning on", File, 56_288, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -263,7 +267,7 @@ public sealed class PathAllocationTests
         // and that context's arenas sized for what they hold rather than for a batch: either one
         // undone costs more than the whole gap that remains. The lane's context holds its zstd
         // decoder's field, 8 bytes, as above.
-        ("selective filter, pruning off", File, 57_160, UnprunedFilter),
+        ("selective filter, pruning off", File, 55_808, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
@@ -271,18 +275,18 @@ public sealed class PathAllocationTests
         // This ceiling also carries the read contract's per-scan state -- the mask of live blocks
         // and the metrics sink, a reference each on the enumerable, the enumerator and the lane's
         // context -- and the headroom the neighbouring axes have.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_648, FullScan),
-        ("scan, vortex.pco", "encodings/pco", 5_136, FullScan),
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_376, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 4_864, FullScan),
         // A node's frames go through one decoder, reset between frames, rather than the one-shot
         // `ZstandardDecoder.TryDecompress`, which builds and tears down a native decompression
         // context per call; and the decoder is the process's, taken by the scan's context and
         // given back when it is disposed, so a warm scan builds none: 104 bytes and 96 KB of
         // native state less than one decoder a scan.
-        ("scan, vortex.zstd", "encodings/zstd", 3_600, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 3_328, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
-        ("scan, vortex.map", "encodings/map", 4_384, FullScan),
-        ("scan, vortex.variant", "encodings/variant", 4_024, FullScan),
+        ("scan, vortex.map", "encodings/map", 4_112, FullScan),
+        ("scan, vortex.variant", "encodings/variant", 3_752, FullScan),
     ];
 
     [Fact]

@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 
 using Vorticity.Arrays;
 using Vorticity.Compute;
@@ -89,25 +90,32 @@ internal sealed class SplitPlan
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxRows);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(windowRows);
 
-        BoundaryList list = new BoundaryList();
-        if (!rows.IsEmpty)
+        BoundaryList list = new BoundaryList(32);
+        try
         {
-            list.Push(rows.Start);
-            LayoutNode root = tree.Root;
-            Walk(in root, rows, rowOffset: 0, in mask, list, depth: 1);
+            if (!rows.IsEmpty)
+            {
+                list.Push(rows.Start);
+                LayoutNode root = tree.Root;
+                Walk(in root, rows, rowOffset: 0, in mask, ref list, depth: 1);
 
-            // The interior boundaries are hints; the two ends are load-bearing, and the walk is
-            // trusted for neither. A node whose children cover fewer rows than it claims - a zoned
-            // layout over a short data child, say - would otherwise contribute a maximum below
-            // rows.End and the scan would drop the tail silently. Pinning the end here makes the
-            // split set cover the requested range whatever the tree says; the layout reader then
-            // fails loudly on the rows the file cannot actually produce, which is the right failure
-            // for a malformed file.
-            list.Push(rows.End);
+                // The interior boundaries are hints; the two ends are load-bearing, and the walk
+                // is trusted for neither. A node whose children cover fewer rows than it claims - a
+                // zoned layout over a short data child, say - would otherwise contribute a maximum
+                // below rows.End and the scan would drop the tail silently. Pinning the end here
+                // makes the split set cover the requested range whatever the tree says; the layout
+                // reader then fails loudly on the rows the file cannot actually produce, which is
+                // the right failure for a malformed file.
+                list.Push(rows.End);
+            }
+
+            int count = list.Finish();
+            return new SplitPlan(list.Items.AsSpan(0, count).ToArray(), count, maxRows, windowRows);
         }
-
-        int count = list.Finish();
-        return new SplitPlan(list.Items, count, maxRows, windowRows);
+        finally
+        {
+            list.Return();
+        }
     }
 
     /// <summary>A fresh cursor over this plan's splits.</summary>
@@ -192,7 +200,7 @@ internal sealed class SplitPlan
     }
 
     private static void Walk(
-        in LayoutNode node, RowRange local, long rowOffset, in FieldMask mask, BoundaryList list, int depth)
+        in LayoutNode node, RowRange local, long rowOffset, in FieldMask mask, ref BoundaryList list, int depth)
     {
         VortexLimits.CheckDepth(depth, VortexLimits.MaxLayoutDepth, "Layout");
 
@@ -204,11 +212,11 @@ internal sealed class SplitPlan
         switch (node.Encoding)
         {
             case LayoutEncodingId.Chunked:
-                WalkChunked(in node, local, rowOffset, in mask, list, depth);
+                WalkChunked(in node, local, rowOffset, in mask, ref list, depth);
                 return;
 
             case LayoutEncodingId.Struct:
-                WalkStruct(in node, local, rowOffset, in mask, list, depth);
+                WalkStruct(in node, local, rowOffset, in mask, ref list, depth);
                 return;
 
             case LayoutEncodingId.Dict:
@@ -218,7 +226,7 @@ internal sealed class SplitPlan
                 {
                     LayoutNode codes = node.GetChild(1);
                     FieldMask all = FieldMask.All;
-                    Walk(in codes, local, rowOffset, in all, list, depth + 1);
+                    Walk(in codes, local, rowOffset, in all, ref list, depth + 1);
                     return;
                 }
 
@@ -231,7 +239,7 @@ internal sealed class SplitPlan
                 if (node.ChildCount >= 1)
                 {
                     LayoutNode data = node.GetChild(0);
-                    Walk(in data, local, rowOffset, in mask, list, depth + 1);
+                    Walk(in data, local, rowOffset, in mask, ref list, depth + 1);
                     return;
                 }
 
@@ -247,7 +255,7 @@ internal sealed class SplitPlan
     }
 
     private static void WalkChunked(
-        in LayoutNode node, RowRange local, long rowOffset, in FieldMask mask, BoundaryList list, int depth)
+        in LayoutNode node, RowRange local, long rowOffset, in FieldMask mask, ref BoundaryList list, int depth)
     {
         ReadOnlySpan<long> offsets = node.ChunkOffsets;
         int chunks = node.ChildCount;
@@ -283,13 +291,13 @@ internal sealed class SplitPlan
                 new RowRange(chunkRows.Start - start, chunkRows.End - start),
                 rowOffset + start,
                 in mask,
-                list,
+                ref list,
                 depth + 1);
         }
     }
 
     private static void WalkStruct(
-        in LayoutNode node, RowRange local, long rowOffset, in FieldMask mask, BoundaryList list, int depth)
+        in LayoutNode node, RowRange local, long rowOffset, in FieldMask mask, ref BoundaryList list, int depth)
     {
         DType dtype = node.DType;
         int validityChildren = !dtype.IsDefault && dtype.IsNullable ? 1 : 0;
@@ -304,7 +312,7 @@ internal sealed class SplitPlan
         {
             LayoutNode validity = node.GetChild(0);
             FieldMask all = FieldMask.All;
-            Walk(in validity, local, rowOffset, in all, list, depth + 1);
+            Walk(in validity, local, rowOffset, in all, ref list, depth + 1);
         }
 
         int fieldCount = dtype.FieldCount;
@@ -317,7 +325,7 @@ internal sealed class SplitPlan
 
             LayoutNode child = node.GetChild(k + validityChildren);
             FieldMask childMask = mask.Descend(k);
-            Walk(in child, local, rowOffset, in childMask, list, depth + 1);
+            Walk(in child, local, rowOffset, in childMask, ref list, depth + 1);
         }
 
         // An empty struct - or one whose every field was projected away - still has to register the
@@ -325,20 +333,39 @@ internal sealed class SplitPlan
         list.Push(rowOffset + local.End);
     }
 
-    /// <summary>A growable ascending set of boundaries. Open-time only; it allocates.</summary>
-    private sealed class BoundaryList
+    /// <summary>
+    /// A growable ascending set of boundaries, gathered in a rented array: the plan keeps an exact
+    /// copy of what survives the sort, since the walk cannot know beforehand how many that is.
+    /// </summary>
+    private struct BoundaryList
     {
-        internal long[] Items = new long[32];
+        internal long[] Items;
         private int _count;
+
+        internal BoundaryList(int capacity)
+        {
+            Items = ArrayPool<long>.Shared.Rent(capacity);
+            _count = 0;
+        }
 
         internal void Push(long row)
         {
             if (_count == Items.Length)
             {
-                Array.Resize(ref Items, Items.Length * 2);
+                long[] grown = ArrayPool<long>.Shared.Rent(Items.Length * 2);
+                Items.AsSpan(0, _count).CopyTo(grown);
+                ArrayPool<long>.Shared.Return(Items);
+                Items = grown;
             }
 
             Items[_count++] = row;
+        }
+
+        /// <summary>Gives the rented array back.</summary>
+        internal void Return()
+        {
+            ArrayPool<long>.Shared.Return(Items);
+            Items = [];
         }
 
         /// <summary>Sorts and de-duplicates in place; returns the surviving count.</summary>
