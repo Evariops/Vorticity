@@ -515,6 +515,51 @@ public sealed class LayoutTreeStructureTests
         Assert.Equal(Nullability.Nullable, boundedMin.Nullability);
     }
 
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(64u)]
+    [InlineData(1_000u)]
+    [InlineData(uint.MaxValue)]
+    public void ZonedBoundedAggregatesNameTheirBound(uint bound)
+    {
+        AggregateSpecList specs = new AggregateSpecList();
+        byte[] options = new byte[8];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(options, bound);
+        specs.Add("vortex.bounded_max"u8, options);
+        specs.Add("vortex.bounded_min"u8, options);
+
+        SyntheticLayout root = new SyntheticLayout("vortex.zoned", 8)
+            .WithMetadata(ZonedMetadata.Serialize(ZonedMetadata.Create(4, specs)))
+            .With(SyntheticLayout.Flat(8, 0), SyntheticLayout.Flat(2, 1));
+
+        DType zones = Parse(root, Utf8, segmentCount: 4).Root.GetChild(1).DType;
+        string digits = bound.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        Assert.Equal("vortex.bounded_max(" + digits + ")", zones.GetFieldName(0));
+        Assert.Equal("vortex.bounded_min(" + digits + ")", zones.GetFieldName(1));
+    }
+
+    [Fact]
+    public void ZonedMaxAndCountsDisplayTheirNames()
+    {
+        AggregateSpecList specs = new AggregateSpecList();
+        specs.Add("vortex.max"u8, default);
+        specs.Add("vortex.max"u8, [0x08, 0x01]);
+        specs.Add("vortex.null_count"u8, default);
+        specs.Add("vortex.nan_count"u8, default);
+
+        SyntheticLayout root = new SyntheticLayout("vortex.zoned", 8)
+            .WithMetadata(ZonedMetadata.Serialize(ZonedMetadata.Create(4, specs)))
+            .With(SyntheticLayout.Flat(8, 0), SyntheticLayout.Flat(2, 1));
+
+        DType floats = Types.Primitive(PType.F64, Nullability.NonNullable);
+        DType zones = Parse(root, floats, segmentCount: 4).Root.GetChild(1).DType;
+        Assert.Equal(4, zones.FieldCount);
+        Assert.Equal("vortex.max(skip_nans=false)", zones.GetFieldName(0));
+        Assert.Equal("vortex.max()", zones.GetFieldName(1));
+        Assert.Equal("vortex.null_count()", zones.GetFieldName(2));
+        Assert.Equal("vortex.nan_count()", zones.GetFieldName(3));
+    }
+
     [Fact]
     public void ZonedMinDisplaysItsNonDefaultNanOption()
     {

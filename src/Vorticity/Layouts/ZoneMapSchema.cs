@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 
@@ -88,41 +89,51 @@ internal static class ZoneMapSchema
             return false;
         }
 
-        string[] names = count == 0 ? [] : new string[count];
-        DType[] fields = count == 0 ? [] : new DType[count];
-        int columns = 0;
-
-        for (int i = 0; i < count; i++)
+        // Scratch for the struct the table is: the struct keeps its own copy of both.
+        int[] names = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
+        DType[] fields = ArrayPool<DType>.Shared.Rent(Math.Max(count, 1));
+        Span<byte> name = stackalloc byte[MaxDisplayNameBytes];
+        try
         {
-            AggregateId aggregate = aggregates[i];
-            if (!TryDisplayName(aggregate, specs.GetOptions(i), out string? name))
+            int columns = 0;
+            for (int i = 0; i < count; i++)
             {
-                return false;
+                AggregateId aggregate = aggregates[i];
+                int nameLength = WriteDisplayName(aggregate, specs.GetOptions(i), name);
+                if (nameLength < 0)
+                {
+                    return false;
+                }
+
+                DType state = AggregateStateDType(types, column, aggregate);
+                if (state.IsDefault)
+                {
+                    // An aggregate with no state dtype for this column contributes no column at
+                    // all, rather than an empty one.
+                    continue;
+                }
+
+                names[columns] = types.InternName(name[..nameLength]);
+
+                // The state dtype may be the column's own, which lives in the file schema's arena,
+                // and a struct's children must all come from the arena it is built in. Import
+                // first, then flip the nullability: flipping a foreign node writes to that node's
+                // own arena, and the file schema's arena is shared by every concurrent scan, so
+                // that write would be a data race.
+                fields[columns] = DTypeImport.Into(types, state).WithNullability(Nullability.Nullable);
+                columnIndices[i] = columns;
+                columns++;
             }
 
-            DType state = AggregateStateDType(types, column, aggregate);
-            if (state.IsDefault)
-            {
-                // An aggregate with no state dtype for this column contributes no column at all,
-                // rather than an empty one.
-                continue;
-            }
-
-            names[columns] = name!;
-
-            // The state dtype may be the column's own, which lives in the file schema's arena, and a
-            // struct's children must all come from the arena it is built in. Import first, then
-            // flip the nullability: flipping a foreign node writes to that node's own arena, and the
-            // file schema's arena is shared by every concurrent scan, so that write would be a data
-            // race.
-            fields[columns] = DTypeImport.Into(types, state).WithNullability(Nullability.Nullable);
-            columnIndices[i] = columns;
-            columns++;
+            tableDType = types.Struct(
+                new ReadOnlySpan<int>(names, 0, columns), fields.AsSpan(0, columns), Nullability.NonNullable);
+            return true;
         }
-
-        tableDType = types.Struct(
-            names.AsSpan(0, columns), fields.AsSpan(0, columns), Nullability.NonNullable);
-        return true;
+        finally
+        {
+            ArrayPool<int>.Shared.Return(names);
+            ArrayPool<DType>.Shared.Return(fields, clearArray: true);
+        }
     }
 
     /// <summary>
@@ -138,43 +149,51 @@ internal static class ZoneMapSchema
     /// </remarks>
     internal static DType LegacyStatsTable(DTypeArena types, DType column, ReadOnlySpan<LegacyStat> presentStats)
     {
-        // Two columns per stat at most: the value and its truncation flag.
-        int capacity = presentStats.Length * 2;
-        string[] names = capacity == 0 ? [] : new string[capacity];
-        DType[] fields = capacity == 0 ? [] : new DType[capacity];
-        int columns = 0;
-
-        for (int i = 0; i < presentStats.Length; i++)
+        // Two columns per stat at most: the value and its truncation flag. Scratch for the struct
+        // the table is, which keeps its own copy of both.
+        int capacity = Math.Max(presentStats.Length * 2, 1);
+        string[] names = ArrayPool<string>.Shared.Rent(capacity);
+        DType[] fields = ArrayPool<DType>.Shared.Rent(capacity);
+        try
         {
-            LegacyStat stat = presentStats[i];
-            DType value = LegacyStatDType(types, column, stat);
-            if (value.IsDefault)
+            int columns = 0;
+            for (int i = 0; i < presentStats.Length; i++)
             {
-                continue;
+                LegacyStat stat = presentStats[i];
+                DType value = LegacyStatDType(types, column, stat);
+                if (value.IsDefault)
+                {
+                    continue;
+                }
+
+                names[columns] = LegacyStatName(stat);
+                // Import first, then flip the nullability, so the flip never writes to the arena
+                // the column's dtype came from.
+                fields[columns] = DTypeImport.Into(types, value).WithNullability(Nullability.Nullable);
+                columns++;
+
+                // Max and Min each emit a second, immediately-following non-nullable Bool column.
+                if (stat == LegacyStat.Max)
+                {
+                    names[columns] = "max_is_truncated";
+                    fields[columns] = types.Bool(Nullability.NonNullable);
+                    columns++;
+                }
+                else if (stat == LegacyStat.Min)
+                {
+                    names[columns] = "min_is_truncated";
+                    fields[columns] = types.Bool(Nullability.NonNullable);
+                    columns++;
+                }
             }
 
-            names[columns] = LegacyStatName(stat);
-            // Import first, then flip the nullability, so the flip never writes to the arena the
-            // column's dtype came from.
-            fields[columns] = DTypeImport.Into(types, value).WithNullability(Nullability.Nullable);
-            columns++;
-
-            // Max and Min each emit a second, immediately-following non-nullable Bool column.
-            if (stat == LegacyStat.Max)
-            {
-                names[columns] = "max_is_truncated";
-                fields[columns] = types.Bool(Nullability.NonNullable);
-                columns++;
-            }
-            else if (stat == LegacyStat.Min)
-            {
-                names[columns] = "min_is_truncated";
-                fields[columns] = types.Bool(Nullability.NonNullable);
-                columns++;
-            }
+            return types.Struct(names.AsSpan(0, columns), fields.AsSpan(0, columns), Nullability.NonNullable);
         }
-
-        return types.Struct(names.AsSpan(0, columns), fields.AsSpan(0, columns), Nullability.NonNullable);
+        finally
+        {
+            ArrayPool<string>.Shared.Return(names, clearArray: true);
+            ArrayPool<DType>.Shared.Return(fields, clearArray: true);
+        }
     }
 
     /// <summary>
@@ -420,87 +439,106 @@ internal static class ZoneMapSchema
     {
         // An explicit stack rather than recursion: the branching cases (struct, union, map) make
         // this the one derivation whose work is not bounded by the dtype depth cap. A DType is a
-        // managed type, so the stack is a heap array; this runs at parse time for a legacy layout,
-        // never on a decode path.
-        DType[] stack = new DType[32];
-        int top = 0;
-        stack[top++] = dtype;
-
-        int visits = 0;
-        HashSet<int>? seen = null;
-        while (top > 0)
+        // managed type, so the stack is a rented array; this runs at parse time for a legacy
+        // layout, never on a decode path.
+        DType[] stack = ArrayPool<DType>.Shared.Rent(32);
+        try
         {
-            if (seen is null && ++visits > SupportVisitBudget)
+            int top = 0;
+            stack[top++] = dtype;
+
+            int visits = 0;
+            HashSet<int>? seen = null;
+            while (top > 0)
             {
-                seen = new HashSet<int>();
+                if (seen is null && ++visits > SupportVisitBudget)
+                {
+                    seen = new HashSet<int>();
+                }
+
+                DType current = stack[--top];
+                if (seen is not null && !seen.Add(current.NodeIndex))
+                {
+                    // Already inspected; a second visit can only reach the same verdict.
+                    continue;
+                }
+                switch (current.Kind)
+                {
+                    case DTypeKind.Null:
+                    case DTypeKind.Bool:
+                    case DTypeKind.Primitive:
+                    case DTypeKind.Decimal:
+                    case DTypeKind.Utf8:
+                    case DTypeKind.Binary:
+                        continue;
+
+                    case DTypeKind.Variant:
+                        return false;
+
+                    case DTypeKind.List:
+                    case DTypeKind.FixedSizeList:
+                        Push(ref stack, ref top, current.ElementType);
+                        continue;
+
+                    case DTypeKind.Extension:
+                        Push(ref stack, ref top, current.StorageType);
+                        continue;
+
+                    case DTypeKind.Map:
+                        Push(ref stack, ref top, current.KeyType);
+                        Push(ref stack, ref top, current.ValueType);
+                        continue;
+
+                    default:
+                        // Struct and Union: every field, respectively every variant.
+                        for (int i = 0; i < current.ChildCount; i++)
+                        {
+                            Push(ref stack, ref top, current.GetChild(i));
+                        }
+
+                        continue;
+                }
             }
 
-            DType current = stack[--top];
-            if (seen is not null && !seen.Add(current.NodeIndex))
-            {
-                // Already inspected; a second visit can only reach the same verdict.
-                continue;
-            }
-            switch (current.Kind)
-            {
-                case DTypeKind.Null:
-                case DTypeKind.Bool:
-                case DTypeKind.Primitive:
-                case DTypeKind.Decimal:
-                case DTypeKind.Utf8:
-                case DTypeKind.Binary:
-                    continue;
-
-                case DTypeKind.Variant:
-                    return false;
-
-                case DTypeKind.List:
-                case DTypeKind.FixedSizeList:
-                    Push(ref stack, ref top, current.ElementType);
-                    continue;
-
-                case DTypeKind.Extension:
-                    Push(ref stack, ref top, current.StorageType);
-                    continue;
-
-                case DTypeKind.Map:
-                    Push(ref stack, ref top, current.KeyType);
-                    Push(ref stack, ref top, current.ValueType);
-                    continue;
-
-                default:
-                    // Struct and Union: every field, respectively every variant.
-                    for (int i = 0; i < current.ChildCount; i++)
-                    {
-                        Push(ref stack, ref top, current.GetChild(i));
-                    }
-
-                    continue;
-            }
+            return true;
         }
-
-        return true;
+        finally
+        {
+            // Cleared: a DType holds its arena, which the pool would otherwise keep alive.
+            ArrayPool<DType>.Shared.Return(stack, clearArray: true);
+        }
     }
 
     private static void Push(ref DType[] stack, ref int top, DType value)
     {
         if (top == stack.Length)
         {
-            Array.Resize(ref stack, stack.Length * 2);
+            DType[] grown = ArrayPool<DType>.Shared.Rent(stack.Length * 2);
+            stack.AsSpan().CopyTo(grown);
+            ArrayPool<DType>.Shared.Return(stack, clearArray: true);
+            stack = grown;
         }
 
         stack[top++] = value;
     }
 
+    /// <summary>The longest display name, <c>vortex.bounded_max(4294967295)</c>, rounded up.</summary>
+    private const int MaxDisplayNameBytes = 32;
+
     /// <summary>
-    /// The struct field name a zone-map column carries: <c>"{id}({optionsDisplay})"</c>.
+    /// Writes the struct field name a zone-map column carries, <c>"{id}({optionsDisplay})"</c>, as
+    /// the UTF-8 the table's struct interns it as.
     /// </summary>
+    /// <param name="aggregate">The aggregate the column holds.</param>
+    /// <param name="options">The aggregate's options payload.</param>
+    /// <param name="destination">At least <see cref="MaxDisplayNameBytes"/> bytes.</param>
     /// <returns>
-    /// <see langword="false"/> when the options payload cannot be read, which disables pruning
+    /// The name's length, or -1 when the options payload cannot be read, which disables pruning
     /// rather than failing the read.
     /// </returns>
-    private static bool TryDisplayName(AggregateId aggregate, ReadOnlySpan<byte> options, out string? name)
+    private static int WriteDisplayName(AggregateId aggregate, ReadOnlySpan<byte> options, Span<byte> destination)
     {
+        ReadOnlySpan<byte> name;
         switch (aggregate)
         {
             case AggregateId.Min:
@@ -512,9 +550,10 @@ internal static class ZoneMapSchema
                 // is false, so an aggregate carrying default options keeps the name it had before
                 // options existed at all.
                 bool skipNans = ReadSkipNans(options);
-                string id = aggregate == AggregateId.Min ? "vortex.min" : "vortex.max";
-                name = skipNans ? id + "()" : id + "(skip_nans=false)";
-                return true;
+                name = aggregate == AggregateId.Min
+                    ? (skipNans ? "vortex.min()"u8 : "vortex.min(skip_nans=false)"u8)
+                    : (skipNans ? "vortex.max()"u8 : "vortex.max(skip_nans=false)"u8);
+                break;
             }
 
             case AggregateId.BoundedMin:
@@ -525,27 +564,32 @@ internal static class ZoneMapSchema
                     // Unreadable bound options degrade to "no zone map" rather than failing the
                     // whole read: the map only ever serves to skip data, so losing it can cost
                     // speed but never correctness.
-                    name = null;
-                    return false;
+                    return -1;
                 }
 
-                string id = aggregate == AggregateId.BoundedMin ? "vortex.bounded_min" : "vortex.bounded_max";
-                name = id + "(" + boundLength.ToString(CultureInfo.InvariantCulture) + ")";
-                return true;
+                ReadOnlySpan<byte> id = aggregate == AggregateId.BoundedMin
+                    ? "vortex.bounded_min("u8
+                    : "vortex.bounded_max("u8;
+                id.CopyTo(destination);
+                boundLength.TryFormat(destination[id.Length..], out int digits, default, CultureInfo.InvariantCulture);
+                destination[id.Length + digits] = (byte)')';
+                return id.Length + digits + 1;
             }
 
             case AggregateId.NullCount:
-                name = "vortex.null_count()";
-                return true;
+                name = "vortex.null_count()"u8;
+                break;
 
             case AggregateId.NanCount:
-                name = "vortex.nan_count()";
-                return true;
+                name = "vortex.nan_count()"u8;
+                break;
 
             default:
-                name = null;
-                return false;
+                return -1;
         }
+
+        name.CopyTo(destination);
+        return name.Length;
     }
 
     /// <summary>Reads <c>NumericalAggregateOpts.skip_nans</c>; an absent field is proto3's <c>false</c>.</summary>

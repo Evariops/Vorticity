@@ -162,7 +162,7 @@ public sealed class PathAllocationTests
     /// </remarks>
     private static readonly (string Axis, string File, long Ceiling, Func<string, ValueTask<long>> Path)[] Axes =
     [
-        ("open, footer only", File, 15_008, FooterOnly),
+        ("open, footer only", File, 14_760, FooterOnly),
         // `VortexFile` holds one reference to the lazily parsed `LayoutTree` that every scan of
         // an open file shares instead of re-deriving: eight bytes once per OPEN, against a
         // layout-tree parse once per `ExecuteAsync`. This axis opens the file and reads one batch,
@@ -213,12 +213,15 @@ public sealed class PathAllocationTests
         // where every scan built a dozen arrays per lane -- the node and canonical arenas, the
         // scalars, the segment set: 16 496 bytes less on every axis that scans, a new arena for the
         // dtypes the scan derives excepted.
-        ("open, first batch", File, 55_752, FirstBatch),
-        ("full scan", File, 63_312, FullScan),
-        ("projected scan, 1 of 5 columns", File, 59_496, ProjectedScan),
+        //
+        // A zone map's column names are written as UTF-8 into the arena that interns them, and the
+        // table's scratch is rented: no string and no array for them per zone map.
+        ("open, first batch", File, 54_600, FirstBatch),
+        ("full scan", File, 62_160, FullScan),
+        ("projected scan, 1 of 5 columns", File, 58_344, ProjectedScan),
         // A take or a filter goes through the filtered delivery, whose enumerable and enumerator hold
         // one more field each: 16 bytes a scan.
-        ("take 64 rows from 64 splits", File, 64_560, ScatteredTake),
+        ("take 64 rows from 64 splits", File, 63_408, ScatteredTake),
         // The filter's field references hold one more field each, and the zone column the pruning
         // pass reads one more: 8 bytes a reference and 8 for the column, besides the arena of the
         // context that reads the zone map.
@@ -235,7 +238,7 @@ public sealed class PathAllocationTests
         // A numeric column's zones are held as columns rather than one summary each, a third of
         // the bytes, and the file keeps them for its next scan in a holder it makes then: 2 352
         // bytes under what the summaries cost.
-        ("selective filter, pruning on", File, 62_360, PrunedFilter),
+        ("selective filter, pruning on", File, 61_208, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -249,7 +252,7 @@ public sealed class PathAllocationTests
         // and that context's arenas sized for what they hold rather than for a batch: either one
         // undone costs more than the whole gap that remains. The lane's context holds its zstd
         // decoder's field, 8 bytes, as above.
-        ("selective filter, pruning off", File, 60_976, UnprunedFilter),
+        ("selective filter, pruning off", File, 59_824, UnprunedFilter),
 
         // One scan per late component. They are single-column files of 4 096 rows, so the figure is
         // dominated by the decoder rather than by the open, which is the point of putting them here
