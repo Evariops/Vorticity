@@ -149,6 +149,115 @@ public sealed class ViewKernelsTests
     }
 
     /// <summary>
+    /// With nulls in play the rows are cut as though all were valid and the null rows' views
+    /// emptied, across blocks and whatever the sizes; the null rows here hold real values, as a
+    /// writer may leave them.
+    /// </summary>
+    [Theory]
+    [InlineData(0, 12)]
+    [InlineData(0, 30)]
+    public void NullRowsAreCutWithTheRestAndEmptied(int shortest, int longest)
+    {
+        Random random = new Random(longest + 7);
+        int[] sizes = new int[3_000];
+        bool[] valid = new bool[sizes.Length];
+        for (int i = 0; i < sizes.Length; i++)
+        {
+            sizes[i] = random.Next(shortest, longest + 1);
+            valid[i] = random.Next(10) != 0;
+        }
+
+        byte[] heap = new byte[Offsets(sizes)[^1]];
+        for (int i = 0; i < heap.Length; i++)
+        {
+            heap[i] = (byte)random.Next(0x20, 0x7F);
+        }
+
+        byte[] expected = Expected(heap, sizes, out _);
+        for (int i = 0; i < sizes.Length; i++)
+        {
+            if (!valid[i])
+            {
+                expected.AsSpan(i * 16, 16).Clear();
+            }
+        }
+
+        foreach (bool requireUtf8 in (bool[])[false, true])
+        {
+            byte[] views = new byte[sizes.Length * 16];
+            views.AsSpan().Fill(0xAB);
+            CanonicalArena arena = new CanonicalArena();
+            ValidityMask mask = ValidityMask.From(arena, Bitmap(arena, valid));
+            ViewKernels.BuildFromOffsets(
+                Int32s(Offsets(sizes)), PType.I32, heap, views, sizes.Length, requireUtf8, in mask, VarBinDecoder.Id);
+            Assert.Equal(expected, views);
+        }
+    }
+
+    /// <summary>
+    /// A null row is bound neither to text nor to order: bytes that are not UTF-8, a span cut through
+    /// a character, offsets that go back -- each makes the whole-column cut refuse, and the column is
+    /// cut row by row instead, without an error, the valid rows as they are; while a valid row that
+    /// is not text is still refused.
+    /// </summary>
+    [Fact]
+    public void ANullRowIsBoundNeitherToTextNorToOrder()
+    {
+        // Rows: "abc"; a null row holding [0xFF, 0xFE]; a null row ending on the first byte of a
+        // character and a null row starting on its second; "éxyz".
+        byte[] heap = [(byte)'a', (byte)'b', (byte)'c', 0xFF, 0xFE, 0xC3, 0xA9, 0xC3, 0xA9, (byte)'x', (byte)'y', (byte)'z'];
+        int[] offsets = [0, 3, 5, 6, 7, 12];
+        bool[] valid = [true, false, false, false, true];
+        CanonicalArena arena = new CanonicalArena();
+        byte[] views = new byte[5 * 16];
+        ValidityMask mask = ValidityMask.From(arena, Bitmap(arena, valid));
+        ViewKernels.BuildFromOffsets(Int32s(offsets), PType.I32, heap, views, 5, requireUtf8: true, in mask, VarBinDecoder.Id);
+
+        Assert.Equal("abc", Encoding.UTF8.GetString(views.AsSpan(4, 3)));
+        Assert.All(views.AsSpan(16, 48).ToArray(), b => Assert.Equal(0, b));
+        Assert.Equal("éxyz", Encoding.UTF8.GetString(views.AsSpan(64 + 4, 5)));
+
+        // A null row whose end comes before its start.
+        int[] backwards = [0, 3, 1, 7, 8, 12];
+        ValidityMask sameMask = ValidityMask.From(arena, Bitmap(arena, [true, false, false, true, true]));
+        ViewKernels.BuildFromOffsets(Int32s(backwards), PType.I32, heap, new byte[5 * 16], 5, requireUtf8: false, in sameMask, VarBinDecoder.Id);
+
+        // The same bytes under a valid row are refused, whether or not another row makes the cut
+        // refuse first: here every row starts on a character, and only the heap is not text.
+        Validity allRows = Bitmap(arena, [true, true, false, false, true]);
+        Assert.Throws<VortexFormatException>(() =>
+        {
+            ValidityMask local = ValidityMask.From(arena, allRows);
+            ViewKernels.BuildFromOffsets(Int32s(offsets), PType.I32, heap, new byte[5 * 16], 5, requireUtf8: true, in local, VarBinDecoder.Id);
+        });
+
+        int[] onCharacters = [0, 3, 5, 7, 12];
+        Validity threeValid = Bitmap(arena, [true, true, false, true]);
+        Assert.Throws<VortexFormatException>(() =>
+        {
+            ValidityMask local = ValidityMask.From(arena, threeValid);
+            ViewKernels.BuildFromOffsets(Int32s(onCharacters), PType.I32, heap, new byte[4 * 16], 4, requireUtf8: true, in local, VarBinDecoder.Id);
+        });
+    }
+
+    /// <summary>A validity bitmap of <paramref name="valid"/> in <paramref name="arena"/>.</summary>
+    private static Validity Bitmap(CanonicalArena arena, bool[] valid)
+    {
+        Vorticity.Buffers.VortexBuffer bits = arena.Allocate((valid.Length + 7) / 8, 8, out Span<byte> bytes);
+        bytes.Clear();
+        for (int i = 0; i < valid.Length; i++)
+        {
+            if (valid[i])
+            {
+                bytes[i >> 3] |= (byte)(1 << (i & 7));
+            }
+        }
+
+        DTypeArena types = new DTypeArena();
+        return Validity.Bitmap(arena.AddBool(types.Bool(Nullability.NonNullable), valid.Length, Validity.NonNullable, bits, 0));
+    }
+
+    /// <summary>
     /// The sum of 32-bit signed lengths is a reduction, and the first negative one is still named,
     /// in the vector part and in the tail.
     /// </summary>

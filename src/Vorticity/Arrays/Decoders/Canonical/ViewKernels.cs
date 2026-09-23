@@ -1407,6 +1407,19 @@ internal static class ViewKernels
             return;
         }
 
+        // With nulls in play, the rows are first cut as though every one were valid, and the null
+        // rows' views emptied after: a writer leaves a null row's span empty, or holds a real value
+        // in it, so its offsets are in order and its bytes are text, and the dense kernel and the
+        // tiling argument apply to the whole column. A null row is not bound to either, though, so
+        // when that cut refuses the rows the column is cut one row at a time, each valid row checked
+        // on its own and no null row read.
+        if (DenseFromOffsets(offsets, ptype, heap, views, count, requireUtf8, out int start, out int stop)
+            && (!requireUtf8 || Utf8.IsValid(heap[start..stop])))
+        {
+            EmptyNullViews(views, in mask, count);
+            return;
+        }
+
         switch (ptype)
         {
             case PType.U8:
@@ -1433,6 +1446,26 @@ internal static class ViewKernels
             default:
                 FromOffsets<long>(offsets, heap, views, count, requireUtf8, in mask);
                 break;
+        }
+    }
+
+    /// <summary>Writes the empty view over every null row's, sixty-four rows of validity at a time.</summary>
+    private static void EmptyNullViews(Span<byte> views, in ValidityMask mask, int count)
+    {
+        ReadOnlySpan<byte> bits = mask.Bits;
+        int bitOffset = mask.BitOffset;
+        ref byte viewRef = ref MemoryMarshal.GetReference(views);
+        for (int row = 0; row < count; row += 64)
+        {
+            // A mask with no bits, every row null, reads as zeroes.
+            ulong nulls = ~BitWords.Load(bits, bitOffset + row) & BitWords.Mask(Math.Min(64, count - row));
+            while (nulls != 0)
+            {
+                ref byte view = ref Unsafe.Add(ref viewRef, (nint)(row + BitOperations.TrailingZeroCount(nulls)) * ViewSize);
+                Unsafe.WriteUnaligned(ref view, 0UL);
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref view, sizeof(ulong)), 0UL);
+                nulls &= nulls - 1;
+            }
         }
     }
 
