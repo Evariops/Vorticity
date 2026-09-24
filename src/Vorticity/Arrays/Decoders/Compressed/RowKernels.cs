@@ -947,19 +947,70 @@ internal static class RowKernels
         ReadOnlySpan<TValue> source = MemoryMarshal.Cast<byte, TValue>(values)[..valuesLength];
         Span<TValue> target = MemoryMarshal.Cast<byte, TValue>(destination)[..count];
         uint limit = (uint)valuesLength;
+        ref TCode codeRef = ref MemoryMarshal.GetReference(codes);
+        ref TValue sourceRef = ref MemoryMarshal.GetReference(source);
+        ref TValue targetRef = ref MemoryMarshal.GetReference(target);
 
-        for (int row = 0; row < target.Length; row++)
+        // Eight rows a step, their codes checked at once against the limit through the largest of
+        // them and then gathered with no test between: a row a step spent as much on the loop and
+        // its test as on the copy, and ran a third slower or faster with where the code happened to
+        // land in memory. A bad code is found in its block, and the caller raises on it, so the
+        // rows of that block are not written.
+        int whole = target.Length & ~7;
+        for (int block = 0; block < whole; block += 8)
         {
-            uint code = WidenCode(codes[row]);
+            ref TCode at = ref Unsafe.Add(ref codeRef, block);
+            uint c0 = WidenCode(at);
+            uint c1 = WidenCode(Unsafe.Add(ref at, 1));
+            uint c2 = WidenCode(Unsafe.Add(ref at, 2));
+            uint c3 = WidenCode(Unsafe.Add(ref at, 3));
+            uint c4 = WidenCode(Unsafe.Add(ref at, 4));
+            uint c5 = WidenCode(Unsafe.Add(ref at, 5));
+            uint c6 = WidenCode(Unsafe.Add(ref at, 6));
+            uint c7 = WidenCode(Unsafe.Add(ref at, 7));
+            uint high = Math.Max(Math.Max(Math.Max(c0, c1), Math.Max(c2, c3)), Math.Max(Math.Max(c4, c5), Math.Max(c6, c7)));
+            if (high >= limit)
+            {
+                return FirstOutOfRange(ref at, block, limit);
+            }
+
+            ref TValue into = ref Unsafe.Add(ref targetRef, block);
+            into = Unsafe.Add(ref sourceRef, (nint)c0);
+            Unsafe.Add(ref into, 1) = Unsafe.Add(ref sourceRef, (nint)c1);
+            Unsafe.Add(ref into, 2) = Unsafe.Add(ref sourceRef, (nint)c2);
+            Unsafe.Add(ref into, 3) = Unsafe.Add(ref sourceRef, (nint)c3);
+            Unsafe.Add(ref into, 4) = Unsafe.Add(ref sourceRef, (nint)c4);
+            Unsafe.Add(ref into, 5) = Unsafe.Add(ref sourceRef, (nint)c5);
+            Unsafe.Add(ref into, 6) = Unsafe.Add(ref sourceRef, (nint)c6);
+            Unsafe.Add(ref into, 7) = Unsafe.Add(ref sourceRef, (nint)c7);
+        }
+
+        for (int row = whole; row < target.Length; row++)
+        {
+            uint code = WidenCode(Unsafe.Add(ref codeRef, row));
             if (code >= limit)
             {
                 return row;
             }
 
-            target[row] = source[(int)code];
+            Unsafe.Add(ref targetRef, row) = Unsafe.Add(ref sourceRef, (nint)code);
         }
 
         return -1;
+    }
+
+    /// <summary>The row of the first code of a block of eight at or past <paramref name="limit"/>, one being.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int FirstOutOfRange<TCode>(ref TCode block, int first, uint limit)
+        where TCode : unmanaged
+    {
+        int k = 0;
+        while (WidenCode(Unsafe.Add(ref block, k)) < limit)
+        {
+            k++;
+        }
+
+        return first + k;
     }
 
     /// <summary>The widths no primitive covers: decimals of an odd storage, if one ever appears.</summary>

@@ -96,6 +96,67 @@ public sealed class RowKernelsTests
         Assert.Equal(701, fault);
     }
 
+    /// <summary>
+    /// The gather eight rows a step, held to the rows gathered one by one: every width it has a
+    /// case for and one it has not, and a row count past the last whole step.
+    /// </summary>
+    [Theory]
+    [InlineData(PType.U8, 1)]
+    [InlineData(PType.U8, 16)]
+    [InlineData(PType.U16, 2)]
+    [InlineData(PType.I32, 4)]
+    [InlineData(PType.U16, 8)]
+    [InlineData(PType.I16, 32)]
+    [InlineData(PType.U8, 12)]
+    internal void CodesGatherAsRowByRow(PType codesPType, int width)
+    {
+        const int rows = Rows + 3;
+        Random random = new Random((width * 31) + (int)codesPType);
+        byte[] values = new byte[Entries * width];
+        random.NextBytes(values);
+        int[] codes = new int[rows];
+        for (int row = 0; row < rows; row++)
+        {
+            codes[row] = random.Next(Entries);
+        }
+
+        byte[] destination = new byte[rows * width];
+        int fault = RowKernels.Gather(Codes(codes, codesPType), codesPType, values, width, Entries, destination, rows);
+
+        Assert.Equal(-1, fault);
+        for (int row = 0; row < rows; row++)
+        {
+            Assert.True(
+                values.AsSpan(codes[row] * width, width).SequenceEqual(destination.AsSpan(row * width, width)), $"row {row}");
+        }
+    }
+
+    /// <summary>
+    /// A code past the dictionary is reported at its own row wherever it falls in a step of eight,
+    /// in the rows past the last step, and when it is negative.
+    /// </summary>
+    [Theory]
+    [InlineData(PType.U16, 0, Entries)]
+    [InlineData(PType.U16, 7, Entries)]
+    [InlineData(PType.U16, 701, 60_000)]
+    [InlineData(PType.U16, Rows + 2, Entries)]
+    [InlineData(PType.I16, 356, -1)]
+    [InlineData(PType.I32, 999, -40)]
+    internal void ACodePastTheDictionaryIsReportedAtItsRow(PType codesPType, int row, int code)
+    {
+        const int rows = Rows + 3;
+        int[] codes = new int[rows];
+        for (int i = 0; i < rows; i++)
+        {
+            codes[i] = i % Entries;
+        }
+
+        codes[row] = code;
+        int fault = RowKernels.Gather(
+            Codes(codes, codesPType), codesPType, new byte[Entries * 4], 4, Entries, new byte[rows * 4], rows);
+        Assert.Equal(row, fault);
+    }
+
     /// <summary><paramref name="codes"/> as <paramref name="ptype"/>, little-endian.</summary>
     private static byte[] Codes(int[] codes, PType ptype)
     {
