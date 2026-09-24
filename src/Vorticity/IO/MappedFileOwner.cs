@@ -22,20 +22,17 @@ namespace Vorticity.IO;
 /// </remarks>
 internal sealed unsafe class MappedFileOwner : SegmentOwner
 {
-    private readonly MemoryMappedFile _file;
     private readonly MemoryMappedViewAccessor _view;
     private readonly SafeFileHandle? _ownedHandle;
     private readonly byte* _base;
     private readonly long _length;
 
     private MappedFileOwner(
-        MemoryMappedFile file,
         MemoryMappedViewAccessor view,
         SafeFileHandle? ownedHandle,
         byte* basePointer,
         long length)
     {
-        _file = file;
         _view = view;
         _ownedHandle = ownedHandle;
         _base = basePointer;
@@ -48,8 +45,10 @@ internal sealed unsafe class MappedFileOwner : SegmentOwner
     /// <param name="ownsHandle">Whether the handle is disposed with the mapping's last lease.</param>
     internal static MappedFileOwner Map(SafeFileHandle handle, long length, bool ownsHandle)
     {
-        // leaveOpen: true — the handle's lifetime is ours to manage, and it must outlive the
-        // mapping on platforms where the mapping keeps a reference to it.
+        // leaveOpen: true — the handle's lifetime is ours to manage. The file object holds a
+        // reference on the handle for as long as it lives, and on Unix the handle holds the lock
+        // FileShare asked for, so it is dropped as soon as the view exists: the view does not need
+        // it, and a mapping kept past its reader must not keep a writer out.
         MemoryMappedFile file = MemoryMappedFile.CreateFromFile(
             handle,
             mapName: null,
@@ -74,12 +73,13 @@ internal sealed unsafe class MappedFileOwner : SegmentOwner
                 throw new IOException("The memory mapping produced a null base address.");
             }
 
-            return new MappedFileOwner(
-                file,
+            MappedFileOwner owner = new MappedFileOwner(
                 view,
                 ownsHandle ? handle : null,
                 pointer + view.PointerOffset,
                 length);
+            file.Dispose();
+            return owner;
         }
         catch
         {
@@ -199,7 +199,6 @@ internal sealed unsafe class MappedFileOwner : SegmentOwner
     {
         _view.SafeMemoryMappedViewHandle.ReleasePointer();
         _view.Dispose();
-        _file.Dispose();
         _ownedHandle?.Dispose();
     }
 

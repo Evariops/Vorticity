@@ -128,7 +128,13 @@ from then on:
   than a positional read at every size, and a mapped scan allocates nothing per batch, so no
   threshold on the volume is worth its complexity;
 - two scans that race to map publish one mapping by compare-and-exchange; a read already under way
-  finishes positionally.
+  finishes positionally;
+- the session keeps the mapping once the file is closed (`MappedFileCacheCount`, 64 files by
+  default): the next open of the same file, known by its device and inode, takes it over with every
+  page already mapped in it, so a file scanned again pays neither the mapping nor a page fault per
+  page. A file whose length changed is mapped again, one replaced under its name leaves the cache at
+  once, and the mapping holds neither the handle nor its lock, so a writer is never kept out. On
+  Windows, where a mapped file can be neither deleted nor replaced, nothing is kept.
 
 **Coalescing against alignment.** A buffer for a coalesced range `[start, end)` places a segment at
 file offset `o` at memory offset `o − start`, arbitrary for an arbitrary `start`. So the start is

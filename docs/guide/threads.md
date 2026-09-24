@@ -40,12 +40,13 @@ A `VortexSession` holds what would otherwise be process-wide state, so that a ho
 | `MaxConcurrentReads` | 16 | reads in flight across every scan of every file of the session |
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer compresses on |
 | `IndexCacheBytes` | 64 MiB | decoded index runs |
+| `MappedFileCacheCount` | 64 | files opened from a path kept mapped once closed, so the next open of one takes over its mapping |
 | `Extensions` | empty | extension types the session reads beyond the editions |
 
 The options are set inside `Create` and frozen when it returns; setting one afterwards throws
 `InvalidOperationException: The session is created; its options are frozen. Set them inside
 VortexSession.Create.` `VortexFile.OpenAsync(path)` uses `VortexSession.Default`, which is immutable:
-the shared pool, no cache, 16 reads in flight, no parallelism.
+the shared pool, no cache, 16 reads in flight, no parallelism, 64 closed files kept mapped.
 
 A session is disposed after its files. Disposing it with one still open throws
 `InvalidOperationException: The session still has 'readings.vortex' open; dispose every file before

@@ -32,8 +32,9 @@ for the segment seam. Everything else in the assembly is internal.
 
 * **Session.** `VortexSession` owns the memory pool (`AlignedMemoryPool`, 64-byte aligned), one
   `SegmentCache` for every file it opens, the bound on reads in flight (`MaxConcurrentReads`), the
-  degree of parallelism (`MaxDegreeOfParallelism`, 1 unless set), the index cache and the registry
-  of extension dtypes (`IVortexExtension<TSelf>`). Its options are frozen by `Create`;
+  degree of parallelism (`MaxDegreeOfParallelism`, 1 unless set), the index cache, the files it
+  keeps mapped once closed (`MappedFileCacheCount`, 64 unless set) and the registry of extension
+  dtypes (`IVortexExtension<TSelf>`). Its options are frozen by `Create`;
   `VortexSession.Default` is immutable and is what `VortexFile.OpenAsync(path)` uses. It opens
   files, creates writers and opens appends.
 * **Schema and records.** `VortexSchema`, `VortexField` and `VortexType` describe a file's columns

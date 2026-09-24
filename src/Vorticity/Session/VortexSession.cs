@@ -20,6 +20,7 @@ public sealed class VortexSessionOptions
     private int _maxConcurrentReads = 16;
     private int _maxDegreeOfParallelism = 1;
     private long _indexCacheBytes = 64L * 1024 * 1024;
+    private int _mappedFileCacheCount = 64;
     private bool _frozen;
 
     internal VortexSessionOptions()
@@ -86,6 +87,26 @@ public sealed class VortexSessionOptions
         }
     }
 
+    /// <summary>
+    /// How many files opened from a path the session keeps mapped once they are closed, so that
+    /// opening one again takes over its mapping and every page already mapped in it; 0 keeps none.
+    /// </summary>
+    /// <remarks>
+    /// A kept file is recognized by its device and inode, and mapped again when its length changed.
+    /// None is kept on Windows, where a mapped file can be neither deleted nor replaced, nor where
+    /// the platform cannot tell one file from another.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
+    public int MappedFileCacheCount
+    {
+        get => _mappedFileCacheCount;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _mappedFileCacheCount = Set(value);
+        }
+    }
+
     /// <summary>The extension dtypes this session knows beyond the frozen editions.</summary>
     public VortexExtensionRegistry Extensions { get; } = new VortexExtensionRegistry();
 
@@ -126,9 +147,15 @@ public sealed class VortexSession : IAsyncDisposable
     {
         Options = options;
         ReadGate = new SemaphoreSlim(options.MaxConcurrentReads, options.MaxConcurrentReads);
+        Mappings = options.MappedFileCacheCount > 0 && FileInode.IsSupported
+            ? new MappedFileCache(options.MappedFileCacheCount)
+            : null;
     }
 
-    /// <summary>The process-wide session: the shared pool, no segment cache, 16 reads in flight, no parallelism, no extensions.</summary>
+    /// <summary>
+    /// The process-wide session: the shared pool, no segment cache, 16 reads in flight, no
+    /// parallelism, no extensions, 64 closed files kept mapped.
+    /// </summary>
     public static VortexSession Default { get; } = CreateDefault();
 
     /// <summary>What this session owns, frozen.</summary>
@@ -136,6 +163,9 @@ public sealed class VortexSession : IAsyncDisposable
 
     /// <summary>The bound on reads in flight across the session.</summary>
     internal SemaphoreSlim ReadGate { get; }
+
+    /// <summary>The files kept mapped once closed, or null when the session keeps none.</summary>
+    internal MappedFileCache? Mappings { get; }
 
     /// <summary>A session configured by <paramref name="configure"/>.</summary>
     /// <param name="configure">Sets the options; they are frozen when it returns.</param>
@@ -151,7 +181,8 @@ public sealed class VortexSession : IAsyncDisposable
 
     /// <summary>
     /// Opens the file at <paramref name="path"/>: its tail read positionally, the file mapped into
-    /// memory by the first scan that reads data.
+    /// memory by the first scan that reads data, and kept mapped once closed for the next open of
+    /// the same file, as <see cref="VortexSessionOptions.MappedFileCacheCount"/> says.
     /// </summary>
     /// <param name="path">A local file path.</param>
     /// <param name="options">What the open reads, trusts and refuses; null for the defaults.</param>
@@ -162,7 +193,7 @@ public sealed class VortexSession : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(path);
         ThrowIfDisposed();
-        VortexFile file = await VortexFile.OpenAsync(path, Effective(options), cancellationToken).ConfigureAwait(false);
+        VortexFile file = await VortexFile.OpenAsync(path, Effective(options), Mappings, cancellationToken).ConfigureAwait(false);
         Attach(file, path);
         return file;
     }
@@ -297,7 +328,7 @@ public sealed class VortexSession : IAsyncDisposable
         return EncodingAdvisor.AdviseAsync(rows, goal ?? EncodingGoal.Default, this, cancellationToken);
     }
 
-    /// <summary>Clears the segment cache and trims the pool. A file of the session still open makes this throw.</summary>
+    /// <summary>Clears the segment cache, lets the kept mappings go and trims the pool. A file of the session still open makes this throw.</summary>
     /// <returns>A completed task.</returns>
     /// <exception cref="InvalidOperationException">A file opened through the session is still open.</exception>
     public ValueTask DisposeAsync()
@@ -318,6 +349,7 @@ public sealed class VortexSession : IAsyncDisposable
         }
 
         Options.SegmentCache?.Clear();
+        Mappings?.Clear();
         if (Options.MemoryPool is AlignedMemoryPool aligned && !ReferenceEquals(aligned, AlignedMemoryPool.Shared))
         {
             aligned.Dispose();

@@ -77,8 +77,11 @@ surface to measure except the scan. The empty-call floor is 2.5 ns.
   the arrow and parquet-variant integrations: about 90 µs, which nothing on the .NET side pays per
   open, since `EncodingRegistry` is static. Built per call, it would read as Rust being slow to open
   a file.
-* **The file is opened from scratch on every call**, on both sides, so neither gets a warm segment
-  cache the other is not offered.
+* **The file is opened from scratch on every call**, on both sides, and neither keeps a segment
+  cache. Our session does keep the mapping of a file it opened before and takes it over at the next
+  open, pages already mapped (`VortexSessionOptions.MappedFileCacheCount`); Rust's reader reads the
+  file into buffers of its own at each open and has no counterpart. A program that opens a file
+  once pays neither.
 * **Panics are caught** at the boundary: unwinding across a C ABI is undefined behaviour. Every
   entry point returns a count, or a negative status.
 

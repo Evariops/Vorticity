@@ -38,6 +38,11 @@ internal interface IReadAnticipation
 /// its segments are read one by one, without coalescing.
 /// </para>
 /// <para>
+/// With the session's <see cref="MappedFileCache"/>, the mapping outlives the reader: the next open
+/// of the same file takes it over with every page already mapped in it, so a file scanned again
+/// pays neither the mapping nor a fault per page nor the unmapping.
+/// </para>
+/// <para>
 /// A read already under way when the mapping is published finishes positionally. The mapping
 /// does not need the handle once made, so disposing the reader closes the handle and drops the
 /// reader's reference on the mapping, which lives on for as long as a lease reads from it.
@@ -46,20 +51,25 @@ internal interface IReadAnticipation
 internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
 {
     private readonly SafeFileHandle _handle;
+    private readonly string _path;
+    private readonly MappedFileCache? _mappings;
     private MappedFileOwner? _mapping;
     private int _disposed;
 
-    private LocalFileSource(SafeFileHandle handle)
+    private LocalFileSource(SafeFileHandle handle, string path, MappedFileCache? mappings)
     {
         _handle = handle;
+        _path = path;
+        _mappings = mappings;
         Length = RandomAccess.GetLength(handle);
     }
 
     /// <summary>Opens <paramref name="path"/> read-only; nothing is mapped yet.</summary>
     /// <param name="path">A local file path.</param>
+    /// <param name="mappings">The session's kept mappings, or null to map the file for this reader alone.</param>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
     /// <exception cref="IOException">The file could not be opened.</exception>
-    internal static LocalFileSource Open(string path)
+    internal static LocalFileSource Open(string path, MappedFileCache? mappings = null)
     {
         ArgumentNullException.ThrowIfNull(path);
 
@@ -68,7 +78,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
             path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.RandomAccess);
         try
         {
-            return new LocalFileSource(handle);
+            return new LocalFileSource(handle, path, mappings);
         }
         catch
         {
@@ -83,6 +93,9 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     /// <summary>Whether a scan has had the file mapped.</summary>
     internal bool IsMapped => Volatile.Read(ref _mapping) is not null;
 
+    /// <summary>The mapping this reader reads, once a scan had the file mapped.</summary>
+    internal MappedFileOwner? Mapping => Volatile.Read(ref _mapping);
+
     /// <inheritdoc/>
     public void AnticipateData()
     {
@@ -91,16 +104,19 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
             return;
         }
 
-        MappedFileOwner mapped = MappedFileOwner.Map(_handle, Length, ownsHandle: false);
+        // This reader holds one reference on the mapping either way, and releases it the same way.
+        MappedFileOwner mapped = _mappings is not null && FileInode.TryGet(_handle, Length, out FileInode identity)
+            ? _mappings.Acquire(identity, _path, _handle, Length)
+            : MappedFileOwner.Map(_handle, Length, ownsHandle: false);
         if (Interlocked.CompareExchange(ref _mapping, mapped, null) is not null)
         {
             // Another scan published its mapping first.
-            mapped.Dispose();
+            mapped.Release();
         }
         else if (Volatile.Read(ref _disposed) != 0 && Interlocked.Exchange(ref _mapping, null) is { } late)
         {
             // A dispose ran between the check and the publication and found nothing to drop.
-            late.Dispose();
+            late.Release();
         }
     }
 
@@ -200,7 +216,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
             return ValueTask.CompletedTask;
         }
 
-        Interlocked.Exchange(ref _mapping, null)?.Dispose();
+        Interlocked.Exchange(ref _mapping, null)?.Release();
         _handle.Dispose();
         return ValueTask.CompletedTask;
     }

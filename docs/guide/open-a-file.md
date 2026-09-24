@@ -156,8 +156,10 @@ Over a source where a read is a request, that is the reason to give the session 
   `MemorySegmentSource` alive until the file is disposed.
 * **Dispose the files before the session.** Disposing a session while one of its files is open
   throws `InvalidOperationException` naming the file.
-* Two files opened over the same path are two independent readers, each with its own mapping or
-  handle. A file is immutable once open and safe to scan from several threads at once.
+* Two files opened over the same path are two independent readers. Opened from a path in one
+  session they share one mapping, which the session keeps once both are closed, for the next open
+  of the same file (`MappedFileCacheCount`). A file is immutable once open and safe to scan from
+  several threads at once.
 
 The figures come from one run of the sample on the demonstration file of a million rows.
 
