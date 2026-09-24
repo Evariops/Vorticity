@@ -222,11 +222,13 @@ windows stay in order.
 splits as its rows are scattered over. On a sorted column the rows of consecutive keys are
 consecutive, so the walk is a plain scan. On sorted runs over a column **uncorrelated with file
 order**, a window can touch a split per row, and a scattered take costs what it costs: 64 rows of an
-uncorrelated column read in key order take 1.19× Rust's time for a take of 64 rows over 64 splits
-([05-benchmarks.md](05-benchmarks.md) §3). So it is the tool for a selective range, a top-k or a
-merge, and not for a whole uncorrelated column, where sorting the scan's output costs less. The
-plan's `OrderPlan` states the source, the runs the range reaches and the entries it admits before
-the read; the scan's statistics count the windows and the splits they touched after it.
+uncorrelated column read in key order take longer than Rust's reader takes for the same 64 rows as a
+take over 64 splits (the key-order axes of [05-benchmarks.md](05-benchmarks.md) §3, measured on
+[the benchmark page](../guide/benchmarks.md#in-one-process-after-warm-up)). So it is the tool for a
+selective range, a top-k or a merge, and not for a whole uncorrelated column, where sorting the
+scan's output costs less. The plan's `OrderPlan` states the source, the runs the range reaches and
+the entries it admits before the read; the scan's statistics count the windows and the splits they
+touched after it.
 
 The dataset's key-ordered reads and its compaction merge are built on this, one call per object
 ([13-dataset.md](13-dataset.md) §5.3, §6.6).

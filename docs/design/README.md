@@ -13,7 +13,7 @@ on those two.
 | [02-format.md](02-format.md) | the Vortex file format, condensed: the tail, the footer, dtypes, arrays, layouts |
 | [03-architecture.md](03-architecture.md) | the engine: constraints, arenas, the I/O seam, performance invariants, parser safety |
 | [04-conformance.md](04-conformance.md) | how correctness is anchored in the Rust reference: the corpus, the cross-check, fuzzing |
-| [05-benchmarks.md](05-benchmarks.md) | performance against the Rust implementation, and how it is measured |
+| [05-benchmarks.md](05-benchmarks.md) | how performance is measured against the Rust implementation; the figures are on [the benchmark page](../guide/benchmarks.md) |
 | [06-row-encoding.md](06-row-encoding.md) | the byte-sortable row encoding |
 | [07-dotnet-mapping.md](07-dotnet-mapping.md) | which .NET type each dtype becomes, and where a naive mapping loses data |
 | [08-semantics.md](08-semantics.md) | pruning, predicates, NaN and nulls, unknown components, untrusted hints, resource caps |

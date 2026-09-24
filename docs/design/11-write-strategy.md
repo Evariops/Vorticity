@@ -250,7 +250,7 @@ which took a thousand-key `IN` from 117 to 51 ms.
 
 | what | how it is held |
 |---|---|
-| bytes | `WrittenSizeTests` rewrites the whole corpus: 0.650× the reference's bytes, held by a ratchet |
+| bytes | `WrittenSizeTests` rewrites the whole corpus and holds its bytes against the reference's under a ratchet |
 | Rust reads it | the cross-check, appended files and chunked-apart columns among them |
 | statistics | property tests against a naive per-row computation, at block and batch edges, for every dtype and validity shape |
 | formulas | the formula's cost equals the encoder's bytes, for every scheme on the corpus |
@@ -314,13 +314,14 @@ it can, or gives the column chunks of its own.
 ## 8. Choosing encodings ahead: the advisor
 
 The writer optimizes one thing per chunk, bytes, under rules that keep decoding fast. The
-measurements of [choose-encodings.md](../guide/choose-encodings.md) show where that is not what a
-caller wants: text that does not repeat goes to zstd, which a scan decodes three times slower than
-FSST and a take seventy times slower; a column whose values repeat across the file more than within
-a chunk cannot take a dictionary, which larger chunks would give it; and which is right turns on the
-storage under the file — below 200 to 360 MB/s the smaller file reads faster end to end — and on
-whether the file is scanned or read by row. None of that is the writer's to know; all of it is the
-caller's, or can be measured on the caller's data.
+measurements of [the encodings, column by column](../guide/benchmarks.md#encodings-column-by-column)
+show where that is not what a caller wants: text that does not repeat goes to zstd, which a scan
+decodes several times slower than FSST and a take far slower; a column whose values repeat across the
+file more than within a chunk cannot take a dictionary, which larger chunks would give it; and which
+is right turns on the storage under the file — below a few hundred MB/s the smaller file reads
+faster end to end — and on whether the file is scanned or read by row. None of that is the writer's
+to know; all of it is the caller's, or can be measured on the caller's data
+([choose-encodings.md](../guide/choose-encodings.md)).
 
 `VortexSession.AdviseAsync` measures it (`Advice/`): it takes a sample of the data, writes it under
 each choice that applies, reads it back, and ranks the choices by the cost of the reads the caller

@@ -119,8 +119,8 @@ The writer's schemes are named after algorithms, and editions constrain ids:
 A compression reaches every child: a list's elements, offsets and sizes, a struct's fields, an
 extension's storage, a dictionary's or a run's values. Validity bitmaps are one bit a row and stay
 plain. How the chooser prices each is [11-write-strategy.md](11-write-strategy.md) §3.4. Over the 856
-files of the conformance corpus, the writer's files are 0.650× the bytes of the reference's
-(`WrittenSizeTests`, which prints the files worst by bytes lost).
+files of the conformance corpus, the writer's files are smaller than the reference's, held under a
+ceiling by `WrittenSizeTests`, which prints the ratio and the files worst by bytes lost.
 
 ## 6. Edition targeting
 

@@ -1,7 +1,10 @@
 # Choose encodings
 
-What each compression profile and hint costs on ten million rows of common column shapes, and where
-the storage under a file, or the way a column is read, makes another choice the better one.
+What each compression profile and hint trades on common column shapes, and where the storage under a
+file, or the way a column is read, makes another choice the better one. The measurements are on the
+benchmark page: [every profile and hint on twenty column shapes](benchmarks.md#encodings-column-by-column)
+and [what the advice picks on them](benchmarks.md#what-the-advice-picks). This page says what they
+mean for a choice.
 
 ```csharp
 // The default: each chunk of each column takes the smallest encoding that decodes fast.
@@ -25,13 +28,12 @@ VortexWriteOptions repeating = new()
 };
 ```
 
-## How the figures were made
+## Reading the measurements
 
-One column of 10 000 000 rows per file, written under each configuration, then opened and read. A
-**scan** decodes every value to its plain form and reads it once; a **take** reads 1 000 rows spread
-over the file. Each figure is the median of three passes after a warm-up, on an Apple M4 Pro, with
-the file in the page cache. The volume only scales them: a column chooses its encoding chunk by
-chunk, so a million rows cost a tenth of these times and take the same encodings.
+Each shape is one column of ten million rows, written under each configuration, then opened and
+read: a **scan** decodes every value to its plain form and reads it once, a **take** reads a thousand
+rows spread over the file. A column chooses its encoding chunk by chunk, so the volume only scales
+the times.
 
 **Crosses at** is the storage throughput at which a configuration and `Auto` read the column whole
 in the same time, counting its bytes at that throughput and then its scan. Below it the smaller file
@@ -41,73 +43,56 @@ object store about 0.1.
 
 ## Integers
 
-| shape | `Auto` writes | B/value | scan | take | worth knowing |
-|---|---|---:|---:|---:|---|
-| a sequence | a progression | 0.00 | 3.1 ms | 1.0 ms | |
-| sorted, runs of 1 000 | runs | 0.01 | 3.3 ms | 1.2 ms | |
-| timestamps: milliseconds, increasing, jittered | bit-packing | 3.38 | 7.2 ms | 1.6 ms | zstd, what `Smallest` writes: 2.07 B/value, scan 55 ms, take 45 ms; crosses at 271 MB/s |
-| random in 0..999 | bit-packing | 1.25 | 5.3 ms | 1.5 ms | |
-| 16 distinct, random order | a dictionary | 0.51 | 6.2 ms | 1.4 ms | |
-| 100 003 distinct, repeating | bit-packing | 4.63 | 6.9 ms | 1.6 ms | 16 MiB chunks: a dictionary, 2.36 B/value, scan 7.0 ms |
-| uniform over 64 bits | the plain form | 8.00 | 5.4 ms | 1.2 ms | |
-| random in 0..999, one row in ten null | bit-packing | 1.38 | 6.3 ms | 1.5 ms | a `Dictionary` hint: 1.27 B/value, scan 7.6 ms |
+Bit-packing, runs, a progression and a dictionary each scan within about twice the time of the plain
+column and take a row as cheaply. Zstd frames are the exception, an order of magnitude slower to scan
+and far slower to take from where the values do not come in runs: where zstd is not the smallest
+form, `Auto` never writes it. On increasing timestamps it is the smallest, and `Smallest` takes it,
+for a scan more than ten times as long: worth it only from storage slower than its crossing, a few
+hundred MB/s.
 
-The plain column scans in about 6 ms, and every form above within one and a half times of it. A
-zstd frame is the exception, at 55 to 100 ms a column where the values do not come in runs: where it
-is not the smallest, as on every integer shape but the timestamps, `Auto` never writes one.
+A column whose values repeat across the file more than within a chunk, 100 003 values over ten
+million rows, takes a dictionary only in larger chunks: at 16 MiB it halves the bytes, for a
+somewhat slower scan. On the nullable integers a `Dictionary` hint saves a few percent of the bytes
+bit-packing leaves, for a slower scan.
 
 ## Floating point
 
-| shape | `Auto` writes | B/value | scan | take | worth knowing |
-|---|---|---:|---:|---:|---|
-| prices, two decimals | ALP | 2.50 | 8.2 ms | 1.7 ms | |
-| 16 distinct, random order | a dictionary | 0.51 | 5.3 ms | 1.4 ms | |
-| 1 000 distinct prices | a dictionary | 1.28 | 5.9 ms | 2.1 ms | |
-| 100 003 distinct, repeating | zstd | 1.69 | 58 ms | 47 ms | 16 MiB chunks: a dictionary, 2.21 B/value, scan 9.6 ms, take 4.5 ms; crosses at 109 MB/s |
-| uniform in [0, 1) | ALP-RD | 6.91 | 12.8 ms | 3.5 ms | the plain form: 8.00 B/value, scan 5.5 ms; crosses at 1.5 GB/s |
+Prices take ALP, and a few distinct values a dictionary, each within a few times the plain scan.
+Uniform doubles take ALP-RD, which the plain form beats end to end from storage faster than about
+2 GB/s.
 
-The repeating column is the one to look at twice. Its values come back every 100 003 rows, and a
-chunk of the default size holds 131 072 of them: a dictionary would store nearly every value once
-per chunk, so zstd, which finds the repeats anyway, is the smallest. Chunks of 16 MiB hold enough
-repeats for the dictionary to pay: a scan then takes a sixth of the frames' time and a take a
-tenth, for a file 31 % larger.
+The repeating column is the one to look at twice. Its values come back every 100 003 rows, about as
+many as a chunk of the default size holds: a dictionary would store nearly every value once per
+chunk, so zstd, which finds the repeats anyway, is the smallest. Chunks of 16 MiB hold enough repeats
+for the dictionary to pay: a scan and a take then cost a small fraction of the frames', for a file a
+third larger.
 
 ## Text
 
-| shape | `Auto` writes | B/value | scan | take | worth knowing |
-|---|---|---:|---:|---:|---|
-| 16 city names, random order | a dictionary | 0.51 | 8.0 ms | 1.6 ms | |
-| 10 000 distinct ids | a dictionary | 2.54 | 36 ms | 32 ms | 16 MiB chunks: 1.80 B/value, scan 12.2 ms, take 9.2 ms, written faster |
-| the same, one row in ten null | a dictionary | 2.45 | 41 ms | 34 ms | 16 MiB chunks: 1.80 B/value, scan 13.9 ms, take 8.3 ms |
-| unique UUIDs | zstd | 20.61 | 311 ms | 315 ms | FSST: 24.91 B/value, scan 120 ms, take 4.1 ms; crosses at 226 MB/s |
-| log lines, about 100 bytes | zstd | 13.71 | 415 ms | 335 ms | FSST: 23.96 B/value, scan 134 ms, take 4.5 ms; crosses at 365 MB/s |
-
 Text is where the choice matters most. On values that do not repeat, `Auto` writes zstd frames, the
-smallest form, and FSST then scans in a third to two fifths of their time; a take costs the frames
-about what a scan costs them, because each row it wants sits in a frame that is inflated whole. FSST
-is 21 to 75 % larger here and reads a row at a time: from anything faster than 226 to 365 MB/s it is
-also the faster file to scan, and a take costs it about 1.3 % of the frames' time. A column read by
-row, or from a local drive, wants the `Fsst` hint.
+smallest form, and FSST then scans in a fraction of their time; a take costs the frames about what a
+scan costs them, because each row it wants sits in a frame that is inflated whole, where FSST reads
+a row at a time. FSST is the larger file here: from storage faster than its crossing, a few hundred
+MB/s, it is also the faster file to scan. A column read by row, or from a local drive, wants the
+`Fsst` hint.
 
-The ids show the other lever. A dictionary of 10 000 entries stored again in each of 306 chunks is
-most of what the column costs to read; in chunks of 16 MiB it is stored eighteen times, and the
-column is smaller, faster to scan and faster to write.
+The ids show the other lever. A dictionary of 10 000 entries stored again in every chunk is most of
+what the column costs to read; in chunks of 16 MiB it is stored far fewer times, and the column is
+smaller, faster to scan and faster to write.
 
 ## Booleans
 
-| shape | `Auto` writes | B/value | scan | take | worth knowing |
-|---|---|---:|---:|---:|---|
-| half true | a bitmap | 0.13 | 0.2 ms | 0.6 ms | |
-| 1 % true | runs | 0.05 | 2.2 ms | 5.5 ms | the bitmap, `None`: 0.13 B/value, scan 0.2 ms, take 0.7 ms; crosses at 357 MB/s |
+Booleans half true stay a bitmap. Rare trues take runs, smaller than the bitmap and slower to scan:
+from anything but slow storage the bitmap, which `None` keeps, reads faster.
 
 ## The profiles side by side
 
-On these twenty columns, `Fastest` chose what `Auto` chose every time, and wrote no index. `Smallest`
-chose the same as well, but for a chunk here and there and the timestamps, where zstd saves 39 % for
-a scan nearly eight times as long; it wrote up to six times slower than `Auto`, since it tries every
-scheme on every chunk: 3.2 s for the ten million log lines against 1.4 s. `None` writes the plain form, which scans
+`Fastest` chooses what `Auto` chooses on these shapes, and writes no index. `Smallest` tries every
+scheme on every chunk and writes several times slower than `Auto`, for a smaller file where one
+exists: the timestamps' zstd, a chunk here and there. `None` writes the plain form, which scans
 fastest when the storage is fast enough to deliver its bytes, 8 per value for a number and as many
-as the text holds, and is the largest file every time.
+as the text holds, and is the largest file every time. The benchmark page counts them under
+[the encodings, column by column](benchmarks.md#encodings-column-by-column).
 
 ## What to steer, and with what
 
@@ -121,14 +106,14 @@ as the text holds, and is the largest file every time.
   them fetches; `ChunkTargetBytes` sets them for the whole file
   ([blocks-and-chunks.md](blocks-and-chunks.md)).
 * **What a hint cannot do.** A hint is tried first and falls back when it does not apply: a
-  `Dictionary` hint on the repeating floats still gave zstd, because a chunk held too few repeats
+  `Dictionary` hint on the repeating floats still gives zstd, because a chunk holds too few repeats
   for a dictionary to pay ([writer-options.md](writer-options.md)).
 * **All of it at once, on your data**: the advice below measures these levers for your columns and
   your reads, and returns the options that pull them.
 
 ## Let your data choose
 
-The tables above measure twenty shapes on one machine. `VortexSession.AdviseAsync` makes the same
+The benchmark page measures twenty shapes on one machine. `VortexSession.AdviseAsync` makes the same
 measurements on your data and your machine, and ranks every way to write each column for the reads
 you describe:
 
@@ -167,32 +152,17 @@ lookup times, its cost, and the throughput at which it and the recommended one c
 `ToWriteOptions` returns the hints, each column's chunk target and the profile, over a baseline of
 yours.
 
-On the twenty shapes above, the advice departs from `Auto` here and nowhere else:
+[What the advice picks](benchmarks.md#what-the-advice-picks) on the benchmark page's twenty shapes
+falls where the tables' crossings put it, and compares every candidate with every other, where the
+tables compare each with `Auto`. So it can find the plain form ahead of FSST for text scanned from
+fast storage, the plain form being larger and faster to decode; under the bytes alone, a dictionary
+a few percent smaller than what `Smallest` alone takes; and for rows read one at a time, zstd, which
+reaches a row by inflating only the frame that holds it.
 
-| shape | scans at 2 GB/s | at 100 MB/s | at 10 GB/s | a row in 1 000 read by row | the bytes |
-|---|---|---|---|---|---|
-| timestamps | | `Zstd` | | `Zstd` | |
-| 100 003 distinct integers, repeating | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | | 16 MiB chunks |
-| integers in 0..999, one in ten null | | `Dictionary` | | `Dictionary` | `Dictionary` |
-| 100 003 distinct floats, repeating | 16 MiB chunks | | `Canonical` | | |
-| uniform floats | | | `Canonical` | | |
-| 10 000 distinct ids, with or without nulls | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | `Zstd` | 16 MiB chunks |
-| unique UUIDs | `Canonical` | | `Canonical` | `Fsst` | |
-| log lines | `Fsst` | | `Canonical` | `Fsst` | |
-| booleans, 1 % true | `Canonical` | | `Canonical` | | |
-
-It falls where the tables' crossings put it, and it compares every candidate with every other,
-where the tables compare each with `Auto`. So it finds the plain form ahead of FSST for UUIDs read
-at 2 GB/s: 36 bytes a value, read in 18 ns and decoded in 2.5, against 25 bytes read in 12.5 ns and
-decoded in 11; the two cross at 1.3 GB/s. Under the bytes alone it finds the dictionary that saves
-8 % on the nullable integers, which `Smallest` alone does not take. And read by row, the timestamps
-and the ids take zstd, which reaches a row by inflating only the frame that holds it: 45 to 63 µs a
-lookup.
-
-* **It is a measurement.** A column costs 0.3 to 3.5 s on the machine above: run it once for a
-  kind of data, keep the options, and run it again when the data or the machine changes. Under the
-  JIT, it first waits for the runtime to finish compiling the decoders it times, up to 3 s a
-  column; a process whose other threads keep compiling is measured on the code it runs then.
+* **It is a measurement.** A column costs seconds: run it once for a kind of data, keep the
+  options, and run it again when the data or the machine changes. Under the JIT, it first waits for
+  the runtime to finish compiling the decoders it times, up to 3 s a column; a process whose other
+  threads keep compiling is measured on the code it runs then.
 * **The decode is timed on one thread.** A scan decoding on several shares the storage between
   them: give `StorageBytesPerSecond` divided by the threads.
 * **A chunk target is the column's.** A column that wants 16 MiB chunks gets them alone, through
@@ -200,21 +170,25 @@ lookup.
 
 ## Watch out
 
-* **These are one machine's times**, with the file in the page cache. The bytes carry to any
-  machine, and so do the ratios between the scans; where a choice crosses scales with the machine's
-  decode speed.
-* **A take pays per block it touches.** The thousand rows above touch every chunk of the file, which
-  is the worst case for a frame and a large dictionary alike; rows that sit together cost far less.
-* **The report says what each chunk became**: `WriteReport.Columns[i].Encodings`, as the second
-  column of the tables above.
+* **The benchmark page's times are one machine's**, with the file in the page cache. The bytes carry
+  to any machine, and so do the ratios between the scans; where a choice crosses scales with the
+  machine's decode speed.
+* **A take pays per block it touches.** The thousand rows measured touch every chunk of the file,
+  which is the worst case for a frame and a large dictionary alike; rows that sit together cost far
+  less.
+* **The report says what each chunk became**: `WriteReport.Columns[i].Encodings`, as the *written
+  as* column of the benchmark page's tables.
 
 ## Run it
 
+The benchmark page's two sections are regenerated by
+
 ```
-DOTNET_TieredCompilation=0 dotnet run -c Release --project bench/Vorticity.Benchmarks -- --tradeoffs
+DOTNET_TieredCompilation=0 dotnet run -c Release --project bench/Vorticity.Benchmarks -- --tradeoffs --out docs/guide/benchmarks.md
+DOTNET_TieredCompilation=0 dotnet run -c Release --project bench/Vorticity.Benchmarks -- --tradeoffs --advise --out docs/guide/benchmarks.md
 ```
 
 `--rows N` changes the volume, and words after it pick columns by name: `-- --tradeoffs --rows
-1000000 utf8` runs the text columns on a million rows. It writes its tables in Markdown; the figures
-above come from it, the 16 MiB chunks from its columns named `distinct`. `--advise` runs the advice
-on each column instead, under the five goals of the table above, with the choice and its reason.
+1000000 utf8` runs the text columns on a million rows and prints their tables without touching the
+page. `--advise` runs the advice on each column under the five goals, with the choice and its
+reason.

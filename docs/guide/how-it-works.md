@@ -138,7 +138,7 @@ The design documents beside this guide say why, in far more depth than a page he
 | [13-dataset.md](../design/13-dataset.md) | the versioned dataset |
 | [14-public-api.md](../design/14-public-api.md) | the rules the public surface follows, and where each part lives |
 | [90-registry.md](../design/90-registry.md) | every encoding, layout and column type, and its state |
-| [05-benchmarks.md](../design/05-benchmarks.md) | performance against the Rust implementation |
+| [05-benchmarks.md](../design/05-benchmarks.md) | how performance is measured against the Rust implementation, whose figures are on [benchmarks.md](benchmarks.md) |
 
 ## Run it
 

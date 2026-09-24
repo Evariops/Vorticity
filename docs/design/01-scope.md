@@ -99,7 +99,7 @@ top of that:
 | every corpus file Rust wrote is read value for value | the conformance corpus, 856 files over seven editions ([04-conformance.md](04-conformance.md) §3) |
 | Rust reads every file this library writes | the cross-check in CI ([04-conformance.md](04-conformance.md) §4) |
 | a scan allocates nothing per batch in steady state | allocation ratchets in the test suite ([05-benchmarks.md](05-benchmarks.md) §5) |
-| a full scan within 2× of Rust's time, a decoder within 1.5×, files no larger than 105 % of Rust's | the benchmark gates; measured 0.33×, a median of 0.59× per decoder, and 0.650× the bytes ([05-benchmarks.md](05-benchmarks.md) §1) |
+| a full scan within 2× of Rust's time, a decoder within 1.5×, files no larger than 105 % of Rust's | the benchmark gates, and `WrittenSizeTests` for the bytes ([05-benchmarks.md](05-benchmarks.md) §1); where each stands is on [the benchmark page](../guide/benchmarks.md) |
 | pruning never removes a row a full scan returns | every filter test run with pruning and indexes on and off ([08-semantics.md](08-semantics.md) §1) |
 | malformed input fails with a clean exception, never a crash, a hang or an unbounded allocation | parser fuzzing in CI and the resource caps ([08-semantics.md](08-semantics.md) §6) |
 | Native AOT and trimming, no reflection | `vxdump` published ahead of time over the corpus in CI |

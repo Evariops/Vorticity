@@ -108,4 +108,4 @@ VX0002 for the row encoding, which a project acknowledges before it builds.
 | [observability.md](observability.md) | the meter, the activities and the per-scan statistics, and what each number diagnoses |
 | [native-aot.md](native-aot.md) | publish an application that uses this library ahead of time |
 | [how-it-works.md](how-it-works.md) | the shape of the library in two pages, and where to read further |
-| [benchmarks.md](benchmarks.md) | what this costs against the Rust implementation, on published scenarios |
+| [benchmarks.md](benchmarks.md) | every figure the bench publishes: what this costs against the Rust implementation, and each kernel against the loop it replaced |
