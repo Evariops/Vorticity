@@ -468,6 +468,12 @@ internal static class FastLanes
     /// <param name="offset">The row of the first block that is row 0 of <paramref name="wanted"/>.</param>
     /// <param name="wanted">The rows, in any order; rows of one block next to each other read it once.</param>
     /// <param name="destination">One value per wanted row.</param>
+    /// <remarks>
+    /// The scratch block is written whole before it is read and the reads one by one never touch
+    /// it, so it is not zeroed: a take of a row or two a block would clear its 8 KiB for nothing at
+    /// every call.
+    /// </remarks>
+    [SkipLocalsInit]
     internal static void GatherRows<T>(
         ReadOnlySpan<T> packed, int bitWidth, int offset, ReadOnlySpan<int> wanted, Span<T> destination)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
