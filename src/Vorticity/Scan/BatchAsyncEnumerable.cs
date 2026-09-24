@@ -267,7 +267,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly BlockMask? _live;
     private readonly ScanMetrics? _metrics;
     private readonly CancellationToken _token;
-    private readonly Lane[] _lanes;
+    private readonly Lane?[] _lanes;
     private readonly ScanSegments _segments;
     private readonly RetainedChunks _retained;
     private readonly bool _sinkDecodes;
@@ -348,19 +348,32 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _decodedBlocks = new BlockTally(blockRows);
         _prunedBlocks = new BlockTally(blockRows);
 
+        // The first lane now, the others at the first split they are given: a take's window is
+        // wider than the splits of a small one.
         _free = degree;
-        _lanes = new Lane[window];
-        for (int i = 0; i < window; i++)
-        {
-            _lanes[i] = new Lane(ScanContexts.Rent(file));
-            // The mask, the metrics sink and the encoded delivery outlive every batch of the scan,
-            // so they are set once here and never by `ResetBatch`; the readers read the mask in
-            // file coordinates and add what they materialize to the sink.
-            _lanes[i].Context.LiveBlocks = live;
-            _lanes[i].Context.Metrics = metrics;
-            _lanes[i].Context.KeepEncodings = keepEncodings;
-            _lanes[i].Context.ShareRetained(_retained);
-        }
+        _lanes = new Lane?[window];
+        _lanes[0] = NewLane(file, live, metrics, keepEncodings);
+    }
+
+    /// <summary>A lane on a context of its own, bound to what outlives every batch of the scan.</summary>
+    private Lane NewLane(VortexFile file, BlockMask? live, ScanMetrics? metrics, bool keepEncodings)
+    {
+        // The mask, the metrics sink and the encoded delivery outlive every batch of the scan, so
+        // they are set once here and never by `ResetBatch`; the readers read the mask in file
+        // coordinates and add what they materialize to the sink.
+        ScanContext context = ScanContexts.Rent(file);
+        context.LiveBlocks = live;
+        context.Metrics = metrics;
+        context.KeepEncodings = keepEncodings;
+        context.ShareRetained(_retained);
+        return new Lane(context);
+    }
+
+    /// <summary>Another lane, bound as the first one is.</summary>
+    private Lane NextLane()
+    {
+        ScanContext first = _lanes[0]!.Context;
+        return NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
     }
 
     /// <summary>
@@ -407,12 +420,22 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return new ValueTask<bool>(false);
         }
 
-        Lane lane = _lanes[0];
+        Lane lane = _lanes[0]!;
         lane.Rows = split;
         _currentLane = lane;
         lane.Sequence = _started++;
         lane.Context.Batch = lane.Sequence;
-        SplitExecution.Window(lane.Context, _cursor.Plan, split);
+
+        // A take's split is a window of its own, as on the lanes: it spans the zones holding its
+        // rows, and a window of the plan's would be decoded over the zones between them.
+        if (_take is not null && !_filterProven)
+        {
+            SplitExecution.Alone(lane.Context, split);
+        }
+        else
+        {
+            SplitExecution.Window(lane.Context, _cursor.Plan, split);
+        }
 
         bool read;
         try
@@ -555,12 +578,48 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 {
                     Widen(ref split);
                 }
+                else if (_take is not null && !_filterProven)
+                {
+                    WidenTake(ref split);
+                }
 
                 return true;
             }
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Extends a split of a take over the splits after it that hold taken rows too, up to the end
+    /// of the window the plan puts it in, so the run is read as one batch.
+    /// </summary>
+    /// <remarks>
+    /// A take is cut zone by zone so that a zone holding none of its rows is neither read nor
+    /// decoded, which leaves a sparse take a split per row or two, each paying a batch, a walk of
+    /// the layout and a trip through the lanes. Consecutive zones that hold taken rows read the
+    /// same chunks, the plan's spans ending where any column's chunk does, and decode the same
+    /// rows or frames as one split or as several, so they are one; the first zone without a taken
+    /// row ends the run, as the window does.
+    /// </remarks>
+    private void WidenTake(ref RowRange split)
+    {
+        RowSelection take = _take!;
+        _cursor.Plan.WindowOf(split.Start, out int lead, out int span);
+        long end = split.Start - lead + span;
+        while (true)
+        {
+            SplitCursor probe = _cursor;
+            if (!probe.TryNext(out RowRange next) || next.Start != split.End || next.End > end ||
+                !take.Touches(next) || (_live is not null && !_live.AnyLive(next)))
+            {
+                return;
+            }
+
+            NotePruned(next);
+            split = new RowRange(split.Start, next.End);
+            _cursor = probe;
+        }
     }
 
     /// <summary>
@@ -1212,7 +1271,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return false;
         }
 
-        Lane lane = _lanes[(int)(_delivered % _lanes.Length)];
+        Lane lane = _lanes[(int)(_delivered % _lanes.Length)]!;
         _delivered++;
 
         int root;
@@ -1263,7 +1322,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 break;
             }
 
-            Lane lane = _lanes[(int)(assigned % window)];
+            Lane lane = _lanes[(int)(assigned % window)] ??= NextLane();
             lane.Rows = split;
             lane.Sequence = assigned;
             lane.Assign(this);
@@ -1277,7 +1336,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             while (_free > 0 && _queued > 0)
             {
                 _free--;
-                _lanes[(int)((_started - _queued) % window)].Go();
+                _lanes[(int)((_started - _queued) % window)]!.Go();
                 _queued--;
             }
         }
@@ -1293,7 +1352,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             if (_queued > 0)
             {
-                _lanes[(int)((_started - _queued) % _lanes.Length)].Go();
+                _lanes[(int)((_started - _queued) % _lanes.Length)]!.Go();
                 _queued--;
             }
             else
@@ -1389,7 +1448,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         {
             for (long split = _started - _queued; split < _started; split++)
             {
-                _lanes[(int)(split % _lanes.Length)].Running = false;
+                _lanes[(int)(split % _lanes.Length)]!.Running = false;
             }
 
             _started -= _queued;
@@ -1398,8 +1457,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         for (int i = 0; i < _lanes.Length; i++)
         {
-            Lane lane = _lanes[i];
-            if (!lane.Running)
+            if (_lanes[i] is not { Running: true } lane)
             {
                 continue;
             }
@@ -1424,7 +1482,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         for (int i = 0; i < _lanes.Length; i++)
         {
-            if (_lanes[i].Running)
+            if (_lanes[i] is { Running: true })
             {
                 return true;
             }
@@ -1492,8 +1550,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         for (int i = 0; i < _lanes.Length; i++)
         {
-            _lanes[i].Stop();
-            ScanContexts.Return(_lanes[i].Context);
+            if (_lanes[i] is { } lane)
+            {
+                lane.Stop();
+                ScanContexts.Return(lane.Context);
+            }
         }
 
         // Once no lane runs: the held segments and the retained chunks carry references of their own.

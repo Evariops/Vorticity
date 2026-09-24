@@ -428,10 +428,90 @@ internal sealed class FlatLayoutReader : LayoutReader
             return true;
         }
 
-        int decoded = DecodedDirect(in root, in node, in fields, context, total, from, spanned);
-        result = Narrowed(
-            spanned == context.SelectionCount ? decoded : GatherRebased(context, decoded, from), in fields, context);
+        result = Narrowed(DecodedSelection(in root, in node, in fields, context, total, from, spanned), in fields, context);
         return true;
+    }
+
+    /// <summary>
+    /// Selected rows further apart than this are decoded as two ranges rather than one: past two
+    /// blocks between them, the one range would decode more rows nobody asked for than a second
+    /// range costs.
+    /// </summary>
+    private const int ClusterGap = 2 * Arrays.Decoders.Compressed.FastLanes.BlockSize;
+
+    /// <summary>
+    /// The selection's rows out of the range <c>[from, from + spanned)</c> it spans: that range
+    /// decoded, or each cluster of it when rows far apart leave most of it unwanted, a cluster
+    /// being rows closer than <see cref="ClusterGap"/>, its range decoded and gathered, and the
+    /// pieces joined in order.
+    /// </summary>
+    /// <remarks>
+    /// A take's batch spans the zones holding its rows, a row or two each, so the range its
+    /// selection spans is mostly the rows between them: an encoding that decodes a range and
+    /// cannot select would decode all of those, where each cluster costs it a block or so.
+    /// </remarks>
+    private static int DecodedSelection(
+        in ArrayNode root, in LayoutNode node, in FieldMask fields, ScanContext context, int total, int from, int spanned)
+    {
+        ReadOnlySpan<int> selection = context.Selection;
+        int clusters = 1;
+        for (int i = 1; i < selection.Length; i++)
+        {
+            clusters += selection[i] - selection[i - 1] >= ClusterGap ? 1 : 0;
+        }
+
+        if (clusters == 1)
+        {
+            int decoded = DecodedDirect(in root, in node, in fields, context, total, from, spanned);
+            return spanned == context.SelectionCount ? decoded : GatherRebased(context, decoded, from);
+        }
+
+        int[] parts = System.Buffers.ArrayPool<int>.Shared.Rent(clusters);
+        int[] local = System.Buffers.ArrayPool<int>.Shared.Rent(selection.Length);
+        uint? outer = context.Decode.BeginNodeCheckScope(node.Segments[0]);
+        try
+        {
+            int part = 0;
+            int first = 0;
+            for (int i = 1; i <= selection.Length; i++)
+            {
+                if (i < selection.Length && selection[i] - selection[i - 1] < ClusterGap)
+                {
+                    continue;
+                }
+
+                int start = selection[first];
+                int count = selection[i - 1] + 1 - start;
+                int wanted = i - first;
+                Decoded(context, count);
+                int decoded = DecodedRange(in root, in node, in fields, context, total, start, count);
+                if (wanted == count)
+                {
+                    parts[part++] = decoded;
+                }
+                else
+                {
+                    Span<int> rows = local.AsSpan(0, wanted);
+                    for (int k = 0; k < wanted; k++)
+                    {
+                        rows[k] = selection[first + k] - start;
+                    }
+
+                    parts[part++] = Compute.CanonicalFilter.Apply(context.Canonical, decoded, rows);
+                }
+
+                first = i;
+            }
+
+            return Arrays.Decoders.Canonical.CanonicalConcat.Concat(
+                context.Decode, context.Canonical.GetNode(parts[0]).DType, selection.Length, parts.AsSpan(0, clusters));
+        }
+        finally
+        {
+            context.Decode.EndNodeCheckScope(outer);
+            System.Buffers.ArrayPool<int>.Shared.Return(local);
+            System.Buffers.ArrayPool<int>.Shared.Return(parts);
+        }
     }
 
     /// <summary>
@@ -638,8 +718,48 @@ internal sealed class FlatLayoutReader : LayoutReader
             }
         }
 
-        ArrayNode wholeRoot = LoadRoot(in node, context);
+        // A batch over the whole node whose rows are a few clusters of it, which is what a take over
+        // the zones of a chunk asks: an encoding that decodes ranges and cannot select decodes the
+        // clusters rather than the node.
+        ArrayNode wholeRoot = default;
+        bool parsed = false;
+        if (Ranged(in node, context, ref wholeRoot, ref parsed) &&
+            !context.Decode.SelectsWithoutFullDecode(in wholeRoot) &&
+            Scattered(context, total) &&
+            context.TryGetSelectionBounds(out int first, out int last))
+        {
+            return Narrowed(
+                DecodedSelection(in wholeRoot, in node, in fields, context, total, first, last + 1 - first), in fields, context);
+        }
+
+        if (!parsed)
+        {
+            wholeRoot = LoadRoot(in node, context);
+        }
+
         return Push(in wholeRoot, in node, in fields, context, total);
+    }
+
+    /// <summary>
+    /// Whether the selection's clusters, decoded range by range, leave at least half of the
+    /// <paramref name="total"/> rows undecoded.
+    /// </summary>
+    private static bool Scattered(ScanContext context, int total)
+    {
+        ReadOnlySpan<int> selection = context.Selection;
+        if (selection.IsEmpty)
+        {
+            return false;
+        }
+
+        long covered = 1;
+        for (int i = 1; i < selection.Length; i++)
+        {
+            int gap = selection[i] - selection[i - 1];
+            covered += gap < ClusterGap ? gap : 1;
+        }
+
+        return 2 * covered <= total;
     }
 
     /// <summary>
