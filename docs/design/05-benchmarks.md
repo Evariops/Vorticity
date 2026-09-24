@@ -65,58 +65,63 @@ On one core:
 
 | action | file written by | Vorticity | Vortex Rust | ratio | GB/s, Vorticity / Rust | allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity | 0.2 ms | 0.7 ms | 0.32× | — | 21.0 KiB | 10 / 12 MiB |
-| `open` | Vortex Rust | 0.2 ms | 0.6 ms | 0.28× | — | 9.5 KiB | 10 / 11 MiB |
-| `scan` | Vorticity | 68.6 ms | 79.0 ms | 0.87× | 3.9 / 3.4 | 74.5 KiB | 36 / 29 MiB |
-| `scan` | Vortex Rust | 17.8 ms | 23.6 ms | 0.76× | 15.0 / 11.3 | 28.6 KiB | 89 / 57 MiB |
-| `project` | Vorticity | 1.5 ms | 4.2 ms | 0.35× | 56.9 / 20.1 | 76.8 KiB | 13 / 21 MiB |
-| `project` | Vortex Rust | 1.3 ms | 2.2 ms | 0.58× | 65.5 / 38.3 | 30.9 KiB | 11 / 13 MiB |
-| `filter-narrow` | Vorticity | 1.5 ms | 3.4 ms | 0.43× | 1.8 / 0.8 | 107.4 KiB | 14 / 23 MiB |
-| `filter-narrow` | Vortex Rust | 1.0 ms | 3.5 ms | 0.29× | 2.6 / 0.8 | 62.5 KiB | 16 / 28 MiB |
-| `filter-wide` | Vorticity | 35.2 ms | 43.1 ms | 0.82× | 3.8 / 3.1 | 107.4 KiB | 24 / 34 MiB |
-| `filter-wide` | Vortex Rust | 9.6 ms | 16.3 ms | 0.59× | 13.9 / 8.2 | 62.5 KiB | 53 / 53 MiB |
-| `take` | Vorticity | 53.1 ms | 58.4 ms | 0.91× | — | 98.2 KiB | 34 / 29 MiB |
-| `take` | Vortex Rust | 5.7 ms | 12.3 ms | 0.47× | — | 52.3 KiB | 35 / 52 MiB |
-| `write` | Vorticity | 292.7 ms | 577.7 ms | 0.51× | 0.9 / 0.5 | 95.7 KiB | 41 / 428 MiB |
-| `write` | Vortex Rust | 248.7 ms | 516.1 ms | 0.48× | 1.1 / 0.5 | 49.8 KiB | 97 / 375 MiB |
+| `open` | Vorticity | 0.2 ms | 0.6 ms | 0.29× | — | 21.0 KiB | 10 / 12 MiB |
+| `open` | Vortex Rust | 0.2 ms | 0.6 ms | 0.30× | — | 9.5 KiB | 10 / 11 MiB |
+| `scan` | Vorticity | 69.1 ms | 79.1 ms | 0.87× | 3.9 / 3.4 | 74.5 KiB | 36 / 29 MiB |
+| `scan` | Vortex Rust | 18.2 ms | 23.5 ms | 0.77× | 14.7 / 11.4 | 28.6 KiB | 89 / 57 MiB |
+| `project` | Vorticity | 1.6 ms | 3.9 ms | 0.40× | 53.6 / 21.6 | 76.8 KiB | 13 / 21 MiB |
+| `project` | Vortex Rust | 1.2 ms | 2.0 ms | 0.61× | 67.5 / 41.3 | 30.8 KiB | 11 / 13 MiB |
+| `filter-narrow` | Vorticity | 1.6 ms | 3.4 ms | 0.46× | 1.7 / 0.8 | 107.4 KiB | 14 / 23 MiB |
+| `filter-narrow` | Vortex Rust | 1.2 ms | 3.4 ms | 0.36× | 2.2 / 0.8 | 62.5 KiB | 17 / 28 MiB |
+| `filter-wide` | Vorticity | 35.2 ms | 43.5 ms | 0.81× | 3.8 / 3.1 | 107.4 KiB | 24 / 33 MiB |
+| `filter-wide` | Vortex Rust | 9.7 ms | 15.6 ms | 0.62× | 13.8 / 8.6 | 62.5 KiB | 53 / 53 MiB |
+| `take` | Vorticity | 51.9 ms | 58.5 ms | 0.89× | — | 98.2 KiB | 34 / 29 MiB |
+| `take` | Vortex Rust | 2.9 ms | 12.7 ms | 0.23× | — | 52.3 KiB | 37 / 52 MiB |
+| `write` | Vorticity | 295.0 ms | 585.4 ms | 0.50× | 0.9 / 0.5 | 95.7 KiB | 41 / 429 MiB |
+| `write` | Vortex Rust | 250.6 ms | 513.8 ms | 0.49× | 1.1 / 0.5 | 49.8 KiB | 97 / 376 MiB |
 
 On all fourteen cores:
 
 | action | file written by | Vorticity | Vortex Rust | ratio | GB/s, Vorticity / Rust | allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity | 0.2 ms | 0.8 ms | 0.24× | — | 21.0 KiB | 10 / 12 MiB |
+| `open` | Vorticity | 0.2 ms | 0.8 ms | 0.25× | — | 21.0 KiB | 10 / 12 MiB |
 | `open` | Vortex Rust | 0.2 ms | 0.8 ms | 0.24× | — | 9.5 KiB | 10 / 12 MiB |
-| `scan` | Vorticity | 9.3 ms | 13.2 ms | 0.70× | 28.8 / 20.3 | 108.3 KiB | 62 / 76 MiB |
-| `scan` | Vortex Rust | 5.7 ms | 9.3 ms | 0.61× | 46.5 / 28.6 | 53.1 KiB | 159 / 89 MiB |
-| `project` | Vorticity | 1.3 ms | 4.2 ms | 0.30× | 65.9 / 20.1 | 95.7 KiB | 20 / 46 MiB |
-| `project` | Vortex Rust | 1.1 ms | 2.2 ms | 0.51× | 73.6 / 37.5 | 46.0 KiB | 25 / 23 MiB |
-| `filter-narrow` | Vorticity | 1.2 ms | 3.8 ms | 0.33× | 2.2 / 0.7 | 111.9 KiB | 15 / 28 MiB |
-| `filter-narrow` | Vortex Rust | 1.1 ms | 3.8 ms | 0.30× | 2.3 / 0.7 | 96.4 KiB | 17 / 34 MiB |
-| `filter-wide` | Vorticity | 5.7 ms | 9.4 ms | 0.60× | 23.6 / 14.1 | 133.2 KiB | 52 / 68 MiB |
-| `filter-wide` | Vortex Rust | 4.4 ms | 8.5 ms | 0.52× | 30.3 / 15.6 | 89.0 KiB | 121 / 89 MiB |
-| `take` | Vorticity | 9.9 ms | 9.8 ms | 1.00× | — | 127.1 KiB | 36 / 56 MiB |
-| `take` | Vortex Rust | 3.1 ms | 6.6 ms | 0.47× | — | 70.2 KiB | 36 / 78 MiB |
-| `write` | Vorticity | 92.4 ms | 104.7 ms | 0.88× | 2.9 / 2.5 | 2.6 MiB | 74 / 530 MiB |
-| `write` | Vortex Rust | 88.7 ms | 100.3 ms | 0.89× | 3.0 / 2.7 | 2.6 MiB | 173 / 540 MiB |
+| `scan` | Vorticity | 8.6 ms | 12.2 ms | 0.70× | 31.2 / 21.8 | 108.5 KiB | 62 / 74 MiB |
+| `scan` | Vortex Rust | 5.5 ms | 9.4 ms | 0.59× | 48.2 / 28.3 | 53.7 KiB | 159 / 93 MiB |
+| `project` | Vorticity | 1.2 ms | 4.2 ms | 0.29× | 69.7 / 20.0 | 95.2 KiB | 20 / 45 MiB |
+| `project` | Vortex Rust | 1.1 ms | 2.2 ms | 0.52× | 72.9 / 37.6 | 47.5 KiB | 25 / 24 MiB |
+| `filter-narrow` | Vorticity | 1.1 ms | 3.7 ms | 0.31× | 2.3 / 0.7 | 109.5 KiB | 15 / 28 MiB |
+| `filter-narrow` | Vortex Rust | 1.1 ms | 3.6 ms | 0.31× | 2.3 / 0.7 | 64.2 KiB | 17 / 34 MiB |
+| `filter-wide` | Vorticity | 4.9 ms | 8.9 ms | 0.55× | 27.2 / 14.9 | 133.8 KiB | 49 / 69 MiB |
+| `filter-wide` | Vortex Rust | 4.5 ms | 8.6 ms | 0.53× | 29.6 / 15.6 | 343.2 KiB | 121 / 96 MiB |
+| `take` | Vorticity | 6.7 ms | 9.0 ms | 0.74× | — | 162.3 KiB | 46 / 57 MiB |
+| `take` | Vortex Rust | 2.0 ms | 6.7 ms | 0.30× | — | 113.8 KiB | 39 / 78 MiB |
+| `write` | Vorticity | 88.1 ms | 100.7 ms | 0.87× | 3.0 / 2.7 | 2.7 MiB | 74 / 520 MiB |
+| `write` | Vortex Rust | 87.4 ms | 101.1 ms | 0.86× | 3.1 / 2.6 | 2.6 MiB | 173 / 534 MiB |
 
-* **Vorticity takes less time on 54 of the 56 rows the benchmark page compares**, at 2^20 rows and
-  at ten times that, on one core and on fourteen. The two others are a take of a thousand rows from
-  the file our writer made: 1.07× at 2^20 rows on one core, 1.00× at ten times that on fourteen.
-  Every row taken inflates the zstd frame that holds its `value`.
-* **On fourteen cores** a scan of our file goes from 68.6 to 9.3 ms, and Rust's from 79.0 to 13.2; a
-  write from 292.7 to 92.4 ms, and Rust's from 577.7 to 104.7. Our writer summarizes its columns and
-  compresses its zstd frames on every core, and chooses and writes the encodings on one.
-* **Peak memory** is lower than Rust's on every write, 41 against 428 MiB on one core, and higher on
+* **Vorticity takes less time on 55 of the 56 rows the benchmark page compares**, at 2^20 rows and
+  at ten times that, on one core and on fourteen. The other is a take of a thousand rows from the
+  file our writer made, at 2^20 rows on one core: 1.04×. Every row taken inflates the zstd frame
+  that holds its `value`, 64 KiB for one value, and the inflating is nearly all of the take.
+* **On fourteen cores** a scan of our file goes from 69.1 to 8.6 ms, and Rust's from 79.1 to 12.2; a
+  take from 51.9 to 6.7 ms, and Rust's from 58.5 to 9.0; a write from 295.0 to 88.1 ms, and Rust's
+  from 585.4 to 100.7. A take keeps three splits a lane decoded ahead of its consumer, so the lanes
+  that finish first do not wait for the slowest; our writer summarizes its columns and compresses
+  its zstd frames on every core, and chooses and writes the encodings on one.
+* **Peak memory** is lower than Rust's on every write, 41 against 429 MiB on one core, and higher on
   the scans of Rust's file.
-* **Allocations**: a read allocates 9 to 134 KiB a call, on one core as on fourteen. The write on
-  fourteen cores allocates 2.6 MiB, against 96 KiB on one: buffers rented from the shared array pool
-  on one thread and returned on another miss its per-thread caches. It is a known defect, not a cost
-  of the work.
+* **Allocations**: on one core a read allocates 9 to 107 KiB a call. On fourteen a take allocates
+  162 KiB, against 98 on one: its three lanes a core each run on a context and a dtype arena of
+  their own. There, too, buffers rented from the shared array pool on one thread and returned on
+  another miss its per-thread caches, so a call now and then allocates several times its median:
+  the wide filter over Rust's file read 343 KiB a call in this run, and the write allocates 2.7 MiB
+  against 96 KiB on one core. It is a known defect, not a cost of the work.
 * **Native AOT, and the JIT.** These figures are the native build's. On the JIT, a fresh process
   compiles the code the first time it runs it: 13 ms to open a file the native build opens in 0.2,
-  133 ms for the scan it does in 69. A process that stays up pays that once, and then reads the same
+  131 ms for the scan it does in 69. A process that stays up pays that once, and then reads the same
   ratios: a median of 0.58× per decoder in one process on the JIT (§4) against 0.59× native.
-  Starting a process is not in the figures: 18 ms for our native binary or Rust's, 45 on the JIT.
+  Starting a process is not in the figures: 24 ms for our native binary, 20 for Rust's, 55 on the
+  JIT.
 
 `append`, which Rust's harness has no entry point for, and the 2^20-row tables are on
 [the benchmark page](../guide/benchmarks.md).
@@ -133,33 +138,33 @@ million rows and six columns, and of fifty columns.
 
 | axis | Vorticity | Vortex Rust | ratio [95 %] |
 |---|---:|---:|---|
-| full scan | 564.2 µs | 1 700.8 µs | 0.331 [0.327; 0.335] |
-| projected scan, 1 of 5 columns | 111.7 µs | 250.4 µs | 0.442 [0.435; 0.450] |
-| open, footer only | 31.5 µs | 50.7 µs | 0.620 [0.617; 0.626] |
-| open to first batch | 100.1 µs | 1 093.2 µs | 0.091 [0.086; 0.095] |
-| read and write back | 5 192.1 µs | 13 259.6 µs | 0.384 [0.380; 0.406] |
-| filtered scan, 1 % band | 101.6 µs | 388.0 µs | 0.264 [0.261; 0.274] |
-| filtered scan, half the rows | 178.1 µs | 652.7 µs | 0.273 [0.268; 0.282] |
-| take, 64 rows from 64 splits | 355.6 µs | 1 573.6 µs | 0.227 [0.221; 0.227] |
-| key order, sorted column, 1 % band | 104.1 µs | 139.6 µs | 0.750 [0.723; 0.770] |
-| key order, uncorrelated column, 64 rows | 239.4 µs | 209.8 µs | 1.190 [1.155; 1.272] |
-| count, exact cover, 1 % band | 180.9 µs | 258.1 µs | 0.656 [0.633; 0.695] |
-| string equality over FSST | 362.1 µs | 387.6 µs | 0.935 [0.906; 0.999] |
-| string prefix over FSST | 861.2 µs | 694.5 µs | 1.250 [1.225; 1.284] |
-| string equality over a dictionary | 186.4 µs | 99.5 µs | 1.874 [1.818; 1.897] |
-| string prefix over a dictionary | 171.7 µs | 131.2 µs | 1.302 [1.280; 1.327] |
-| band over run-ends | 79.9 µs | 78.4 µs | 1.026 [1.000; 1.050] |
-| band over bit-packing | 96.9 µs | 85.6 µs | 1.078 [1.045; 1.123] |
-| full scan, 1M rows, 6 columns | 5 880.5 µs | 95 101.2 µs | 0.061 [0.057; 0.062] |
-| projected scan, 1 of 50 columns | 70.4 µs | 1 028.8 µs | 0.068 [0.065; 0.072] |
+| full scan | 633.9 µs | 1 979.0 µs | 0.334 [0.320; 0.340] |
+| projected scan, 1 of 5 columns | 102.5 µs | 256.5 µs | 0.393 [0.373; 0.411] |
+| open, footer only | 36.8 µs | 62.3 µs | 0.611 [0.575; 0.630] |
+| open to first batch | 110.5 µs | 1 233.7 µs | 0.091 [0.086; 0.094] |
+| read and write back | 5 815.7 µs | 15 207.5 µs | 0.382 [0.370; 0.390] |
+| filtered scan, 1 % band | 100.2 µs | 426.1 µs | 0.234 [0.228; 0.249] |
+| filtered scan, half the rows | 198.0 µs | 734.9 µs | 0.271 [0.265; 0.284] |
+| take, 64 rows from 64 splits | 410.2 µs | 1 784.3 µs | 0.230 [0.226; 0.236] |
+| key order, sorted column, 1 % band | 106.7 µs | 149.4 µs | 0.729 [0.690; 0.762] |
+| key order, uncorrelated column, 64 rows | 281.5 µs | 240.0 µs | 1.112 [1.073; 1.180] |
+| count, exact cover, 1 % band | 249.5 µs | 385.6 µs | 0.622 [0.597; 0.657] |
+| string equality over FSST | 334.3 µs | 379.6 µs | 0.892 [0.841; 0.929] |
+| string prefix over FSST | 938.0 µs | 759.2 µs | 1.232 [1.189; 1.297] |
+| string equality over a dictionary | 205.5 µs | 114.1 µs | 1.778 [1.671; 1.813] |
+| string prefix over a dictionary | 202.5 µs | 152.6 µs | 1.343 [1.320; 1.387] |
+| band over run-ends | 95.5 µs | 93.3 µs | 1.022 [0.996; 1.077] |
+| band over bit-packing | 105.3 µs | 100.5 µs | 1.057 [1.028; 1.104] |
+| full scan, 1M rows, 6 columns | 6 400.7 µs | 104 394.9 µs | 0.061 [0.059; 0.063] |
+| projected scan, 1 of 50 columns | 88.0 µs | 1 137.8 µs | 0.075 [0.073; 0.079] |
 
-* **Where Rust is ahead**: predicates on strings — equality over a dictionary (1.87×), a prefix over
-  a dictionary (1.30×) or over FSST (1.25×) — a band over bit-packed integers (1.08×), and 64 rows of
-  an uncorrelated column read in key order (1.19×).
+* **Where Rust is ahead**: predicates on strings — equality over a dictionary (1.78×), a prefix over
+  a dictionary (1.34×) or over FSST (1.23×) — a band over bit-packed integers (1.06×), and 64 rows
+  of an uncorrelated column read in key order (1.11×). A band over run-ends is even, 1.02×.
 * **`open to first batch` is a latency.** Rust's stream decodes the whole local scan at its first
-  poll, so its first batch costs 1.09 ms of the 1.70 its whole scan takes. The ratio is the time to
+  poll, so its first batch costs 1.23 ms of the 1.98 its whole scan takes. The ratio is the time to
   the first row, and nothing more.
-* **`read and write back` is over its ceiling**, 0.384 against 0.369: our writer regressed on this
+* **`read and write back` is over its ceiling**, 0.382 against 0.369: our writer regressed on this
   file, and it is not yet fixed.
 * The gate has six more axes: two time Rust's scan without decoding, which asks another question,
   and four read one file as each writer wrote it. [bench/README.md](../../bench/README.md)
@@ -173,36 +178,38 @@ process of its own, on one core, every value decoded to its plain form; a figure
 last 10 scans and of 3 processes, Native AOT against Rust's `vxbench` binary: what a decoder costs
 once warm.
 
-Vorticity decodes 50 of the 57 files in less time than Rust, with a median ratio of 0.59×. A
+Vorticity decodes 46 of the 57 files in less time than Rust, with a median ratio of 0.59×. A
 selection; [the benchmark page](../guide/benchmarks.md) has all 57:
 
 | encoding | stores | Vorticity, ns/row | Vortex Rust, ns/row | ratio | GB/s, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|
-| `primitive` | integers, plain | 0.05 | 0.32 | 0.15× | 164.9 / 25.4 |
-| `fastlanes_bitpacked` | integers, bit-packed | 0.21 | 0.19 | 1.12× | 18.9 / 21.2 |
-| `fastlanes_for` | integers, frame of reference | 0.45 | 0.48 | 0.93× | 17.7 / 16.5 |
-| `fastlanes_delta` | integers, deltas | 0.55 | 1.12 | 0.49× | 14.5 / 7.2 |
-| `fastlanes_rle` | integers, runs | 0.41 | 0.51 | 0.80× | 9.9 / 7.9 |
-| `runend` | integers, run ends | 0.17 | 0.17 | 1.00× | 23.9 / 23.9 |
-| `sequence` | integers, a progression | 0.12 | 0.12 | 0.96× | 67.8 / 64.8 |
-| `zigzag` | signed integers | 0.25 | 0.31 | 0.81× | 16.0 / 13.0 |
-| `pco` | integers, Pcodec | 0.42 | 1.66 | 0.25× | 19.2 / 4.8 |
-| `alp` | floats, decimal | 0.75 | 1.08 | 0.69× | 10.7 / 7.4 |
-| `alprd` | floats, real doubles | 0.96 | 0.87 | 1.10× | 8.3 / 9.1 |
-| `bool` | booleans | 0.04 | 0.06 | 0.70× | 3.0 / 2.1 |
-| `varbinview` | strings, plain | 3.78 | 61.4 | 0.06× | 3.6 / 0.2 |
-| `fsst` | strings, FSST | 6.40 | 5.75 | 1.11× | 8.8 / 9.7 |
-| `onpair` | strings, OnPair | 2.34 | 2.50 | 0.94× | 9.3 / 8.7 |
-| `dict` | strings, a dictionary of five | 0.46 | 0.51 | 0.90× | 13.0 / 11.7 |
-| `zstd` | zstd frames | 4.11 | 6.98 | 0.59× | 7.7 / 4.6 |
-| `list` | lists | 0.35 | 1.29 | 0.27× | 28.2 / 7.7 |
-| `struct` | a struct | 2.47 | 45.3 | 0.05× | 6.0 / 0.3 |
-| `table_mixed` | a table of six columns | 8.12 | 104.4 | 0.08× | 8.6 / 0.7 |
+| `primitive` | integers, plain | 0.05 | 0.35 | 0.13× | 170.2 / 22.7 |
+| `fastlanes_bitpacked` | integers, bit-packed | 0.25 | 0.22 | 1.14× | 15.8 / 18.0 |
+| `fastlanes_for` | integers, frame of reference | 0.60 | 0.60 | 1.01× | 13.3 / 13.4 |
+| `fastlanes_delta` | integers, deltas | 0.65 | 1.26 | 0.52× | 12.3 / 6.4 |
+| `fastlanes_rle` | integers, runs | 0.42 | 0.57 | 0.74× | 9.5 / 7.0 |
+| `runend` | integers, run ends | 0.16 | 0.17 | 0.94× | 25.3 / 23.7 |
+| `sequence` | integers, a progression | 0.13 | 0.13 | 1.03× | 61.3 / 63.2 |
+| `zigzag` | signed integers | 0.24 | 0.29 | 0.84× | 16.4 / 13.8 |
+| `pco` | integers, Pcodec | 0.43 | 1.63 | 0.27× | 18.5 / 4.9 |
+| `alp` | floats, decimal | 0.77 | 0.98 | 0.79× | 10.4 / 8.2 |
+| `alprd` | floats, real doubles | 1.05 | 0.81 | 1.29× | 7.6 / 9.9 |
+| `bool` | booleans | 0.04 | 0.06 | 0.76× | 2.9 / 2.2 |
+| `varbinview` | strings, plain | 3.67 | 61.5 | 0.06× | 3.7 / 0.2 |
+| `fsst` | strings, FSST | 6.76 | 5.69 | 1.19× | 8.3 / 9.8 |
+| `onpair` | strings, OnPair | 2.49 | 2.43 | 1.02× | 8.7 / 8.9 |
+| `dict` | strings, a dictionary of five | 0.56 | 0.49 | 1.14× | 10.8 / 12.3 |
+| `zstd` | zstd frames | 4.09 | 7.00 | 0.58× | 7.8 / 4.5 |
+| `list` | lists | 0.38 | 1.46 | 0.26× | 26.7 / 6.8 |
+| `struct` | a struct | 2.77 | 46.2 | 0.06× | 5.4 / 0.3 |
+| `table_mixed` | a table of six columns | 7.85 | 104.8 | 0.07× | 8.9 / 0.7 |
 
-* **At 1.00× or above**: bit-packing with patches (1.21×), a chunked column of mixed validity
-  (1.18×), 64-bit dictionary codes (1.13×), bit-packing (1.12×), FSST (1.11×), ALP-RD (1.10×) and run
-  ends (1.00×). On files decoded in a few hundred microseconds, a ratio moves by a tenth from one run
-  to the next.
+* **At 1.00× or above**: ALP-RD (1.29×), FSST (1.19×), a chunked column of mixed validity (1.15×),
+  bit-packing (1.14×) and with patches (1.13×), dictionaries of five strings (1.14×) and of one-byte
+  (1.12×) or 64-bit codes (1.06×), and within a few hundredths of even, a progression, OnPair and a
+  frame of reference. On files decoded in a few hundred microseconds a ratio moves by a tenth or two
+  from one run to the next: read in one process, both sides taking turns, the three dictionaries
+  take 0.81× to 0.92× Rust's time and ALP-RD 1.03×.
 * **Past what memory can move is not decoding.** A column stored in its plain form is handed out as
   a view of the mapped file, nothing copied: the figure measures the walk of the layout.
 * **The widest gaps are not skipped work.** In `varbinview`, `struct` and the tables, the stored
@@ -214,8 +221,8 @@ a ceiling (`--throughput --take`, `--throughput --write`):
 
 | axis | median ratio | at or under 1.00× | above |
 |---|---:|---:|---|
-| take 64 rows spread over the file | 0.36× | 51 of 57 | `sequence` and `variant` 1.10×, `runend` and `dict_u8_codes` 1.05×, `constant` 1.03× |
-| write, both writers given the rows decoded | 0.31× | 55 of 56 | `zstd` 1.43× |
+| take 64 rows spread over the file | 0.34× | 53 of 57 | `sequence` 1.02×, `constant`, `dict_u8_codes` and `variant` 1.01× |
+| write, both writers given the rows decoded | 0.29× | 55 of 56 | `zstd` 1.45× |
 
 Rust's writer declines `parquet_variant`, the 57th.
 
@@ -233,7 +240,12 @@ Rust's writer declines `parquet_variant`, the 57th.
   nothing: 40.9 µs for 64 KiB of codes, against 39.7 for the bare loop (`FsstKernelBenchmarks`).
 * **Zstd: a frame per block, and only the frames a take needs.** Our writer compresses a zstd column
   a block of 8 192 rows to a frame, and our reader inflates only the frames that hold the rows it is
-  asked for: 64 rows of a million take 0.19× Rust's time.
+  asked for: 64 rows of a million take 0.16× Rust's time.
+* **A take reads by the run, and decodes ahead.** Consecutive zones holding a take's rows are read
+  as one batch, up to sixteen rows a batch on several lanes, and a column whose encoding decodes
+  ranges without selecting decodes the clusters of rows it is asked for rather than the span between
+  them. On several lanes a take keeps three splits a lane in flight, and its degree bounds how many
+  decode at once.
 * **Zone maps prune before any decode.** The file keeps the minimum, maximum and null count of every
   zone of 8 192 rows. A filter skips the zones it proves empty and hands out the zones it proves full
   without testing their rows: the narrow filter of §2 decodes about a hundredth of the rows.
@@ -264,13 +276,13 @@ exact: a test fails above its ceiling, and a ceiling only comes down.
   | operation | bytes |
   |---|---:|
   | open, footer only | 13 888 |
-  | open and first batch | 43 848 |
-  | full scan | 43 848 |
-  | projection, 1 of 5 columns | 46 200 |
-  | take, 64 rows from 64 splits | 45 096 |
-  | filter, zone maps used | 55 536 |
-  | filter, zone maps ignored | 47 616 |
-  | full scan of one encoding's 4 096-row file | 3 144 to 3 928 |
+  | open and first batch | 43 840 |
+  | full scan | 43 840 |
+  | projection, 1 of 5 columns | 46 192 |
+  | take, 64 rows from 64 splits | 45 088 |
+  | filter, zone maps used | 55 528 |
+  | filter, zone maps ignored | 47 608 |
+  | full scan of one encoding's 4 096-row file | 3 136 to 3 920 |
 
   A full scan costs what its first batch costs.
 * **Per write** (`WriteAllocationTests`): 7.3 to 13.5 KB to write a corpus file of 1 025 to 8 193
