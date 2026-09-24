@@ -951,11 +951,12 @@ internal static class RowKernels
         ref TValue sourceRef = ref MemoryMarshal.GetReference(source);
         ref TValue targetRef = ref MemoryMarshal.GetReference(target);
 
-        // Eight rows a step, their codes checked at once against the limit through the largest of
-        // them and then gathered with no test between: a row a step spent as much on the loop and
-        // its test as on the copy, and ran a third slower or faster with where the code happened to
-        // land in memory. A bad code is found in its block, and the caller raises on it, so the
-        // rows of that block are not written.
+        // Eight rows a step, their codes checked against the limit and then gathered with no test
+        // between: a row a step spent as much on the loop and its test as on the copy, and ran a
+        // third slower or faster with where the code happened to land in memory. Each code has a
+        // test of its own, false on every valid row and so always predicted, where the largest of
+        // the eight would be a chain of comparisons whose outcome follows the data. A bad code is
+        // found in its step, and the caller raises on it, so the rows of that step are not written.
         int whole = target.Length & ~7;
         for (int block = 0; block < whole; block += 8)
         {
@@ -968,8 +969,8 @@ internal static class RowKernels
             uint c5 = WidenCode(Unsafe.Add(ref at, 5));
             uint c6 = WidenCode(Unsafe.Add(ref at, 6));
             uint c7 = WidenCode(Unsafe.Add(ref at, 7));
-            uint high = Math.Max(Math.Max(Math.Max(c0, c1), Math.Max(c2, c3)), Math.Max(Math.Max(c4, c5), Math.Max(c6, c7)));
-            if (high >= limit)
+            if (c0 >= limit || c1 >= limit || c2 >= limit || c3 >= limit ||
+                c4 >= limit || c5 >= limit || c6 >= limit || c7 >= limit)
             {
                 return FirstOutOfRange(ref at, block, limit);
             }
