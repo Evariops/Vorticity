@@ -1,10 +1,10 @@
 # vxbench-rs
 
-Vortex's Rust reader behind a C ABI, so that
-[docs/design/05-benchmarks.md](../../docs/design/05-benchmarks.md) §2 can happen: **both implementations measured
-in one process**, on the same bytes, with the same clock and the same page-cache state. Two runs of
-two binaries can differ by more than the thing being measured, which is how a 1.4× ratio becomes
-unreadable.
+Vortex's Rust reader behind a C ABI, so that the comparison of
+[docs/design/05-benchmarks.md](../../docs/design/05-benchmarks.md) can measure **both
+implementations in one process**, on the same bytes, with the same clock and the same page-cache
+state. Two runs of two binaries can differ by more than the thing being measured, which is how a
+1.4× ratio becomes unreadable.
 
 ## Two shapes, one body of code
 
@@ -29,13 +29,16 @@ target/release/vxbench rewrite <file.vortex> <out.vortex>
 Each prints `rows=<n>` and exits 0, or a reason on standard error and exits 1. `filter` wants an
 `i64` field: the predicate's literal is one, and an `i32` column is refused rather than coerced.
 `--threads <n>` or `--threads all` runs any of them on a multi-threaded runtime of that many
-workers, or of one per processor; without it they run on the single-threaded runtime. `rewrite` is
-not a timing axis: it writes the same rows as the reference's writer makes them, for the read
-scenarios to run on a file of its own.
+workers, or of one per processor; without it they run on the single-threaded runtime.
+`--repeat <n>` runs the scenario n times in the process and prints `round=<i> rows=<n>
+work_us=<time>` for each before the last line, as our Native AOT runner does: the first round is
+the cold one, the others what a process that stays up pays, which is how the report's
+per-encoding table times a decoder once warm. `rewrite` is not a timing axis: it writes the same
+rows as the reference's writer makes them, for the read scenarios to run on a file of its own.
 
 ## Why this is not `vortex-ffi`
 
-§2 originally named `vortex-ffi` as the cdylib. Two reasons it is not used:
+`vortex-ffi` would be the obvious cdylib. Two reasons it is not used:
 
 * it is `publish = false` upstream, so it would mean a second git dependency;
 * it is a general-purpose C API with its own object model, whose per-call overhead would land
@@ -63,13 +66,17 @@ surface to measure except the scan. The empty-call floor is 2.5 ns.
 * **Decoded where the work is split.** Each split is decoded to its canonical form on its own task,
   through `ScanBuilder::map`, as upstream's Arrow conversion does. Decoded in the loop that drains
   the stream instead, the splits would be read on every core and decoded on one.
+* **Every value decoded.** Each entry point that reads values executes `RecursiveCanonical`:
+  `execute::<Canonical>` stops at the first canonical kind, a struct among them, which on a table is
+  before a single column has been decoded. `--ffi-check` asserts that both readers return the same
+  rows and the same checksum of every decoded value, in file order, on seven corpus files.
 * **The writer is given decoded rows**, which is what our reader hands our writer. Given the file's
   own encodings, the reference's writer re-encodes from them, which is not the work our side does,
   and refuses a numeric column stored as zstd, which it cannot append to a builder.
 * **The session is built once.** `VortexSession::default()` registers every edition and initializes
-  the arrow and parquet-variant integrations. An earlier version paid that per call — about 90 µs —
-  which nothing on the .NET side pays per open, since `EncodingRegistry` is static. It read as
-  Rust being slow to open a file.
+  the arrow and parquet-variant integrations: about 90 µs, which nothing on the .NET side pays per
+  open, since `EncodingRegistry` is static. Built per call, it would read as Rust being slow to open
+  a file.
 * **The file is opened from scratch on every call**, on both sides, so neither gets a warm segment
   cache the other is not offered.
 * **Panics are caught** at the boundary: unwinding across a C ABI is undefined behaviour. Every

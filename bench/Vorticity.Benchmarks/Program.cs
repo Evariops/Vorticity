@@ -467,16 +467,20 @@ internal static class Program
           --report                 the published comparison: eight high-level scenarios at 2^20
                                      rows and ten times that, EACH SIDE IN ITS OWN PROCESS, on one
                                      core and on all of them, on our file and on the reference's,
-                                     reporting the action's time, peak resident memory and rows
-                                     rendered. Our side runs as the Native AOT runner, which the
-                                     ratio is taken against, and as this host on the JIT; the
-                                     reference is the vxbench binary rather than the cdylib,
-                                     because those figures belong to a process. Build both first:
+                                     reporting the action's time, its throughput over the rows'
+                                     plain size, what our side allocates for a call once warm, and
+                                     each process's peak resident memory; then every file of the
+                                     per-encoding corpus scanned by both, warm, on one core. Our
+                                     side runs as the Native AOT runner, which the ratio is taken
+                                     against, and as this host on the JIT; the reference is the
+                                     vxbench binary rather than the cdylib, because those figures
+                                     belong to a process. Build both first:
                                      dotnet publish -c Release bench/Vorticity.Benchmarks.Runner
                                      cd tools/vxbench-rs && cargo build --release
-                                     ~75 s
+                                     ~2 min
                                      --runs N          runs per scenario, default 5, one more
                                                        discarded before them
+                                     --no-kernels      without the per-encoding section
                                      --markdown        the table as the guide's page
                                      --out <path>      write it there instead of to stdout
           --scenario <name> <file> <rows>

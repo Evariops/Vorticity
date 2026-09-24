@@ -36,7 +36,7 @@ so under 1.00 the measured side took less.
 | **anything, before you push** | `bench/gate.sh` | 68 s | the nine ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, ratio per round |
 | the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
-| **what a user would see**, for the published page | `-- --report` | ~75 s | eight high-level scenarios at 2^20 rows and ten times that, **each side in its own process**, **on one core and on all of them**, on the file our writer makes and on the one the reference's writer makes from the same rows: the action's time with its spread, peak resident memory, rows rendered, and each file's chunks and encodings per column. Our side runs as the **Native AOT runner** built for the machine's instruction set (`dotnet publish -c Release bench/Vorticity.Benchmarks.Runner`), whose time the ratio divides by the reference's, as every ratio of the bench does, and on one core also as this framework-dependent host on the JIT. The reference is the `vxbench` **binary** (`cargo build --release` in `tools/vxbench-rs`), built as upstream builds its benchmarks: mimalloc, `target-cpu=native`, one codegen unit, no LTO. On all cores, `--threads all` gives our scans a lane per processor and the reference a Tokio worker per processor. Build both first. `--markdown --out docs/guide/benchmarks.md` writes the page. The fixtures are written again on every run |
+| **what a user would see**, for the published page | `-- --report` | ~2 min | eight high-level scenarios at 2^20 rows and ten times that, **each side in its own process**, **on one core and on all of them**, on the file our writer makes and on the one the reference's writer makes from the same rows: the action's time with its spread, its throughput over the plain size of the rows returned (`PlainSize.cs`), what our side allocates for a call once warm (the median of six calls after two), peak resident memory, rows rendered, and each file's chunks and encodings per column. Then **every file of the per-encoding corpus**, scanned by both sides twelve times in each of three processes a side, the median of the last ten: the decoders once warm, which `--no-kernels` leaves out. Our side runs as the **Native AOT runner** built for the machine's instruction set (`dotnet publish -c Release bench/Vorticity.Benchmarks.Runner`), whose time the ratio divides by the reference's, as every ratio of the bench does, and on one core also as this framework-dependent host on the JIT. The reference is the `vxbench` **binary** (`cargo build --release` in `tools/vxbench-rs`), built as upstream builds its benchmarks: mimalloc, `target-cpu=native`, one codegen unit, no LTO. On all cores, `--threads all` gives our scans a lane per processor and the reference a Tokio worker per processor. Build both first. `--markdown --out docs/guide/benchmarks.md` writes the page. The fixtures are written again on every run |
 | a hot path you want to profile | `-- --profile <scenario> [seconds]` | as asked | a bare loop for `dotnet-trace`, no harness in the profile |
 | where a report scenario spends its cycles, line by line | `bench/profile.sh cycles <scenario> <file> <rows>` (macOS, Xcode) | 15 s | the **Native AOT runner** sampled every 25–30 µs by Instruments' CPU Profiler, weighed in cycles: self time per function and **per source line, inlined code included**, and every sample charged to the innermost line of this repository. Run from the command line, no Instruments window |
 | what a report scenario allocates, and where | `bench/profile.sh allocations <scenario> <file> <rows>` (macOS) | 15 s–5 min | **every** allocation of three rounds of the Native AOT runner, stopped on under lldb: type, size, stack to the line, managed and native (the C allocator and `mmap`). Not sampled — the managed totals per round equal the runner's own `allocated_bytes` |
@@ -208,8 +208,8 @@ journals and in the commits.
   **`--take`** asks the same fifty-seven files for 64 rows spread evenly over each (one every 15 625),
   against `vxbench_take`, with its own ratchet table — the two axes do not move together, and that
   is the point: a decoder without a `DecodeSelected` override decodes the whole chunk a taken row
-  falls in, once for the take, where one with it decodes only the taken rows. `zstd` has none and
-  takes at 0.24×, as `fsst` does with its override; `onpair`, with one, takes at 0.48×.
+  falls in, once for the take, where one with it decodes only the taken rows. `zstd` inflates only
+  the frames that hold the taken rows and takes at 0.19×, `fsst` at 0.25×, `onpair` at 0.51×.
   `--ratio-check`'s single `scattered take` axis reads 0.23× and says none of this, because it is
   one file whose encodings all have the override.
 
@@ -224,10 +224,9 @@ journals and in the commits.
   `--quick` (23 s instead of 70) shortens the warm-up and the per-file budget: a direction, not a
   gate. `--recalibrate N` prints a replacement reference table, as it does for `--ratio-check`.
 
-  **A bare family name narrows the report, and does not currently give the gate's ratio**:
-  `fsst` reads 1.27 in the full run and 1.63–1.66 on its own, reproducibly, on the same bytes — over
-  its ceiling on a healthy tree. Use the narrow form to see a direction; confirm with the full run
-  before believing a red.
+  **A bare family name narrows the report, and does not give the gate's ratio**: a file measured
+  on its own reads higher than in the full run, on the same bytes, the JIT not finished with it.
+  Use the narrow form to see a direction; confirm with the full run before believing a red.
 
 **A ceiling only ever comes down, and only behind a real improvement.** Raising one to make a run
 pass is the one thing this directory forbids outright.

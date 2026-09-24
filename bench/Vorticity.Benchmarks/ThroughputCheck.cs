@@ -70,6 +70,10 @@ internal static class ThroughputCheck
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         ".cache", "vorticity", "throughput-1M");
 
+    /// <summary>The generated input directory: the variable's, or the default.</summary>
+    internal static string Root =>
+        Environment.GetEnvironmentVariable(Variable) is { Length: > 0 } configured ? configured : DefaultRoot;
+
     /// <summary>The row count every reference in <see cref="References"/> was measured at.</summary>
     private const long ReferenceRows = 1_000_000;
 
@@ -1093,8 +1097,7 @@ internal static class ThroughputCheck
     internal static async Task<int> RunAsync(
         bool check, string[] only, int recalibrate, bool rebase, bool hold, string? rebaseFrom = null)
     {
-        string? configured = Environment.GetEnvironmentVariable(Variable);
-        string root = string.IsNullOrEmpty(configured) ? DefaultRoot : configured;
+        string root = Root;
 
         // The files, not the directory: the generator creates the directory before it writes
         // anything, so one that failed or was interrupted leaves it behind empty, and that needs

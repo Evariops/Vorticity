@@ -99,7 +99,27 @@ internal static class Report
     /// <param name="Path">Where it is.</param>
     /// <param name="Bytes">Its size.</param>
     /// <param name="Columns">Each column's name and how the writer laid it out.</param>
-    private sealed record Fixture(int Rows, string Writer, string Path, long Bytes, (string Name, string Layout)[] Columns);
+    /// <param name="Plain">Each column's plain size (<see cref="PlainSize"/>), the same for both files of a size.</param>
+    private sealed record Fixture(
+        int Rows, string Writer, string Path, long Bytes, (string Name, string Layout)[] Columns, long[] Plain);
+
+    /// <summary>Rounds a process of the per-encoding comparison runs, and the first ones it does not count.</summary>
+    private const int KernelRounds = 12;
+
+    private const int KernelColdRounds = 2;
+
+    /// <summary>Processes per side and per encoding file, taking turns.</summary>
+    private const int KernelProcesses = 3;
+
+    /// <summary>
+    /// Rounds the process that measures our allocations runs, and the first ones it does not count:
+    /// the others are counted once the pools, the caches and the thread pool have met the scenario.
+    /// Their median is the figure, because on several lanes a call now and then allocates ten times
+    /// what the others do, and a single round can be that one.
+    /// </summary>
+    private const int AllocationRounds = 8;
+
+    private const int AllocationColdRounds = 2;
 
     /// <summary>The writer name of our own files.</summary>
     private const string Ours = "Vorticity";
@@ -194,10 +214,12 @@ internal static class Report
                 return 1;
             }
 
+            // The rows are the same in both files, and so is what they weigh flat.
+            (_, long[] plain) = await PlainSize.OfFileAsync(ours).ConfigureAwait(false);
             Fixture[] fixtures =
             [
-                new Fixture(rows, Ours, ours, new FileInfo(ours).Length, await ColumnsAsync(ours).ConfigureAwait(false)),
-                new Fixture(rows, Theirs, theirs, new FileInfo(theirs).Length, await ColumnsAsync(theirs).ConfigureAwait(false)),
+                new Fixture(rows, Ours, ours, new FileInfo(ours).Length, await ColumnsAsync(ours).ConfigureAwait(false), plain),
+                new Fixture(rows, Theirs, theirs, new FileInfo(theirs).Length, await ColumnsAsync(theirs).ConfigureAwait(false), plain),
             ];
 
             foreach (Fixture fixture in fixtures)
@@ -226,7 +248,14 @@ internal static class Report
             }
         }
 
-        string text = markdown ? Markdown(table, runs) : Text(table, runs);
+        List<KernelRow>? kernels = null;
+        if (Array.IndexOf(args, "--no-kernels") < 0)
+        {
+            kernels = await KernelsAsync(runner, reference).ConfigureAwait(false);
+            disagreed |= kernels.Any(k => k.Problem is { } problem && problem.StartsWith(DisagreementPrefix, StringComparison.Ordinal));
+        }
+
+        string text = markdown ? Markdown(table, kernels, runs) : Text(table, kernels, runs);
         int outAt = Array.IndexOf(args, "--out");
         if (outAt >= 0 && outAt + 1 < args.Length)
         {
@@ -255,7 +284,131 @@ internal static class Report
         ];
 
         List<(Measurement? Measurement, string? Refusal)> measured = await MeasureAsync(commands, runs).ConfigureAwait(false);
-        return new Row(fixture, cores, scenario, measured[0].Measurement, measured[1].Measurement, measured[2].Measurement, measured[2].Refusal);
+        long allocated = measured[0].Measurement is null
+            ? -1
+            : await AllocatedAsync(runner, ours).ConfigureAwait(false);
+        return new Row(
+            fixture, cores, scenario, measured[0].Measurement, measured[1].Measurement, measured[2].Measurement,
+            measured[2].Refusal, allocated);
+    }
+
+    /// <summary>
+    /// What our runner allocates for the action once warm: the median of the rounds past the cold
+    /// ones, the cost of a call in a process that stays up, where the first calls also fill the pools.
+    /// </summary>
+    /// <returns>The bytes, or -1 when the runner did not say.</returns>
+    private static async Task<long> AllocatedAsync(string runner, string[] arguments)
+    {
+        (string output, _, int exit, _) = await RunAsync(
+            (runner, [.. arguments, "--repeat", AllocationRounds.ToString(CultureInfo.InvariantCulture)])).ConfigureAwait(false);
+        List<double> warm = WarmRounds(output, "allocated_bytes=", AllocationColdRounds);
+        return exit == 0 && warm.Count > 0 ? (long)Median(warm) : -1;
+    }
+
+    /// <summary>
+    /// Every file of the per-encoding corpus scanned by both sides, each in processes of its own
+    /// that run the scan <see cref="KernelRounds"/> times: the decoders' cost once warm, on one core.
+    /// </summary>
+    /// <returns>A row per file; none when the corpus has not been generated.</returns>
+    private static async Task<List<KernelRow>> KernelsAsync(string runner, string reference)
+    {
+        string root = ThroughputCheck.Root;
+        string[] files = Directory.Exists(root) ? Directory.GetFiles(root, "*.vortex") : [];
+        Array.Sort(files, StringComparer.Ordinal);
+        if (files.Length == 0)
+        {
+            Console.Error.WriteLine($"no per-encoding corpus at {root}: bench/gen-throughput.sh writes it; the section is left out");
+            return [];
+        }
+
+        string rounds = KernelRounds.ToString(CultureInfo.InvariantCulture);
+        List<KernelRow> kernels = [];
+        foreach (string path in files)
+        {
+            string encoding = Path.GetFileNameWithoutExtension(path);
+            (long rows, long[] columns) = await PlainSize.OfFileAsync(path).ConfigureAwait(false);
+            (string Exe, string[] Args)[] sides =
+            [
+                (runner, ["--scenario", "scan", path, rows.ToString(CultureInfo.InvariantCulture), "--repeat", rounds]),
+                (reference, ["scan", path, "--repeat", rounds]),
+            ];
+
+            List<double>[] warm = [[], []];
+            long[] rendered = [-1, -1];
+            string? problem = null;
+            for (int run = 0; run < KernelProcesses && problem is null; run++)
+            {
+                for (int turn = 0; turn < sides.Length && problem is null; turn++)
+                {
+                    int side = (run + turn) % sides.Length;
+                    (string output, string error, int exit, _) = await RunAsync(sides[side]).ConfigureAwait(false);
+                    if (exit != 0)
+                    {
+                        problem = $"{(side == 0 ? Ours : Theirs)} refused: {First(error).Replace(path, Path.GetFileName(path), StringComparison.Ordinal)}";
+                        continue;
+                    }
+
+                    warm[side].Add(Median(WarmRounds(output, "work_us=", KernelColdRounds)));
+                    rendered[side] = Value(output, "rows=");
+                }
+            }
+
+            if (problem is null && rendered[0] != rendered[1])
+            {
+                problem = string.Create(CultureInfo.InvariantCulture,
+                    $"{DisagreementPrefix} {rendered[0]} rows on one side and {rendered[1]} on the other");
+                Console.Error.WriteLine($"{encoding}: {problem}");
+            }
+
+            KernelRow row = new KernelRow(
+                encoding, rows, columns.Sum(),
+                warm[0].Count == 0 ? 0 : Median(warm[0]), warm[1].Count == 0 ? 0 : Median(warm[1]), problem);
+            kernels.Add(row);
+            Console.Error.WriteLine(string.Create(CultureInfo.InvariantCulture,
+                $"  {encoding}: {row.OursUs:F0} us against {row.TheirsUs:F0} us{(problem is null ? string.Empty : ", " + problem)}"));
+        }
+
+        return kernels;
+    }
+
+    /// <summary>The prefix of a problem that is two sides returning different rows, which fails the run.</summary>
+    private const string DisagreementPrefix = "different rows:";
+
+    /// <summary>One figure of each round a <c>--repeat</c> run printed, past the cold ones.</summary>
+    /// <param name="output">The run's standard output.</param>
+    /// <param name="key">The figure, as the round line names it: <c>work_us=</c> or <c>allocated_bytes=</c>.</param>
+    /// <param name="cold">The first rounds, which are not counted.</param>
+    private static List<double> WarmRounds(string output, string key, int cold)
+    {
+        List<double> values = [];
+        foreach (string line in output.Split('\n'))
+        {
+            if (!line.StartsWith("round=", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (Value(line, "round=") >= cold && Value(line, key) is >= 0 and long value)
+            {
+                values.Add(value);
+            }
+        }
+
+        return values;
+    }
+
+    private static double Median(List<double> values)
+    {
+        if (values.Count == 0)
+        {
+            return 0;
+        }
+
+        List<double> sorted = [.. values];
+        sorted.Sort();
+        return sorted.Count % 2 == 1
+            ? sorted[sorted.Count / 2]
+            : (sorted[(sorted.Count / 2) - 1] + sorted[sorted.Count / 2]) / 2;
     }
 
     /// <summary>Whether the sides rendered different rows, which the run then fails on.</summary>
@@ -622,20 +775,30 @@ internal static class Report
     /// <param name="Jit">This framework-dependent host's measurement, on one core; null otherwise or when it refused.</param>
     /// <param name="Theirs">The reference's, or null when it refused or was not asked.</param>
     /// <param name="Refusal">What the reference said when it refused, so the page can quote it.</param>
+    /// <param name="Allocated">Bytes our runner allocated for the action once warm, or -1 when not measured.</param>
     private sealed record Row(
         Fixture Fixture, Cores Cores, Scenario Scenario, Measurement? Aot, Measurement? Jit, Measurement? Theirs,
-        string? Refusal);
+        string? Refusal, long Allocated);
+
+    /// <summary>One file of the per-encoding comparison.</summary>
+    /// <param name="Encoding">The file's name: the encoding it holds, or its shape.</param>
+    /// <param name="Rows">Its rows.</param>
+    /// <param name="Plain">The plain size of its values.</param>
+    /// <param name="OursUs">Our warm scan, in microseconds, or 0 when there is none.</param>
+    /// <param name="TheirsUs">The reference's warm scan, or 0.</param>
+    /// <param name="Problem">Why a side has no figure, or why the two cannot be compared.</param>
+    private sealed record KernelRow(string Encoding, long Rows, long Plain, double OursUs, double TheirsUs, string? Problem);
 
     private static string Label(Cores cores) =>
         cores == Cores.One ? "one core" : string.Create(CultureInfo.InvariantCulture, $"{Environment.ProcessorCount} cores");
 
-    private static string Text(List<Row> table, int runs)
+    private static string Text(List<Row> table, List<KernelRow>? kernels, int runs)
     {
         StringBuilder text = new StringBuilder();
         text.AppendLine(Header(runs));
         text.AppendLine();
         text.AppendLine("rows       file         cores     scenario       ours AOT, ms (low-high)  ours JIT, ms (low-high)  " +
-            "rust, ms (low-high)     ratio   ours MiB  rust MiB  rows out");
+            "rust, ms (low-high)     ratio   ours GB/s rust GB/s ours alloc  ours MiB  rust MiB  rows out");
         foreach (Row row in table)
         {
             bool asked = row.Scenario.Reference is not null;
@@ -643,13 +806,91 @@ internal static class Report
                 $"{row.Fixture.Rows,-10:N0} {row.Fixture.Writer,-12} {Label(row.Cores),-9} {row.Scenario.Name,-14} " +
                 $"{Work(row.Aot),-24} {(row.Cores == Cores.One ? Work(row.Jit) : "-"),-24} " +
                 $"{Work(row.Theirs, asked),-23} " +
-                $"{Ratio(row),-7} {Side(row.Aot, m => m.RssBytes.Median / (1024 * 1024)),8}  " +
+                $"{Ratio(row),-7} {Throughput(row, row.Aot),9} {Throughput(row, row.Theirs),9} {Bytes(row.Allocated),10}  " +
+                $"{Side(row.Aot, m => m.RssBytes.Median / (1024 * 1024)),8}  " +
                 $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024), asked: asked),8}  " +
                 $"{(row.Aot is null ? "refused" : row.Aot.Rows.ToString("N0", CultureInfo.InvariantCulture)),10}"));
         }
 
+        if (kernels is { Count: > 0 })
+        {
+            text.AppendLine();
+            text.AppendLine("encoding                                     rows  ours ns/row  rust ns/row  ratio  ours GB/s  rust GB/s");
+            foreach (KernelRow kernel in kernels)
+            {
+                text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                    $"{kernel.Encoding,-40} {kernel.Rows,9:N0} {NsPerRow(kernel, kernel.OursUs),12} {NsPerRow(kernel, kernel.TheirsUs),12} " +
+                    $"{KernelRatio(kernel),6} {KernelThroughput(kernel, kernel.OursUs),10} {KernelThroughput(kernel, kernel.TheirsUs),10}" +
+                    $"{(kernel.Problem is null ? string.Empty : "  " + kernel.Problem)}"));
+            }
+        }
+
         return text.ToString();
     }
+
+    /// <summary>
+    /// The plain bytes of the rows <paramref name="row"/>'s scenario returned: every column of them,
+    /// or the one a projection keeps; none for a scenario whose output is not its work.
+    /// </summary>
+    /// <remarks>
+    /// An open returns nothing, a take a thousand rows whose cost is their chunks and not their
+    /// bytes, and an append copies the file before it writes: a throughput would describe none of
+    /// them.
+    /// </remarks>
+    private static long PlainBytes(Row row)
+    {
+        if (row.Aot is null || row.Scenario.Name is "open" or "take" or "append")
+        {
+            return 0;
+        }
+
+        long[] plain = row.Fixture.Plain;
+        long columns = row.Scenario.Name == "project"
+            ? plain[Array.FindIndex(row.Fixture.Columns, c => c.Name == Set.Field)]
+            : plain.Sum();
+        return columns * row.Aot.Rows / row.Fixture.Rows;
+    }
+
+    /// <summary>A side's gigabytes a second over the plain bytes of its scenario, or a dash.</summary>
+    private static string Throughput(Row row, Measurement? measurement) =>
+        PlainBytes(row) is > 0 and long bytes && measurement is { WorkMs.Median: > 0 }
+            ? string.Create(CultureInfo.InvariantCulture, $"{bytes / (measurement.WorkMs.Median * 1e6):F1}")
+            : "—";
+
+    /// <summary>A byte count in the unit that keeps it short.</summary>
+    private static string Bytes(long bytes) => bytes switch
+    {
+        < 0 => "—",
+        < 1024 => string.Create(CultureInfo.InvariantCulture, $"{bytes} B"),
+        < 1024 * 1024 => string.Create(CultureInfo.InvariantCulture, $"{bytes / 1024.0:F1} KiB"),
+        _ => string.Create(CultureInfo.InvariantCulture, $"{bytes / (1024.0 * 1024):F1} MiB"),
+    };
+
+    private static string NsPerRow(KernelRow kernel, double micros)
+    {
+        if (micros <= 0 || kernel.Rows == 0)
+        {
+            return "—";
+        }
+
+        double ns = micros * 1000 / kernel.Rows;
+        return ns < 10
+            ? string.Create(CultureInfo.InvariantCulture, $"{ns:F2}")
+            : string.Create(CultureInfo.InvariantCulture, $"{ns:F1}");
+    }
+
+    private static double KernelRatioOf(KernelRow kernel) =>
+        kernel.Problem is null && kernel.OursUs > 0 && kernel.TheirsUs > 0 ? kernel.OursUs / kernel.TheirsUs : 0;
+
+    private static string KernelRatio(KernelRow kernel) =>
+        KernelRatioOf(kernel) is > 0 and double ratio
+            ? string.Create(CultureInfo.InvariantCulture, $"{ratio:F2}x")
+            : "n/a";
+
+    private static string KernelThroughput(KernelRow kernel, double micros) =>
+        micros <= 0 || kernel.Plain == 0
+            ? "—"
+            : string.Create(CultureInfo.InvariantCulture, $"{kernel.Plain / (micros * 1000):F1}");
 
     /// <summary>The action's time inside the process, median with the spread the runs showed.</summary>
     private static string Work(Measurement? measurement, bool asked = true) =>
@@ -674,55 +915,59 @@ internal static class Report
     /// </remarks>
     private static string Absent(bool asked) => asked ? "refused" : "not asked";
 
-    private static string Markdown(List<Row> table, int runs)
+    private static string Markdown(List<Row> table, List<KernelRow>? kernels, int runs)
     {
         StringBuilder text = new StringBuilder();
         text.AppendLine("# Benchmarks");
         text.AppendLine();
-        text.AppendLine("What this library costs against the Rust implementation, on scenarios a caller");
-        text.AppendLine("would recognise, on one core and on all of them. **This page is generated. Do not edit");
-        text.AppendLine("it** — every figure comes from");
-        text.AppendLine("`dotnet run -c Release --project bench/Vorticity.Benchmarks -- --report --markdown`,");
-        text.AppendLine("and a hand-written number here would be a number nothing re-measures.");
+        text.AppendLine("Vorticity against Vortex's Rust implementation: the same files, read and written by both, on");
+        text.AppendLine("one core and on all of them. This page is generated by");
+        text.AppendLine("`dotnet run -c Release --project bench/Vorticity.Benchmarks -- --report --markdown`, and");
+        text.AppendLine("every figure on it comes from that run.");
         text.AppendLine();
         text.AppendLine("Vortex™ is a trademark of LF Projects, LLC. Vorticity is an independent implementation,");
         text.AppendLine("not affiliated with or endorsed by the Vortex project or LF Projects, LLC.");
         text.AppendLine();
-        text.AppendLine("## How the two sides are built and run");
+        text.AppendLine("## What is measured");
         text.AppendLine();
-        text.AppendLine("**Vortex Rust 0.86.1** is built and run as upstream's own benchmarks are: mimalloc as the");
-        text.AppendLine("allocator, `-C target-cpu=native -C force-frame-pointers=yes`, one codegen unit, no LTO. On");
-        text.AppendLine("one core it runs on its single-threaded runtime, all the work on the calling thread; on all");
-        text.AppendLine("cores, on a multi-threaded Tokio runtime of one worker per processor, which is how upstream's");
-        text.AppendLine("benchmarks use every core, with each split decoded on its own task, as upstream's Arrow");
-        text.AppendLine("conversion does. Its scans decode every column to its plain form: the reference's scan");
-        text.AppendLine("otherwise hands back arrays in their stored encodings, which is not the work a reader");
-        text.AppendLine("with no other representation does. `tools/vxbench-rs` is the harness.");
+        text.AppendLine("* **The two sides.** Vorticity as a Native AOT binary built for this machine's instruction");
+        text.AppendLine("  set, with the workstation garbage collector. Vortex Rust 0.86.1 built as upstream builds its");
+        text.AppendLine("  own benchmarks (mimalloc, `-C target-cpu=native`, one codegen unit, no LTO), through");
+        text.AppendLine("  `tools/vxbench-rs`. Both decode every value they return to its plain form.");
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"* **One core, or all {Environment.ProcessorCount}.** On one core, Rust's single-threaded runtime and our scans at one"));
+        text.AppendLine("  lane. On all of them, a Tokio worker per processor for Rust; for Vorticity, a lane per");
+        text.AppendLine("  processor for a scan (`ScanBuilder.DefaultDegreeOfParallelism`) and as many threads for the");
+        text.AppendLine("  writer (`VortexWriteOptions.DegreeOfParallelism`).");
+        text.AppendLine("* **The data.** A table of four columns: `monotone`, an increasing `i64` that the filters and");
+        text.AppendLine("  the projection use; `value`, an `f64`; `label`, one of five short strings; `flag`, a `bool`");
+        text.AppendLine("  with nulls. 2^20 rows, and ten times as many.");
+        text.AppendLine("* **Two files of the same rows.** Each writer chooses its own encodings, and what a read costs");
+        text.AppendLine("  depends on them, so the rows are written twice: by Vorticity's writer (*Vorticity's file*)");
+        text.AppendLine("  and by Rust's (*Vortex Rust's file*). Both readers read both files; each section lists what");
+        text.AppendLine("  the two writers chose.");
+        text.AppendLine("* **A figure** is the time a fresh process takes for its action, from opening the file to its");
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"  last row, by its own clock: {runs} runs a side, the sides taking turns after one discarded run, the"));
+        text.AppendLine("  median with the lowest and highest beside it. The page cache is warm. Both sides must return");
+        text.AppendLine("  the same rows or the run fails.");
+        if (table.FirstOrDefault(r => r.Fixture.Plain.Length > 0) is { } sized)
+        {
+            text.AppendLine("* **Throughput** is the plain size of the rows a scenario returns over its time. Plain is");
+            text.AppendLine("  Arrow's layout: 8 bytes an `i64` or an `f64`, a string's bytes and a 4-byte offset, a bit a");
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"  boolean and a bit a row for a column with nulls: {(double)sized.Fixture.Plain.Sum() / sized.Fixture.Rows:F1} bytes a row here."));
+        }
+
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"* **Allocated** is what Vorticity allocates on its managed heap for the action: the median of {AllocationRounds - AllocationColdRounds}"));
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"  calls in a process that has made {AllocationColdRounds} before them, the cost of a call once the pools are filled."));
+        text.AppendLine("  On all cores a call now and then allocates several times the median. Rust's allocator");
+        text.AppendLine("  reports no such figure. **Peak** is each process's peak resident memory.");
+        text.AppendLine("* **Ratio** is Vorticity's time over Rust's: under 1.00x, Vorticity took less.");
         text.AppendLine();
-        text.AppendLine("**Vorticity** runs as a Native AOT binary built for this machine's instruction set");
-        text.AppendLine("(`IlcInstructionSet=native`), with the workstation garbage collector. On one core its");
-        text.AppendLine("scans run at one lane, the library's default; on all cores at one lane per processor,");
-        text.AppendLine("`ScanBuilder.DefaultDegreeOfParallelism`, and its writer summarizes its columns and compresses");
-        text.AppendLine("a column's zstd frames on as many threads, `VortexWriteOptions.DegreeOfParallelism`, but");
-        text.AppendLine("chooses and writes the encodings on one, where the reference compresses its chunks on every");
-        text.AppendLine("core. It also runs on one core as the framework-dependent build under `dotnet`, the **JIT**");
-        text.AppendLine("column, in which the action compiles its own code as it goes: what the first call costs in a");
-        text.AppendLine("fresh `dotnet` process.");
-        text.AppendLine();
-        text.AppendLine("**Both sides read the same two files**: the one Vorticity's writer makes, and the one Vortex");
-        text.AppendLine("Rust's writer makes from the same rows, four columns of 2^20 and ten times as many rows: a");
-        text.AppendLine("monotone `i64`, an `f64`, a short `utf8` and a nullable `bool`. Each writer chooses its own");
-        text.AppendLine("chunks and encodings, which each size lists first: on a given file, both readers decode the");
-        text.AppendLine("same encodings, and from one file to the other, the encodings change what a read costs.");
-        text.AppendLine();
-        text.AppendLine("**Each side runs in its own process**, once per run, and **times the action from its own");
-        text.AppendLine("clock** once the process is up: opening the file, doing the work, rendering the rows. The");
-        text.AppendLine("sides take turns run after run, the first of them changing, so that a machine that drifts");
-        text.AppendLine("drifts under both. Peak resident memory and processor time are each side's own `getrusage`.");
-        text.AppendLine("Both sides render the same rows, and the harness fails rather than print a ratio between two");
-        text.AppendLine("different answers. The page cache is warm: one run of each side is discarded first.");
-        text.AppendLine();
-        text.AppendLine(Header(runs));
+        text.AppendLine(Provenance());
         text.AppendLine();
         foreach (int rows in Sizes)
         {
@@ -736,7 +981,7 @@ internal static class Report
             text.AppendLine();
             List<Fixture> files = [.. of.Select(r => r.Fixture).Distinct()];
             text.AppendLine("| column | " + string.Join(" | ", files.Select(f => string.Create(
-                CultureInfo.InvariantCulture, $"as {f.Writer} writes it, {f.Bytes:N0} bytes in all"))) + " |");
+                CultureInfo.InvariantCulture, $"{FileName(f)}, {f.Bytes:N0} bytes"))) + " |");
             text.AppendLine("|---|" + string.Concat(files.Select(_ => "---|")));
             for (int column = 0; column < files[0].Columns.Length; column++)
             {
@@ -757,21 +1002,17 @@ internal static class Report
                     ? "### One core"
                     : string.Create(CultureInfo.InvariantCulture, $"### All {Environment.ProcessorCount} cores"));
                 text.AppendLine();
-                text.AppendLine(cores == Cores.One
-                    ? "| scenario | file written by | ours AOT, ms | ours JIT, ms | Vortex Rust, ms | ratio | ours AOT, peak | Rust, peak |"
-                    : "| scenario | file written by | ours AOT, ms | Vortex Rust, ms | ratio | ours AOT, peak | Rust, peak |");
-                text.AppendLine(cores == Cores.One ? "|---|---|---|---|---|---|---|---|" : "|---|---|---|---|---|---|---|");
+                text.AppendLine("| scenario | file | Vorticity, ms | Vortex Rust, ms | ratio | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |");
+                text.AppendLine("|---|---|---:|---:|---:|---:|---:|---:|---:|");
                 foreach (Scenario scenario in Scenarios)
                 {
                     foreach (Row row in at.Where(r => r.Scenario == scenario))
                     {
                         bool asked = row.Scenario.Reference is not null;
-                        string jit = cores == Cores.One ? $" {Work(row.Jit)} |" : string.Empty;
                         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                            $"| `{row.Scenario.Name}` | {row.Fixture.Writer} | {Work(row.Aot)} |{jit} " +
-                            $"{Work(row.Theirs, asked)} | {Ratio(row)} | " +
-                            $"{Side(row.Aot, m => m.RssBytes.Median / (1024 * 1024), " MiB")} | " +
-                            $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024), " MiB", asked)} |"));
+                            $"| `{row.Scenario.Name}` | {FileName(row.Fixture)} | {Work(row.Aot)} | " +
+                            $"{Work(row.Theirs, asked)} | {Ratio(row)} | {Throughput(row, row.Aot)} | " +
+                            $"{Throughput(row, row.Theirs)} | {Bytes(row.Allocated)} | {Peak(row, asked)} |"));
                     }
                 }
 
@@ -781,42 +1022,118 @@ internal static class Report
 
         text.AppendLine(string.Join(" ", Scenarios.Select(s => $"`{s.Name}`: {s.What}.")));
         text.AppendLine();
-        text.Append(Reading(table));
+        if (kernels is { Count: > 0 })
+        {
+            text.Append(KernelSection(kernels));
+        }
+
+        text.Append(JitSection(table));
+        text.Append(Reading(table, kernels));
+        return text.ToString();
+    }
+
+    /// <summary>How the page names a file: after the writer that made it.</summary>
+    private static string FileName(Fixture fixture) => fixture.Writer == Ours ? "Vorticity's" : "Vortex Rust's";
+
+    /// <summary>The two processes' peak resident memory, in one cell; a dash for a side not asked.</summary>
+    private static string Peak(Row row, bool asked) =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"{Side(row.Aot, m => m.RssBytes.Median / (1024 * 1024))} / {(asked ? Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024)) : "—")} MiB");
+
+    /// <summary>The machine, the builds and the commit the figures belong to, for the page.</summary>
+    private static string Provenance() =>
+        string.Create(CultureInfo.InvariantCulture,
+            $"**Machine**: {Processor()} ({RuntimeInformation.OSArchitecture}), {Environment.ProcessorCount} processors, " +
+            $"{RuntimeInformation.OSDescription}. **Runtime**: {RuntimeInformation.FrameworkDescription}. " +
+            $"**Reference**: Vortex 0.86.1, {RustVersion()}. **Commit** {Commit()}, {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC.");
+
+    /// <summary>The per-encoding table, with what it measures above it.</summary>
+    private static string KernelSection(List<KernelRow> kernels)
+    {
+        StringBuilder text = new StringBuilder();
+        text.AppendLine("## Decoding, per encoding");
+        text.AppendLine();
+        text.AppendLine("One file per encoding, and per notable shape of one, written by Rust's writer");
+        text.AppendLine("(`bench/gen-throughput.sh`): a million rows each, `table_wide` fifty columns of fifty thousand.");
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"Each side scans the file, every value decoded to its plain form, {KernelRounds} times in a process of its own on"));
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"one core; a figure is the median of the last {KernelRounds - KernelColdRounds} scans, and the median of {KernelProcesses} processes: what a"));
+        text.AppendLine("decoder costs once warm. Throughput is over the plain size, as above; a figure past what memory");
+        text.AppendLine("can move is a column handed out as views of the mapped file, nothing decoded and nothing");
+        text.AppendLine("copied, and measures the walk of the layout.");
+        text.AppendLine();
+        text.AppendLine("| encoding | rows | Vorticity, ns/row | Vortex Rust, ns/row | ratio | Vorticity, GB/s | Vortex Rust, GB/s |");
+        text.AppendLine("|---|---:|---:|---:|---:|---:|---:|");
+        foreach (KernelRow kernel in kernels)
+        {
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"| `{kernel.Encoding}` | {kernel.Rows:N0} | {NsPerRow(kernel, kernel.OursUs)} | {NsPerRow(kernel, kernel.TheirsUs)} | " +
+                $"{KernelRatio(kernel)} | {KernelThroughput(kernel, kernel.OursUs)} | {KernelThroughput(kernel, kernel.TheirsUs)} |"));
+        }
+
+        text.AppendLine();
+        foreach (KernelRow kernel in kernels.Where(k => k.Problem is not null))
+        {
+            text.AppendLine($"`{kernel.Encoding}`: {kernel.Problem}.");
+            text.AppendLine();
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>The framework-dependent build's first call, on one core, beside nothing: it has no counterpart.</summary>
+    private static string JitSection(List<Row> table)
+    {
+        List<Row> jit = [.. table.Where(r => r.Cores == Cores.One && r.Jit is not null)];
+        if (jit.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        List<Fixture> files = [.. jit.Select(r => r.Fixture).Distinct()];
+        StringBuilder text = new StringBuilder();
+        text.AppendLine("## A first call on the JIT");
+        text.AppendLine();
+        text.AppendLine("The same scenarios in the framework-dependent build, under `dotnet`, on one core: what a");
+        text.AppendLine("process that is not compiled ahead of time pays the first time, the code compiling as it runs.");
+        text.AppendLine("Milliseconds, the median of the same runs.");
+        text.AppendLine();
+        text.AppendLine("| scenario | " + string.Join(" | ", files.Select(f => string.Create(
+            CultureInfo.InvariantCulture, $"{f.Rows:N0} rows, {FileName(f)} file"))) + " |");
+        text.AppendLine("|---|" + string.Concat(files.Select(_ => "---:|")));
+        foreach (Scenario scenario in Scenarios)
+        {
+            List<string> cells = [];
+            foreach (Fixture file in files)
+            {
+                Row? row = jit.FirstOrDefault(r => r.Scenario == scenario && r.Fixture == file);
+                cells.Add(row?.Jit is { } measured
+                    ? string.Create(CultureInfo.InvariantCulture, $"{measured.WorkMs.Median:F1}")
+                    : "—");
+            }
+
+            if (cells.Any(c => c != "—"))
+            {
+                text.AppendLine($"| `{scenario.Name}` | {string.Join(" | ", cells)} |");
+            }
+        }
+
+        text.AppendLine();
         return text.ToString();
     }
 
     /// <summary>
-    /// The reading, computed from the rows rather than written: which way each scenario went at each
-    /// core count, what the startup floor is, and what the table does not say.
+    /// The reading, computed from the rows rather than written: which way the scenarios went at each
+    /// core count and the decoders per encoding, what the process start costs, and what the tables
+    /// do not say.
     /// </summary>
-    private static string Reading(List<Row> table)
+    private static string Reading(List<Row> table, List<KernelRow>? kernels)
     {
         List<Row> compared = [.. table.Where(r => RatioOf(r) > 0)];
         StringBuilder text = new StringBuilder();
         text.AppendLine("## Reading it");
         text.AppendLine();
-
-        Row? floor = table.FirstOrDefault(
-            r => r.Scenario.Name == "open" && r.Cores == Cores.One && r.Aot is not null && r.Theirs is not null);
-        if (floor is { Aot: { } ourFloor, Theirs: { } theirFloor })
-        {
-            // The process start is the whole process less the action it timed itself, on the row
-            // whose action is the smallest.
-            text.AppendLine("**What the table leaves out.** Starting the process, up to the point where it begins");
-            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"its action, costs {ourFloor.WallMs.Median - ourFloor.WorkMs.Median:F0} ms for the native build and " +
-                $"{theirFloor.WallMs.Median - theirFloor.WorkMs.Median:F0} ms for the reference on this machine, most of it"));
-            text.AppendLine("the operating system starting any binary at all.");
-            if (floor.Jit is { } jitFloor)
-            {
-                text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                    $"The JIT build's start is {jitFloor.WallMs.Median - jitFloor.WorkMs.Median:F0} ms, the managed runtime coming up; what its"));
-                text.AppendLine("column then shows is the action compiling its own code as it runs, which is why an");
-                text.AppendLine("`open` that takes the native build a fraction of a millisecond takes it tens.");
-            }
-
-            text.AppendLine();
-        }
 
         foreach (Cores cores in (Cores[])[Cores.One, Cores.All])
         {
@@ -830,31 +1147,55 @@ internal static class Report
             Row worst = at.MaxBy(RatioOf)!;
             int ahead = at.Count(r => RatioOf(r) < 1);
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"**{(cores == Cores.One ? "On one core" : $"On all {Environment.ProcessorCount} cores")}.** Of {at.Count} compared rows, the native build took less time than"));
+                $"**{(cores == Cores.One ? "On one core" : $"On all {Environment.ProcessorCount} cores")}.** Vorticity took less time than Rust on {ahead} of {at.Count} compared rows."));
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"the reference on {ahead}. The best is `{best.Scenario.Name}` at {best.Fixture.Rows:N0} rows on {best.Fixture.Writer}'s file ({Ratio(best)}),"));
+                $"The lowest ratio is `{best.Scenario.Name}` at {best.Fixture.Rows:N0} rows on {FileName(best.Fixture)} file ({Ratio(best)}), the highest"));
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"the worst `{worst.Scenario.Name}` at {worst.Fixture.Rows:N0} rows on {worst.Fixture.Writer}'s file ({Ratio(worst)})."));
+                $"`{worst.Scenario.Name}` at {worst.Fixture.Rows:N0} rows on {FileName(worst.Fixture)} file ({Ratio(worst)})."));
             text.AppendLine();
         }
 
-        text.AppendLine("A ratio is the native build's time over the reference's: under 1.00x, we took less.");
-        text.AppendLine();
+        List<KernelRow> decoded = kernels is null ? [] : [.. kernels.Where(k => KernelRatioOf(k) > 0)];
+        if (decoded.Count > 0)
+        {
+            List<double> ratios = [.. decoded.Select(KernelRatioOf)];
+            List<KernelRow> over = [.. decoded.Where(k => KernelRatioOf(k) >= 1).OrderByDescending(KernelRatioOf)];
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"**Per encoding.** Vorticity decoded {decoded.Count - over.Count} of {decoded.Count} files in less time than Rust; the"));
+            text.Append(string.Create(CultureInfo.InvariantCulture, $"median ratio is {Median(ratios):F2}x."));
+            text.AppendLine(over.Count == 0
+                ? string.Empty
+                : $" At 1.00x or above: {string.Join(", ", over.Select(k => $"`{k.Encoding}` {KernelRatio(k)}"))}.");
+            text.AppendLine();
+        }
+
+        Row? floor = table.FirstOrDefault(
+            r => r.Scenario.Name == "open" && r.Cores == Cores.One && r.Aot is not null && r.Theirs is not null);
+        if (floor is { Aot: { } ourFloor, Theirs: { } theirFloor })
+        {
+            // The process start is the whole process less the action it timed itself, on the row
+            // whose action is the smallest.
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"**The process start** is not in the figures: {ourFloor.WallMs.Median - ourFloor.WorkMs.Median:F0} ms for Vorticity's native binary and " +
+                $"{theirFloor.WallMs.Median - theirFloor.WorkMs.Median:F0} ms for Rust's,"));
+            text.AppendLine(floor.Jit is { } jitFloor
+                ? string.Create(CultureInfo.InvariantCulture,
+                    $"most of it the operating system starting a binary, and {jitFloor.WallMs.Median - jitFloor.WorkMs.Median:F0} ms for the managed runtime on the JIT.")
+                : "most of it the operating system starting a binary.");
+            text.AppendLine();
+        }
 
         List<Row> refused = [.. table.Where(r => r.Scenario.Reference is not null && r.Theirs is null)];
         if (refused.Count > 0)
         {
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"**Where the reference refused.** No figure for it on " +
-                $"{string.Join(", ", refused.Select(r => $"`{r.Scenario.Name}` at {r.Fixture.Rows:N0} rows on {r.Fixture.Writer}'s file, {Label(r.Cores)}"))}."));
-            foreach (string reason in refused
-                .Select(r => r.Refusal).OfType<string>().Distinct())
+                $"**Where Rust refused**, the row stays with the reason: " +
+                $"{string.Join(", ", refused.Select(r => $"`{r.Scenario.Name}` at {r.Fixture.Rows:N0} rows on {FileName(r.Fixture)} file, {Label(r.Cores)}"))}."));
+            foreach (string reason in refused.Select(r => r.Refusal).OfType<string>().Distinct())
             {
                 text.AppendLine(string.Create(CultureInfo.InvariantCulture, $"It said: *{reason}*."));
             }
 
-            text.AppendLine("The harness records the refusal rather than dropping the row: a table that shows only");
-            text.AppendLine("what worked is not a comparison.");
             text.AppendLine();
         }
 
@@ -863,28 +1204,20 @@ internal static class Report
         if (alone.Count > 0)
         {
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"**Where there is nothing to compare against.** {string.Join(", ", alone)}: the reference shim"));
-            text.AppendLine("exposes no such entry point, so the figure is ours alone and is not a ratio. Those");
-            text.AppendLine("cells read `not asked`, which is not the same claim as `refused`.");
+                $"**Not asked of Rust**: {string.Join(", ", alone)}, which its harness has no entry point for; those figures"));
+            text.AppendLine("are Vorticity's alone.");
             text.AppendLine();
         }
 
         text.AppendLine("## What this does not measure");
         text.AppendLine();
-        text.AppendLine("* **Steady state.** Every figure is a first and only action in a fresh process: a page cache");
-        text.AppendLine("  warmed only by the discarded run before it, thread pools starting, and in the JIT column");
-        text.AppendLine("  the code compiling as it runs. The per-encoding ratios in `bench/README.md` measure the");
-        text.AppendLine("  other thing — the same code after warm-up, in one process — and they are the place to");
-        text.AppendLine("  look for what a decoder costs.");
-        text.AppendLine("* **Pinned cores.** macOS pins no process to a set of cores, and this machine's cores are of");
-        text.AppendLine("  two kinds; both sides see all of them and the same count. Upstream's own figures come");
-        text.AppendLine("  from 94 pinned cores of one kind, and are not this machine's.");
-        text.AppendLine("* **A cold cache.** Upstream flushes the page cache before each query and keeps the first,");
-        text.AppendLine("  cold, run in its median; here the cache is warm for every run, on both sides.");
-        text.AppendLine("* **Your data.** One table of four columns is not every file. A column the compressor likes");
-        text.AppendLine("  less, or a filter a zone map cannot prune, moves these numbers more than any implementation");
-        text.AppendLine("  detail does.");
-        text.AppendLine("* **Your machine.** These figures belong to the one named above.");
+        text.AppendLine("* **A cold cache.** The page cache is warm for every run, on both sides; upstream's own");
+        text.AppendLine("  benchmarks flush it before each query.");
+        text.AppendLine("* **Pinned cores.** macOS pins no process, and this machine's cores are of two kinds; both");
+        text.AppendLine("  sides see all of them. Upstream measures on 94 pinned cores of one kind.");
+        text.AppendLine("* **Your data and your machine.** One table of four columns and one machine: a column the");
+        text.AppendLine("  compressor likes less, or a filter the zone maps cannot prune, moves these numbers more than");
+        text.AppendLine("  either implementation does.");
         return text.ToString();
     }
 
