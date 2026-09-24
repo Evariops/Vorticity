@@ -478,7 +478,7 @@ internal sealed class ScanBuilder
     }
 
     /// <summary>Opts in to decoding independent splits concurrently.</summary>
-    /// <param name="degree">How many splits may be in flight at once. Must be positive.</param>
+    /// <param name="degree">How many splits may decode at once. Must be positive.</param>
     /// <returns>This builder.</returns>
     /// <remarks>
     /// <para>

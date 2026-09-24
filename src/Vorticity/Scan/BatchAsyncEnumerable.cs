@@ -129,7 +129,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </remarks>
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live: null, _metrics,
+            _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live: null, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes);
 
     /// <summary>Batches decoded ahead of the consumer, on lanes of their own.</summary>
@@ -150,6 +150,29 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// <summary>The lanes the scan runs on: the degree, widened by the read-ahead.</summary>
     private int Lanes => _reverse ? 1 : Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1);
 
+    /// <summary>
+    /// The splits a scan keeps in flight, decoding or decoded and waiting for the consumer: its
+    /// lanes, and for a take on several lanes <see cref="TakeWindowPerLane"/> times its degree, of
+    /// which only the degree decode at once.
+    /// </summary>
+    /// <param name="take">The rows the scan takes, or null.</param>
+    /// <remarks>
+    /// Batches are delivered in row order, so a lane that finishes cannot start a split past the
+    /// ones in flight until the consumer has taken the oldest of them: the slowest split in flight
+    /// sets the pace, and every lane that finished before it waits. A take pays that at every split,
+    /// since its splits are many and each is a zone decoded for a row or two; and its batches carry
+    /// only the rows it takes, so the splits decoded ahead cost it little memory, where a scan whose
+    /// batches hold a window of rows would hold that many windows more.
+    /// </remarks>
+    private int WindowFor(RowSelection? take) =>
+        take is not null && _degree > 1 ? Math.Max(Lanes, TakeWindowPerLane * _degree) : Lanes;
+
+    /// <summary>
+    /// Splits in flight per lane of a take: enough for a lane on a core half as fast as the others
+    /// to finish a split while each of them finishes two.
+    /// </summary>
+    private const int TakeWindowPerLane = 3;
+
     /// <summary>Starts a scan that reads only the splits <paramref name="live"/> keeps.</summary>
     /// <param name="live">The mask of live blocks the pruning pass refined, or null for every block.</param>
     /// <param name="cancellationToken">Cancels at batch boundaries.</param>
@@ -157,7 +180,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         BlockMask? live, CancellationToken cancellationToken, ZonePruner? zones = null) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, _take, live, _metrics,
+            _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
             zones: zones, widenRows: WidenRows);
 
@@ -179,7 +202,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     internal IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(
         BlockMask? live, RowSelection proven, CancellationToken cancellationToken) =>
         new BatchAsyncEnumerator(
-            _file, _tree, _read, _keep, _schema, _plan, Lanes, _filter, proven, live, _metrics,
+            _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes);
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
@@ -243,7 +266,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly RowSelection? _take;
     private readonly BlockMask? _live;
     private readonly ScanMetrics? _metrics;
-    private readonly int _maxBatchRows;
     private readonly CancellationToken _token;
     private readonly Lane[] _lanes;
     private readonly ScanSegments _segments;
@@ -260,9 +282,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private RecordBatch? _current;
     private bool _held;
     private Lane? _currentLane;
-    private RowRange _pending;
     private long _started;
     private long _delivered;
+
+    // The decodes the scan's degree still allows, and the splits started and waiting for one, the
+    // last `_queued` of them: both under the lock of `_lanes`.
+    private int _free;
+    private int _queued;
     private bool _drained;
     private bool _disposed;
 
@@ -274,6 +300,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         DType schema,
         SplitPlan plan,
         int degree,
+        int window,
         VortexExpr? filter,
         RowSelection? take,
         BlockMask? live,
@@ -303,7 +330,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _keep = keep.RootMask;
         _schema = schema;
         _evaluator = filter is null ? null : new FilterEvaluator(filter) { Zones = zones };
-        _maxBatchRows = (int)Math.Min(plan.MaxRows, int.MaxValue);
         _token = cancellationToken;
         _cursor = plan.CreateCursor(reverse);
         _segments = new ScanSegments(degree);
@@ -322,8 +348,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _decodedBlocks = new BlockTally(blockRows);
         _prunedBlocks = new BlockTally(blockRows);
 
-        _lanes = new Lane[degree];
-        for (int i = 0; i < degree; i++)
+        _free = degree;
+        _lanes = new Lane[window];
+        for (int i = 0; i < window; i++)
         {
             _lanes[i] = new Lane(ScanContexts.Rent(file));
             // The mask, the metrics sink and the encoded delivery outlive every batch of the scan,
@@ -346,7 +373,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     /// <summary>The request the current batch was produced for.</summary>
     /// <remarks>Exposed for diagnostics and for the scan's own tests; it changes with every batch.</remarks>
-    public ScanRequest CurrentRequest => new ScanRequest(_pending, _mask, _maxBatchRows);
+    public ScanRequest CurrentRequest =>
+        new ScanRequest(_currentLane?.Rows ?? RowRange.Empty, _mask, (int)Math.Min(_cursor.Plan.MaxRows, int.MaxValue));
 
     /// <summary>Produces the next batch.</summary>
     /// <returns><see langword="true"/> when <see cref="Current"/> holds a new batch.</returns>
@@ -380,7 +408,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         Lane lane = _lanes[0];
-        _pending = split;
+        lane.Rows = split;
         _currentLane = lane;
         lane.Sequence = _started++;
         lane.Context.Batch = lane.Sequence;
@@ -620,14 +648,14 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             int root;
             if (!_compact && !_filterProven)
             {
-                root = ExecuteSelected(lane, _pending);
+                root = ExecuteSelected(lane, lane.Rows);
             }
             else
             {
-                root = ExecuteFiltered(lane, _pending);
+                root = ExecuteFiltered(lane, lane.Rows);
             }
 
-            RecordBatch batch = Deliver(lane, root, _pending.Start);
+            RecordBatch batch = Deliver(lane, root, lane.Rows.Start);
             batch.Select(lane.Selection, lane.Selected);
             _metrics?.AddBatch(batch.SelectedRows);
             return true;
@@ -1200,7 +1228,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         lane.Running = false;
-        _pending = lane.Rows;
         _currentLane = lane;
 
         // Every batch before this one has taken its own reference to what it needed, and is dead;
@@ -1226,20 +1253,53 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
     private void Pump()
     {
-        int lanes = _lanes.Length;
-        while (_started - _delivered < lanes)
+        int window = _lanes.Length;
+        long assigned = _started;
+        while (assigned - _delivered < window)
         {
             if (_drained || !TryNextSplit(out RowRange split))
             {
                 _drained = true;
-                return;
+                break;
             }
 
-            Lane lane = _lanes[(int)(_started % lanes)];
+            Lane lane = _lanes[(int)(assigned % window)];
             lane.Rows = split;
-            lane.Sequence = _started;
-            lane.Start(this);
-            _started++;
+            lane.Sequence = assigned;
+            lane.Assign(this);
+            assigned++;
+        }
+
+        lock (_lanes)
+        {
+            _queued += (int)(assigned - _started);
+            _started = assigned;
+            while (_free > 0 && _queued > 0)
+            {
+                _free--;
+                _lanes[(int)((_started - _queued) % window)].Go();
+                _queued--;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Hands the decode a lane has finished to the next split waiting for one, in the order of the
+    /// splits, or gives it back when none waits.
+    /// </summary>
+    private void HandOff()
+    {
+        lock (_lanes)
+        {
+            if (_queued > 0)
+            {
+                _lanes[(int)((_started - _queued) % _lanes.Length)].Go();
+                _queued--;
+            }
+            else
+            {
+                _free++;
+            }
         }
     }
 
@@ -1259,14 +1319,20 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         while (await lane.NextAsync().ConfigureAwait(false))
         {
             lane.Taken();
+            int root;
             try
             {
-                lane.Done(await RunLaneAsync(lane).ConfigureAwait(false));
+                root = await RunLaneAsync(lane).ConfigureAwait(false);
             }
             catch (Exception error)
             {
+                HandOff();
                 lane.Failed(error);
+                continue;
             }
+
+            HandOff();
+            lane.Done(root);
         }
     }
 
@@ -1316,6 +1382,19 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private async Task DisposePipelinedAsync()
     {
         ReleaseCurrent();
+
+        // The splits no loop has started are withdrawn, since nothing would ever run them; the
+        // lanes running one are awaited.
+        lock (_lanes)
+        {
+            for (long split = _started - _queued; split < _started; split++)
+            {
+                _lanes[(int)(split % _lanes.Length)].Running = false;
+            }
+
+            _started -= _queued;
+            _queued = 0;
+        }
 
         for (int i = 0; i < _lanes.Length; i++)
         {
@@ -1406,7 +1485,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return;
         }
 
-        _metrics.AddBlocksDecoded(_decodedBlocks.Add(_pending, Wanted, _live, Proven));
+        _metrics.AddBlocksDecoded(_decodedBlocks.Add(lane.Rows, Wanted, _live, Proven));
     }
 
     private void DisposeLanes()
@@ -1422,12 +1501,17 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _retained.Dispose();
     }
 
-    /// <summary>One decode flow: its own <see cref="ScanContext"/>, never shared.</summary>
+    /// <summary>
+    /// One split in flight, from the pump that gives it to the delivery of its batch: its own
+    /// <see cref="ScanContext"/>, never shared.
+    /// </summary>
     /// <remarks>
     /// A lane runs one loop for the whole scan, started with its first split: the loop waits for a
     /// split on one reusable source and reports the batch on another, and both resume their waiter
     /// on the thread pool. So a split allocates nothing, where a <c>Task.Run</c> per split would
-    /// allocate a task and its promise, and a split that suspends rents its state machine.
+    /// allocate a task and its promise, and a split that suspends rents its state machine. A lane
+    /// is given its split when the scan's window has room and runs it when its degree does, which
+    /// for a take, whose window is wider than its degree, may be later.
     /// </remarks>
     private sealed class Lane : SegmentWaiter, IValueTaskSource<bool>, IValueTaskSource<int>
     {
@@ -1453,14 +1537,16 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         /// <summary>The split in flight, to be awaited once.</summary>
         internal ValueTask<int> Completion => new ValueTask<int>(this, _done.Version);
 
-        /// <summary>Hands the split in <see cref="Rows"/> to the lane's loop, starting the loop with the first one.</summary>
-        internal void Start(BatchAsyncEnumerator owner)
+        /// <summary>Gives the lane the split in <see cref="Rows"/>, starting its loop with the first one.</summary>
+        internal void Assign(BatchAsyncEnumerator owner)
         {
             Running = true;
             _done.Reset();
             _loop ??= owner.LaneLoopAsync(this);
-            _go.SetResult(true);
         }
+
+        /// <summary>Lets the lane's loop run the split it was given.</summary>
+        internal void Go() => _go.SetResult(true);
 
         /// <summary>Ends the loop; the lane holds no split.</summary>
         internal void Stop()

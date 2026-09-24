@@ -53,6 +53,75 @@ public sealed class DegreeOfParallelismTests
         Assert.InRange(peak, 1, degree);
     }
 
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public async Task ATakeDecodesNoMoreSplitsAtOnceThanItsDegree(int degree)
+    {
+        (int peak, int batches) = await ScanAsync(
+            builder => builder.Take(OneRowAChunk()).WithDegreeOfParallelism(degree));
+
+        Report($"take, degree {degree}", peak, batches);
+        Assert.Equal(Chunks, batches);
+        Assert.InRange(peak, 1, degree);
+    }
+
+    /// <summary>
+    /// A take goes on decoding past the batch its consumer holds, three splits a lane, where a scan
+    /// stops at a split a lane: the lanes that finish do not wait for the consumer to reach them.
+    /// </summary>
+    [Fact]
+    public async Task ATakeDecodesThreeSplitsALaneAheadOfItsConsumer()
+    {
+        const int degree = 2;
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        byte[] bytes = await System.IO.File.ReadAllBytesAsync(Corpus.Path(Multi), ct);
+        OverlapCountingSource source = new OverlapCountingSource(new TestSegmentSource(bytes));
+        await using VortexFile file = await VortexFile.OpenAsync(
+            source, VortexOpenOptions.Default, CancellationToken.None);
+        int opened = source.Served;
+
+        IAsyncEnumerator<RecordBatch> batches = file.ScanBuilder().WithMaxBatchRows(BatchRows)
+            .Take(OneRowAChunk()).WithDegreeOfParallelism(degree).ExecuteAsync().GetAsyncEnumerator(ct);
+        try
+        {
+            Assert.True(await batches.MoveNextAsync());
+
+            // A split a read, each chunk being read by its own split. The count can only grow to
+            // the window while the consumer holds its first batch, so once it is there, a moment
+            // more shows it stays.
+            int ahead = await ReadsReachingAsync(source, opened, 3 * degree, ct);
+            Assert.Equal(3 * degree, ahead);
+            await Task.Delay(50, ct);
+            Assert.Equal(3 * degree, source.Served - opened);
+        }
+        finally
+        {
+            await batches.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// A take abandoned while splits wait for a lane disposes: the splits no lane started are
+    /// withdrawn rather than awaited.
+    /// </summary>
+    [Fact]
+    public async Task ATakeAbandonedWithSplitsWaitingDisposes()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        byte[] bytes = await System.IO.File.ReadAllBytesAsync(Corpus.Path(Multi), ct);
+        OverlapCountingSource source = new OverlapCountingSource(new TestSegmentSource(bytes));
+        await using VortexFile file = await VortexFile.OpenAsync(
+            source, VortexOpenOptions.Default, CancellationToken.None);
+
+        IAsyncEnumerator<RecordBatch> batches = file.ScanBuilder().WithMaxBatchRows(BatchRows)
+            .Take(OneRowAChunk()).WithDegreeOfParallelism(4).ExecuteAsync().GetAsyncEnumerator(ct);
+        Assert.True(await batches.MoveNextAsync());
+        Assert.Equal(1, batches.Current.RowCount);
+
+        await batches.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30), ct);
+    }
+
     [Fact]
     public async Task TheProcessDefaultAppliesToAScanThatAsksForNothing()
     {
@@ -120,6 +189,34 @@ public sealed class DegreeOfParallelismTests
     public void TheProcessDefaultRejectsANonPositiveValue(int degree) =>
         Assert.Throws<ArgumentOutOfRangeException>(() => ScanBuilder.DefaultDegreeOfParallelism = degree);
 
+    /// <summary>The file's chunks, of <see cref="BatchRows"/> rows each.</summary>
+    private const int Chunks = 64;
+
+    /// <summary>A row in every chunk, so a take of them is a split a chunk.</summary>
+    private static long[] OneRowAChunk()
+    {
+        long[] rows = new long[Chunks];
+        for (int i = 0; i < Chunks; i++)
+        {
+            rows[i] = (i * (long)BatchRows) + 7;
+        }
+
+        return rows;
+    }
+
+    /// <summary>The reads served since <paramref name="since"/>, once they reach <paramref name="expected"/> or ten seconds pass.</summary>
+    private static async Task<int> ReadsReachingAsync(
+        OverlapCountingSource source, int since, int expected, CancellationToken cancellationToken)
+    {
+        long deadline = Environment.TickCount64 + 10_000;
+        while (source.Served - since < expected && Environment.TickCount64 < deadline)
+        {
+            await Task.Delay(5, cancellationToken);
+        }
+
+        return source.Served - since;
+    }
+
     private static void Report(string what, int peak, int batches) =>
         Console.Out.Write(
             string.Create(
@@ -144,16 +241,19 @@ public sealed class DegreeOfParallelismTests
         return (source.Peak, batches);
     }
 
-    /// <summary>Records the largest number of <c>ReadManyAsync</c> calls ever open at once.</summary>
+    /// <summary>Records the largest number of <c>ReadManyAsync</c> calls ever open at once, and how many were served.</summary>
     private sealed class OverlapCountingSource : ISegmentReader
     {
         private readonly ISegmentReader _inner;
         private int _inFlight;
         private int _peak;
+        private int _served;
 
         internal OverlapCountingSource(ISegmentReader inner) => _inner = inner;
 
         internal int Peak => Volatile.Read(ref _peak);
+
+        internal int Served => Volatile.Read(ref _served);
 
         public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) =>
             _inner.GetLengthAsync(cancellationToken);
@@ -176,6 +276,7 @@ public sealed class DegreeOfParallelismTests
                 // the overlap wide enough that the count is about the pump and not about luck.
                 await Task.Delay(1, cancellationToken).ConfigureAwait(false);
                 await _inner.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+                Interlocked.Increment(ref _served);
             }
             finally
             {

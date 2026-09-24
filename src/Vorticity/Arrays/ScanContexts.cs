@@ -1,3 +1,4 @@
+using System;
 using System.Threading;
 
 namespace Vorticity.Arrays;
@@ -9,12 +10,13 @@ namespace Vorticity.Arrays;
 /// </summary>
 /// <remarks>
 /// A context comes back recycled, holding nothing of the scan or the file it served, and is bound
-/// to the next scan's file when it is taken. The bound is what a few scans at once hold, a lane
-/// each; a context past it is disposed.
+/// to the next scan's file when it is taken. The bound is what a take on a lane per processor
+/// holds, three contexts a lane, and never less than a few scans at once hold, a lane each; a
+/// context past it is disposed.
 /// </remarks>
 internal static class ScanContexts
 {
-    private const int Capacity = 16;
+    private static readonly int Capacity = Math.Max(16, 3 * Environment.ProcessorCount);
 
     private static readonly ScanContext?[] Contexts = new ScanContext?[Capacity];
     private static readonly Lock Gate = new Lock();
