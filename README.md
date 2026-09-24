@@ -150,13 +150,14 @@ time over Rust's, so under 1.00× Vorticity takes less:
 
 | action | one core | all 14 cores |
 |---|---|---|
-| scan every column | 68.6 ms against 79.0 (0.87×) | 9.3 ms against 13.2 (0.70×) |
-| filter to 1 % of the rows | 1.5 ms against 3.4 (0.43×) | 1.2 ms against 3.8 (0.33×) |
-| take 1 000 rows | 53.1 ms against 58.4 (0.91×) | 9.9 ms against 9.8 (1.00×) |
-| read the file and write it back | 293 ms against 578 (0.51×) | 92.4 ms against 104.7 (0.88×) |
+| scan every column | 69.1 ms against 79.1 (0.87×) | 8.6 ms against 12.2 (0.70×) |
+| filter to 1 % of the rows | 1.6 ms against 3.4 (0.46×) | 1.1 ms against 3.7 (0.31×) |
+| take 1 000 rows | 51.9 ms against 58.5 (0.89×) | 6.7 ms against 9.0 (0.74×) |
+| read the file and write it back | 295 ms against 585 (0.50×) | 88.1 ms against 100.7 (0.87×) |
 
 The file is 24.5 MB, and 79.0 MB from Rust's writer. Per encoding, the median decoder takes 0.59×
-Rust's time; a read allocates at most 134 KiB a call, and a scan nothing per batch.
+Rust's time. On one core a read allocates at most 107 KiB a call; on fourteen, where buffers rented
+on one thread come back on another, up to 343; a scan allocates nothing per batch.
 [docs/design/05-benchmarks.md](docs/design/05-benchmarks.md) says what the figures mean and where
 Rust is ahead, [the benchmark page](docs/guide/benchmarks.md) has all of them, and
 [bench/README.md](bench/README.md) how to run each instrument: `bench/gate.sh` runs everything that
