@@ -387,31 +387,31 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Dictionary<string, Reference> References = new()
     {
-        ["full scan"] = new(0.344, 2, 0.055),   // 3 passes, spread 0.318-0.337; carried from 0.307, +12.1% under the new binary (0.300 -> 0.337, k 2 -> 2)
-        ["full scan, upstream lazy"] = new(0.500, 2, 0.020),   // 3 passes, spread 0.462-0.472; carried from 0.419, +19.4% under the new binary (0.395 -> 0.472, k 2 -> 2)
-        ["projected scan, 1 of 5 columns"] = new(0.442, 9, 0.128),   // 3 passes, spread 0.386-0.443; carried from 0.366, +20.8% under the new binary (0.367 -> 0.443, k 9 -> 9)
-        ["projected scan, upstream lazy"] = new(0.484, 10, 0.131),   // 3 passes, spread 0.430-0.495; carried from 0.406, +19.2% under the new binary (0.415 -> 0.495, k 9 -> 10)
-        ["open to first batch"] = new(0.090, 10, 0.035),   // 3 passes, spread 0.084-0.087; carried from 0.076, +18.7% under the new binary (0.074 -> 0.087, k 10 -> 10)
-        ["open, footer only"] = new(0.724, 34, 0.015),   // 3 passes, spread 0.605-0.614; carried from 0.706, +2.6% under the new binary (0.599 -> 0.614, k 34 -> 34)
-        ["read and write back"] = new(0.321, 1, 0.009),   // 3 passes, spread 0.392-0.396; carried from 0.297, +8.0% under the new binary (0.367 -> 0.396, k 1 -> 1)
-        ["filtered scan, 1% band"] = new(0.258, 11, 0.025),   // 3 passes, spread 0.243-0.249; carried from 0.197, +30.9% under the new binary (0.190 -> 0.249, k 10 -> 11)
-        ["filtered scan, half the rows"] = new(0.294, 6, 0.017),   // 3 passes, spread 0.264-0.269; carried from 0.251, +16.9% under the new binary (0.230 -> 0.269, k 6 -> 6)
-        ["scattered take, 64 of 64 splits"] = new(0.228, 3, 0.009),   // 3 passes, spread 0.225-0.227; carried from 0.191, +19.3% under the new binary (0.190 -> 0.227, k 3 -> 3)
-        ["rewritten zoned, reference's"] = new(0.356, 2, 0.027),   // 3 passes, spread 0.330-0.339; carried from 0.307, +15.9% under the new binary (0.293 -> 0.339, k 2 -> 2)
-        ["rewritten zoned, ours"] = new(1.089, 2, 0.005),   // 3 passes, spread 0.948-0.952; carried from 1.070, +1.8% under the new binary (0.935 -> 0.952, k 2 -> 2)
-        ["rewritten high card, reference's"] = new(0.920, 28, 0.043),   // 3 passes, spread 0.851-0.889; carried from 0.850, +8.3% under the new binary (0.821 -> 0.889, k 27 -> 28)
-        ["rewritten high card, ours"] = new(1.001, 21, 0.010),   // 3 passes, spread 0.952-0.962; carried from 0.915, +9.4% under the new binary (0.880 -> 0.962, k 21 -> 21)
-        ["key order, sorted column, 1% band"] = new(0.754, 12, 0.019),   // 3 passes, spread 0.737-0.751; carried from 0.627, +20.2% under the new binary (0.625 -> 0.751, k 12 -> 12)
-        ["key order, uncorrelated, 64 rows"] = new(1.262, 8, 0.065),   // 3 passes, spread 1.145-1.225; carried from 1.077, +17.1% under the new binary (1.046 -> 1.225, k 7 -> 8)
-        ["count, exact cover, 1% band"] = new(0.687, 10, 0.177),   // 3 passes, spread 0.547-0.665; carried from 0.615, +11.7% under the new binary (0.595 -> 0.665, k 7 -> 10)
-        ["filtered scan, string equality, fsst"] = new(0.898, 4, 0.139),   // 3 passes, spread 0.809-0.940; carried from 0.923, -2.7% under the new binary (0.966 -> 0.940, k 4 -> 4)
-        ["filtered scan, string prefix, fsst"] = new(1.237, 2, 0.038),   // 3 passes, spread 1.165-1.212; carried from 1.264, -2.1% under the new binary (1.239 -> 1.212, k 2 -> 2)
-        ["filtered scan, string equality, dict"] = new(1.933, 7, 0.151),   // 3 passes, spread 1.638-1.930; carried from 1.713, +12.8% under the new binary (1.710 -> 1.930, k 9 -> 7)
-        ["filtered scan, string prefix, dict"] = new(1.573, 8, 0.023),   // 3 passes, spread 1.408-1.440; carried from 1.444, +9.0% under the new binary (1.322 -> 1.440, k 7 -> 8)
-        ["filtered scan, band, runend"] = new(1.301, 13, 0.039),   // 3 passes, spread 0.993-1.032; carried from 1.117, +16.5% under the new binary (0.886 -> 1.032, k 13 -> 13)
-        ["filtered scan, band, bitpacked"] = new(1.257, 12, 0.028),   // 3 passes, spread 1.087-1.117; carried from 1.113, +12.9% under the new binary (0.989 -> 1.117, k 11 -> 12)
-        ["full scan, 1M table"] = new(0.060, 1, 0.012),   // 3 passes, spread 0.060-0.061; carried from 0.057, +5.0% under the new binary (0.058 -> 0.061, k 1 -> 1)
-        ["projected scan, 1 of 50 columns"] = new(0.088, 9, 0.170),   // 3 passes, spread 0.067-0.081; carried from 0.095, -6.9% under the new binary (0.087 -> 0.081, k 10 -> 9)
+        ["full scan"] = new(0.312, 2, 0.018),   // 3 passes, spread 0.307-0.312; was 0.344, -9.2%
+        ["full scan, upstream lazy"] = new(0.438, 2, 0.022),   // 3 passes, spread 0.428-0.438; was 0.500, -12.4%
+        ["projected scan, 1 of 5 columns"] = new(0.409, 10, 0.144),   // 3 passes, spread 0.350-0.409; was 0.442, -7.6%
+        ["projected scan, upstream lazy"] = new(0.457, 10, 0.097),   // 3 passes, spread 0.412-0.457; was 0.484, -5.7%
+        ["open to first batch"] = new(0.084, 11, 0.062),   // 3 passes, spread 0.079-0.084; was 0.090, -7.0%
+        ["open, footer only"] = new(0.622, 35, 0.030),   // 3 passes, spread 0.603-0.622; was 0.724, -14.1%
+        ["read and write back"] = new(0.321, 1, 0.009),   // 3 passes, spread 0.373-0.384; held, not rebased: over its reference before this binary too
+        ["filtered scan, 1% band"] = new(0.211, 12, 0.029),   // 3 passes, spread 0.205-0.211; was 0.258, -18.1%
+        ["filtered scan, half the rows"] = new(0.259, 6, 0.049),   // 3 passes, spread 0.247-0.259; was 0.294, -11.8%
+        ["scattered take, 64 of 64 splits"] = new(0.205, 3, 0.013),   // 3 passes, spread 0.203-0.205; was 0.228, -9.9%
+        ["rewritten zoned, reference's"] = new(0.313, 2, 0.025),   // 3 passes, spread 0.305-0.313; was 0.356, -12.1%
+        ["rewritten zoned, ours"] = new(0.914, 2, 0.056),   // 3 passes, spread 0.863-0.914; was 1.089, -16.1%
+        ["rewritten high card, reference's"] = new(0.762, 32, 0.033),   // 3 passes, spread 0.736-0.762; was 0.920, -17.2%
+        ["rewritten high card, ours"] = new(0.842, 23, 0.008),   // 3 passes, spread 0.836-0.842; was 1.001, -15.8%
+        ["key order, sorted column, 1% band"] = new(0.718, 14, 0.057),   // 3 passes, spread 0.676-0.718; was 0.754, -4.8%
+        ["key order, uncorrelated, 64 rows"] = new(1.125, 8, 0.024),   // 3 passes, spread 1.098-1.125; was 1.262, -10.9%
+        ["count, exact cover, 1% band"] = new(0.627, 7, 0.100),   // 3 passes, spread 0.564-0.627; was 0.687, -8.8%
+        ["filtered scan, string equality, fsst"] = new(0.852, 5, 0.148),   // 3 passes, spread 0.726-0.852; was 0.898, -5.1%
+        ["filtered scan, string prefix, fsst"] = new(1.237, 2, 0.039),   // 3 passes, spread 1.189-1.237; was 1.237, 0.0%
+        ["filtered scan, string equality, dict"] = new(1.908, 10, 0.121),   // 3 passes, spread 1.677-1.908; was 1.933, -1.3%
+        ["filtered scan, string prefix, dict"] = new(1.365, 7, 0.020),   // 3 passes, spread 1.337-1.365; was 1.573, -13.2%
+        ["filtered scan, band, runend"] = new(0.968, 14, 0.013),   // 3 passes, spread 0.956-0.968; was 1.301, -25.6%
+        ["filtered scan, band, bitpacked"] = new(0.924, 14, 0.019),   // 3 passes, spread 0.906-0.924; was 1.257, -26.5%
+        ["full scan, 1M table"] = new(0.037, 1, 0.011),   // 3 passes, spread 0.036-0.037; was 0.060, -39.1%
+        ["projected scan, 1 of 50 columns"] = new(0.071, 13, 0.199),   // 3 passes, spread 0.057-0.071; was 0.088, -19.2%
     };
 
     /// <summary>
@@ -423,7 +423,7 @@ internal static class RatioCheck
     /// to gate on one; and a recalibration under another binary may raise a reference with
     /// <c>--rebase</c>, because the denominator changed, as a new k changes it.
     /// </remarks>
-    private static readonly string? CalibratedShim = "5235c667a60b";
+    private static readonly string? CalibratedShim = "5ee2b9027373";
 
     /// <summary>
     /// How far under its reference a ratio may sit before it is called stale.
