@@ -100,6 +100,54 @@ internal sealed class RowSelection
     /// <param name="split">A row range, in file coordinates.</param>
     internal int CountIn(RowRange split) => LowerBound(split.End) - LowerBound(split.Start);
 
+    /// <summary>
+    /// Whether any requested row falls inside <paramref name="split"/>, for a caller walking its
+    /// splits forward: no search, the rows before it stepped over from where the last split left off.
+    /// </summary>
+    /// <param name="split">The split's row range, at or past every split asked about before it.</param>
+    /// <param name="at">
+    /// The first requested row at or past the last split asked about, 0 before the first; moved to
+    /// the first at or past this one.
+    /// </param>
+    internal bool Touches(RowRange split, ref int at)
+    {
+        int first = at;
+        while (first < _count && _rows[first] < split.Start)
+        {
+            first++;
+        }
+
+        at = first;
+        return first < _count && _rows[first] < split.End;
+    }
+
+    /// <summary>
+    /// How many requested rows fall inside <paramref name="split"/>, for a caller walking its splits
+    /// forward: no search, the rows before it stepped over from where the last split left off.
+    /// </summary>
+    /// <param name="split">The split's row range, at or past every split asked about before it.</param>
+    /// <param name="at">
+    /// The first requested row at or past the last split asked about, 0 before the first; moved to
+    /// the first at or past this one.
+    /// </param>
+    internal int CountIn(RowRange split, ref int at)
+    {
+        int first = at;
+        while (first < _count && _rows[first] < split.Start)
+        {
+            first++;
+        }
+
+        at = first;
+        int end = first;
+        while (end < _count && _rows[end] < split.End)
+        {
+            end++;
+        }
+
+        return end - first;
+    }
+
     /// <summary>The first index whose row is at or after <paramref name="row"/>.</summary>
     private int LowerBound(long row)
     {

@@ -289,6 +289,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     // last `_queued` of them: both under the lock of `_lanes`.
     private int _free;
     private int _queued;
+
+    // The first row of a caller's take at or past the split the cursor last reached: a take is
+    // walked forward, split after split, so its rows are stepped over rather than searched.
+    private int _takeAt;
     private bool _drained;
     private bool _disposed;
 
@@ -556,10 +560,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         while (_cursor.TryNext(out split))
         {
-            // A take's own skip comes first: it is a binary search over the index list, while the
-            // mask reads the bit or two the split overlaps. A caller's take never held the rows it
+            // A take's own skip comes first: a step through its rows, or for the rows an exact
+            // index proved, which a descending walk reads backwards, a binary search; the mask
+            // reads the bit or two the split overlaps. A caller's take never held the rows it
             // skips; rows an exact index proved outside the filter are pruned by that index.
-            if (_take is not null && !_take.Touches(split))
+            if (_take is not null && !(_filterProven ? _take.Touches(split) : _take.Touches(split, ref _takeAt)))
             {
                 if (_filterProven)
                 {
@@ -610,7 +615,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _cursor.Plan.WindowOf(split.Start, out int lead, out int span);
         long end = split.Start - lead + span;
         int most = _lanes.Length > 1 ? TakeRunRows : int.MaxValue;
-        int held = take.CountIn(split);
+        int held = take.CountIn(split, ref _takeAt);
         while (held < most)
         {
             SplitCursor probe = _cursor;
@@ -620,7 +625,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 return;
             }
 
-            int rows = take.CountIn(next);
+            int rows = take.CountIn(next, ref _takeAt);
             if (rows == 0)
             {
                 return;
