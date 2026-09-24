@@ -28,7 +28,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// suite runs once with hardware intrinsics disabled, so it is exercised rather than merely
 /// present.
 /// </remarks>
-internal static class FastLanes
+internal static partial class FastLanes
 {
     /// <summary>Elements in one FastLanes block.</summary>
     public const int BlockSize = 1024;
@@ -367,7 +367,7 @@ internal static class FastLanes
 
         if (Vectorizable<T>() && Vector128.IsHardwareAccelerated)
         {
-            Vectorized(packed, ShapesOf<T>(bitWidth), output, lanes, lanes * bitWidth, 1);
+            UnpackVectorized(packed, bitWidth, output, lanes, 1);
             return;
         }
 
@@ -375,35 +375,18 @@ internal static class FastLanes
     }
 
     /// <summary>
-    /// Unpacks a run of consecutive blocks into consecutive output, with the per-row shape computed
-    /// once for the whole run.
+    /// Unpacks a run of consecutive blocks into consecutive output, with what depends on the bit
+    /// width laid out once for the whole run.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// Every block of a node shares one bit width, so the row shapes are the same for all of them.
-    /// Building them per block would spend a sizeable share of the kernel recomputing a table that
-    /// never changes, several multiply-shift pairs and two mask constructions per row against an
-    /// inner loop of a few vector iterations.
+    /// Every block of a node shares one bit width, so the steps the kernel takes are the same for
+    /// all of them and are built once per width rather than once per block.
     /// </para>
     /// <para>
-    /// The block stays the outer loop even though hoisting the rows outside it would also hoist the
-    /// two mask broadcasts. A row writes only <c>lanes</c> contiguous elements per block, so
-    /// row-outer would sweep the whole output once per row instead of once in total. The broadcasts
-    /// are a register move; the sweep is memory bandwidth.
-    /// </para>
-    /// <para>
-    /// Two other shapes are slower, for reasons that will not change. Carrying the packed word in a
-    /// register across rows, with lane groups outside, costs a data-dependent branch per row and
-    /// re-reads the shape table per lane group, to save loads that all hit the first-level cache.
-    /// Precomputing the mask vectors into an array and indexing them by row replaces a broadcast
-    /// from a register, which is one instruction, with a vector load.
-    /// </para>
-    /// <para>
-    /// Hard-coding the shift and the masks as literals is faster still, and that is the ceiling a
-    /// generator monomorphised by bit width could reach. It would mean emitting code for every
-    /// (width, row) pair, since the shift depends on the row and not on the width alone -- four
-    /// element types times sixty-four widths times their rows, thousands of generated lines -- for
-    /// a fraction of one kernel.
+    /// The block stays the outer loop: a block's output is a few kilobytes, written whole while it
+    /// sits in the first-level cache, where a loop over rows or words outside the blocks would sweep
+    /// the whole output once per row.
     /// </para>
     /// </remarks>
     /// <typeparam name="T">The unsigned element type.</typeparam>
@@ -442,7 +425,34 @@ internal static class FastLanes
             return;
         }
 
-        Vectorized(packed, ShapesOf<T>(bitWidth), output, lanes, wordsPerBlock, blocks);
+        UnpackVectorized(packed, bitWidth, output, lanes, blocks);
+    }
+
+    /// <summary>Runs the vector kernel this machine is fastest with over a run of whole blocks.</summary>
+    /// <remarks>
+    /// The word-at-a-time kernel is written over 128-bit vectors; where wider ones are accelerated,
+    /// the row-at-a-time kernel runs at their width instead.
+    /// </remarks>
+    private static void UnpackVectorized<T>(
+        ReadOnlySpan<T> packed, int bitWidth, Span<T> output, int lanes, int blocks)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        // `lanes` is 16, 32, 64 or 128 and every vector width divides all four, so the loops of the
+        // row-at-a-time kernels never need a remainder tail.
+        if (Vector512.IsHardwareAccelerated)
+        {
+            Unpack512(packed, ShapesOf<T>(bitWidth), output, lanes, lanes * bitWidth, blocks);
+            return;
+        }
+
+        if (Vector256.IsHardwareAccelerated)
+        {
+            Unpack256(packed, ShapesOf<T>(bitWidth), output, lanes, lanes * bitWidth, blocks);
+            return;
+        }
+
+        UnpackWords(
+            ref MemoryMarshal.GetReference(packed), bitWidth, ref MemoryMarshal.GetReference(output), blocks);
     }
 
     /// <summary>
@@ -483,9 +493,7 @@ internal static class FastLanes
         int wordsPerBlock = lanes * bitWidth;
         ReadOnlySpan<int> rowOf = PackedRowTable(elementBits);
         ReadOnlySpan<int> laneOf = PackedLaneTable(elementBits);
-        ReadOnlySpan<Row<T>> shapes = Vectorizable<T>() && Vector128.IsHardwareAccelerated
-            ? ShapesOf<T>(bitWidth)
-            : default;
+        bool vectorized = Vectorizable<T>() && Vector128.IsHardwareAccelerated;
         Span<T> scratch = stackalloc T[BlockSize];
 
         // One pass over the rows: whether a block is read whole is judged on the row a block's worth
@@ -500,9 +508,9 @@ internal static class FastLanes
             int ahead = i + WholeBlockRows - 1;
             if (ahead < wanted.Length && (uint)(wanted[ahead] - first) < BlockSize)
             {
-                if (!shapes.IsEmpty)
+                if (vectorized)
                 {
-                    Vectorized<T>(source, shapes, scratch, lanes, wordsPerBlock, 1);
+                    UnpackVectorized(source, bitWidth, scratch, lanes, 1);
                 }
                 else
                 {
@@ -794,29 +802,6 @@ internal static class FastLanes
         typeof(T) == typeof(byte) || typeof(T) == typeof(ushort)
         || typeof(T) == typeof(uint) || typeof(T) == typeof(ulong);
 
-    /// <summary>Runs whichever vector width is available over a run of prepared blocks.</summary>
-    private static void Vectorized<T>(
-        ReadOnlySpan<T> packed, ReadOnlySpan<Row<T>> shapes, Span<T> output, int lanes,
-        int wordsPerBlock, int blocks)
-        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
-    {
-        // `lanes` is 16, 32, 64 or 128 and every vector width divides all four, so the loops below
-        // never need a remainder tail.
-        if (Vector512.IsHardwareAccelerated)
-        {
-            Unpack512(packed, shapes, output, lanes, wordsPerBlock, blocks);
-            return;
-        }
-
-        if (Vector256.IsHardwareAccelerated)
-        {
-            Unpack256(packed, shapes, output, lanes, wordsPerBlock, blocks);
-            return;
-        }
-
-        Unpack128(packed, shapes, output, lanes, wordsPerBlock, blocks);
-    }
-
     /// <summary>Runs whichever vector width is available over one block's rows.</summary>
     /// <typeparam name="T">The unsigned element type.</typeparam>
     /// <param name="values">The block's 1024 values.</param>
@@ -1077,60 +1062,6 @@ internal static class FastLanes
                 {
                     Vector256<T> value = ShiftRight(
                         Vector256.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
-                    value.StoreUnsafe(ref destination, into + (nuint)lane);
-                }
-            }
-        }
-    }
-
-    private static void Unpack128<T>(
-        ReadOnlySpan<T> packed, ReadOnlySpan<Row<T>> shapes, Span<T> output, int lanes,
-        int wordsPerBlock, int blocks)
-        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
-    {
-        ref T source = ref MemoryMarshal.GetReference(packed);
-        ref T destination = ref MemoryMarshal.GetReference(output);
-        ref Row<T> shapeTable = ref MemoryMarshal.GetReference(shapes);
-        int rows = shapes.Length;
-        int step = Vector128<T>.Count;
-
-        for (int block = 0; block < blocks; block++)
-        {
-            nuint blockSource = (nuint)((nint)block * wordsPerBlock);
-            nuint blockDestination = (nuint)((nint)block * BlockSize);
-
-            for (int row = 0; row < rows; row++)
-            {
-                ref Row<T> shape = ref Unsafe.Add(ref shapeTable, row);
-                Vector128<T> low = Vector128.Create(shape.LowMask);
-                Vector128<T> high = Vector128.Create(shape.HighMask);
-                nuint current = blockSource + (nuint)(lanes * shape.CurrentWord);
-                nuint next = blockSource + (nuint)(lanes * shape.NextWord);
-                nuint into = blockDestination + (nuint)shape.Destination;
-                int shift = shape.Shift;
-                int currentBits = shape.CurrentBits;
-                // The spill test is a property of the row, so it is not in the lane loop. Whether
-                // this row straddles two packed words is decided when the shape is built and is the
-                // same for all 16 to 128 lanes; testing it inside would be one branch per vector
-                // iteration of the innermost loop of the encoding. Two loops, one test.
-                if (shape.Spills)
-                {
-                    for (int lane = 0; lane < lanes; lane += step)
-                    {
-                        Vector128<T> value = ShiftRight(
-                            Vector128.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
-                        value |= ShiftLeft(
-                            Vector128.LoadUnsafe(ref source, next + (nuint)lane) & high, currentBits);
-                        value.StoreUnsafe(ref destination, into + (nuint)lane);
-                    }
-
-                    continue;
-                }
-
-                for (int lane = 0; lane < lanes; lane += step)
-                {
-                    Vector128<T> value = ShiftRight(
-                        Vector128.LoadUnsafe(ref source, current + (nuint)lane), shift) & low;
                     value.StoreUnsafe(ref destination, into + (nuint)lane);
                 }
             }
