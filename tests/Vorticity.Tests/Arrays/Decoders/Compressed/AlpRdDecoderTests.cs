@@ -180,6 +180,66 @@ public sealed class AlpRdDecoderTests
     }
 
     [Fact]
+    public void ASelectionTakesThePatchesOfItsRowsAndNoOthers()
+    {
+        // A patch every fourth row and two more: a selection of a few rows looks each of them up
+        // among the patches, a larger one walks them, and both put every patch where its row landed.
+        const int rows = 256;
+        System.Collections.Generic.List<int> exceptions = [5, 255];
+        for (int i = 0; i < rows; i += 4)
+        {
+            exceptions.Add(i);
+        }
+
+        exceptions.Sort();
+        double[] originals = new double[rows];
+        for (int i = 0; i < rows; i++)
+        {
+            originals[i] = exceptions.Contains(i) ? 1e300 * (i + 1) : 1.0 + (i * 1e-9);
+        }
+
+        ulong shared = BitConverter.DoubleToUInt64Bits(1.0) >> RightBitWidth;
+        uint[] positions = new uint[exceptions.Count];
+        ushort[] highs = new ushort[exceptions.Count];
+        for (int p = 0; p < exceptions.Count; p++)
+        {
+            positions[p] = (uint)exceptions[p];
+            highs[p] = (ushort)(BitConverter.DoubleToUInt64Bits(originals[exceptions[p]]) >> RightBitWidth);
+        }
+
+        TestNode root = new TestNode("vortex.alprd")
+            .WithMetadata(TestMetadata.AlpRd(
+                RightBitWidth, PType.U16, PatchesMetadata.Create((ulong)exceptions.Count, 0, PType.U32), (uint)shared))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(0))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(1))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(2))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(3));
+
+        using DecodeHarness harness = DecodeHarness.Load(
+            root, new byte[rows * sizeof(ushort)], RightParts(originals), TestBuffers.UInt32(positions), TestBuffers.UInt16(highs));
+        DType f64 = harness.Types.Primitive(PType.F64, Nullability.NonNullable);
+        ArrayNode node = harness.Scan.Nodes.Root;
+
+        int[] every3 = new int[86];
+        for (int i = 0; i < every3.Length; i++)
+        {
+            every3[i] = i * 3;
+        }
+
+        foreach (int[] wanted in new[] { new[] { 0 }, [3], [4, 5], [0, 17, 128, 255], [1, 2, 3, 6, 7], [254, 255], every3 })
+        {
+            CanonicalNode taken = harness.Node(harness.Scan.Decode.DecodeRootSelected(in node, f64, rows, wanted));
+            double[] expected = new double[wanted.Length];
+            for (int i = 0; i < wanted.Length; i++)
+            {
+                expected[i] = originals[wanted[i]];
+            }
+
+            Assert.Equal(expected, Values(taken, wanted.Length));
+        }
+    }
+
+    [Fact]
     public void ValidityComesFromTheLeftPartsChild()
     {
         byte[] codes = TestBuffers.UInt16(0, 0, 0);

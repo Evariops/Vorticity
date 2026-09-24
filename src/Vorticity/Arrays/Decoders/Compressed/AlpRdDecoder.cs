@@ -415,7 +415,8 @@ internal sealed class AlpRdDecoder : ArrayDecoder
     /// The patch set is decoded whole even for a selective decode: patch indices are positions in
     /// the file's row space, so knowing which of them the selection touches means having them all.
     /// They are the rows the dictionary could not hold, a small minority or the encoder would have
-    /// chosen otherwise, and the two ascending lists are then walked together once.
+    /// chosen otherwise, and the two ascending lists are then walked together once, or the patches
+    /// searched for each wanted row when the rows are few enough for that to cost less.
     /// </para>
     /// </remarks>
     private static void ApplyLeftPartPatches(
@@ -486,6 +487,29 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         // decoded selectively, so it holds the wanted rows in the same order. A range holds the
         // patches of its own rows, rebased to its first, and the walk starts at the first of them.
         ReadOnlySpan<byte> source = values.Values.Span;
+
+        // A take asks for a row or two a zone among patches that may number thousands: each wanted
+        // row is then looked for among the patches from the last one found, a binary search a row,
+        // where the walk below reads every patch up to the last wanted row.
+        if (selective && (long)wanted.Length * (System.Numerics.BitOperations.Log2((uint)patches.Count) + 1) < patches.Count)
+        {
+            int from = 0;
+            for (int w = 0; w < wanted.Length && from < patches.Count; w++)
+            {
+                int found = Patches.Find(in patches, wanted[w], from);
+                if (found < 0)
+                {
+                    from = ~found;
+                    continue;
+                }
+
+                Write(destination, w, CompressedValues.ReadUnsigned(source, leftPType, found), right, rightBitWidth, isSingle);
+                from = found;
+            }
+
+            return;
+        }
+
         int at = 0;
         int first = 0;
         if (!selective && start != 0)
