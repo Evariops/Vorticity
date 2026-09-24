@@ -77,7 +77,7 @@ public sealed partial class PerRowDispatchTests
         ("Arrays/Decoders/Canonical/ListDecoder.cs", 2, 0, "legitimate: bounds"),
         ("Arrays/Decoders/Canonical/VarBinDecoder.cs", 2, 0, "legitimate: bounds"),
         ("Arrays/Decoders/Canonical/ViewKernels.cs", 4, 0, "legitimate: four error paths"),
-        ("Arrays/Decoders/Compressed/AlpRdDecoder.cs", 1, 1, "R4"),
+        ("Arrays/Decoders/Compressed/AlpRdDecoder.cs", 0, 0, "R4 done: the patch values are read at their own width"),
         ("Arrays/Decoders/Compressed/CompressedValues.cs", 2, 0, "the definitions of ReadUnsigned/WriteInteger"),
         ("Arrays/Decoders/Compressed/DictDecoder.cs", 1, 0, "legitimate: an error message"),
         ("Arrays/Decoders/Compressed/EncodedNodes.cs", 3, 0, "per run, not per row: the binary search for a slice's run bounds and the rebased ends; one error message"),
@@ -102,7 +102,7 @@ public sealed partial class PerRowDispatchTests
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
-    private const int TotalCalls = 58;
+    private const int TotalCalls = 57;
 
     /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -110,7 +110,7 @@ public sealed partial class PerRowDispatchTests
     /// left in the file is an error path: that change of COMPOSITION is what this column exists
     /// to record.
     /// </remarks>
-    private const int TotalPerRow = 15;
+    private const int TotalPerRow = 14;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()

@@ -477,20 +477,51 @@ internal sealed class AlpRdDecoder : ArrayDecoder
             CompressedThrow.Format($"{Id} patch values must not contain nulls.");
         }
 
-        // One loop serves both paths: a second copy of this walk would be a second per-row dispatch
-        // on the left parts' physical type. The branch below runs once per patch -- the rows the
-        // dictionary could not hold, a minority by construction -- so the dense path pays one
-        // predictable test for each of them.
-        //
-        // Both lists ascend, so one walk finds the intersection. `at` is where the patched row
-        // landed in the selection, which is also where its right part is: the right child was
-        // decoded selectively, so it holds the wanted rows in the same order. A range holds the
-        // patches of its own rows, rebased to its first, and the walk starts at the first of them.
+        // The patch values are read at their own width, resolved here once rather than at every
+        // patch applied.
         ReadOnlySpan<byte> source = values.Values.Span;
+        switch (leftPType)
+        {
+            case PType.U8:
+                Patch(in patches, source, right, destination, rightBitWidth, isSingle, wanted, selective, start, produced);
+                break;
+            case PType.U16:
+                Patch(in patches, MemoryMarshal.Cast<byte, ushort>(source), right, destination, rightBitWidth, isSingle, wanted, selective, start, produced);
+                break;
+            case PType.U32:
+                Patch(in patches, MemoryMarshal.Cast<byte, uint>(source), right, destination, rightBitWidth, isSingle, wanted, selective, start, produced);
+                break;
+            default:
+                Patch(in patches, MemoryMarshal.Cast<byte, ulong>(source), right, destination, rightBitWidth, isSingle, wanted, selective, start, produced);
+                break;
+        }
+    }
 
-        // A take asks for a row or two a zone among patches that may number thousands: each wanted
-        // row is then looked for among the patches from the last one found, a binary search a row,
-        // where the walk below reads every patch up to the last wanted row.
+    /// <summary>
+    /// Recombines each patched row the output holds with its patch's high bits: every patch of the
+    /// range, or those of the wanted rows.
+    /// </summary>
+    /// <remarks>
+    /// Both lists ascend. A take asks for a row or two a zone among patches that may number
+    /// thousands, so each wanted row is looked for among the patches from the last one found, a
+    /// binary search a row. A denser selection walks the two lists together once, `at` being where
+    /// the patched row landed in the selection, which is also where its right part is: the right
+    /// child was decoded over the same rows. A range holds the patches of its own rows, rebased to
+    /// its first, and its walk starts at the first of them.
+    /// </remarks>
+    private static void Patch<THigh>(
+        in Patches patches,
+        ReadOnlySpan<THigh> highs,
+        ReadOnlySpan<byte> right,
+        Span<byte> destination,
+        int rightBitWidth,
+        bool isSingle,
+        ReadOnlySpan<int> wanted,
+        bool selective,
+        int start,
+        int produced)
+        where THigh : unmanaged
+    {
         if (selective && (long)wanted.Length * (System.Numerics.BitOperations.Log2((uint)patches.Count) + 1) < patches.Count)
         {
             int from = 0;
@@ -503,7 +534,7 @@ internal sealed class AlpRdDecoder : ArrayDecoder
                     continue;
                 }
 
-                Write(destination, w, CompressedValues.ReadUnsigned(source, leftPType, found), right, rightBitWidth, isSingle);
+                Write(destination, w, High(highs[found]), right, rightBitWidth, isSingle);
                 from = found;
             }
 
@@ -552,9 +583,31 @@ internal sealed class AlpRdDecoder : ArrayDecoder
                 target = position - start;
             }
 
-            ulong high = CompressedValues.ReadUnsigned(source, leftPType, i);
-            Write(destination, target, high, right, rightBitWidth, isSingle);
+            Write(destination, target, High(highs[i]), right, rightBitWidth, isSingle);
         }
+    }
+
+    /// <summary>A patch's high bits, widened from the width they are stored at.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong High<THigh>(THigh value)
+        where THigh : unmanaged
+    {
+        if (typeof(THigh) == typeof(byte))
+        {
+            return Unsafe.As<THigh, byte>(ref value);
+        }
+
+        if (typeof(THigh) == typeof(ushort))
+        {
+            return Unsafe.As<THigh, ushort>(ref value);
+        }
+
+        if (typeof(THigh) == typeof(uint))
+        {
+            return Unsafe.As<THigh, uint>(ref value);
+        }
+
+        return Unsafe.As<THigh, ulong>(ref value);
     }
 
     private static void Write(
