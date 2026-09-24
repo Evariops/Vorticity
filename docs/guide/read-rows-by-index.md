@@ -17,7 +17,7 @@ await foreach (Columns<Reading> cols in take)
 ```
 a block of 8192 rows from row 4, 1 selected
   row 4: day 0, Paris
-a block of 8003 rows from row 891998, 1 selected
+a block of 7073 rows from row 892928, 1 selected
   row 900000: day 900, Toulouse
 ```
 

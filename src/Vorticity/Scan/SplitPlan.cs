@@ -422,12 +422,13 @@ internal sealed class SplitPlan
 
 /// <summary>
 /// Walks a <see cref="SplitPlan"/>'s spans, sub-dividing any span wider than the cap into evenly
-/// sized pieces.
+/// sized pieces of whole blocks.
 /// </summary>
 /// <remarks>
 /// Even sub-division rather than "max-sized pieces plus a remainder": a 9000-row span capped at
-/// 8192 yields 4500 + 4500, not 8192 + 808, so a parallel decode is not left with one nearly empty
-/// split.
+/// 8192 yields 5120 + 3880, not 8192 + 808, so a parallel decode is not left with one nearly empty
+/// split. The even size is rounded up to whole FastLanes blocks when the cap holds one, which a
+/// span of many splits pays for with a short last one.
 /// </remarks>
 internal struct SplitCursor
 {
@@ -556,6 +557,18 @@ internal struct SplitCursor
         // ceil(span / maxRows) sub-ranges, then ceil(span / subCount) rows each. Both divisions are
         // on non-negative longs that cannot overflow: span <= long.MaxValue and maxRows >= 1.
         long subCount = (span / maxRows) + (span % maxRows == 0 ? 0 : 1);
-        return (span / subCount) + (span % subCount == 0 ? 0 : 1);
+        long even = (span / subCount) + (span % subCount == 0 ? 0 : 1);
+
+        // Whole blocks under the cap, when it holds one: a split that starts or ends inside a
+        // FastLanes block decodes that block through a scratch block and copies its part out, once
+        // at each end, and a span cut evenly is cut inside blocks but by chance.
+        const long Block = Arrays.Decoders.Compressed.FastLanes.BlockSize;
+        if (maxRows < Block)
+        {
+            return even;
+        }
+
+        long whole = (even + Block - 1) / Block * Block;
+        return whole <= maxRows ? whole : maxRows / Block * Block;
     }
 }

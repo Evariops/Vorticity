@@ -47,18 +47,16 @@ public sealed class BlockPruningDecodeTests
     /// <param name="prunedDecodes">
     /// The values a pruned scan materializes, exactly. Three parts. The zone maps' own rows: the
     /// zones child of each column is a flat node the same reader decodes whole, one row per block
-    /// -- 98 for 100 000 rows, 96 for 98 304. The live splits, which the filter's own pass reads:
-    /// one split of 1 024 rows in the many-chunk shape, where a chunk is 8 blocks and divides
-    /// evenly; TWO of 1 021 in the one-chunk shape, because <c>SplitCursor</c> sub-divides a
-    /// 100 000-row span evenly rather than into blocks-plus-a-remainder, so its splits straddle
-    /// blocks and the band's rows (49 998 to 50 099) fall in two of them. Rows of the dead half of
-    /// a straddling split are decoded and filtered out, which is correct and is what the split
-    /// geometry costs. And the band's 100 rows again: the projection keeps the filtered column, and
-    /// its pass reads the kept rows of it, which a live split read through a selection does not
+    /// -- 98 for 100 000 rows, 96 for 98 304. The live split, which the filter's own pass reads:
+    /// one split of 1 024 rows in both shapes, a chunk of 8 blocks dividing evenly and
+    /// <c>SplitCursor</c> cutting the 100 000-row span on whole blocks, so the band's rows (49 998
+    /// to 50 099) fall in one split, where an even cut of 1 021 rows put them in two and decoded the
+    /// dead half of each. And the band's 100 rows again: the projection keeps the filtered column,
+    /// and its pass reads the kept rows of it, which a live split read through a selection does not
     /// retain.
     /// </param>
     [Theory]
-    [InlineData(1, 100_000, 1_048_576, (2 * 1_021) + 98 + 100)]
+    [InlineData(1, 100_000, 1_048_576, 1_024 + 98 + 100)]
     [InlineData(12, 8_192, 65_536, 1_024 + 96 + 100)]
     public async Task APrunedScanMaterializesOnlyTheLiveBlocks(
         int batches, int rowsPerBatch, long chunkBytes, long prunedDecodes)
@@ -100,7 +98,7 @@ public sealed class BlockPruningDecodeTests
             Assert.Equal(unpruned, pruned);
 
             // EXACT, like the decode-count tests: the live splits and the zone maps, against the
-            // whole chunk(s) once -- 47x and 88x fewer values materialized for the same rows.
+            // whole chunk(s) once -- 82x and 81x fewer values materialized for the same rows.
             Assert.Equal(prunedDecodes, prunedDecoded);
             Assert.Equal(rows, unprunedDecoded);
         }

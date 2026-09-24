@@ -50,6 +50,35 @@ public sealed class SplitPlanTests
     }
 
     [Fact]
+    public void ACapOfABlockOrMoreSplitsOnWholeBlocks()
+    {
+        // 9000 rows capped at 8192 cut evenly would be 4500 + 4500, each ending inside a 1024-row
+        // block that both would decode; rounded up to whole blocks, 5120 + 3880.
+        LayoutTree tree = Tree(Node(Flat, 9000, segments: [0]), I64());
+        Assert.Equal([new RowRange(0, 5120), new RowRange(5120, 9000)], Splits(tree, new RowRange(0, 9000), 8192));
+
+        // A million rows capped at 16384: 61 splits of 16 whole blocks and a short last one, never
+        // above the cap, and never a split starting inside a block.
+        tree = Tree(Node(Flat, 1_000_000, segments: [0]), I64());
+        List<RowRange> splits = Splits(tree, new RowRange(0, 1_000_000), 16384);
+        Assert.Equal(62, splits.Count);
+        for (int i = 0; i < splits.Count; i++)
+        {
+            Assert.Equal(0, splits[i].Start % 1024);
+            Assert.True(splits[i].Length <= 16384, $"split {i} holds {splits[i].Length} rows");
+        }
+
+        Assert.Equal(new RowRange(999_424, 1_000_000), splits[^1]);
+
+        // Rounded up past a cap that is not a whole number of blocks, the size drops to the blocks
+        // the cap holds: 11000 rows capped at 5500 is 5120, 5120 and 760, not 5500 twice.
+        tree = Tree(Node(Flat, 11_000, segments: [0]), I64());
+        Assert.Equal(
+            [new RowRange(0, 5120), new RowRange(5120, 10240), new RowRange(10240, 11000)],
+            Splits(tree, new RowRange(0, 11_000), 5500));
+    }
+
+    [Fact]
     public void ChunkBoundariesAreTheNaturalSplits()
     {
         LayoutTree tree = Tree(
