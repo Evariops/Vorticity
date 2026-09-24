@@ -16,8 +16,8 @@ not affiliated with or endorsed by the Vortex project or LF Projects, LLC.
   `tools/vxbench-rs`. Both decode every value they return to its plain form.
 * **One core, or all 14.** On one core, Rust's single-threaded runtime and our scans at one
   lane. On all of them, a Tokio worker per processor for Rust; for Vorticity, a lane per
-  processor for a scan (`ScanBuilder.DefaultDegreeOfParallelism`) and as many threads for the
-  writer (`VortexWriteOptions.DegreeOfParallelism`).
+  processor for a scan and as many threads for the writer, the degree a session's
+  `MaxDegreeOfParallelism` gives both.
 * **The data.** A table of four columns: `monotone`, an increasing `i64` that the filters and
   the projection use; `value`, an `f64`; `label`, one of five short strings; `flag`, a `bool`
   with nulls. 2^20 rows, and ten times as many.

@@ -937,8 +937,8 @@ internal static class Report
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
             $"* **One core, or all {Environment.ProcessorCount}.** On one core, Rust's single-threaded runtime and our scans at one"));
         text.AppendLine("  lane. On all of them, a Tokio worker per processor for Rust; for Vorticity, a lane per");
-        text.AppendLine("  processor for a scan (`ScanBuilder.DefaultDegreeOfParallelism`) and as many threads for the");
-        text.AppendLine("  writer (`VortexWriteOptions.DegreeOfParallelism`).");
+        text.AppendLine("  processor for a scan and as many threads for the writer, the degree a session's");
+        text.AppendLine("  `MaxDegreeOfParallelism` gives both.");
         text.AppendLine("* **The data.** A table of four columns: `monotone`, an increasing `i64` that the filters and");
         text.AppendLine("  the projection use; `value`, an `f64`; `label`, one of five short strings; `flag`, a `bool`");
         text.AppendLine("  with nulls. 2^20 rows, and ten times as many.");
