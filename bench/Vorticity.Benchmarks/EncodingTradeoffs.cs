@@ -52,7 +52,10 @@ internal static class EncodingTradeoffs
     ];
 
     /// <summary>Runs every column whose name contains one of <paramref name="only"/>, or all of them.</summary>
-    internal static async Task<int> RunAsync(long rows, string[] only)
+    /// <param name="rows">Rows a column.</param>
+    /// <param name="only">Words that pick columns by name; none for all.</param>
+    /// <param name="page">The benchmark page to write the <c>tradeoffs</c> section to, after a run of every column; null for none.</param>
+    internal static async Task<int> RunAsync(long rows, string[] only, string? page)
     {
         string directory = Path.Combine(Path.GetTempPath(), "vorticity-tradeoffs");
         Directory.CreateDirectory(directory);
@@ -60,6 +63,7 @@ internal static class EncodingTradeoffs
             CultureInfo.InvariantCulture,
             $"# Encoding trade-offs, {rows:N0} rows a column, median of {Passes} after {Warmups} warm-up\n"));
 
+        List<(Column Column, List<Result> Results)> measured = [];
         foreach (Column column in Columns())
         {
             if (only.Length > 0 && !only.Any(o => column.Name.Contains(o, StringComparison.OrdinalIgnoreCase)))
@@ -67,10 +71,22 @@ internal static class EncodingTradeoffs
                 continue;
             }
 
-            await MeasureAsync(column, rows, directory).ConfigureAwait(false);
+            measured.Add((column, await MeasureAsync(column, rows, directory).ConfigureAwait(false)));
         }
 
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"checksum {s_checksum}"));
+        if (page is not null)
+        {
+            if (only.Length > 0)
+            {
+                Console.Error.WriteLine("The page takes a run of every column; it is not written by this run.");
+            }
+            else
+            {
+                await ResultsPage.WriteAsync(page, [("tradeoffs", Section(rows, measured))]).ConfigureAwait(false);
+            }
+        }
+
         return 0;
     }
 
@@ -79,7 +95,10 @@ internal static class EncodingTradeoffs
     /// them, under the goals the tables above tell apart: whole scans from a local drive, from an
     /// object store and from the page cache, reads by row, and the bytes alone.
     /// </summary>
-    internal static async Task<int> AdviseAsync(long rows, string[] only)
+    /// <param name="rows">Rows a column.</param>
+    /// <param name="only">Words that pick columns by name; none for all.</param>
+    /// <param name="page">The benchmark page to write the <c>advice</c> section to, after a run of every column; null for none.</param>
+    internal static async Task<int> AdviseAsync(long rows, string[] only, string? page)
     {
         string directory = Path.Combine(Path.GetTempPath(), "vorticity-tradeoffs");
         Directory.CreateDirectory(directory);
@@ -93,12 +112,15 @@ internal static class EncodingTradeoffs
         ];
 
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"# Encoding advice, {rows:N0} rows a column\n"));
+        List<(Column Column, string[] Advised)> advised = [];
         foreach (Column column in Columns())
         {
             if (only.Length > 0 && !only.Any(o => column.Name.Contains(o, StringComparison.OrdinalIgnoreCase)))
             {
                 continue;
             }
+
+            string[] cells = new string[goals.Length];
 
             string path = Path.Combine(directory, "column.vortex");
             await WriteAsync(column, rows, path, new VortexWriteOptions { Compression = CompressionProfile.None }).ConfigureAwait(false);
@@ -108,26 +130,58 @@ internal static class EncodingTradeoffs
             text.Append("|---|---|---|---:|---:|---:|---:|---:|---|\n");
             await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None).ConfigureAwait(false))
             {
-                foreach ((string name, EncodingGoal goal) in goals)
+                for (int g = 0; g < goals.Length; g++)
                 {
+                    (string name, EncodingGoal goal) = goals[g];
                     long start = Stopwatch.GetTimestamp();
                     EncodingAdvice advice = await VortexSession.Default.AdviseAsync(file, goal).ConfigureAwait(false);
                     double seconds = Stopwatch.GetElapsedTime(start).TotalSeconds;
-                    ColumnEncodingAdvice advised = advice.Columns[0];
-                    EncodingCandidate chosen = advised.Recommended;
+                    ColumnEncodingAdvice answer = advice.Columns[0];
+                    EncodingCandidate chosen = answer.Recommended;
                     text.Append(CultureInfo.InvariantCulture,
-                        $"| {name} | {chosen.Hint} | {string.Join(", ", chosen.WrittenAs)} | {chosen.ChunkTargetBytes >> 20} MiB | {chosen.BytesPerValue:F2} | {chosen.ScanNanosecondsPerValue:F2} | {chosen.LookupMicroseconds:F1} | {seconds:F1} | {advised.Reason} |\n");
+                        $"| {name} | {chosen.Hint} | {string.Join(", ", chosen.WrittenAs)} | {chosen.ChunkTargetBytes >> 20} MiB | {chosen.BytesPerValue:F2} | {chosen.ScanNanosecondsPerValue:F2} | {chosen.LookupMicroseconds:F1} | {seconds:F1} | {answer.Reason} |\n");
+                    cells[g] = Departure(chosen);
                 }
             }
 
             System.IO.File.Delete(path);
             Console.WriteLine(text.ToString());
+            advised.Add((column, cells));
+        }
+
+        if (page is not null)
+        {
+            if (only.Length > 0)
+            {
+                Console.Error.WriteLine("The page takes a run of every column; it is not written by this run.");
+            }
+            else
+            {
+                await ResultsPage.WriteAsync(page, [("advice", AdviceSection(rows, [.. goals.Select(g => g.Name)], advised))]).ConfigureAwait(false);
+            }
         }
 
         return 0;
     }
 
-    private static async Task MeasureAsync(Column column, long rows, string directory)
+    /// <summary>How a recommendation departs from the writer's own choice, for a cell; empty when it does not.</summary>
+    private static string Departure(EncodingCandidate chosen)
+    {
+        List<string> parts = [];
+        if (chosen.Hint != EncodingHint.Auto)
+        {
+            parts.Add($"`{chosen.Hint}`");
+        }
+
+        if (chosen.ChunkTargetBytes > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{chosen.ChunkTargetBytes >> 20} MiB chunks"));
+        }
+
+        return string.Join(", ", parts);
+    }
+
+    private static async Task<List<Result>> MeasureAsync(Column column, long rows, string directory)
     {
         string path = Path.Combine(directory, "column.vortex");
 
@@ -173,14 +227,15 @@ internal static class EncodingTradeoffs
             System.IO.File.Delete(path);
         }
 
-        Print(column, rows, results);
+        Console.WriteLine($"## {column.Name}\n\n{Table(rows, results)}");
+        return results;
     }
 
-    private static void Print(Column column, long rows, List<Result> results)
+    /// <summary>Every configuration of one column, against <c>Auto</c>, its first.</summary>
+    private static string Table(long rows, List<Result> results)
     {
         Result auto = results[0];
         StringBuilder text = new StringBuilder();
-        text.Append(CultureInfo.InvariantCulture, $"## {column.Name}\n\n");
         text.Append("| configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |\n");
         text.Append("|---|---|---:|---:|---:|---:|---:|---|\n");
         foreach (Result r in results)
@@ -189,7 +244,213 @@ internal static class EncodingTradeoffs
                 $"| {r.Name} | {r.Encodings} | {r.Bytes:N0} | {(double)r.Bytes / rows:F2} | {r.WriteMs:F0} | {r.ScanMs:F1} | {r.TakeMs:F2} | {Against(auto, r)} |\n");
         }
 
-        Console.WriteLine(text.ToString());
+        return text.ToString();
+    }
+
+    /// <summary>
+    /// The twenty columns by kind, what <c>Auto</c> writes and what it costs, the configurations
+    /// worth knowing beside it, and every configuration folded under each; for the page's
+    /// <c>tradeoffs</c> section.
+    /// </summary>
+    private static string Section(long rows, List<(Column Column, List<Result> Results)> measured)
+    {
+        StringBuilder text = new StringBuilder();
+        text.AppendLine("## Encodings, column by column");
+        text.AppendLine();
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"One column of {rows:N0} rows per file, written under each compression profile and each hint that"));
+        text.AppendLine("applies to it, then opened and read. A **scan** decodes every value to its plain form and reads it");
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"once; a **take** reads {TakeRows:N0} rows spread over the file. Each figure is the median of {Passes} passes after"));
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"{Warmups} warm-up, the file in the page cache; a write is net of generating its rows. **Crosses at** is the"));
+        text.AppendLine("storage throughput at which a configuration and `Auto` read the column whole in the same time,");
+        text.AppendLine("counting its bytes at that throughput and then its scan: below it the smaller file reads faster");
+        text.AppendLine("end to end, above it the faster decode does. What the figures mean for a choice is in");
+        text.AppendLine("[choose-encodings.md](choose-encodings.md).");
+        text.AppendLine();
+        text.AppendLine("**Worth knowing** is picked by rule, against `Auto`, among the configurations that write something");
+        text.AppendLine("else: the smallest, when it saves 5 % of the bytes; of those a fifth faster to scan, the one that");
+        text.AppendLine("overtakes `Auto` on the slowest storage, when that storage is no faster than the page cache, 10");
+        text.AppendLine("GB/s; and the fastest take, when it halves `Auto`'s.");
+        text.AppendLine();
+        foreach (string kind in (string[])["Integers", "Floating point", "Text", "Booleans"])
+        {
+            List<(Column Column, List<Result> Results)> of = [.. measured.Where(m => Kind(m.Column) == kind)];
+            if (of.Count == 0)
+            {
+                continue;
+            }
+
+            text.AppendLine($"### {kind}");
+            text.AppendLine();
+            text.AppendLine("| shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |");
+            text.AppendLine("|---|---|---:|---:|---:|---:|---|");
+            foreach ((Column column, List<Result> results) in of)
+            {
+                Result auto = results[0];
+                text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                    $"| {Shape(column)} | {auto.Encodings} | {(double)auto.Bytes / rows:F2} | {auto.WriteMs:F0} | {auto.ScanMs:F1} | " +
+                    $"{auto.TakeMs:F2} | {string.Join("; ", WorthKnowing(rows, results))} |"));
+            }
+
+            text.AppendLine();
+            foreach ((Column column, List<Result> results) in of)
+            {
+                text.AppendLine($"<details><summary>{Shape(column)}: every configuration</summary>");
+                text.AppendLine();
+                text.Append(Table(rows, results));
+                text.AppendLine();
+                text.AppendLine("</details>");
+                text.AppendLine();
+            }
+        }
+
+        text.Append(Profiles(rows, measured));
+        text.AppendLine(ResultsPage.Provenance());
+        return text.ToString();
+    }
+
+    /// <summary>The fastest storage a column is read from, the page cache, in MB/s: past it a crossing is not one a reader meets.</summary>
+    private const double PageCacheMegabytesPerSecond = 10_000;
+
+    /// <summary>The configurations beside <c>Auto</c> a reader of one column's row should know of, by the rule the section states.</summary>
+    private static List<string> WorthKnowing(long rows, List<Result> results)
+    {
+        Result auto = results[0];
+        List<Result> others = [.. results.Skip(1).Where(r => r.Encodings != auto.Encodings)];
+        List<Result> picked = [];
+        if (others.MinBy(r => r.Bytes) is { } smallest && smallest.Bytes <= 0.95 * auto.Bytes)
+        {
+            picked.Add(smallest);
+        }
+
+        // Of those a fifth faster to scan, the one that overtakes `Auto` on the slowest storage:
+        // no bytes more, or the fewest bytes more for each millisecond saved.
+        if (others.Where(r => r.ScanMs <= 0.8 * auto.ScanMs && Overtakes(auto, r) <= PageCacheMegabytesPerSecond)
+                .MinBy(r => Overtakes(auto, r)) is { } faster && !picked.Contains(faster))
+        {
+            picked.Add(faster);
+        }
+
+        if (others.Where(r => r.TakeMs <= 0.5 * auto.TakeMs && Against(auto, r) != "reads slower at any throughput")
+                .MinBy(r => r.TakeMs) is { } nearest && !picked.Contains(nearest))
+        {
+            picked.Add(nearest);
+        }
+
+        return
+        [
+            .. picked.Select(r => string.Create(CultureInfo.InvariantCulture,
+                $"{r.Name}: {r.Encodings}, {(double)r.Bytes / rows:F2} B/value, scan {r.ScanMs:F1} ms, take {r.TakeMs:F2} ms; {Against(auto, r)}")),
+        ];
+    }
+
+    /// <summary>
+    /// The storage throughput, in MB/s, above which <paramref name="r"/>, faster to scan than
+    /// <paramref name="auto"/>, reads the column faster end to end: zero when it is no larger.
+    /// </summary>
+    private static double Overtakes(Result auto, Result r) =>
+        r.Bytes <= auto.Bytes ? 0 : (r.Bytes - auto.Bytes) / (auto.ScanMs - r.ScanMs) / 1_000;
+
+    /// <summary>What the profiles chose over every column, computed from the tables.</summary>
+    private static string Profiles(long rows, List<(Column Column, List<Result> Results)> measured)
+    {
+        int fastestSame = 0;
+        int noneLargest = 0;
+        List<string> smallestOther = [];
+        (double Ratio, Result Smallest, Result Auto, Column Column)? slowest = null;
+        foreach ((Column column, List<Result> results) in measured)
+        {
+            Result auto = results[0];
+            Result? fastest = results.FirstOrDefault(r => r.Name == "Fastest");
+            Result? smallest = results.FirstOrDefault(r => r.Name == "Smallest");
+            Result? none = results.FirstOrDefault(r => r.Name == "None");
+            fastestSame += fastest is not null && fastest.Encodings == auto.Encodings ? 1 : 0;
+            noneLargest += none is not null && results.All(r => r.Bytes <= none.Bytes) ? 1 : 0;
+            if (smallest is not null && smallest.Encodings != auto.Encodings)
+            {
+                smallestOther.Add(column.Name);
+            }
+
+            if (smallest is not null && auto.WriteMs > 0 && smallest.WriteMs / auto.WriteMs > (slowest?.Ratio ?? 0))
+            {
+                slowest = (smallest.WriteMs / auto.WriteMs, smallest, auto, column);
+            }
+        }
+
+        StringBuilder text = new StringBuilder();
+        text.AppendLine("### The profiles side by side");
+        text.AppendLine();
+        string written = slowest is { } slow
+            ? string.Create(CultureInfo.InvariantCulture,
+                $", and took up to {slow.Ratio:F1} times `Auto`'s write, {slow.Smallest.WriteMs:N0} ms against {slow.Auto.WriteMs:N0} ms on *{slow.Column.Name}*, since it tries every scheme on every chunk.")
+            : ".";
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"`Fastest` wrote what `Auto` wrote on {fastestSame} of {measured.Count} columns. `Smallest` wrote something else on " +
+            $"{(smallestOther.Count == 0 ? "none" : string.Join(", ", smallestOther.Select(s => $"*{s}*")))}{written}"));
+
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"`None`, the plain form, made the largest file on {noneLargest} of {measured.Count} columns."));
+        text.AppendLine();
+        return text.ToString();
+    }
+
+    /// <summary>
+    /// The columns on which the advice departs from the writer's own choice under at least one of
+    /// the goals, a cell a goal's departure; for the page's <c>advice</c> section.
+    /// </summary>
+    private static string AdviceSection(long rows, string[] goals, List<(Column Column, string[] Advised)> advised)
+    {
+        StringBuilder text = new StringBuilder();
+        text.AppendLine("## What the advice picks");
+        text.AppendLine();
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"`VortexSession.AdviseAsync` on the same columns of {rows:N0} rows, under five goals: whole scans with the"));
+        text.AppendLine("bytes read at 2 GB/s, 100 MB/s and 10 GB/s, a row in a thousand read by row, and the bytes alone.");
+        text.AppendLine("A cell is what the advice takes where it departs from the writer's own choice, empty where it");
+        text.AppendLine("does not; a column it never departs on is left out.");
+        text.AppendLine();
+        text.AppendLine("| column | " + string.Join(" | ", goals) + " |");
+        text.AppendLine("|---|" + string.Concat(goals.Select(_ => "---|")));
+        List<string> alike = [];
+        foreach ((Column column, string[] cells) in advised)
+        {
+            if (cells.All(c => c.Length == 0))
+            {
+                alike.Add(column.Name);
+                continue;
+            }
+
+            text.AppendLine($"| {column.Name} | {string.Join(" | ", cells)} |");
+        }
+
+        text.AppendLine();
+        if (alike.Count > 0)
+        {
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"It keeps the writer's choice under every goal on the {alike.Count} other columns."));
+            text.AppendLine();
+        }
+
+        text.AppendLine(ResultsPage.Provenance());
+        return text.ToString();
+    }
+
+    /// <summary>The kind a column's table sits under.</summary>
+    private static string Kind(Column column) => column switch
+    {
+        Longs => "Integers",
+        Doubles => "Floating point",
+        Strings => "Text",
+        _ => "Booleans",
+    };
+
+    /// <summary>A column's shape, its name without the physical type the table's kind already says.</summary>
+    private static string Shape(Column column)
+    {
+        int comma = column.Name.IndexOf(", ", StringComparison.Ordinal);
+        return comma < 0 ? column.Name : column.Name[(comma + 2)..];
     }
 
     /// <summary>Where a configuration stands against <c>Auto</c> for a full read, storage included.</summary>

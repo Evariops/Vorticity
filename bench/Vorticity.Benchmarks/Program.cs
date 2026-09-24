@@ -30,6 +30,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -105,15 +106,17 @@ internal static class Program
                 ? lanes
                 : 0;
 
-            // `--rebase-from <binary>` swallows its path the same way.
+            // `--rebase-from <binary>` swallows its path the same way, and `--out <page>` its page.
             int fromFlag = Array.IndexOf(args, "--rebase-from");
             string? rebaseFrom = fromFlag >= 0 && fromFlag + 1 < args.Length ? args[fromFlag + 1] : null;
+            int ratioPage = Array.IndexOf(args, "--out");
+            RatioCheck.Page = ratioPage >= 0 && ratioPage + 1 < args.Length ? args[ratioPage + 1] : null;
 
             string[] axes =
             [
                 .. args.Where((a, i) =>
                     i > 0 && i != counted && i != lanesFlag + 1 && (fromFlag < 0 || i != fromFlag + 1) &&
-                    !a.StartsWith("--", StringComparison.Ordinal))
+                    (ratioPage < 0 || i != ratioPage + 1) && !a.StartsWith("--", StringComparison.Ordinal))
             ];
             bool rebase = Array.IndexOf(args, "--rebase") >= 0;
             bool abSame = Array.IndexOf(args, "--ab-same") >= 0;
@@ -222,11 +225,13 @@ internal static class Program
 
             int tpFrom = Array.IndexOf(args, "--rebase-from");
             string? tpRebaseFrom = tpFrom >= 0 && tpFrom + 1 < args.Length ? args[tpFrom + 1] : null;
+            int tpPage = Array.IndexOf(args, "--out");
+            ThroughputCheck.Page = tpPage >= 0 && tpPage + 1 < args.Length ? args[tpPage + 1] : null;
             string[] only =
             [
                 .. args.Where((a, i) =>
                     i > 0 && i != tpCounted && (tpFrom < 0 || i != tpFrom + 1) &&
-                    !a.StartsWith("--", StringComparison.Ordinal))
+                    (tpPage < 0 || i != tpPage + 1) && !a.StartsWith("--", StringComparison.Ordinal))
             ];
             return await ThroughputCheck.RunAsync(
                 check,
@@ -246,13 +251,16 @@ internal static class Program
                 && long.TryParse(args[rowsFlag + 1], CultureInfo.InvariantCulture, out long given) && given > 0
                 ? given
                 : 10_000_000;
+            int tradeoffsPage = Array.IndexOf(args, "--out");
+            string? tradeoffsOut = tradeoffsPage >= 0 && tradeoffsPage + 1 < args.Length ? args[tradeoffsPage + 1] : null;
             string[] columns =
             [
-                .. args.Where((a, i) => i > 0 && i != rowsFlag + 1 && !a.StartsWith("--", StringComparison.Ordinal))
+                .. args.Where((a, i) => i > 0 && i != rowsFlag + 1 && (tradeoffsPage < 0 || i != tradeoffsPage + 1) &&
+                    !a.StartsWith("--", StringComparison.Ordinal))
             ];
             return Array.IndexOf(args, "--advise") >= 0
-                ? await EncodingTradeoffs.AdviseAsync(rows, columns).ConfigureAwait(false)
-                : await EncodingTradeoffs.RunAsync(rows, columns).ConfigureAwait(false);
+                ? await EncodingTradeoffs.AdviseAsync(rows, columns, tradeoffsOut).ConfigureAwait(false)
+                : await EncodingTradeoffs.RunAsync(rows, columns, tradeoffsOut).ConfigureAwait(false);
         }
 
         if (args.Length > 0 && args[0] == "--tree")
@@ -286,8 +294,14 @@ internal static class Program
         BenchmarkConfig.Full = Array.IndexOf(args, "--full") >= 0;
         BenchmarkConfig.Exploring = Array.IndexOf(args, "--explore") >= 0;
         BenchmarkConfig.InProcess = Array.IndexOf(args, "--inprocess") >= 0;
+
+        // `--out <page>` is ours too: each class run goes to the benchmark page as a section of its
+        // own, so a run of one class refreshes that class and leaves the others.
+        int pageFlag = Array.IndexOf(args, "--out");
+        string? page = pageFlag >= 0 && pageFlag + 1 < args.Length ? args[pageFlag + 1] : null;
         string[] forwarded =
-            [.. args.Where(a => a is not ("--full" or "--explore" or "--inprocess"))];
+            [.. args.Where((a, i) => a is not ("--full" or "--explore" or "--inprocess" or "--out") &&
+                (pageFlag < 0 || i != pageFlag + 1))];
 
         if (UncategorizedClasses() is { Length: > 0 } uncategorized)
         {
@@ -299,8 +313,62 @@ internal static class Program
             return 2;
         }
 
-        BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(BareWordsToFilters(forwarded));
+        IEnumerable<BenchmarkDotNet.Reports.Summary> summaries =
+            BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(BareWordsToFilters(forwarded));
+        if (page is not null)
+        {
+            await ResultsPage.WriteAsync(page, KernelSections(summaries)).ConfigureAwait(false);
+        }
+
         return 0;
+    }
+
+    /// <summary>
+    /// Each class a BenchmarkDotNet run measured, as the page's <c>kernel:</c> section of that
+    /// class: the table of the GitHub report BenchmarkDotNet wrote for it, without the environment
+    /// the section states in its last line.
+    /// </summary>
+    private static List<(string Name, string Markdown)> KernelSections(IEnumerable<BenchmarkDotNet.Reports.Summary> summaries)
+    {
+        List<(string Name, string Markdown)> sections = [];
+        foreach (BenchmarkDotNet.Reports.Summary summary in summaries)
+        {
+            if (summary.BenchmarksCases.Length == 0 || summary.HasCriticalValidationErrors)
+            {
+                continue;
+            }
+
+            Type measured = summary.BenchmarksCases[0].Descriptor.Type;
+            string type = measured.Name;
+            string report = System.IO.Path.Combine(summary.ResultsDirectoryPath, $"{measured.FullName}-report-github.md");
+            if (!System.IO.File.Exists(report))
+            {
+                Console.Error.WriteLine($"no GitHub report for {type} at {report}; its section is left as it was");
+                continue;
+            }
+
+            string[] lines = System.IO.File.ReadAllLines(report);
+            int first = Array.FindIndex(lines, l => l.StartsWith('|'));
+            if (first < 0)
+            {
+                continue;
+            }
+
+            StringBuilder text = new StringBuilder();
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture, $"### `{type}`"));
+            text.AppendLine();
+            foreach (string line in lines[first..])
+            {
+                text.AppendLine(line.TrimEnd('\r'));
+            }
+
+            text.AppendLine();
+            text.AppendLine(ResultsPage.Provenance(
+                string.Create(CultureInfo.InvariantCulture, $"BenchmarkDotNet {summary.HostEnvironmentInfo.BenchmarkDotNetVersion}, {(BenchmarkConfig.Full ? "the full profile" : "the fast profile")}")));
+            sections.Add(("kernel:" + type, text.ToString()));
+        }
+
+        return sections;
     }
 
     /// <summary>
@@ -428,8 +496,10 @@ internal static class Program
 
         MODES, decided by the first argument:
 
-          (nothing)                every class, fast profile, ~2 min 40
+          (nothing)                every class, fast profile, ~3 min
           <word> [<word>…]         bare words become a filter: `fsst` is `--filter *fsst*`
+                                     --out <page>      each class's table as its section of the
+                                                       benchmark page, docs/guide/benchmarks.md
           --ratio-check [axis…]    25 axes, ours over the reference, one clock, ~55 s
                                      NEVER under DOTNET_TieredCompilation=0: the pin costs our
                                      side dynamic PGO and the native reference nothing, which
@@ -445,24 +515,30 @@ internal static class Program
                                                        under B and under it, and a reference moves
                                                        by what the binary moved the ratio
                                      --lanes N         adds `full scan, N lanes`, threads pinned
+                                     --out <page>      the axes as the page's section, after a
+                                                       check of every axis
           --throughput [family…]   57 encodings at a million rows, ~55 s
                                      --check           hold each ratio to its ceiling. Refused
                                                        with a family filter: a short run is +32%
                                                        on our side, the JIT unfinished
                                      --quick           23 s instead of 70; a direction
                                      --take            64 rows spread over each file
-                                     --write           read back out to a discarding sink, ~8 min
+                                     --write           read back out to a discarding sink, ~90 s
                                      --recalibrate N   as above
                                      --rebase-from B   as above
                                      --hold            with --recalibrate, print every reference
                                                        back unchanged and refresh only the
                                                        dispersion each encoding measured
+                                     --out <page>      with --take or --write, the files as the
+                                                       page's section, after a run of every file
           --tradeoffs [column…]    every compression profile and hint on twenty column shapes:
                                      bytes, write, scan, take, and the storage throughput at which
                                      each crosses Auto; Markdown tables
                                      --rows N          rows a column, default ten million
                                      --advise          the encoding advice on each shape instead,
                                                        under five goals, the choice and its reason
+                                     --out <page>      the tables as the page's section, after a
+                                                       run of every column
           --ffi-check             rows AND decoded values agree with the reference, < 1 s
           --report                 the published comparison: eight high-level scenarios at 2^20
                                      rows and ten times that, EACH SIDE IN ITS OWN PROCESS, on one
@@ -481,8 +557,9 @@ internal static class Program
                                      --runs N          runs per scenario, default 5, one more
                                                        discarded before them
                                      --no-kernels      without the per-encoding section
-                                     --markdown        the table as the guide's page
-                                     --out <path>      write it there instead of to stdout
+                                     --markdown        the tables as the benchmark page's sections
+                                     --out <path>      with --markdown, rewrite those sections of
+                                                       the page there; the text form, the file
           --scenario <name> <file> <rows>
                                    one scenario in this process, printing the rows it rendered and
                                      what the process cost. What --report spawns; not a benchmark

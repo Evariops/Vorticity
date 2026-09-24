@@ -39,6 +39,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -118,6 +119,13 @@ internal static class ThroughputCheck
 
     /// <summary>Which workload this invocation measures.</summary>
     internal static Workload Axis { get; set; } = Workload.Scan;
+
+    /// <summary>
+    /// The benchmark page to write the take or the write axis to, as its <c>take</c> or
+    /// <c>write</c> section, or null. Only a run of every file writes it; the scan axis is on the
+    /// page as the report measures it, each side in a process of its own.
+    /// </summary>
+    internal static string? Page { get; set; }
 
     /// <summary>The field a recalibrated table is pasted into.</summary>
     private static string TableName => Axis switch
@@ -1153,6 +1161,14 @@ internal static class ThroughputCheck
             return 2;
         }
 
+        if (Page is not null && (only.Length > 0 || recalibrate > 0 || Axis == Workload.Scan || IsConfirming))
+        {
+            Console.Error.WriteLine(Axis == Workload.Scan
+                ? "The page shows the scan as the report measures it; this run does not write it."
+                : "The page takes a run of every file; it is not written by this run.");
+            Page = null;
+        }
+
         // THE NARROW FORM DOES NOT GATE. Measured on identical bytes: the same
         // file reads 6 452 us when the run holds three files and 8 557 us when it holds one --
         // +32 % on OUR side, with the reference flat at 5 071-5 235 either way. It is not the rank
@@ -1266,6 +1282,10 @@ internal static class ThroughputCheck
         // The names behind `failures`, for the confirming run.
         List<string> over = [];
 
+        // Every file both sides measured, and the ones the reference declines, for the page.
+        List<(string Encoding, Measurement Measured)> shown = [];
+        List<string> declined = [];
+
         // Axes whose interval never reaches their reference.
         List<string> pinned = [];
         // A PASS IS A PROCESS when recalibrating: measured over twenty runs of one
@@ -1288,6 +1308,7 @@ internal static class ThroughputCheck
                 Console.Out.WriteLine(
                     $"  {name,-32} skipped: the reference cannot write this encoding " +
                     $"({ReferenceCannotWrite[cannot].Reason})");
+                declined.Add(name);
                 continue;
             }
 
@@ -1452,6 +1473,7 @@ internal static class ThroughputCheck
                     CultureInfo.InvariantCulture,
                     $"  {name,-32} {rows,10} {ours,9:F0}us {theirs,9:F0}us {nsPerValue,9:F2} {rustNs,10:F2} " +
                     $"{Ref(ratio.Median),6} {ratio} {ratio.Samples,3} {m.Repeats,3} {ratio.MinimumDetectableEffect,6:P1}{suffix}"));
+                shown.Add((name, m));
             }
             else
             {
@@ -1540,6 +1562,12 @@ internal static class ThroughputCheck
             Console.Error.WriteLine(failure);
         }
 
+        if (Page is not null && shown.Count > 0)
+        {
+            await ResultsPage.WriteAsync(
+                Page, [(Axis == Workload.Take ? "take" : "write", Section(shown, declined))]).ConfigureAwait(false);
+        }
+
         if (!check)
         {
             return 0;
@@ -1572,6 +1600,60 @@ internal static class ThroughputCheck
     /// <summary>True when this process is the second opinion, not the one that decides.</summary>
     private static bool IsConfirming =>
         Environment.GetEnvironmentVariable(ConfirmVariable) == "1";
+
+    /// <summary>The take or the write axis per encoding, for the page's <c>take</c> or <c>write</c> section.</summary>
+    /// <param name="shown">Every file both sides measured, in order.</param>
+    /// <param name="declined">The files the reference declines to write.</param>
+    private static string Section(List<(string Encoding, Measurement Measured)> shown, List<string> declined)
+    {
+        bool take = Axis == Workload.Take;
+        StringBuilder text = new StringBuilder();
+        text.AppendLine(take ? "## Taking rows, per encoding" : "## Writing, per encoding");
+        text.AppendLine();
+        text.AppendLine(take
+            ? string.Create(CultureInfo.InvariantCulture,
+                $"The files of the per-encoding corpus again, {TakeCount} rows spread evenly over each, one every {TakeStride:N0}: what a")
+            : "The files of the per-encoding corpus again, each read and written back out to a sink that");
+        text.AppendLine(take
+            ? "decoder costs to reach a few rows rather than all of them."
+            : "keeps nothing, both writers given the rows decoded: what a writer costs, the read included on both sides.");
+        text.AppendLine("Both implementations in one process, Rust's through a C ABI, taking turns against one clock:");
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"at least {MinRounds} rounds after a {WarmupBudget.TotalSeconds:F0}-second warm-up per file, our side on the JIT, warmed."));
+        text.AppendLine();
+        text.AppendLine("| encoding | Vorticity, µs | Vortex Rust, µs | ratio |");
+        text.AppendLine("|---|---:|---:|---:|");
+        foreach ((string encoding, Measurement m) in shown)
+        {
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"| `{encoding}` | {m.Ours:N0} | {m.Theirs:N0} | {m.Ratio.Median:F2}x |"));
+        }
+
+        text.AppendLine();
+        List<double> ratios = [.. shown.Select(s => s.Measured.Ratio.Median)];
+        ratios.Sort();
+        double median = ratios.Count % 2 == 1
+            ? ratios[ratios.Count / 2]
+            : (ratios[(ratios.Count / 2) - 1] + ratios[ratios.Count / 2]) / 2;
+        List<(string Encoding, Measurement Measured)> behind =
+            [.. shown.Where(s => s.Measured.Ratio.Median >= 1).OrderByDescending(s => s.Measured.Ratio.Median)];
+        text.Append(string.Create(CultureInfo.InvariantCulture,
+            $"Vorticity took less time on {shown.Count - behind.Count} of {shown.Count} files; the median ratio is {median:F2}x."));
+        text.AppendLine(behind.Count == 0
+            ? string.Empty
+            : string.Create(CultureInfo.InvariantCulture,
+                $" At 1.00x or above: {string.Join(", ", behind.Select(b => $"`{b.Encoding}` {b.Measured.Ratio.Median:F2}x"))}."));
+        if (declined.Count > 0)
+        {
+            text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+                $"Rust's writer declines {string.Join(", ", declined.Select(d => $"`{d}`"))}, which is left out."));
+        }
+
+        text.AppendLine();
+        text.AppendLine(ResultsPage.Provenance(
+            $"Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary {RustReader.Fingerprint ?? "unknown"}"));
+        return text.ToString();
+    }
 
     /// <summary>
     /// Re-measures the whole axis in a FRESH PROCESS and keeps only the encodings over the ceiling

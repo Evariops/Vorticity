@@ -13,6 +13,13 @@ dotnet run -c Release PROJ -- <arguments>
 it is compared with — ours over the reference's, the later build's over the earlier's in `ab.sh` —
 so under 1.00 the measured side took less.
 
+**Every figure it publishes is on one page**, [docs/guide/benchmarks.md](../docs/guide/benchmarks.md).
+`--out docs/guide/benchmarks.md` makes the report, `--ratio-check`, `--throughput --take`,
+`--throughput --write`, `--tradeoffs`, `--tradeoffs --advise` and a BenchmarkDotNet run each write
+their own sections of it, dated and signed with the machine and the commit, and leave the others;
+a run narrowed to some axes, files or columns writes nothing, and a BenchmarkDotNet run writes the
+classes it ran. The page's head lists the command behind each section.
+
 ## The loop: what you changed, what you run
 
 | you changed | you run | it costs | what it answers |
@@ -25,19 +32,19 @@ so under 1.00 the measured side took less.
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
 | a gather, a tile, a dictionary | `-- RowKernel` | 9 s | `Gather`, `GatherMasked`, `Tile` against the per-row type switch each replaced |
 | a string heap cut into views | `-- ViewKernel` | 9 s | `SumLengths`, `BuildFromLengths`, `RequireAscending` against the per-row loops |
-| the OnPair token concatenation | `-- OnPairKernel` | 6 s | 48% of an OnPair scan, against the per-code switch it replaced |
+| the OnPair token concatenation | `-- OnPairKernel` | 6 s | the bulk of an OnPair scan, against the per-code switch it replaced |
 | whether your change moved anything | `bench/compare.sh --record before <filter>`, then `--record after`, then `bench/compare.sh before after` | 2x the class | Mann-Whitney per case: Faster / Same / Slower |
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust. **Reports, never gates**: a run of one file is +32% on our side, the JIT not finished with it |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 57 files |
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 57 files, against Rust |
 | a lane, or the degree of parallelism | `-- LanesBench` (`--full` walks 1, 2, 4, 8) | 15 s | ours at n lanes against the reference on a Tokio runtime of n workers, threads pinned both sides |
 | the compressor's decision | `-- CompressorBench` | 12 s | `Choose` and one arm per candidate; `--full` adds the utf8 and f64 columns |
-| the writer, per encoding | `-- --throughput --write --check` | ~2 min | each file read back out to a discarding sink, against Rust, both writers given decoded rows. **A gate** — 56 references, median **0.300**, one encoding above 1, `zstd` at 1.43. Three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`): re-run before believing a red. Only `parquet_variant` produces no ratio, and that is **the reference** refusing to write it |
+| the writer, per encoding | `-- --throughput --write --check` | ~2 min | each file read back out to a discarding sink, against Rust, both writers given decoded rows. **A gate** over 56 files; three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`): re-run before believing a red. Only `parquet_variant` produces no ratio, and that is **the reference** refusing to write it |
 | every file we write, read by Rust | `bench/crosscheck.sh` | 80 s | 854 files compared scalar by scalar, 2 538 751 rows; needs cargo. `gate.sh --crosscheck` folds it in |
 | **anything, before you push** | `bench/gate.sh` | 68 s | the nine ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, ratio per round |
 | the FFI harness, or before trusting any ratio | `-- --ffi-check` | < 1 s | both readers return the same rows on the same files |
-| **what a user would see**, for the published page | `-- --report` | ~2 min | eight high-level scenarios at 2^20 rows and ten times that, **each side in its own process**, **on one core and on all of them**, on the file our writer makes and on the one the reference's writer makes from the same rows: the action's time with its spread, its throughput over the plain size of the rows returned (`PlainSize.cs`), what our side allocates for a call once warm (the median of six calls after two), peak resident memory, rows rendered, and each file's chunks and encodings per column. Then **every file of the per-encoding corpus**, scanned by both sides twelve times in each of three processes a side, the median of the last ten: the decoders once warm, which `--no-kernels` leaves out. Our side runs as the **Native AOT runner** built for the machine's instruction set (`dotnet publish -c Release bench/Vorticity.Benchmarks.Runner`), whose time the ratio divides by the reference's, as every ratio of the bench does, and on one core also as this framework-dependent host on the JIT. The reference is the `vxbench` **binary** (`cargo build --release` in `tools/vxbench-rs`), built as upstream builds its benchmarks: mimalloc, `target-cpu=native`, one codegen unit, no LTO. On all cores, `--threads all` gives our scans a lane per processor and the reference a Tokio worker per processor. Build both first. `--markdown --out docs/guide/benchmarks.md` writes the page. The fixtures are written again on every run |
+| **what a user would see**, for the published page | `-- --report` | ~2 min | eight high-level scenarios at 2^20 rows and ten times that, **each side in its own process**, **on one core and on all of them**, on the file our writer makes and on the one the reference's writer makes from the same rows: the action's time with its spread, its throughput over the plain size of the rows returned (`PlainSize.cs`), what our side allocates for a call once warm (the median of six calls after two), peak resident memory, rows rendered, and each file's chunks and encodings per column. Then **every file of the per-encoding corpus**, scanned by both sides twelve times in each of three processes a side, the median of the last ten: the decoders once warm, which `--no-kernels` leaves out. Our side runs as the **Native AOT runner** built for the machine's instruction set (`dotnet publish -c Release bench/Vorticity.Benchmarks.Runner`), whose time the ratio divides by the reference's, as every ratio of the bench does, and on one core also as this framework-dependent host on the JIT. The reference is the `vxbench` **binary** (`cargo build --release` in `tools/vxbench-rs`), built as upstream builds its benchmarks: mimalloc, `target-cpu=native`, one codegen unit, no LTO. On all cores, `--threads all` gives our scans a lane per processor and the reference a Tokio worker per processor. Build both first. `--markdown --out docs/guide/benchmarks.md` writes its two sections of the benchmark page. The fixtures are written again on every run |
 | a hot path you want to profile | `-- --profile <scenario> [seconds]` | as asked | a bare loop for `dotnet-trace`, no harness in the profile |
 | where a report scenario spends its cycles, line by line | `bench/profile.sh cycles <scenario> <file> <rows>` (macOS, Xcode) | 15 s | the **Native AOT runner** sampled every 25–30 µs by Instruments' CPU Profiler, weighed in cycles: self time per function and **per source line, inlined code included**, and every sample charged to the innermost line of this repository. Run from the command line, no Instruments window |
 | what a report scenario allocates, and where | `bench/profile.sh allocations <scenario> <file> <rows>` (macOS) | 15 s–5 min | **every** allocation of three rounds of the Native AOT runner, stopped on under lldb: type, size, stack to the line, managed and native (the C allocator and `mmap`). Not sampled — the managed totals per round equal the runner's own `allocated_bytes` |
@@ -95,20 +102,19 @@ VORTICITY_THROUGHPUT_CORPUS=/tmp/pair \
     dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput
 ```
 
-That pair is how a slow read of our own rewrite was attributed: it scans in 914 µs against 342 µs for
-the same rewrite without zstd, while the reference reads both in 140 µs. Note that
-`vxdump --encodings` cannot answer the same question by itself — the reference interns all 37
-encodings of the registry whatever the file uses, so only OUR dictionary is informative. What does
-answer it is `vxdump --layout`, whose `encoding=` column names the array encoding of every terminal
-node:
+That pair locates a slow read of our own rewrite: the same file rewritten with and without zstd,
+read by both readers, says whether the frames are the cost. `vxdump --encodings` cannot say which
+column holds them — the reference interns all 37 encodings of the registry whatever the file uses,
+so only OUR dictionary is informative. What does answer it is `vxdump --layout`, whose `encoding=`
+column names the array encoding of every terminal node:
 
 ```sh
 dotnet run -c Release --project tools/vxdump -- /tmp/pair/ours.vortex --layout |
     grep -o 'encoding=.*' | sort | uniq -c | sort -rn
 ```
 
-Three `vortex.zstd` nodes on our side and none on the reference's, all three on the `strs` column —
-the slowdown located to a column rather than inferred from a target edition.
+The `vortex.zstd` nodes it counts, and the columns they sit on, put the slowdown on a column rather
+than leave it to be inferred from a target edition.
 
 ## Reading the assembly a kernel actually got
 
@@ -195,10 +201,10 @@ journals and in the commits.
 
   **Do not pin tiered compilation for this gate.** `DOTNET_TieredCompilation=0` costs our side
   dynamic profile-guided optimization while the reference, being native, loses nothing: the same
-  command that is green unpinned reports **nine axes over their ceiling** with the pin, `full scan`
-  among them at 0.417 against a 0.385 ceiling. `bench/ab.sh` pins on purpose and says why — both of
-  its sides are the same runtime and the pin removes a JIT difference between them. A ratio against
-  native code is the opposite case.
+  command that is green unpinned reports **several axes over their ceiling** with the pin, `full
+  scan` among them. `bench/ab.sh` pins on purpose and says why — both of its sides are the same
+  runtime and the pin removes a JIT difference between them. A ratio against native code is the
+  opposite case.
 * **`--throughput [family…] [--check]`** — 57 encodings at a million rows, where the fixed
   open-and-walk cost is under a percent instead of most of the measurement. `--check` makes it a
   gate. Its inputs are 468 MB and are not committed: run `bench/gen-throughput.sh` once, and it
@@ -210,10 +216,10 @@ journals and in the commits.
   **`--take`** asks the same fifty-seven files for 64 rows spread evenly over each (one every 15 625),
   against `vxbench_take`, with its own ratchet table — the two axes do not move together, and that
   is the point: a decoder without a `DecodeSelected` override decodes the whole chunk a taken row
-  falls in, once for the take, where one with it decodes only the taken rows. `zstd` inflates only
-  the frames that hold the taken rows and takes at 0.19×, `fsst` at 0.25×, `onpair` at 0.51×.
-  `--ratio-check`'s single `scattered take` axis reads 0.23× and says none of this, because it is
-  one file whose encodings all have the override.
+  falls in, once for the take, where one with it decodes only the taken rows: `zstd` inflates only
+  the frames that hold the taken rows, and the benchmark page's table says what each encoding makes
+  of it. `--ratio-check`'s single `scattered take` axis says none of this, because it is one file
+  whose encodings all have the override.
 
   **`--write`** reads each file back out into a sink that keeps nothing, against `vxbench_write`,
   which gives the reference's writer the rows decoded, as our reader gives ours, and writes into a
@@ -249,8 +255,8 @@ the ninth — narrow and wrong. **Narrow does not mean reproducible**, which is 
 runs each pass in its own process, and why the replay rule below still stands for a single red.
 
 **When the code outran a ceiling, `--ratio-check` says `STALE`** — more than 15 % under its reference
-— because a ratchet that is never lowered defends nothing. `read and write back` sat 43 % under its
-own for five commits, which left room for a 75 % regression to pass. Lower them with:
+— because a ratchet that is never lowered defends nothing: a reference left far above its axis leaves
+room for a regression of that size to pass. Lower them with:
 
 ```
 dotnet run -c Release PROJ -- --ratio-check --recalibrate 3     # ~90 s, prints a table to paste
@@ -286,18 +292,18 @@ ceiling, or stale under it, is still over or stale after the carry: a plain `--r
 measurement would have absorbed it. Paste the tables and the `CalibratedShim` line they print
 together, the three throughput tables before the fingerprint.
 
-**A red gate is not believed on the first run.** Measured run-to-run spread is +12 to +22 % on four
-of the nine axes the dataset then had, and two invocations in four were red with no byte changed.
-Replay three times: two reds out of three is a regression, otherwise it is noise.
+**A red gate is not believed on the first run.** Run-to-run spread reaches a fifth on some axes,
+and a run can come out red with no byte changed. Replay three times: two reds out of three is a
+regression, otherwise it is noise.
 
 ## Where the rest lives
 
-These are engineering journals: French, dated, and kept on the maintainer's machine rather than in
-the repository. They are named and not linked, because the name is the reference.
+The figures are on [the benchmark page](../docs/guide/benchmarks.md). What follows are engineering
+journals: French, dated, and kept outside the repository. They are named and not linked, because
+the name is the reference.
 
 | file | what it holds |
 |---|---|
-| `bench-BASELINE.md` | the current number on every axis, its machine, its commit. A record, not a gate |
 | `bench-PROFILE.md` | the CPU profiling session: what actually costs, as opposed to what should |
 | `bench-ALLOCATIONS.md`, `bench-BRANCHING.md`, `bench-STRUCTURE.md` | the three code audits |
 | `bench-PERF-AUDIT.md` | v1, the archive: three passes, 41 steps, the negative results |
