@@ -76,6 +76,44 @@ public sealed class TakeSplitTests
     }
 
     /// <summary>
+    /// Eight rows in each zone of the chunk: one batch on one lane, and on several a batch every
+    /// sixteen rows, so that a small take still gives every lane a split.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(4, 4)]
+    public async Task ARunOnSeveralLanesEndsAtSixteenRows(int degree, int expected)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string path = await WriteAsync(ct);
+        try
+        {
+            long[] wanted = new long[64];
+            for (int i = 0; i < wanted.Length; i++)
+            {
+                wanted[i] = ((i / 8) * 8_192L) + ((i % 8) * 1_000L);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            int batches = 0;
+            long rows = 0;
+            await foreach (RecordBatch batch in file.ScanBuilder().Take(wanted).WithDegreeOfParallelism(degree)
+                               .ExecuteAsync().WithCancellation(ct))
+            {
+                batches++;
+                rows += batch.RowCount;
+            }
+
+            Assert.Equal(expected, batches);
+            Assert.Equal(wanted.Length, rows);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>
     /// Rows far apart in a column whose encoding decodes a range and cannot select come out of the
     /// ranges around them, joined in order, as a scan reads them.
     /// </summary>

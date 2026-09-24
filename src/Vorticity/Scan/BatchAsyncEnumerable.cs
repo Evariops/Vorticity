@@ -600,27 +600,44 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// the layout and a trip through the lanes. Consecutive zones that hold taken rows read the
     /// same chunks, the plan's spans ending where any column's chunk does, and decode the same
     /// rows or frames as one split or as several, so they are one; the first zone without a taken
-    /// row ends the run, as the window does.
+    /// row ends the run, as the window does. On several lanes, so does the
+    /// <see cref="TakeRunRows"/>th taken row: a take of a few chunks would otherwise be a split a
+    /// chunk, fewer than the lanes.
     /// </remarks>
     private void WidenTake(ref RowRange split)
     {
         RowSelection take = _take!;
         _cursor.Plan.WindowOf(split.Start, out int lead, out int span);
         long end = split.Start - lead + span;
-        while (true)
+        int most = _lanes.Length > 1 ? TakeRunRows : int.MaxValue;
+        int held = take.CountIn(split);
+        while (held < most)
         {
             SplitCursor probe = _cursor;
             if (!probe.TryNext(out RowRange next) || next.Start != split.End || next.End > end ||
-                !take.Touches(next) || (_live is not null && !_live.AnyLive(next)))
+                (_live is not null && !_live.AnyLive(next)))
+            {
+                return;
+            }
+
+            int rows = take.CountIn(next);
+            if (rows == 0)
             {
                 return;
             }
 
             NotePruned(next);
+            held += rows;
             split = new RowRange(split.Start, next.End);
             _cursor = probe;
         }
     }
+
+    /// <summary>
+    /// The taken rows past which a run of a take on several lanes stops: a split's fixed cost is
+    /// paid by then, and a small take still leaves the lanes splits enough to share.
+    /// </summary>
+    private const int TakeRunRows = 16;
 
     /// <summary>
     /// Extends a split the zone maps prove whole over the splits after it that they prove whole
