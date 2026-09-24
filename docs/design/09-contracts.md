@@ -34,10 +34,12 @@ fanning out. So:
 - **The call may say otherwise**: `ScanOptions.DegreeOfParallelism` for one scan and
   `VortexWriteOptions.DegreeOfParallelism` for one file, 0 taking the session's.
 - **A scan** decodes its splits side by side, each on a context and arenas of its own, nothing
-  shared, and still delivers its batches in row order; an aggregate keeps a state per chunk and
-  merges them at the end. **A writer** summarizes its columns and compresses a column's zstd frames
-  on its threads, and chooses and writes the encodings on the calling one; the file is the same
-  bytes at any degree.
+  shared, and still delivers its batches in row order. A take, whose splits are many and small,
+  keeps up to three a lane decoded ahead of its consumer, so the lanes that finish first do not
+  wait for the slowest; its degree still bounds how many decode at once. An aggregate keeps a
+  state per chunk and merges them at the end. **A writer** summarizes its columns and compresses a
+  column's zstd frames on its threads, and chooses and writes the encodings on the calling one; the
+  file is the same bytes at any degree.
 - **I/O concurrency is separate and always on**: the batch read of the seam issues overlapping reads
   whatever the degree, because latency hiding is the point on an object store. It is bounded per
   session by `MaxConcurrentReads`, 16 by default, across every scan of every file. A mapped file and
