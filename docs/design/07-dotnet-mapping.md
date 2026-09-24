@@ -1,162 +1,111 @@
 # DType → .NET mapping
 
-The public type contract. Vortex's logical type system is specified in
-[02-format.md](02-format.md) §4; this document says what a caller actually receives, and where a
-naive mapping would lose data.
+The type contract: what a caller receives for each Vortex dtype, and where a naive mapping would
+lose data. The dtypes themselves are [02-format.md](02-format.md) §4.
 
-## 1. Mapping table
+## 1. The mapping
 
-What a record member and a `Column<T>` may be; [14-public-api.md](14-public-api.md) §3.1 lists
-the accessors of each.
+What a record member and a `Column<T>` may be, and what the column exposes:
 
-| DType | `T` | Zero-copy | Overflow / loss behavior |
+| dtype | `T` | what `Column<T>` exposes | notes |
 |---|---|---|---|
-| `Null` | none: the schema shows it, no `T` reads it | n/a | — |
-| `Bool` | `bool`: `Bits` as `ReadOnlySpan<ulong>`, an indexer | yes | — |
-| `Primitive(U8…I64)` | `byte…long`: `Values` as `ReadOnlySpan<T>` | yes | — |
-| `Primitive(F32/F64)` | `float`, `double` | yes | — |
-| `Primitive(F16)` | `Half` | yes | `Half` is IEEE binary16 — exact match |
-| `Decimal(p, s)` | `decimal` within §2's bounds, `VortexDecimal` always | yes (storage) | never lossy; a column too wide for `decimal` is refused at binding |
-| `Utf8` | `string`: a UTF-8 span per value | yes | `GetString` allocates, opt-in |
-| `Binary` | `ReadOnlyMemory<byte>`: a span per value | yes | — |
-| `Struct` | a nested `[VortexRecord]` type: `Columns<TNested>` | yes | — |
-| `List`, `ListView`, `FixedSizeList` | `ReadOnlyMemory<T>`: a `Range` per row, `Elements` as `Column<T>` | yes | a row allocates one array per list |
-| `Extension(vortex.date)` | `DateOnly`, over its `int` or `long` days | yes | — |
-| `Extension(vortex.time)` | `TimeOnly`, with the column's `Unit` | yes | — |
-| `Extension(vortex.timestamp)` | `DateTime` when naive or UTC, `DateTimeOffset` with a zone (see §3) | yes | — |
-| `Extension(vortex.uuid)` | `Guid` | yes | the byte order is converted explicitly, never implied |
+| `Null` | none | — | the schema shows it; no `T` reads it |
+| `Bool` | `bool` | `Bits` as `ReadOnlySpan<ulong>`, an indexer | zero-copy |
+| `Primitive` i8…i64, u8…u64 | `sbyte`…`long`, `byte`…`ulong` | `Values` as `ReadOnlySpan<T>`, an indexer | zero-copy |
+| `Primitive` f16, f32, f64 | `Half`, `float`, `double` | the same | exact: `Half` is IEEE binary16 |
+| `Decimal(p, s)` | `decimal` within §2's bounds, `VortexDecimal` always | an indexer, `Storage<TStorage>()`, `Scale` | never lossy: a column too wide for `decimal` is refused when it binds |
+| `Utf8` | `string` | a UTF-8 span per value; `GetString(i)` on request | §4 |
+| `Binary` | `ReadOnlyMemory<byte>` | a span per value | |
+| `Struct` | a nested `[VortexRecord]` type | `Columns<TNested>` | |
+| `List`, `FixedSizeList` | `ReadOnlyMemory<T>` | a `Range` per row, `Elements` as `Column<T>` | reading rows allocates one array per list |
+| `vortex.date` | `DateOnly` | an indexer, `Storage<int>()` or `Storage<long>()` | |
+| `vortex.time` | `TimeOnly` | an indexer, `Storage<TStorage>()`, `Unit` | |
+| `vortex.timestamp` | `DateTime` when naive or UTC, `DateTimeOffset` with a zone | an indexer, `Storage<long>()`, `Unit`, `TimeZone` | §3 |
+| `vortex.uuid` | `Guid` | an indexer | the byte order is converted explicitly, never implied |
+| an extension registered on the session | the registered type | an indexer, `Storage<TStorage>()` | [14-public-api.md](14-public-api.md) §2 |
 
-Nullability is carried by `T`: `Column<double?>` is a nullable column and `Column<double>` is not,
-and a non-nullable value type over a nullable column is refused at binding with
-`VortexSchemaException`. The `T?` is the name of the column, not of its storage: `Values` is still
-the `ReadOnlySpan<double>` of the slots, a null slot holds an unspecified value, and
-`ValidityWords` gives the validity as 64-bit words, empty when every row is valid, so a caller
-skips the per-row checks on the common case. Only the indexer and `ToRecordsAsync` produce a
-`double?` per value.
+`Map`, `Union` and `Variant` columns appear in a schema but no `T` maps to them. An `enum` member
+maps to its underlying integer; a `char` is refused, since it is no dtype.
+
+**Nullability is carried by `T`**: `Column<double?>` is a nullable column and `Column<double>` is
+not, and a non-nullable value type over a nullable column is refused when it binds
+(`VortexSchemaException`). The `T?` names the column, not its storage: `Values` is still the
+`ReadOnlySpan<double>` of the slots, a null slot holds an unspecified value, and `ValidityWords`
+gives the validity as 64-bit words, empty when every row is valid, so a caller skips per-row checks
+on the common case. Only the indexer and row materialization produce a `double?` per value.
 
 ## 2. Decimal: why `System.Decimal` is not the answer
 
-Vortex allows precision up to **76**, backed by `i256`. `System.Decimal` holds 28–29 significant
-digits. A default mapping to `decimal` would therefore be **silently lossy over a legal range of
-the format** — the exact failure mode this library must not have.
+Vortex allows a precision up to **76**, backed by `i256`; `System.Decimal` holds 28 to 29
+significant digits. A default mapping to `decimal` would be **silently lossy over a legal range of
+the format**, which is the one failure this library must not have.
 
-What is accepted instead is a `decimal` where it cannot lose anything, and a refusal everywhere
-else. A `decimal` record member, `Column<decimal>`, `Sym<decimal>` or `ColumnBuilder<decimal>`
-binds to a decimal column whose precision is at most 28 and whose scale lies in `[0, 28]`, which
-`System.Decimal` holds exactly; the check is made once, when the record or the column binds to the
-file, and a wider column is refused there with `VortexSchemaException` naming `VortexDecimal`, never
-rounded value by value. `VortexDecimal` binds to every decimal column, and it is the only mapping of
-a column beyond those bounds, for a record member and a `Column<T>` alike. Written from a record, a
-`decimal` member declares `Decimal(28, 10)` unless `[VortexColumn]` gives its precision and scale.
+So a `decimal` is accepted where it cannot lose anything, and refused everywhere else. A `decimal`
+record member, `Column<decimal>`, `Sym<decimal>` or `ColumnBuilder<decimal>` binds to a column
+whose precision is at most 28 and whose scale lies in `[0, 28]`, which `System.Decimal` holds
+exactly. The check is made once, when the record or the column binds, and a wider column is refused
+there with `VortexSchemaException` naming `VortexDecimal`, never rounded value by value.
+`VortexDecimal` (`Types/Numerics/VortexDecimal.cs`) binds to every decimal column and is the only
+mapping of one beyond those bounds; it converts to `decimal` or `Int128` when the value fits and
+formats exactly always. Written from a record, a `decimal` member declares `Decimal(28, 10)` unless
+`[VortexColumn]` gives its precision and scale.
 
-The exact bounds, from `vortex-array/src/dtype/decimal/mod.rs` (`MAX_PRECISION` is
-`<i256>::MAX_PRECISION`), transcribed in [spec/METADATA.md](../../spec/METADATA.md):
+The exact bounds, from the reference and transcribed in
+[spec/METADATA.md](../../spec/METADATA.md):
 
 * `1 ≤ precision ≤ 76`
 * `scale ≤ 76`
-* `scale ≤ precision` **only when `scale > 0`** — negative scale is legal and bounded only by `i8`
+* `scale ≤ precision` **only when `scale > 0`**: a negative scale is legal, bounded only by `i8`
 
-A reader that rejects precision > 38, or that requires `scale ≥ -precision`, refuses legal files.
+A reader that refuses a precision above 38, or requires `scale ≥ −precision`, refuses legal files.
 
-```csharp
-public readonly struct VortexDecimal : IEquatable<VortexDecimal>, IComparable<VortexDecimal>
-{
-    public static VortexDecimal FromInt128(Int128 unscaled, byte precision, sbyte scale);
-    public static VortexDecimal FromInt64(long unscaled, byte precision, sbyte scale);
-    public byte   Precision { get; }
-    public sbyte  Scale { get; }
-    public bool   IsNegative { get; }
+**Storage width** is carried in `vortex.decimal`'s metadata as `values_type`: `i8` (0), `i16` (1),
+`i32` (2), `i64` (3), `i128` (4), `i256` (5). The precision selects the *smallest* legal width —
+1–2 → `i8`, 3–4 → `i16`, 5–9 → `i32`, 10–18 → `i64`, 19–38 → `i128`, 39–76 → `i256` — but a file may
+declare any **wider** one, and often does: upstream allows precision-2 values in an `i256` buffer,
+and a decimal column from Arrow or Parquet arrives as `i128` or `i256` whatever its precision. The
+width is therefore read from `values_type`, and only a width *narrower* than the precision requires
+is refused; `Storage<TStorage>()` exposes what the file declared, for callers who do their own
+arithmetic without widening.
 
-    public decimal ToDecimal();          // throws OverflowException outside decimal's range
-    public bool TryToDecimal(out decimal value);
-    public bool TryToInt128(out Int128 value);
-    public override string ToString();   // always exact
-    public bool TryFormat(Span<char> destination, out int charsWritten);
-}
-```
+.NET has `Int128` and no `Int256`, so this library carries an internal `Int256` with what the
+decimal path needs: comparison, negation, two's-complement bytes in both endiannesses and exact
+text. It is correctness insurance, not a hot path: precision ≤ 38 is what files hold in practice.
 
-The unscaled value is held in an `Int256` of our own (see below), which stays internal: a caller
-reaches it as an `Int128` when it fits, and as exact text always.
-
-Storage width is the `DecimalType` enum, carried in `vortex.decimal`'s metadata as `values_type`:
-`i8` (0), `i16` (1), `i32` (2), `i64` (3), `i128` (4), `i256` (5). Precision selects the *smallest*
-legal width — p1–2 → `i8`, 3–4 → `i16`, 5–9 → `i32`, 10–18 → `i64`, 19–38 → `i128`, 39–76 → `i256` —
-but the file may declare any **wider** one, and often does: upstream's own `DecimalArray` doc allows
-precision-2 values in an `i256` buffer, and every Arrow- or Parquet-sourced decimal column arrives
-as `i128`/`i256` regardless of precision. A reader must therefore take the width from `values_type`
-and reject only a width *narrower* than the precision requires; `Storage<TStorage>()` on a
-`Column<decimal>` or a `Column<VortexDecimal>` reads what the file declared. It exposes the storage
-span directly for callers who want to do their own arithmetic without widening.
-
-**`Decimal256` is reachable and `net11.0` has no `Int256`.** `Int128` is in-box; the 256-bit case
-is not, so a `readonly struct Int256` of our own is a Phase 1 deliverable, not an optional extra:
-without it, a legal `Decimal(40, 2)` column cannot be read at all. It needs comparison, negation,
-two's-complement byte access in both endiannesses, and exact decimal `ToString` — not general
-arithmetic. `Int128` covers precision ≤ 38, which is every decimal anyone actually writes, so the
-`i256` path is correctness insurance rather than a hot path and may be scalar and simple.
-
-Note that the row encoder's narrower table (19–38 → `i128`, no `Decimal256`) stays correct: that
-limit is `vortex-row`'s own, not the format's — see [06-row-encoding.md](06-row-encoding.md) §6.
+The row encoder's narrower table (up to `i128`, no `Decimal256`) is `vortex-row`'s own limit, not
+the format's ([06-row-encoding.md](06-row-encoding.md) §6).
 
 ## 3. Temporal extensions: one resolution, at binding
 
-`vortex.timestamp` carries a unit and a timezone in its extension metadata. Resolving an IANA
-timezone identifier requires the OS timezone database via `TimeZoneInfo`, which makes the result
-**machine-dependent** and interacts badly with `InvariantGlobalization`.
+`vortex.timestamp` carries a unit and a time zone in its metadata. Resolving an IANA zone takes the
+operating system's time-zone database through `TimeZoneInfo`, which makes the result
+**machine-dependent**.
 
-Decision: the zone is resolved once, when a `DateTimeOffset` member or column binds to the file,
-by `TimeZoneInfo.FindSystemTimeZoneById`, and never per value. A naive or UTC timestamp binds as
+So the zone is resolved once, when a `DateTimeOffset` member or column binds to the file, by
+`TimeZoneInfo.FindSystemTimeZoneById`, and never per value. A naive or UTC timestamp binds as
 `DateTime`, with `Kind` `Unspecified` or `Utc`, and needs no database. A zone the host cannot
 resolve refuses the `DateTimeOffset` binding with `VortexSchemaException`; the column still binds
-as `long`, its storage, and `Storage()`, `Unit` and `TimeZone` give a caller what it needs to
-convert with a zone of its own choosing.
-
-The machine dependence is therefore confined to one call, at one moment, with a refusal rather
-than a guess when the host lacks the zone.
-
-Note that `Extension` is **not** supported by the row encoder (see [06-row-encoding.md](06-row-encoding.md) §6):
-temporal sort keys require the caller to normalize to the storage column explicitly. We do not
-silently unwrap extensions there, or our bytes would stop matching Rust's.
+as `long`, its storage, and `Storage()`, `Unit` and `TimeZone` let a caller convert with a zone of
+its own choosing. The machine dependence is confined to one call, at one moment, with a refusal
+rather than a guess.
 
 ## 4. Strings: spans first, `string` on request
 
-`vortex.varbinview` values are 16-byte views pointing into file buffers. The nominal accessor is
-therefore a UTF-8 span, and materializing a `string` is an opt-in allocation:
+A `vortex.varbinview` value is a 16-byte view into the file's buffers, so the natural accessor is a
+UTF-8 span, and a `string` is an allocation the caller asks for (`GetString`).
+[text-columns.md](../guide/text-columns.md) measures the difference.
 
-```csharp
-await foreach (Columns<Reading> batch in file.Scan<Reading>())
-{
-    Column<string> city = batch.City;
-    for (int i = 0; i < city.Length; i++)
-    {
-        ReadOnlySpan<byte> utf8 = city[i];          // zero-copy, valid for this iteration of the loop
-        // city.GetString(i) allocates
-    }
-}
-```
+The lifetime rule is the sharp edge: **a span borrowed from a batch is invalid once the enumeration
+moves on.** `Columns<TRecord>` and `Column<T>` are `ref struct`s, so the compiler keeps them inside
+the loop body and out of an `await`, and analyzer VX1001 flags a span stored outside it. A caller
+who needs the values later copies them, or takes an owned `RecordBatch`.
 
-The lifetime rule is the sharp edge of this design: **a span borrowed from a batch is invalid once
-the enumeration moves on.** `Columns<TRecord>` and `Column<T>` are `ref struct`s, so the compiler
-keeps them inside the loop body and out of an `await`; VX1001 flags a span stored outside it. A
-caller who needs the values later copies them, or takes an owned `RecordBatch` with
-`ToBatchesAsync` or `ToOwned`.
+## 5. A root that is not a struct
 
-## 5. Non-struct root
-
-A Vortex file's root DType may be a bare `Float64`, `Bool`, or any other type — the reader must
-not assume a tabular schema. The schema of such a file is one field with an empty name, whose type
-is the root:
-
-```csharp
-await using VortexFile file = await VortexFile.OpenAsync(path);
-bool tabular = file.Schema.Count != 1 || file.Schema[0].Name.Length != 0;
-await foreach (BatchView batch in file.Scan())
-{
-    Column<double> values = batch.Column<double>(0);    // the root itself
-}
-```
-
-A record binds to the columns of a struct root, and `Scan<TRecord>()` on any other root throws
-`VortexSchemaException` pointing at the tool scan, which reads the root as its single column. The
-alternative, inventing a synthetic column name, would make round-tripping through our own writer
-produce a different schema than the input, which is worse than an awkward API.
+A file's root dtype may be a bare `Float64`, a `Bool`, or any type, and the reader does not assume a
+table. The schema of such a file is one field with an empty name, whose type is the root. A record
+binds to the fields of a struct root only, and `Scan<TRecord>()` on any other root throws
+`VortexSchemaException` pointing at the tool scan, which reads the root as its single column
+([untyped-files.md](../guide/untyped-files.md)). Inventing a synthetic column name instead would
+make a round trip through this writer produce another schema than its input, which is worse than an
+awkward API.

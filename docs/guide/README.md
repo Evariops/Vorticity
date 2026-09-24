@@ -3,10 +3,9 @@
 Pages named by what you are trying to do. Each one is short, opens with a working example, and says
 what happens, what to watch out for, and what it costs.
 
-A page that has one is a case of the public API's [read cases](../design/14-public-api.md#9-read-cases)
-or [write cases](../design/14-public-api.md#10-write-cases), with the figures its program measured.
 Every example is a program in [samples/Vorticity.Samples](../../samples/Vorticity.Samples),
-compiled by the build and run by the page's name:
+compiled by the build and run by the page's name, and the figures a page quotes are what its program
+measured:
 
 ```
 dotnet run -c Release --project samples/Vorticity.Samples -- filter-rows

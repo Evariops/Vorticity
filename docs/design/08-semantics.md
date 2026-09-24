@@ -1,8 +1,8 @@
 # Query semantics: pruning, predicates, unknown components
 
-The rules that decide whether a scan returns *correct* rows. None of these are visible in the byte
-format; all of them produce silently wrong results if guessed. Where a rule was resolved by
-reading the reference implementation rather than the prose spec, the source is cited inline.
+The rules that decide whether a scan returns *correct* rows. None of them is visible in the byte
+format, and each produces silently wrong results if guessed. Where a rule was settled by reading the
+reference implementation rather than its prose, the source is cited.
 
 ## 1. Statistic precision: what `Inexact` licenses
 
@@ -31,10 +31,9 @@ A statistic with no value licenses nothing.
 
 > Pruning may never eliminate a row that full materialization would have returned.
 
-The converse — pruning too little — is only a performance loss. This asymmetry is what makes the
-test writable: generate a file, run the filter with pruning enabled and with pruning forced off,
-and assert the pruned result is a *subset-free* match of the unpruned one. Feed it deliberately
-sloppy (but legal) `Inexact` statistics to prove the reader does not over-trust them.
+The converse, pruning too little, only costs time. That asymmetry is what makes the invariant
+testable: every filter test runs with pruning and indexes on and off, and the row sets must be
+equal, including over deliberately loose but legal `Inexact` statistics.
 
 ## 2. NaN
 
@@ -48,9 +47,7 @@ The reference computes `min`/`max` with `NumericalAggregateOpts::skip_nans()`
   operand is NaN, `NaN == NaN` included. **`!=` is the exception**: it is defined as the negation of
   `==`, so `NaN != x` is **true**, for every `x`, NaN included. C, C#, Rust and SQL all agree on
   this; a reader that makes `!=` false for NaN "for consistency" drops rows every other
-  implementation returns. That is not a hypothetical — the first draft of this paragraph said every
-  comparison involving NaN is false, and the test written from it failed against a correct
-  implementation.
+  implementation returns.
 * This is all distinct from the row encoding, which deliberately defines a *total* order over floats
   where NaN is ordered by raw bit pattern ([06-row-encoding.md](06-row-encoding.md) §3). The two
   orderings serve different purposes and must not be unified — an implementer who reuses the
@@ -67,8 +64,8 @@ Predicates evaluate over `{true, false, unknown}`, SQL-style:
 * `unknown AND false = false`; `unknown OR true = true`; `NOT unknown = unknown`.
 * A row is returned only when the filter evaluates to `true` — `unknown` does not match.
 * `IS NULL` / `IS NOT NULL` never yield `unknown`.
-* `ListContains(list, v)` (step 28b) is `unknown` on a null list and under a null `v`; a null
-  element matches nothing and leaves the row `false` ([12-index-reads.md](12-index-reads.md) §7).
+* `ListContains(list, v)` is `unknown` on a null list and under a null `v`; a null element matches
+  nothing and leaves the row `false` ([12-index-reads.md](12-index-reads.md) §6).
 
 A literal of a type the column cannot compare to is **not a silent non-match**: it is refused
 before a row is read. On the typed path it does not compile, because `Sym<T>` compares only with a
@@ -111,20 +108,19 @@ layouts and dtypes is what lets a reader keep working when upstream freezes a ne
 the default writer starts emitting a new ID in *one* column of a fifty-column file. An
 open-time hard failure would make that file entirely unreadable for no reason.
 
-Lazy resolution is the default and unconditional behavior, and there is no option to switch it:
-an `AllowUnknownComponents` flag, once planned as an inspection mode, is not offered, because the
-inspection it would have given is always there. `VortexFile.ArrayEncodings` and `LayoutEncodings`
-list what the footer declares, each with `Supported`, and `vxdump` prints them.
+Lazy resolution is unconditional, and there is no option to fail at open instead: the inspection
+such an option would give is always there. `VortexFile.ArrayEncodings` and `LayoutEncodings` list
+what the footer declares, each with whether this build supports it, and `vxdump` prints them.
 
 Every such exception must name the component ID and kind, because that is exactly the input the
 upstream troubleshooting procedure requires ("which edition, which minimum library version").
 
 ### Binary preservation on rewrite
 
-Preserving unknown nodes byte-for-byte through a read-modify-write cycle is a *separate feature*
-with its own invariants (which segments are copied verbatim, what happens when the surrounding
-layout changes, how edition enforcement applies to a component we cannot name). It is **out of
-scope for 1.0**. Inspection-only preservation is in scope.
+Preserving unknown nodes byte for byte through a read-modify-write cycle is a separate feature with
+invariants of its own: which segments are copied verbatim, what happens when the surrounding layout
+changes, how edition enforcement applies to a component nobody can name. It is not offered; a
+rewrite fails on the component it cannot decode.
 
 ## 5. Untrusted hints: a three-class policy
 
@@ -143,10 +139,11 @@ index in `ArrayNode.buffers`; every segment index in `Layout.segments`; `alignme
 (see §6).
 
 **Class II — only result correctness depends on it.** Monotonicity of `RunEndMetadata` ends,
-`is_sorted`, `is_strict_sorted`, zone-map min/max. Default: **not** validated, and the threat model
-says so explicitly — a well-formed file that lies produces wrong results, exactly as in every
-format with embedded statistics, Parquet included. An opt-in `VerifyStatistics` mode validates
-them in O(n) at first decode, for callers reading files from untrusted producers.
+`is_sorted`, `is_strict_sorted`, zone-map min/max. By default they are **not** validated, and the
+threat model says so ([09-contracts.md](09-contracts.md) §4): a well-formed file that lies produces
+wrong results, as in every format with embedded statistics, Parquet included.
+`VortexOpenOptions.VerifyStatistics` validates them in O(n) at first decode, for files from
+producers a caller does not trust.
 
 The distinction matters because a lying `is_sorted` cannot corrupt memory but a lying
 `values_len` can. Conflating the two either costs throughput everywhere or leaves a hole.
@@ -181,31 +178,20 @@ back to a streaming loop with a running budget.
 
 ## 7. Buffer-level LZ4
 
-`Buffer.compression` admits `LZ4` ([02-format.md](02-format.md) §5.2). The decision here used to be
-"1.0 reads it", on the grounds that an LZ4 block decoder is ~200 lines with no dependency and that a
-conformance hole is better closed by us than found by a user. **That decision is reversed, and the
-reason is not effort.**
+`Buffer.compression` admits `LZ4` ([02-format.md](02-format.md) §5.2), and the segment table
+reserves a compression byte too. **A compressed buffer is refused**, with
+`VortexUnsupportedException` naming the id `lz4` and the kind `compression`, and nothing is written
+compressed.
 
-Grepping the whole of Vortex 0.86.1 for `lz4` returns four files: the two `.fbs` schemas that
-declare the enum, and the two generated Rust files that mirror it. Nothing else. `vortex-array`'s
-`serde.rs` *writes* `Compression::None` and **never reads `Buffer.compression` at all** — not even
-to reject it — and no vortex crate depends on an lz4 implementation. The enum value is a
-placeholder, exactly like `SegmentSpec._compression`, which `footer.fbs` says outright is "reserved
-for future use ... not used in the current version of the file format".
+There is nothing to be conformant with. In the whole of Vortex 0.86.1, `lz4` appears in the two
+schemas that declare the enum and the generated code that mirrors them, and nowhere else: the
+reference writes `Compression::None`, never reads the field, and depends on no LZ4 implementation.
+The schema names an algorithm and stops: it does not say whether the bytes would be a raw LZ4 block
+or a frame, and it records no decompressed length anywhere, so a decoder could not even size its
+output without inventing a rule. Writing one would mean choosing a framing and calling it the
+format, the same mistake as inventing an order for `List` in the row encoder
+([06-row-encoding.md](06-row-encoding.md) §6).
 
-So there is nothing to be conformant *with*. The schema names an algorithm and stops: it does not
-say whether the bytes are a raw LZ4 block or an LZ4 frame, and — decisively — it provides no
-decompressed length anywhere. `Buffer.length` is documented as "the length of the buffer in bytes"
-and is used by every consumer as the on-disk extent. A raw LZ4 block carries no size of its own, so
-a decoder could not even size its output without inventing a rule. Writing one would mean choosing
-a framing and a length convention and calling the result the format, which is the same mistake as
-inventing an ordering for `List` in the row encoder ([06-row-encoding.md](06-row-encoding.md) §6).
-
-**Decision: 1.0 refuses a compressed buffer**, with `VortexUnsupportedException` naming the id
-`lz4` and the kind `compression`. Note what that buys: the reference, which never inspects the
-field, would read the compressed bytes AS DATA and return silently wrong values. Refusing is not
-merely defensible here, it is the safer of the two behaviours. We do not write LZ4 either; the
-default writer emits `None` and so do we.
-
-This reverses when — and only when — upstream implements it, at which point the framing becomes
-observable in a real file and the ~200 lines can be written against something.
+Refusing is also the safer behaviour: the reference, which never inspects the field, would read
+compressed bytes as data and return wrong values without a word. The decision changes the day
+upstream implements it and a real file shows the framing.

@@ -1,6 +1,7 @@
-# Condensed binary specification
+# The format, condensed
 
-Everything that must be implemented, extracted from primary sources (see [99-sources.md](99-sources.md)).
+The Vortex file format as this library reads and writes it, condensed from the primary sources of
+[99-sources.md](99-sources.md); the schemas themselves are vendored in [spec/](../../spec/).
 **Everything is little-endian.**
 
 ## 1. File structure
@@ -96,9 +97,9 @@ enum CompressionScheme : uint8 { None = 0, LZ4 = 1, ZLib = 2, ZStd = 3 }
 table FileStatistics { field_stats: [ArrayStats]; }  // one entry per root field
 ```
 
-**Implementation consequence:** `segment_specs` is a vector of fixed-size structs. It can be read
-as a reinterpreted `ReadOnlySpan<SegmentSpec>` (`MemoryMarshal.Cast`) with no traversal and no
-allocation — a major optimization on wide files. Same for `Buffer` (8 bytes) in `array.fbs`.
+`segment_specs` is a vector of fixed-size structs, so it is read as a reinterpreted
+`ReadOnlySpan<SegmentSpec>` with no traversal and no allocation, which matters on wide files; so is
+`Buffer` (8 bytes) in `array.fbs`.
 
 ## 4. DType (`dtype.fbs` + `dtype.proto`)
 
@@ -123,12 +124,11 @@ define the same union, with identical and **stable** tags:
 
 `PType`: `U8=0, U16, U32, U64, I8, I16, I32, I64, F16, F32, F64=10`.
 
-The DType therefore has two parsers for one model. A property test asserting equivalence (generate
-a DType → serialize both ways → re-parse → structural equality) costs an hour and catches any tag
-transcription divergence.
+Two parsers therefore share one model, and a property test holds them equivalent: a generated
+DType serialized both ways parses back to the same value (`DTypeEquivalenceTests`).
 
-Note: a Vortex file's root DType is **not required to be a Struct**. A file may hold a bare
-`Float64` or `Bool`. The reader must not assume a tabular schema.
+A file's root DType is **not required to be a Struct**: a file may hold a bare `Float64` or `Bool`,
+and a reader must not assume a tabular schema ([07-dotnet-mapping.md](07-dotnet-mapping.md) §5).
 
 Core-edition extension dtypes: `vortex.date`, `vortex.time`, `vortex.timestamp`, `vortex.uuid`.
 
@@ -185,8 +185,7 @@ traversal, and every decoder must know how to compute its children's DTypes.
 ### 5.3 Per-encoding metadata
 
 Each encoding serializes its metadata as **Protobuf** (`prost`) with stable tags. There is no
-single `.proto` file: messages are defined alongside the data. Observed examples (the complete,
-exhaustive list must be transcribed during implementation):
+single `.proto` file upstream: messages are declared beside each encoding. A few examples:
 
 ```proto
 // vortex.dict
@@ -223,22 +222,19 @@ the metadata and stops finds nothing. `fastlanes.for` is **not** empty: its meta
 `ScalarValue` holding the frame-of-reference value, with zero buffers and one child. And
 `vortex.zoned`'s layout metadata is a version byte followed by a protobuf, not a bare message.
 
-The examples above are illustrative. The **complete transcription of all thirty-odd metadata
-messages**, with the upstream Rust source path recorded per message so each can be re-verified,
-is in [spec/METADATA.md](../../spec/METADATA.md). Those tag numbers are the contract; transcribe from
-that file, not from this one.
+The complete transcription of every metadata message, with the upstream source path of each, is
+[spec/METADATA.md](../../spec/METADATA.md). Its tag numbers are the contract.
 
 #### Unknown Protobuf fields: skip, never reject
 
-The hand-written Protobuf runtime must **silently skip fields with unknown numbers**, dispatching
-on wire type (varint, fixed32, fixed64, length-delimited; groups — wire types 3 and 4 — are
-rejected, as proto3 never emits them).
+The Protobuf runtime **skips fields with unknown numbers**, dispatching on the wire type (varint,
+fixed32, fixed64, length-delimited; groups, wire types 3 and 4, are rejected, as proto3 never emits
+them).
 
-This is not a nicety, it protects the read-forever promise. Upstream may add an *optional* field to
-a metadata message without it being a reader-visible evolution: old readers ignore it, existing
-semantics are unchanged, so under its own rules upstream is not obliged to mint a new ID. A parser
-that rejected unknown fields would fail on perfectly legal files, and a golden corpus pinned to
-today's version would not notice until the next regeneration — with users hitting it first.
+This protects the read-forever promise. Upstream may add an *optional* field to a metadata message
+without it being a reader-visible evolution: old readers ignore it and the semantics are unchanged,
+so upstream need not mint a new id. A parser that rejected unknown fields would fail on legal files,
+and a corpus pinned to today's version would not notice until its next regeneration.
 
 The distinction to keep sharp:
 
@@ -246,11 +242,10 @@ The distinction to keep sharp:
   an out-of-range exponent).
 * **Tolerate** = a field number the wire format does not recognize.
 
-**A compatibility rule that must be honored exactly:** an encoding ID is a *frozen contract*. A
-reader-visible evolution gets a **new ID** (`vortex.foo` → `vortex.foo_v2`), never a silent
-extension. A Vorticity decoder must therefore reject a payload outside the contract of the ID it
-read, even when it knows how to decode the successor's contract (e.g. `vortex.pco` must refuse an
-8-bit dtype, which belongs to `vortex.pco.v2`).
+**An encoding id is a frozen contract.** A reader-visible evolution gets a **new id**
+(`vortex.foo` → `vortex.foo_v2`), never a silent extension. A decoder therefore rejects a payload
+outside the contract of the id it read, even when it could decode the successor's: `vortex.pco`
+refuses an 8-bit dtype, which belongs to `vortex.pco.v2`.
 
 ### 5.4 Validity (nullability)
 
@@ -283,27 +278,25 @@ Aggregates allowed in zone maps (core edition): `vortex.min`, `vortex.max`, `vor
 `vortex.bounded_max`, `vortex.nan_count`, `vortex.null_count`.
 An unknown aggregate must **not** invalidate the file: it disables the affected pruning only.
 
-## 7. What the default writer produces
+## 7. What the Rust writer produces
 
-This drives decoder prioritization. The default Rust pipeline is
-**split structs → repartition into 8192-row blocks → zone maps → dictionary where useful →
-coalesce toward ~1 MiB → BtrBlocks compression → flat leaves**.
+What a default Rust writer emits is what most files contain. Its pipeline is **split structs →
+repartition into 8 192-row blocks → zone maps → dictionary where useful → coalesce toward ~1 MiB →
+BtrBlocks compression → flat leaves**.
 
 Compression schemes enabled by default, in this order (order breaks ties):
 FoR, ZigZag, BitPacking, Sparse, IntDict, RunEnd, Sequence, IntRLE, Delta; ALP, ALPrd, FloatDict,
 NullDominatedSparse, FloatRLE; StringDict, FSST, OnPair; BinaryDict, VarBin; Decimal; Temporal.
 
-Two important caveats:
+Two caveats:
 
-* **Zstd and Pco are not enabled by default** (`with_compact()`, `zstd`/`pco` features), so
-  neither is needed to read ordinary files. Zstd is nonetheless supported with no external
-  dependency, since `net11.0` ships `ZstandardDecoder` in `System.IO.Compression`; Pco has no such
-  shortcut and is deferred.
-* **`fastlanes.delta` belongs to no `core` edition.** The Delta scheme is in the scheme list, but
-  the edition allowlist forbids writing its ID, so it does not appear in default-written files.
-  Treat it as low priority.
+* **Zstd and Pco are not enabled by default** (`with_compact()`, the `zstd` and `pco` features), so
+  ordinary files need neither. This library reads both; zstd costs it no dependency, since
+  `net11.0` ships `ZstandardDecoder` in `System.IO.Compression`.
+* **`fastlanes.delta` belongs to no edition.** The Delta scheme is in the list, but the edition
+  allowlist forbids its id, so it appears only in files written with enforcement turned off.
 
-## 8. Algorithmic details not to underestimate
+## 8. Algorithmic details that are easy to get wrong
 
 * **FastLanes**: 1024-element **transposed** blocks. Bit-packing operates in that order, not
   logical order — which is what allows unpacking without cross-lane shuffles, and any access by
@@ -321,5 +314,5 @@ Two important caveats:
   the target float type. Patches in a modern ALP are read as a `Patched` array wrapping a
   patch-free ALP.
 * **VarBinView**: 16-byte views (Arrow StringView compatible), `views` buffer aligned to 16.
-* **Patches**: a shared structure (indices + values + optional chunk offsets) reused by BitPacked,
-  ALP and Sparse. Implement it once.
+* **Patches**: one shared structure (indices, values and optional chunk offsets) that BitPacked,
+  ALP and Sparse all use, implemented once here.

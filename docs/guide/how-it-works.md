@@ -123,12 +123,12 @@ framework but `System.IO.Hashing`.
 
 ## Where to read further
 
-The design documents beside this guide say why, in far more depth than a page here should. They
-are written for someone implementing the format, not using it.
+The design documents beside this guide say why, in far more depth than a page here should.
 
 | | |
 |---|---|
-| [02-format.md](../design/02-format.md) | the binary format, byte by byte |
+| [01-scope.md](../design/01-scope.md) | what the library reads, writes and answers, and the guarantees it holds |
+| [02-format.md](../design/02-format.md) | the binary format, condensed |
 | [03-architecture.md](../design/03-architecture.md) | the .NET architecture and its performance invariants |
 | [07-dotnet-mapping.md](../design/07-dotnet-mapping.md) | which .NET type each column type becomes, and where a naive mapping loses data |
 | [08-semantics.md](../design/08-semantics.md) | pruning, predicate semantics, unknown components, resource caps |
@@ -136,8 +136,9 @@ are written for someone implementing the format, not using it.
 | [11-write-strategy.md](../design/11-write-strategy.md) | how the writer chooses an encoding, block by block |
 | [12-index-reads.md](../design/12-index-reads.md) | the key cursor, and answers that need no rows |
 | [13-dataset.md](../design/13-dataset.md) | the versioned dataset |
-| [14-public-api.md](../design/14-public-api.md) | every public type, the shape of each call, and what each costs |
+| [14-public-api.md](../design/14-public-api.md) | the rules the public surface follows, and where each part lives |
 | [90-registry.md](../design/90-registry.md) | every encoding, layout and column type, and its state |
+| [05-benchmarks.md](../design/05-benchmarks.md) | performance against the Rust implementation |
 
 ## Run it
 

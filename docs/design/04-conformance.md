@@ -1,178 +1,122 @@
-# Testing and conformance strategy
+# Testing and conformance
 
-Test framework: **xUnit v3** (`xunit.v3`), with `Microsoft.Testing.Platform` as the runner.
-
-The central problem: a format implementation that only tests against itself proves nothing. A
-round trip through our own writer and reader is self-consistent and can be uniformly wrong. Every
-conformance claim must be anchored in the Rust reference implementation.
+A format implementation tested only against itself proves nothing: a round trip through its own
+writer and reader is self-consistent and can be uniformly wrong. So every claim about bytes is
+anchored in the Rust reference, in both directions. Tests use xUnit v3 on Microsoft.Testing.Platform.
 
 ## 1. Four layers
 
-| Layer | Question answered | Requires Rust? |
+| layer | question | needs Rust |
 |---|---|---|
-| L1 — Unit | Does this kernel/parser do what the spec says? | no |
-| L2 — Golden corpus | Do we read reference-produced files correctly? | at corpus build time |
-| L3 — Differential | Do both implementations agree, value for value, on arbitrary input? | yes, at run time |
-| L4 — Fuzzing | Does malformed input ever break out of clean failure? | no |
+| unit and property tests | does this kernel, parser or operator do what the spec says? | no |
+| golden corpus | do we read what Rust wrote, value for value? | when the corpus is generated |
+| cross-check | does Rust read what we write, value for value? | yes, in CI |
+| fuzzing | does malformed input ever escape a clean failure? | no |
 
-## 2. L1 — Unit tests
+## 2. Unit and property tests
 
-* FlatBuffers/Protobuf readers: hand-crafted byte vectors, boundary cases (missing vtable field →
-  default value, empty vector, absent optional table).
-* Each SIMD kernel: compared against a naive scalar reference implementation over randomized
-  inputs, then compared against itself with intrinsics disabled (`DOTNET_EnableHWIntrinsic=0`).
-* FastLanes transposition: `untranspose(transpose(i)) == i` for all i in [0, 1024) — the same
-  property the reference asserts.
-* Bounds checks: every parser must reject a truncated, over-long, or cyclic-offset input with
+- The FlatBuffers and Protobuf readers on hand-built bytes: a missing vtable field reads its
+  default, an empty vector, an absent optional table, and a truncated or over-long input fails with
   `VortexFormatException` and nothing else.
+- Every SIMD kernel against a scalar reference over random inputs, and the whole suite again with
+  hardware intrinsics disabled, in CI.
+- The FastLanes transposition: `untranspose(transpose(i)) == i` for every `i` of a block, as the
+  reference asserts.
+- Every operator against the full materialization it replaces: a projection, a filter, a take, a
+  count or an aggregate equals the same operation applied to every decoded row.
+- The allocation ratchets of [05-benchmarks.md](05-benchmarks.md) §5.
 
-## 3. L2 — Golden corpus
+## 3. The golden corpus
 
-A Rust crate `tools/conformance-gen` pinned to a specific Vortex version (0.86.x at the time of
-writing; the pin is recorded in the corpus manifest) generates:
+`tools/conformance-gen`, a Rust crate pinned to `vortex = "=0.86.1"`, writes the corpus under
+`tests/Vorticity.Conformance/corpus`: 856 files, deterministic from a fixed seed, across the seven
+core editions from `core2025.05.0` to `core2026.08.3`. The matrix is deliberate:
 
-1. `.vortex` files covering a deliberate matrix:
-   * each DType × nullability × {empty, 1 row, 1023, 1024, 1025, 8191, 8192, 8193 rows}
-     — the block boundaries at 1024 (FastLanes) and 8192 (default row block) are where bugs live;
-   * each target encoding, forced individually via an explicit compressor configuration, so that
-     a single encoding is exercised in isolation rather than whichever one sampling happens to pick;
-   * the default configuration on realistic data (the actual production path);
-   * edge cases: all-null column, constant column, single-value dictionary, strings > 1 MiB,
-     deeply nested structs, a non-struct root DType, a file with no DType segment, a file with
-     user metadata segments;
-   * **container variations**, which the type matrix alone never reaches because the default
-     writer emits none of them:
-     - a file with Zstd-compressed *segments* — forces the "decompress before parsing the footer"
-       path;
-     - ~~a file with an LZ4-compressed *buffer*~~ — dropped: nothing in Vortex 0.86.1 reads or
-       writes `Buffer.compression`, so there is no reference behaviour to match and no framing to
-       decode against ([08-semantics.md](08-semantics.md) §7). The refusal is pinned by a unit
-       test over a hand-built blob instead, which is where a fixture no producer can make belongs;
-     - a `vortex.flat` layout with `array_encoding_tree` inlined in layout metadata — the segment
-       then holds only buffers, a different offset-reconstruction path;
-     - a `vortex.dict` layout;
-     - a postscript near the 65527-byte ceiling;
-     - a file with **deliberately false** min/max statistics, to exercise the class II policy.
-       This one cannot come from the Rust writer; it must be forged.
-2. For each file, a **sidecar of expected values** in a trivially parsable format (JSON Lines or
-   a simple self-described binary), produced by the Rust reader. This decouples value checking
-   from any need to run Rust in CI.
-3. A `manifest.json`: Vortex version, target edition, encodings actually present per file
-   (extracted from the footer's `array_specs`), SHA-256.
+- every dtype × nullability × row counts of 0, 1, 1 023, 1 024, 1 025, 8 191, 8 192 and 8 193,
+  because the block edges at 1 024 (FastLanes) and 8 192 (the default block) are where bugs live;
+- every encoding forced on its own by an explicit compressor configuration, so that each is
+  exercised in isolation rather than whichever the sampling happens to pick;
+- the default configuration on realistic distributions, which is the production path;
+- edge cases: all-null and constant columns, a single-value dictionary, strings over a mebibyte,
+  deep nesting, a root that is not a struct, a file with no dtype segment, user metadata, and the
+  layouts a default writer never emits (an inlined array tree, a dictionary layout).
 
-The corpus is generated by a CI job and published as a versioned artifact; day-to-day test runs
-consume the artifact and require no Rust toolchain. A scheduled job regenerates it against the
-latest Vortex release and fails loudly on drift — that is the early-warning system for upstream
-format evolution.
+Beside each file, a **sidecar of expected values** produced by the Rust reader (`SIDECAR.md` gives
+its format): the dtype, the layout tree, the file statistics, the zone maps and every value, with
+floats compared by their bits, so a wrong NaN payload or a `-0.0` read as `+0.0` fails. The tests
+therefore need no Rust toolchain. A `manifest.json` records the Vortex version, the edition and the
+encodings of every file, and its SHA-256.
 
-**Corpus coverage gate:** the union of `array_specs` and `layout_specs` across the corpus must
-cover every component we claim to support. A claimed-but-untested encoding fails the build.
+**The coverage gate**: the union of the corpus's array and layout ids must cover every component
+this library claims to read, or the build fails. What no Rust writer can produce is forged by
+patching bytes, in `forged/`: the legacy `vortex.stats` layout, and the unknown ids of §6.
 
-## 4. L3 — Differential testing
+## 4. The cross-check: Rust reads what we write
 
-Golden files prove we read what Rust wrote. They do not prove Rust reads what *we* write, and
-they do not cover inputs nobody thought to generate. Two mechanisms close that:
+Golden files prove that we read what Rust wrote. They do not prove that Rust reads what we write,
+and a writer tested only by its own reader reads back its own mistakes. So a CI job has this
+library write the whole corpus out again, and the reference read every file and compare it scalar
+by scalar with the source (`bench/crosscheck.sh` locally, `verify_written` in the generator). The
+writes rotate the index policies, append in pieces, rewrite files as a dataset's compaction does,
+and chunk some columns apart, so that every structure this writer can emit meets a strict Rust
+reader.
 
-### 4.1 Reverse direction (the critical one)
+The benchmark shim adds an in-process check ([05-benchmarks.md](05-benchmarks.md) §6): both readers
+return the same rows and the same checksum of every decoded value on the same files.
 
-Vorticity writes → the Rust reader reads and dumps values → compare. Without this, the writer is
-untested in any meaningful sense: our own reader will happily read back our own mistakes. This
-runs as a CI job with the Rust toolchain, over generated data (see property testing below).
+## 5. Fuzzing
 
-### 4.2 In-process differential via P/Invoke
-
-`vortex-ffi` exposes a stable C API (`vortex.h`, `vx_session`, `vx_file`, `vx_array`, `vx_scan`,
-…) and builds as a cdylib. Loading it via `DllImport` lets a single xUnit test read the same file
-with both implementations and compare array by array — no process boundary, no serialization of
-expected values, immediate failure localization.
-
-This is the mechanism for **randomized** differential testing: generate a dataset, write it with
-both implementations, read it with both, and assert the 2×2 matrix agrees.
-
-The FFI dependency is confined to `Vorticity.Conformance`. It never touches the shipped library.
-
-### 4.3 Property-based testing
-
-A generator over (DType, nullability, value distribution, row count, chunking) feeds:
-
-* `write(Vorticity) → read(Rust)` ≡ input
-* `write(Rust) → read(Vorticity)` ≡ input
-* `write(Vorticity) → read(Vorticity)` ≡ input
-* projection/filter/row-range results ≡ the same operation applied to the full materialized result
-
-Value distributions must be adversarial, because they are what select the encoding: constant runs,
-long runs, low cardinality, high cardinality, sorted, reverse-sorted, mostly-null, all-null, NaN,
-±Inf, −0.0, subnormals, denormal-heavy floats (ALP), repeated string prefixes (FSST), empty
-strings, 4-byte-boundary strings (VarBinView inline vs. indirect).
-
-## 5. L4 — Fuzzing
-
-* Target: `VortexFile.OpenAsync` + full scan, over mutated corpus files.
-* Seed corpus: the golden corpus plus the upstream `fuzz/` corpus.
-* Invariant: only `VortexFormatException` or `VortexUnsupportedException` may escape. Any
-  `AccessViolation`, `IndexOutOfRange`, `OutOfMemory`, hang, or silently wrong value is a bug.
-* **Resource caps are fuzzing invariants, not just constants.** A file declaring `2^255` alignment
-  or a 100 GiB decompressed segment must fail *cleanly and fast*; the fuzzer asserts the failure
-  and the time bound, rather than merely surviving.
-* **Structural mutation, not just bit flips.** A naive mutator on an offset-based format spends
-  99% of its budget producing files rejected at the first bounds check, giving almost no coverage
-  past the postscript parser. The mutator targets FlatBuffers offsets, segment indices, Protobuf
-  tags, and class I semantic fields ([08-semantics.md](08-semantics.md) §5) — the last being the
-  only way to produce a structurally valid file with an out-of-range `values_len`.
-* A dedicated mutation injects **unknown Protobuf fields** into encoding metadata, since no seed
-  file will ever contain one and the skip rule is load-bearing for read-forever
-  ([02-format.md](02-format.md) §5.3).
-* Runs nightly, not per-commit; findings are minimized and checked in as regression tests.
+- **Target**: open and full scan, over mutated corpus files.
+- **Invariant**: only `VortexFormatException` or `VortexUnsupportedException` escapes. An access
+  violation, an index out of range, an out-of-memory, a hang or a silently wrong value is a bug.
+- **Structure-aware mutation**: a naive bit flip on an offset-based format dies at the first bounds
+  check. The mutator (`tests/Vorticity.Fuzz`) rewrites words in the tail where the offsets live,
+  truncates, writes plausible Protobuf tags and long varints, and puts extreme values in the
+  lengths and counts that memory safety depends on ([08-semantics.md](08-semantics.md) §5).
+- **Caps are invariants**: a file declaring a `2²⁵⁵` alignment or a segment that expands to 100 GiB
+  must fail cleanly and fast.
+- **Where it runs**: a smoke campaign in every test run (`FuzzSmokeTests`), and 100 000 mutations
+  with a fixed seed in CI, so a finding reproduces from the log.
 
 ## 6. Negative and forward-compatibility tests
 
-Two tests that the current layers would otherwise never produce, both built on a forged file
-carrying an encoding ID that does not exist in any edition:
+Two fixtures carry an encoding or a layout id that exists in no edition
+(`forged/negative/unknown_*_id.vortex`):
 
-* Reading a **projected** column that uses it fails with `VortexUnsupportedException` whose message
-  contains both the ID and the kind — [03-architecture.md](03-architecture.md) §5 makes this a
-  requirement, and a requirement no test checks is a wish.
-* Scanning while **not** projecting that column **succeeds**. This is the test that locks in lazy
-  component resolution ([08-semantics.md](08-semantics.md) §4); without it, someone will
-  "simplify" the open path into an eager failure and nothing will object.
+- reading a **projected** column that uses one fails with `VortexUnsupportedException` naming the
+  id and its kind;
+- scanning **without** projecting it succeeds. This is what locks in lazy resolution
+  ([08-semantics.md](08-semantics.md) §4): without it, an open path "simplified" into an eager
+  failure would pass.
 
-A third, on the pruning side: run every filter test twice, once with pruning enabled and once
-forced off, asserting identical result sets. Combined with the forged false-statistics file, this
-is what enforces "pruning never eliminates a matching row".
+On the pruning side, filter tests run with pruning and indexes on and off and must return the same
+rows, which is what enforces that pruning never removes a matching row.
 
-## 7. Row encoding
+## 7. The row encoding
 
-The row encoder (see [06-row-encoding.md](06-row-encoding.md)) is tested separately, because its
-correctness condition is a single crisp property rather than a format match.
+The row encoder's contract is one property, byte order equals tuple order, and a format match
+([06-row-encoding.md](06-row-encoding.md)):
 
-* **Order property, randomized.** Generate random tuples over a random schema and random per-column
-  `RowSortField` settings; assert that sorting by `memcmp` of the encoded rows produces exactly the
-  same permutation as sorting by tuple comparison. This is the whole contract, and it catches
-  sign-bit, endianness, inversion and block-marker mistakes in one shot.
-* **Adversarial values.** `-0.0` vs `+0.0`, NaN bit patterns (not canonicalized by the spec — the
-  test asserts raw-bit ordering, not IEEE semantics), `i64::MIN`, empty vs null vs one-byte
-  strings, strings of length exactly 31/32/33/64 (the block boundary), prefix pairs
-  (`"ab"` vs `"abc"`), and nulls under nested structs with garbage in the child arrays — the case
-  that only the canonicalized-null-body rule gets right.
-* **Byte-exactness against Rust.** `vortex-ffi` exposes no row-encoding API, so this goes through
-  a binary that encodes a generated table with `vortex-row` and dumps the bytes; we compare byte
-  for byte. Being merely order-*compatible* is not enough — two implementations could each be
-  internally consistent and still disagree, which would silently break any cross-language
-  comparison.
+- **The order property, randomized**: random tuples over a random schema and random sort options;
+  sorting by `memcmp` of the encoded rows must give exactly the permutation of a tuple sort.
+- **Adversarial values**: `-0.0` and `+0.0`, NaN bit patterns, `i64::MIN`, empty against null
+  against one-byte strings, strings of 31, 32, 33 and 64 bytes around the block size, prefix pairs,
+  and nulls under nested structs with garbage in their children.
+- **Byte for byte against Rust**: `tools/row-vectors` encodes generated tables with the reference
+  `vortex-row` and records the bytes in `tests/Vorticity.Conformance/row-vectors`; the tests
+  compare every one. `vortex-row` is not published on crates.io, so that crate takes the Vortex
+  repository at tag `0.86.1` as a git dependency, the only one in the repository, and its output is
+  committed. Being order-compatible is not enough: two encoders can each be consistent and still
+  disagree, which would break any comparison across languages.
 
-  It lives in [`tools/row-vectors`](../../tools/row-vectors) rather than in `conformance-gen`, because
-  `vortex-row` is marked `publish = false` upstream — it exists only inside the vortex monorepo and
-  is not on crates.io, so the exact crates.io pin `conformance-gen` uses cannot reach it. It is
-  taken as a **git dependency pinned to the tag `0.86.1`**, the only git dependency in the
-  repository, and every other vortex crate comes from the same tag so one resolved `vortex-array`
-  serves them all. The crate is not built by CI; its output is committed.
-* **Version pinning.** The format is experimental upstream. The golden row-encoding vectors record
-  the Vortex version that produced them, and a mismatch is a loud failure rather than a silent
-  re-baseline.
+## 8. Read forever
 
-## 8. Interoperability regression
+Files written under the oldest edition must stay readable, and the corpus holds files written under
+each edition from `core2025.05.0` on: the files of the older editions are what catches a reader
+that hard-codes today's encodings. They are written by the pinned 0.86.1 generator restricted to
+each edition, which is the same component set as the 0.36.0 floor with a modern writer; files from
+a 0.36.0 writer itself would need a second, older generator.
 
-Independently of correctness: a **read-forever** test asserts that files written by old Vortex
-versions stay readable. The corpus therefore keeps files generated by 0.36.0 (the compatibility
-floor), plus one per subsequent core edition. This is not redundant with the current corpus —
-it is the only thing that catches us accidentally hard-coding today's encodings.
+A CI job re-vendors the upstream schemas and reports any drift; a change there is a format change,
+reviewed against [90-registry.md](90-registry.md), and the corpus is regenerated with the generator
+pinned to the new version.

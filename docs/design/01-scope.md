@@ -1,236 +1,106 @@
-# Functional scope
+# Scope
 
-## 1. What Vortex is (and what that implies)
+What Vorticity covers, what it deliberately leaves out, and the guarantees it holds.
 
-Vortex is not "yet another Parquet". It is a **columnar compression framework** whose file format
-is merely a container. Three consequences shape Vorticity:
+## 1. What Vortex is, and what that implies
 
-1. **The file is self-describing.** The split into row groups / pages / columns is not mandated by
-   the spec: the *writer* decides, by composing a `Layout` tree that is serialized into the footer.
-   A reader must therefore implement a **layout-tree interpreter**, not a fixed-structure parser.
-2. **Data stays compressed until the last moment.** A Vortex array is a tree of encodings
-   (`dict(runend(for(bitpacked)))`), and operations (filter, take, projection) can execute *on
-   compressed data*. "Decompression" is a progressive canonicalization process.
-3. **Compatibility is governed by "editions".** An edition is a frozen set of component IDs. The
-   current Rust writer defaults to `core2026.08.3`; the read-forever guarantee starts at
-   `core2025.05.0` (Vortex 0.36.0). Our *read* scope is therefore defined as a subset of editions,
-   not as "version N of the format".
+Vortex is not another Parquet. It is a **columnar compression framework** whose file format is a
+container, and three of its properties shape this implementation:
 
-Target format: **`VTXF` version 1**, extension `.vortex`. The format version has not moved since
-stabilization; it is the edition registry that evolves.
+1. **The file is self-describing.** How rows are partitioned into chunks, zones and columns is not
+   fixed by the format: the writer decides, by composing a layout tree that the footer serializes.
+   A reader is therefore an interpreter of that tree, not a parser of a fixed structure.
+2. **Data stays compressed until the last moment.** An array is a tree of encodings, such as
+   `dict(runend(for(bitpacked)))`, and a filter, a take or a projection can run on the compressed
+   form. Decoding is a progressive canonicalization.
+3. **Compatibility is governed by editions.** An edition is a frozen set of component ids. Files
+   written from Vortex 0.36.0 on, edition `core2025.05.0`, are promised to stay readable. A reader's
+   scope is a set of editions, not a version of the format, which has stayed at `VTXF` version 1.
 
-## 2. Goals for Vorticity 1.0
+[02-format.md](02-format.md) condenses the format; [90-registry.md](90-registry.md) lists every
+component and its state.
 
-### In scope
+## 2. What Vorticity is
 
-| # | Capability | Detail |
-|---|---|---|
-| F1 | **Open a Vortex file** | EOF marker → postscript → footer → dtype → layout, in 1–2 I/O round trips (64 KiB tail read) |
-| F2 | **Expose the schema** | Full `DType`: Null, Bool, Primitive (11 ptypes incl. f16), Decimal, Utf8, Binary, Struct, List, FixedSizeList, Extension |
-| F3 | **Full scan** | `IAsyncEnumerable` of batches, decoded to canonical form |
-| F4 | **Projection pushdown** | Read only the segments of requested columns (nested paths included) |
-| F5 | **Row-range / random access** | Read rows `[a, b)` or an index list without touching the rest. Specialized `take` paths for `dict`, `runend`, `fastlanes.bitpacked`, `for`, `zigzag`, `alp`, `sequence` and `constant`, pushed down through the layout tree; documented zone-decode fallback for the variable-length encodings (`fsst`, `onpair`, `alprd`) — see [90-registry.md](90-registry.md) |
-| F6 | **Zone-map pruning** | Use `vortex.zoned` / `vortex.stats` (min, max, null_count, nan_count) to skip zones |
-| F7 | **Filter pushdown** | Simple predicates (comparisons, AND/OR/NOT, IS NULL, IN) evaluated before materialization |
-| F8 | **Decode the `core` edition** | The 34 array encodings + 6 layouts of `core2026.08.3` — see [90-registry.md](90-registry.md) for the deliberate exceptions |
-| F9 | **Write a file** | Conformant writer targeting an explicit edition, enforced per component kind. Default `core2026.08.3` — the newest frozen edition, and what the reference writer defaults to; `core2025.05.0` is selectable and honoured, at the cost of the zone map. The floor cannot be the *default* because the writer's own zone maps (`vortex.zoned`, `core2026.08.0`) and `vortex.uuid` (`core2026.08.3`) are outside it — see [90-registry.md](90-registry.md) |
-| F10 | **Compress on write** | BtrBlocks-style cascade: FoR, ZigZag, BitPacking, Dict, RunEnd, Sparse, Constant, FSST, ALP |
-| F11 | **Statistics** | Compute and write file-level statistics and zone maps |
-| F12 | **Diagnostics** | Dump the layout/encoding tree (equivalent of `display_tree`) — indispensable for debugging and cross-testing |
-| F13 | **Byte-sortable row encoding** | Columns → `ListView<u8>` such that `memcmp` of encoded rows equals tuple comparison. Ships as the separate `Vorticity.RowEncoding` **0.x** package, not in the 1.0 core contract — the upstream format is experimental and reserves the right to change ([09-contracts.md](09-contracts.md) §3). Spec: [06-row-encoding.md](06-row-encoding.md) |
-| F14 | **Zstd** | `vortex.zstd` arrays and Zstd-compressed segments, via the in-box `System.IO.Compression.ZstandardDecoder` |
+A reader and a writer of Vortex files for .NET 11, with no third-party dependency: the FlatBuffers
+and Protobuf runtimes are written here, and the one package the core references is the first-party
+`System.IO.Hashing` ([03-architecture.md](03-architecture.md) §1). It is compatible with Native AOT
+and trimming.
 
-### Scope decision, 2026-09-13: full parity with what Vortex Rust supports
-
-**The encodings below were deferred to 1.1 and are now in scope for 1.0.** The owner's instruction is
-"on veut un support complet de ce que la version rust supporte", and that settles a question this
-document had answered on a different basis — rarity and effort — rather than on capability.
-
-| now in scope | was deferred because | still true, and now irrelevant |
-|---|---|---|
-| **`vortex.pco`** | a full integer/float codec, sizeable work; writer opt-in upstream so it never appears in default-written files | the effort is real; rarity is not a reason when parity is the target |
-| **`vortex.zstd_buffers`** | draft `zstd2026.02.0` edition, no read-forever guarantee | still a draft edition; decode is trivial now that `vortex.zstd` is in place |
-| **`vortex.variant`, `vortex.parquet.variant`, `vortex.map`, Union** | very recent (`core2026.08.2`/`.3`), rarely present | recency is not a reason either |
-| **`fastlanes.delta`** | belonged to no core edition, so nothing required it | Rust writes it, so parity requires reading it |
-
-**What this costs, measured rather than estimated.** `CorpusCoverageTests` records 45 corpus files
-this build cannot read. 43 of them are exactly these components — `vortex.map` alone is 22 — so this
-decision converts almost the whole of that number from *scope* into *work*. That test's header says
-"it is not a work queue"; as of this decision, it is one.
-
-**The effort estimates this table carried were unreliable, and here they are re-derived from the
-reference implementation rather than from memory.** The parity decision does not depend on them — the
-owner's instruction was unconditional — but the ORDER of the work does, and one estimate was simply
-wrong.
-
-| component | files | what it actually is | corrected estimate |
-|---|---|---|---|
-| ~~**`vortex.map`**~~ | 23 | **the estimate was wrong twice over.** The `Map` DTYPE was already implemented — parsing, arena, switch sites — and a map ARRAY is a `ListView<Struct{key,value}>` wearing the map dtype, so no new canonical kind and no new column type were needed | **DONE.** One decoder, one writer wrapper, and the harness work below |
-| ~~**`vortex.zstd_buffers`**~~ | 4 | a META-ENCODING: each top-level buffer of *another* array compressed independently, with that array's encoding id and metadata stored so it can be rebuilt | **DONE, and "architectural" was too pessimistic.** `inner_metadata` is a `bytes` field inside this node's metadata, so it is already a sub-span of the arena's FlatBuffer copy: a synthesised node points at it with an offset, exactly as a parsed node does. No new storage, no arena change |
-| **`vortex.variant`, `vortex.parquet.variant`** | 8 | **the largest of the six, and the only one needing a new canonical kind.** The sidecar renders a variant row as `{dtype, value}` — genuinely typed PER ROW — and nothing in `CanonicalKind` expresses that, unlike `vortex.map` which reused `ListView`. `vortex.variant` wraps a core-storage child carrying the same Variant dtype plus an optional shredded child; the real payload is `vortex.parquet.variant`, whose crate is 4 623 lines of the Parquet Variant binary format | **large**: new canonical kind, new column type, a binary format, and `ValueComparer` support |
-| **`vortex.pco`** | 4 | full pcodec — a real compression algorithm. Canonical form is `Primitive`, which exists, so no new kind: the whole cost is the codec | **large**, but bounded and verifiable value-for-value against the sidecar |
-| ~~**`fastlanes.delta`**~~ | 4 | ~~per-lane prefix sum over 1024-element FastLanes blocks~~ | **DONE.** The estimate held: one decoder, one metadata reader |
-
-**Three of these were pinned by contract §2.8, not merely absent**, with reasons that stay true
-after implementation. The registry used to return them verbatim beside the refusal:
-
-* ~~`fastlanes.delta`~~ and ~~`vortex.patched`~~ — both now read; their notes were true of upstream
-  and were never reasons not to read one;
-* ~~the `vortex.list` **layout**~~ — now read; its note was true of upstream and was never a reason
-  not to read one. **All three of §2.8's pinned notes are now retired**, each by its component
-  gaining a reader.
-
-Those statements describe *upstream*, and implementing a reader does not falsify any of them. What
-changes is whether this library refuses the file. Both remaining single-file refusals sit here:
-`containers/experimental_patched_array_editions_off` and `containers/experimental_list_layout`, each
-produced only with an upstream environment switch. **The array `vortex.list` is already implemented
-and read** — about fifty corpus files carry one; only the same-named layout is missing.
-
-**What is NOT moved by this decision**, because "parity with Rust" is not the axis that excluded
-them. Each is listed in the table below with its own reason, and each is a separate call:
-
-* **IPC format** — upstream calls it under construction, with no shared-array support.
-* **`tensor`, `spatial`, `json` editions** — plugins outside `core`, a product-surface question.
-* **Apache.Arrow interop** — would break the zero-dependency rule, which is an architectural
-  invariant of this library rather than a scope preference.
-* **CUDA, DataFusion, DuckDB, Spark** — engine integrations, not format support.
-* **Encryption**, **forward compatibility / WASM** — nothing to implement; upstream has neither.
-
-If any of those was also meant by "support complet", it needs saying separately: three of the five
-are not encodings at all, and one of them costs the zero-dependency guarantee.
-
-### Out of scope (1.0)
-
-| Exclusion | Reason |
+| package | what it holds |
 |---|---|
-| **IPC format** | Explicitly marked unstable and incomplete upstream ("under construction", no shared-array support) |
-| **`tensor`, `spatial`, `json` editions** | Optional plugins outside `core` |
-| **Encryption** | `EncryptionSpec` is an empty reserved table in the spec; nothing to implement |
-| **Forward compatibility / WASM** | Not yet implemented upstream (planned before Vortex 1.0) |
-| **CUDA, DataFusion, DuckDB, Spark** | Engine integrations, out of scope for a format library |
-| **Apache.Arrow interop** | Would break the zero-dependency rule. Optional separate `Vorticity.Arrow` package |
+| `Vorticity` | the session, files, the typed scan and its columns, aggregates, the key cursor, the tool path for schemas known only at run time, the writer and its builders, the I/O seam |
+| `Vorticity.Generators` | the `[VortexRecord]` source generator and the analyzers VX1001 to VX1008, build-time only |
+| `Vorticity.Dataset` | a versioned dataset over an object store ([13-dataset.md](13-dataset.md)); experimental, `VX0001` |
+| `Vorticity.RowEncoding` | the byte-sortable row encoding ([06-row-encoding.md](06-row-encoding.md)); experimental, `VX0002`, because upstream reserves the right to change it |
+| `vxdump` | the inspection tool, written against the public surface only |
 
-### Note: segment compression
+## 3. What it reads
 
-The footer's `CompressionSpec` allows `None`, `LZ4`, `ZLib`, `ZStd` at the **segment** level, and
-`Buffer.compression` allows `None`/`LZ4` at the **buffer** level. Neither is implemented by any
-Vortex release: the default Rust writer emits `None`, the reader never inspects either field, and
-`footer.fbs` states that the segment spec's pointer into `compression_specs` is "reserved for
-future use ... not used in the current version of the file format".
+- **Every component a Rust writer emits**: 37 array encodings and 7 layouts. That is every
+  component of the core editions up to `core2026.08.3`, `vortex.zstd_buffers` from the draft
+  `zstd2026.02.0` edition, and the three Rust writes outside every edition when an upstream flag
+  asks for them: `fastlanes.delta`, `vortex.patched` and the experimental `vortex.list` layout.
+- **Every file from Rust 0.36.0 to the version the conformance corpus is pinned to**, 0.86.1 today,
+  value for value ([04-conformance.md](04-conformance.md)).
+- **Lazily.** An id this library does not know fails only the read that needs it: an unprojected
+  column may use one, and a zone-map aggregate nobody knows only disables its pruning
+  ([08-semantics.md](08-semantics.md) §4).
+- **Refused by name**, with the id and its kind: a legacy two-buffer `vortex.fsst`, a shredded
+  variant child, and a compressed buffer or segment, which the schema declares and no Vortex release
+  implements ([08-semantics.md](08-semantics.md) §7).
 
-.NET 11 adds `ZstandardStream`, `ZstandardEncoder`, `ZstandardDecoder`, `ZstandardDictionary`
-and their options types to `System.IO.Compression`, so Zstd costs us no external dependency — the
-span-based one-shot `ZstandardDecoder.TryDecompress` is exactly the shape our buffer decompression
-needs, with no stream allocation. `ZLib` and `Deflate` have always been in the BCL.
+## 4. What it writes
 
-`LZ4` would have been the only scheme we hand-write, and **we do not**: buffer-level LZ4 is
-declared by the schema and implemented by nothing. Vortex 0.86.1 never reads `Buffer.compression`,
-never writes anything but `None`, and depends on no lz4 crate, while `footer.fbs` says in as many
-words that `SegmentSpec._compression` is "reserved for future use ... not used in the current
-version of the file format". With no framing and no decompressed length defined anywhere, a decoder
-could only be written by inventing both. **Decision: 1.0 refuses a compressed buffer** with
-`VortexUnsupportedException(lz4, compression)` — which, since the reference would read the
-compressed bytes as data and return silent garbage, is also the safer behaviour. Reversed the day
-upstream implements it. See [08-semantics.md](08-semantics.md) §7.
+- **Files every Rust reader of the target edition opens.** The target is `VortexEditions.Default`,
+  `core2026.08.3` today, read by Vortex Rust from 0.85.0; lower targets are honoured by dropping
+  what they cannot carry, and refused where a column needs a component the target lacks
+  ([90-registry.md](90-registry.md)). The reference reads every file this writer produces, value
+  for value, in CI.
+- **Encodings chosen per chunk**, by exact formulas over statistics computed in one pass, with a
+  trial only for zstd, FSST, ALP and ALP-RD ([11-write-strategy.md](11-write-strategy.md)).
+- **Pruning structures**: a zone map per block of 8 192 rows, file statistics, bounded string
+  bounds, and on request the skipping and locating indexes of [10-indexes.md](10-indexes.md), which
+  a Rust reader ignores.
+- **Appends** that continue a file in place, and a repair for a torn one.
 
-This removes the argument for deferring `vortex.zstd`. The library targets `net11.0` only, so the
-support is unconditional — see [03-architecture.md](03-architecture.md) §1.
+## 5. What it answers
 
-## 3. Phasing
+A scan reads the columns a record names and nothing else, pushes a filter written as a lambda into
+the file statistics, the zone maps and the indexes, and decodes only the blocks that survive. On
+top of that:
 
-Each phase is independently shippable and testable.
+| capability | where |
+|---|---|
+| rows by index, decoding only the rows asked for where the encoding allows it | [90-registry.md](90-registry.md) |
+| aggregates and group by on the encoded form: a dictionary by code, a run by its length | [14-public-api.md](14-public-api.md) §5.5 |
+| counts, existence, minimum and maximum answered from the structures before any decode | [12-index-reads.md](12-index-reads.md) §4 |
+| a key cursor that seeks, steps, ranks and counts, and batches in key order | [12-index-reads.md](12-index-reads.md) |
+| parallel decode on a session's threads, batches still in file order | [09-contracts.md](09-contracts.md) §2 |
 
-### Phase 0 — Foundations (zero dependency)
-The entry price of "no dependencies": we write the serialization runtimes ourselves. Both are
-small and precisely bounded.
+## 6. What it leaves out
 
-* Aligned buffers, reference counting, zero-copy slices, `NativeMemory.AlignedAlloc`.
-* **Minimal FlatBuffers runtime**: reader (vtable resolution, tables, vectors, inline structs,
-  unions) plus a builder. No generated code: accessors hand-written against the 5 schemas.
-  FlatBuffers reading is pure offset arithmetic — this is what makes zero-dependency realistic.
-* **Minimal Protobuf runtime**: varint / zigzag / length-delimited, read and write, for ~30
-  metadata messages plus `DType` and `Scalar`.
-* `DType` and `Scalar` models with both serializations (the spec uses FlatBuffers *and* Protobuf
-  depending on context).
-* Error model with no exceptions on hot paths.
-* Protobuf unknown-field skipping and the resource caps of
-  [08-semantics.md](08-semantics.md) §6 — both are parser-level and must exist before any decoder
-  is written.
+| | why |
+|---|---|
+| the IPC format | unstable and incomplete upstream |
+| the `tensor`, `spatial` and `json` editions | plugins outside `core` |
+| encryption | the format's slot is an empty reserved table |
+| engine integrations (DataFusion, DuckDB, Spark, CUDA) | not a format library's job |
+| Apache Arrow interoperability | it would break the zero-dependency rule; an owned `RecordBatch` is where a bridge package would attach |
+| a DataFrame, SQL, joins | the plan a scan builds is what such a layer would target |
+| deleting or updating rows | a file is immutable and an append adds blocks; mutation belongs to a storage engine above the library |
+| an S3 client | the dataset's store is a seam another library implements ([13-dataset.md](13-dataset.md) §11) |
+| preserving unknown nodes byte for byte through a rewrite | a separate feature, with its own invariants |
 
-### Phase 1 — Reading
-* File-tail parsing: EOF (8 B) → postscript → footer → dtype → statistics.
-* `ISegmentSource`: async range-read abstraction with request coalescing and caching. Two
-  implementations: `mmap` (local, zero-copy) and async `RandomAccess` (network / object storage).
-* Layout tree: `flat`, `chunked`, `struct`, `zoned`, `stats` (legacy), `dict`.
-* Array deserialization: blob → `ArrayNode` tree + buffer table, zero-copy.
-* Decoders: canonical first, then compressed (ordering in [90-registry.md](90-registry.md)).
-* Scan with projection and row ranges.
+## 7. Guarantees, and what holds each
 
-### Phase 2 — Compute & pushdown
-* SIMD kernels: FastLanes unpacking (1024-element transposed blocks), FoR, ZigZag, ALP, RunEnd, FSST.
-* Row masks, `filter`, `take` directly over compressed encodings where it wins.
-* Filter expressions and derivation of pruning predicates from zone maps.
-* Zstd buffer and segment decompression.
-
-### Phase 3 — Writing
-* Canonical uncompressed writer (a valid file at an explicit target edition) — the milestone that
-  unlocks cross-testing in the Vorticity → Rust direction.
-* Layout strategies: struct split → row blocks (8192 by default) → zone maps → coalesce toward
-  ~1 MiB → flat leaves.
-* Sampling compressor (BtrBlocks style), with the **candidate scheme list derived from the target
-  edition before sampling** and the allowlist at serialization reduced to a bug assertion
-  ([90-registry.md](90-registry.md)).
-* Write-side kernels in frequency order: FoR / BitPacking / Dict first, then FSST, then ALP.
-
-Three cost sinks that the symmetry with reading hides, and that this phase should not discover
-late: **FSST symbol-table construction** is an iterative sampling algorithm and is by far the
-largest write kernel (decoding it is trivial by comparison); **ALP encoding** requires exponent
-search and patch management, of which decoding exercises only a fraction; and the **FlatBuffers
-builder** — back-to-front construction, alignment, and vtable deduplication — is the hidden half of
-Phase 0. Vtable dedup is not optional: without it, wide-schema metadata inflates and the 105%
-size target starts with a self-inflicted handicap.
-
-All three are built. The measured corpus write ratio is **0.650×** (2026-09-23), inside the ≤105%
-target; the breakdown and what remains are in [90-registry.md](90-registry.md).
-
-### Phase 3b — Row encoding (parallelizable)
-Independent of the file format and of I/O: it touches neither, so it can be built alongside any
-other phase and is gated only by the `DType`/array model from Phase 0. See
-[06-row-encoding.md](06-row-encoding.md).
-
-* Two-pass, column-major encoder (size pass, write pass), vectorized big-endian conversion and
-  descending inversion.
-* The full supported type set: Null, Bool, all primitives, Decimal up to i128, Utf8, Binary,
-  Struct, FixedSizeList, with recursive nesting and canonicalized null bodies.
-
-### Phase 4 — Hardening
-* `vxdump` CLI (inspection, statistics, verification).
-* Parser fuzzing: no malformed file may produce anything other than a clean exception — no
-  out-of-bounds read, no OOM.
-* Zero-allocation analyzers in CI.
-
-## 4. 1.0 acceptance criteria
-
-1. Any file written by Vortex Rust, from 0.36.0 up to **the version the corpus is pinned to**, in
-   default configuration, is read correctly value by value (verified differentially, see
-   [04-conformance.md](04-conformance.md)). The upper bound is explicit and moves when the
-   scheduled corpus regeneration extends it — without it the criterion breaks itself the day
-   upstream freezes a new core edition, with no regression on our side.
-2. Any file written by Vorticity is read back correctly by Vortex Rust.
-3. Zero managed allocations per batch in steady state on a full scan (excluding output buffers),
-   measured with `MemoryDiagnoser`.
-4. Scan throughput within a stated factor of the Rust reader on the same machine and dataset
-   (target: ≤ 2×, see [05-benchmarks.md](05-benchmarks.md)). **Measured: 0.333×** on a full scan of
-   `containers/zoned_many_zones_nulls`, in one process against `vortex = 0.86.1` built as upstream
-   builds its benchmarks, through [`tools/vxbench-rs`](../../tools/vxbench-rs) — one file on one
-   arm64 machine, not a general claim; [05-benchmarks.md](05-benchmarks.md) §2.2 states what it
-   does and does not support.
-5. AOT- and trimming-compatible, with no reflection and no `DynamicallyAccessedMembers`.
-6. A file whose *unprojected* columns use unknown encodings still scans successfully; a projected
-   one fails with the component ID and kind in the message ([08-semantics.md](08-semantics.md) §4).
-7. Pruning never eliminates a row that full materialization would have returned, under randomized
-   testing with deliberately inexact statistics ([08-semantics.md](08-semantics.md) §1).
-
-Row encoding has its own criteria, in its own `0.x` package: byte-identical to `vortex-row` for
-every supported type, and the order property holding under randomized testing
-([04-conformance.md](04-conformance.md) §6).
+| guarantee | held by |
+|---|---|
+| every corpus file Rust wrote is read value for value | the conformance corpus, 856 files over seven editions ([04-conformance.md](04-conformance.md) §3) |
+| Rust reads every file this library writes | the cross-check in CI ([04-conformance.md](04-conformance.md) §4) |
+| a scan allocates nothing per batch in steady state | allocation ratchets in the test suite ([05-benchmarks.md](05-benchmarks.md) §5) |
+| a full scan within 2× of Rust's time, a decoder within 1.5×, files no larger than 105 % of Rust's | the benchmark gates; measured 0.33×, a median of 0.59× per decoder, and 0.650× the bytes ([05-benchmarks.md](05-benchmarks.md) §1) |
+| pruning never removes a row a full scan returns | every filter test run with pruning and indexes on and off ([08-semantics.md](08-semantics.md) §1) |
+| malformed input fails with a clean exception, never a crash, a hang or an unbounded allocation | parser fuzzing in CI and the resource caps ([08-semantics.md](08-semantics.md) §6) |
+| Native AOT and trimming, no reflection | `vxdump` published ahead of time over the corpus in CI |
+| the row encoding is byte-identical to Rust's `vortex-row`, and byte order is tuple order | golden vectors and a randomized order property ([04-conformance.md](04-conformance.md) §7) |

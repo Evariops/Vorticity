@@ -8,12 +8,13 @@ values**, under per-column sort direction and null placement.
 Use cases: sort keys, row keys, range partitioning, merge joins, index entries — anywhere a
 comparator must become a `memcmp`.
 
-> **Stability caveat.** Upstream marks this format *experimental*: byte layout, supported type set
-> and edge-case semantics may change between Vortex releases, and the spec explicitly says not to
-> persist these bytes as a stable interchange format. We implement it, but the same warning must
-> appear in our public API docs, and the encoder must be versioned against the Vortex release it
-> was transcribed from. Encoded bytes are safe to compare within one process or one cluster
-> running one version; they are not safe in a durable index.
+> **Stability.** Upstream marks this format *experimental*: the byte layout, the supported types and
+> the edge cases may change between Vortex releases, and its spec says not to persist these bytes as
+> an interchange format. So it ships in its own package, `Vorticity.RowEncoding`, marked
+> `[Experimental("VX0002")]`, and the encoder names the release its bytes follow (`vortex-row
+> 0.86.1`). Encoded bytes are safe to compare within one process, or one cluster running one
+> version; a durable index that stores them records that name
+> ([10-indexes.md](10-indexes.md) §5.4).
 
 ## 1. Contract
 
@@ -77,7 +78,7 @@ ordered = sign_bit(bits) == 0 ? bits XOR sign_bit_mask
 ```
 
 This yields a total order: negatives before positives, `-0.0` before `+0.0`. NaNs order by raw bit
-pattern and are **not** canonicalized — an important behavioral note for our API docs.
+pattern and are **not** canonicalized: two NaNs with different payloads are two keys.
 
 **Decimal storage width**, selected from precision:
 
@@ -134,65 +135,31 @@ offsets:  per-row start offset into elements
 sizes:    per-row byte length
 ```
 
-Rows are not self-delimiting without `sizes`. The encoder computes sizes first (fixed-width
-columns contribute a constant, variable-width columns a data-dependent width), then reuses the
-`sizes` array as the per-row write cursor. We do the same: **one sizing pass, one write pass**, and
-three pooled buffers — elements, offsets and sizes. (Calling it "one allocation" would be wrong by
-two, and in a library whose acceptance criteria count allocations, that kind of imprecision is
-expensive in review.)
+Rows are not self-delimiting without `sizes`. The encoder computes the sizes first (a fixed-width
+column contributes a constant, a variable-width one what its values need), then reuses the `sizes`
+array as the per-row write cursor: **one sizing pass, one write pass**, into three pooled buffers.
 
 ## 6. Unsupported types
 
-Variable-size `List`, `Variant`, `Union`, `Extension`, `Decimal256`. The absence is deliberate
-upstream — adding one requires defining both the logical order and the byte representation. Our
-encoder rejects them with the same error, and must not invent an ordering.
+Variable-size `List`, `Variant`, `Union`, `Extension` and `Decimal256`. The absence is deliberate
+upstream: adding one means defining both its order and its bytes. This encoder refuses them as the
+reference does, and never invents an ordering.
 
-Note that `Extension` being unsupported means timestamps and dates cannot be row-encoded directly
-today; upstream flags normalizing them to their storage arrays as a possible future addition. If
-we need temporal sort keys before that lands, the caller normalizes to storage type explicitly —
-we do not silently unwrap extensions, or our bytes would stop matching Rust's.
+`Extension` being unsupported means a timestamp or a date is not row-encoded directly: a caller
+encodes its storage column. Unwrapping extensions silently would make the bytes stop matching
+Rust's.
 
-## 7. Implementation notes
+## 7. Implementation
 
-This is an unusually good fit for the project's constraints:
+- **Column at a time.** The encoder writes one field for every row, then the next field: better
+  for branch prediction and vector width than a row at a time, and what the two-pass sizing assumes.
+  Big-endian conversion is a byte swap, descending a bitwise NOT over a span.
+- **No allocation per row.** The output size is known before a byte is written. The kernels call
+  `TryWriteBigEndian`, never `WriteBigEndian`: the latter is a default interface method the
+  primitive types do not override, so a generic call to it boxes its receiver on every row.
+- **Synchronous.** It is CPU work over arrays already in memory; the async-only rule is for I/O.
 
-* **Vectorizable.** Big-endian conversion is `BinaryPrimitives`/`BSWAP`; descending is a bitwise
-  NOT over a span; the 32-byte block layout maps onto `Vector256`. A column-at-a-time encoder
-  (encode field *f* for all rows, then field *f+1*) beats a row-at-a-time one on both branch
-  prediction and vector width — and the two-pass sizing model already assumes column-major work.
-* **Zero-allocation by construction.** Output size is known before writing.
-* **`BE(i128)` needs no helper on `net11.0`.** This note used to say `BinaryPrimitives` had no
-  `Int128` big-endian path and that we would hand-write one. It has had `WriteInt128BigEndian` and
-  `WriteUInt128BigEndian` since .NET 8, so the encoder calls those directly.
-* **Use `TryWriteBigEndian`, never `WriteBigEndian`.** `IBinaryInteger<T>.WriteBigEndian` is a
-  *default interface method* that the primitive types do not override, so a constrained call to it
-  from a generic kernel has to **box the receiver** to reach the interface's implementation — 24
-  bytes on every row of every fixed-width column, which is exactly the allocation the design
-  promises not to make. `TryWriteBigEndian` is abstract, implemented by each type, devirtualizes,
-  and spells the same bytes. Found by the allocation test, not by review.
-* **Independently testable.** It touches neither the file format nor I/O, so it can proceed in
-  parallel with Phase 1 and its correctness is fully characterized by one property: byte order
-  equals tuple order.
-
-Public API, as built:
-
-```csharp
-ReadOnlySpan<RowSortField> fields = [new RowSortField(descending: false, nullsFirst: true), /* … */];
-
-// Pooled: three buffers in, one disposable out.
-using RowKeys keys = RowEncoder.Encode(arena, columns, fields);
-keys.SortIndices(indices);                                          // memcmp is the comparator
-
-// Or caller-owned, for a caller that pools its own memory:
-int total = RowEncoder.ComputeSizes(arena, columns, fields, sizes);        // pass 1
-RowEncoder.ComputeOffsets(sizes, offsets);
-RowEncoder.Encode(arena, columns, fields, offsets, cursors, destination);  // pass 2
-```
-
-`columns` is a `ReadOnlySpan<int>` of canonical node indices into a `CanonicalArena`, because
-`CanonicalNode` is a `ref struct` and cannot be put in an array; a `RecordBatch` overload encodes
-the root struct's fields. `cursors` goes in zeroed and comes back holding each row's size — the
-reference reuses one array for both, and so do we.
-
-Synchronous by design: this is pure CPU work over in-memory arrays, with no I/O to await. The
-async-only rule applies to the I/O and scan surface, not to a comparator.
+The surface is `RowEncoder` (a borrowed batch in, a pooled `RowKeys` out; one key's bytes with
+`EncodeKey`), `RowSortField`, and `RowKeyEncoder`, which a writer uses to key a composite index
+([10-indexes.md](10-indexes.md) §5.4). The code is `src/Vorticity.RowEncoding`, and
+[row-keys.md](../guide/row-keys.md) is the guide's page.

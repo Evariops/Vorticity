@@ -51,24 +51,12 @@ vortex-ffi/cinclude/vortex.h                         C API used for cross-testin
 
 Per-encoding metadata messages are **not** in `.proto` files: they are `prost` derive structs
 declared next to each encoding (`encodings/*/src/**.rs`, `vortex-array/src/arrays/**/vtable/mod.rs`).
-Transcribing them is a per-encoding task; the tag numbers are the contract. **That transcription
-is done** and lives in [spec/METADATA.md](../../spec/METADATA.md), with the upstream source path
-recorded per message. It also records two errors it found in these docs.
+Their transcription is [spec/METADATA.md](../../spec/METADATA.md), with the upstream source path of
+each message; the tag numbers are the contract.
 
-The whole reference tree is unpacked locally as a side effect of building
-`tools/conformance-gen` — see [spec/REFERENCE.md](../../spec/REFERENCE.md) for the paths. Read the
-reference there rather than fetching it.
-
-## Local toolchain assumptions
-
-Recorded so a future reader can tell what was actually verified rather than assumed:
-
-* Target framework: **`net11.0`**, SDK `11.0.100-rc.1.26425.128` installed locally (alongside
-  8.0.x, 9.0.x and 10.0.x, which the project does not target).
-* Zstd availability was checked by inspecting the reference assemblies, not the documentation:
-  `Microsoft.NETCore.App.Ref/11.0.0-rc.1.26425.128/ref/net11.0/System.IO.Compression.dll` exposes
-  six Zstandard types, where the 10.0 ref assembly exposes none.
-* Rust toolchain present (`cargo`, `rustc`) for the conformance generator and the FFI harness.
+Building `tools/conformance-gen` unpacks the whole reference tree at the pinned version into Cargo's
+registry; [spec/REFERENCE.md](../../spec/REFERENCE.md) gives the paths, and the reference is best read
+there rather than fetched.
 
 ## Semantics resolved by reading the reference
 
@@ -112,5 +100,5 @@ Drift to watch for, in decreasing order of impact:
    experimental. This is the one place where upstream has reserved the right to break us, so the
    golden vectors are pinned and checked on every corpus regeneration.
 
-The scheduled corpus regeneration described in [04-conformance.md](04-conformance.md) is what
-turns this from a manual review into an automated alarm.
+A CI job re-vendors the upstream schemas and reports any drift, and the corpus is regenerated with
+the generator pinned to the new version ([04-conformance.md](04-conformance.md) §8).
