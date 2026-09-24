@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -858,13 +859,14 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>Counts a chunk's data bytes toward its column, for `Auto`'s shares.</summary>
     internal void AddColumnBytes(int field, long bytes) => _columnBytes[field] += bytes;
 
-    internal void CloseChunk(int firstBlock, int blocks, long firstRow, long rows)
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    internal async ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)
     {
         foreach (List<IndexBuilder> builders in _builders)
         {
             foreach (IndexBuilder builder in builders)
             {
-                builder.CloseChunk(firstBlock, blocks, firstRow, rows);
+                await builder.CloseChunkAsync(firstBlock, blocks, firstRow, rows, cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -948,14 +950,14 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    /// <summary>Closes what the end of the data closes: partial generations, file-level filters.</summary>
-    internal void EndOfData()
+    /// <summary>Closes what the end of the data closes: partial generations, file-level filters, merged runs.</summary>
+    internal async ValueTask EndOfDataAsync(CancellationToken cancellationToken)
     {
         foreach (List<IndexBuilder> builders in _builders)
         {
             foreach (IndexBuilder builder in builders)
             {
-                builder.EndOfData();
+                await builder.EndOfDataAsync(cancellationToken).ConfigureAwait(false);
             }
         }
     }

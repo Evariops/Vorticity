@@ -14,6 +14,7 @@ using System.IO.Hashing;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Indexes;
@@ -130,7 +131,7 @@ public sealed class BloomVectorTests
 
     [Theory]
     [MemberData(nameof(WriterCases))]
-    public void TheWritersBlockFilterIsTheReferencesToo(string name, int blocks)
+    public async Task TheWritersBlockFilterIsTheReferencesToo(string name, int blocks)
     {
         // The half the first test cannot see: the builder reads a CANONICAL column -- a primitive
         // buffer at its width, a view that is inline or points into a data buffer, a validity
@@ -144,7 +145,7 @@ public sealed class BloomVectorTests
         using BloomBuilder builder = new BloomBuilder(policy);
         builder.Accumulate(arena, node, 0, vector.Rows.Length);
         builder.CloseBlock();
-        builder.EndOfData();
+        await builder.EndOfDataAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(blocks, Assert.Single(builder.BlockFilterBlocks));
         PendingPayload payload = Assert.IsType<PendingPayload>(Assert.Single(builder.Runs).Blocks);

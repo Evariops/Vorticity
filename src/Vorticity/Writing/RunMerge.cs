@@ -1,7 +1,10 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Indexes;
@@ -60,6 +63,17 @@ internal sealed class RawRun
     internal static long HeldBytes(long entries, long keyBytes, bool hasRows, long blocks) =>
         keyBytes + ((entries + 1) * sizeof(int)) + (hasRows ? entries * sizeof(long) : ((entries + 1) * sizeof(int)) + (blocks * sizeof(uint)));
 
+    /// <summary>
+    /// The bytes a window takes in the scratch: for byte keys their offsets, the keys, then the
+    /// rows, or the list offsets and the lists.
+    /// </summary>
+    internal int WindowBytes(int entries, int keyBytes, int blocks) =>
+        checked((KeyWidth == 0 ? (entries + 1) * sizeof(int) : 0) + keyBytes
+            + (HasRows ? entries * sizeof(long) : ((entries + 1) * sizeof(int)) + (blocks * sizeof(uint))));
+
+    internal int WindowBytes(RawWindow window) =>
+        WindowBytes(window.Entries, KeyWidth == 0 ? window.KeyBytes : window.Entries * KeyWidth, window.BlockCount);
+
     /// <summary>Gives its arrays back and its bytes to the scratch.</summary>
     internal void Release(RunScratch scratch)
     {
@@ -91,16 +105,16 @@ internal sealed class HeldWindowSource(RawRun run) : IWindowSource
 {
     private bool _done;
 
-    public bool Fill(RunCursor cursor)
+    public ValueTask<bool> FillAsync(RunCursor cursor, CancellationToken cancellationToken)
     {
         if (_done || run.Entries == 0)
         {
-            return false;
+            return new ValueTask<bool>(false);
         }
 
         _done = true;
         cursor.Adopt(run.HeldKeys!, run.HeldKeyOffsets, run.HeldRows, run.HeldBlockOffsets, run.HeldBlocks, checked((int)run.Entries));
-        return true;
+        return new ValueTask<bool>(true);
     }
 
     public void Dispose()
@@ -108,11 +122,14 @@ internal sealed class HeldWindowSource(RawRun run) : IWindowSource
     }
 }
 
-/// <summary>Where a merge puts its entries.</summary>
+/// <summary>
+/// Where a merge puts its entries. <see cref="Add"/> and <see cref="EndKey"/> say when the sink
+/// takes no further entry before <see cref="FlushAsync"/>.
+/// </summary>
 internal interface IRunSink
 {
-    /// <summary>A sorted run's next entry.</summary>
-    void Add(ReadOnlySpan<byte> key, long row);
+    /// <summary>A sorted run's next entry; true when a flush is due.</summary>
+    bool Add(ReadOnlySpan<byte> key, long row);
 
     /// <summary>A postings run's next key; its block lists follow.</summary>
     void BeginKey(ReadOnlySpan<byte> key);
@@ -120,15 +137,18 @@ internal interface IRunSink
     /// <summary>Blocks of the current key, in block order.</summary>
     void AddBlocks(ReadOnlySpan<uint> blocks);
 
-    /// <summary>The current key is complete.</summary>
-    void EndKey();
+    /// <summary>The current key is complete; true when a flush is due.</summary>
+    bool EndKey();
+
+    /// <summary>The flush <see cref="Add"/> or <see cref="EndKey"/> said was due.</summary>
+    ValueTask FlushAsync(CancellationToken cancellationToken);
 }
 
 /// <summary>Fills a cursor with the next window of a run.</summary>
 internal interface IWindowSource : IDisposable
 {
     /// <summary>Loads the next window; false when a window with at least one entry does not come.</summary>
-    bool Fill(RunCursor cursor);
+    ValueTask<bool> FillAsync(RunCursor cursor, CancellationToken cancellationToken);
 }
 
 /// <summary>A position in one run, a window at a time.</summary>
@@ -182,18 +202,12 @@ internal sealed class RunCursor : IDisposable
     internal ReadOnlySpan<uint> BlockList =>
         Blocks.AsSpan(BlockOffsets[_index], BlockOffsets[_index + 1] - BlockOffsets[_index]);
 
-    /// <summary>Steps to the next entry, loading a window when the current one is spent.</summary>
+    /// <summary>Steps to the window's next entry; false once the window is spent.</summary>
     internal bool MoveNext()
     {
-        _index++;
-        if (_index >= Count)
+        if (++_index >= Count)
         {
-            _index = 0;
-            Count = 0;
-            if (!_source.Fill(this) || Count == 0)
-            {
-                return false;
-            }
+            return false;
         }
 
         if (_layout.Shape != KeyShape.Bytes)
@@ -202,6 +216,15 @@ internal sealed class RunCursor : IDisposable
         }
 
         return true;
+    }
+
+    /// <summary>Loads the next window and steps onto its first entry; false when the run has none left.</summary>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    internal async ValueTask<bool> FillAsync(CancellationToken cancellationToken)
+    {
+        _index = -1;
+        Count = 0;
+        return await _source.FillAsync(this, cancellationToken).ConfigureAwait(false) && MoveNext();
     }
 
     internal int Index => _index;
@@ -332,49 +355,92 @@ internal sealed class RunCursor : IDisposable
     }
 }
 
-/// <summary>The windows of a raw run, read back from the scratch.</summary>
+/// <summary>
+/// The windows of a raw run, read back from the scratch: while it is in memory each part is
+/// copied from its pages into the cursor, and from its file a window comes in one read.
+/// </summary>
 internal sealed class RawWindowSource(RunScratch scratch, RawRun run) : IWindowSource
 {
     private int _next;
 
-    public bool Fill(RunCursor cursor)
+    public ValueTask<bool> FillAsync(RunCursor cursor, CancellationToken cancellationToken)
     {
         if (_next >= run.Windows.Count)
         {
-            return false;
+            return new ValueTask<bool>(false);
         }
 
         RawWindow window = run.Windows[_next++];
-        long at = window.Offset;
+        if (scratch.OnDisk)
+        {
+            return ReadAsync(window, cursor, cancellationToken);
+        }
+
+        Unpack(window, null, cursor);
+        return new ValueTask<bool>(true);
+    }
+
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    private async ValueTask<bool> ReadAsync(RawWindow window, RunCursor cursor, CancellationToken cancellationToken)
+    {
+        int bytes = run.WindowBytes(window);
+        byte[] staged = ArrayPool<byte>.Shared.Rent(bytes);
+        try
+        {
+            await scratch.ReadAsync(window.Offset, staged.AsMemory(0, bytes), cancellationToken).ConfigureAwait(false);
+            Unpack(window, staged, cursor);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(staged);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Copies the window's parts into the cursor, in their order in the scratch: from
+    /// <paramref name="staged"/> when it holds the window, from the scratch's pages otherwise.
+    /// </summary>
+    private void Unpack(RawWindow window, byte[]? staged, RunCursor cursor)
+    {
         int n = window.Entries;
+        int at = 0;
         if (run.KeyWidth == 0)
         {
-            Span<int> offsets = cursor.KeyOffsetsFor(n + 1);
-            scratch.Read(at, offsets);
-            at += (n + 1) * sizeof(int);
-            scratch.Read(at, cursor.KeysFor(window.KeyBytes));
-            at += window.KeyBytes;
+            Take(window, staged, ref at, MemoryMarshal.AsBytes(cursor.KeyOffsetsFor(n + 1)));
+            Take(window, staged, ref at, cursor.KeysFor(window.KeyBytes));
         }
         else
         {
-            int bytes = n * run.KeyWidth;
-            scratch.Read(at, cursor.KeysFor(bytes));
-            at += bytes;
+            Take(window, staged, ref at, cursor.KeysFor(n * run.KeyWidth));
         }
 
         if (run.HasRows)
         {
-            scratch.Read(at, cursor.RowsFor(n));
+            Take(window, staged, ref at, MemoryMarshal.AsBytes(cursor.RowsFor(n)));
         }
         else
         {
-            scratch.Read(at, cursor.BlockOffsetsFor(n + 1));
-            at += (n + 1) * sizeof(int);
-            scratch.Read(at, cursor.BlocksFor(window.BlockCount));
+            Take(window, staged, ref at, MemoryMarshal.AsBytes(cursor.BlockOffsetsFor(n + 1)));
+            Take(window, staged, ref at, MemoryMarshal.AsBytes(cursor.BlocksFor(window.BlockCount)));
         }
 
         cursor.Count = n;
-        return true;
+    }
+
+    private void Take(RawWindow window, byte[]? staged, ref int at, Span<byte> part)
+    {
+        if (staged is null)
+        {
+            scratch.Read(window.Offset + at, part);
+        }
+        else
+        {
+            staged.AsSpan(at, part.Length).CopyTo(part);
+        }
+
+        at += part.Length;
     }
 
     public void Dispose()
@@ -382,7 +448,11 @@ internal sealed class RawWindowSource(RunScratch scratch, RawRun run) : IWindowS
     }
 }
 
-/// <summary>Lays a run into the scratch, window by window.</summary>
+/// <summary>
+/// Lays a run into the scratch, window by window. Its entries go in synchronously; the one that
+/// fills a window makes <see cref="Add"/> or <see cref="EndKey"/> return true, and the window
+/// takes no further entry before <see cref="FlushAsync"/>.
+/// </summary>
 internal sealed class RawRunWriter : IRunSink, IDisposable
 {
     /// <summary>The most entries a window holds; the merge's memory is its fan-in times a window.</summary>
@@ -408,11 +478,11 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
         _blockOffsets[0] = 0;
     }
 
-    public void Add(ReadOnlySpan<byte> key, long row)
+    public bool Add(ReadOnlySpan<byte> key, long row)
     {
         AddKey(key);
         _rows[_count] = row;
-        Next();
+        return Next();
     }
 
     public void BeginKey(ReadOnlySpan<byte> key) => AddKey(key);
@@ -428,11 +498,14 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
         _blockCount += blocks.Length;
     }
 
-    public void EndKey()
+    public bool EndKey()
     {
         _blockOffsets[_count + 1] = _blockCount;
-        Next();
+        return Next();
     }
+
+    /// <summary>Whether the window is full, waiting for <see cref="FlushAsync"/>.</summary>
+    internal bool Full => _count == WindowEntries;
 
     private void AddKey(ReadOnlySpan<byte> key)
     {
@@ -446,40 +519,90 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
         _keyOffsets[_count + 1] = _keyBytes;
     }
 
-    private void Next()
+    private bool Next()
     {
         _count++;
         _run.Entries++;
-        if (_count == WindowEntries)
-        {
-            Flush();
-        }
+        return _count == WindowEntries;
     }
 
-    private void Flush()
+    /// <summary>Lays the open window: onto the scratch's pages while it fits them, in one write to its file otherwise.</summary>
+    public ValueTask FlushAsync(CancellationToken cancellationToken)
     {
         if (_count == 0)
         {
-            return;
+            return ValueTask.CompletedTask;
+        }
+
+        int bytes = _run.WindowBytes(_count, _keyBytes, _blockCount);
+        if (!_scratch.Fits(bytes))
+        {
+            return FlushToFileAsync(bytes, cancellationToken);
         }
 
         long offset = _scratch.Length;
+        Pack(null);
+        Laid(offset);
+        return ValueTask.CompletedTask;
+    }
+
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask FlushToFileAsync(int bytes, CancellationToken cancellationToken)
+    {
+        byte[] staged = ArrayPool<byte>.Shared.Rent(bytes);
+        try
+        {
+            Pack(staged);
+            long offset = await _scratch.AppendAsync(staged.AsMemory(0, bytes), cancellationToken).ConfigureAwait(false);
+            Laid(offset);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(staged);
+        }
+    }
+
+    /// <summary>
+    /// Copies the window's parts in their order in the scratch: into <paramref name="staged"/> when
+    /// there is one, onto the scratch's pages otherwise.
+    /// </summary>
+    private void Pack(byte[]? staged)
+    {
+        int at = 0;
         if (_run.KeyWidth == 0)
         {
-            _scratch.Append<int>(_keyOffsets.AsSpan(0, _count + 1));
+            Put(staged, ref at, MemoryMarshal.AsBytes(_keyOffsets.AsSpan(0, _count + 1)));
         }
 
-        _scratch.Append(_keys.AsSpan(0, _keyBytes));
+        Put(staged, ref at, _keys.AsSpan(0, _keyBytes));
         if (_run.HasRows)
         {
-            _scratch.Append<long>(_rows.AsSpan(0, _count));
+            Put(staged, ref at, MemoryMarshal.AsBytes(_rows.AsSpan(0, _count)));
         }
         else
         {
-            _scratch.Append<int>(_blockOffsets.AsSpan(0, _count + 1));
-            _scratch.Append<uint>(_blocks.AsSpan(0, _blockCount));
+            Put(staged, ref at, MemoryMarshal.AsBytes(_blockOffsets.AsSpan(0, _count + 1)));
+            Put(staged, ref at, MemoryMarshal.AsBytes(_blocks.AsSpan(0, _blockCount)));
+        }
+    }
+
+    private void Put(byte[]? staged, ref int at, ReadOnlySpan<byte> part)
+    {
+        if (staged is null)
+        {
+            _scratch.Append(part);
+        }
+        else
+        {
+            part.CopyTo(staged.AsSpan(at));
         }
 
+        at += part.Length;
+    }
+
+    /// <summary>Records the window laid at <paramref name="offset"/> and opens the next one.</summary>
+    private void Laid(long offset)
+    {
         _run.Windows.Add(new RawWindow(offset, _count, _run.KeyWidth == 0 ? _keyBytes : 0, _blockCount));
         _count = 0;
         _keyBytes = 0;
@@ -487,9 +610,10 @@ internal sealed class RawRunWriter : IRunSink, IDisposable
     }
 
     /// <summary>Lays the last window and returns the run.</summary>
-    internal RawRun Finish()
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+    internal async ValueTask<RawRun> FinishAsync(CancellationToken cancellationToken)
     {
-        Flush();
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
         return _run;
     }
 
@@ -524,16 +648,63 @@ internal static class RunMerger
 
     /// <summary>
     /// Merges the cursors into the sink, and disposes them. They arrive in block order, and a
-    /// postings key's lists are concatenated in that order.
+    /// postings key's lists are concatenated in that order. The merge runs synchronously until a
+    /// cursor has spent its window or the sink asks for a flush, and resumes once that is awaited.
     /// </summary>
-    internal static void Merge(List<RunCursor> cursors, KeyLayout layout, bool hasRows, IRunSink sink)
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    internal static async ValueTask MergeAsync(
+        List<RunCursor> cursors, KeyLayout layout, bool hasRows, IRunSink sink, CancellationToken cancellationToken)
     {
+        MergeState state = new MergeState
+        {
+            Cursors = cursors,
+            Sink = sink,
+            Width = layout.Shape == KeyShape.Bytes ? 0 : layout.Width,
+            Heap = ArrayPool<Head>.Shared.Rent(Math.Max(cursors.Count, 1)),
+            Key = hasRows ? [] : ArrayPool<byte>.Shared.Rent(64),
+        };
         try
         {
-            MergeCore(cursors, layout.Shape == KeyShape.Bytes ? 0 : layout.Width, hasRows, sink);
+            for (int i = 0; i < cursors.Count; i++)
+            {
+                RunCursor cursor = cursors[i];
+                if (await cursor.FillAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    state.Heap[state.Size++] = new Head
+                    {
+                        Key = KeyOf(cursor, state.Width), Tie = hasRows ? cursor.Row : cursor.Ordinal, Cursor = i,
+                    };
+                }
+            }
+
+            for (int i = (state.Size / 2) - 1; i >= 0; i--)
+            {
+                SiftDown(state.Heap, state.Size, i, cursors, state.Width);
+            }
+
+            Pause pause;
+            while ((pause = hasRows ? Sorted(ref state) : Postings(ref state)) != Pause.Done)
+            {
+                if ((pause & Pause.Flush) != 0)
+                {
+                    await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                if ((pause & Pause.Refill) != 0)
+                {
+                    bool filled = await cursors[state.Heap[0].Cursor].FillAsync(cancellationToken).ConfigureAwait(false);
+                    Settle(ref state, filled, hasRows);
+                }
+            }
         }
         finally
         {
+            ArrayPool<Head>.Shared.Return(state.Heap);
+            if (state.Key.Length > 0)
+            {
+                ArrayPool<byte>.Shared.Return(state.Key);
+            }
+
             foreach (RunCursor cursor in cursors)
             {
                 cursor.Dispose();
@@ -550,6 +721,59 @@ internal static class RunMerger
         public ulong Key;
         public long Tie;
         public int Cursor;
+    }
+
+    /// <summary>
+    /// A merge across its pauses. Each cursor in the heap stands on an entry, but for the top while
+    /// it waits for its refill; for postings, the key being gathered stays open across a refill, as
+    /// its bytes, their length and their ordered prefix.
+    /// </summary>
+    private struct MergeState
+    {
+        public List<RunCursor> Cursors;
+        public IRunSink Sink;
+        public int Width;
+        public Head[] Heap;
+        public int Size;
+        public byte[] Key;
+        public int KeyLength;
+        public ulong Ordered;
+        public bool Open;
+    }
+
+    /// <summary>What a merge step waits for before it resumes.</summary>
+    [Flags]
+    private enum Pause
+    {
+        /// <summary>Nothing: the merge is complete.</summary>
+        Done = 0,
+
+        /// <summary>The sink's flush.</summary>
+        Flush = 1,
+
+        /// <summary>The next window of the heap's top, whose window is spent.</summary>
+        Refill = 2,
+    }
+
+    /// <summary>After the top's refill: its new first entry is its head, or the run has ended and leaves the heap.</summary>
+    private static void Settle(ref MergeState state, bool filled, bool hasRows)
+    {
+        Head[] heap = state.Heap;
+        if (filled)
+        {
+            RunCursor top = state.Cursors[heap[0].Cursor];
+            heap[0].Key = KeyOf(top, state.Width);
+            if (hasRows)
+            {
+                heap[0].Tie = top.Row;
+            }
+        }
+        else
+        {
+            heap[0] = heap[--state.Size];
+        }
+
+        SiftDown(heap, state.Size, 0, state.Cursors, state.Width);
     }
 
     /// <summary>A byte key's first eight bytes, zero-padded, as an integer in <c>memcmp</c> order.</summary>
@@ -572,105 +796,117 @@ internal static class RunMerger
         width > 0 ? cursor.Keys.AsSpan(cursor.Index * width, width) : cursor.Key;
 
     /// <summary>
-    /// The merge. Entries of the heap's top that stay below the runner-up go out with no heap work.
+    /// Sorted runs, up to the next pause. Entries of the heap's top that stay below the runner-up
+    /// go out with no heap work.
     /// </summary>
-    private static void MergeCore(List<RunCursor> cursors, int width, bool hasRows, IRunSink sink)
+    private static Pause Sorted(ref MergeState state)
     {
-        Head[] heap = new Head[cursors.Count];
-        int size = 0;
-        for (int i = 0; i < cursors.Count; i++)
+        Head[] heap = state.Heap;
+        int size = state.Size;
+        List<RunCursor> cursors = state.Cursors;
+        IRunSink sink = state.Sink;
+        int width = state.Width;
+        while (size > 0)
         {
-            RunCursor cursor = cursors[i];
-            if (cursor.MoveNext())
+            RunCursor cursor = cursors[heap[0].Cursor];
+            bool bounded = size > 1;
+            int bound = 0;
+            if (bounded)
             {
-                heap[size++] = new Head { Key = KeyOf(cursor, width), Tie = hasRows ? cursor.Row : cursor.Ordinal, Cursor = i };
-            }
-        }
-
-        for (int i = (size / 2) - 1; i >= 0; i--)
-        {
-            SiftDown(heap, size, i, cursors, width);
-        }
-
-        if (hasRows)
-        {
-            while (size > 0)
-            {
-                RunCursor cursor = cursors[heap[0].Cursor];
-                bool bounded = size > 1;
-                int bound = 0;
-                if (bounded)
-                {
-                    bound = size > 2 && Less(heap[2], heap[1], cursors, width) ? 2 : 1;
-                }
-
-                Head runnerUp = heap[bound];
-                while (true)
-                {
-                    sink.Add(KeySpan(cursor, width), heap[0].Tie);
-                    if (!cursor.MoveNext())
-                    {
-                        heap[0] = heap[--size];
-                        SiftDown(heap, size, 0, cursors, width);
-                        break;
-                    }
-
-                    heap[0].Key = KeyOf(cursor, width);
-                    heap[0].Tie = cursor.Row;
-                    if (bounded && !Less(heap[0], runnerUp, cursors, width))
-                    {
-                        SiftDown(heap, size, 0, cursors, width);
-                        break;
-                    }
-                }
+                bound = size > 2 && Less(heap[2], heap[1], cursors, width) ? 2 : 1;
             }
 
-            return;
+            Head runnerUp = heap[bound];
+            while (true)
+            {
+                bool flush = sink.Add(KeySpan(cursor, width), heap[0].Tie);
+                if (!cursor.MoveNext())
+                {
+                    return flush ? Pause.Flush | Pause.Refill : Pause.Refill;
+                }
+
+                heap[0].Key = KeyOf(cursor, width);
+                heap[0].Tie = cursor.Row;
+                if (flush || (bounded && !Less(heap[0], runnerUp, cursors, width)))
+                {
+                    SiftDown(heap, size, 0, cursors, width);
+                    if (flush)
+                    {
+                        return Pause.Flush;
+                    }
+
+                    break;
+                }
+            }
         }
 
-        // Postings: every run holding the key is next, in block order; the key is copied by the
-        // sink before any run steps past it, and again here to recognise the runs that follow.
-        byte[] current = ArrayPool<byte>.Shared.Rent(64);
-        try
+        return Pause.Done;
+    }
+
+    /// <summary>
+    /// Postings, up to the next pause: every run holding the key is next, in block order. The key is
+    /// copied by the sink before any run steps past it, and again here to recognise the runs that
+    /// follow, across a refill too.
+    /// </summary>
+    private static Pause Postings(ref MergeState state)
+    {
+        Head[] heap = state.Heap;
+        int size = state.Size;
+        List<RunCursor> cursors = state.Cursors;
+        IRunSink sink = state.Sink;
+        int width = state.Width;
+        byte[] current = state.Key;
+        int length = state.KeyLength;
+        ulong ordered = state.Ordered;
+        bool open = state.Open;
+        while (true)
         {
-            while (size > 0)
+            if (open && (size == 0 || heap[0].Key != ordered
+                || (width == 0 && !KeySpan(cursors[heap[0].Cursor], width).SequenceEqual(current.AsSpan(0, length)))))
             {
-                RunCursor first = cursors[heap[0].Cursor];
-                ReadOnlySpan<byte> key = KeySpan(first, width);
+                open = false;
+                if (sink.EndKey())
+                {
+                    state.Open = false;
+                    return Pause.Flush;
+                }
+            }
+
+            if (!open)
+            {
+                if (size == 0)
+                {
+                    state.Open = false;
+                    return Pause.Done;
+                }
+
+                ReadOnlySpan<byte> key = KeySpan(cursors[heap[0].Cursor], width);
                 if (current.Length < key.Length)
                 {
                     ArrayPool<byte>.Shared.Return(current);
                     current = ArrayPool<byte>.Shared.Rent(key.Length);
+                    state.Key = current;
                 }
 
-                int length = key.Length;
+                length = key.Length;
                 key.CopyTo(current);
-                ulong ordered = heap[0].Key;
+                ordered = heap[0].Key;
                 sink.BeginKey(key);
-                do
-                {
-                    RunCursor cursor = cursors[heap[0].Cursor];
-                    sink.AddBlocks(cursor.BlockList);
-                    if (cursor.MoveNext())
-                    {
-                        heap[0].Key = KeyOf(cursor, width);
-                    }
-                    else
-                    {
-                        heap[0] = heap[--size];
-                    }
-
-                    SiftDown(heap, size, 0, cursors, width);
-                }
-                while (size > 0 && heap[0].Key == ordered
-                    && (width > 0 || KeySpan(cursors[heap[0].Cursor], width).SequenceEqual(current.AsSpan(0, length))));
-
-                sink.EndKey();
+                open = true;
             }
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(current);
+
+            RunCursor cursor = cursors[heap[0].Cursor];
+            sink.AddBlocks(cursor.BlockList);
+            if (!cursor.MoveNext())
+            {
+                state.Open = true;
+                state.KeyLength = length;
+                state.Ordered = ordered;
+                return Pause.Refill;
+            }
+
+            heap[0].Key = KeyOf(cursor, width);
+            SiftDown(heap, size, 0, cursors, width);
         }
     }
 
@@ -763,7 +999,7 @@ internal sealed class PayloadRunSink : IRunSink
     /// <summary>Whether its rows need 64 bits, the run spanning too many for 32.</summary>
     internal bool WideRows => _wide;
 
-    public void Add(ReadOnlySpan<byte> key, long row)
+    public bool Add(ReadOnlySpan<byte> key, long row)
     {
         AddKey(key);
         long relative = row - _firstRow;
@@ -774,6 +1010,7 @@ internal sealed class PayloadRunSink : IRunSink
 
         _rows[_count] = (ulong)relative;
         Next();
+        return false;
     }
 
     public void BeginKey(ReadOnlySpan<byte> key) => AddKey(key);
@@ -796,11 +1033,15 @@ internal sealed class PayloadRunSink : IRunSink
         _listed += blocks.Length;
     }
 
-    public void EndKey()
+    public bool EndKey()
     {
         _listOffsets[_count + 1] = (uint)_listed;
         Next();
+        return false;
     }
+
+    /// <summary>Never due: its segments are cut in memory.</summary>
+    public ValueTask FlushAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
 
     private void AddKey(ReadOnlySpan<byte> key)
     {

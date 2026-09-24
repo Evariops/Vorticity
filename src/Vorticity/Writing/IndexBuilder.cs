@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 
 namespace Vorticity.Writing;
@@ -64,9 +66,8 @@ internal abstract class IndexBuilder : IDisposable
     }
 
     /// <summary>A chunk went out: its blocks and its rows.</summary>
-    internal virtual void CloseChunk(int firstBlock, int blocks, long firstRow, long rows)
-    {
-    }
+    internal virtual ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken) =>
+        ValueTask.CompletedTask;
 
     /// <summary>
     /// The verdict after a chunk: gives up when the builder costs more of the column than its share,
@@ -88,9 +89,7 @@ internal abstract class IndexBuilder : IDisposable
     }
 
     /// <summary>The data ended; close what only the end closes.</summary>
-    internal virtual void EndOfData()
-    {
-    }
+    internal virtual ValueTask EndOfDataAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
 
     /// <summary>Drops the whole index; anything already written stays in the file as dead weight.</summary>
     internal virtual void Abandon(string reason)

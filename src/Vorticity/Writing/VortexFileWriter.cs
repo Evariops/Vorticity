@@ -1425,7 +1425,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The chunk's locating runs close with it and go out right behind it, and the builders are
         // judged before anything is written, so one `Auto` gives up on leaves no dead weight.
-        _indexes?.CloseChunk(_emittedBlocks, blocks, _rowCount, rows);
+        if (_indexes is not null)
+        {
+            await _indexes.CloseChunkAsync(_emittedBlocks, blocks, _rowCount, rows, cancellationToken).ConfigureAwait(false);
+        }
+
         _indexes?.Judge();
         _emittedBlocks += blocks;
         _chunkRows.Add(rows);
@@ -1613,7 +1617,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // end of the data left open, and the file-level filter.
         long dataEnd = _sink.Position;
         long interleaved = _indexes?.FileBytes ?? 0;
-        _indexes?.EndOfData();
+        if (_indexes is not null)
+        {
+            await _indexes.EndOfDataAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         _indexes?.Judge();
         _indexes?.SettleBudget(dataEnd - interleaved);
         await FlushIndexesAsync(cancellationToken, judged: true).ConfigureAwait(false);

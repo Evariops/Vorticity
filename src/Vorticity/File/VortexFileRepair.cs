@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
 using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Serialization.Schemas;
@@ -55,11 +56,9 @@ public static class VortexFileRepair
             return new VortexRepairResult(length, length, false);
         }
 
-        FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
-        await using (stream.ConfigureAwait(false))
+        using (SafeFileHandle handle = System.IO.File.OpenHandle(path, FileMode.Open, FileAccess.Write, FileShare.None))
         {
-            stream.SetLength(end);
-            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            RandomAccess.SetLength(handle, end);
         }
 
         return new VortexRepairResult(length, end, true);

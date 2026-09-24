@@ -1,8 +1,10 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
@@ -202,9 +204,15 @@ public static class VortexFileIndexer
                 VortexFileRepair.ThrowIfTorn(path, file, "An index");
                 RequireColumns(file.DType, declared);
                 length = file.FileLength;
-                FileStream tail = new FileStream(scratch, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                StreamSegmentSink sink = new StreamSegmentSink(tail, ownsStream: true, length);
-                await using (sink.ConfigureAwait(false))
+
+                // The tail is written into the scratch from its start, while its offsets count from
+                // the end of the file it goes behind.
+                FilePipeWriter tail = new FilePipeWriter(
+                    System.IO.File.OpenHandle(scratch, FileMode.CreateNew, FileAccess.Write, FileShare.None, FileOptions.Asynchronous),
+                    0,
+                    file.Session.Options.MemoryPool);
+                PipeSegmentSink sink = new PipeSegmentSink(tail, length);
+                try
                 {
                     EncodingDictionary encodings = new EncodingDictionary(ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
                     List<string> old = new List<string>(file.ArrayEncodingCount);
@@ -223,27 +231,26 @@ public static class VortexFileIndexer
                     reports = [.. indexes.Reports];
                     await WriteTailAsync(file, sink, indexes, encodings, options?.Identity, cancellationToken).ConfigureAwait(false);
                     await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    await tail.CompleteAsync().ConfigureAwait(false);
+                }
+                catch
+                {
+                    tail.Abandon();
+                    throw;
                 }
             }
 
             // The reader is closed: the tail goes behind the file.
-            FileStream target = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
-            await using (target.ConfigureAwait(false))
+            using SafeFileHandle target = System.IO.File.OpenHandle(
+                path, FileMode.Open, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
+            if (RandomAccess.GetLength(target) != length)
             {
-                if (target.Length != length)
-                {
-                    throw new IOException($"{path} changed while it was being indexed.");
-                }
-
-                target.Seek(0, SeekOrigin.End);
-                FileStream source = new FileStream(scratch, FileMode.Open, FileAccess.Read, FileShare.None);
-                await using (source.ConfigureAwait(false))
-                {
-                    await source.CopyToAsync(target, cancellationToken).ConfigureAwait(false);
-                }
-
-                await target.FlushAsync(cancellationToken).ConfigureAwait(false);
+                throw new IOException($"{path} changed while it was being indexed.");
             }
+
+            using SafeFileHandle source = System.IO.File.OpenHandle(
+                scratch, FileMode.Open, FileAccess.Read, FileShare.None, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await CopyBehindAsync(source, target, length, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -251,6 +258,36 @@ public static class VortexFileIndexer
         }
 
         return reports;
+    }
+
+    /// <summary>Every byte of <paramref name="source"/>, written into <paramref name="target"/> from <paramref name="at"/> on.</summary>
+    private static async ValueTask CopyBehindAsync(
+        SafeFileHandle source, SafeFileHandle target, long at, CancellationToken cancellationToken)
+    {
+        const int ChunkBytes = 1 << 20;
+        long length = RandomAccess.GetLength(source);
+        byte[] chunk = ArrayPool<byte>.Shared.Rent((int)Math.Min(ChunkBytes, Math.Max(length, 1)));
+        try
+        {
+            for (long done = 0; done < length;)
+            {
+                int wanted = (int)Math.Min(chunk.Length, length - done);
+                int read = await RandomAccess.ReadAsync(source, chunk.AsMemory(0, wanted), done, cancellationToken)
+                    .ConfigureAwait(false);
+                if (read <= 0)
+                {
+                    throw new IOException($"The index scratch ended at {done} of its {length} bytes.");
+                }
+
+                await RandomAccess.WriteAsync(target, chunk.AsMemory(0, read), at + done, cancellationToken)
+                    .ConfigureAwait(false);
+                done += read;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(chunk);
+        }
     }
 
     /// <summary>
@@ -327,7 +364,7 @@ public static class VortexFileIndexer
 
     /// <summary>Writes one container: the magic, the runs, the bound directory and the trailer.</summary>
     private static async ValueTask<IReadOnlyList<IndexWriteReport>> WriteContainerAsync(
-        VortexFile file, StreamSegmentSink sink, WritePolicy policy, RowRange rows, string? token, UInt128? hash,
+        VortexFile file, ISegmentSink sink, WritePolicy policy, RowRange rows, string? token, UInt128? hash,
         VortexWriteOptions? options, CancellationToken cancellationToken)
     {
         await sink.WriteAsync(IndexContainer.Magic.ToArray(), cancellationToken).ConfigureAwait(false);
@@ -346,7 +383,7 @@ public static class VortexFileIndexer
 
     /// <summary>Feeds the range's rows to the builders and writes their runs.</summary>
     private static async ValueTask<IndexWriter> BuildAsync(
-        VortexFile file, StreamSegmentSink sink, WritePolicy policy, VortexWriteOptions? options,
+        VortexFile file, ISegmentSink sink, WritePolicy policy, VortexWriteOptions? options,
         EncodingDictionary encodings, IReadOnlyList<IndexEntry> previous, long previousEof, RowRange range,
         CancellationToken cancellationToken)
     {
@@ -496,7 +533,8 @@ public static class VortexFileIndexer
                 }
 
                 int firstBlock = checked((int)(from / blockRows));
-                indexes.CloseChunk(firstBlock, VortexFileWriter.ChunkBlocks(to - from, blockRows), from, to - from);
+                await indexes.CloseChunkAsync(
+                    firstBlock, VortexFileWriter.ChunkBlocks(to - from, blockRows), from, to - from, cancellationToken).ConfigureAwait(false);
                 indexes.Judge();
 
                 // The budget before the bytes, as on the write path: the file's own data bytes are
@@ -507,7 +545,7 @@ public static class VortexFileIndexer
                 }
             }
 
-            indexes.EndOfData();
+            await indexes.EndOfDataAsync(cancellationToken).ConfigureAwait(false);
             indexes.Judge();
             indexes.SettleBudget(file.FileLength);
             await FlushAsync(indexes, blobs, sink, encodings, cancellationToken).ConfigureAwait(false);
@@ -565,7 +603,7 @@ public static class VortexFileIndexer
     }
 
     private static async ValueTask FlushAsync(
-        IndexWriter indexes, ArrayBlobWriter.Workspace blobs, StreamSegmentSink sink, EncodingDictionary encodings,
+        IndexWriter indexes, ArrayBlobWriter.Workspace blobs, ISegmentSink sink, EncodingDictionary encodings,
         CancellationToken cancellationToken)
     {
         while (indexes.TryTakePayload(blobs, encodings, out ArrayBlobWriter.BlobLease blob, out PendingPayload? payload))
@@ -613,7 +651,7 @@ public static class VortexFileIndexer
 
     /// <summary>The statistics, directory, dtype, layout, footer, postscript and EOF, after the runs.</summary>
     private static async ValueTask WriteTailAsync(
-        VortexFile file, StreamSegmentSink sink, IndexWriter indexes, EncodingDictionary encodings,
+        VortexFile file, ISegmentSink sink, IndexWriter indexes, EncodingDictionary encodings,
         Guid? identity, CancellationToken cancellationToken)
     {
         OldTail old = await OldTail.ReadAsync(file, cancellationToken).ConfigureAwait(false);

@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -130,6 +131,7 @@ internal static class RunAbsorb
             scratch, hasRows, layout.Width, checked((int)run.FirstBlock), checked((int)run.BlockCount));
         using ScanContext context = file.CreateIndexContext(run);
         ISegmentReader source = file.IndexSourceOf(run);
+        uint[] absolute = ArrayPool<uint>.Shared.Rent(256);
         try
         {
             for (long s = 0; s < table!.SegmentCount; s++)
@@ -158,9 +160,23 @@ internal static class RunAbsorb
                     }
                 }
 
-                if (!Lay(context, requests, slots, run, table.WideRows, entries, keyType, layout, hasRows, firstRow, types, writer))
+                if (!DecodeSegment(context, requests, slots, table.WideRows, entries, keyType, layout, hasRows, types, out SegmentNodes nodes))
                 {
                     return null;
+                }
+
+                for (int from = 0; from < entries;)
+                {
+                    from = Lay(context, nodes, entries, run, layout, hasRows, table.WideRows, firstRow, from, ref absolute, writer);
+                    if (from < 0)
+                    {
+                        return null;
+                    }
+
+                    if (writer.Full)
+                    {
+                        await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    }
                 }
             }
         }
@@ -168,16 +184,26 @@ internal static class RunAbsorb
         {
             return null;
         }
+        finally
+        {
+            ArrayPool<uint>.Shared.Return(absolute);
+        }
 
-        return writer.Finish();
+        return await writer.FinishAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static bool Lay(
-        ScanContext context, SegmentRequestSet requests, int[] slots, IndexRun run, bool wide, int entries,
-        DType keyType, KeyLayout layout, bool hasRows, long firstRow, DTypeArena types, RawRunWriter writer)
+    /// <summary>A decoded segment's nodes in its context's arena: its keys, its rows or list offsets, and its lists.</summary>
+    private readonly record struct SegmentNodes(int Keys, int Values, int Lists);
+
+    /// <summary>Decodes a segment into the context's arena; false when its arrays do not have the run's shape.</summary>
+    private static bool DecodeSegment(
+        ScanContext context, SegmentRequestSet requests, int[] slots, bool wide, int entries,
+        DType keyType, KeyLayout layout, bool hasRows, DTypeArena types, out SegmentNodes nodes)
     {
+        nodes = default;
         context.ResetBatch();
-        CanonicalNode keys = context.Canonical.GetNode(Decode(context, requests.GetBuffer(slots[0]), keyType, entries));
+        int keysNode = Decode(context, requests.GetBuffer(slots[0]), keyType, entries);
+        CanonicalNode keys = context.Canonical.GetNode(keysNode);
         bool fits = keys.Length == entries && (layout.Shape == KeyShape.Bytes
             ? keys.Kind == CanonicalKind.VarBinView
             : keys.Kind == CanonicalKind.Primitive && keys.PType == layout.PType);
@@ -190,65 +216,96 @@ internal static class RunAbsorb
         {
             PType width = wide ? PType.U64 : PType.U32;
             // The keys' arena is kept: the rows are decoded beside them.
-            CanonicalNode rows = context.Canonical.GetNode(
-                Decode(context, requests.GetBuffer(slots[1]), types.Primitive(width, Nullability.NonNullable), entries));
+            int rowsNode = Decode(context, requests.GetBuffer(slots[1]), types.Primitive(width, Nullability.NonNullable), entries);
+            CanonicalNode rows = context.Canonical.GetNode(rowsNode);
             if (rows.Kind != CanonicalKind.Primitive || rows.PType != width || rows.Length != entries)
             {
                 return false;
             }
 
-            for (int i = 0; i < entries; i++)
-            {
-                long relative = wide ? checked((long)rows.Values.Cast<ulong>()[i]) : rows.Values.Cast<uint>()[i];
-                writer.Add(KeyAt(keys, layout, i), firstRow + relative);
-            }
-
+            nodes = new SegmentNodes(keysNode, rowsNode, -1);
             return true;
         }
 
         DType u32 = types.Primitive(PType.U32, Nullability.NonNullable);
-        CanonicalNode offsets = context.Canonical.GetNode(Decode(context, requests.GetBuffer(slots[1]), u32, entries + 1));
+        int offsetsNode = Decode(context, requests.GetBuffer(slots[1]), u32, entries + 1);
+        CanonicalNode offsets = context.Canonical.GetNode(offsetsNode);
         if (offsets.Kind != CanonicalKind.Primitive || offsets.PType != PType.U32 || offsets.Length != entries + 1)
         {
             return false;
         }
 
-        ReadOnlySpan<uint> starts = offsets.Values.Cast<uint>();
-        int listLength = checked((int)starts[entries]);
-        CanonicalNode lists = context.Canonical.GetNode(Decode(context, requests.GetBuffer(slots[2]), u32, listLength));
+        int listLength = checked((int)offsets.Values.Cast<uint>()[entries]);
+        int listsNode = Decode(context, requests.GetBuffer(slots[2]), u32, listLength);
+        CanonicalNode lists = context.Canonical.GetNode(listsNode);
         if (lists.Kind != CanonicalKind.Primitive || lists.PType != PType.U32 || lists.Length != listLength)
         {
             return false;
         }
 
-        ReadOnlySpan<uint> blocks = lists.Values.Cast<uint>();
-        uint firstBlock = checked((uint)run.FirstBlock);
-        uint[] absolute = new uint[256];
-        for (int i = 0; i < entries; i++)
+        nodes = new SegmentNodes(keysNode, offsetsNode, listsNode);
+        return true;
+    }
+
+    /// <summary>
+    /// Lays a decoded segment's entries from <paramref name="from"/> on, until the writer's window is
+    /// full or they end, and returns where it stopped; -1 when a block list lies outside the lists.
+    /// </summary>
+    private static int Lay(
+        ScanContext context, SegmentNodes nodes, int entries, IndexRun run, KeyLayout layout, bool hasRows, bool wide,
+        long firstRow, int from, ref uint[] absolute, RawRunWriter writer)
+    {
+        CanonicalNode keys = context.Canonical.GetNode(nodes.Keys);
+        if (hasRows)
         {
-            int from = checked((int)starts[i]);
-            int to = checked((int)starts[i + 1]);
-            if (from > to || to > listLength)
+            CanonicalNode rows = context.Canonical.GetNode(nodes.Values);
+            for (int i = from; i < entries; i++)
             {
-                return false;
+                long relative = wide ? checked((long)rows.Values.Cast<ulong>()[i]) : rows.Values.Cast<uint>()[i];
+                if (writer.Add(KeyAt(keys, layout, i), firstRow + relative))
+                {
+                    return i + 1;
+                }
             }
 
-            if (absolute.Length < to - from)
+            return entries;
+        }
+
+        CanonicalNode offsets = context.Canonical.GetNode(nodes.Values);
+        CanonicalNode lists = context.Canonical.GetNode(nodes.Lists);
+        ReadOnlySpan<uint> starts = offsets.Values.Cast<uint>();
+        ReadOnlySpan<uint> blocks = lists.Values.Cast<uint>();
+        int listLength = checked((int)starts[entries]);
+        uint firstBlock = checked((uint)run.FirstBlock);
+        for (int i = from; i < entries; i++)
+        {
+            int start = checked((int)starts[i]);
+            int end = checked((int)starts[i + 1]);
+            if (start > end || end > listLength)
             {
-                absolute = new uint[to - from];
+                return -1;
             }
 
-            for (int b = from; b < to; b++)
+            if (absolute.Length < end - start)
             {
-                absolute[b - from] = checked(firstBlock + blocks[b]);
+                ArrayPool<uint>.Shared.Return(absolute);
+                absolute = ArrayPool<uint>.Shared.Rent(end - start);
+            }
+
+            for (int b = start; b < end; b++)
+            {
+                absolute[b - start] = checked(firstBlock + blocks[b]);
             }
 
             writer.BeginKey(KeyAt(keys, layout, i));
-            writer.AddBlocks(absolute.AsSpan(0, to - from));
-            writer.EndKey();
+            writer.AddBlocks(absolute.AsSpan(0, end - start));
+            if (writer.EndKey())
+            {
+                return i + 1;
+            }
         }
 
-        return true;
+        return entries;
     }
 
     private static ReadOnlySpan<byte> KeyAt(CanonicalNode keys, KeyLayout layout, int index) =>

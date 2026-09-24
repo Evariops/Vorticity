@@ -2,6 +2,8 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Compute;
@@ -110,7 +112,7 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>Every generation closed, with the region of its leaves, in block order.</summary>
     internal List<BloomRun> Runs { get; } = [];
 
-    /// <summary>The tree, once <see cref="EndOfData"/> finished it.</summary>
+    /// <summary>The tree, once <see cref="EndOfDataAsync"/> finished it.</summary>
     internal BloomTree? Tree { get; private set; }
 
     /// <summary>The blocks, since the builder's first, whose filter was built.</summary>
@@ -721,9 +723,9 @@ internal sealed class BloomBuilder : IndexBuilder
 
     /// <summary>
     /// Closes a partial generation at the end of the data, then the tree, whose root takes the
-    /// file-level filter when the policy asks for one.
+    /// file-level filter when the policy asks for one; all of it in memory, so it completes at once.
     /// </summary>
-    internal override void EndOfData()
+    internal override ValueTask EndOfDataAsync(CancellationToken cancellationToken)
     {
         if (_blocks > _generationFirst)
         {
@@ -737,12 +739,15 @@ internal sealed class BloomBuilder : IndexBuilder
             if (Abandoned is not null)
             {
                 _tree?.Abandon();
-                return;
             }
-
-            // Over the blocks it hashed: after an append, those since the boundary.
-            Tree = _tree?.Finish(_start, file is null ? null : () => FileFilter(file));
+            else
+            {
+                // Over the blocks it hashed: after an append, those since the boundary.
+                Tree = _tree?.Finish(_start, file is null ? null : () => FileFilter(file));
+            }
         }
+
+        return ValueTask.CompletedTask;
     }
 
     /// <summary>The file-wide filter under the file-level ceiling, or null with the reason kept.</summary>

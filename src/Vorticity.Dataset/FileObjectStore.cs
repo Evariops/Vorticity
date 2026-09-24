@@ -6,6 +6,7 @@ using System.IO;
 using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Win32.SafeHandles;
 using Vorticity.IO;
 
 namespace Vorticity.Dataset;
@@ -49,11 +50,10 @@ public sealed class FileObjectStore : IObjectStore
         cancellationToken.ThrowIfCancellationRequested();
 
         string path = PathOf(key);
-        FileStream stream;
+        SafeFileHandle handle;
         try
         {
-            stream = new FileStream(
-                path, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize: 1, FileOptions.Asynchronous);
+            handle = System.IO.File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.Asynchronous);
         }
         catch (FileNotFoundException cause)
         {
@@ -64,9 +64,9 @@ public sealed class FileObjectStore : IObjectStore
             throw new ObjectNotFoundException($"No object at '{key}'.", cause) { Key = key };
         }
 
-        await using (stream.ConfigureAwait(false))
+        using (handle)
         {
-            long size = stream.Length;
+            long size = RandomAccess.GetLength(handle);
             if (offset >= size && !(offset == 0 && size == 0))
             {
                 throw new ArgumentOutOfRangeException(
@@ -81,7 +81,7 @@ public sealed class FileObjectStore : IObjectStore
                 while (read < available)
                 {
                     int got = await RandomAccess
-                        .ReadAsync(stream.SafeFileHandle, bytes.AsMemory(read, available - read), offset + read, cancellationToken)
+                        .ReadAsync(handle, bytes.AsMemory(read, available - read), offset + read, cancellationToken)
                         .ConfigureAwait(false);
                     if (got == 0)
                     {
@@ -119,7 +119,7 @@ public sealed class FileObjectStore : IObjectStore
         string key, PipeReader content, long length, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(content);
-        FileStream stream;
+        SafeFileHandle handle;
         string path;
         try
         {
@@ -131,12 +131,11 @@ public sealed class FileObjectStore : IObjectStore
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             try
             {
-                stream = new FileStream(
+                handle = System.IO.File.OpenHandle(
                     path,
                     FileMode.CreateNew,
                     FileAccess.Write,
                     FileShare.None,
-                    bufferSize: 1,
                     Durable ? FileOptions.Asynchronous | FileOptions.WriteThrough : FileOptions.Asynchronous);
             }
             catch (IOException) when (System.IO.File.Exists(path))
@@ -154,11 +153,11 @@ public sealed class FileObjectStore : IObjectStore
         Exception? failure = null;
         try
         {
-            await using (stream.ConfigureAwait(false))
+            using (handle)
             {
                 if (length > 0)
                 {
-                    stream.SetLength(length);
+                    RandomAccess.SetLength(handle, length);
                 }
 
                 long written = 0;
@@ -174,7 +173,7 @@ public sealed class FileObjectStore : IObjectStore
 
                     foreach (ReadOnlyMemory<byte> segment in buffer)
                     {
-                        await RandomAccess.WriteAsync(stream.SafeFileHandle, segment, written, cancellationToken).ConfigureAwait(false);
+                        await RandomAccess.WriteAsync(handle, segment, written, cancellationToken).ConfigureAwait(false);
                         written += segment.Length;
                     }
 
