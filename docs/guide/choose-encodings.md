@@ -43,51 +43,51 @@ object store about 0.1.
 
 | shape | `Auto` writes | B/value | scan | take | worth knowing |
 |---|---|---:|---:|---:|---|
-| a sequence | a progression | 0.00 | 3.2 ms | 0.9 ms | |
-| sorted, runs of 1 000 | runs | 0.01 | 3.4 ms | 1.3 ms | |
-| timestamps: milliseconds, increasing, jittered | bit-packing | 3.38 | 8.6 ms | 1.7 ms | zstd, what `Smallest` writes: 2.07 B/value, scan 58 ms, take 56 ms; crosses at 264 MB/s |
-| random in 0..999 | bit-packing | 1.25 | 5.1 ms | 1.4 ms | |
-| 16 distinct, random order | a dictionary | 0.51 | 5.8 ms | 1.7 ms | |
-| 100 003 distinct, repeating | bit-packing | 4.63 | 7.0 ms | 1.6 ms | 16 MiB chunks: a dictionary, 2.36 B/value, scan 10.4 ms |
-| uniform over 64 bits | the plain form | 8.00 | 6.6 ms | 1.3 ms | |
-| random in 0..999, one row in ten null | bit-packing | 1.38 | 6.7 ms | 1.6 ms | a `Dictionary` hint: 1.27 B/value, scan 8.0 ms |
+| a sequence | a progression | 0.00 | 3.1 ms | 1.0 ms | |
+| sorted, runs of 1 000 | runs | 0.01 | 3.3 ms | 1.2 ms | |
+| timestamps: milliseconds, increasing, jittered | bit-packing | 3.38 | 7.2 ms | 1.6 ms | zstd, what `Smallest` writes: 2.07 B/value, scan 55 ms, take 45 ms; crosses at 271 MB/s |
+| random in 0..999 | bit-packing | 1.25 | 5.3 ms | 1.5 ms | |
+| 16 distinct, random order | a dictionary | 0.51 | 6.2 ms | 1.4 ms | |
+| 100 003 distinct, repeating | bit-packing | 4.63 | 6.9 ms | 1.6 ms | 16 MiB chunks: a dictionary, 2.36 B/value, scan 7.0 ms |
+| uniform over 64 bits | the plain form | 8.00 | 5.4 ms | 1.2 ms | |
+| random in 0..999, one row in ten null | bit-packing | 1.38 | 6.3 ms | 1.5 ms | a `Dictionary` hint: 1.27 B/value, scan 7.6 ms |
 
 The plain column scans in about 6 ms, and every form above within one and a half times of it. A
-zstd frame is the exception, at 60 to 85 ms a column where the values do not come in runs: where it
+zstd frame is the exception, at 55 to 100 ms a column where the values do not come in runs: where it
 is not the smallest, as on every integer shape but the timestamps, `Auto` never writes one.
 
 ## Floating point
 
 | shape | `Auto` writes | B/value | scan | take | worth knowing |
 |---|---|---:|---:|---:|---|
-| prices, two decimals | ALP | 2.50 | 8.9 ms | 1.9 ms | |
-| 16 distinct, random order | a dictionary | 0.51 | 5.7 ms | 1.4 ms | |
-| 1 000 distinct prices | a dictionary | 1.28 | 6.2 ms | 2.2 ms | |
-| 100 003 distinct, repeating | zstd | 1.69 | 61 ms | 59 ms | 16 MiB chunks: a dictionary, 2.21 B/value, scan 12.5 ms, take 4.7 ms; crosses at 108 MB/s |
-| uniform in [0, 1) | ALP | 6.91 | 13.5 ms | 3.8 ms | the plain form: 8.00 B/value, scan 5.9 ms; crosses at 1.4 GB/s |
+| prices, two decimals | ALP | 2.50 | 8.2 ms | 1.7 ms | |
+| 16 distinct, random order | a dictionary | 0.51 | 5.3 ms | 1.4 ms | |
+| 1 000 distinct prices | a dictionary | 1.28 | 5.9 ms | 2.1 ms | |
+| 100 003 distinct, repeating | zstd | 1.69 | 58 ms | 47 ms | 16 MiB chunks: a dictionary, 2.21 B/value, scan 9.6 ms, take 4.5 ms; crosses at 109 MB/s |
+| uniform in [0, 1) | ALP-RD | 6.91 | 12.8 ms | 3.5 ms | the plain form: 8.00 B/value, scan 5.5 ms; crosses at 1.5 GB/s |
 
 The repeating column is the one to look at twice. Its values come back every 100 003 rows, and a
 chunk of the default size holds 131 072 of them: a dictionary would store nearly every value once
 per chunk, so zstd, which finds the repeats anyway, is the smallest. Chunks of 16 MiB hold enough
-repeats for the dictionary to pay, and it then scans five times faster and takes twelve times faster
-than the frames, for a file 31 % larger.
+repeats for the dictionary to pay: a scan then takes a sixth of the frames' time and a take a
+tenth, for a file 31 % larger.
 
 ## Text
 
 | shape | `Auto` writes | B/value | scan | take | worth knowing |
 |---|---|---:|---:|---:|---|
-| 16 city names, random order | a dictionary | 0.51 | 8.7 ms | 1.8 ms | |
-| 10 000 distinct ids | a dictionary | 2.54 | 38 ms | 34 ms | 16 MiB chunks: 1.80 B/value, scan 12.1 ms, take 9.0 ms, written faster |
-| the same, one row in ten null | a dictionary | 2.45 | 43 ms | 36 ms | 16 MiB chunks: 1.80 B/value, scan 14.1 ms, take 8.7 ms |
-| unique UUIDs | zstd | 20.61 | 323 ms | 327 ms | FSST: 24.91 B/value, scan 122 ms, take 4.3 ms; crosses at 214 MB/s |
-| log lines, about 100 bytes | zstd | 13.71 | 424 ms | 351 ms | FSST: 23.96 B/value, scan 136 ms, take 5.0 ms; crosses at 355 MB/s |
+| 16 city names, random order | a dictionary | 0.51 | 8.0 ms | 1.6 ms | |
+| 10 000 distinct ids | a dictionary | 2.54 | 36 ms | 32 ms | 16 MiB chunks: 1.80 B/value, scan 12.2 ms, take 9.2 ms, written faster |
+| the same, one row in ten null | a dictionary | 2.45 | 41 ms | 34 ms | 16 MiB chunks: 1.80 B/value, scan 13.9 ms, take 8.3 ms |
+| unique UUIDs | zstd | 20.61 | 311 ms | 315 ms | FSST: 24.91 B/value, scan 120 ms, take 4.1 ms; crosses at 226 MB/s |
+| log lines, about 100 bytes | zstd | 13.71 | 415 ms | 335 ms | FSST: 23.96 B/value, scan 134 ms, take 4.5 ms; crosses at 365 MB/s |
 
 Text is where the choice matters most. On values that do not repeat, `Auto` writes zstd frames, the
-smallest form, and a scan then costs about three times what FSST costs; a take costs as much as the
-scan, because each row it wants sits in a frame that is inflated whole. FSST is 21 to 75 % larger
-here and reads a row at a time: from anything faster than 215 to 355 MB/s it is also the faster file
-to scan, and it takes seventy to eighty times faster. A column read by row, or from a local drive, wants the
-`Fsst` hint.
+smallest form, and FSST then scans in a third to two fifths of their time; a take costs the frames
+about what a scan costs them, because each row it wants sits in a frame that is inflated whole. FSST
+is 21 to 75 % larger here and reads a row at a time: from anything faster than 226 to 365 MB/s it is
+also the faster file to scan, and a take costs it about 1.3 % of the frames' time. A column read by
+row, or from a local drive, wants the `Fsst` hint.
 
 The ids show the other lever. A dictionary of 10 000 entries stored again in each of 306 chunks is
 most of what the column costs to read; in chunks of 16 MiB it is stored eighteen times, and the
@@ -98,13 +98,13 @@ column is smaller, faster to scan and faster to write.
 | shape | `Auto` writes | B/value | scan | take | worth knowing |
 |---|---|---:|---:|---:|---|
 | half true | a bitmap | 0.13 | 0.2 ms | 0.6 ms | |
-| 1 % true | runs | 0.05 | 2.3 ms | 5.6 ms | the bitmap, `None`: 0.13 B/value, scan 0.2 ms, take 0.7 ms; crosses at 350 MB/s |
+| 1 % true | runs | 0.05 | 2.2 ms | 5.5 ms | the bitmap, `None`: 0.13 B/value, scan 0.2 ms, take 0.7 ms; crosses at 357 MB/s |
 
 ## The profiles side by side
 
 On these twenty columns, `Fastest` chose what `Auto` chose every time, and wrote no index. `Smallest`
 chose the same as well, but for a chunk here and there and the timestamps, where zstd saves 39 % for
-a scan seven times slower; it wrote up to six times slower than `Auto`, since it tries every
+a scan nearly eight times as long; it wrote up to six times slower than `Auto`, since it tries every
 scheme on every chunk: 3.2 s for the ten million log lines against 1.4 s. `None` writes the plain form, which scans
 fastest when the storage is fast enough to deliver its bytes, 8 per value for a number and as many
 as the text holds, and is the largest file every time.
@@ -171,12 +171,12 @@ On the twenty shapes above, the advice departs from `Auto` here and nowhere else
 
 | shape | scans at 2 GB/s | at 100 MB/s | at 10 GB/s | a row in 1 000 read by row | the bytes |
 |---|---|---|---|---|---|
-| timestamps | | `Zstd` | | | |
+| timestamps | | `Zstd` | | `Zstd` | |
 | 100 003 distinct integers, repeating | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | | 16 MiB chunks |
 | integers in 0..999, one in ten null | | `Dictionary` | | `Dictionary` | `Dictionary` |
-| 100 003 distinct floats, repeating | 16 MiB chunks | | `Canonical` | `Canonical` | |
+| 100 003 distinct floats, repeating | 16 MiB chunks | | `Canonical` | | |
 | uniform floats | | | `Canonical` | | |
-| 10 000 distinct ids, with or without nulls | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | | 16 MiB chunks |
+| 10 000 distinct ids, with or without nulls | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | `Zstd` | 16 MiB chunks |
 | unique UUIDs | `Canonical` | | `Canonical` | `Fsst` | |
 | log lines | `Fsst` | | `Canonical` | `Fsst` | |
 | booleans, 1 % true | `Canonical` | | `Canonical` | | |
@@ -184,8 +184,10 @@ On the twenty shapes above, the advice departs from `Auto` here and nowhere else
 It falls where the tables' crossings put it, and it compares every candidate with every other,
 where the tables compare each with `Auto`. So it finds the plain form ahead of FSST for UUIDs read
 at 2 GB/s: 36 bytes a value, read in 18 ns and decoded in 2.5, against 25 bytes read in 12.5 ns and
-decoded in 11; the two cross at 1.3 GB/s. And under the bytes alone it finds the dictionary that
-saves 8 % on the nullable integers, which `Smallest` alone does not take.
+decoded in 11; the two cross at 1.3 GB/s. Under the bytes alone it finds the dictionary that saves
+8 % on the nullable integers, which `Smallest` alone does not take. And read by row, the timestamps
+and the ids take zstd, which reaches a row by inflating only the frame that holds it: 45 to 63 µs a
+lookup.
 
 * **It is a measurement.** A column costs 0.3 to 3.5 s on the machine above: run it once for a
   kind of data, keep the options, and run it again when the data or the machine changes. Under the
