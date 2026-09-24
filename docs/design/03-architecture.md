@@ -73,9 +73,12 @@ structural and allocate nothing.
 
 A batch of fifty columns, each a tree of three to six encodings rebuilt per chunk, would allocate
 hundreds of objects per batch as an object graph. So nodes are structs in a pooled array owned by
-the batch (`CanonicalArena`), addressed by index and returned to the pool when the batch is
-released; `CanonicalNode` is a `ref struct` view of one. This mirrors the format, where
-`ArrayNode.children` and `buffers` are indices already.
+the batch (`CanonicalArena`), addressed by index; `CanonicalNode` is a `ref struct` view of one.
+This mirrors the format, where `ArrayNode.children` and `buffers` are indices already. The blocks a
+batch decodes into are kept for the next batch of the scan, which writes into memory still in the
+cache without renting it again, and go back to the pool when the scan ends. The parse of a flat
+layout's array blob is kept the same way, in the contexts the scans pool, for the next batch that
+holds the same segment bytes.
 
 A file's encoding ids are resolved **once, at open**, against the registry, into an array indexed
 by the file's own `u16`: on the hot path, dispatch is an index, not a string lookup. Kernels are

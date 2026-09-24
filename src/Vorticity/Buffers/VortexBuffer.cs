@@ -153,6 +153,10 @@ internal readonly unsafe struct VortexBuffer
         get => ((nuint)_pointer & (nuint)(Alignment - 1)) == 0;
     }
 
+    /// <summary>Whether <paramref name="other"/> views the same bytes: the same base address and the same length.</summary>
+    /// <param name="other">The buffer to compare with.</param>
+    public bool SameAs(VortexBuffer other) => _pointer == other._pointer && _length == other._length;
+
     /// <summary>Returns the sub-buffer starting at <paramref name="offset"/>.</summary>
     /// <param name="offset">Byte offset in <c>[0, <see cref="Length"/>]</c>.</param>
     /// <exception cref="VortexFormatException">The offset escapes the buffer.</exception>

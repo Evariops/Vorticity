@@ -198,6 +198,17 @@ internal sealed class RetainedChunks : IDisposable
     /// <returns><see langword="true"/> when the entry is published.</returns>
     internal bool Peek(long key, long batch, out CanonicalArena arena, out int nodeIndex)
     {
+        // An empty table is looked at without the lock: a scan whose batches decode their own rows
+        // retains nothing and still looks on every batch. An entry another context is publishing
+        // meanwhile is missed as it would have been a moment earlier: a look is followed by a
+        // claim, which takes the lock, or by a decode of the caller's own.
+        if (Volatile.Read(ref _count) == 0)
+        {
+            arena = null!;
+            nodeIndex = -1;
+            return false;
+        }
+
         lock (this)
         {
             if (Find(key) is { NodeIndex: >= 0 } entry)
@@ -273,6 +284,13 @@ internal sealed class RetainedChunks : IDisposable
     /// <param name="batch">The number of the batch just delivered.</param>
     internal void Release(long batch)
     {
+        // Nothing to evict, and no lock to take: an entry another context is publishing meanwhile
+        // belongs to a batch not delivered yet, which this release would keep.
+        if (Volatile.Read(ref _count) == 0)
+        {
+            return;
+        }
+
         lock (this)
         {
             if (_count == 0)

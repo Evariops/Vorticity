@@ -182,6 +182,11 @@ internal sealed class ScanSegments : IDisposable
     /// <param name="batch">The batch just delivered.</param>
     internal void Release(long batch)
     {
+        if (!MayRelease(batch))
+        {
+            return;
+        }
+
         lock (this)
         {
             int kept = 0;
@@ -218,6 +223,33 @@ internal sealed class ScanSegments : IDisposable
                 _entries = [];
             }
         }
+    }
+
+    /// <summary>
+    /// Whether a segment the scan holds was last asked for before <paramref name="batch"/>, looked
+    /// at without the lock: most batches ask for the segments their predecessor asked for, and have
+    /// nothing to drop.
+    /// </summary>
+    /// <remarks>
+    /// A batch of another lane may raise a last use or publish a segment meanwhile. The first can
+    /// only make this say yes for a segment the lock then keeps; a segment published by a batch
+    /// before <paramref name="batch"/> was published before that batch was delivered, so before
+    /// this call; and a segment a torn read misses is dropped by the next release, or when the scan
+    /// ends.
+    /// </remarks>
+    private bool MayRelease(long batch)
+    {
+        Entry[] entries = Volatile.Read(ref _entries);
+        int count = Math.Min(Volatile.Read(ref _count), entries.Length);
+        for (int i = 0; i < count; i++)
+        {
+            if (entries[i].Owner is not null && entries[i].LastUse < batch)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private int Find(ulong offset, uint length)

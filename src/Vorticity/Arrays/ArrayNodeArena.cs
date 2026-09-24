@@ -174,7 +174,8 @@ internal readonly ref struct ArrayNode
 
 /// <summary>
 /// A pooled arena of <see cref="ArrayNodeRecord"/>s plus the resolved buffer table for one array
-/// blob. Owned by a <see cref="ScanContext"/> and <see cref="Reset"/> per batch.
+/// blob. Owned by a <see cref="ScanContext"/>, which <see cref="Reset"/>s it per batch unless it
+/// holds a flat layout's blob kept for the next (see <see cref="KeptBlobs"/>).
 /// </summary>
 /// <remarks>
 /// <para>

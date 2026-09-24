@@ -309,6 +309,10 @@ internal sealed class AlignedBufferPool
         return true;
     }
 
+    /// <summary>The bytes <see cref="Rent"/> allocates for a block of <paramref name="length"/> bytes: its size class, or the length itself past the largest.</summary>
+    /// <param name="length">Length in bytes, non-negative.</param>
+    internal int CapacityFor(int length) => length > MaxPooledLength ? length : RoundedSize(length);
+
     /// <summary>Number of blocks currently retained in the bucket serving <paramref name="length"/>.</summary>
     /// <param name="length">A length whose size class is being inspected.</param>
     /// <remarks>

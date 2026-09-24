@@ -94,7 +94,7 @@ internal sealed class ScanContext : IDisposable
         // then. A context that reads metadata loads other trees and is thrown away, so it neither
         // takes the hint nor gives one.
         _notesTrees = capacity >= ScanCapacity;
-        Nodes = new ArrayNodeArena(capacity, _notesTrees ? file.LargestArrayTree : 0);
+        _scratchNodes = new ArrayNodeArena(capacity, _notesTrees ? file.LargestArrayTree : 0);
         _batchCanonical = new CanonicalArena(capacity);
 
         // Deliberately not sized from the arena capacity. A batch registers one segment per leaf it
@@ -144,7 +144,7 @@ internal sealed class ScanContext : IDisposable
         }
 
         Scalars = new ScalarStore();
-        Nodes = new ArrayNodeArena();
+        _scratchNodes = new ArrayNodeArena();
         _batchCanonical = new CanonicalArena();
         Segments = new SegmentRequestSet();
         Decode = new ArrayDecodeContext(this);
@@ -211,8 +211,65 @@ internal sealed class ScanContext : IDisposable
     /// </summary>
     public ScalarStore Scalars { get; }
 
-    /// <summary>One <see cref="ArrayNodeRecord"/> per serialized node, plus the resolved buffer table.</summary>
-    public ArrayNodeArena Nodes { get; }
+    /// <summary>
+    /// One <see cref="ArrayNodeRecord"/> per serialized node, plus the resolved buffer table, of the
+    /// blob loaded last in the batch in flight: a flat layout's blob kept from one batch to the next
+    /// (see <see cref="TakeBlobArena"/>), or the arena <see cref="ResetBatch"/> clears.
+    /// </summary>
+    public ArrayNodeArena Nodes => _memory?.Blobs?.Current ?? _scratchNodes;
+
+    /// <summary>The arena a blob not kept is loaded into, cleared per batch.</summary>
+    private readonly ArrayNodeArena _scratchNodes;
+
+    /// <summary>
+    /// Whether this context keeps the blobs of the flat layouts its batches read parsed from one
+    /// batch to the next: a context the scans take from their pool and give back, whose kept arenas
+    /// serve every scan it serves after.
+    /// </summary>
+    internal bool KeepsBlobs { get; set; }
+
+    /// <summary>
+    /// Makes current the node arena holding flat layout <paramref name="layout"/>'s blob as parsed
+    /// from <paramref name="segment"/>, when this context keeps blobs; or, when none does, the arena
+    /// to load it into, which the caller then does and <see cref="RememberBlob"/>s.
+    /// </summary>
+    /// <param name="layout">The flat layout's index in the layout tree.</param>
+    /// <param name="segment">Its segment, as the batch in flight holds it.</param>
+    /// <returns>Whether <see cref="Nodes"/> holds the blob parsed.</returns>
+    internal bool TakeBlobArena(int layout, VortexBuffer segment)
+    {
+        if (!KeepsBlobs)
+        {
+            return false;
+        }
+
+        KeptBlobs blobs = (_memory ??= new BatchMemory()).Blobs ??= new KeptBlobs();
+        return blobs.Take(layout, segment, _notesTrees ? _file!.LargestArrayTree : 0);
+    }
+
+    /// <summary>Records that the blob just loaded into <see cref="Nodes"/> is flat layout <paramref name="layout"/>'s, parsed from <paramref name="segment"/>.</summary>
+    /// <param name="layout">The flat layout's index in the layout tree.</param>
+    /// <param name="segment">The segment the blob was parsed from.</param>
+    internal void RememberBlob(int layout, VortexBuffer segment) => _memory?.Blobs?.RememberCurrent(layout, segment);
+
+    /// <summary>Forgets which blob <see cref="Nodes"/> holds, before one is loaded into it.</summary>
+    internal void ForgetBlob() => _memory?.Blobs?.ForgetCurrent();
+
+    /// <summary>
+    /// Whether the current kept blob's root decodes a range of its rows and materializes them, once
+    /// a flat reader has asked; null before, and always when no kept blob is current.
+    /// </summary>
+    internal bool? BlobRanged
+    {
+        get => _memory?.Blobs?.CurrentRanged;
+        set
+        {
+            if (_memory?.Blobs is { } blobs)
+            {
+                blobs.CurrentRanged = value;
+            }
+        }
+    }
 
     /// <summary>One record per decoded node.</summary>
     /// <remarks>
@@ -710,9 +767,9 @@ internal sealed class ScanContext : IDisposable
     private const int CheckedNodeSlots = 8;
 
     /// <summary>
-    /// Keys of the nodes whose O(n) validation has already passed: the open scope in slot 0 and the
-    /// passed checks in slots 1 and up, each stored as its value plus one so that 0 means empty.
-    /// Null until a scope is opened.
+    /// What this context remembers of the file's bytes from one batch to the next: the nodes whose
+    /// O(n) validation has already passed, and the blobs it keeps parsed. Null until a reader opens
+    /// a node-check scope or a blob is kept.
     /// </summary>
     /// <remarks>
     /// One field, and allocated on first use, because the scan paths hold tight allocation
@@ -720,13 +777,14 @@ internal sealed class ScanContext : IDisposable
     /// fields on every <see cref="ScanContext"/> whether or not a scan ever opens a scope, and
     /// moving one of them to <c>ArrayDecodeContext</c> only shifts the cost onto a smaller object.
     /// As one reference, allocated only when a reader opens a scope -- which only a take on a node
-    /// bigger than its batch does -- a full scan pays nothing at all.
+    /// bigger than its batch, or a batch decoding its own rows of one, does -- or when a context
+    /// of the scans' pool keeps a blob, a context that reads metadata pays nothing at all.
     /// </remarks>
-    private long[]? _nodeChecks;
+    private BatchMemory? _memory;
 
     /// <summary>The segment whose blob is being decoded, while a node-check scope is open.</summary>
     internal uint? NodeCheckScope =>
-        _nodeChecks is { } slots && slots[0] != 0 ? (uint)(slots[0] - 1) : null;
+        _memory is { } memory && memory.Checks[0] != 0 ? (uint)(memory.Checks[0] - 1) : null;
 
     /// <summary>Opens a node-check scope. See <see cref="ArrayDecodeContext.IsNodeChecked"/>.</summary>
     /// <param name="segmentId">The segment whose blob is being decoded.</param>
@@ -734,7 +792,7 @@ internal sealed class ScanContext : IDisposable
     internal uint? BeginNodeCheckScope(uint segmentId)
     {
         uint? previous = NodeCheckScope;
-        (_nodeChecks ??= new long[CheckedNodeSlots + 1])[0] = (long)segmentId + 1;
+        (_memory ??= new BatchMemory()).Checks[0] = (long)segmentId + 1;
         return previous;
     }
 
@@ -742,9 +800,9 @@ internal sealed class ScanContext : IDisposable
     /// <param name="previous">Its return value.</param>
     internal void EndNodeCheckScope(uint? previous)
     {
-        if (_nodeChecks is { } slots)
+        if (_memory is { } memory)
         {
-            slots[0] = previous is uint segment ? (long)segment + 1 : 0;
+            memory.Checks[0] = previous is uint segment ? (long)segment + 1 : 0;
         }
     }
 
@@ -776,7 +834,7 @@ internal sealed class ScanContext : IDisposable
     /// </remarks>
     internal bool IsNodeChecked(long key)
     {
-        if (_nodeChecks is not { } slots)
+        if (_memory is not { } memory)
         {
             return false;
         }
@@ -784,7 +842,7 @@ internal sealed class ScanContext : IDisposable
         long stored = key + 1;
         for (int i = 1; i <= CheckedNodeSlots; i++)
         {
-            long slot = slots[i];
+            long slot = memory.Checks[i];
             if (slot == stored)
             {
                 return true;
@@ -807,19 +865,38 @@ internal sealed class ScanContext : IDisposable
     /// </remarks>
     internal void MarkNodeChecked(long key)
     {
-        if (_nodeChecks is not { } slots)
+        if (_memory is not { } memory)
         {
             return;
         }
 
         for (int i = 1; i <= CheckedNodeSlots; i++)
         {
-            if (slots[i] == 0)
+            if (memory.Checks[i] == 0)
             {
-                slots[i] = key + 1;
+                memory.Checks[i] = key + 1;
                 return;
             }
         }
+    }
+
+    /// <summary>See <see cref="_memory"/>.</summary>
+    private sealed class BatchMemory
+    {
+        /// <summary>
+        /// The open scope in slot 0 and the passed checks in slots 1 and up, each stored as its value
+        /// plus one so that 0 means empty.
+        /// </summary>
+        internal CheckSlots Checks;
+
+        /// <summary>The blobs kept parsed, made at the first one a context of the scans' pool keeps.</summary>
+        internal KeptBlobs? Blobs;
+    }
+
+    [InlineArray(CheckedNodeSlots + 1)]
+    private struct CheckSlots
+    {
+        private long _slot;
     }
 
     /// <summary>
@@ -1115,12 +1192,14 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
-    /// Releases every segment held for the previous batch and resets every arena.
+    /// Releases every segment held for the previous batch and resets every arena but those holding
+    /// flat layouts' blobs, which the next batch finds parsed when it holds the same bytes.
     /// </summary>
     /// <remarks>
     /// The order is fixed: release segments, then the node arena, then the canonical arena. A
     /// canonical node holds non-owning views into segment memory, so resetting the arenas first
-    /// would leave a window in which a live view names released pages.
+    /// would leave a window in which a live view names released pages. A kept blob's views are read
+    /// again only once a batch holds their bytes at the address they name.
     /// </remarks>
     public void ResetBatch()
     {
@@ -1154,8 +1233,9 @@ internal sealed class ScanContext : IDisposable
         WindowLead = 0;
         WindowSpan = 0;
         Segments.Release();
-        Nodes.Reset();
-        _batchCanonical.Reset();
+        _scratchNodes.Reset();
+        _memory?.Blobs?.NextBatch();
+        _batchCanonical.ResetKeepingBlocks();
         Scalars.Clear();
         Decode.ResetBatch();
     }
@@ -1195,12 +1275,13 @@ internal sealed class ScanContext : IDisposable
 
     /// <summary>
     /// Undoes everything a scan set on this context, so that a later scan of any file may take it:
-    /// the batch, the retained chunks it owns, the node checks it remembered -- facts about one
-    /// file's bytes -- and every switch the scan set once.
+    /// the batch, the blocks its batches kept, the retained chunks it owns, the blobs and node
+    /// checks it remembered -- facts about one file's bytes -- and every switch the scan set once.
     /// </summary>
     internal void Recycle()
     {
         ResetBatch();
+        _batchCanonical.Reset();
         AbandonRetained();
         if (_ownsRetained)
         {
@@ -1211,9 +1292,10 @@ internal sealed class ScanContext : IDisposable
         _ownsRetained = true;
         _building = null;
         _child = null;
-        if (_nodeChecks is { } checks)
+        if (_memory is { } memory)
         {
-            Array.Clear(checks);
+            memory.Checks = default;
+            memory.Blobs?.Forget();
         }
 
         if (_pushed is { } pushed)

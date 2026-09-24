@@ -489,7 +489,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             // awaited where it is created: a ValueTask handed across a method boundary to be
             // awaited later is one an exception path can drop unawaited.
             await ReadAsync(lane.Context.Segments, read).ConfigureAwait(false);
-            _segments.Publish(lane.Context.Segments, lane.Sequence);
+            if (read)
+            {
+                _segments.Publish(lane.Context.Segments, lane.Sequence);
+            }
         }
         catch
         {
@@ -1442,8 +1445,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 await lane.ReadByOthersAsync().ConfigureAwait(false);
             }
 
-            await ReadAsync(context.Segments, NoteRequests(context)).ConfigureAwait(false);
-            _segments.Publish(context.Segments, batch);
+            bool read = NoteRequests(context);
+            await ReadAsync(context.Segments, read).ConfigureAwait(false);
+            if (read)
+            {
+                _segments.Publish(context.Segments, batch);
+            }
+
             ScanMetrics.Served(_metrics, context.Segments);
             if (!_compact && !_filterProven)
             {

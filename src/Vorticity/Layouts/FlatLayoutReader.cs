@@ -71,11 +71,10 @@ internal sealed class FlatLayoutReader : LayoutReader
         int total = NodeLength(in node);
         int length = BatchLength(rows);
 
-        // The blob is parsed where it is read, not on the way past. Loading it means resetting the
-        // node arena, copying the array flatbuffer into it, walking the node tree and resolving
-        // every buffer spec in the segment -- and none of that survives the call. A batch that
-        // finds its chunk already decoded and retained never touches the root, so parsing it up
-        // front would pay for every batch of a chunk to serve the one that needs it.
+        // The blob is loaded where it is read, not on the way past. Parsing it means copying the
+        // array flatbuffer into a node arena, walking the node tree and resolving every buffer spec
+        // in the segment; the parse is kept for the next batch that holds the same bytes, and a
+        // batch that finds its chunk already decoded and retained never asks for the root at all.
         //
         // The three readers below each load it themselves, immediately before the only use.
 
@@ -188,8 +187,10 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// <summary>
     /// The most rows a window of a chunk holds: sixteen batches of the default size, a megabyte of
     /// fixed-width values or two of string views per column, about what the reference decodes at
-    /// once. A window pays a parse of the chunk's blob and of its encodings' metadata, so a smaller
-    /// one makes a cheap encoding pay that parse more often than the memory it saves is worth.
+    /// once. A window pays the fixed cost of a batch and its encodings' metadata, so a smaller one
+    /// makes a cheap encoding pay them more often than the memory it saves is worth: a window in
+    /// the first-level cache speeds up a kernel bound by its stores, plain bit-packing, and slows
+    /// down nearly every other encoding.
     /// </summary>
     internal const int WindowRows = 1 << 17;
 
@@ -286,6 +287,7 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// first when no one has: a chunk whose decode is a set of views onto the segment holds nothing
     /// a window would not, and a window of it would parse the blob once per window for no saving.
     /// </summary>
+    /// <remarks>Asked of the encodings once per parse of a kept blob, and remembered with it.</remarks>
     private bool Ranged(in LayoutNode node, ScanContext context, ref ArrayNode root, ref bool loaded)
     {
         if (!loaded)
@@ -294,7 +296,14 @@ internal sealed class FlatLayoutReader : LayoutReader
             loaded = true;
         }
 
-        return context.Decode.DecodesRange(in root) && !context.Decode.MaterializesNothing(in root, node.DType);
+        if (context.BlobRanged is bool known)
+        {
+            return known;
+        }
+
+        bool ranged = context.Decode.DecodesRange(in root) && !context.Decode.MaterializesNothing(in root, node.DType);
+        context.BlobRanged = ranged;
+        return ranged;
     }
 
     /// <summary>Whether a retained window holds the rows up to <paramref name="end"/> of it.</summary>
@@ -1061,18 +1070,24 @@ internal sealed class FlatLayoutReader : LayoutReader
     }
 
     /// <summary>
-    /// Parses this layout's array blob into the scan's node arena and returns its root.
+    /// The root of this layout's array blob: parsed by an earlier batch that read the same segment
+    /// bytes, or parsed now into a node arena of the scan's.
     /// </summary>
     /// <remarks>
     /// The contained array's dtype is exactly the node's and its length exactly the node's row
     /// count; neither is carried by the array blob itself.
     /// </remarks>
     /// <param name="node">The flat layout node.</param>
-    /// <param name="context">The scan context owning the node arena.</param>
+    /// <param name="context">The scan context owning the node arenas.</param>
     /// <returns>The root of the parsed blob.</returns>
     private ArrayNode LoadRoot(scoped in LayoutNode node, ScanContext context)
     {
         VortexBuffer segment = SegmentBuffer(in node, 0, context);
+        if (context.TakeBlobArena(node.Index, segment))
+        {
+            return context.Nodes.Root;
+        }
+
         FlatLayoutMetadata metadata = FlatLayoutMetadata.Read(node.Metadata);
         if (metadata.HasArrayEncodingTree)
         {
@@ -1083,6 +1098,7 @@ internal sealed class FlatLayoutReader : LayoutReader
             context.Decode.LoadBlob(segment);
         }
 
+        context.RememberBlob(node.Index, segment);
         return context.Nodes.Root;
     }
 }

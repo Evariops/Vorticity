@@ -38,7 +38,7 @@ internal static class ScanContexts
 
         if (context is null)
         {
-            return new ScanContext(file);
+            return new ScanContext(file) { KeepsBlobs = true };
         }
 
         context.Rebind(file);

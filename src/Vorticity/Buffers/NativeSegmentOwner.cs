@@ -44,6 +44,12 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// </summary>
     internal NativeSegmentOwner? NextOwned;
 
+    /// <summary>
+    /// Whether the arena whose chain holds this block kept it from the batch before, for an
+    /// allocation of its size class, and has not handed it out again.
+    /// </summary>
+    internal bool Idle;
+
     private unsafe NativeSegmentOwner(
         void* pointer,
         int capacity,

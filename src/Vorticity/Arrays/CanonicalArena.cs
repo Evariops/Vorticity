@@ -495,8 +495,9 @@ internal readonly ref struct CanonicalNode
 }
 
 /// <summary>
-/// The pooled store behind <see cref="CanonicalNode"/>. Owned by a <see cref="ScanContext"/>;
-/// <see cref="Reset"/> per batch.
+/// The pooled store behind <see cref="CanonicalNode"/>. Owned by a <see cref="ScanContext"/>,
+/// reset per batch keeping its blocks for the next (<see cref="ResetKeepingBlocks"/>), and
+/// <see cref="Reset"/> once its scan is done.
 /// </summary>
 internal sealed partial class CanonicalArena
 {
@@ -509,9 +510,11 @@ internal sealed partial class CanonicalArena
     private VortexBuffer[] _dataBuffers;
     private int _dataBufferCount;
 
-    // Blocks handed out by Allocate, returned to the pool on Reset. Never handed to a caller as an
-    // owner, because a decoder neither retains nor releases anything. Chained through the blocks
-    // themselves, so that a batch renting more of them than the one before allocates nothing.
+    // Blocks handed out by Allocate, returned to the pool on Reset, and the idle ones
+    // ResetKeepingBlocks kept from the batch before. Never handed to a caller as an owner, because a
+    // decoder neither retains nor releases anything. Chained through the blocks themselves, so that
+    // a batch renting more of them than the one before allocates nothing, and so that keeping them
+    // costs no reference of its own.
     private NativeSegmentOwner? _owned;
 
     // How much of the block at the head of that chain small allocations have carved, or -1 when none
@@ -619,27 +622,68 @@ internal sealed partial class CanonicalArena
     /// Clears the counts and returns every block <see cref="Allocate(int, int)"/> handed out,
     /// leaving the backing arrays allocated.
     /// </summary>
-    /// <remarks>
-    /// Holding the blocks across the reset, so that the next batch does not rent them back, would
-    /// save nothing: a batch holds a handful of blocks at a time, and the rentals this loop
-    /// performs do not rise above the noise of the scan around them.
-    /// </remarks>
     public void Reset()
     {
         NativeSegmentOwner? owner = _owned;
-        _owned = null;
-        _slabUsed = -1;
         while (owner is not null)
         {
             // Unlinked before it goes back, because the pool may hand it to another arena at once.
             NativeSegmentOwner? next = owner.NextOwned;
             owner.NextOwned = null;
+            owner.Idle = false;
             _pool.Return(owner);
             owner = next;
         }
 
-        // The words view blocks the loop above has just returned, and a node that takes one of these
-        // indices after the reset is another node.
+        _owned = null;
+        Clear();
+    }
+
+    /// <summary>
+    /// Clears the counts and keeps the blocks this batch used in the chain, idle, for the next
+    /// batch's allocations of the same size classes, returning those the batch before kept and this
+    /// one did not take.
+    /// </summary>
+    /// <remarks>
+    /// A scan's batches allocate the same blocks batch after batch, and a block rented back from
+    /// the pool costs a lock and two interlocked adds, one each way: on batches sized to the
+    /// first-level cache, as many as the decode of a small column. A block kept is also the memory
+    /// the batch before wrote last, still in the cache. A block another holder still references
+    /// goes back as <see cref="Reset"/> gives it, and <see cref="Reset"/> returns what is kept.
+    /// </remarks>
+    internal void ResetKeepingBlocks()
+    {
+        NativeSegmentOwner? kept = null;
+        NativeSegmentOwner? owner = _owned;
+        while (owner is not null)
+        {
+            NativeSegmentOwner? next = owner.NextOwned;
+            if (!owner.Idle && owner.RefCount == 1)
+            {
+                owner.Idle = true;
+                owner.NextOwned = kept;
+                kept = owner;
+            }
+            else
+            {
+                owner.NextOwned = null;
+                owner.Idle = false;
+                _pool.Return(owner);
+            }
+
+            owner = next;
+        }
+
+        _owned = kept;
+        Clear();
+    }
+
+    private void Clear()
+    {
+        _slabUsed = -1;
+
+        // The words view blocks the reset has just returned or kept, and a node that takes one of
+        // these indices after it is another node.
         if (_words is not null)
         {
             Array.Clear(_words, 0, Math.Min(_recordCount, _words.Length));
@@ -648,6 +692,42 @@ internal sealed partial class CanonicalArena
         _recordCount = 0;
         _childCount = 0;
         _dataBufferCount = 0;
+    }
+
+    /// <summary>
+    /// A block of <paramref name="length"/> bytes, out of the chain: an idle one of its size class,
+    /// or one rented from the pool.
+    /// </summary>
+    private NativeSegmentOwner Rent(int length, int alignment)
+    {
+        NativeSegmentOwner? previous = null;
+        NativeSegmentOwner? idle = _owned;
+        int capacity = idle is null ? 0 : _pool.CapacityFor(length);
+        while (idle is not null && !(idle.Idle && idle.Capacity == capacity))
+        {
+            previous = idle;
+            idle = idle.NextOwned;
+        }
+
+        if (idle is null)
+        {
+            return _pool.Rent(length, alignment);
+        }
+
+        if (previous is null)
+        {
+            _owned = idle.NextOwned;
+        }
+        else
+        {
+            previous.NextOwned = idle.NextOwned;
+        }
+
+        idle.NextOwned = null;
+        idle.Idle = false;
+        NativeSegmentOwner.CheckLengthAndAlignment(length, alignment);
+        idle.ResetForRent(length);
+        return idle;
     }
 
     // ------------------------------------------------------------------------------- builders
@@ -1094,7 +1174,7 @@ internal sealed partial class CanonicalArena
             return Carve(byteLength, alignment, out destination);
         }
 
-        NativeSegmentOwner owner = Own(_pool.Rent(byteLength, alignment));
+        NativeSegmentOwner owner = Own(Rent(byteLength, alignment));
         destination = owner.WritableSpan;
         return owner.Buffer;
     }
@@ -1142,7 +1222,7 @@ internal sealed partial class CanonicalArena
         if (_slabUsed < 0 || start + byteLength > slab!.Length)
         {
             int slabBytes = _slabUsed < 0 ? FirstSlabBytes : Math.Min(slab!.Length * 2, LargestSlabBytes);
-            slab = _pool.Rent(slabBytes, VortexLimits.MaxAlignment);
+            slab = Rent(slabBytes, VortexLimits.MaxAlignment);
             slab.NextOwned = _owned;
             _owned = slab;
             start = 0;

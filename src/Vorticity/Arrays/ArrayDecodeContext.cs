@@ -61,6 +61,7 @@ internal sealed class ArrayDecodeContext
     /// <exception cref="VortexFormatException">The blob is malformed.</exception>
     public void LoadBlob(VortexBuffer segment)
     {
+        _scan.ForgetBlob();
         ArrayBlobReader.Load(_scan.Nodes, segment, _scan.ArrayEncodings);
         _scan.NoteArrayTree();
     }
@@ -74,6 +75,7 @@ internal sealed class ArrayDecodeContext
     /// <exception cref="VortexFormatException">The blob is malformed.</exception>
     public void LoadBlob(ReadOnlySpan<byte> arrayTree, VortexBuffer segment)
     {
+        _scan.ForgetBlob();
         ArrayBlobReader.Load(_scan.Nodes, arrayTree, segment, _scan.ArrayEncodings);
         _scan.NoteArrayTree();
     }
