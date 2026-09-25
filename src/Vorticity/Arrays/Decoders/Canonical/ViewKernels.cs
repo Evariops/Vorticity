@@ -192,7 +192,26 @@ internal static class ViewKernels
         ulong total = 0;
         int i = 0;
 
-        if (Vector.IsHardwareAccelerated)
+        if (AdvSimd.IsSupported)
+        {
+            // One widening pairwise add-accumulate a vector, into four sums so that no add waits
+            // for the one before: a single sum makes every vector wait for the last one's add.
+            ref uint source = ref MemoryMarshal.GetReference(values);
+            Vector128<ulong> s0 = Vector128<ulong>.Zero;
+            Vector128<ulong> s1 = Vector128<ulong>.Zero;
+            Vector128<ulong> s2 = Vector128<ulong>.Zero;
+            Vector128<ulong> s3 = Vector128<ulong>.Zero;
+            for (; i <= values.Length - 16; i += 16)
+            {
+                s0 = AdvSimd.AddPairwiseWideningAndAdd(s0, Vector128.LoadUnsafe(ref source, (nuint)i));
+                s1 = AdvSimd.AddPairwiseWideningAndAdd(s1, Vector128.LoadUnsafe(ref source, (nuint)(i + 4)));
+                s2 = AdvSimd.AddPairwiseWideningAndAdd(s2, Vector128.LoadUnsafe(ref source, (nuint)(i + 8)));
+                s3 = AdvSimd.AddPairwiseWideningAndAdd(s3, Vector128.LoadUnsafe(ref source, (nuint)(i + 12)));
+            }
+
+            total = Vector128.Sum((s0 + s1) + (s2 + s3));
+        }
+        else if (Vector.IsHardwareAccelerated)
         {
             int lanes = Vector<uint>.Count;
             ref uint source = ref MemoryMarshal.GetReference(values);
@@ -232,7 +251,33 @@ internal static class ViewKernels
         int signs = 0;
         int i = 0;
 
-        if (Vector.IsHardwareAccelerated)
+        if (AdvSimd.IsSupported)
+        {
+            // As the unsigned sum, four widening pairwise add-accumulates in flight, and the signs
+            // gathered by or on the side.
+            ref int source = ref MemoryMarshal.GetReference(values);
+            Vector128<long> s0 = Vector128<long>.Zero;
+            Vector128<long> s1 = Vector128<long>.Zero;
+            Vector128<long> s2 = Vector128<long>.Zero;
+            Vector128<long> s3 = Vector128<long>.Zero;
+            Vector128<int> ored = Vector128<int>.Zero;
+            for (; i <= values.Length - 16; i += 16)
+            {
+                Vector128<int> a = Vector128.LoadUnsafe(ref source, (nuint)i);
+                Vector128<int> b = Vector128.LoadUnsafe(ref source, (nuint)(i + 4));
+                Vector128<int> c = Vector128.LoadUnsafe(ref source, (nuint)(i + 8));
+                Vector128<int> d = Vector128.LoadUnsafe(ref source, (nuint)(i + 12));
+                ored |= (a | b) | (c | d);
+                s0 = AdvSimd.AddPairwiseWideningAndAdd(s0, a);
+                s1 = AdvSimd.AddPairwiseWideningAndAdd(s1, b);
+                s2 = AdvSimd.AddPairwiseWideningAndAdd(s2, c);
+                s3 = AdvSimd.AddPairwiseWideningAndAdd(s3, d);
+            }
+
+            sum = Vector128.Sum((s0 + s1) + (s2 + s3));
+            signs = Vector128.LessThanAny(ored, Vector128<int>.Zero) ? -1 : 0;
+        }
+        else if (Vector.IsHardwareAccelerated)
         {
             int lanes = Vector<int>.Count;
             ref int source = ref MemoryMarshal.GetReference(values);
@@ -627,10 +672,36 @@ internal static class ViewKernels
         int i = 0;
         if (Vector.IsHardwareAccelerated && count >= Vector<T>.Count)
         {
+            // Four vectors a step into four minimums and four maximums, so that no compare waits
+            // for the one before; they meet once the loop is done.
             int lanes = Vector<T>.Count;
             Vector<T> low = Vector.LoadUnsafe(ref first);
             Vector<T> high = low;
-            for (i = lanes; i <= count - lanes; i += lanes)
+            Vector<T> low1 = low;
+            Vector<T> high1 = low;
+            Vector<T> low2 = low;
+            Vector<T> high2 = low;
+            Vector<T> low3 = low;
+            Vector<T> high3 = low;
+            for (i = lanes; i <= count - (4 * lanes); i += 4 * lanes)
+            {
+                Vector<T> a = Vector.LoadUnsafe(ref first, (nuint)i);
+                Vector<T> b = Vector.LoadUnsafe(ref first, (nuint)(i + lanes));
+                Vector<T> c = Vector.LoadUnsafe(ref first, (nuint)(i + (2 * lanes)));
+                Vector<T> d = Vector.LoadUnsafe(ref first, (nuint)(i + (3 * lanes)));
+                low = Vector.Min(low, a);
+                high = Vector.Max(high, a);
+                low1 = Vector.Min(low1, b);
+                high1 = Vector.Max(high1, b);
+                low2 = Vector.Min(low2, c);
+                high2 = Vector.Max(high2, c);
+                low3 = Vector.Min(low3, d);
+                high3 = Vector.Max(high3, d);
+            }
+
+            low = Vector.Min(Vector.Min(low, low1), Vector.Min(low2, low3));
+            high = Vector.Max(Vector.Max(high, high1), Vector.Max(high2, high3));
+            for (; i <= count - lanes; i += lanes)
             {
                 Vector<T> values = Vector.LoadUnsafe(ref first, (nuint)i);
                 low = Vector.Min(low, values);
