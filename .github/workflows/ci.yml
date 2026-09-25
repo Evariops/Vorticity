@@ -22,9 +22,9 @@ jobs:
         # that contract is untested.
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
 
@@ -56,8 +56,8 @@ jobs:
     name: native aot over the corpus
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
 
@@ -118,8 +118,8 @@ jobs:
     name: parser fuzzing
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
 
@@ -133,7 +133,7 @@ jobs:
           dotnet run --project tests/Vorticity.Fuzz -c Release -- \
             tests/Vorticity.Conformance/corpus 100000 20260912
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: fuzz-findings
@@ -143,11 +143,14 @@ jobs:
     name: Vortex Rust reads what we write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
-      - uses: dtolnay/rust-toolchain@stable
+
+      # The runner image ships rustup, and its stable can trail the minimum the pinned crates need.
+      - name: Update the Rust toolchain
+        run: rustup update stable --no-self-update && rustup default stable
 
       # The reference reading what we write is the only check that can catch a writer and a reader
       # agreeing on the same mistake. The .NET step skips when the variable is unset, so this job
@@ -167,7 +170,7 @@ jobs:
     name: upstream schema drift
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # A change here is a format change, not a dependency bump: it must be reviewed against the
       # component registry and the conformance corpus regenerated. This job reports drift on a
