@@ -724,7 +724,7 @@ internal static class BlockStatsPass
     private static void Wide<T>(
         ReadOnlySpan<byte> bytes, ReadOnlySpan<byte> seed, bool seam, int start, int count,
         ref BlockStats stats)
-        where T : unmanaged, IBinaryInteger<T>
+        where T : unmanaged, IBinaryInteger<T>, IMinMaxValue<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes);
         Int128 step = stats.Delta;
@@ -760,6 +760,28 @@ internal static class BlockStatsPass
             first = 0;
         }
 
+        // Two registers at a time once the first pair has named the step, as `Narrow` does, the
+        // previous row being inside the span from then on.
+        if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported && count - first > 8)
+        {
+            Int128 head = Int128.CreateTruncating(values[start + first]);
+            Int128 delta = head - last;
+            if (known ? delta != step : delta < long.MinValue || delta > long.MaxValue)
+            {
+                stats.BreakDelta();
+                return;
+            }
+
+            if (!WideProgression(values, start + first + 1, start + count, head, (long)delta))
+            {
+                stats.BreakDelta();
+                return;
+            }
+
+            stats.SetDelta((long)delta);
+            return;
+        }
+
         for (int i = first; i < count; i++)
         {
             Int128 value = Int128.CreateTruncating(values[start + i]);
@@ -791,6 +813,45 @@ internal static class BlockStatsPass
         {
             stats.SetDelta((long)step);
         }
+    }
+
+    /// <summary>
+    /// <see cref="Progression{T}"/> for 64-bit columns: the endpoint taken in <see cref="Int128"/>,
+    /// since the row before may not fit a long, and two registers of two lanes a step.
+    /// </summary>
+    private static bool WideProgression<T>(ReadOnlySpan<T> values, int from, int end, Int128 previous, long step)
+        where T : unmanaged, IBinaryInteger<T>, IMinMaxValue<T>
+    {
+        Int128 endpoint = previous + ((Int128)(end - from) * step);
+        if (endpoint < Int128.CreateTruncating(T.MinValue) || endpoint > Int128.CreateTruncating(T.MaxValue))
+        {
+            return false;
+        }
+
+        int lanes = Vector128<T>.Count;
+        ref T head = ref MemoryMarshal.GetReference(values);
+        T each = T.CreateTruncating(step);
+        Vector128<T> steps = Vector128.Create(each);
+        int row = from;
+        for (; row + (2 * lanes) <= end; row += 2 * lanes)
+        {
+            Vector128<T> low = Vector128.LoadUnsafe(ref head, (nuint)row) - Vector128.LoadUnsafe(ref head, (nuint)(row - 1));
+            Vector128<T> high = Vector128.LoadUnsafe(ref head, (nuint)(row + lanes)) - Vector128.LoadUnsafe(ref head, (nuint)(row + lanes - 1));
+            if (!Vector128.EqualsAll((low ^ steps) | (high ^ steps), Vector128<T>.Zero))
+            {
+                return false;
+            }
+        }
+
+        for (; row < end; row++)
+        {
+            if (unchecked(Unsafe.Add(ref head, row) - Unsafe.Add(ref head, row - 1)) != each)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     // ------------------------------------------------------------------------------ run boundaries
@@ -874,7 +935,7 @@ internal static class BlockStatsPass
 
     /// <summary>
     /// Adjacent rows that differ, with the element width resolved into the loop: a vector equality
-    /// against the vector one element behind, then <c>ExtractMostSignificantBits</c>.
+    /// against the vector one element behind, its matches counted in the lanes.
     /// </summary>
     /// <remarks>
     /// The shift is a second load, not a lane shuffle. Comparing a row against the row before it
@@ -884,9 +945,9 @@ internal static class BlockStatsPass
     /// iterations, which is exactly what this kernel exists to remove. The two loads overlap in
     /// cache and the second is free.
     /// <para>
-    /// The mask is an equality, so the boundaries are the lanes it does not set:
-    /// <c>lanes - PopCount</c>. Counting the zero bits directly would need the complement masked
-    /// back to the lane count, which is the same instruction with one more step.
+    /// The boundaries are the lanes the equality does not set. Its all-ones lanes are subtracted
+    /// into an accumulator rather than gathered into a bit mask each step, which on Arm is several
+    /// instructions where the subtraction is one; the lanes are folded every 255 steps at most.
     /// </para>
     /// <para>
     /// T is always an unsigned integer here -- <see cref="Interior"/> casts the raw bytes at the
@@ -901,7 +962,7 @@ internal static class BlockStatsPass
     /// </para>
     /// </remarks>
     private static long Differing<T>(ReadOnlySpan<T> values)
-        where T : unmanaged, IEquatable<T>
+        where T : unmanaged, IBinaryInteger<T>
     {
         long boundaries = 0;
         int i = 1;
@@ -910,12 +971,26 @@ internal static class BlockStatsPass
         {
             ref T head = ref MemoryMarshal.GetReference(values);
             int last = values.Length - lanes;
-            for (; i <= last; i += lanes)
+            while (i <= last)
             {
-                Vector128<T> here = Vector128.LoadUnsafe(ref head, (nuint)i);
-                Vector128<T> before = Vector128.LoadUnsafe(ref head, (nuint)(i - 1));
-                uint equal = Vector128.Equals(here, before).ExtractMostSignificantBits();
-                boundaries += lanes - BitOperations.PopCount(equal);
+                // Equal lanes counted in the lanes themselves, an equality being all ones: minus
+                // one per match, and at most 255 steps between folds so a byte lane cannot wrap.
+                Vector128<T> equal = Vector128<T>.Zero;
+                int steps = Math.Min(255, ((last - i) / lanes) + 1);
+                for (int step = 0; step < steps; step++, i += lanes)
+                {
+                    Vector128<T> here = Vector128.LoadUnsafe(ref head, (nuint)i);
+                    Vector128<T> before = Vector128.LoadUnsafe(ref head, (nuint)(i - 1));
+                    equal -= Vector128.Equals(here, before);
+                }
+
+                long matches = 0;
+                for (int lane = 0; lane < lanes; lane++)
+                {
+                    matches += long.CreateTruncating(equal.GetElement(lane));
+                }
+
+                boundaries += ((long)steps * lanes) - matches;
             }
         }
 
@@ -966,29 +1041,40 @@ internal static class BlockStatsPass
         };
     }
 
+    /// <summary>
+    /// A run starts where validity changes, or between two valid rows that differ: counted as
+    /// <c>(valid ^ previous) | (valid &amp; previous &amp; differs)</c> rather than behind branches.
+    /// </summary>
     private static long DifferingNullable<T>(
         ReadOnlySpan<T> values, in ValidityMask mask, int start, int count)
         where T : unmanaged, IEquatable<T>
     {
-        long boundaries = 0;
-        bool previousValid = mask.IsValid(start);
-        for (int i = 1; i < count; i++)
+        int firstBit = mask.BitOffset + start;
+        ReadOnlySpan<byte> bits = mask.Bits[..((firstBit + count + 7) >> 3)];
+        ref byte bit = ref MemoryMarshal.GetReference(bits);
+        ref T value = ref MemoryMarshal.GetReference(values[..count]);
+        nint boundaries = 0;
+        nint previous = BitAt(ref bit, firstBit);
+        for (nint i = 1; i < count; i++)
         {
-            bool valid = mask.IsValid(start + i);
-            if (valid != previousValid)
-            {
-                boundaries++;
-            }
-            else if (valid && !values[i].Equals(values[i - 1]))
-            {
-                boundaries++;
-            }
-
-            previousValid = valid;
+            nint valid = BitAt(ref bit, firstBit + i);
+            nint differs = Unsafe.Add(ref value, i).Equals(Unsafe.Add(ref value, i - 1)) ? 0 : 1;
+            boundaries += (valid ^ previous) | (valid & previous & differs);
+            previous = valid;
         }
 
         return boundaries;
     }
+
+    /// <summary>Rows from which <see cref="CountWidths{T}"/> spreads a range over four pairs of histograms.</summary>
+    private const int LanesFrom = 256;
+
+    /// <summary>A bitmap of one valid row, read at bit 0 for every row of a column without nulls.</summary>
+    private static ReadOnlySpan<byte> Everything => [0x01];
+
+    /// <summary>Bit <paramref name="at"/> of an LSB-first bitmap the caller has bounded, as 0 or 1.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static nint BitAt(ref byte bits, nint at) => (Unsafe.Add(ref bits, at >> 3) >> (int)(at & 7)) & 1;
 
     private static long DifferingWideNullable(
         ReadOnlySpan<byte> window, int width, in ValidityMask mask, int start, int count)
@@ -1648,7 +1734,10 @@ internal static class BlockStatsPass
         }
     }
 
-    /// <summary>The raw and zigzag widths of one value, counted into the pair of histograms.</summary>
+    /// <summary>
+    /// The raw width of one value, and its zigzag width when <paramref name="zigzag"/>, counted
+    /// into a pair of histograms by <paramref name="valid"/>: one for a value, zero for a null.
+    /// </summary>
     /// <remarks>
     /// The raw width is taken on the unsigned reading of the bits, which is what the packer writes:
     /// a signed <c>-1</c> is an <c>sbyte</c> of eight set bits, so its raw width is eight and not
@@ -1657,16 +1746,18 @@ internal static class BlockStatsPass
     /// <c>BitPackPlan</c> prices with, so the histograms this produces are the ones it would
     /// otherwise walk the column for.
     /// </remarks>
-    /// <param name="bits">The row's value, masked to the element width.</param>
-    /// <param name="elementBits">8, 16, 32 or 64.</param>
-    /// <param name="widths">The pair of histograms.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Widths(ulong bits, int elementBits, Span<int> widths)
+    private static void Count<T>(ref int histograms, T value, int valid, int elementBits, ulong top, bool zigzag)
+        where T : unmanaged, IBinaryInteger<T>
     {
-        widths[64 - BitOperations.LeadingZeroCount(bits)]++;
-        ulong sign = 0UL - ((bits >> (elementBits - 1)) & 1);
-        ulong zigzag = ((bits << 1) ^ sign) & BitWords.Mask(elementBits);
-        widths[BitPackWidths.ZigZagOffset + 64 - BitOperations.LeadingZeroCount(zigzag)]++;
+        ulong bits = ulong.CreateTruncating(value) & top;
+        Unsafe.Add(ref histograms, 64 - BitOperations.LeadingZeroCount(bits)) += valid;
+        if (zigzag)
+        {
+            ulong sign = 0UL - ((bits >> (elementBits - 1)) & 1);
+            ulong folded = ((bits << 1) ^ sign) & top;
+            Unsafe.Add(ref histograms, BitPackWidths.ZigZagOffset + 64 - BitOperations.LeadingZeroCount(folded)) += valid;
+        }
     }
 
     // ------------------------------------------------------------------------------------ order
@@ -2067,28 +2158,12 @@ internal static class BlockStatsPass
             return;
         }
 
-        bool any = false;
-        for (int i = 0; i < values.Length; i++)
+        if (mask.AllInvalid)
         {
-            if (!mask.IsValid(start + i))
-            {
-                continue;
-            }
-
-            any = true;
-            T value = values[i];
-            if (value < min)
-            {
-                min = value;
-            }
-
-            if (value > max)
-            {
-                max = value;
-            }
+            return;
         }
 
-        if (any)
+        if (MaskedBounds(values, in mask, start, out min, out max))
         {
             stats.MergeSigned(long.CreateTruncating(min), long.CreateTruncating(max));
         }
@@ -2097,6 +2172,57 @@ internal static class BlockStatsPass
         {
             CountWidths<T>(values, in mask, start, widths, zigzag: true);
         }
+    }
+
+    /// <summary>
+    /// The bounds of a range's valid rows, each null standing for the far end of either bound
+    /// through a select rather than behind a branch, two rows a step on two pairs of bounds.
+    /// </summary>
+    /// <returns>Whether a row of the range is valid.</returns>
+    private static bool MaskedBounds<T>(ReadOnlySpan<T> values, in ValidityMask mask, int start, out T min, out T max)
+        where T : unmanaged, IBinaryInteger<T>, IMinMaxValue<T>
+    {
+        int count = values.Length;
+        int firstBit = mask.BitOffset + start;
+        ref byte bit = ref MemoryMarshal.GetReference(mask.Bits[..((firstBit + count + 7) >> 3)]);
+        ref T value = ref MemoryMarshal.GetReference(values);
+        T low = T.MaxValue;
+        T otherLow = T.MaxValue;
+        T high = T.MinValue;
+        T otherHigh = T.MinValue;
+        nint any = 0;
+        nint i = 0;
+        for (; i + 1 < count; i += 2)
+        {
+            nint first = BitAt(ref bit, firstBit + i);
+            nint second = BitAt(ref bit, firstBit + i + 1);
+            T a = Unsafe.Add(ref value, i);
+            T b = Unsafe.Add(ref value, i + 1);
+            T aLow = first != 0 ? a : T.MaxValue;
+            T aHigh = first != 0 ? a : T.MinValue;
+            T bLow = second != 0 ? b : T.MaxValue;
+            T bHigh = second != 0 ? b : T.MinValue;
+            low = aLow < low ? aLow : low;
+            high = aHigh > high ? aHigh : high;
+            otherLow = bLow < otherLow ? bLow : otherLow;
+            otherHigh = bHigh > otherHigh ? bHigh : otherHigh;
+            any |= first | second;
+        }
+
+        if (i < count)
+        {
+            nint last = BitAt(ref bit, firstBit + i);
+            T a = Unsafe.Add(ref value, i);
+            T aLow = last != 0 ? a : T.MaxValue;
+            T aHigh = last != 0 ? a : T.MinValue;
+            low = aLow < low ? aLow : low;
+            high = aHigh > high ? aHigh : high;
+            any |= last;
+        }
+
+        min = otherLow < low ? otherLow : low;
+        max = otherHigh > high ? otherHigh : high;
+        return any != 0;
     }
 
     /// <summary>
@@ -2181,74 +2307,71 @@ internal static class BlockStatsPass
         ReadOnlySpan<T> values, in ValidityMask mask, int start, Span<int> widths, bool zigzag)
         where T : unmanaged, IBinaryInteger<T>
     {
-        int elementBits = Unsafe.SizeOf<T>() * 8;
-        ulong mask64 = BitWords.Mask(elementBits);
-        if (mask.AllValid)
+        if (mask.AllInvalid)
         {
-            if (zigzag)
-            {
-                for (int i = 0; i < values.Length; i++)
-                {
-                    Widths(ulong.CreateTruncating(values[i]) & mask64, elementBits, widths);
-                }
-            }
-            else
-            {
-                // Two histograms, rows alternating, summed at the end. A run of equal widths
-                // increments one counter over and over, and each increment waits on the store
-                // before it; split over two counters the dependency chain is half as long, and the
-                // fold costs one pass over the histogram per range.
-                Span<int> odd = stackalloc int[65];
-                odd.Clear();
-                int i = 0;
-                for (; i + 1 < values.Length; i += 2)
-                {
-                    RawWidth(ulong.CreateTruncating(values[i]) & mask64, widths);
-                    RawWidth(ulong.CreateTruncating(values[i + 1]) & mask64, odd);
-                }
-
-                if (i < values.Length)
-                {
-                    RawWidth(ulong.CreateTruncating(values[i]) & mask64, widths);
-                }
-
-                for (int w = 0; w < odd.Length; w++)
-                {
-                    widths[w] += odd[w];
-                }
-            }
-
             return;
         }
 
-        if (zigzag)
+        // A null row adds its validity bit, zero, to the counter its garbage would have moved,
+        // rather than skipping it behind a branch; a column without nulls reads the one bit of a
+        // bitmap of its own at every row.
+        int count = values.Length;
+        int firstBit = mask.BitOffset + start;
+        bool masked = !mask.AllValid;
+        ReadOnlySpan<byte> bits = masked ? mask.Bits[..((firstBit + count + 7) >> 3)] : Everything;
+        ref byte bit = ref MemoryMarshal.GetReference(bits);
+        nint rowMask = masked ? -1 : 0;
+        int used = zigzag ? BitPackWidths.Length : BitPackWidths.Domain;
+        ref int own = ref MemoryMarshal.GetReference(widths[..used]);
+        if (count < LanesFrom)
         {
-            for (int i = 0; i < values.Length; i++)
-            {
-                if (mask.IsValid(start + i))
-                {
-                    Widths(ulong.CreateTruncating(values[i]) & mask64, elementBits, widths);
-                }
-            }
-
+            WidthLanes(values, ref bit, firstBit, rowMask, zigzag, ref own, ref own, ref own, ref own);
             return;
         }
 
-        for (int i = 0; i < values.Length; i++)
+        // Four pairs of histograms taken in turn, folded at the end. A run of equal widths
+        // increments one counter over and over, each increment waiting on the store before it;
+        // four counters make the chain four times shorter, for a fold per range.
+        Span<int> spare = stackalloc int[3 * BitPackWidths.Length];
+        spare.Clear();
+        ref int second = ref MemoryMarshal.GetReference(spare);
+        ref int third = ref Unsafe.Add(ref second, BitPackWidths.Length);
+        ref int fourth = ref Unsafe.Add(ref second, 2 * BitPackWidths.Length);
+        WidthLanes(values, ref bit, firstBit, rowMask, zigzag, ref own, ref second, ref third, ref fourth);
+        for (int w = 0; w < used; w++)
         {
-            if (mask.IsValid(start + i))
-            {
-                RawWidth(ulong.CreateTruncating(values[i]) & mask64, widths);
-            }
+            Unsafe.Add(ref own, w) += Unsafe.Add(ref second, w) + Unsafe.Add(ref third, w) + Unsafe.Add(ref fourth, w);
         }
     }
 
-    /// <summary>The raw half of <see cref="Widths(ulong, int, Span{int})"/> alone, for a column zigzag is never offered.</summary>
-    /// <param name="bits">The row's value, masked to the element width.</param>
-    /// <param name="widths">The pair of histograms; only the raw one moves.</param>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void RawWidth(ulong bits, Span<int> widths) =>
-        widths[64 - BitOperations.LeadingZeroCount(bits)]++;
+    /// <summary>
+    /// The widths of <paramref name="values"/> into four pairs of histograms taken in turn, which
+    /// may all be the same pair, each row counted by its validity bit.
+    /// </summary>
+    private static void WidthLanes<T>(
+        ReadOnlySpan<T> values, ref byte bits, nint firstBit, nint rowMask, bool zigzag,
+        ref int first, ref int second, ref int third, ref int fourth)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        ulong top = BitWords.Mask(elementBits);
+        ref T value = ref MemoryMarshal.GetReference(values);
+        nint count = values.Length;
+        nint i = 0;
+        for (; i + 3 < count; i += 4)
+        {
+            nint at = firstBit + i;
+            Count(ref first, Unsafe.Add(ref value, i), (int)BitAt(ref bits, at & rowMask), elementBits, top, zigzag);
+            Count(ref second, Unsafe.Add(ref value, i + 1), (int)BitAt(ref bits, (at + 1) & rowMask), elementBits, top, zigzag);
+            Count(ref third, Unsafe.Add(ref value, i + 2), (int)BitAt(ref bits, (at + 2) & rowMask), elementBits, top, zigzag);
+            Count(ref fourth, Unsafe.Add(ref value, i + 3), (int)BitAt(ref bits, (at + 3) & rowMask), elementBits, top, zigzag);
+        }
+
+        for (; i < count; i++)
+        {
+            Count(ref first, Unsafe.Add(ref value, i), (int)BitAt(ref bits, (firstBit + i) & rowMask), elementBits, top, zigzag);
+        }
+    }
 
 
     private static void Unsigned<T>(
@@ -2275,28 +2398,12 @@ internal static class BlockStatsPass
             return;
         }
 
-        bool any = false;
-        for (int i = 0; i < values.Length; i++)
+        if (mask.AllInvalid)
         {
-            if (!mask.IsValid(start + i))
-            {
-                continue;
-            }
-
-            any = true;
-            T value = values[i];
-            if (value < min)
-            {
-                min = value;
-            }
-
-            if (value > max)
-            {
-                max = value;
-            }
+            return;
         }
 
-        if (any)
+        if (MaskedBounds(values, in mask, start, out min, out max))
         {
             stats.MergeUnsigned(ulong.CreateTruncating(min), ulong.CreateTruncating(max));
         }
