@@ -73,41 +73,41 @@ and the arguments below, which rewrite that section of this page and leave the o
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | ratio | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.6 (0.5-0.7) | 0.35x | — | — | 5.3 KiB | 10 / 11 MiB |
-| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.6 (0.5-0.6) | 0.29x | — | — | 4.9 KiB | 10 / 11 MiB |
-| `scan` | Vorticity's | 6.8 (6.7-7.1) | 8.3 (8.0-8.6) | 0.83x | 3.9 | 3.2 | 14.6 KiB | 15 / 18 MiB |
-| `scan` | Vortex Rust's | 1.9 (1.8-2.0) | 3.3 (3.0-3.9) | 0.58x | 13.9 | 8.1 | 11.0 KiB | 23 / 23 MiB |
-| `project` | Vorticity's | 0.4 (0.4-0.5) | 1.1 (1.0-1.1) | 0.35x | 21.2 | 7.5 | 16.9 KiB | 11 / 15 MiB |
-| `project` | Vortex Rust's | 0.4 (0.4-0.4) | 0.8 (0.8-0.9) | 0.46x | 21.9 | 10.0 | 13.2 KiB | 11 / 13 MiB |
-| `filter-narrow` | Vorticity's | 1.0 (0.9-1.1) | 1.3 (1.2-1.3) | 0.79x | 0.3 | 0.2 | 41.4 KiB | 13 / 15 MiB |
-| `filter-narrow` | Vortex Rust's | 0.8 (0.7-0.8) | 1.3 (1.2-1.3) | 0.61x | 0.3 | 0.2 | 21.2 KiB | 16 / 16 MiB |
-| `filter-wide` | Vorticity's | 3.8 (3.6-4.1) | 5.1 (4.9-5.3) | 0.75x | 3.5 | 2.6 | 23.9 KiB | 14 / 17 MiB |
-| `filter-wide` | Vortex Rust's | 1.4 (1.3-1.4) | 2.4 (2.3-2.5) | 0.57x | 9.7 | 5.6 | 21.2 KiB | 20 / 20 MiB |
-| `take` | Vorticity's | 6.8 (6.5-6.9) | 6.4 (6.4-6.7) | 1.06x | — | — | 38.3 KiB | 14 / 17 MiB |
-| `take` | Vortex Rust's | 0.7 (0.6-0.9) | 2.0 (1.9-2.2) | 0.38x | — | — | 34.7 KiB | 18 / 21 MiB |
-| `write` | Vorticity's | 30.5 (30.2-30.9) | 57.7 (56.2-58.9) | 0.53x | 0.9 | 0.5 | 30.7 KiB | 20 / 77 MiB |
-| `write` | Vortex Rust's | 25.3 (25.0-27.4) | 50.2 (49.0-51.3) | 0.50x | 1.1 | 0.5 | 27.1 KiB | 28 / 77 MiB |
-| `append` | Vorticity's | 10.5 (9.8-11.0) | not asked | n/a | — | — | 223.8 KiB | 18 / — MiB |
+| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.6 (0.6-0.8) | 0.26x | — | — | 5.3 KiB | 9 / 11 MiB |
+| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.5 (0.5-0.8) | 0.30x | — | — | 4.9 KiB | 9 / 11 MiB |
+| `scan` | Vorticity's | 7.1 (6.8-7.2) | 8.3 (8.2-8.7) | 0.85x | 3.8 | 3.2 | 14.6 KiB | 15 / 18 MiB |
+| `scan` | Vortex Rust's | 1.9 (1.8-2.0) | 3.0 (2.9-3.2) | 0.64x | 13.8 | 8.8 | 11.0 KiB | 23 / 23 MiB |
+| `project` | Vorticity's | 0.4 (0.4-0.4) | 1.1 (1.0-1.1) | 0.36x | 21.2 | 7.7 | 16.9 KiB | 11 / 15 MiB |
+| `project` | Vortex Rust's | 0.4 (0.4-0.4) | 0.9 (0.8-0.9) | 0.44x | 21.8 | 9.6 | 13.2 KiB | 11 / 13 MiB |
+| `filter-narrow` | Vorticity's | 1.0 (0.9-1.2) | 1.3 (1.2-1.4) | 0.81x | 0.3 | 0.2 | 41.4 KiB | 13 / 15 MiB |
+| `filter-narrow` | Vortex Rust's | 0.7 (0.7-0.8) | 1.2 (1.2-1.3) | 0.59x | 0.4 | 0.2 | 21.2 KiB | 15 / 16 MiB |
+| `filter-wide` | Vorticity's | 3.9 (3.7-4.1) | 5.0 (4.8-5.2) | 0.79x | 3.4 | 2.7 | 23.9 KiB | 14 / 17 MiB |
+| `filter-wide` | Vortex Rust's | 1.3 (1.2-1.4) | 2.4 (2.3-2.6) | 0.57x | 10.0 | 5.7 | 21.2 KiB | 20 / 20 MiB |
+| `take` | Vorticity's | 6.7 (6.5-6.8) | 6.4 (6.2-7.0) | 1.05x | — | — | 38.3 KiB | 13 / 17 MiB |
+| `take` | Vortex Rust's | 0.7 (0.7-0.7) | 2.0 (1.9-2.2) | 0.34x | — | — | 34.7 KiB | 18 / 21 MiB |
+| `write` | Vorticity's | 30.0 (29.9-30.6) | 56.2 (55.0-57.4) | 0.53x | 0.9 | 0.5 | 30.7 KiB | 20 / 77 MiB |
+| `write` | Vortex Rust's | 24.8 (24.6-25.1) | 52.2 (50.4-55.3) | 0.48x | 1.1 | 0.5 | 27.1 KiB | 28 / 74 MiB |
+| `append` | Vorticity's | 10.1 (9.9-13.3) | not asked | n/a | — | — | 219.5 KiB | 18 / — MiB |
 
 #### All 14 cores
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | ratio | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.7 (0.7-0.8) | 0.26x | — | — | 5.3 KiB | 10 / 12 MiB |
-| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.8 (0.7-0.8) | 0.22x | — | — | 4.9 KiB | 10 / 12 MiB |
-| `scan` | Vorticity's | 1.9 (1.8-2.0) | 4.0 (3.8-4.1) | 0.47x | 14.2 | 6.7 | 35.5 KiB | 43 / 49 MiB |
-| `scan` | Vortex Rust's | 1.7 (1.7-1.9) | 4.1 (3.6-4.2) | 0.42x | 15.5 | 6.5 | 24.8 KiB | 62 / 55 MiB |
-| `project` | Vorticity's | 0.6 (0.6-0.7) | 1.6 (1.6-1.8) | 0.40x | 13.0 | 5.1 | 31.8 KiB | 18 / 23 MiB |
-| `project` | Vortex Rust's | 0.6 (0.6-0.7) | 1.4 (1.3-1.5) | 0.46x | 13.4 | 6.1 | 20.9 KiB | 19 / 20 MiB |
-| `filter-narrow` | Vorticity's | 0.6 (0.6-0.8) | 1.8 (1.8-2.0) | 0.33x | 0.4 | 0.1 | 43.4 KiB | 12 / 20 MiB |
-| `filter-narrow` | Vortex Rust's | 0.5 (0.5-0.6) | 1.9 (1.8-2.2) | 0.27x | 0.5 | 0.1 | 24.7 KiB | 12 / 21 MiB |
-| `filter-wide` | Vorticity's | 1.3 (1.2-1.4) | 2.9 (2.8-3.0) | 0.44x | 10.5 | 4.6 | 34.7 KiB | 29 / 38 MiB |
-| `filter-wide` | Vortex Rust's | 1.1 (1.0-1.3) | 3.1 (2.8-3.5) | 0.37x | 11.8 | 4.3 | 27.8 KiB | 37 / 41 MiB |
-| `take` | Vorticity's | 2.0 (1.6-2.3) | 2.3 (2.3-2.6) | 0.84x | — | — | 84.3 KiB | 23 / 27 MiB |
-| `take` | Vortex Rust's | 0.9 (0.8-1.0) | 1.8 (1.8-1.9) | 0.51x | — | — | 73.8 KiB | 20 / 26 MiB |
-| `write` | Vorticity's | 12.0 (11.6-12.3) | 15.8 (15.6-16.1) | 0.76x | 2.2 | 1.7 | 2.5 MiB | 53 / 123 MiB |
-| `write` | Vortex Rust's | 12.1 (11.9-12.6) | 15.9 (15.5-16.2) | 0.76x | 2.2 | 1.7 | 2.3 MiB | 72 / 133 MiB |
-| `append` | Vorticity's | 10.1 (9.9-10.2) | not asked | n/a | — | — | 220.6 KiB | 19 / — MiB |
+| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.7 (0.7-0.8) | 0.25x | — | — | 5.3 KiB | 9 / 12 MiB |
+| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.7 (0.6-0.8) | 0.23x | — | — | 4.9 KiB | 9 / 12 MiB |
+| `scan` | Vorticity's | 1.9 (1.8-2.4) | 3.8 (3.7-3.9) | 0.51x | 13.7 | 7.0 | 38.0 KiB | 43 / 50 MiB |
+| `scan` | Vortex Rust's | 1.6 (1.5-1.7) | 3.7 (3.2-3.8) | 0.43x | 16.6 | 7.1 | 24.3 KiB | 62 / 54 MiB |
+| `project` | Vorticity's | 0.7 (0.6-1.0) | 1.7 (1.7-1.9) | 0.40x | 12.1 | 4.8 | 31.2 KiB | 18 / 24 MiB |
+| `project` | Vortex Rust's | 0.6 (0.6-0.7) | 1.3 (1.2-1.7) | 0.46x | 14.1 | 6.4 | 21.5 KiB | 19 / 19 MiB |
+| `filter-narrow` | Vorticity's | 0.6 (0.6-1.1) | 1.9 (1.7-2.0) | 0.33x | 0.4 | 0.1 | 57.7 KiB | 12 / 20 MiB |
+| `filter-narrow` | Vortex Rust's | 0.5 (0.5-0.5) | 2.0 (2.0-2.2) | 0.25x | 0.5 | 0.1 | 23.9 KiB | 12 / 22 MiB |
+| `filter-wide` | Vorticity's | 1.3 (1.2-1.6) | 2.9 (2.7-2.9) | 0.47x | 9.9 | 4.7 | 35.8 KiB | 29 / 38 MiB |
+| `filter-wide` | Vortex Rust's | 1.1 (1.0-1.5) | 3.0 (2.7-3.2) | 0.37x | 12.1 | 4.4 | 27.2 KiB | 37 / 41 MiB |
+| `take` | Vorticity's | 1.6 (1.5-1.9) | 2.3 (2.3-2.3) | 0.70x | — | — | 87.5 KiB | 23 / 28 MiB |
+| `take` | Vortex Rust's | 0.9 (0.8-1.2) | 1.8 (1.6-2.3) | 0.54x | — | — | 71.4 KiB | 20 / 25 MiB |
+| `write` | Vorticity's | 11.3 (11.3-13.4) | 16.1 (15.6-16.9) | 0.70x | 2.4 | 1.7 | 1.5 MiB | 53 / 120 MiB |
+| `write` | Vortex Rust's | 11.6 (11.4-12.0) | 15.6 (15.6-16.0) | 0.74x | 2.3 | 1.7 | 2.4 MiB | 72 / 124 MiB |
+| `append` | Vorticity's | 10.1 (9.7-10.5) | not asked | n/a | — | — | 220.7 KiB | 19 / — MiB |
 
 ### 10,485,760 rows
 
@@ -122,54 +122,54 @@ and the arguments below, which rewrite that section of this page and leave the o
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | ratio | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.6 (0.6-0.6) | 0.27x | — | — | 21.1 KiB | 10 / 12 MiB |
-| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.6 (0.6-0.6) | 0.32x | — | — | 9.5 KiB | 10 / 11 MiB |
-| `scan` | Vorticity's | 66.2 (65.7-66.5) | 75.7 (75.0-79.4) | 0.87x | 4.0 | 3.5 | 74.2 KiB | 36 / 29 MiB |
-| `scan` | Vortex Rust's | 14.6 (14.6-15.3) | 21.9 (21.8-22.4) | 0.67x | 18.3 | 12.2 | 28.3 KiB | 89 / 57 MiB |
-| `project` | Vorticity's | 1.4 (1.3-1.5) | 3.7 (3.6-4.3) | 0.38x | 59.0 | 22.5 | 76.5 KiB | 13 / 21 MiB |
-| `project` | Vortex Rust's | 1.2 (1.1-1.3) | 1.9 (1.8-2.5) | 0.64x | 70.0 | 44.6 | 30.5 KiB | 11 / 14 MiB |
-| `filter-narrow` | Vorticity's | 1.5 (1.4-1.6) | 3.2 (3.0-3.5) | 0.47x | 1.8 | 0.8 | 107.1 KiB | 15 / 23 MiB |
-| `filter-narrow` | Vortex Rust's | 1.1 (1.0-1.3) | 3.0 (2.9-3.0) | 0.36x | 2.4 | 0.9 | 62.2 KiB | 17 / 28 MiB |
-| `filter-wide` | Vorticity's | 40.6 (33.5-42.5) | 45.6 (41.0-47.3) | 0.89x | 3.3 | 2.9 | 107.1 KiB | 25 / 34 MiB |
-| `filter-wide` | Vortex Rust's | 7.7 (7.6-8.0) | 15.4 (14.6-19.7) | 0.50x | 17.3 | 8.7 | 62.2 KiB | 53 / 53 MiB |
-| `take` | Vorticity's | 50.4 (50.0-51.0) | 56.3 (55.7-57.7) | 0.89x | — | — | 97.9 KiB | 34 / 29 MiB |
-| `take` | Vortex Rust's | 2.3 (2.2-2.9) | 11.1 (10.7-14.5) | 0.21x | — | — | 52.0 KiB | 37 / 52 MiB |
-| `write` | Vorticity's | 286.2 (282.9-287.2) | 537.3 (536.3-551.6) | 0.53x | 0.9 | 0.5 | 95.4 KiB | 42 / 428 MiB |
-| `write` | Vortex Rust's | 240.9 (233.9-241.7) | 495.4 (481.9-510.7) | 0.49x | 1.1 | 0.5 | 49.5 KiB | 97 / 375 MiB |
-| `append` | Vorticity's | 90.2 (90.1-92.0) | not asked | n/a | — | — | 1.4 MiB | 23 / — MiB |
+| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.6 (0.6-0.7) | 0.27x | — | — | 21.1 KiB | 9 / 12 MiB |
+| `open` | Vortex Rust's | 0.2 (0.2-0.3) | 0.6 (0.5-0.7) | 0.28x | — | — | 9.5 KiB | 9 / 11 MiB |
+| `scan` | Vorticity's | 67.3 (67.0-68.1) | 77.0 (75.8-78.0) | 0.87x | 4.0 | 3.5 | 74.2 KiB | 36 / 29 MiB |
+| `scan` | Vortex Rust's | 14.2 (14.1-14.6) | 21.2 (20.9-23.1) | 0.67x | 18.7 | 12.6 | 28.3 KiB | 89 / 57 MiB |
+| `project` | Vorticity's | 1.4 (1.3-1.4) | 3.5 (3.3-3.6) | 0.39x | 61.2 | 24.0 | 76.5 KiB | 13 / 21 MiB |
+| `project` | Vortex Rust's | 1.2 (1.1-4.5) | 1.9 (1.8-2.0) | 0.64x | 71.3 | 45.3 | 30.5 KiB | 11 / 14 MiB |
+| `filter-narrow` | Vorticity's | 1.4 (1.3-1.7) | 3.1 (2.9-3.7) | 0.47x | 1.9 | 0.9 | 107.1 KiB | 15 / 23 MiB |
+| `filter-narrow` | Vortex Rust's | 1.1 (1.0-1.2) | 3.1 (3.0-3.3) | 0.35x | 2.5 | 0.9 | 62.2 KiB | 17 / 28 MiB |
+| `filter-wide` | Vorticity's | 34.2 (33.7-35.3) | 41.7 (41.5-42.8) | 0.82x | 3.9 | 3.2 | 107.1 KiB | 25 / 33 MiB |
+| `filter-wide` | Vortex Rust's | 7.8 (7.7-7.9) | 14.2 (14.0-15.2) | 0.55x | 17.1 | 9.4 | 62.2 KiB | 53 / 53 MiB |
+| `take` | Vorticity's | 51.1 (50.5-51.5) | 56.4 (55.8-59.3) | 0.91x | — | — | 97.9 KiB | 34 / 29 MiB |
+| `take` | Vortex Rust's | 2.2 (2.2-3.1) | 10.7 (10.2-11.4) | 0.21x | — | — | 52.0 KiB | 37 / 52 MiB |
+| `write` | Vorticity's | 283.3 (282.5-301.7) | 551.8 (546.7-565.2) | 0.51x | 0.9 | 0.5 | 95.4 KiB | 42 / 428 MiB |
+| `write` | Vortex Rust's | 231.9 (230.7-235.1) | 493.4 (484.9-516.2) | 0.47x | 1.2 | 0.5 | 49.5 KiB | 97 / 376 MiB |
+| `append` | Vorticity's | 80.8 (79.6-81.7) | not asked | n/a | — | — | 1.4 MiB | 23 / — MiB |
 
 #### All 14 cores
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | ratio | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.8 (0.7-0.8) | 0.22x | — | — | 21.1 KiB | 10 / 12 MiB |
-| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.8 (0.7-0.8) | 0.24x | — | — | 9.5 KiB | 10 / 12 MiB |
-| `scan` | Vorticity's | 8.0 (7.9-10.3) | 11.4 (11.2-11.4) | 0.71x | 33.3 | 23.5 | 104.3 KiB | 64 / 78 MiB |
-| `scan` | Vortex Rust's | 5.0 (4.8-5.0) | 8.9 (8.3-9.4) | 0.56x | 53.6 | 29.9 | 54.8 KiB | 162 / 93 MiB |
-| `project` | Vorticity's | 1.1 (1.1-1.2) | 3.9 (3.8-4.7) | 0.30x | 73.0 | 21.6 | 95.4 KiB | 21 / 45 MiB |
-| `project` | Vortex Rust's | 1.0 (1.0-2.2) | 2.0 (1.9-2.0) | 0.53x | 80.4 | 42.3 | 46.0 KiB | 25 / 24 MiB |
-| `filter-narrow` | Vorticity's | 1.1 (1.1-1.2) | 3.7 (3.5-4.0) | 0.31x | 2.3 | 0.7 | 109.2 KiB | 15 / 28 MiB |
-| `filter-narrow` | Vortex Rust's | 1.0 (1.0-1.2) | 3.5 (3.3-3.5) | 0.30x | 2.6 | 0.8 | 64.8 KiB | 17 / 34 MiB |
-| `filter-wide` | Vorticity's | 5.1 (5.0-5.6) | 9.0 (8.9-9.0) | 0.57x | 26.1 | 14.9 | 144.0 KiB | 53 / 68 MiB |
-| `filter-wide` | Vortex Rust's | 4.1 (3.9-5.0) | 8.2 (8.0-8.5) | 0.50x | 32.8 | 16.2 | 92.3 KiB | 126 / 97 MiB |
-| `take` | Vorticity's | 6.1 (5.6-6.5) | 8.6 (8.5-9.3) | 0.71x | — | — | 173.5 KiB | 47 / 57 MiB |
-| `take` | Vortex Rust's | 1.6 (1.5-3.5) | 6.5 (6.0-6.9) | 0.25x | — | — | 126.0 KiB | 40 / 79 MiB |
-| `write` | Vorticity's | 84.7 (83.5-85.3) | 96.9 (95.9-102.0) | 0.87x | 3.1 | 2.8 | 2.7 MiB | 75 / 524 MiB |
-| `write` | Vortex Rust's | 88.6 (85.0-108.8) | 97.4 (96.7-227.7) | 0.91x | 3.0 | 2.7 | 2.6 MiB | 176 / 527 MiB |
-| `append` | Vorticity's | 85.8 (85.1-86.6) | not asked | n/a | — | — | 3.2 MiB | 52 / — MiB |
+| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.8 (0.7-0.8) | 0.22x | — | — | 21.1 KiB | 9 / 12 MiB |
+| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.7 (0.7-0.9) | 0.24x | — | — | 9.5 KiB | 9 / 12 MiB |
+| `scan` | Vorticity's | 8.0 (7.7-8.1) | 11.6 (11.1-12.0) | 0.69x | 33.5 | 23.1 | 106.8 KiB | 64 / 76 MiB |
+| `scan` | Vortex Rust's | 5.3 (5.1-5.8) | 8.8 (8.0-9.4) | 0.60x | 50.5 | 30.3 | 54.6 KiB | 161 / 93 MiB |
+| `project` | Vorticity's | 1.0 (1.0-1.1) | 3.9 (3.6-4.0) | 0.27x | 81.5 | 21.8 | 94.7 KiB | 21 / 45 MiB |
+| `project` | Vortex Rust's | 1.1 (1.0-1.5) | 2.1 (2.0-2.2) | 0.50x | 78.6 | 39.7 | 46.7 KiB | 25 / 24 MiB |
+| `filter-narrow` | Vorticity's | 1.1 (1.0-1.1) | 3.6 (3.2-3.8) | 0.30x | 2.5 | 0.7 | 109.2 KiB | 15 / 28 MiB |
+| `filter-narrow` | Vortex Rust's | 1.1 (0.9-1.3) | 3.3 (3.2-3.7) | 0.33x | 2.4 | 0.8 | 64.8 KiB | 17 / 34 MiB |
+| `filter-wide` | Vorticity's | 4.6 (4.5-4.9) | 8.7 (8.1-9.1) | 0.53x | 28.9 | 15.3 | 144.4 KiB | 53 / 70 MiB |
+| `filter-wide` | Vortex Rust's | 4.2 (4.1-8.7) | 8.1 (7.6-10.8) | 0.52x | 31.9 | 16.5 | 96.6 KiB | 126 / 92 MiB |
+| `take` | Vorticity's | 5.7 (5.6-6.1) | 8.2 (8.0-8.5) | 0.69x | — | — | 167.4 KiB | 47 / 57 MiB |
+| `take` | Vortex Rust's | 1.6 (1.6-1.7) | 6.4 (6.3-6.9) | 0.25x | — | — | 139.8 KiB | 40 / 78 MiB |
+| `write` | Vorticity's | 88.6 (84.3-94.7) | 96.3 (94.9-105.6) | 0.92x | 3.0 | 2.8 | 2.6 MiB | 75 / 515 MiB |
+| `write` | Vortex Rust's | 111.7 (103.8-134.1) | 109.8 (103.9-121.3) | 1.02x | 2.4 | 2.4 | 327.2 KiB | 175 / 540 MiB |
+| `append` | Vorticity's | 75.7 (74.2-77.2) | not asked | n/a | — | — | 3.2 MiB | 52 / — MiB |
 
 `open`: open the file and read no rows. `scan`: read every column of every row. `project`: read one column of four. `filter-narrow`: read the rows of a band holding about one in a hundred. `filter-wide`: read the rows of a band holding about half. `take`: take a thousand rows spread across the file. `write`: read the file and encode it back out. `append`: append a tenth of the rows to a copy of the file.
 
 **On one core.** Vorticity took less time than Rust on 27 of 28 compared rows.
 The lowest ratio is `take` at 10,485,760 rows on Vortex Rust's file (0.21x), the highest
-`take` at 1,048,576 rows on Vorticity's file (1.06x).
+`take` at 1,048,576 rows on Vorticity's file (1.05x).
 
-**On all 14 cores.** Vorticity took less time than Rust on 28 of 28 compared rows.
-The lowest ratio is `open` at 1,048,576 rows on Vortex Rust's file (0.22x), the highest
-`write` at 10,485,760 rows on Vortex Rust's file (0.91x).
+**On all 14 cores.** Vorticity took less time than Rust on 27 of 28 compared rows.
+The lowest ratio is `open` at 10,485,760 rows on Vorticity's file (0.22x), the highest
+`write` at 10,485,760 rows on Vortex Rust's file (1.02x).
 
-**The process start** is not in the figures: 16 ms for Vorticity's native binary and 16 ms for Rust's,
-most of it the operating system starting a binary, and 41 ms for the managed runtime on the JIT.
+**The process start** is not in the figures: 17 ms for Vorticity's native binary and 16 ms for Rust's,
+most of it the operating system starting a binary, and 40 ms for the managed runtime on the JIT.
 
 **Not asked of Rust**: `append`, which its harness has no entry point for; those figures
 are Vorticity's alone.
@@ -182,16 +182,16 @@ Milliseconds, the median of the same runs.
 
 | scenario | 1,048,576 rows, Vorticity's file | 1,048,576 rows, Vortex Rust's file | 10,485,760 rows, Vorticity's file | 10,485,760 rows, Vortex Rust's file |
 |---|---:|---:|---:|---:|
-| `open` | 11.6 | 11.9 | 12.2 | 12.0 |
-| `scan` | 59.2 | 60.9 | 125.3 | 115.8 |
-| `project` | 43.9 | 41.4 | 44.7 | 45.1 |
-| `filter-narrow` | 82.9 | 80.6 | 81.9 | 88.5 |
-| `filter-wide` | 72.2 | 77.5 | 122.2 | 106.6 |
-| `take` | 68.4 | 58.8 | 119.7 | 68.2 |
-| `write` | 174.8 | 178.3 | 569.6 | 565.0 |
-| `append` | 176.6 | — | 296.9 | — |
+| `open` | 12.8 | 11.8 | 12.6 | 12.2 |
+| `scan` | 62.2 | 64.6 | 126.1 | 119.2 |
+| `project` | 43.4 | 42.8 | 44.6 | 47.3 |
+| `filter-narrow` | 83.1 | 82.7 | 83.7 | 90.2 |
+| `filter-wide` | 73.3 | 78.9 | 108.9 | 110.2 |
+| `take` | 69.3 | 61.5 | 125.6 | 65.8 |
+| `write` | 176.5 | 184.6 | 595.1 | 587.5 |
+| `append` | 180.6 | — | 287.6 | — |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew); commit f04c110 with uncommitted changes, 2026-09-24 22:34 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew); commit 7d8f1790, 2026-09-25 11:03 UTC.*
 <!-- /results: scenarios -->
 
 <!-- results: decoding -->
@@ -207,67 +207,67 @@ copied, and measures the walk of the layout.
 
 | encoding | rows | Vorticity, ns/row | Vortex Rust, ns/row | ratio | Vorticity, GB/s | Vortex Rust, GB/s |
 |---|---:|---:|---:|---:|---:|---:|
-| `alp` | 1,000,000 | 0.34 | 0.88 | 0.39x | 23.4 | 9.1 |
-| `alp_no_patches` | 1,000,000 | 0.20 | 0.59 | 0.33x | 40.2 | 13.4 |
-| `alp_patched_no_chunk_offsets` | 1,000,000 | 0.22 | 0.63 | 0.35x | 36.0 | 12.6 |
-| `alprd` | 1,000,000 | 0.62 | 0.86 | 0.72x | 13.0 | 9.3 |
-| `bool` | 1,000,000 | 0.05 | 0.07 | 0.75x | 2.5 | 1.9 |
-| `bool_bit_offset3` | 1,000,000 | 0.05 | 0.09 | 0.61x | 2.3 | 1.4 |
-| `bool_bit_offset7` | 1,000,000 | 0.05 | 0.11 | 0.46x | 2.5 | 1.2 |
-| `bool_bit_offset_straddle` | 1,000,000 | 0.05 | 0.07 | 0.72x | 2.6 | 1.9 |
-| `bytebool` | 1,000,000 | 0.09 | 0.12 | 0.77x | 1.4 | 1.1 |
-| `chunked` | 1,000,000 | 0.05 | 0.39 | 0.14x | 146.8 | 20.6 |
-| `chunked_bool` | 1,000,000 | 0.05 | 0.10 | 0.50x | 2.5 | 1.2 |
-| `chunked_decimal` | 1,000,000 | 0.05 | 0.44 | 0.12x | 146.8 | 18.3 |
-| `chunked_empty_chunks` | 1,000,000 | 0.06 | 0.42 | 0.14x | 134.5 | 18.8 |
-| `chunked_mixed_validity` | 1,000,000 | 0.16 | 0.40 | 0.40x | 50.9 | 20.4 |
-| `chunked_one_chunk` | 1,000,000 | 0.05 | 0.35 | 0.14x | 166.7 | 23.0 |
-| `chunked_varbinview` | 1,000,000 | 3.94 | 62.8 | 0.06x | 3.4 | 0.2 |
-| `constant` | 1,000,000 | 0.04 | 0.12 | 0.33x | 200.0 | 65.0 |
-| `datetimeparts` | 1,000,000 | 0.55 | 1.42 | 0.38x | 14.7 | 5.6 |
-| `decimal` | 1,000,000 | 0.03 | 0.30 | 0.11x | 242.4 | 26.3 |
-| `decimal_byte_parts` | 1,000,000 | 0.04 | 0.32 | 0.12x | 205.1 | 25.2 |
-| `dict` | 1,000,000 | 0.34 | 0.48 | 0.71x | 17.5 | 12.5 |
-| `dict_nullable_codes` | 1,000,000 | 1.15 | 2.18 | 0.53x | 4.8 | 2.5 |
-| `dict_nullable_values_nonnull_codes` | 1,000,000 | 0.58 | 0.70 | 0.82x | 9.9 | 8.1 |
-| `dict_u64_codes` | 1,000,000 | 0.40 | 0.60 | 0.67x | 14.9 | 10.0 |
-| `dict_u8_codes` | 1,000,000 | 0.36 | 0.44 | 0.83x | 22.2 | 18.3 |
-| `ext` | 1,000,000 | 0.04 | 0.31 | 0.14x | 188.2 | 26.1 |
-| `fastlanes_bitpacked` | 1,000,000 | 0.11 | 0.17 | 0.64x | 35.6 | 22.9 |
-| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,000,000 | 0.12 | 0.19 | 0.61x | 33.9 | 20.8 |
-| `fastlanes_delta` | 1,000,000 | 0.30 | 1.02 | 0.29x | 27.1 | 7.9 |
-| `fastlanes_for` | 1,000,000 | 0.19 | 0.47 | 0.41x | 41.7 | 17.1 |
-| `fastlanes_rle` | 1,000,000 | 0.28 | 0.52 | 0.53x | 14.4 | 7.7 |
-| `fixed_size_list` | 1,000,000 | 0.05 | 0.55 | 0.09x | 240.0 | 21.9 |
-| `fsst` | 1,000,000 | 5.53 | 5.23 | 1.06x | 10.1 | 10.7 |
-| `list` | 1,000,000 | 0.17 | 1.04 | 0.16x | 58.5 | 9.6 |
-| `listview` | 1,000,000 | 1.44 | 6.85 | 0.21x | 6.9 | 1.5 |
-| `map` | 1,000,000 | 3.32 | 42.5 | 0.08x | 6.0 | 0.5 |
-| `masked` | 1,000,000 | 0.04 | 0.18 | 0.21x | 108.6 | 23.1 |
-| `masked_all_invalid` | 1,000,000 | 0.04 | 0.17 | 0.23x | 100.0 | 23.1 |
-| `masked_all_valid` | 1,000,000 | 0.04 | 0.15 | 0.27x | 95.2 | 26.0 |
-| `null` | 1,000,000 | 0.04 | 0.04 | 0.93x | — | — |
-| `onpair` | 1,000,000 | 2.07 | 2.27 | 0.91x | 10.5 | 9.5 |
-| `parquet_variant` | 1,000,000 | 1.70 | 4.44 | 0.38x | 7.0 | 2.7 |
-| `pco` | 1,000,000 | 0.39 | 1.55 | 0.25x | 20.7 | 5.2 |
-| `primitive` | 1,000,000 | 0.03 | 0.28 | 0.11x | 254.0 | 28.5 |
-| `runend` | 1,000,000 | 0.15 | 0.16 | 0.95x | 26.8 | 25.5 |
-| `sequence` | 1,000,000 | 0.10 | 0.13 | 0.80x | 79.6 | 63.5 |
-| `sparse` | 1,000,000 | 0.10 | 0.15 | 0.67x | 38.5 | 25.9 |
-| `struct` | 1,000,000 | 1.78 | 43.8 | 0.04x | 8.4 | 0.3 |
-| `table_mixed` | 1,000,000 | 6.10 | 105.6 | 0.06x | 11.5 | 0.7 |
-| `table_wide` | 50,000 | 0.99 | 19.9 | 0.05x | 404.0 | 20.1 |
-| `varbin` | 1,000,000 | 1.22 | 65.5 | 0.02x | 13.0 | 0.2 |
-| `varbinview` | 1,000,000 | 3.01 | 61.0 | 0.05x | 4.5 | 0.2 |
-| `variant` | 1,000,000 | 0.06 | 0.07 | 0.90x | 273.5 | 246.2 |
-| `zigzag` | 1,000,000 | 0.11 | 0.29 | 0.38x | 36.0 | 13.6 |
-| `zstd` | 1,000,000 | 3.92 | 6.88 | 0.57x | 8.1 | 4.6 |
-| `zstd_buffers` | 1,000,000 | 0.31 | 2.43 | 0.13x | 25.4 | 3.3 |
-| `zstd_nullable` | 1,000,000 | 2.09 | 3.25 | 0.64x | 3.9 | 2.5 |
+| `alp` | 1,000,000 | 0.35 | 0.92 | 0.38x | 22.9 | 8.7 |
+| `alp_no_patches` | 1,000,000 | 0.18 | 0.64 | 0.28x | 45.2 | 12.5 |
+| `alp_patched_no_chunk_offsets` | 1,000,000 | 0.19 | 0.55 | 0.35x | 41.6 | 14.6 |
+| `alprd` | 1,000,000 | 0.61 | 0.80 | 0.76x | 13.2 | 10.1 |
+| `bool` | 1,000,000 | 0.04 | 0.06 | 0.67x | 3.2 | 2.2 |
+| `bool_bit_offset3` | 1,000,000 | 0.04 | 0.06 | 0.56x | 3.5 | 2.0 |
+| `bool_bit_offset7` | 1,000,000 | 0.04 | 0.05 | 0.70x | 3.3 | 2.3 |
+| `bool_bit_offset_straddle` | 1,000,000 | 0.04 | 0.06 | 0.65x | 3.5 | 2.3 |
+| `bytebool` | 1,000,000 | 0.08 | 0.10 | 0.81x | 1.6 | 1.3 |
+| `chunked` | 1,000,000 | 0.04 | 0.31 | 0.13x | 200.0 | 25.6 |
+| `chunked_bool` | 1,000,000 | 0.04 | 0.08 | 0.51x | 3.0 | 1.5 |
+| `chunked_decimal` | 1,000,000 | 0.04 | 0.33 | 0.11x | 228.6 | 24.1 |
+| `chunked_empty_chunks` | 1,000,000 | 0.04 | 0.32 | 0.13x | 192.8 | 25.2 |
+| `chunked_mixed_validity` | 1,000,000 | 0.17 | 0.34 | 0.50x | 47.7 | 23.9 |
+| `chunked_one_chunk` | 1,000,000 | 0.04 | 0.33 | 0.11x | 222.2 | 24.5 |
+| `chunked_varbinview` | 1,000,000 | 1.36 | 60.8 | 0.02x | 9.9 | 0.2 |
+| `constant` | 1,000,000 | 0.06 | 0.13 | 0.44x | 142.9 | 63.2 |
+| `datetimeparts` | 1,000,000 | 0.37 | 1.49 | 0.25x | 21.7 | 5.4 |
+| `decimal` | 1,000,000 | 0.04 | 0.36 | 0.11x | 202.5 | 22.0 |
+| `decimal_byte_parts` | 1,000,000 | 0.04 | 0.34 | 0.12x | 195.1 | 23.8 |
+| `dict` | 1,000,000 | 0.36 | 0.47 | 0.77x | 16.7 | 12.9 |
+| `dict_nullable_codes` | 1,000,000 | 0.56 | 2.06 | 0.27x | 10.0 | 2.7 |
+| `dict_nullable_values_nonnull_codes` | 1,000,000 | 0.45 | 0.69 | 0.65x | 12.8 | 8.3 |
+| `dict_u64_codes` | 1,000,000 | 0.38 | 0.57 | 0.67x | 15.6 | 10.5 |
+| `dict_u8_codes` | 1,000,000 | 0.35 | 0.39 | 0.90x | 23.1 | 20.8 |
+| `ext` | 1,000,000 | 0.04 | 0.28 | 0.14x | 207.8 | 28.4 |
+| `fastlanes_bitpacked` | 1,000,000 | 0.10 | 0.16 | 0.64x | 39.2 | 25.2 |
+| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,000,000 | 0.11 | 0.18 | 0.59x | 37.7 | 22.3 |
+| `fastlanes_delta` | 1,000,000 | 0.30 | 1.12 | 0.27x | 26.4 | 7.1 |
+| `fastlanes_for` | 1,000,000 | 0.18 | 0.44 | 0.40x | 45.2 | 18.3 |
+| `fastlanes_rle` | 1,000,000 | 0.26 | 0.50 | 0.52x | 15.3 | 7.9 |
+| `fixed_size_list` | 1,000,000 | 0.04 | 0.51 | 0.07x | 338.0 | 23.7 |
+| `fsst` | 1,000,000 | 3.37 | 5.17 | 0.65x | 16.6 | 10.8 |
+| `list` | 1,000,000 | 0.19 | 1.30 | 0.15x | 52.1 | 7.7 |
+| `listview` | 1,000,000 | 0.20 | 6.70 | 0.03x | 50.1 | 1.5 |
+| `map` | 1,000,000 | 0.41 | 42.7 | 0.01x | 48.3 | 0.5 |
+| `masked` | 1,000,000 | 0.04 | 0.18 | 0.22x | 104.4 | 23.4 |
+| `masked_all_invalid` | 1,000,000 | 0.05 | 0.19 | 0.28x | 76.2 | 21.3 |
+| `masked_all_valid` | 1,000,000 | 0.04 | 0.17 | 0.24x | 98.8 | 24.1 |
+| `null` | 1,000,000 | 0.03 | 0.04 | 0.67x | — | — |
+| `onpair` | 1,000,000 | 1.74 | 2.16 | 0.80x | 12.5 | 10.0 |
+| `parquet_variant` | 1,000,000 | 1.54 | 4.36 | 0.35x | 7.8 | 2.8 |
+| `pco` | 1,000,000 | 0.40 | 1.58 | 0.25x | 20.2 | 5.0 |
+| `primitive` | 1,000,000 | 0.04 | 0.30 | 0.12x | 210.5 | 26.3 |
+| `runend` | 1,000,000 | 0.14 | 0.15 | 0.92x | 28.5 | 26.1 |
+| `sequence` | 1,000,000 | 0.10 | 0.13 | 0.84x | 76.2 | 63.7 |
+| `sparse` | 1,000,000 | 0.09 | 0.15 | 0.59x | 44.9 | 26.7 |
+| `struct` | 1,000,000 | 0.22 | 43.8 | 0.00x | 68.8 | 0.3 |
+| `table_mixed` | 1,000,000 | 2.20 | 101.8 | 0.02x | 31.8 | 0.7 |
+| `table_wide` | 50,000 | 0.95 | 18.3 | 0.05x | 421.1 | 21.9 |
+| `varbin` | 1,000,000 | 1.01 | 66.7 | 0.02x | 15.8 | 0.2 |
+| `varbinview` | 1,000,000 | 0.85 | 60.8 | 0.01x | 15.8 | 0.2 |
+| `variant` | 1,000,000 | 0.04 | 0.06 | 0.62x | 421.1 | 260.2 |
+| `zigzag` | 1,000,000 | 0.12 | 0.30 | 0.39x | 33.9 | 13.2 |
+| `zstd` | 1,000,000 | 3.91 | 6.79 | 0.58x | 8.1 | 4.7 |
+| `zstd_buffers` | 1,000,000 | 0.34 | 2.64 | 0.13x | 23.9 | 3.0 |
+| `zstd_nullable` | 1,000,000 | 2.20 | 3.48 | 0.63x | 3.7 | 2.3 |
 
-Vorticity decoded 56 of 57 files in less time than Rust; the median ratio is 0.38x. At 1.00x or above: `fsst` 1.06x.
+Vorticity decoded 57 of 57 files in less time than Rust; the median ratio is 0.35x.
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew); commit f04c110 with uncommitted changes, 2026-09-24 22:34 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew); commit 7d8f1790, 2026-09-25 11:03 UTC.*
 <!-- /results: decoding -->
 
 <!-- results: in-process -->
@@ -281,29 +281,29 @@ holds to a ceiling; what each one reads and asks is in
 
 | axis | Vorticity, µs | Vortex Rust, µs | ratio | 95 % interval |
 |---|---:|---:|---:|---|
-| full scan | 547.2 | 1,790.6 | 0.31x | 0.298 to 0.313 |
-| projected scan, 1 of 5 columns | 84.1 | 239.4 | 0.35x | 0.345 to 0.361 |
-| open to first batch | 94.6 | 1,136.5 | 0.08x | 0.082 to 0.085 |
-| open, footer only | 31.8 | 51.9 | 0.62x | 0.602 to 0.632 |
-| read and write back | 5,519.2 | 14,013.0 | 0.39x | 0.380 to 0.396 |
-| filtered scan, 1% band | 85.6 | 403.8 | 0.21x | 0.207 to 0.218 |
-| filtered scan, half the rows | 168.5 | 680.7 | 0.25x | 0.246 to 0.255 |
-| scattered take, 64 of 64 splits | 337.5 | 1,649.3 | 0.21x | 0.204 to 0.208 |
-| key order, sorted column, 1% band | 74.5 | 109.5 | 0.71x | 0.673 to 0.730 |
-| key order, uncorrelated, 64 rows | 229.5 | 206.2 | 1.14x | 1.092 to 1.202 |
-| count, exact cover, 1% band | 175.2 | 275.4 | 0.61x | 0.591 to 0.651 |
-| filtered scan, string equality, fsst | 330.7 | 345.3 | 0.96x | 0.895 to 0.987 |
-| filtered scan, string prefix, fsst | 844.6 | 697.7 | 1.21x | 1.188 to 1.230 |
-| filtered scan, string equality, dict | 192.5 | 107.5 | 1.80x | 1.741 to 1.833 |
-| filtered scan, string prefix, dict | 180.6 | 132.4 | 1.36x | 1.317 to 1.416 |
-| filtered scan, band, runend | 171.5 | 199.0 | 0.82x | 0.771 to 0.850 |
-| filtered scan, band, bitpacked | 80.4 | 86.7 | 0.93x | 0.907 to 0.933 |
-| full scan, 1M table | 3,608.7 | 97,037.8 | 0.04x | 0.037 to 0.038 |
-| projected scan, 1 of 50 columns | 74.4 | 919.7 | 0.08x | 0.078 to 0.085 |
+| full scan | 503.9 | 1,807.2 | 0.28x | 0.271 to 0.283 |
+| projected scan, 1 of 5 columns | 116.2 | 273.8 | 0.41x | 0.398 to 0.422 |
+| open to first batch | 84.1 | 1,210.1 | 0.07x | 0.068 to 0.075 |
+| open, footer only | 33.1 | 54.2 | 0.61x | 0.602 to 0.626 |
+| read and write back | 5,468.6 | 14,701.4 | 0.37x | 0.368 to 0.381 |
+| filtered scan, 1% band | 87.3 | 404.3 | 0.21x | 0.213 to 0.219 |
+| filtered scan, half the rows | 158.6 | 678.7 | 0.23x | 0.228 to 0.238 |
+| scattered take, 64 of 64 splits | 349.4 | 1,681.6 | 0.21x | 0.204 to 0.210 |
+| key order, sorted column, 1% band | 76.5 | 110.1 | 0.69x | 0.684 to 0.709 |
+| key order, uncorrelated, 64 rows | 197.7 | 161.5 | 1.12x | 1.045 to 1.156 |
+| count, exact cover, 1% band | 126.3 | 235.5 | 0.53x | 0.503 to 0.554 |
+| filtered scan, string equality, fsst | 230.4 | 322.7 | 0.72x | 0.707 to 0.725 |
+| filtered scan, string prefix, fsst | 907.1 | 716.8 | 1.27x | 1.223 to 1.299 |
+| filtered scan, string equality, dict | 300.0 | 235.9 | 1.26x | 1.220 to 1.331 |
+| filtered scan, string prefix, dict | 176.6 | 138.2 | 1.28x | 1.258 to 1.304 |
+| filtered scan, band, runend | 79.6 | 84.3 | 0.95x | 0.896 to 0.986 |
+| filtered scan, band, bitpacked | 77.5 | 84.3 | 0.93x | 0.882 to 0.952 |
+| full scan, 1M table | 1,421.2 | 99,391.5 | 0.01x | 0.014 to 0.015 |
+| projected scan, 1 of 50 columns | 73.8 | 913.4 | 0.08x | 0.075 to 0.082 |
 
-Vorticity took less time on 15 of 19 axes. At 1.00x or above: filtered scan, string equality, dict (1.80x), filtered scan, string prefix, dict (1.36x), filtered scan, string prefix, fsst (1.21x), key order, uncorrelated, 64 rows (1.14x).
+Vorticity took less time on 15 of 19 axes. At 1.00x or above: filtered scan, string prefix, dict (1.28x), filtered scan, string prefix, fsst (1.27x), filtered scan, string equality, dict (1.26x), key order, uncorrelated, 64 rows (1.12x).
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit f04c110 with uncommitted changes, 2026-09-24 22:35 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:04 UTC.*
 <!-- /results: in-process -->
 
 <!-- results: take -->
@@ -316,67 +316,67 @@ at least 9 rounds after a 1-second warm-up per file, our side on the JIT, warmed
 
 | encoding | Vorticity, µs | Vortex Rust, µs | ratio |
 |---|---:|---:|---:|
-| `alp` | 139 | 622 | 0.23x |
-| `alp_no_patches` | 75 | 332 | 0.22x |
-| `alp_patched_no_chunk_offsets` | 77 | 331 | 0.24x |
-| `alprd` | 75 | 282 | 0.26x |
-| `bool` | 39 | 61 | 0.65x |
-| `bool_bit_offset3` | 41 | 61 | 0.66x |
-| `bool_bit_offset7` | 40 | 61 | 0.67x |
-| `bool_bit_offset_straddle` | 38 | 58 | 0.65x |
-| `bytebool` | 85 | 125 | 0.68x |
-| `chunked` | 45 | 302 | 0.15x |
-| `chunked_bool` | 48 | 99 | 0.47x |
-| `chunked_decimal` | 59 | 382 | 0.15x |
-| `chunked_empty_chunks` | 67 | 344 | 0.20x |
-| `chunked_mixed_validity` | 216 | 414 | 0.54x |
-| `chunked_one_chunk` | 71 | 351 | 0.21x |
-| `chunked_varbinview` | 2,631 | 55,914 | 0.05x |
-| `constant` | 40 | 52 | 0.79x |
-| `datetimeparts` | 66 | 620 | 0.10x |
-| `decimal` | 48 | 270 | 0.17x |
-| `decimal_byte_parts` | 41 | 269 | 0.15x |
-| `dict` | 53 | 158 | 0.32x |
-| `dict_nullable_codes` | 60 | 167 | 0.35x |
-| `dict_nullable_values_nonnull_codes` | 53 | 122 | 0.45x |
-| `dict_u64_codes` | 74 | 311 | 0.24x |
-| `dict_u8_codes` | 60 | 99 | 0.61x |
-| `ext` | 64 | 312 | 0.21x |
-| `fastlanes_bitpacked` | 42 | 87 | 0.48x |
-| `fastlanes_bitpacked_patched_no_chunk_offsets` | 56 | 112 | 0.49x |
-| `fastlanes_delta` | 106 | 1,028 | 0.10x |
-| `fastlanes_for` | 70 | 341 | 0.21x |
-| `fastlanes_rle` | 303 | 483 | 0.62x |
-| `fixed_size_list` | 78 | 527 | 0.15x |
-| `fsst` | 111 | 874 | 0.12x |
-| `list` | 204 | 492 | 0.41x |
-| `listview` | 533 | 6,444 | 0.08x |
-| `map` | 1,601 | 45,448 | 0.03x |
-| `masked` | 42 | 173 | 0.25x |
-| `masked_all_invalid` | 45 | 175 | 0.26x |
-| `masked_all_valid` | 44 | 175 | 0.25x |
-| `null` | 38 | 49 | 0.75x |
-| `onpair` | 144 | 497 | 0.31x |
-| `parquet_variant` | 99 | 527 | 0.18x |
-| `pco` | 398 | 1,570 | 0.25x |
-| `primitive` | 65 | 309 | 0.21x |
-| `runend` | 107 | 140 | 0.77x |
-| `sequence` | 49 | 57 | 0.85x |
-| `sparse` | 55 | 87 | 0.63x |
-| `struct` | 1,164 | 41,438 | 0.03x |
-| `table_mixed` | 3,793 | 101,394 | 0.04x |
-| `table_wide` | 89 | 1,075 | 0.08x |
-| `varbin` | 163 | 63,493 | 0.00x |
-| `varbinview` | 1,795 | 56,322 | 0.03x |
-| `variant` | 49 | 62 | 0.78x |
-| `zigzag` | 47 | 162 | 0.28x |
-| `zstd` | 861 | 6,755 | 0.13x |
-| `zstd_buffers` | 339 | 2,452 | 0.14x |
-| `zstd_nullable` | 1,149 | 3,308 | 0.35x |
+| `alp` | 142 | 648 | 0.21x |
+| `alp_no_patches` | 68 | 316 | 0.22x |
+| `alp_patched_no_chunk_offsets` | 79 | 336 | 0.24x |
+| `alprd` | 55 | 250 | 0.22x |
+| `bool` | 38 | 59 | 0.64x |
+| `bool_bit_offset3` | 39 | 63 | 0.63x |
+| `bool_bit_offset7` | 39 | 59 | 0.66x |
+| `bool_bit_offset_straddle` | 40 | 61 | 0.66x |
+| `bytebool` | 76 | 114 | 0.67x |
+| `chunked` | 66 | 335 | 0.20x |
+| `chunked_bool` | 44 | 98 | 0.44x |
+| `chunked_decimal` | 69 | 352 | 0.19x |
+| `chunked_empty_chunks` | 47 | 317 | 0.15x |
+| `chunked_mixed_validity` | 206 | 397 | 0.52x |
+| `chunked_one_chunk` | 65 | 316 | 0.21x |
+| `chunked_varbinview` | 1,028 | 56,316 | 0.02x |
+| `constant` | 41 | 53 | 0.77x |
+| `datetimeparts` | 92 | 682 | 0.14x |
+| `decimal` | 64 | 300 | 0.21x |
+| `decimal_byte_parts` | 66 | 324 | 0.21x |
+| `dict` | 52 | 156 | 0.33x |
+| `dict_nullable_codes` | 61 | 170 | 0.36x |
+| `dict_nullable_values_nonnull_codes` | 61 | 126 | 0.46x |
+| `dict_u64_codes` | 77 | 336 | 0.24x |
+| `dict_u8_codes` | 51 | 100 | 0.51x |
+| `ext` | 68 | 334 | 0.20x |
+| `fastlanes_bitpacked` | 42 | 88 | 0.47x |
+| `fastlanes_bitpacked_patched_no_chunk_offsets` | 52 | 107 | 0.49x |
+| `fastlanes_delta` | 109 | 1,001 | 0.11x |
+| `fastlanes_for` | 70 | 322 | 0.21x |
+| `fastlanes_rle` | 306 | 501 | 0.60x |
+| `fixed_size_list` | 45 | 429 | 0.10x |
+| `fsst` | 119 | 874 | 0.14x |
+| `list` | 195 | 497 | 0.40x |
+| `listview` | 278 | 6,390 | 0.04x |
+| `map` | 545 | 52,528 | 0.01x |
+| `masked` | 43 | 176 | 0.25x |
+| `masked_all_invalid` | 47 | 176 | 0.26x |
+| `masked_all_valid` | 45 | 170 | 0.26x |
+| `null` | 36 | 47 | 0.76x |
+| `onpair` | 149 | 521 | 0.28x |
+| `parquet_variant` | 86 | 480 | 0.19x |
+| `pco` | 421 | 1,615 | 0.26x |
+| `primitive` | 61 | 306 | 0.20x |
+| `runend` | 71 | 90 | 0.79x |
+| `sequence` | 44 | 54 | 0.82x |
+| `sparse` | 56 | 88 | 0.63x |
+| `struct` | 348 | 41,978 | 0.01x |
+| `table_mixed` | 1,477 | 100,835 | 0.01x |
+| `table_wide` | 94 | 997 | 0.09x |
+| `varbin` | 185 | 64,864 | 0.00x |
+| `varbinview` | 622 | 56,287 | 0.01x |
+| `variant` | 51 | 65 | 0.80x |
+| `zigzag` | 45 | 163 | 0.28x |
+| `zstd` | 848 | 6,746 | 0.13x |
+| `zstd_buffers` | 370 | 2,548 | 0.14x |
+| `zstd_nullable` | 1,172 | 3,362 | 0.35x |
 
-Vorticity took less time on 57 of 57 files; the median ratio is 0.25x.
+Vorticity took less time on 57 of 57 files; the median ratio is 0.24x.
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit f04c110 with uncommitted changes, 2026-09-24 22:36 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:05 UTC.*
 <!-- /results: take -->
 
 <!-- results: write -->
@@ -389,67 +389,67 @@ at least 9 rounds after a 1-second warm-up per file, our side on the JIT, warmed
 
 | encoding | Vorticity, µs | Vortex Rust, µs | ratio |
 |---|---:|---:|---:|
-| `alp` | 7,390 | 23,724 | 0.31x |
-| `alp_no_patches` | 7,695 | 16,440 | 0.46x |
-| `alp_patched_no_chunk_offsets` | 7,516 | 18,412 | 0.40x |
-| `alprd` | 6,970 | 18,796 | 0.38x |
-| `bool` | 139 | 494 | 0.28x |
-| `bool_bit_offset3` | 226 | 622 | 0.36x |
-| `bool_bit_offset7` | 211 | 610 | 0.35x |
-| `bool_bit_offset_straddle` | 222 | 626 | 0.36x |
-| `bytebool` | 180 | 547 | 0.33x |
-| `chunked` | 1,927 | 11,145 | 0.18x |
-| `chunked_bool` | 188 | 708 | 0.27x |
-| `chunked_decimal` | 1,432 | 13,761 | 0.09x |
-| `chunked_empty_chunks` | 1,342 | 10,794 | 0.12x |
-| `chunked_mixed_validity` | 5,437 | 10,640 | 0.51x |
-| `chunked_one_chunk` | 943 | 10,133 | 0.09x |
-| `chunked_varbinview` | 21,935 | 77,684 | 0.28x |
-| `constant` | 92 | 3,282 | 0.03x |
-| `datetimeparts` | 4,301 | 24,879 | 0.17x |
-| `decimal` | 1,305 | 12,815 | 0.10x |
-| `decimal_byte_parts` | 1,246 | 12,608 | 0.10x |
-| `dict` | 7,287 | 18,615 | 0.39x |
-| `dict_nullable_codes` | 12,696 | 17,811 | 0.71x |
-| `dict_nullable_values_nonnull_codes` | 12,309 | 16,998 | 0.73x |
-| `dict_u64_codes` | 7,380 | 18,953 | 0.39x |
-| `dict_u8_codes` | 14,057 | 18,116 | 0.78x |
-| `ext` | 962 | 19,478 | 0.05x |
-| `fastlanes_bitpacked` | 2,190 | 5,199 | 0.42x |
-| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,669 | 5,594 | 0.30x |
-| `fastlanes_delta` | 1,207 | 11,342 | 0.11x |
-| `fastlanes_for` | 3,140 | 6,159 | 0.50x |
-| `fastlanes_rle` | 1,354 | 5,117 | 0.24x |
-| `fixed_size_list` | 711 | 22,549 | 0.03x |
-| `fsst` | 54,994 | 264,067 | 0.21x |
-| `list` | 13,352 | 21,364 | 0.63x |
-| `listview` | 12,852 | 37,429 | 0.35x |
-| `map` | 24,296 | 94,002 | 0.26x |
-| `masked` | 7,989 | 13,226 | 0.61x |
-| `masked_all_invalid` | 217 | 856 | 0.26x |
-| `masked_all_valid` | 358 | 8,618 | 0.04x |
-| `null` | 64 | 310 | 0.21x |
-| `onpair` | 24,776 | 25,579 | 0.97x |
-| `pco` | 1,339 | 12,462 | 0.11x |
-| `primitive` | 984 | 10,772 | 0.09x |
-| `runend` | 869 | 5,738 | 0.15x |
-| `sequence` | 969 | 9,895 | 0.10x |
-| `sparse` | 953 | 2,824 | 0.34x |
-| `struct` | 29,086 | 127,551 | 0.23x |
-| `table_mixed` | 75,571 | 377,808 | 0.20x |
-| `table_wide` | 8,119 | 31,645 | 0.25x |
-| `varbin` | 37,995 | 246,435 | 0.15x |
-| `varbinview` | 21,319 | 77,534 | 0.28x |
-| `variant` | 102 | 1,543 | 0.07x |
-| `zigzag` | 2,604 | 10,376 | 0.25x |
-| `zstd` | 42,350 | 29,602 | 1.43x |
-| `zstd_buffers` | 3,032 | 7,326 | 0.42x |
-| `zstd_nullable` | 8,836 | 11,290 | 0.78x |
+| `alp` | 4,998 | 23,396 | 0.21x |
+| `alp_no_patches` | 5,354 | 16,518 | 0.32x |
+| `alp_patched_no_chunk_offsets` | 6,239 | 22,311 | 0.28x |
+| `alprd` | 7,725 | 20,539 | 0.38x |
+| `bool` | 139 | 502 | 0.27x |
+| `bool_bit_offset3` | 232 | 632 | 0.37x |
+| `bool_bit_offset7` | 216 | 625 | 0.35x |
+| `bool_bit_offset_straddle` | 215 | 618 | 0.35x |
+| `bytebool` | 183 | 545 | 0.33x |
+| `chunked` | 1,156 | 11,237 | 0.10x |
+| `chunked_bool` | 122 | 508 | 0.24x |
+| `chunked_decimal` | 1,281 | 13,944 | 0.09x |
+| `chunked_empty_chunks` | 774 | 10,677 | 0.07x |
+| `chunked_mixed_validity` | 3,393 | 10,627 | 0.32x |
+| `chunked_one_chunk` | 578 | 10,121 | 0.06x |
+| `chunked_varbinview` | 17,792 | 78,216 | 0.23x |
+| `constant` | 98 | 3,368 | 0.03x |
+| `datetimeparts` | 2,788 | 24,810 | 0.11x |
+| `decimal` | 1,212 | 12,967 | 0.09x |
+| `decimal_byte_parts` | 1,191 | 12,557 | 0.10x |
+| `dict` | 7,326 | 18,785 | 0.39x |
+| `dict_nullable_codes` | 10,637 | 18,333 | 0.58x |
+| `dict_nullable_values_nonnull_codes` | 10,216 | 17,020 | 0.60x |
+| `dict_u64_codes` | 7,254 | 19,586 | 0.37x |
+| `dict_u8_codes` | 13,950 | 18,312 | 0.76x |
+| `ext` | 615 | 19,870 | 0.03x |
+| `fastlanes_bitpacked` | 1,813 | 4,952 | 0.37x |
+| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,578 | 5,692 | 0.27x |
+| `fastlanes_delta` | 890 | 11,871 | 0.07x |
+| `fastlanes_for` | 2,065 | 5,777 | 0.36x |
+| `fastlanes_rle` | 1,179 | 5,053 | 0.23x |
+| `fixed_size_list` | 743 | 22,663 | 0.03x |
+| `fsst` | 31,883 | 258,448 | 0.12x |
+| `list` | 7,544 | 21,410 | 0.36x |
+| `listview` | 7,600 | 37,196 | 0.20x |
+| `map` | 18,318 | 92,796 | 0.20x |
+| `masked` | 3,959 | 13,100 | 0.30x |
+| `masked_all_invalid` | 222 | 871 | 0.25x |
+| `masked_all_valid` | 400 | 8,963 | 0.04x |
+| `null` | 61 | 309 | 0.20x |
+| `onpair` | 19,687 | 25,628 | 0.77x |
+| `pco` | 909 | 12,102 | 0.08x |
+| `primitive` | 572 | 9,896 | 0.06x |
+| `runend` | 840 | 5,790 | 0.14x |
+| `sequence` | 623 | 9,954 | 0.06x |
+| `sparse` | 772 | 2,820 | 0.28x |
+| `struct` | 27,675 | 129,101 | 0.21x |
+| `table_mixed` | 52,589 | 381,981 | 0.14x |
+| `table_wide` | 5,036 | 32,244 | 0.16x |
+| `varbin` | 32,594 | 245,670 | 0.13x |
+| `varbinview` | 17,034 | 78,470 | 0.22x |
+| `variant` | 100 | 1,543 | 0.06x |
+| `zigzag` | 1,814 | 10,352 | 0.18x |
+| `zstd` | 25,751 | 29,888 | 0.86x |
+| `zstd_buffers` | 2,392 | 7,501 | 0.32x |
+| `zstd_nullable` | 5,585 | 10,675 | 0.52x |
 
-Vorticity took less time on 55 of 56 files; the median ratio is 0.27x. At 1.00x or above: `zstd` 1.43x.
+Vorticity took less time on 56 of 56 files; the median ratio is 0.22x.
 Rust's writer declines `parquet_variant`, which is left out.
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit f04c110 with uncommitted changes, 2026-09-24 22:38 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:07 UTC.*
 <!-- /results: write -->
 
 <!-- results: tradeoffs -->
@@ -473,27 +473,27 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| a sequence | Sequence x77 | 0.00 | 10 | 3.3 | 0.33 |  |
-| sorted runs of 1 000 | RunEnd x77 | 0.01 | 15 | 3.4 | 0.45 |  |
-| timestamps (ms, increasing, jittered) | BitPacked x77 | 3.38 | 37 | 5.2 | 0.34 | Smallest: Zstd x77, 2.07 B/value, scan 58.4 ms, take 46.23 ms; reads faster below 246 MB/s |
-| random in 0..999 | BitPacked x77 | 1.25 | 29 | 3.7 | 0.37 |  |
-| 16 distinct, random order | Dictionary x77 | 0.51 | 67 | 5.0 | 0.41 |  |
-| 100 003 distinct, repeating | BitPacked x77 | 4.63 | 34 | 4.0 | 0.39 | Auto, 16 MiB chunks: Dictionary x5, 2.36 B/value, scan 5.6 ms, take 0.47 ms; reads faster below 14,528 MB/s |
-| uniform 64-bit | Canonical x77 | 8.00 | 21 | 2.5 | 0.31 |  |
-| random in 0..999, 10 % null | BitPacked x82 | 1.38 | 86 | 5.1 | 0.38 | hint Dictionary: Dictionary x82, 1.27 B/value, scan 7.4 ms, take 0.58 ms; reads faster below 495 MB/s |
+| a sequence | Sequence x77 | 0.00 | 5 | 3.3 | 0.36 |  |
+| sorted runs of 1 000 | RunEnd x77 | 0.01 | 15 | 3.7 | 0.49 |  |
+| timestamps (ms, increasing, jittered) | BitPacked x77 | 3.38 | 28 | 5.5 | 0.40 | Smallest: Zstd x77, 2.07 B/value, scan 58.8 ms, take 47.07 ms; reads faster below 246 MB/s |
+| random in 0..999 | BitPacked x77 | 1.25 | 24 | 3.9 | 0.34 |  |
+| 16 distinct, random order | Dictionary x77 | 0.51 | 67 | 5.3 | 0.43 |  |
+| 100 003 distinct, repeating | BitPacked x77 | 4.63 | 32 | 4.3 | 0.48 | Auto, 16 MiB chunks: Dictionary x5, 2.36 B/value, scan 5.8 ms, take 0.46 ms; reads faster below 15,587 MB/s |
+| uniform 64-bit | Canonical x77 | 8.00 | 20 | 2.6 | 0.34 |  |
+| random in 0..999, 10 % null | BitPacked x82 | 1.38 | 51 | 5.2 | 0.43 | hint Dictionary: Dictionary x82, 1.27 B/value, scan 6.9 ms, take 0.56 ms; reads faster below 661 MB/s |
 
 <details><summary>a sequence: every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Sequence x77 | 38,836 | 0.00 | 10 | 3.3 | 0.33 |  |
-| Fastest | Sequence x77 | 38,836 | 0.00 | 10 | 3.3 | 0.36 | same |
-| Smallest | Sequence x77 | 38,836 | 0.00 | 10 | 3.3 | 0.34 | same |
-| None | Canonical x77 | 80,043,716 | 8.00 | 22 | 2.5 | 0.34 | reads faster above 93,072 MB/s |
-| hint Dictionary | Sequence x77 | 38,836 | 0.00 | 93 | 3.3 | 0.38 | same |
-| hint BitPacked | Sequence x77 | 38,836 | 0.00 | 10 | 3.2 | 0.35 | same |
-| hint RunEnd | Sequence x77 | 38,836 | 0.00 | 10 | 3.4 | 0.36 | same |
-| hint Zstd | Sequence x77 | 38,836 | 0.00 | 10 | 3.2 | 0.34 | same |
+| Auto | Sequence x77 | 38,836 | 0.00 | 5 | 3.3 | 0.36 |  |
+| Fastest | Sequence x77 | 38,836 | 0.00 | 5 | 3.3 | 0.36 | same |
+| Smallest | Sequence x77 | 38,836 | 0.00 | 5 | 3.4 | 0.37 | same |
+| None | Canonical x77 | 80,043,716 | 8.00 | 20 | 2.6 | 0.36 | reads faster above 120,435 MB/s |
+| hint Dictionary | Sequence x77 | 38,836 | 0.00 | 90 | 3.5 | 0.37 | reads slower at any throughput |
+| hint BitPacked | Sequence x77 | 38,836 | 0.00 | 5 | 3.4 | 0.36 | same |
+| hint RunEnd | Sequence x77 | 38,836 | 0.00 | 5 | 3.4 | 0.38 | same |
+| hint Zstd | Sequence x77 | 38,836 | 0.00 | 5 | 3.4 | 0.36 | same |
 
 </details>
 
@@ -501,14 +501,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | RunEnd x77 | 87,996 | 0.01 | 15 | 3.4 | 0.45 |  |
-| Fastest | RunEnd x77 | 87,996 | 0.01 | 15 | 3.8 | 0.53 | reads slower at any throughput |
-| Smallest | RunEnd x76, Zstd x1 | 87,964 | 0.01 | 30 | 3.4 | 0.48 | same |
-| None | Canonical x77 | 80,043,708 | 8.00 | 24 | 2.4 | 0.33 | reads faster above 80,084 MB/s |
-| hint Dictionary | Dictionary x77 | 1,449,884 | 0.14 | 47 | 6.5 | 1.93 | reads slower at any throughput |
-| hint BitPacked | BitPacked x77 | 10,034,452 | 1.00 | 27 | 4.9 | 0.35 | reads slower at any throughput |
-| hint RunEnd | RunEnd x77 | 87,996 | 0.01 | 23 | 4.3 | 0.64 | reads slower at any throughput |
-| hint Zstd | Zstd x77 | 136,620 | 0.01 | 22 | 22.1 | 18.75 | reads slower at any throughput |
+| Auto | RunEnd x77 | 87,996 | 0.01 | 15 | 3.7 | 0.49 |  |
+| Fastest | RunEnd x77 | 87,996 | 0.01 | 15 | 3.6 | 0.51 | same |
+| Smallest | RunEnd x76, Zstd x1 | 87,964 | 0.01 | 28 | 3.6 | 0.49 | same |
+| None | Canonical x77 | 80,043,708 | 8.00 | 26 | 2.6 | 0.35 | reads faster above 72,568 MB/s |
+| hint Dictionary | Dictionary x77 | 1,449,884 | 0.14 | 47 | 6.8 | 2.03 | reads slower at any throughput |
+| hint BitPacked | BitPacked x77 | 10,034,452 | 1.00 | 25 | 5.1 | 0.37 | reads slower at any throughput |
+| hint RunEnd | RunEnd x77 | 87,996 | 0.01 | 15 | 3.7 | 0.47 | same |
+| hint Zstd | Zstd x77 | 136,620 | 0.01 | 15 | 20.3 | 15.53 | reads slower at any throughput |
 
 </details>
 
@@ -516,14 +516,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x77 | 33,795,164 | 3.38 | 37 | 5.2 | 0.34 |  |
-| Fastest | BitPacked x77 | 33,795,164 | 3.38 | 37 | 5.2 | 0.37 | same |
-| Smallest | Zstd x77 | 20,700,788 | 2.07 | 188 | 58.4 | 46.23 | reads faster below 246 MB/s |
-| None | Canonical x77 | 80,043,716 | 8.00 | 25 | 2.5 | 0.34 | reads faster above 16,783 MB/s |
-| hint Dictionary | BitPacked x77 | 33,795,164 | 3.38 | 120 | 5.2 | 0.37 | same |
-| hint BitPacked | BitPacked x77 | 33,795,164 | 3.38 | 37 | 5.1 | 0.41 | same |
-| hint RunEnd | BitPacked x77 | 33,795,164 | 3.38 | 47 | 5.0 | 0.30 | same |
-| hint Zstd | Zstd x77 | 20,700,788 | 2.07 | 130 | 57.9 | 45.56 | reads faster below 249 MB/s |
+| Auto | BitPacked x77 | 33,795,164 | 3.38 | 28 | 5.5 | 0.40 |  |
+| Fastest | BitPacked x77 | 33,795,164 | 3.38 | 27 | 5.3 | 0.44 | same |
+| Smallest | Zstd x77 | 20,700,788 | 2.07 | 171 | 58.8 | 47.07 | reads faster below 246 MB/s |
+| None | Canonical x77 | 80,043,716 | 8.00 | 24 | 2.6 | 0.30 | reads faster above 15,483 MB/s |
+| hint Dictionary | BitPacked x77 | 33,795,164 | 3.38 | 112 | 5.3 | 0.40 | same |
+| hint BitPacked | BitPacked x77 | 33,795,164 | 3.38 | 31 | 5.4 | 0.39 | same |
+| hint RunEnd | BitPacked x77 | 33,795,164 | 3.38 | 39 | 5.4 | 0.40 | same |
+| hint Zstd | Zstd x77 | 20,700,788 | 2.07 | 134 | 59.7 | 47.08 | reads faster below 242 MB/s |
 
 </details>
 
@@ -531,14 +531,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x77 | 12,544,276 | 1.25 | 29 | 3.7 | 0.37 |  |
-| Fastest | BitPacked x77 | 12,544,276 | 1.25 | 29 | 3.5 | 0.33 | same |
-| Smallest | BitPacked x77 | 12,544,276 | 1.25 | 184 | 3.7 | 0.38 | same |
-| None | Canonical x77 | 80,043,708 | 8.00 | 19 | 2.5 | 0.33 | reads faster above 56,231 MB/s |
-| hint Dictionary | Dictionary x77 | 12,652,716 | 1.27 | 91 | 5.3 | 0.54 | reads slower at any throughput |
-| hint BitPacked | BitPacked x77 | 12,544,276 | 1.25 | 29 | 3.6 | 0.35 | same |
-| hint RunEnd | BitPacked x77 | 12,544,276 | 1.25 | 29 | 3.6 | 0.34 | same |
-| hint Zstd | Zstd x77 | 20,141,164 | 2.01 | 169 | 82.7 | 66.66 | reads slower at any throughput |
+| Auto | BitPacked x77 | 12,544,276 | 1.25 | 24 | 3.9 | 0.34 |  |
+| Fastest | BitPacked x77 | 12,544,276 | 1.25 | 24 | 4.0 | 0.36 | same |
+| Smallest | BitPacked x77 | 12,544,276 | 1.25 | 183 | 3.9 | 0.33 | same |
+| None | Canonical x77 | 80,043,708 | 8.00 | 20 | 2.6 | 0.34 | reads faster above 52,345 MB/s |
+| hint Dictionary | Dictionary x77 | 12,652,716 | 1.27 | 95 | 5.6 | 0.51 | reads slower at any throughput |
+| hint BitPacked | BitPacked x77 | 12,544,276 | 1.25 | 24 | 3.9 | 0.37 | same |
+| hint RunEnd | BitPacked x77 | 12,544,276 | 1.25 | 22 | 3.7 | 0.30 | same |
+| hint Zstd | Zstd x77 | 20,141,164 | 2.01 | 169 | 84.6 | 67.94 | reads slower at any throughput |
 
 </details>
 
@@ -546,15 +546,15 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x77 | 5,063,740 | 0.51 | 67 | 5.0 | 0.41 |  |
-| Fastest | Dictionary x77 | 5,063,740 | 0.51 | 66 | 5.1 | 0.41 | same |
-| Smallest | Dictionary x77 | 5,063,740 | 0.51 | 187 | 5.1 | 0.41 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 20 | 2.5 | 0.35 | reads faster above 29,223 MB/s |
-| hint Dictionary | Dictionary x77 | 5,063,740 | 0.51 | 65 | 5.0 | 0.40 | same |
-| hint BitPacked | Dictionary x77 | 5,063,740 | 0.51 | 114 | 5.1 | 0.42 | same |
-| hint RunEnd | Dictionary x77 | 5,063,740 | 0.51 | 101 | 5.1 | 0.39 | same |
-| hint Zstd | Zstd x77 | 10,539,388 | 1.05 | 120 | 64.9 | 52.18 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 5,032,924 | 0.50 | 73 | 5.1 | 0.44 | same |
+| Auto | Dictionary x77 | 5,063,740 | 0.51 | 67 | 5.3 | 0.43 |  |
+| Fastest | Dictionary x77 | 5,063,740 | 0.51 | 72 | 6.2 | 0.57 | reads slower at any throughput |
+| Smallest | Dictionary x77 | 5,063,740 | 0.51 | 211 | 6.2 | 0.56 | reads slower at any throughput |
+| None | Canonical x77 | 80,043,724 | 8.00 | 26 | 3.2 | 0.43 | reads faster above 37,007 MB/s |
+| hint Dictionary | Dictionary x77 | 5,063,740 | 0.51 | 79 | 5.7 | 0.44 | reads slower at any throughput |
+| hint BitPacked | Dictionary x77 | 5,063,740 | 0.51 | 104 | 5.2 | 0.35 | same |
+| hint RunEnd | Dictionary x77 | 5,063,740 | 0.51 | 90 | 5.3 | 0.42 | same |
+| hint Zstd | Zstd x77 | 10,539,388 | 1.05 | 119 | 66.2 | 53.45 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 5,032,924 | 0.50 | 74 | 5.3 | 0.39 | same |
 
 </details>
 
@@ -562,15 +562,15 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x77 | 46,295,644 | 4.63 | 34 | 4.0 | 0.39 |  |
-| Fastest | BitPacked x77 | 46,295,644 | 4.63 | 35 | 4.0 | 0.45 | same |
-| Smallest | BitPacked x77 | 46,295,644 | 4.63 | 146 | 3.9 | 0.36 | same |
-| None | Canonical x77 | 80,043,716 | 8.00 | 19 | 2.5 | 0.34 | reads faster above 21,858 MB/s |
-| hint Dictionary | BitPacked x77 | 46,295,644 | 4.63 | 111 | 3.9 | 0.39 | same |
-| hint BitPacked | BitPacked x77 | 46,295,644 | 4.63 | 34 | 3.9 | 0.37 | same |
-| hint RunEnd | BitPacked x77 | 46,295,644 | 4.63 | 55 | 3.9 | 0.31 | same |
-| hint Zstd | Zstd x77 | 51,815,860 | 5.18 | 107 | 63.7 | 50.94 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 23,603,540 | 2.36 | 94 | 5.6 | 0.47 | reads faster below 14,528 MB/s |
+| Auto | BitPacked x77 | 46,295,644 | 4.63 | 32 | 4.3 | 0.48 |  |
+| Fastest | BitPacked x77 | 46,295,644 | 4.63 | 29 | 4.2 | 0.40 | same |
+| Smallest | BitPacked x77 | 46,295,644 | 4.63 | 143 | 4.1 | 0.39 | same |
+| None | Canonical x77 | 80,043,716 | 8.00 | 19 | 2.6 | 0.37 | reads faster above 19,252 MB/s |
+| hint Dictionary | BitPacked x77 | 46,295,644 | 4.63 | 111 | 4.2 | 0.39 | same |
+| hint BitPacked | BitPacked x77 | 46,295,644 | 4.63 | 29 | 4.1 | 0.41 | reads faster at any throughput |
+| hint RunEnd | BitPacked x77 | 46,295,644 | 4.63 | 49 | 4.1 | 0.39 | same |
+| hint Zstd | Zstd x77 | 51,815,860 | 5.18 | 104 | 67.7 | 53.18 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 23,603,540 | 2.36 | 92 | 5.8 | 0.46 | reads faster below 15,587 MB/s |
 
 </details>
 
@@ -578,14 +578,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Canonical x77 | 80,043,724 | 8.00 | 21 | 2.5 | 0.31 |  |
-| Fastest | Canonical x77 | 80,043,724 | 8.00 | 21 | 2.5 | 0.32 | same |
-| Smallest | Canonical x77 | 80,043,724 | 8.00 | 86 | 2.5 | 0.29 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 20 | 2.5 | 0.33 | same |
-| hint Dictionary | Canonical x77 | 80,043,724 | 8.00 | 129 | 2.4 | 0.32 | same |
-| hint BitPacked | Canonical x77 | 80,043,724 | 8.00 | 99 | 2.5 | 0.34 | same |
-| hint RunEnd | Canonical x77 | 80,043,724 | 8.00 | 85 | 2.4 | 0.33 | same |
-| hint Zstd | Canonical x77 | 80,043,724 | 8.00 | 95 | 2.5 | 0.35 | same |
+| Auto | Canonical x77 | 80,043,724 | 8.00 | 20 | 2.6 | 0.34 |  |
+| Fastest | Canonical x77 | 80,043,724 | 8.00 | 23 | 2.7 | 0.36 | same |
+| Smallest | Canonical x77 | 80,043,724 | 8.00 | 77 | 2.6 | 0.34 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.6 | 0.38 | same |
+| hint Dictionary | Canonical x77 | 80,043,724 | 8.00 | 126 | 2.6 | 0.33 | same |
+| hint BitPacked | Canonical x77 | 80,043,724 | 8.00 | 84 | 2.7 | 0.36 | same |
+| hint RunEnd | Canonical x77 | 80,043,724 | 8.00 | 78 | 2.6 | 0.36 | same |
+| hint Zstd | Canonical x77 | 80,043,724 | 8.00 | 88 | 2.6 | 0.34 | same |
 
 </details>
 
@@ -593,14 +593,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x82 | 13,800,452 | 1.38 | 86 | 5.1 | 0.38 |  |
-| Fastest | BitPacked x82 | 13,800,452 | 1.38 | 86 | 5.1 | 0.39 | same |
-| Smallest | BitPacked x82 | 13,800,452 | 1.38 | 253 | 5.1 | 0.44 | same |
-| None | Canonical x82 | 81,294,660 | 8.13 | 48 | 2.8 | 0.40 | reads faster above 28,581 MB/s |
-| hint Dictionary | Dictionary x82 | 12,676,388 | 1.27 | 119 | 7.4 | 0.58 | reads faster below 495 MB/s |
-| hint BitPacked | BitPacked x82 | 13,800,452 | 1.38 | 90 | 5.4 | 0.45 | same |
-| hint RunEnd | BitPacked x82 | 13,800,452 | 1.38 | 89 | 5.3 | 0.42 | same |
-| hint Zstd | Zstd x82 | 19,283,932 | 1.93 | 203 | 83.9 | 61.05 | reads slower at any throughput |
+| Auto | BitPacked x82 | 13,800,452 | 1.38 | 51 | 5.2 | 0.43 |  |
+| Fastest | BitPacked x82 | 13,800,452 | 1.38 | 50 | 5.3 | 0.42 | same |
+| Smallest | BitPacked x82 | 13,800,452 | 1.38 | 216 | 5.4 | 0.45 | same |
+| None | Canonical x82 | 81,294,660 | 8.13 | 41 | 2.7 | 0.40 | reads faster above 26,880 MB/s |
+| hint Dictionary | Dictionary x82 | 12,676,388 | 1.27 | 111 | 6.9 | 0.56 | reads faster below 661 MB/s |
+| hint BitPacked | BitPacked x82 | 13,800,452 | 1.38 | 50 | 5.2 | 0.41 | same |
+| hint RunEnd | BitPacked x82 | 13,800,452 | 1.38 | 50 | 5.3 | 0.41 | same |
+| hint Zstd | Zstd x82 | 19,283,932 | 1.93 | 199 | 81.7 | 62.20 | reads slower at any throughput |
 
 </details>
 
@@ -608,23 +608,23 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| prices (2 decimals) | Alp x77 | 2.50 | 80 | 6.4 | 0.41 |  |
-| 16 distinct, random order | Dictionary x77 | 0.51 | 54 | 5.1 | 0.40 |  |
-| 1 000 distinct prices | Dictionary x77 | 1.28 | 99 | 5.5 | 0.52 |  |
-| 100 003 distinct, repeating | Zstd x77 | 1.69 | 135 | 60.0 | 48.29 | Auto, 16 MiB chunks: Dictionary x5, 2.21 B/value, scan 8.9 ms, take 3.72 ms; reads faster above 102 MB/s; None: Canonical x77, 8.00 B/value, scan 2.5 ms, take 0.33 ms; reads faster above 1,099 MB/s |
-| uniform in [0, 1) | AlpRd x77 | 6.91 | 57 | 8.2 | 0.60 | None: Canonical x77, 8.00 B/value, scan 2.6 ms, take 0.34 ms; reads faster above 1,944 MB/s |
+| prices (2 decimals) | Alp x77 | 2.50 | 40 | 6.5 | 0.42 |  |
+| 16 distinct, random order | Dictionary x77 | 0.51 | 53 | 5.3 | 0.43 |  |
+| 1 000 distinct prices | Dictionary x77 | 1.28 | 96 | 5.7 | 0.55 |  |
+| 100 003 distinct, repeating | Zstd x77 | 1.69 | 136 | 60.6 | 48.22 | Auto, 16 MiB chunks: Dictionary x5, 2.21 B/value, scan 8.5 ms, take 3.25 ms; reads faster above 100 MB/s; None: Canonical x77, 8.00 B/value, scan 2.6 ms, take 0.34 ms; reads faster above 1,089 MB/s |
+| uniform in [0, 1) | AlpRd x77 | 6.91 | 53 | 8.4 | 0.61 | None: Canonical x77, 8.00 B/value, scan 2.6 ms, take 0.34 ms; reads faster above 1,915 MB/s |
 
 <details><summary>prices (2 decimals): every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Alp x77 | 25,049,724 | 2.50 | 80 | 6.4 | 0.41 |  |
-| Fastest | Alp x77 | 25,049,724 | 2.50 | 80 | 6.3 | 0.42 | same |
-| Smallest | Alp x77 | 25,049,724 | 2.50 | 363 | 6.4 | 0.41 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 20 | 2.5 | 0.32 | reads faster above 14,188 MB/s |
-| hint Dictionary | Alp x77 | 25,049,724 | 2.50 | 197 | 6.4 | 0.40 | same |
-| hint Alp | Alp x77 | 25,049,724 | 2.50 | 79 | 6.8 | 0.39 | reads slower at any throughput |
-| hint Zstd | Zstd x77 | 41,240,252 | 4.12 | 249 | 80.4 | 64.99 | reads slower at any throughput |
+| Auto | Alp x77 | 25,049,724 | 2.50 | 40 | 6.5 | 0.42 |  |
+| Fastest | Alp x77 | 25,049,724 | 2.50 | 40 | 6.5 | 0.49 | same |
+| Smallest | Alp x77 | 25,049,724 | 2.50 | 327 | 6.5 | 0.44 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.6 | 0.35 | reads faster above 13,950 MB/s |
+| hint Dictionary | Alp x77 | 25,049,724 | 2.50 | 156 | 6.5 | 0.43 | same |
+| hint Alp | Alp x77 | 25,049,724 | 2.50 | 46 | 6.6 | 0.42 | same |
+| hint Zstd | Zstd x77 | 41,240,252 | 4.12 | 250 | 82.1 | 65.78 | reads slower at any throughput |
 
 </details>
 
@@ -632,14 +632,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x77 | 5,063,740 | 0.51 | 54 | 5.1 | 0.40 |  |
-| Fastest | Dictionary x77 | 5,063,740 | 0.51 | 54 | 5.1 | 0.42 | same |
-| Smallest | Dictionary x77 | 5,063,740 | 0.51 | 205 | 5.1 | 0.42 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.5 | 0.35 | reads faster above 28,961 MB/s |
-| hint Dictionary | Dictionary x77 | 5,063,740 | 0.51 | 54 | 5.2 | 0.45 | same |
-| hint Alp | Dictionary x77 | 5,063,740 | 0.51 | 126 | 5.2 | 0.41 | same |
-| hint Zstd | Zstd x77 | 10,545,660 | 1.05 | 122 | 65.3 | 52.78 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 5,032,924 | 0.50 | 62 | 5.1 | 0.39 | same |
+| Auto | Dictionary x77 | 5,063,740 | 0.51 | 53 | 5.3 | 0.43 |  |
+| Fastest | Dictionary x77 | 5,063,740 | 0.51 | 53 | 5.3 | 0.39 | same |
+| Smallest | Dictionary x77 | 5,063,740 | 0.51 | 191 | 5.2 | 0.47 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 22 | 2.6 | 0.34 | reads faster above 27,746 MB/s |
+| hint Dictionary | Dictionary x77 | 5,063,740 | 0.51 | 52 | 5.3 | 0.44 | same |
+| hint Alp | Dictionary x77 | 5,063,740 | 0.51 | 107 | 5.4 | 0.41 | same |
+| hint Zstd | Zstd x77 | 10,545,660 | 1.05 | 122 | 65.8 | 52.46 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 5,032,924 | 0.50 | 60 | 5.2 | 0.39 | same |
 
 </details>
 
@@ -647,14 +647,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x77 | 12,756,252 | 1.28 | 99 | 5.5 | 0.52 |  |
-| Fastest | Dictionary x77 | 12,756,252 | 1.28 | 99 | 5.3 | 0.54 | same |
-| Smallest | Dictionary x77 | 12,756,252 | 1.28 | 310 | 5.5 | 0.54 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.5 | 0.32 | reads faster above 22,452 MB/s |
-| hint Dictionary | Dictionary x77 | 12,756,252 | 1.28 | 98 | 5.5 | 0.56 | same |
-| hint Alp | Alp x77 | 12,756,252 | 1.28 | 151 | 6.9 | 0.57 | reads slower at any throughput |
-| hint Zstd | Zstd x77 | 26,073,404 | 2.61 | 200 | 68.2 | 54.12 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 12,545,724 | 1.25 | 94 | 5.5 | 0.49 | reads faster at any throughput |
+| Auto | Dictionary x77 | 12,756,252 | 1.28 | 96 | 5.7 | 0.55 |  |
+| Fastest | Dictionary x77 | 12,756,252 | 1.28 | 99 | 5.6 | 0.58 | same |
+| Smallest | Dictionary x77 | 12,756,252 | 1.28 | 298 | 5.6 | 0.52 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 18 | 2.6 | 0.33 | reads faster above 21,919 MB/s |
+| hint Dictionary | Dictionary x77 | 12,756,252 | 1.28 | 96 | 5.7 | 0.55 | same |
+| hint Alp | Alp x77 | 12,756,252 | 1.28 | 109 | 7.0 | 0.56 | reads slower at any throughput |
+| hint Zstd | Zstd x77 | 26,073,404 | 2.61 | 205 | 69.7 | 55.19 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 12,545,724 | 1.25 | 92 | 5.6 | 0.50 | reads faster at any throughput |
 
 </details>
 
@@ -662,14 +662,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Zstd x77 | 16,909,884 | 1.69 | 135 | 60.0 | 48.29 |  |
-| Fastest | Zstd x77 | 16,909,884 | 1.69 | 135 | 60.3 | 48.11 | same |
-| Smallest | Zstd x77 | 16,909,884 | 1.69 | 220 | 59.9 | 48.15 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 18 | 2.5 | 0.33 | reads faster above 1,099 MB/s |
-| hint Dictionary | Zstd x77 | 16,909,884 | 1.69 | 254 | 60.3 | 48.07 | same |
-| hint Alp | Zstd x77 | 16,909,884 | 1.69 | 238 | 59.9 | 47.68 | same |
-| hint Zstd | Zstd x77 | 16,909,884 | 1.69 | 135 | 60.3 | 47.70 | same |
-| Auto, 16 MiB chunks | Dictionary x5 | 22,129,980 | 2.21 | 104 | 8.9 | 3.72 | reads faster above 102 MB/s |
+| Auto | Zstd x77 | 16,909,884 | 1.69 | 136 | 60.6 | 48.22 |  |
+| Fastest | Zstd x77 | 16,909,884 | 1.69 | 136 | 60.7 | 48.56 | same |
+| Smallest | Zstd x77 | 16,909,884 | 1.69 | 210 | 60.8 | 48.50 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 18 | 2.6 | 0.34 | reads faster above 1,089 MB/s |
+| hint Dictionary | Zstd x77 | 16,909,884 | 1.69 | 242 | 61.1 | 48.63 | same |
+| hint Alp | Zstd x77 | 16,909,884 | 1.69 | 212 | 60.9 | 48.28 | same |
+| hint Zstd | Zstd x77 | 16,909,884 | 1.69 | 135 | 61.0 | 48.55 | same |
+| Auto, 16 MiB chunks | Dictionary x5 | 22,129,980 | 2.21 | 105 | 8.5 | 3.25 | reads faster above 100 MB/s |
 
 </details>
 
@@ -677,13 +677,13 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | AlpRd x77 | 69,054,372 | 6.91 | 57 | 8.2 | 0.60 |  |
-| Fastest | AlpRd x77 | 69,054,372 | 6.91 | 55 | 8.3 | 0.61 | same |
-| Smallest | AlpRd x77 | 69,054,372 | 6.91 | 183 | 8.2 | 0.61 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.6 | 0.34 | reads faster above 1,944 MB/s |
-| hint Dictionary | AlpRd x77 | 69,054,372 | 6.91 | 226 | 8.2 | 0.63 | same |
-| hint Alp | AlpRd x77 | 69,054,372 | 6.91 | 211 | 8.2 | 0.63 | same |
-| hint Zstd | AlpRd x77 | 69,054,372 | 6.91 | 243 | 8.2 | 0.60 | same |
+| Auto | AlpRd x77 | 69,054,372 | 6.91 | 53 | 8.4 | 0.61 |  |
+| Fastest | AlpRd x77 | 69,054,372 | 6.91 | 52 | 8.6 | 0.76 | same |
+| Smallest | AlpRd x77 | 69,054,372 | 6.91 | 170 | 8.3 | 0.64 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.6 | 0.34 | reads faster above 1,915 MB/s |
+| hint Dictionary | AlpRd x77 | 69,054,372 | 6.91 | 214 | 8.4 | 0.61 | same |
+| hint Alp | AlpRd x77 | 69,054,372 | 6.91 | 186 | 8.3 | 0.61 | same |
+| hint Zstd | AlpRd x77 | 69,054,372 | 6.91 | 231 | 8.4 | 0.77 | same |
 
 </details>
 
@@ -691,23 +691,23 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| 16 cities, random order | Dictionary x175 | 0.51 | 237 | 8.3 | 0.67 |  |
-| 10 000 distinct ids | Dictionary x306 | 2.54 | 784 | 37.2 | 28.76 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 12.0 ms, take 3.31 ms; reads faster at any throughput; hint Fsst: Fsst x306, 9.06 B/value, scan 33.2 ms, take 0.96 ms; reads faster above 16,217 MB/s |
-| 10 000 distinct ids, 10 % null | Dictionary x306 | 2.45 | 782 | 41.1 | 30.79 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 13.3 ms, take 3.36 ms; reads faster at any throughput; hint Fsst: Fsst x306, 8.80 B/value, scan 38.2 ms, take 1.00 ms; reads faster above 21,425 MB/s |
-| unique UUIDs | Zstd x611 | 20.61 | 1384 | 310.4 | 304.24 | hint Fsst: Fsst x611, 24.91 B/value, scan 110.4 ms, take 1.84 ms; reads faster above 215 MB/s |
-| log lines (~100 B) | Zstd x1221 | 13.71 | 1469 | 412.1 | 333.67 | hint Fsst: Fsst x1221, 23.96 B/value, scan 124.7 ms, take 2.63 ms; reads faster above 357 MB/s |
+| 16 cities, random order | Dictionary x175 | 0.51 | 233 | 8.6 | 0.66 |  |
+| 10 000 distinct ids | Dictionary x306 | 2.54 | 601 | 37.3 | 28.90 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 12.2 ms, take 3.34 ms; reads faster at any throughput; hint Fsst: Fsst x306, 9.06 B/value, scan 25.3 ms, take 0.92 ms; reads faster above 5,445 MB/s |
+| 10 000 distinct ids, 10 % null | Dictionary x306 | 2.45 | 607 | 39.7 | 29.24 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 13.3 ms, take 3.32 ms; reads faster at any throughput; hint Fsst: Fsst x306, 8.80 B/value, scan 36.0 ms, take 1.24 ms; reads faster above 17,320 MB/s |
+| unique UUIDs | Zstd x611 | 20.61 | 1310 | 316.4 | 311.58 | hint Fsst: Fsst x611, 24.91 B/value, scan 71.8 ms, take 1.99 ms; reads faster above 176 MB/s |
+| log lines (~100 B) | Zstd x1221 | 13.71 | 1252 | 418.1 | 338.68 | hint Fsst: Fsst x1221, 23.96 B/value, scan 90.9 ms, take 2.82 ms; reads faster above 313 MB/s |
 
 <details><summary>16 cities, random order: every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x175 | 5,117,276 | 0.51 | 237 | 8.3 | 0.67 |  |
-| Fastest | Dictionary x175 | 5,117,276 | 0.51 | 236 | 8.3 | 0.63 | same |
-| Smallest | Dictionary x175 | 5,117,276 | 0.51 | 522 | 9.2 | 0.86 | reads slower at any throughput |
-| None | Canonical x175 | 96,746,748 | 9.67 | 227 | 22.9 | 4.98 | reads slower at any throughput |
-| hint Dictionary | Dictionary x175 | 5,117,276 | 0.51 | 238 | 8.4 | 0.64 | same |
-| hint Fsst | Fsst x175 | 64,458,972 | 6.45 | 402 | 26.4 | 0.62 | reads slower at any throughput |
-| hint Zstd | Zstd x175 | 17,427,092 | 1.74 | 296 | 92.8 | 66.71 | reads slower at any throughput |
+| Auto | Dictionary x175 | 5,117,276 | 0.51 | 233 | 8.6 | 0.66 |  |
+| Fastest | Dictionary x175 | 5,117,276 | 0.51 | 232 | 8.6 | 0.67 | same |
+| Smallest | Dictionary x175 | 5,117,276 | 0.51 | 376 | 8.6 | 0.70 | same |
+| None | Canonical x175 | 96,746,748 | 9.67 | 199 | 23.1 | 5.03 | reads slower at any throughput |
+| hint Dictionary | Dictionary x175 | 5,117,276 | 0.51 | 234 | 8.6 | 0.62 | same |
+| hint Fsst | Fsst x175 | 64,458,972 | 6.45 | 393 | 24.3 | 0.82 | reads slower at any throughput |
+| hint Zstd | Zstd x175 | 17,427,092 | 1.74 | 228 | 92.9 | 66.92 | reads slower at any throughput |
 
 </details>
 
@@ -715,14 +715,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x306 | 25,433,780 | 2.54 | 784 | 37.2 | 28.76 |  |
-| Fastest | Dictionary x306 | 25,433,780 | 2.54 | 788 | 37.1 | 28.76 | same |
-| Smallest | Dictionary x305, Zstd x1 | 25,427,444 | 2.54 | 1685 | 37.4 | 29.17 | same |
-| None | Canonical x306 | 140,098,164 | 14.01 | 356 | 17.9 | 6.61 | reads faster above 5,951 MB/s |
-| hint Dictionary | Dictionary x306 | 25,433,780 | 2.54 | 786 | 37.0 | 28.76 | same |
-| hint Fsst | Fsst x306 | 90,615,708 | 9.06 | 679 | 33.2 | 0.96 | reads faster above 16,217 MB/s |
-| hint Zstd | Zstd x306 | 27,097,620 | 2.71 | 566 | 91.9 | 66.40 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x18 | 18,014,004 | 1.80 | 520 | 12.0 | 3.31 | reads faster at any throughput |
+| Auto | Dictionary x306 | 25,433,780 | 2.54 | 601 | 37.3 | 28.90 |  |
+| Fastest | Dictionary x306 | 25,433,780 | 2.54 | 592 | 37.1 | 28.71 | same |
+| Smallest | Dictionary x305, Zstd x1 | 25,427,444 | 2.54 | 1449 | 37.0 | 28.71 | same |
+| None | Canonical x306 | 140,098,164 | 14.01 | 145 | 18.4 | 6.87 | reads faster above 6,084 MB/s |
+| hint Dictionary | Dictionary x306 | 25,433,780 | 2.54 | 593 | 37.7 | 28.88 | same |
+| hint Fsst | Fsst x306 | 90,615,708 | 9.06 | 480 | 25.3 | 0.92 | reads faster above 5,445 MB/s |
+| hint Zstd | Zstd x306 | 27,097,620 | 2.71 | 323 | 106.7 | 77.56 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x18 | 18,014,004 | 1.80 | 345 | 12.2 | 3.34 | reads faster at any throughput |
 
 </details>
 
@@ -730,14 +730,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x306 | 24,539,276 | 2.45 | 782 | 41.1 | 30.79 |  |
-| Fastest | Dictionary x306 | 24,539,276 | 2.45 | 787 | 41.6 | 30.88 | same |
-| Smallest | Dictionary x305, Zstd x1 | 24,533,580 | 2.45 | 1660 | 41.6 | 30.73 | same |
-| None | Canonical x306 | 151,883,724 | 15.19 | 409 | 29.5 | 6.36 | reads faster above 10,913 MB/s |
-| hint Dictionary | Dictionary x306 | 24,539,276 | 2.45 | 779 | 41.5 | 31.04 | same |
-| hint Fsst | Fsst x306 | 87,950,764 | 8.80 | 702 | 38.2 | 1.00 | reads faster above 21,425 MB/s |
-| hint Zstd | Zstd x306 | 25,595,628 | 2.56 | 558 | 103.1 | 60.20 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x18 | 17,982,596 | 1.80 | 552 | 13.3 | 3.36 | reads faster at any throughput |
+| Auto | Dictionary x306 | 24,539,276 | 2.45 | 607 | 39.7 | 29.24 |  |
+| Fastest | Dictionary x306 | 24,539,276 | 2.45 | 629 | 39.8 | 29.04 | same |
+| Smallest | Dictionary x305, Zstd x1 | 24,533,580 | 2.45 | 1458 | 39.6 | 28.76 | same |
+| None | Canonical x306 | 151,883,724 | 15.19 | 217 | 30.3 | 6.49 | reads faster above 13,663 MB/s |
+| hint Dictionary | Dictionary x306 | 24,539,276 | 2.45 | 611 | 39.6 | 29.10 | same |
+| hint Fsst | Fsst x306 | 87,950,764 | 8.80 | 519 | 36.0 | 1.24 | reads faster above 17,320 MB/s |
+| hint Zstd | Zstd x306 | 25,595,628 | 2.56 | 334 | 104.7 | 60.05 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x18 | 17,982,596 | 1.80 | 386 | 13.3 | 3.32 | reads faster at any throughput |
 
 </details>
 
@@ -745,13 +745,13 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Zstd x611 | 206,058,580 | 20.61 | 1384 | 310.4 | 304.24 |  |
-| Fastest | Zstd x611 | 206,058,580 | 20.61 | 1380 | 310.0 | 304.46 | same |
-| Smallest | Zstd x611 | 206,058,580 | 20.61 | 3230 | 310.4 | 305.10 | same |
-| None | Canonical x611 | 360,155,508 | 36.02 | 200 | 27.7 | 12.13 | reads faster above 545 MB/s |
-| hint Dictionary | Zstd x611 | 206,058,580 | 20.61 | 3205 | 310.5 | 306.03 | same |
-| hint Fsst | Fsst x611 | 249,114,908 | 24.91 | 1775 | 110.4 | 1.84 | reads faster above 215 MB/s |
-| hint Zstd | Zstd x611 | 206,058,580 | 20.61 | 1383 | 312.9 | 304.38 | same |
+| Auto | Zstd x611 | 206,058,580 | 20.61 | 1310 | 316.4 | 311.58 |  |
+| Fastest | Zstd x611 | 206,058,580 | 20.61 | 1296 | 316.1 | 309.80 | same |
+| Smallest | Zstd x611 | 206,058,580 | 20.61 | 3144 | 315.5 | 309.86 | same |
+| None | Canonical x611 | 360,155,508 | 36.02 | 161 | 28.3 | 12.52 | reads faster above 535 MB/s |
+| hint Dictionary | Zstd x611 | 206,058,580 | 20.61 | 3118 | 374.4 | 335.24 | reads slower at any throughput |
+| hint Fsst | Fsst x611 | 249,114,908 | 24.91 | 1717 | 71.8 | 1.99 | reads faster above 176 MB/s |
+| hint Zstd | Zstd x611 | 206,058,580 | 20.61 | 1295 | 316.2 | 310.12 | same |
 
 </details>
 
@@ -759,13 +759,13 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Zstd x1221 | 137,107,180 | 13.71 | 1469 | 412.1 | 333.67 |  |
-| Fastest | Zstd x1221 | 137,107,180 | 13.71 | 1440 | 411.6 | 334.92 | same |
-| Smallest | Zstd x1221 | 137,107,180 | 13.71 | 3173 | 411.5 | 334.92 | same |
-| None | Canonical x1221 | 725,468,436 | 72.55 | 606 | 45.9 | 19.57 | reads faster above 1,606 MB/s |
-| hint Dictionary | Zstd x1221 | 137,107,180 | 13.71 | 3259 | 411.7 | 333.76 | same |
-| hint Fsst | Fsst x1221 | 239,634,612 | 23.96 | 2266 | 124.7 | 2.63 | reads faster above 357 MB/s |
-| hint Zstd | Zstd x1221 | 137,107,180 | 13.71 | 1415 | 413.5 | 333.29 | same |
+| Auto | Zstd x1221 | 137,107,180 | 13.71 | 1252 | 418.1 | 338.68 |  |
+| Fastest | Zstd x1221 | 137,107,180 | 13.71 | 1244 | 416.3 | 338.01 | same |
+| Smallest | Zstd x1221 | 137,107,180 | 13.71 | 3004 | 415.0 | 342.19 | same |
+| None | Canonical x1221 | 725,468,436 | 72.55 | 493 | 49.2 | 20.44 | reads faster above 1,595 MB/s |
+| hint Dictionary | Zstd x1221 | 137,107,180 | 13.71 | 3104 | 416.7 | 337.28 | same |
+| hint Fsst | Fsst x1221 | 239,634,612 | 23.96 | 2051 | 90.9 | 2.82 | reads faster above 313 MB/s |
+| hint Zstd | Zstd x1221 | 137,107,180 | 13.71 | 1225 | 417.9 | 338.45 | same |
 
 </details>
 
@@ -773,18 +773,18 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| half true | Canonical x10 | 0.13 | 0 | 0.2 | 0.26 |  |
-| 1 % true | RunEnd x10 | 0.05 | 3 | 2.2 | 1.74 | None: Canonical x10, 0.13 B/value, scan 0.2 ms, take 0.23 ms; reads faster above 353 MB/s |
+| half true | Canonical x10 | 0.13 | 2 | 0.2 | 0.24 |  |
+| 1 % true | RunEnd x10 | 0.05 | 3 | 2.3 | 1.79 | None: Canonical x10, 0.13 B/value, scan 0.2 ms, take 0.27 ms; reads faster above 344 MB/s |
 
 <details><summary>half true: every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Canonical x10 | 1,262,548 | 0.13 | 0 | 0.2 | 0.26 |  |
-| Fastest | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.26 | reads slower at any throughput |
-| Smallest | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.27 | reads slower at any throughput |
-| None | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.26 | reads slower at any throughput |
-| hint RunEnd | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.25 | same |
+| Auto | Canonical x10 | 1,262,548 | 0.13 | 2 | 0.2 | 0.24 |  |
+| Fastest | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.27 | reads slower at any throughput |
+| Smallest | Canonical x10 | 1,262,548 | 0.13 | 2 | 0.2 | 0.25 | same |
+| None | Canonical x10 | 1,262,548 | 0.13 | 2 | 0.2 | 0.27 | reads slower at any throughput |
+| hint RunEnd | Canonical x10 | 1,262,548 | 0.13 | 3 | 0.2 | 0.29 | reads slower at any throughput |
 
 </details>
 
@@ -792,20 +792,20 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | RunEnd x10 | 548,084 | 0.05 | 3 | 2.2 | 1.74 |  |
-| Fastest | RunEnd x10 | 548,084 | 0.05 | 3 | 2.2 | 1.70 | same |
-| Smallest | RunEnd x10 | 548,084 | 0.05 | 4 | 2.2 | 1.75 | same |
-| None | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.23 | reads faster above 353 MB/s |
-| hint RunEnd | RunEnd x10 | 548,084 | 0.05 | 3 | 2.2 | 1.70 | same |
+| Auto | RunEnd x10 | 548,084 | 0.05 | 3 | 2.3 | 1.79 |  |
+| Fastest | RunEnd x10 | 548,084 | 0.05 | 3 | 2.2 | 1.78 | same |
+| Smallest | RunEnd x10 | 548,084 | 0.05 | 4 | 2.2 | 1.78 | same |
+| None | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.27 | reads faster above 344 MB/s |
+| hint RunEnd | RunEnd x10 | 548,084 | 0.05 | 4 | 2.2 | 1.79 | same |
 
 </details>
 
 ### The profiles side by side
 
-`Fastest` wrote what `Auto` wrote on 20 of 20 columns. `Smallest` wrote something else on *i64, sorted runs of 1 000*, *i64, timestamps (ms, increasing, jittered)*, *utf8, 10 000 distinct ids*, *utf8, 10 000 distinct ids, 10 % null*, and took up to 6.3 times `Auto`'s write, 184 ms against 29 ms on *i64, random in 0..999*, since it tries every scheme on every chunk.
+`Fastest` wrote what `Auto` wrote on 20 of 20 columns. `Smallest` wrote something else on *i64, sorted runs of 1 000*, *i64, timestamps (ms, increasing, jittered)*, *utf8, 10 000 distinct ids*, *utf8, 10 000 distinct ids, 10 % null*, and took up to 8.2 times `Auto`'s write, 327 ms against 40 ms on *f64, prices (2 decimals)*, since it tries every scheme on every chunk.
 `None`, the plain form, made the largest file on 20 of 20 columns.
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; commit f04c110 with uncommitted changes, 2026-09-24 23:06 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:12 UTC.*
 <!-- /results: tradeoffs -->
 
 <!-- results: advice -->
@@ -825,13 +825,13 @@ does not; a column it never departs on is left out.
 | f64, uniform in [0, 1) |  |  | `Canonical` |  |  |
 | utf8, 10 000 distinct ids | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | `Zstd` | 16 MiB chunks |
 | utf8, 10 000 distinct ids, 10 % null | 16 MiB chunks | 16 MiB chunks | 16 MiB chunks | `Zstd` | 16 MiB chunks |
-| utf8, unique UUIDs | `Canonical` |  | `Canonical` | `Fsst` |  |
-| utf8, log lines (~100 B) | `Fsst` |  | `Canonical` | `Fsst` |  |
+| utf8, unique UUIDs | `Fsst` |  | `Canonical` | `Fsst` |  |
+| utf8, log lines (~100 B) | `Fsst` |  | `Fsst` | `Fsst` |  |
 | bool, 1 % true | `Canonical` |  | `Canonical` |  |  |
 
 It keeps the writer's choice under every goal on the 10 other columns.
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; commit f04c110 with uncommitted changes, 2026-09-24 22:45 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:14 UTC.*
 <!-- /results: advice -->
 
 ## Kernels, against what they replaced
@@ -847,30 +847,30 @@ the reference profile on that class, the one to quote a small difference from.
 
 | Method       | BitWidth | Mean      | Error     | StdDev    | Ratio | MannWhitney(5%) | ns/row | GB/s  | Allocated | Alloc Ratio |
 |------------- |--------- |----------:|----------:|----------:|------:|---------------- |-------:|------:|----------:|------------:|
-| &#39;i64 scalar&#39; | 17       | 76.277 μs | 1.1077 μs | 0.1714 μs |  1.00 | Baseline        |   1.16 |  6.87 |         - |          NA |
-| &#39;i64 vector&#39; | 17       |  9.924 μs | 0.2624 μs | 0.0682 μs |  0.13 | Faster          |   0.15 | 52.83 |         - |          NA |
-| &#39;i32 scalar&#39; | 17       | 87.495 μs | 3.7763 μs | 0.5844 μs |  1.15 | Same            |   1.34 |  3.00 |         - |          NA |
-| &#39;i64 pack&#39;   | 17       | 21.656 μs | 0.1967 μs | 0.0304 μs |  0.28 | Faster          |   0.33 | 24.21 |         - |          NA |
-| &#39;i32 pack&#39;   | 17       | 11.850 μs | 0.2784 μs | 0.0723 μs |  0.16 | Faster          |   0.18 | 22.12 |         - |          NA |
-| &#39;i32 vector&#39; | 17       |  4.746 μs | 0.0537 μs | 0.0139 μs |  0.06 | Faster          |   0.07 | 55.23 |         - |          NA |
+| &#39;i64 scalar&#39; | 17       | 77.113 μs | 2.3706 μs | 0.6156 μs |  1.00 | Baseline        |   1.18 |  6.80 |         - |          NA |
+| &#39;i64 vector&#39; | 17       |  8.377 μs | 0.2198 μs | 0.0340 μs |  0.11 | Faster          |   0.13 | 62.59 |         - |          NA |
+| &#39;i32 scalar&#39; | 17       | 88.322 μs | 3.4862 μs | 0.9054 μs |  1.15 | Same            |   1.35 |  2.97 |         - |          NA |
+| &#39;i64 pack&#39;   | 17       | 22.438 μs | 0.7023 μs | 0.1824 μs |  0.29 | Faster          |   0.34 | 23.37 |         - |          NA |
+| &#39;i32 pack&#39;   | 17       | 11.295 μs | 0.1837 μs | 0.0477 μs |  0.15 | Faster          |   0.17 | 23.21 |         - |          NA |
+| &#39;i32 vector&#39; | 17       |  5.601 μs | 0.0276 μs | 0.0043 μs |  0.07 | Faster          |   0.09 | 46.80 |         - |          NA |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:FastLanesKernelBenchmarks -->
 
 <!-- results: kernel:BitPackingBenchmarks -->
 ### `BitPackingBenchmarks`
 
-| Method     | Shape   | Blocks | Offset | Mean        | Error       | StdDev    | Min         | Median      | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s   | GB/s in | cycles/value | Allocated | Alloc Ratio |
-|----------- |-------- |------- |------- |------------:|------------:|----------:|------------:|------------:|------:|---------------- |--------:|-------:|-------:|--------:|-------------:|----------:|------------:|
-| **Original**   | **u32-w10** | **8**      | **0**      |    **979.7 ns** |    **42.47 ns** |  **11.03 ns** |    **963.3 ns** |    **985.5 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.12** |  **33.45** |   **10.45** |        **0.531** |         **-** |          **NA** |
-| Current    | u32-w10 | 8      | 0      |    316.5 ns |     6.30 ns |   0.97 ns |    315.1 ns |    316.7 ns |  0.32 | Faster          |    0.00 |   0.04 | 103.53 |   32.35 |        0.172 |         - |          NA |
-| StoreFloor | u32-w10 | 8      | 0      |    341.5 ns |   107.23 ns |  16.59 ns |    317.4 ns |    348.0 ns |  0.35 | Faster          |    0.02 |   0.04 |  95.95 |   29.99 |        0.185 |         - |          NA |
-|            |         |        |        |             |             |           |             |             |       |                 |         |        |        |         |              |           |             |
-| **Original**   | **u32-w10** | **128**    | **0**      | **17,322.5 ns** | **1,078.74 ns** | **280.14 ns** | **17,033.4 ns** | **17,198.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.13** |  **30.27** |    **9.46** |        **0.587** |         **-** |          **NA** |
-| Current    | u32-w10 | 128    | 0      |  8,227.3 ns |   140.77 ns |  21.78 ns |  8,195.3 ns |  8,235.3 ns |  0.48 | Faster          |    0.01 |   0.06 |  63.73 |   19.91 |        0.279 |         - |          NA |
-| StoreFloor | u32-w10 | 128    | 0      |  5,220.3 ns |   654.06 ns | 101.22 ns |  5,074.9 ns |  5,248.7 ns |  0.30 | Faster          |    0.01 |   0.04 | 100.43 |   31.39 |        0.177 |         - |          NA |
+| Method     | Shape   | Blocks | Offset | Mean        | Error     | StdDev    | Min         | Median      | Ratio | MannWhitney(5%) | ns/row | GB/s   | GB/s in | cycles/value | Allocated | Alloc Ratio |
+|----------- |-------- |------- |------- |------------:|----------:|----------:|------------:|------------:|------:|---------------- |-------:|-------:|--------:|-------------:|----------:|------------:|
+| **Original**   | **u32-w10** | **8**      | **0**      |    **967.2 ns** |  **82.42 ns** |  **12.76 ns** |    **949.7 ns** |    **970.2 ns** |  **1.00** | **Baseline**        |   **0.12** |  **33.88** |   **10.59** |        **0.524** |         **-** |          **NA** |
+| Current    | u32-w10 | 8      | 0      |    315.2 ns |   9.33 ns |   1.44 ns |    313.5 ns |    315.2 ns |  0.33 | Faster          |   0.04 | 103.97 |   32.49 |        0.171 |         - |          NA |
+| StoreFloor | u32-w10 | 8      | 0      |    330.9 ns |  55.83 ns |  14.50 ns |    307.3 ns |    335.7 ns |  0.34 | Faster          |   0.04 |  99.03 |   30.95 |        0.179 |         - |          NA |
+|            |         |        |        |             |           |           |             |             |       |                 |        |        |         |              |           |             |
+| **Original**   | **u32-w10** | **128**    | **0**      | **17,285.9 ns** | **787.98 ns** | **121.94 ns** | **17,163.2 ns** | **17,287.8 ns** |  **1.00** | **Baseline**        |   **0.13** |  **30.33** |    **9.48** |        **0.586** |         **-** |          **NA** |
+| Current    | u32-w10 | 128    | 0      |  8,230.4 ns | 122.61 ns |  31.84 ns |  8,192.7 ns |  8,230.1 ns |  0.48 | Faster          |   0.06 |  63.70 |   19.91 |        0.279 |         - |          NA |
+| StoreFloor | u32-w10 | 128    | 0      |  5,227.4 ns | 291.50 ns |  75.70 ns |  5,158.1 ns |  5,213.2 ns |  0.30 | Faster          |   0.04 | 100.30 |   31.34 |        0.177 |         - |          NA |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:BitPackingBenchmarks -->
 
 <!-- results: kernel:FsstKernelBenchmarks -->
@@ -878,92 +878,92 @@ the reference profile on that class, the one to quote a small difference from.
 
 | Method                         | CodeBytes | Mean     | Error    | StdDev   | Ratio | MannWhitney(5%) | Allocated | Alloc Ratio |
 |------------------------------- |---------- |---------:|---------:|---------:|------:|---------------- |----------:|------------:|
-| &#39;library, validation included&#39; | 65536     | 41.19 μs | 1.463 μs | 0.380 μs |  1.05 | Same            |         - |          NA |
-| &#39;wide store&#39;                   | 65536     | 39.25 μs | 0.396 μs | 0.061 μs |  1.00 | Baseline        |         - |          NA |
+| &#39;library, validation included&#39; | 65536     | 23.04 μs | 0.615 μs | 0.160 μs |  0.59 | Faster          |         - |          NA |
+| &#39;wide store&#39;                   | 65536     | 39.23 μs | 0.929 μs | 0.241 μs |  1.00 | Baseline        |         - |          NA |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:FsstKernelBenchmarks -->
 
 <!-- results: kernel:OnPairKernelBenchmarks -->
 ### `OnPairKernelBenchmarks`
 
-| Method                         | Mean      | Error    | StdDev   | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s | Allocated | Alloc Ratio |
-|------------------------------- |----------:|---------:|---------:|------:|---------------- |--------:|-------:|-----:|----------:|------------:|
-| &#39;concatenate, switch per code&#39; | 315.04 μs | 79.91 μs | 20.75 μs |  1.00 | Baseline        |    0.00 |   4.81 | 1.77 |         - |          NA |
-| &#39;concatenate, library&#39;         |  90.84 μs | 75.19 μs | 19.53 μs |  0.29 | Faster          |    0.06 |   1.39 | 6.13 |         - |          NA |
+| Method                         | Mean      | Error     | StdDev    | Ratio | MannWhitney(5%) | ns/row | GB/s  | Allocated | Alloc Ratio |
+|------------------------------- |----------:|----------:|----------:|------:|---------------- |-------:|------:|----------:|------------:|
+| &#39;concatenate, switch per code&#39; | 340.59 μs | 42.877 μs | 11.135 μs |  1.00 | Baseline        |   5.20 |  1.64 |         - |          NA |
+| &#39;concatenate, library&#39;         |  36.28 μs |  0.394 μs |  0.102 μs |  0.11 | Faster          |   0.55 | 15.36 |         - |          NA |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:OnPairKernelBenchmarks -->
 
 <!-- results: kernel:FilterKernelBenchmarks -->
 ### `FilterKernelBenchmarks`
 
-| Method                             | Count | Mean     | Error     | StdDev   | Ratio | MannWhitney(5%) | RatioSD | Allocated | Alloc Ratio |
-|----------------------------------- |------ |---------:|----------:|---------:|------:|---------------- |--------:|----------:|------------:|
-| library                            | 65536 | 16.58 μs |  0.736 μs | 0.191 μs |  1.01 | Same            |    0.01 |         - |          NA |
-| &#39;i64 &lt; literal, nullable, library&#39; | 65536 | 44.73 μs |  1.315 μs | 0.203 μs |  2.74 | Slower          |    0.02 |         - |          NA |
-| &#39;library, i64 &lt; float&#39;             | 65536 | 16.64 μs |  1.260 μs | 0.327 μs |  1.02 | Same            |    0.02 |         - |          NA |
-| &#39;library, f64 &lt;&#39;                   | 65536 | 16.16 μs |  0.577 μs | 0.089 μs |  0.99 | Same            |    0.01 |         - |          NA |
-| &#39;library, bool =&#39;                  | 65536 | 16.14 μs |  4.351 μs | 1.130 μs |  0.99 | Same            |    0.06 |         - |          NA |
-| &#39;library, utf8 =&#39;                  | 65536 | 90.28 μs | 12.524 μs | 3.252 μs |  5.52 | Slower          |    0.18 |         - |          NA |
-| &#39;library, i64 IN (8)&#39;              | 65536 | 52.40 μs |  2.243 μs | 0.583 μs |  3.21 | Slower          |    0.04 |         - |          NA |
-| &#39;branches hoisted, still scalar&#39;   | 65536 | 16.34 μs |  0.294 μs | 0.076 μs |  1.00 | Baseline        |    0.00 |         - |          NA |
+| Method                             | Count | Mean      | Error     | StdDev   | Ratio | MannWhitney(5%) | RatioSD | Allocated | Alloc Ratio |
+|----------------------------------- |------ |----------:|----------:|---------:|------:|---------------- |--------:|----------:|------------:|
+| library                            | 65536 |  16.19 μs |  0.240 μs | 0.062 μs |  0.97 | Same            |    0.01 |         - |          NA |
+| &#39;i64 &lt; literal, nullable, library&#39; | 65536 |  50.22 μs |  7.881 μs | 2.047 μs |  3.02 | Slower          |    0.12 |         - |          NA |
+| &#39;library, i64 &lt; float&#39;             | 65536 |  16.24 μs |  0.492 μs | 0.076 μs |  0.98 | Same            |    0.01 |         - |          NA |
+| &#39;library, f64 &lt;&#39;                   | 65536 |  16.33 μs |  0.468 μs | 0.072 μs |  0.98 | Same            |    0.01 |         - |          NA |
+| &#39;library, bool =&#39;                  | 65536 |  18.40 μs |  0.152 μs | 0.024 μs |  1.11 | Same            |    0.01 |         - |          NA |
+| &#39;library, utf8 =&#39;                  | 65536 | 107.78 μs | 10.115 μs | 1.565 μs |  6.49 | Slower          |    0.10 |         - |          NA |
+| &#39;library, i64 IN (8)&#39;              | 65536 |  99.31 μs | 27.757 μs | 7.208 μs |  5.98 | Slower          |    0.40 |         - |          NA |
+| &#39;branches hoisted, still scalar&#39;   | 65536 |  16.61 μs |  0.574 μs | 0.149 μs |  1.00 | Baseline        |    0.00 |         - |          NA |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:FilterKernelBenchmarks -->
 
 <!-- results: kernel:BitmapKernelBenchmarks -->
 ### `BitmapKernelBenchmarks`
 
-| Method                  | Mean         | Error       | StdDev     | Ratio | MannWhitney(5%) | ns/row | GB/s  | Allocated | Alloc Ratio |
-|------------------------ |-------------:|------------:|-----------:|------:|---------------- |-------:|------:|----------:|------------:|
-| &#39;classify, per byte&#39;    |   103.126 μs |   0.8559 μs |  0.1325 μs |  1.00 | Baseline        |   0.10 |  1.27 |         - |          NA |
-| &#39;classify, library&#39;     |     3.930 μs |   0.0892 μs |  0.0232 μs |  0.04 | Faster          |   0.00 | 33.35 |         - |          NA |
-|                         |              |             |            |       |                 |        |       |           |             |
-| &#39;copy range, per bit&#39;   | 2,036.395 μs | 291.9658 μs | 75.8226 μs |  1.00 | Baseline        |   1.94 |  0.13 |         - |          NA |
-| &#39;copy range, library&#39;   |    66.678 μs |   1.8145 μs |  0.2808 μs |  0.03 | Faster          |   0.06 |  3.93 |         - |          NA |
-|                         |              |             |            |       |                 |        |       |           |             |
-| &#39;count set, per bit&#39;    |   391.863 μs |   5.3011 μs |  0.8204 μs | 1.000 | Baseline        |   0.37 |  0.33 |         - |          NA |
-| &#39;count set, library&#39;    |     1.508 μs |   0.0463 μs |  0.0072 μs | 0.004 | Faster          |   0.00 | 86.91 |         - |          NA |
-|                         |              |             |            |       |                 |        |       |           |             |
-| &#39;pack bytes, per value&#39; | 1,610.293 μs |  26.5410 μs |  4.1073 μs |  1.00 | Baseline        |   1.54 |  0.73 |         - |          NA |
-| &#39;pack bytes, library&#39;   |    37.777 μs |   0.1861 μs |  0.0483 μs |  0.02 | Faster          |   0.04 | 31.23 |         - |          NA |
+| Method                  | Mean         | Error         | StdDev      | Ratio | MannWhitney(5%) | ns/row | GB/s  | Allocated | Alloc Ratio |
+|------------------------ |-------------:|--------------:|------------:|------:|---------------- |-------:|------:|----------:|------------:|
+| &#39;classify, per byte&#39;    |   102.117 μs |     1.3500 μs |   0.2089 μs |  1.00 | Baseline        |   0.10 |  1.28 |         - |          NA |
+| &#39;classify, library&#39;     |     3.950 μs |     0.1163 μs |   0.0180 μs |  0.04 | Faster          |   0.00 | 33.18 |         - |          NA |
+|                         |              |               |             |       |                 |        |       |           |             |
+| &#39;copy range, per bit&#39;   | 1,997.040 μs |    41.7193 μs |  10.8344 μs |  1.00 | Baseline        |   1.90 |  0.13 |         - |          NA |
+| &#39;copy range, library&#39;   |    66.780 μs |     1.2817 μs |   0.3328 μs |  0.03 | Faster          |   0.06 |  3.93 |         - |          NA |
+|                         |              |               |             |       |                 |        |       |           |             |
+| &#39;count set, per bit&#39;    | 1,196.369 μs | 3,318.9713 μs | 861.9263 μs | 1.000 | Baseline        |   1.14 |  0.11 |         - |          NA |
+| &#39;count set, library&#39;    |     1.642 μs |     0.2303 μs |   0.0356 μs | 0.002 | Faster          |   0.00 | 79.82 |         - |          NA |
+|                         |              |               |             |       |                 |        |       |           |             |
+| &#39;pack bytes, per value&#39; | 1,780.352 μs |   109.1773 μs |  28.3530 μs |  1.00 | Baseline        |   1.70 |  0.66 |         - |          NA |
+| &#39;pack bytes, library&#39;   |    38.087 μs |     1.6687 μs |   0.4334 μs |  0.02 | Faster          |   0.04 | 30.97 |         - |          NA |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:BitmapKernelBenchmarks -->
 
 <!-- results: kernel:RowKernelBenchmarks -->
 ### `RowKernelBenchmarks`
 
-| Method                          | Mean       | Error      | StdDev    | Ratio | MannWhitney(5%) | ns/row | GB/s   | Allocated | Alloc Ratio |
-|-------------------------------- |-----------:|-----------:|----------:|------:|---------------- |-------:|-------:|----------:|------------:|
-| &#39;gather, switch per row&#39;        |  39.424 μs |  6.7447 μs | 1.7516 μs |  1.00 | Baseline        |   0.60 |  19.95 |         - |          NA |
-| &#39;gather, library&#39;               |  13.737 μs |  0.2270 μs | 0.0351 μs |  0.35 | Faster          |   0.21 |  57.25 |         - |          NA |
-|                                 |            |            |           |       |                 |        |        |           |             |
-| &#39;masked gather, switch per row&#39; | 104.271 μs | 14.3859 μs | 3.7360 μs |  1.00 | Baseline        |   1.59 |   7.54 |         - |          NA |
-| &#39;masked gather, library&#39;        |  41.136 μs |  2.8253 μs | 0.7337 μs |  0.39 | Faster          |   0.63 |  19.12 |         - |          NA |
-|                                 |            |            |           |       |                 |        |        |           |             |
-| &#39;tile, copy per row&#39;            |  81.346 μs |  1.6164 μs | 0.4198 μs |  1.00 | Baseline        |   1.24 |   6.45 |         - |          NA |
-| &#39;tile, library&#39;                 |   5.231 μs |  0.7903 μs | 0.2052 μs |  0.06 | Faster          |   0.08 | 100.23 |         - |          NA |
+| Method                          | Mean       | Error     | StdDev    | Ratio | MannWhitney(5%) | ns/row | GB/s  | Allocated | Alloc Ratio |
+|-------------------------------- |-----------:|----------:|----------:|------:|---------------- |-------:|------:|----------:|------------:|
+| &#39;gather, switch per row&#39;        |  39.825 μs | 5.4706 μs | 1.4207 μs |  1.00 | Baseline        |   0.61 | 19.75 |         - |          NA |
+| &#39;gather, library&#39;               |  13.770 μs | 0.2562 μs | 0.0396 μs |  0.35 | Faster          |   0.21 | 57.11 |         - |          NA |
+|                                 |            |           |           |       |                 |        |       |           |             |
+| &#39;masked gather, switch per row&#39; | 102.491 μs | 2.2769 μs | 0.5913 μs |  1.00 | Baseline        |   1.56 |  7.67 |         - |          NA |
+| &#39;masked gather, library&#39;        |  22.826 μs | 0.7502 μs | 0.1948 μs |  0.22 | Faster          |   0.35 | 34.45 |         - |          NA |
+|                                 |            |           |           |       |                 |        |       |           |             |
+| &#39;tile, copy per row&#39;            |  82.127 μs | 2.1474 μs | 0.3323 μs |  1.00 | Baseline        |   1.25 |  6.38 |         - |          NA |
+| &#39;tile, library&#39;                 |   7.588 μs | 0.4067 μs | 0.1056 μs |  0.09 | Faster          |   0.12 | 69.09 |         - |          NA |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:RowKernelBenchmarks -->
 
 <!-- results: kernel:ViewKernelBenchmarks -->
 ### `ViewKernelBenchmarks`
 
-| Method                              | Mean       | Error     | StdDev    | Ratio | MannWhitney(5%) | ns/row | GB/s  | Allocated | Alloc Ratio |
-|------------------------------------ |-----------:|----------:|----------:|------:|---------------- |-------:|------:|----------:|------------:|
-| &#39;require ascending, switch per row&#39; |  22.555 μs | 1.3494 μs | 0.3504 μs |  1.00 | Baseline        |   0.34 | 11.62 |         - |          NA |
-| &#39;require ascending, library&#39;        |   5.587 μs | 0.1072 μs | 0.0278 μs |  0.25 | Faster          |   0.09 | 46.92 |         - |          NA |
-|                                     |            |           |           |       |                 |        |       |           |             |
-| &#39;build views, IsValid per row&#39;      | 212.297 μs | 4.7680 μs | 0.7379 μs |  1.00 | Baseline        |   3.24 |  8.64 |         - |          NA |
-| &#39;build views, library&#39;              |  66.853 μs | 4.2956 μs | 1.1156 μs |  0.31 | Faster          |   1.02 | 27.45 |         - |          NA |
-|                                     |            |           |           |       |                 |        |       |           |             |
-| &#39;sum lengths, switch per row&#39;       |  20.657 μs | 0.2855 μs | 0.0741 μs |  1.00 | Baseline        |   0.32 | 12.69 |         - |          NA |
-| &#39;sum lengths, library&#39;              |   7.604 μs | 0.2062 μs | 0.0536 μs |  0.37 | Faster          |   0.12 | 34.47 |         - |          NA |
+| Method                              | Mean       | Error      | StdDev    | Ratio | MannWhitney(5%) | ns/row | GB/s  | Allocated | Alloc Ratio |
+|------------------------------------ |-----------:|-----------:|----------:|------:|---------------- |-------:|------:|----------:|------------:|
+| &#39;require ascending, switch per row&#39; |  23.203 μs |  2.9771 μs | 0.7731 μs |  1.00 | Baseline        |   0.35 | 11.30 |         - |          NA |
+| &#39;require ascending, library&#39;        |   5.564 μs |  0.2591 μs | 0.0673 μs |  0.24 | Faster          |   0.08 | 47.12 |         - |          NA |
+|                                     |            |            |           |       |                 |        |       |           |             |
+| &#39;build views, IsValid per row&#39;      | 222.648 μs | 24.3873 μs | 6.3333 μs |  1.00 | Baseline        |   3.40 |  8.24 |         - |          NA |
+| &#39;build views, library&#39;              |  44.324 μs |  0.9745 μs | 0.1508 μs |  0.20 | Faster          |   0.68 | 41.40 |         - |          NA |
+|                                     |            |            |           |       |                 |        |       |           |             |
+| &#39;sum lengths, switch per row&#39;       |  21.079 μs |  0.7340 μs | 0.1906 μs |  1.00 | Baseline        |   0.32 | 12.44 |         - |          NA |
+| &#39;sum lengths, library&#39;              |   3.072 μs |  0.1120 μs | 0.0291 μs |  0.15 | Faster          |   0.05 | 85.34 |         - |          NA |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:ViewKernelBenchmarks -->
 
 <!-- results: kernel:RowEncodingBenchmarks -->
@@ -971,22 +971,22 @@ the reference profile on that class, the one to quote a small difference from.
 
 | Method                                   | Entry                | Mean       | Error      | StdDev    | ns/row | GB/s | Allocated |
 |----------------------------------------- |--------------------- |-----------:|-----------:|----------:|-------:|-----:|----------:|
-| **&#39;encode a batch to row keys&#39;**             | **conta(...)nical [33]** |  **48.709 μs** |  **1.5027 μs** | **0.3902 μs** |  **11.89** | **3.62** |      **48 B** |
-| &#39;encode a batch to row keys, descending&#39; | conta(...)nical [33] |  48.585 μs |  2.9729 μs | 0.7720 μs |  11.86 | 3.63 |      48 B |
-| &#39;encode, then sort rows by key&#39;          | conta(...)nical [33] | 357.102 μs | 14.2012 μs | 3.6880 μs |  87.18 | 0.49 |      48 B |
+| **&#39;encode a batch to row keys&#39;**             | **conta(...)nical [33]** |  **48.643 μs** |  **1.2391 μs** | **0.3218 μs** |  **11.88** | **3.62** |      **48 B** |
+| &#39;encode a batch to row keys, descending&#39; | conta(...)nical [33] |  48.980 μs |  3.3704 μs | 0.5216 μs |  11.96 | 3.60 |      48 B |
+| &#39;encode, then sort rows by key&#39;          | conta(...)nical [33] | 365.200 μs | 18.9096 μs | 2.9263 μs |  89.16 | 0.48 |      48 B |
 | **&#39;encode a batch to row keys&#39;**             | **conta(...)nulls [33]** |         **NA** |         **NA** |        **NA** |      **-** |    **-** |        **NA** |
 | &#39;encode a batch to row keys, descending&#39; | conta(...)nulls [33] |         NA |         NA |        NA |      - |    - |        NA |
 | &#39;encode, then sort rows by key&#39;          | conta(...)nulls [33] |         NA |         NA |        NA |      - |    - |        NA |
-| **&#39;encode a batch to row keys&#39;**             | **encod(...)r1025 [31]** |   **6.455 μs** |  **0.1358 μs** | **0.0353 μs** |   **6.30** | **1.43** |      **48 B** |
-| &#39;encode a batch to row keys, descending&#39; | encod(...)r1025 [31] |   6.572 μs |  0.0940 μs | 0.0244 μs |   6.41 | 1.40 |      48 B |
-| &#39;encode, then sort rows by key&#39;          | encod(...)r1025 [31] |  34.887 μs |  1.4308 μs | 0.2214 μs |  34.04 | 0.26 |      48 B |
+| **&#39;encode a batch to row keys&#39;**             | **encod(...)r1025 [31]** |   **6.772 μs** |  **0.1071 μs** | **0.0278 μs** |   **6.61** | **1.36** |      **48 B** |
+| &#39;encode a batch to row keys, descending&#39; | encod(...)r1025 [31] |   6.752 μs |  0.2228 μs | 0.0579 μs |   6.59 | 1.37 |      48 B |
+| &#39;encode, then sort rows by key&#39;          | encod(...)r1025 [31] |  36.969 μs |  1.5542 μs | 0.4036 μs |  36.07 | 0.25 |      48 B |
 
 Benchmarks with issues:
   RowEncodingBenchmarks.'encode a batch to row keys': fast(MinIterationTime=50ms, Toolchain=InProcessEmitToolchain, IterationCount=5, IterationTime=100ms, MaxWarmupIterationCount=30, MinWarmupIterationCount=4) [Entry=conta(...)nulls [33]]
   RowEncodingBenchmarks.'encode a batch to row keys, descending': fast(MinIterationTime=50ms, Toolchain=InProcessEmitToolchain, IterationCount=5, IterationTime=100ms, MaxWarmupIterationCount=30, MinWarmupIterationCount=4) [Entry=conta(...)nulls [33]]
   RowEncodingBenchmarks.'encode, then sort rows by key': fast(MinIterationTime=50ms, Toolchain=InProcessEmitToolchain, IterationCount=5, IterationTime=100ms, MaxWarmupIterationCount=30, MinWarmupIterationCount=4) [Entry=conta(...)nulls [33]]
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:RowEncodingBenchmarks -->
 
 <!-- results: kernel:CompressorBenchmarks -->
@@ -994,26 +994,606 @@ Benchmarks with issues:
 
 | Method                       | Column | Mean          | Error         | StdDev      | Ratio | MannWhitney(5%) | Allocated | Alloc Ratio |
 |----------------------------- |------- |--------------:|--------------:|------------:|------:|---------------- |----------:|------------:|
-| &#39;Choose, the whole decision&#39; | i64    | 58,470.031 ns | 2,993.2426 ns | 777.3356 ns | 1.000 | Baseline        |      72 B |        1.00 |
-| &#39;candidate: sequence&#39;        | i64    |      7.332 ns |     0.0597 ns |   0.0092 ns | 0.000 | Faster          |         - |        0.00 |
-| &#39;candidate: bit packing&#39;     | i64    | 23,333.351 ns |   989.5208 ns | 256.9754 ns | 0.399 | Faster          |         - |        0.00 |
-| &#39;candidate: FSST&#39;            | i64    |      1.528 ns |     0.0194 ns |   0.0030 ns | 0.000 | Faster          |         - |        0.00 |
-| &#39;candidate: zstd&#39;            | i64    |  9,488.816 ns |   426.6523 ns |  66.0249 ns | 0.162 | Faster          |      72 B |        1.00 |
-| &#39;candidate: ALP&#39;             | i64    |      1.855 ns |     0.5743 ns |   0.0889 ns | 0.000 | Faster          |         - |        0.00 |
+| &#39;Choose, the whole decision&#39; | i64    | 43,437.126 ns | 2,778.9539 ns | 721.6855 ns | 1.000 | Baseline        |      72 B |        1.00 |
+| &#39;candidate: sequence&#39;        | i64    |      7.412 ns |     0.1156 ns |   0.0300 ns | 0.000 | Faster          |         - |        0.00 |
+| &#39;candidate: bit packing&#39;     | i64    |  6,636.432 ns |   150.8890 ns |  39.1854 ns | 0.153 | Faster          |         - |        0.00 |
+| &#39;candidate: FSST&#39;            | i64    |      1.578 ns |     0.0165 ns |   0.0026 ns | 0.000 | Faster          |         - |        0.00 |
+| &#39;candidate: zstd&#39;            | i64    |  9,797.567 ns |   366.3004 ns |  95.1271 ns | 0.226 | Faster          |      72 B |        1.00 |
+| &#39;candidate: ALP&#39;             | i64    |      1.755 ns |     0.0525 ns |   0.0136 ns | 0.000 | Faster          |         - |        0.00 |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:CompressorBenchmarks -->
 
 <!-- results: kernel:LanesBenchmarks -->
 ### `LanesBenchmarks`
 
-| Method                 | Lanes | Mean       | Error    | StdDev   | Ratio | MannWhitney(5%) | RatioSD | Gen0   | Completed Work Items | Lock Contentions | Allocated | Alloc Ratio |
-|----------------------- |------ |-----------:|---------:|---------:|------:|---------------- |--------:|-------:|---------------------:|-----------------:|----------:|------------:|
-| &#39;ours, n lanes&#39;        | 4     |   423.9 μs | 40.52 μs | 10.52 μs |  1.00 | Baseline        |    0.00 | 3.9063 |             104.5625 |                - |   46586 B |        1.00 |
-| &#39;reference, n workers&#39; | 4     | 1,029.2 μs | 52.11 μs | 13.53 μs |  2.43 | Slower          |    0.06 |      - |                    - |                - |         - |        0.00 |
+| Method                 | Lanes | Mean       | Error    | StdDev   | Ratio | MannWhitney(5%) | RatioSD | Completed Work Items | Lock Contentions | Allocated | Alloc Ratio |
+|----------------------- |------ |-----------:|---------:|---------:|------:|---------------- |--------:|---------------------:|-----------------:|----------:|------------:|
+| &#39;ours, n lanes&#39;        | 4     |   369.3 μs |  9.55 μs |  1.48 μs |  1.00 | Baseline        |    0.00 |             103.2778 |                - |   46586 B |        1.00 |
+| &#39;reference, n workers&#39; | 4     | 1,085.7 μs | 60.16 μs | 15.62 μs |  2.94 | Slower          |    0.04 |                    - |                - |         - |        0.00 |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit f04c110 with uncommitted changes, 2026-09-24 22:48 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
 <!-- /results: kernel:LanesBenchmarks -->
+
+<!-- results: kernel:AlpEncodeBenchmarks -->
+### `AlpEncodeBenchmarks`
+
+| Method   | Shape      | Rows   | Mean       | Error      | StdDev     | Min        | Median     | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |----------- |------- |-----------:|-----------:|-----------:|-----------:|-----------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **f32-nulls**  | **8192**   |  **16.652 μs** |  **0.9009 μs** |  **0.2340 μs** |  **16.365 μs** |  **16.609 μs** |  **1.00** | **Baseline**        |    **0.00** |   **2.03** |  **1.97** |        **9.025** |         **-** |          **NA** |
+| Current  | f32-nulls  | 8192   |   9.899 μs |  1.2281 μs |  0.3189 μs |   9.624 μs |   9.716 μs |  0.59 | Faster          |    0.02 |   1.21 |  3.31 |        5.365 |         - |          NA |
+|          |            |        |            |            |            |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **f32-nulls**  | **131072** | **254.039 μs** |  **9.9021 μs** |  **2.5715 μs** | **250.271 μs** | **253.707 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.94** |  **2.06** |        **8.605** |         **-** |          **NA** |
+| Current  | f32-nulls  | 131072 | 120.471 μs | 13.8703 μs |  3.6021 μs | 116.012 μs | 121.510 μs |  0.47 | Faster          |    0.01 |   0.92 |  4.35 |        4.081 |         - |          NA |
+|          |            |        |            |            |            |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **f64**        | **8192**   |  **21.454 μs** |  **1.4439 μs** |  **0.3750 μs** |  **21.121 μs** |  **21.237 μs** |  **1.00** | **Baseline**        |    **0.00** |   **2.62** |  **3.05** |       **11.628** |         **-** |          **NA** |
+| Current  | f64        | 8192   |  16.457 μs |  1.2746 μs |  0.3310 μs |  16.183 μs |  16.244 μs |  0.77 | Same            |    0.02 |   2.01 |  3.98 |        8.920 |         - |          NA |
+|          |            |        |            |            |            |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **f64**        | **131072** | **162.913 μs** |  **6.3263 μs** |  **0.9790 μs** | **161.487 μs** | **163.254 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.24** |  **6.44** |        **5.519** |         **-** |          **NA** |
+| Current  | f64        | 131072 |  89.894 μs | 12.0126 μs |  3.1196 μs |  87.661 μs |  88.213 μs |  0.55 | Faster          |    0.02 |   0.69 | 11.66 |        3.045 |         - |          NA |
+|          |            |        |            |            |            |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **f64-nulls**  | **8192**   |  **32.277 μs** |  **1.3506 μs** |  **0.3507 μs** |  **31.798 μs** |  **32.313 μs** |  **1.00** | **Baseline**        |    **0.00** |   **3.94** |  **2.03** |       **17.494** |         **-** |          **NA** |
+| Current  | f64-nulls  | 8192   |  20.641 μs |  1.1214 μs |  0.2912 μs |  20.304 μs |  20.697 μs |  0.64 | Faster          |    0.01 |   2.52 |  3.17 |       11.187 |         - |          NA |
+|          |            |        |            |            |            |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **f64-nulls**  | **131072** | **359.084 μs** |  **8.9880 μs** |  **2.3342 μs** | **356.191 μs** | **358.486 μs** |  **1.00** | **Baseline**        |    **0.00** |   **2.74** |  **2.92** |       **12.164** |         **-** |          **NA** |
+| Current  | f64-nulls  | 131072 | 174.450 μs |  4.5591 μs |  0.7055 μs | 173.673 μs | 174.378 μs |  0.49 | Faster          |    0.00 |   1.33 |  6.01 |        5.909 |         - |          NA |
+|          |            |        |            |            |            |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **f64-random** | **8192**   |  **31.124 μs** |  **4.0826 μs** |  **0.6318 μs** |  **30.286 μs** |  **31.247 μs** |  **1.00** | **Baseline**        |    **0.00** |   **3.80** |  **2.11** |       **16.869** |         **-** |          **NA** |
+| Current  | f64-random | 8192   |  19.448 μs |  1.5170 μs |  0.3940 μs |  19.077 μs |  19.323 μs |  0.63 | Faster          |    0.02 |   2.37 |  3.37 |       10.541 |         - |          NA |
+|          |            |        |            |            |            |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **f64-random** | **131072** | **960.241 μs** | **39.8913 μs** | **10.3596 μs** | **943.877 μs** | **961.628 μs** |  **1.00** | **Baseline**        |    **0.00** |   **7.33** |  **1.09** |       **32.528** |         **-** |          **NA** |
+| Current  | f64-random | 131072 | 470.509 μs | 22.8213 μs |  3.5316 μs | 465.604 μs | 471.229 μs |  0.49 | Faster          |    0.01 |   3.59 |  2.23 |       15.938 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:AlpEncodeBenchmarks -->
+
+<!-- results: kernel:BitPackPlanBenchmarks -->
+### `BitPackPlanBenchmarks`
+
+| Method   | Shape     | Rows   | Mean       | Error     | StdDev    | Min        | Median     | Ratio | MannWhitney(5%) | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |---------- |------- |-----------:|----------:|----------:|-----------:|-----------:|------:|---------------- |-------:|------:|-------------:|----------:|------------:|
+| **Original** | **i32-nulls** | **8192**   |  **22.919 μs** | **1.7764 μs** | **0.2749 μs** |  **22.521 μs** |  **23.007 μs** |  **1.00** | **Baseline**        |   **2.80** |  **1.43** |       **12.422** |         **-** |          **NA** |
+| Current  | i32-nulls | 8192   |  10.385 μs | 0.2017 μs | 0.0524 μs |  10.341 μs |  10.373 μs |  0.45 | Faster          |   1.27 |  3.16 |        5.629 |         - |          NA |
+|          |           |        |            |           |           |            |            |       |                 |        |       |              |           |             |
+| **Original** | **i32-nulls** | **131072** | **360.563 μs** | **1.8121 μs** | **0.2804 μs** | **360.168 μs** | **360.652 μs** |  **1.00** | **Baseline**        |   **2.75** |  **1.45** |       **12.214** |         **-** |          **NA** |
+| Current  | i32-nulls | 131072 | 161.989 μs | 2.1324 μs | 0.3300 μs | 161.688 μs | 161.928 μs |  0.45 | Faster          |   1.24 |  3.24 |        5.487 |         - |          NA |
+|          |           |        |            |           |           |            |            |       |                 |        |       |              |           |             |
+| **Original** | **i64**       | **8192**   |  **11.798 μs** | **0.1077 μs** | **0.0167 μs** |  **11.776 μs** |  **11.800 μs** |  **1.00** | **Baseline**        |   **1.44** |  **5.55** |        **6.394** |         **-** |          **NA** |
+| Current  | i64       | 8192   |   5.382 μs | 0.1193 μs | 0.0310 μs |   5.348 μs |   5.386 μs |  0.46 | Faster          |   0.66 | 12.18 |        2.917 |         - |          NA |
+|          |           |        |            |           |           |            |            |       |                 |        |       |              |           |             |
+| **Original** | **i64**       | **131072** | **193.247 μs** | **1.9207 μs** | **0.2972 μs** | **192.907 μs** | **193.234 μs** |  **1.00** | **Baseline**        |   **1.47** |  **5.43** |        **6.546** |         **-** |          **NA** |
+| Current  | i64       | 131072 |  82.266 μs | 1.0114 μs | 0.1565 μs |  82.107 μs |  82.258 μs |  0.43 | Faster          |   0.63 | 12.75 |        2.787 |         - |          NA |
+|          |           |        |            |           |           |            |            |       |                 |        |       |              |           |             |
+| **Original** | **i64-nulls** | **8192**   |  **10.272 μs** | **0.0745 μs** | **0.0194 μs** |  **10.248 μs** |  **10.277 μs** |  **1.00** | **Baseline**        |   **1.25** |  **6.38** |        **5.567** |         **-** |          **NA** |
+| Current  | i64-nulls | 8192   |   7.228 μs | 0.0571 μs | 0.0088 μs |   7.219 μs |   7.229 μs |  0.70 | Same            |   0.88 |  9.07 |        3.918 |         - |          NA |
+|          |           |        |            |           |           |            |            |       |                 |        |       |              |           |             |
+| **Original** | **i64-nulls** | **131072** | **166.829 μs** | **4.7661 μs** | **0.7376 μs** | **165.884 μs** | **166.877 μs** |  **1.00** | **Baseline**        |   **1.27** |  **6.29** |        **5.651** |         **-** |          **NA** |
+| Current  | i64-nulls | 131072 | 111.368 μs | 1.2760 μs | 0.3314 μs | 110.795 μs | 111.444 μs |  0.67 | Same            |   0.85 |  9.42 |        3.773 |         - |          NA |
+|          |           |        |            |           |           |            |            |       |                 |        |       |              |           |             |
+| **Original** | **u64**       | **8192**   |   **3.540 μs** | **0.0905 μs** | **0.0140 μs** |   **3.528 μs** |   **3.539 μs** |  **1.00** | **Baseline**        |   **0.43** | **18.51** |        **1.919** |         **-** |          **NA** |
+| Current  | u64       | 8192   |   3.540 μs | 0.0453 μs | 0.0118 μs |   3.529 μs |   3.536 μs |  1.00 | Same            |   0.43 | 18.51 |        1.919 |         - |          NA |
+|          |           |        |            |           |           |            |            |       |                 |        |       |              |           |             |
+| **Original** | **u64**       | **131072** |  **54.520 μs** | **0.2798 μs** | **0.0433 μs** |  **54.485 μs** |  **54.506 μs** |  **1.00** | **Baseline**        |   **0.42** | **19.23** |        **1.847** |         **-** |          **NA** |
+| Current  | u64       | 131072 |  54.539 μs | 0.7875 μs | 0.2045 μs |  54.324 μs |  54.563 μs |  1.00 | Same            |   0.42 | 19.23 |        1.847 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:BitPackPlanBenchmarks -->
+
+<!-- results: kernel:DictBuildBenchmarks -->
+### `DictBuildBenchmarks`
+
+| Method   | Shape     | Rows   | Mean        | Error      | StdDev    | Min         | Median      | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |---------- |------- |------------:|-----------:|----------:|------------:|------------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **labels200** | **8192**   |    **74.02 μs** |   **1.652 μs** |  **0.429 μs** |    **73.48 μs** |    **73.91 μs** |  **1.00** | **Baseline**        |    **0.00** |   **9.04** |  **1.77** |       **40.117** |     **136 B** |        **1.00** |
+| Current  | labels200 | 8192   |    70.82 μs |   0.880 μs |  0.136 μs |    70.71 μs |    70.77 μs |  0.96 | Same            |    0.01 |   8.64 |  1.85 |       38.382 |     136 B |        1.00 |
+|          |           |        |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **labels200** | **131072** | **1,151.20 μs** |  **19.787 μs** |  **5.139 μs** | **1,144.29 μs** | **1,150.10 μs** |  **1.00** | **Baseline**        |    **0.00** |   **8.78** |  **1.82** |       **38.997** |     **136 B** |        **1.00** |
+| Current  | labels200 | 131072 | 1,091.92 μs |   2.919 μs |  0.758 μs | 1,091.01 μs | 1,091.92 μs |  0.95 | Same            |    0.00 |   8.33 |  1.92 |       36.989 |     136 B |        1.00 |
+|          |           |        |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **labels5**   | **8192**   |    **11.22 μs** |   **1.406 μs** |  **0.365 μs** |    **10.71 μs** |    **11.21 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.37** | **11.69** |        **6.079** |     **136 B** |        **1.00** |
+| Current  | labels5   | 8192   |    10.74 μs |   0.691 μs |  0.107 μs |    10.65 μs |    10.71 μs |  0.96 | Same            |    0.03 |   1.31 | 12.20 |        5.822 |     136 B |        1.00 |
+|          |           |        |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **labels5**   | **131072** |   **172.75 μs** |   **9.447 μs** |  **2.453 μs** |   **170.44 μs** |   **171.46 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.32** | **12.14** |        **5.852** |     **136 B** |        **1.00** |
+| Current  | labels5   | 131072 |   174.65 μs |  28.287 μs |  7.346 μs |   165.44 μs |   177.01 μs |  1.01 | Same            |    0.04 |   1.33 | 12.01 |        5.916 |     136 B |        1.00 |
+|          |           |        |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **names**     | **8192**   |   **113.78 μs** |   **5.113 μs** |  **1.328 μs** |   **111.75 μs** |   **114.01 μs** |  **1.00** | **Baseline**        |    **0.00** |  **13.89** |  **1.15** |       **61.670** |     **136 B** |        **1.00** |
+| Current  | names     | 8192   |   109.88 μs |   5.927 μs |  1.539 μs |   107.74 μs |   110.34 μs |  0.97 | Same            |    0.02 |  13.41 |  1.19 |       59.553 |     136 B |        1.00 |
+|          |           |        |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **names**     | **131072** | **1,951.59 μs** |  **83.503 μs** | **21.685 μs** | **1,925.69 μs** | **1,944.55 μs** |  **1.00** | **Baseline**        |    **0.00** |  **14.89** |  **1.07** |       **66.109** |     **136 B** |        **1.00** |
+| Current  | names     | 131072 | 1,936.16 μs |  73.841 μs | 19.176 μs | 1,917.54 μs | 1,932.56 μs |  0.99 | Same            |    0.01 |  14.77 |  1.08 |       65.587 |     136 B |        1.00 |
+|          |           |        |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **uuids**     | **8192**   |   **225.23 μs** |   **4.251 μs** |  **0.658 μs** |   **224.67 μs** |   **225.06 μs** |  **1.00** | **Baseline**        |    **0.00** |  **27.49** |  **0.58** |      **122.075** |     **136 B** |        **1.00** |
+| Current  | uuids     | 8192   |   223.01 μs |   3.245 μs |  0.502 μs |   222.30 μs |   223.19 μs |  0.99 | Same            |    0.00 |  27.22 |  0.59 |      120.871 |     136 B |        1.00 |
+|          |           |        |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **uuids**     | **131072** | **4,738.74 μs** | **105.989 μs** | **27.525 μs** | **4,712.22 μs** | **4,737.26 μs** |  **1.00** | **Baseline**        |    **0.00** |  **36.15** |  **0.44** |      **160.523** |     **136 B** |        **1.00** |
+| Current  | uuids     | 131072 | 4,610.27 μs |  85.568 μs | 13.242 μs | 4,590.71 μs | 4,615.37 μs |  0.97 | Same            |    0.01 |  35.17 |  0.45 |      156.171 |     136 B |        1.00 |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:DictBuildBenchmarks -->
+
+<!-- results: kernel:DictGatherBenchmarks -->
+### `DictGatherBenchmarks`
+
+| Method   | Shape          | Rows   | Mean         | Error       | StdDev      | Min          | Median       | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |--------------- |------- |-------------:|------------:|------------:|-------------:|-------------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **u16-nullcodes**  | **1024**   |     **969.1 ns** |    **76.23 ns** |    **11.80 ns** |     **952.1 ns** |     **972.5 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.95** | **16.91** |        **4.202** |         **-** |          **NA** |
+| Current  | u16-nullcodes  | 1024   |     439.6 ns |     8.65 ns |     2.25 ns |     436.3 ns |     440.5 ns |  0.45 | Faster          |    0.01 |   0.43 | 37.27 |        1.906 |         - |          NA |
+|          |                |        |              |             |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **u16-nullcodes**  | **131072** | **127,828.3 ns** | **8,043.03 ns** | **1,244.67 ns** | **126,412.4 ns** | **127,876.5 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.98** | **16.41** |        **4.330** |         **-** |          **NA** |
+| Current  | u16-nullcodes  | 131072 |  69,157.0 ns | 7,312.26 ns | 1,898.97 ns |  66,625.8 ns |  68,542.7 ns |  0.54 | Faster          |    0.01 |   0.53 | 30.32 |        2.343 |         - |          NA |
+|          |                |        |              |             |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **u16-nullvalues** | **1024**   |     **538.5 ns** |    **25.32 ns** |     **3.92 ns** |     **535.5 ns** |     **537.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.53** | **30.43** |        **2.335** |         **-** |          **NA** |
+| Current  | u16-nullvalues | 1024   |     349.4 ns |    31.20 ns |     8.10 ns |     341.8 ns |     349.7 ns |  0.65 | Faster          |    0.01 |   0.34 | 46.89 |        1.515 |         - |          NA |
+|          |                |        |              |             |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **u16-nullvalues** | **131072** |  **67,297.9 ns** |   **847.44 ns** |   **220.08 ns** |  **67,096.0 ns** |  **67,219.9 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.51** | **31.16** |        **2.280** |         **-** |          **NA** |
+| Current  | u16-nullvalues | 131072 |  54,630.5 ns |   688.03 ns |   106.47 ns |  54,480.1 ns |  54,659.8 ns |  0.81 | Same            |    0.00 |   0.42 | 38.39 |        1.851 |         - |          NA |
+|          |                |        |              |             |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **u64**            | **1024**   |     **232.2 ns** |     **8.79 ns** |     **2.28 ns** |     **229.6 ns** |     **231.6 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.23** | **70.56** |        **1.007** |         **-** |          **NA** |
+| Current  | u64            | 1024   |     231.1 ns |     6.27 ns |     0.97 ns |     229.7 ns |     231.3 ns |  1.00 | Same            |    0.01 |   0.23 | 70.91 |        1.002 |         - |          NA |
+|          |                |        |              |             |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **u64**            | **131072** |  **45,510.4 ns** |   **453.19 ns** |    **70.13 ns** |  **45,414.9 ns** |  **45,530.0 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.35** | **46.08** |        **1.542** |         **-** |          **NA** |
+| Current  | u64            | 131072 |  43,139.7 ns |   569.93 ns |   148.01 ns |  42,962.5 ns |  43,171.4 ns |  0.95 | Same            |    0.00 |   0.33 | 48.61 |        1.461 |         - |          NA |
+|          |                |        |              |             |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **u8**             | **1024**   |     **237.4 ns** |    **15.54 ns** |     **4.04 ns** |     **233.8 ns** |     **235.9 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.23** | **69.00** |        **1.030** |         **-** |          **NA** |
+| Current  | u8             | 1024   |     233.8 ns |     4.27 ns |     0.66 ns |     233.2 ns |     233.8 ns |  0.99 | Same            |    0.02 |   0.23 | 70.06 |        1.014 |         - |          NA |
+|          |                |        |              |             |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **u8**             | **131072** |  **41,947.5 ns** | **1,590.04 ns** |   **412.93 ns** |  **41,552.7 ns** |  **41,783.8 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.32** | **49.99** |        **1.421** |         **-** |          **NA** |
+| Current  | u8             | 131072 |  45,692.2 ns | 2,348.15 ns |   363.38 ns |  45,201.2 ns |  45,748.4 ns |  1.09 | Same            |    0.01 |   0.35 | 45.90 |        1.548 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:DictGatherBenchmarks -->
+
+<!-- results: kernel:FsstDecodeBenchmarks -->
+### `FsstDecodeBenchmarks`
+
+| Method    | Shape | Rows   | Mean           | Error         | StdDev       | Min            | Median         | Ratio | MannWhitney(5%) | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|---------- |------ |------- |---------------:|--------------:|-------------:|---------------:|---------------:|------:|---------------- |-------:|------:|-------------:|----------:|------------:|
+| **Original**  | **logs**  | **1024**   |     **9,145.1 ns** |     **208.07 ns** |     **54.04 ns** |     **9,092.7 ns** |     **9,126.5 ns** |  **1.00** | **Baseline**        |   **8.93** |  **7.81** |       **39.653** |         **-** |          **NA** |
+| Current   | logs  | 1024   |     4,862.6 ns |     124.19 ns |     19.22 ns |     4,844.8 ns |     4,861.5 ns |  0.53 | Faster          |   4.75 | 14.69 |       21.084 |         - |          NA |
+| CopyFloor | logs  | 1024   |     1,231.3 ns |     314.15 ns |     81.58 ns |     1,128.5 ns |     1,259.1 ns |  0.13 | Faster          |   1.20 | 58.01 |        5.339 |         - |          NA |
+|           |       |        |                |               |              |                |                |       |                 |        |       |              |           |             |
+| **Original**  | **logs**  | **131072** | **1,504,499.2 ns** | **153,305.97 ns** | **23,724.27 ns** | **1,479,785.9 ns** | **1,506,262.0 ns** |  **1.00** | **Baseline**        |  **11.48** |  **6.07** |       **50.964** |         **-** |          **NA** |
+| Current   | logs  | 131072 |   793,566.3 ns |  47,746.06 ns | 12,399.50 ns |   781,751.0 ns |   789,298.8 ns |  0.53 | Faster          |   6.05 | 11.51 |       26.882 |         - |          NA |
+| CopyFloor | logs  | 131072 |   151,081.5 ns |  17,450.58 ns |  2,700.50 ns |   147,138.2 ns |   152,081.7 ns |  0.10 | Faster          |   1.15 | 60.46 |        5.118 |         - |          NA |
+|           |       |        |                |               |              |                |                |       |                 |        |       |              |           |             |
+| **Original**  | **urls**  | **1024**   |     **4,197.8 ns** |      **97.88 ns** |     **25.42 ns** |     **4,172.6 ns** |     **4,196.1 ns** |  **1.00** | **Baseline**        |   **4.10** | **12.68** |       **18.201** |         **-** |          **NA** |
+| Current   | urls  | 1024   |     2,280.7 ns |      68.60 ns |     17.82 ns |     2,261.3 ns |     2,287.0 ns |  0.54 | Faster          |   2.23 | 23.35 |        9.889 |         - |          NA |
+| CopyFloor | urls  | 1024   |     1,006.6 ns |     126.61 ns |     32.88 ns |       978.8 ns |       990.8 ns |  0.24 | Faster          |   0.98 | 52.90 |        4.364 |         - |          NA |
+|           |       |        |                |               |              |                |                |       |                 |        |       |              |           |             |
+| **Original**  | **urls**  | **131072** |   **628,593.9 ns** |  **10,390.99 ns** |  **2,698.51 ns** |   **625,667.4 ns** |   **629,119.5 ns** |  **1.00** | **Baseline**        |   **4.80** | **10.84** |       **21.293** |         **-** |          **NA** |
+| Current   | urls  | 131072 |   347,641.6 ns |   4,575.01 ns |  1,188.12 ns |   346,451.4 ns |   347,630.1 ns |  0.55 | Faster          |   2.65 | 19.61 |       11.776 |         - |          NA |
+| CopyFloor | urls  | 131072 |   105,787.4 ns |  33,241.13 ns |  8,632.62 ns |    94,404.0 ns |   109,676.0 ns |  0.17 | Faster          |   0.81 | 64.43 |        3.584 |         - |          NA |
+|           |       |        |                |               |              |                |                |       |                 |        |       |              |           |             |
+| **Original**  | **uuids** | **1024**   |    **10,373.5 ns** |     **289.36 ns** |     **75.15 ns** |    **10,273.5 ns** |    **10,355.2 ns** |  **1.00** | **Baseline**        |  **10.13** |  **3.55** |       **44.979** |         **-** |          **NA** |
+| Current   | uuids | 1024   |     5,672.1 ns |     399.51 ns |    103.75 ns |     5,542.5 ns |     5,693.1 ns |  0.55 | Faster          |   5.54 |  6.50 |       24.594 |         - |          NA |
+| CopyFloor | uuids | 1024   |       551.1 ns |     162.76 ns |     42.27 ns |       492.9 ns |       559.8 ns |  0.05 | Faster          |   0.54 | 66.89 |        2.390 |         - |          NA |
+|           |       |        |                |               |              |                |                |       |                 |        |       |              |           |             |
+| **Original**  | **uuids** | **131072** | **1,201,193.3 ns** |  **28,340.88 ns** |  **7,360.04 ns** | **1,192,235.7 ns** | **1,198,887.2 ns** |  **1.00** | **Baseline**        |   **9.16** |  **3.93** |       **40.690** |         **-** |          **NA** |
+| Current   | uuids | 131072 |   623,488.9 ns |   8,496.38 ns |  1,314.82 ns |   621,863.8 ns |   623,527.3 ns |  0.52 | Faster          |   4.76 |  7.57 |       21.120 |         - |          NA |
+| CopyFloor | uuids | 131072 |    80,167.1 ns |   2,576.72 ns |    669.17 ns |    79,195.5 ns |    80,260.4 ns |  0.07 | Faster          |   0.61 | 58.86 |        2.716 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:FsstDecodeBenchmarks -->
+
+<!-- results: kernel:IntegerStatsBenchmarks -->
+### `IntegerStatsBenchmarks`
+
+| Method   | Shape      | Rows   | Mean         | Error       | StdDev     | Min          | Median       | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |----------- |------- |-------------:|------------:|-----------:|-------------:|-------------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **i64**        | **8192**   |    **16.058 μs** |   **0.3200 μs** |  **0.0495 μs** |    **16.002 μs** |    **16.057 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.96** |  **4.08** |        **8.703** |         **-** |          **NA** |
+| Current  | i64        | 8192   |    10.646 μs |   0.2498 μs |  0.0649 μs |    10.550 μs |    10.662 μs |  0.66 | Faster          |    0.00 |   1.30 |  6.16 |        5.770 |         - |          NA |
+|          |            |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64**        | **131072** |   **256.879 μs** |   **2.4420 μs** |  **0.6342 μs** |   **256.295 μs** |   **256.668 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.96** |  **4.08** |        **8.702** |         **-** |          **NA** |
+| Current  | i64        | 131072 |   170.589 μs |   2.2610 μs |  0.5872 μs |   169.900 μs |   170.738 μs |  0.66 | Faster          |    0.00 |   1.30 |  6.15 |        5.779 |         - |          NA |
+|          |            |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64-nulls**  | **8192**   |    **21.741 μs** |   **0.3778 μs** |  **0.0981 μs** |    **21.596 μs** |    **21.735 μs** |  **1.00** | **Baseline**        |    **0.00** |   **2.65** |  **3.01** |       **11.784** |         **-** |          **NA** |
+| Current  | i64-nulls  | 8192   |    18.011 μs |   0.1263 μs |  0.0195 μs |    17.989 μs |    18.012 μs |  0.83 | Same            |    0.00 |   2.20 |  3.64 |        9.762 |         - |          NA |
+|          |            |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64-nulls**  | **131072** |   **349.853 μs** |  **10.9515 μs** |  **2.8441 μs** |   **346.657 μs** |   **349.214 μs** |  **1.00** | **Baseline**        |    **0.00** |   **2.67** |  **3.00** |       **11.851** |         **-** |          **NA** |
+| Current  | i64-nulls  | 131072 |   289.430 μs |   1.2449 μs |  0.3233 μs |   288.925 μs |   289.562 μs |  0.83 | Same            |    0.01 |   2.21 |  3.62 |        9.804 |         - |          NA |
+|          |            |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64-random** | **8192**   |    **25.846 μs** |   **1.4141 μs** |  **0.3672 μs** |    **25.377 μs** |    **25.960 μs** |  **1.00** | **Baseline**        |    **0.00** |   **3.16** |  **2.54** |       **14.009** |         **-** |          **NA** |
+| Current  | i64-random | 8192   |    21.287 μs |   0.3877 μs |  0.1007 μs |    21.171 μs |    21.279 μs |  0.82 | Same            |    0.01 |   2.60 |  3.08 |       11.537 |         - |          NA |
+|          |            |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64-random** | **131072** | **1,317.635 μs** | **144.7525 μs** | **37.5918 μs** | **1,272.009 μs** | **1,333.554 μs** |  **1.00** | **Baseline**        |    **0.00** |  **10.05** |  **0.80** |       **44.634** |         **-** |          **NA** |
+| Current  | i64-random | 131072 |   566.090 μs |  60.2693 μs | 15.6517 μs |   552.575 μs |   560.425 μs |  0.43 | Faster          |    0.02 |   4.32 |  1.85 |       19.176 |         - |          NA |
+|          |            |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64-seq**    | **8192**   |     **7.980 μs** |   **0.3524 μs** |  **0.0545 μs** |     **7.903 μs** |     **7.995 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.97** |  **8.21** |        **4.325** |         **-** |          **NA** |
+| Current  | i64-seq    | 8192   |     1.853 μs |   0.0658 μs |  0.0171 μs |     1.825 μs |     1.860 μs |  0.23 | Faster          |    0.00 |   0.23 | 35.36 |        1.005 |         - |          NA |
+|          |            |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64-seq**    | **131072** |   **131.260 μs** |   **7.9228 μs** |  **2.0575 μs** |   **128.715 μs** |   **130.635 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.00** |  **7.99** |        **4.446** |         **-** |          **NA** |
+| Current  | i64-seq    | 131072 |    24.964 μs |   0.2402 μs |  0.0624 μs |    24.879 μs |    24.953 μs |  0.19 | Faster          |    0.00 |   0.19 | 42.00 |        0.846 |         - |          NA |
+|          |            |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **u32-nulls**  | **8192**   |    **17.746 μs** |   **1.1768 μs** |  **0.1821 μs** |    **17.485 μs** |    **17.804 μs** |  **1.00** | **Baseline**        |    **0.00** |   **2.17** |  **1.85** |        **9.618** |         **-** |          **NA** |
+| Current  | u32-nulls  | 8192   |    15.252 μs |   0.0830 μs |  0.0215 μs |    15.232 μs |    15.242 μs |  0.86 | Same            |    0.01 |   1.86 |  2.15 |        8.267 |         - |          NA |
+|          |            |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **u32-nulls**  | **131072** |   **290.142 μs** |  **16.8855 μs** |  **4.3851 μs** |   **285.198 μs** |   **290.056 μs** |  **1.00** | **Baseline**        |    **0.00** |   **2.21** |  **1.81** |        **9.828** |         **-** |          **NA** |
+| Current  | u32-nulls  | 131072 |   245.500 μs |   4.5685 μs |  0.7070 μs |   244.878 μs |   245.305 μs |  0.85 | Same            |    0.01 |   1.87 |  2.14 |        8.316 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:IntegerStatsBenchmarks -->
+
+<!-- results: kernel:LengthSumBenchmarks -->
+### `LengthSumBenchmarks`
+
+| Method   | Shape | Rows   | Mean         | Error      | StdDev    | Min          | Median       | Ratio | MannWhitney(5%) | ns/row | GB/s   | cycles/value | Allocated | Alloc Ratio |
+|--------- |------ |------- |-------------:|-----------:|----------:|-------------:|-------------:|------:|---------------- |-------:|-------:|-------------:|----------:|------------:|
+| **Original** | **i32**   | **1024**   |    **103.22 ns** |   **1.777 ns** |  **0.275 ns** |    **102.97 ns** |    **103.14 ns** |  **1.00** | **Baseline**        |   **0.10** |  **39.68** |        **0.448** |         **-** |          **NA** |
+| Current  | i32   | 1024   |     42.70 ns |   0.795 ns |  0.123 ns |     42.57 ns |     42.68 ns |  0.41 | Faster          |   0.04 |  95.93 |        0.185 |         - |          NA |
+|          |       |        |              |            |           |              |              |       |                 |        |        |              |           |             |
+| **Original** | **i32**   | **131072** | **15,713.85 ns** | **362.736 ns** | **56.134 ns** | **15,631.26 ns** | **15,733.82 ns** |  **1.00** | **Baseline**        |   **0.12** |  **33.36** |        **0.532** |         **-** |          **NA** |
+| Current  | i32   | 131072 |  6,315.37 ns | 189.218 ns | 49.139 ns |  6,253.17 ns |  6,311.75 ns |  0.40 | Faster          |   0.05 |  83.02 |        0.214 |         - |          NA |
+|          |       |        |              |            |           |              |              |       |                 |        |        |              |           |             |
+| **Original** | **u32**   | **1024**   |     **97.00 ns** |   **2.303 ns** |  **0.598 ns** |     **96.06 ns** |     **97.23 ns** |  **1.00** | **Baseline**        |   **0.09** |  **42.23** |        **0.421** |         **-** |          **NA** |
+| Current  | u32   | 1024   |     37.68 ns |   0.940 ns |  0.244 ns |     37.40 ns |     37.62 ns |  0.39 | Faster          |   0.04 | 108.71 |        0.163 |         - |          NA |
+|          |       |        |              |            |           |              |              |       |                 |        |        |              |           |             |
+| **Original** | **u32**   | **131072** | **15,448.38 ns** | **373.728 ns** | **57.835 ns** | **15,367.22 ns** | **15,464.32 ns** |  **1.00** | **Baseline**        |   **0.12** |  **33.94** |        **0.523** |         **-** |          **NA** |
+| Current  | u32   | 131072 |  6,104.70 ns | 141.865 ns | 21.954 ns |  6,082.79 ns |  6,100.44 ns |  0.40 | Faster          |   0.05 |  85.88 |        0.207 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:LengthSumBenchmarks -->
+
+<!-- results: kernel:ListViewValidationBenchmarks -->
+### `ListViewValidationBenchmarks`
+
+| Method   | Shape | Rows   | Mean        | Error        | StdDev       | Min         | Median      | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s   | cycles/value | Allocated | Alloc Ratio |
+|--------- |------ |------- |------------:|-------------:|-------------:|------------:|------------:|------:|---------------- |--------:|-------:|-------:|-------------:|----------:|------------:|
+| **Original** | **i32**   | **1024**   |    **384.2 ns** |     **22.32 ns** |      **3.45 ns** |    **381.5 ns** |    **383.0 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.38** |  **21.32** |        **1.666** |         **-** |          **NA** |
+| Current  | i32   | 1024   |    116.1 ns |      4.98 ns |      1.29 ns |    115.0 ns |    115.4 ns |  0.30 | Faster          |    0.00 |   0.11 |  70.55 |        0.504 |         - |          NA |
+|          |       |        |             |              |              |             |             |       |                 |         |        |        |              |           |             |
+| **Original** | **i32**   | **131072** | **50,734.6 ns** |  **3,211.35 ns** |    **833.98 ns** | **49,393.0 ns** | **50,744.5 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.39** |  **20.67** |        **1.719** |         **-** |          **NA** |
+| Current  | i32   | 131072 | 16,183.7 ns |    504.23 ns |     78.03 ns | 16,111.9 ns | 16,184.6 ns |  0.32 | Faster          |    0.01 |   0.12 |  64.79 |        0.548 |         - |          NA |
+|          |       |        |             |              |              |             |             |       |                 |         |        |        |              |           |             |
+| **Original** | **u32**   | **1024**   |    **345.2 ns** |     **10.90 ns** |      **2.83 ns** |    **340.4 ns** |    **346.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.34** |  **23.73** |        **1.497** |         **-** |          **NA** |
+| Current  | u32   | 1024   |    116.0 ns |      4.02 ns |      1.04 ns |    114.9 ns |    115.7 ns |  0.34 | Faster          |    0.00 |   0.11 |  70.61 |        0.503 |         - |          NA |
+|          |       |        |             |              |              |             |             |       |                 |         |        |        |              |           |             |
+| **Original** | **u32**   | **131072** | **43,895.6 ns** |  **1,651.26 ns** |    **428.83 ns** | **43,509.7 ns** | **43,719.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.33** |  **23.89** |        **1.487** |         **-** |          **NA** |
+| Current  | u32   | 131072 | 16,018.7 ns |    163.47 ns |     25.30 ns | 15,992.7 ns | 16,020.5 ns |  0.36 | Faster          |    0.00 |   0.12 |  65.46 |        0.543 |         - |          NA |
+|          |       |        |             |              |              |             |             |       |                 |         |        |        |              |           |             |
+| **Original** | **u64**   | **1024**   |    **522.8 ns** |    **131.71 ns** |     **34.21 ns** |    **475.7 ns** |    **542.3 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.51** |  **31.34** |        **2.267** |         **-** |          **NA** |
+| Current  | u64   | 1024   |    160.2 ns |      2.18 ns |      0.57 ns |    159.7 ns |    160.0 ns |  0.31 | Faster          |    0.02 |   0.16 | 102.24 |        0.695 |         - |          NA |
+|          |       |        |             |              |              |             |             |       |                 |         |        |        |              |           |             |
+| **Original** | **u64**   | **131072** | **69,208.3 ns** | **41,010.96 ns** | **10,650.42 ns** | **54,649.1 ns** | **69,957.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.53** |  **30.30** |        **2.344** |         **-** |          **NA** |
+| Current  | u64   | 131072 | 20,572.6 ns |    247.98 ns |     38.37 ns | 20,532.0 ns | 20,571.1 ns |  0.30 | Faster          |    0.05 |   0.16 | 101.94 |        0.697 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:ListViewValidationBenchmarks -->
+
+<!-- results: kernel:NamedBytesBenchmarks -->
+### `NamedBytesBenchmarks`
+
+| Method   | Shape  | Rows    | Mean        | Error      | StdDev    | Min         | Median      | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |------- |-------- |------------:|-----------:|----------:|------------:|------------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **heap**   | **131072**  |    **33.36 μs** |   **1.375 μs** |  **0.213 μs** |    **33.13 μs** |    **33.38 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.25** | **62.86** |        **1.130** |         **-** |          **NA** |
+| Current  | heap   | 131072  |    22.71 μs |   0.703 μs |  0.183 μs |    22.50 μs |    22.61 μs |  0.68 | Same            |    0.01 |   0.17 | 92.36 |        0.769 |         - |          NA |
+|          |        |         |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **heap**   | **1048576** |   **273.04 μs** |   **6.819 μs** |  **1.055 μs** |   **271.77 μs** |   **273.13 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.26** | **61.45** |        **1.156** |         **-** |          **NA** |
+| Current  | heap   | 1048576 |   184.33 μs |   6.934 μs |  1.801 μs |   181.97 μs |   184.89 μs |  0.68 | Same            |    0.01 |   0.18 | 91.02 |        0.780 |         - |          NA |
+|          |        |         |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **inline** | **131072**  |    **34.84 μs** |   **1.870 μs** |  **0.486 μs** |    **34.10 μs** |    **35.06 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.27** | **60.19** |        **1.180** |         **-** |          **NA** |
+| Current  | inline | 131072  |    23.50 μs |   0.954 μs |  0.248 μs |    23.07 μs |    23.60 μs |  0.67 | Same            |    0.01 |   0.18 | 89.22 |        0.796 |         - |          NA |
+|          |        |         |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **inline** | **1048576** |   **271.49 μs** |  **10.849 μs** |  **2.817 μs** |   **268.27 μs** |   **270.35 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.26** | **61.80** |        **1.150** |         **-** |          **NA** |
+| Current  | inline | 1048576 |   190.39 μs |  25.920 μs |  6.731 μs |   182.96 μs |   190.25 μs |  0.70 | Same            |    0.02 |   0.18 | 88.12 |        0.806 |         - |          NA |
+|          |        |         |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **mixed**  | **131072**  |   **238.17 μs** |  **38.462 μs** |  **9.988 μs** |   **228.08 μs** |   **236.87 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.82** |  **8.81** |        **8.068** |         **-** |          **NA** |
+| Current  | mixed  | 131072  |    23.19 μs |   0.616 μs |  0.160 μs |    22.93 μs |    23.26 μs |  0.10 | Faster          |    0.00 |   0.18 | 90.43 |        0.786 |         - |          NA |
+|          |        |         |             |            |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **mixed**  | **1048576** | **2,049.36 μs** | **167.001 μs** | **43.370 μs** | **2,009.20 μs** | **2,024.30 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.95** |  **8.19** |        **8.678** |         **-** |          **NA** |
+| Current  | mixed  | 1048576 |   184.61 μs |   9.045 μs |  2.349 μs |   182.50 μs |   183.94 μs |  0.09 | Faster          |    0.00 |   0.18 | 90.88 |        0.782 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:NamedBytesBenchmarks -->
+
+<!-- results: kernel:OnPairConcatBenchmarks -->
+### `OnPairConcatBenchmarks`
+
+| Method   | Shape  | Codes  | Mean       | Error       | StdDev     | Min         | Median     | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s | cycles/value | Allocated | Alloc Ratio |
+|--------- |------- |------- |-----------:|------------:|-----------:|------------:|-----------:|------:|---------------- |--------:|-------:|-----:|-------------:|----------:|------------:|
+| **Original** | **corpus** | **2048**   |   **1.339 μs** |   **0.0742 μs** |  **0.0193 μs** |   **1.3167 μs** |   **1.332 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.65** | **3.06** |        **2.903** |         **-** |          **NA** |
+| Current  | corpus | 2048   |   1.040 μs |   0.0718 μs |  0.0186 μs |   1.0225 μs |   1.035 μs |  0.78 | Same            |    0.02 |   0.51 | 3.94 |        2.255 |         - |          NA |
+|          |        |        |            |             |            |             |            |       |                 |         |        |      |              |           |             |
+| **Original** | **corpus** | **262144** | **582.974 μs** |  **52.5684 μs** | **13.6518 μs** | **562.0712 μs** | **581.622 μs** |  **1.00** | **Baseline**        |    **0.00** |   **2.22** | **0.90** |        **9.874** |         **-** |          **NA** |
+| Current  | corpus | 262144 | 123.627 μs |   1.9010 μs |  0.4937 μs | 123.0673 μs | 123.925 μs |  0.21 | Faster          |    0.00 |   0.47 | 4.24 |        2.094 |         - |          NA |
+|          |        |        |            |             |            |             |            |       |                 |         |        |      |              |           |             |
+| **Original** | **wide**   | **2048**   |   **1.370 μs** |   **0.0927 μs** |  **0.0241 μs** |   **1.3375 μs** |   **1.380 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.67** | **2.99** |        **2.970** |         **-** |          **NA** |
+| Current  | wide   | 2048   |   1.005 μs |   0.0452 μs |  0.0117 μs |   0.9862 μs |   1.005 μs |  0.73 | Same            |    0.01 |   0.49 | 4.08 |        2.178 |         - |          NA |
+|          |        |        |            |             |            |             |            |       |                 |         |        |      |              |           |             |
+| **Original** | **wide**   | **262144** | **588.265 μs** | **129.6235 μs** | **33.6628 μs** | **551.4849 μs** | **598.184 μs** |  **1.00** | **Baseline**        |    **0.00** |   **2.24** | **0.89** |        **9.964** |         **-** |          **NA** |
+| Current  | wide   | 262144 | 140.939 μs |   2.8304 μs |  0.4380 μs | 140.5581 μs | 140.819 μs |  0.24 | Faster          |    0.01 |   0.54 | 3.72 |        2.387 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:OnPairConcatBenchmarks -->
+
+<!-- results: kernel:RecomposeBenchmarks -->
+### `RecomposeBenchmarks`
+
+| Method   | Shape       | Rows   | Mean        | Error       | StdDev    | Min         | Median      | Ratio | MannWhitney(5%) | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |------------ |------- |------------:|------------:|----------:|------------:|------------:|------:|---------------- |-------:|------:|-------------:|----------:|------------:|
+| **Original** | **i64-i32-i32** | **1024**   |    **464.0 ns** |     **8.98 ns** |   **2.33 ns** |    **461.1 ns** |    **463.6 ns** |  **1.00** | **Baseline**        |   **0.45** | **17.65** |        **2.012** |         **-** |          **NA** |
+| Current  | i64-i32-i32 | 1024   |    276.9 ns |     7.49 ns |   1.16 ns |    275.4 ns |    277.0 ns |  0.60 | Faster          |   0.27 | 29.58 |        1.201 |         - |          NA |
+|          |             |        |             |             |           |             |             |       |                 |        |       |              |           |             |
+| **Original** | **i64-i32-i32** | **131072** | **60,992.6 ns** | **1,807.67 ns** | **279.74 ns** | **60,668.7 ns** | **61,015.1 ns** |  **1.00** | **Baseline**        |   **0.47** | **17.19** |        **2.066** |         **-** |          **NA** |
+| Current  | i64-i32-i32 | 131072 | 50,287.1 ns |   932.74 ns | 242.23 ns | 50,017.3 ns | 50,247.6 ns |  0.82 | Same            |   0.38 | 20.85 |        1.703 |         - |          NA |
+|          |             |        |             |             |           |             |             |       |                 |        |       |              |           |             |
+| **Original** | **u16-u32-u16** | **1024**   |    **379.1 ns** |     **1.76 ns** |   **0.27 ns** |    **378.7 ns** |    **379.2 ns** |  **1.00** | **Baseline**        |   **0.37** | **21.61** |        **1.644** |         **-** |          **NA** |
+| Current  | u16-u32-u16 | 1024   |    277.9 ns |     6.25 ns |   1.62 ns |    275.5 ns |    278.1 ns |  0.73 | Same            |   0.27 | 29.48 |        1.205 |         - |          NA |
+|          |             |        |             |             |           |             |             |       |                 |        |       |              |           |             |
+| **Original** | **u16-u32-u16** | **131072** | **48,323.8 ns** |   **263.16 ns** |  **68.34 ns** | **48,256.0 ns** | **48,297.3 ns** |  **1.00** | **Baseline**        |   **0.37** | **21.70** |        **1.637** |         **-** |          **NA** |
+| Current  | u16-u32-u16 | 131072 | 35,426.5 ns |   597.84 ns | 155.26 ns | 35,237.2 ns | 35,410.7 ns |  0.73 | Same            |   0.27 | 29.60 |        1.200 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:RecomposeBenchmarks -->
+
+<!-- results: kernel:StringBoundsBenchmarks -->
+### `StringBoundsBenchmarks`
+
+| Method   | Shape  | Rows   | Mean         | Error       | StdDev     | Min          | Median       | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |------- |------- |-------------:|------------:|-----------:|-------------:|-------------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **labels** | **8192**   |     **9.370 μs** |   **0.7393 μs** |  **0.1144 μs** |     **9.212 μs** |     **9.406 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.14** | **13.99** |        **5.078** |     **744 B** |        **1.00** |
+| Current  | labels | 8192   |     9.605 μs |   0.3957 μs |  0.0612 μs |     9.548 μs |     9.596 μs |  1.03 | Same            |    0.01 |   1.17 | 13.65 |        5.206 |     792 B |        1.06 |
+|          |        |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **labels** | **131072** |   **143.481 μs** |  **14.8493 μs** |  **2.2979 μs** |   **140.295 μs** |   **143.922 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.09** | **14.62** |        **4.860** |    **2568 B** |        **1.00** |
+| Current  | labels | 131072 |   159.164 μs |  36.7361 μs |  9.5403 μs |   148.525 μs |   162.684 μs |  1.11 | Same            |    0.06 |   1.21 | 13.18 |        5.392 |    2616 B |        1.02 |
+|          |        |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **urls**   | **8192**   |   **138.902 μs** |   **4.4617 μs** |  **0.6904 μs** |   **137.910 μs** |   **139.093 μs** |  **1.00** | **Baseline**        |    **0.00** |  **16.96** |  **0.94** |       **75.284** |     **744 B** |        **1.00** |
+| Current  | urls   | 8192   |    39.301 μs |   2.9309 μs |  0.7611 μs |    38.051 μs |    39.404 μs |  0.28 | Faster          |    0.01 |   4.80 |  3.34 |       21.301 |     792 B |        1.06 |
+|          |        |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **urls**   | **131072** | **2,527.914 μs** | **527.9288 μs** | **81.6976 μs** | **2,407.839 μs** | **2,557.224 μs** |  **1.00** | **Baseline**        |    **0.00** |  **19.29** |  **0.83** |       **85.632** |    **3104 B** |        **1.00** |
+| Current  | urls   | 131072 |   622.624 μs |  59.6164 μs |  9.2257 μs |   608.791 μs |   627.057 μs |  0.25 | Faster          |    0.01 |   4.75 |  3.37 |       21.091 |    3152 B |        1.02 |
+|          |        |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **uuids**  | **8192**   |    **12.618 μs** |   **0.4279 μs** |  **0.0662 μs** |    **12.576 μs** |    **12.589 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.54** | **10.39** |        **6.839** |     **744 B** |        **1.00** |
+| Current  | uuids  | 8192   |    12.665 μs |   0.2723 μs |  0.0421 μs |    12.626 μs |    12.655 μs |  1.00 | Same            |    0.01 |   1.55 | 10.35 |        6.864 |     792 B |        1.06 |
+|          |        |        |              |             |            |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **uuids**  | **131072** |   **208.710 μs** |   **3.2298 μs** |  **0.8388 μs** |   **207.538 μs** |   **209.069 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.59** | **10.05** |        **7.070** |    **3104 B** |        **1.00** |
+| Current  | uuids  | 131072 |   207.949 μs |   5.7622 μs |  0.8917 μs |   207.136 μs |   207.721 μs |  1.00 | Same            |    0.01 |   1.59 | 10.08 |        7.044 |    3152 B |        1.02 |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:StringBoundsBenchmarks -->
+
+<!-- results: kernel:StringStatsBenchmarks -->
+### `StringStatsBenchmarks`
+
+| Method   | Shape      | Rows   | Mean        | Error     | StdDev    | Min         | Median      | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |----------- |------- |------------:|----------:|----------:|------------:|------------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **codes**      | **8192**   |    **37.49 μs** |  **6.626 μs** |  **1.721 μs** |    **35.93 μs** |    **36.90 μs** |  **1.00** | **Baseline**        |    **0.00** |   **4.58** |  **3.50** |       **20.321** |         **-** |          **NA** |
+| Current  | codes      | 8192   |    26.73 μs |  7.352 μs |  1.909 μs |    25.19 μs |    25.74 μs |  0.71 | Same            |    0.06 |   3.26 |  4.90 |       14.485 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **codes**      | **131072** |   **598.31 μs** | **56.724 μs** | **14.731 μs** |   **573.92 μs** |   **600.88 μs** |  **1.00** | **Baseline**        |    **0.00** |   **4.56** |  **3.51** |       **20.268** |         **-** |          **NA** |
+| Current  | codes      | 131072 |   405.58 μs | 10.280 μs |  1.591 μs |   403.71 μs |   405.76 μs |  0.68 | Same            |    0.02 |   3.09 |  5.17 |       13.739 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **ids**        | **8192**   |    **47.41 μs** |  **3.463 μs** |  **0.536 μs** |    **46.61 μs** |    **47.65 μs** |  **1.00** | **Baseline**        |    **0.00** |   **5.79** |  **2.76** |       **25.696** |         **-** |          **NA** |
+| Current  | ids        | 8192   |    18.06 μs |  0.839 μs |  0.218 μs |    17.71 μs |    18.15 μs |  0.38 | Faster          |    0.01 |   2.20 |  7.26 |        9.786 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **ids**        | **131072** |   **758.75 μs** | **46.836 μs** | **12.163 μs** |   **737.33 μs** |   **763.90 μs** |  **1.00** | **Baseline**        |    **0.00** |   **5.79** |  **2.76** |       **25.702** |         **-** |          **NA** |
+| Current  | ids        | 131072 |   286.79 μs |  5.580 μs |  1.449 μs |   284.64 μs |   287.31 μs |  0.38 | Faster          |    0.01 |   2.19 |  7.31 |        9.715 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **labels**     | **8192**   |    **13.46 μs** |  **3.171 μs** |  **0.823 μs** |    **12.92 μs** |    **12.93 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.64** |  **9.74** |        **7.296** |         **-** |          **NA** |
+| Current  | labels     | 8192   |    13.33 μs |  0.433 μs |  0.067 μs |    13.25 μs |    13.34 μs |  0.99 | Same            |    0.05 |   1.63 |  9.83 |        7.225 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **labels**     | **131072** |   **211.05 μs** | **11.782 μs** |  **1.823 μs** |   **209.00 μs** |   **211.25 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.61** |  **9.94** |        **7.149** |         **-** |          **NA** |
+| Current  | labels     | 131072 |   221.78 μs | 25.110 μs |  6.521 μs |   215.04 μs |   222.10 μs |  1.05 | Same            |    0.03 |   1.69 |  9.46 |        7.513 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **urls**       | **8192**   |    **72.06 μs** |  **8.328 μs** |  **2.163 μs** |    **69.38 μs** |    **72.30 μs** |  **1.00** | **Baseline**        |    **0.00** |   **8.80** |  **1.82** |       **39.055** |         **-** |          **NA** |
+| Current  | urls       | 8192   |    46.78 μs |  3.732 μs |  0.969 μs |    45.45 μs |    46.74 μs |  0.65 | Faster          |    0.02 |   5.71 |  2.80 |       25.355 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **urls**       | **131072** | **1,155.25 μs** | **98.857 μs** | **25.673 μs** | **1,112.62 μs** | **1,158.01 μs** |  **1.00** | **Baseline**        |    **0.00** |   **8.81** |  **1.82** |       **39.134** |         **-** |          **NA** |
+| Current  | urls       | 131072 |   752.23 μs | 62.085 μs | 16.123 μs |   734.22 μs |   755.41 μs |  0.65 | Faster          |    0.02 |   5.74 |  2.79 |       25.481 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **urls-split** | **8192**   |   **120.69 μs** |  **4.167 μs** |  **1.082 μs** |   **119.68 μs** |   **120.53 μs** |  **1.00** | **Baseline**        |    **0.00** |  **14.73** |  **1.09** |       **65.413** |         **-** |          **NA** |
+| Current  | urls-split | 8192   |    46.34 μs |  1.473 μs |  0.228 μs |    46.14 μs |    46.28 μs |  0.38 | Faster          |    0.00 |   5.66 |  2.83 |       25.114 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **urls-split** | **131072** | **2,067.84 μs** | **10.825 μs** |  **1.675 μs** | **2,066.24 μs** | **2,067.75 μs** |  **1.00** | **Baseline**        |    **0.00** |  **15.78** |  **1.01** |       **70.047** |         **-** |          **NA** |
+| Current  | urls-split | 131072 |   766.12 μs | 21.042 μs |  5.464 μs |   760.67 μs |   764.40 μs |  0.37 | Faster          |    0.00 |   5.85 |  2.74 |       25.952 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **uuids**      | **8192**   |    **46.02 μs** |  **1.124 μs** |  **0.292 μs** |    **45.66 μs** |    **46.01 μs** |  **1.00** | **Baseline**        |    **0.00** |   **5.62** |  **2.85** |       **24.942** |         **-** |          **NA** |
+| Current  | uuids      | 8192   |    11.62 μs |  3.468 μs |  0.901 μs |    10.88 μs |    11.20 μs |  0.25 | Faster          |    0.02 |   1.42 | 11.28 |        6.297 |         - |          NA |
+|          |            |        |             |           |           |             |             |       |                 |         |        |       |              |           |             |
+| **Original** | **uuids**      | **131072** |   **741.19 μs** | **34.074 μs** |  **8.849 μs** |   **729.45 μs** |   **744.98 μs** |  **1.00** | **Baseline**        |    **0.00** |   **5.65** |  **2.83** |       **25.108** |         **-** |          **NA** |
+| Current  | uuids      | 131072 |   178.94 μs | 26.171 μs |  6.796 μs |   173.00 μs |   174.71 μs |  0.24 | Faster          |    0.01 |   1.37 | 11.72 |        6.062 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:StringStatsBenchmarks -->
+
+<!-- results: kernel:TransformBenchmarks -->
+### `TransformBenchmarks`
+
+| Method   | Shape      | Rows   | Mean         | Error        | StdDev       | Min          | Median       | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |----------- |------- |-------------:|-------------:|-------------:|-------------:|-------------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **i32-nulls**  | **8192**   |  **17,697.9 ns** |  **2,533.35 ns** |    **657.90 ns** |  **16,816.8 ns** |  **17,497.0 ns** |  **1.00** | **Baseline**        |    **0.00** |   **2.16** |  **1.85** |        **9.592** |         **-** |          **NA** |
+| Current  | i32-nulls  | 8192   |   4,326.6 ns |     72.72 ns |     18.88 ns |   4,306.7 ns |   4,328.8 ns |  0.24 | Faster          |    0.01 |   0.53 |  7.57 |        2.345 |         - |          NA |
+|          |            |        |              |              |              |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i32-nulls**  | **131072** | **267,411.7 ns** | **43,626.45 ns** | **11,329.65 ns** | **254,451.3 ns** | **271,519.9 ns** |  **1.00** | **Baseline**        |    **0.00** |   **2.04** |  **1.96** |        **9.058** |         **-** |          **NA** |
+| Current  | i32-nulls  | 131072 |  69,665.2 ns |    701.51 ns |    182.18 ns |  69,469.2 ns |  69,647.0 ns |  0.26 | Faster          |    0.01 |   0.53 |  7.53 |        2.360 |         - |          NA |
+|          |            |        |              |              |              |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64**        | **8192**   |   **1,237.4 ns** |     **40.28 ns** |      **6.23 ns** |   **1,230.1 ns** |   **1,237.7 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.15** | **52.96** |        **0.671** |         **-** |          **NA** |
+| Current  | i64        | 8192   |     775.5 ns |     13.38 ns |      2.07 ns |     773.4 ns |     775.2 ns |  0.63 | Faster          |    0.00 |   0.09 | 84.51 |        0.420 |         - |          NA |
+|          |            |        |              |              |              |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64**        | **131072** |  **19,065.2 ns** |    **980.89 ns** |    **254.73 ns** |  **18,843.6 ns** |  **18,978.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.15** | **55.00** |        **0.646** |         **-** |          **NA** |
+| Current  | i64        | 131072 |  14,871.7 ns |  2,899.46 ns |    752.98 ns |  14,075.3 ns |  14,905.5 ns |  0.78 | Same            |    0.04 |   0.11 | 70.51 |        0.504 |         - |          NA |
+|          |            |        |              |              |              |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64-nulls**  | **8192**   |  **14,513.3 ns** |  **2,376.40 ns** |    **617.14 ns** |  **14,022.6 ns** |  **14,186.8 ns** |  **1.00** | **Baseline**        |    **0.00** |   **1.77** |  **4.52** |        **7.866** |         **-** |          **NA** |
+| Current  | i64-nulls  | 8192   |   4,808.2 ns |    336.64 ns |     87.42 ns |   4,732.8 ns |   4,762.5 ns |  0.33 | Faster          |    0.01 |   0.59 | 13.63 |        2.606 |         - |          NA |
+|          |            |        |              |              |              |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64-nulls**  | **131072** | **234,428.1 ns** | **41,950.88 ns** | **10,894.51 ns** | **224,962.5 ns** | **228,774.8 ns** |  **1.00** | **Baseline**        |    **0.00** |   **1.79** |  **4.47** |        **7.941** |         **-** |          **NA** |
+| Current  | i64-nulls  | 131072 |  79,042.7 ns |  1,143.65 ns |    297.00 ns |  78,601.7 ns |  79,046.0 ns |  0.34 | Faster          |    0.01 |   0.60 | 13.27 |        2.678 |         - |          NA |
+|          |            |        |              |              |              |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64-random** | **8192**   |  **14,612.3 ns** |  **2,825.80 ns** |    **733.85 ns** |  **13,572.5 ns** |  **14,850.3 ns** |  **1.00** | **Baseline**        |    **0.00** |   **1.78** |  **4.48** |        **7.920** |         **-** |          **NA** |
+| Current  | i64-random | 8192   |   4,864.4 ns |     52.64 ns |     13.67 ns |   4,851.3 ns |   4,865.7 ns |  0.33 | Faster          |    0.02 |   0.59 | 13.47 |        2.637 |         - |          NA |
+|          |            |        |              |              |              |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **i64-random** | **131072** | **538,210.8 ns** | **41,491.97 ns** | **10,775.33 ns** | **523,024.7 ns** | **540,657.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **4.11** |  **1.95** |       **18.232** |         **-** |          **NA** |
+| Current  | i64-random | 131072 |  79,123.5 ns |    800.31 ns |    207.84 ns |  78,771.7 ns |  79,167.5 ns |  0.15 | Faster          |    0.00 |   0.60 | 13.25 |        2.680 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:TransformBenchmarks -->
+
+<!-- results: kernel:ValidityLookupBenchmarks -->
+### `ValidityLookupBenchmarks`
+
+| Method   | Shape     | Rows   | Mean       | Error      | StdDev    | Min        | Median     | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |---------- |------- |-----------:|-----------:|----------:|-----------:|-----------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **all-valid** | **8192**   |   **2.624 μs** |  **1.1603 μs** | **0.3013 μs** |   **2.229 μs** |   **2.750 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.32** | **24.98** |        **1.422** |         **-** |          **NA** |
+| Current  | all-valid | 8192   |   4.176 μs |  0.1964 μs | 0.0510 μs |   4.129 μs |   4.152 μs |  1.61 | Slower          |    0.18 |   0.51 | 15.69 |        2.263 |         - |          NA |
+|          |           |        |            |            |           |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **all-valid** | **131072** |  **35.037 μs** | **12.0149 μs** | **3.1202 μs** |  **32.755 μs** |  **33.067 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.27** | **29.93** |        **1.187** |         **-** |          **NA** |
+| Current  | all-valid | 131072 |  66.036 μs |  2.0365 μs | 0.5289 μs |  65.390 μs |  65.904 μs |  1.90 | Slower          |    0.15 |   0.50 | 15.88 |        2.237 |         - |          NA |
+|          |           |        |            |            |           |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **nulls**     | **8192**   |   **6.336 μs** |  **0.4013 μs** | **0.1042 μs** |   **6.201 μs** |   **6.325 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.77** | **10.34** |        **3.434** |         **-** |          **NA** |
+| Current  | nulls     | 8192   |   3.911 μs |  0.1864 μs | 0.0484 μs |   3.872 μs |   3.884 μs |  0.62 | Faster          |    0.01 |   0.48 | 16.76 |        2.120 |         - |          NA |
+|          |           |        |            |            |           |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **nulls**     | **131072** | **101.990 μs** | **11.6742 μs** | **3.0317 μs** |  **98.883 μs** | **101.970 μs** |  **1.00** | **Baseline**        |    **0.00** |   **0.78** | **10.28** |        **3.455** |         **-** |          **NA** |
+| Current  | nulls     | 131072 |  60.750 μs |  0.5669 μs | 0.0877 μs |  60.635 μs |  60.767 μs |  0.60 | Faster          |    0.02 |   0.46 | 17.26 |        2.058 |         - |          NA |
+|          |           |        |            |            |           |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **random**    | **8192**   |  **15.344 μs** |  **1.0788 μs** | **0.1669 μs** |  **15.115 μs** |  **15.393 μs** |  **1.00** | **Baseline**        |    **0.00** |   **1.87** |  **4.27** |        **8.316** |         **-** |          **NA** |
+| Current  | random    | 8192   |  10.992 μs |  4.7410 μs | 1.2312 μs |   9.165 μs |  11.168 μs |  0.72 | Same            |    0.07 |   1.34 |  5.96 |        5.958 |         - |          NA |
+|          |           |        |            |            |           |            |            |       |                 |         |        |       |              |           |             |
+| **Original** | **random**    | **131072** | **420.201 μs** | **12.2159 μs** | **3.1724 μs** | **414.906 μs** | **420.634 μs** |  **1.00** | **Baseline**        |    **0.00** |   **3.21** |  **2.50** |       **14.234** |         **-** |          **NA** |
+| Current  | random    | 131072 | 431.070 μs | 20.4600 μs | 5.3134 μs | 422.300 μs | 432.557 μs |  1.03 | Same            |    0.01 |   3.29 |  2.43 |       14.602 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:ValidityLookupBenchmarks -->
+
+<!-- results: kernel:ViewBuildBenchmarks -->
+### `ViewBuildBenchmarks`
+
+| Method   | Shape  | Rows   | Mean         | Error        | StdDev      | Min          | Median       | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |------- |------- |-------------:|-------------:|------------:|-------------:|-------------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **fsst**   | **1024**   |   **1,114.1 ns** |     **26.02 ns** |     **6.76 ns** |   **1,103.4 ns** |   **1,115.4 ns** |  **1.00** | **Baseline**        |    **0.00** |   **1.09** | **14.71** |        **4.831** |         **-** |          **NA** |
+| Current  | fsst   | 1024   |     972.3 ns |     27.25 ns |     7.08 ns |     964.6 ns |     969.7 ns |  0.87 | Same            |    0.01 |   0.95 | 16.85 |        4.216 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **fsst**   | **131072** | **166,716.2 ns** | **13,422.44 ns** | **3,485.76 ns** | **162,694.0 ns** | **167,130.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **1.27** | **12.58** |        **5.647** |         **-** |          **NA** |
+| Current  | fsst   | 131072 | 143,691.3 ns | 14,781.21 ns | 3,838.63 ns | 137,880.6 ns | 145,347.9 ns |  0.86 | Same            |    0.03 |   1.10 | 14.59 |        4.867 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **mixed**  | **1024**   |   **1,164.9 ns** |     **28.26 ns** |     **4.37 ns** |   **1,158.6 ns** |   **1,166.0 ns** |  **1.00** | **Baseline**        |    **0.00** |   **1.14** | **14.07** |        **5.051** |         **-** |          **NA** |
+| Current  | mixed  | 1024   |   1,139.2 ns |     29.66 ns |     4.59 ns |   1,132.9 ns |   1,140.0 ns |  0.98 | Same            |    0.00 |   1.11 | 14.38 |        4.940 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **mixed**  | **131072** | **187,291.9 ns** |  **5,809.67 ns** |   **899.05 ns** | **186,147.9 ns** | **187,414.8 ns** |  **1.00** | **Baseline**        |    **0.00** |   **1.43** | **11.20** |        **6.344** |         **-** |          **NA** |
+| Current  | mixed  | 131072 | 146,785.9 ns |  2,877.94 ns |   747.39 ns | 145,506.5 ns | 147,028.4 ns |  0.78 | Same            |    0.00 |   1.12 | 14.29 |        4.972 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **onpair** | **1024**   |     **831.0 ns** |     **13.51 ns** |     **2.09 ns** |     **828.5 ns** |     **831.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.81** | **19.72** |        **3.603** |         **-** |          **NA** |
+| Current  | onpair | 1024   |     699.1 ns |     39.93 ns |    10.37 ns |     689.2 ns |     693.8 ns |  0.84 | Same            |    0.01 |   0.68 | 23.44 |        3.031 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **onpair** | **131072** | **108,083.5 ns** |  **2,105.24 ns** |   **546.73 ns** | **107,368.9 ns** | **108,253.4 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.82** | **19.40** |        **3.661** |         **-** |          **NA** |
+| Current  | onpair | 131072 |  90,781.6 ns |    782.06 ns |   203.10 ns |  90,571.3 ns |  90,700.4 ns |  0.84 | Same            |    0.00 |   0.69 | 23.10 |        3.075 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **varbin** | **1024**   |   **1,327.3 ns** |     **35.66 ns** |     **9.26 ns** |   **1,317.2 ns** |   **1,329.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **1.30** | **12.34** |        **5.755** |         **-** |          **NA** |
+| Current  | varbin | 1024   |     746.9 ns |     15.50 ns |     4.03 ns |     742.7 ns |     745.3 ns |  0.56 | Faster          |    0.00 |   0.73 | 21.94 |        3.238 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **varbin** | **131072** | **139,676.5 ns** |  **3,090.57 ns** |   **802.61 ns** | **139,038.6 ns** | **139,183.6 ns** |  **1.00** | **Baseline**        |    **0.00** |   **1.07** | **15.01** |        **4.732** |         **-** |          **NA** |
+| Current  | varbin | 131072 |  98,970.2 ns |  3,455.40 ns |   897.36 ns |  97,982.1 ns |  98,675.8 ns |  0.71 | Same            |    0.01 |   0.76 | 21.19 |        3.353 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:ViewBuildBenchmarks -->
+
+<!-- results: kernel:ViewRebaseBenchmarks -->
+### `ViewRebaseBenchmarks`
+
+| Method   | Rows   | Mean         | Error        | StdDev      | Min          | Median       | Ratio | MannWhitney(5%) | RatioSD | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |------- |-------------:|-------------:|------------:|-------------:|-------------:|------:|---------------- |--------:|-------:|------:|-------------:|----------:|------------:|
+| **Original** | **1024**   |     **626.9 ns** |     **59.59 ns** |    **15.47 ns** |     **612.3 ns** |     **623.0 ns** |  **1.00** | **Baseline**        |    **0.00** |   **0.61** | **26.14** |        **2.718** |         **-** |          **NA** |
+| Current  | 1024   |     361.8 ns |     16.21 ns |     4.21 ns |     357.0 ns |     361.2 ns |  0.58 | Faster          |    0.01 |   0.35 | 45.29 |        1.569 |         - |          NA |
+|          |        |              |              |             |              |              |       |                 |         |        |       |              |           |             |
+| **Original** | **131072** | **177,125.4 ns** | **23,756.78 ns** | **3,676.39 ns** | **171,689.6 ns** | **178,554.1 ns** |  **1.00** | **Baseline**        |    **0.00** |   **1.35** | **11.84** |        **6.000** |         **-** |          **NA** |
+| Current  | 131072 | 152,306.5 ns |  4,801.47 ns | 1,246.93 ns | 150,787.5 ns | 152,366.0 ns |  0.86 | Same            |    0.02 |   1.16 | 13.77 |        5.159 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:ViewRebaseBenchmarks -->
+
+<!-- results: kernel:ViewValidationBenchmarks -->
+### `ViewValidationBenchmarks`
+
+| Method   | Shape  | Rows   | Mean         | Error        | StdDev      | Min          | Median       | Ratio | MannWhitney(5%) | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |------- |------- |-------------:|-------------:|------------:|-------------:|-------------:|------:|---------------- |-------:|------:|-------------:|----------:|------------:|
+| **Original** | **corpus** | **1024**   |   **1,715.0 ns** |    **174.86 ns** |    **45.41 ns** |   **1,679.1 ns** |   **1,691.4 ns** |  **1.00** | **Baseline**        |   **1.67** | **12.88** |        **7.436** |         **-** |          **NA** |
+| Current  | corpus | 1024   |     628.8 ns |     46.54 ns |    12.09 ns |     612.5 ns |     630.9 ns |  0.37 | Faster          |   0.61 | 35.14 |        2.726 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |        |       |              |           |             |
+| **Original** | **corpus** | **131072** | **244,370.8 ns** | **20,010.52 ns** | **5,196.67 ns** | **238,715.4 ns** | **242,214.0 ns** |  **1.00** | **Baseline**        |   **1.86** | **11.59** |        **8.278** |         **-** |          **NA** |
+| Current  | corpus | 131072 |  86,671.5 ns | 12,501.44 ns | 3,246.58 ns |  83,606.4 ns |  84,833.3 ns |  0.35 | Faster          |   0.66 | 32.66 |        2.936 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |        |       |              |           |             |
+| **Original** | **inline** | **1024**   |     **922.2 ns** |     **48.61 ns** |    **12.62 ns** |     **900.1 ns** |     **928.9 ns** |  **1.00** | **Baseline**        |   **0.90** | **17.77** |        **3.999** |         **-** |          **NA** |
+| Current  | inline | 1024   |     200.9 ns |      2.05 ns |     0.53 ns |     200.2 ns |     201.1 ns |  0.22 | Faster          |   0.20 | 81.55 |        0.871 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |        |       |              |           |             |
+| **Original** | **inline** | **131072** | **115,934.1 ns** |  **3,072.36 ns** |   **797.88 ns** | **114,736.6 ns** | **116,064.2 ns** |  **1.00** | **Baseline**        |   **0.88** | **18.09** |        **3.927** |         **-** |          **NA** |
+| Current  | inline | 131072 |  24,706.4 ns |    209.60 ns |    54.43 ns |  24,624.0 ns |  24,723.8 ns |  0.21 | Faster          |   0.19 | 84.88 |        0.837 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |        |       |              |           |             |
+| **Original** | **long**   | **1024**   |   **3,855.3 ns** |     **52.87 ns** |     **8.18 ns** |   **3,844.1 ns** |   **3,857.5 ns** |  **1.00** | **Baseline**        |   **3.76** | **15.37** |       **16.716** |         **-** |          **NA** |
+| Current  | long   | 1024   |   1,455.5 ns |     65.04 ns |    10.07 ns |   1,447.7 ns |   1,452.1 ns |  0.38 | Faster          |   1.42 | 40.70 |        6.311 |         - |          NA |
+|          |        |        |              |              |             |              |              |       |                 |        |       |              |           |             |
+| **Original** | **long**   | **131072** | **500,259.4 ns** | **12,230.09 ns** | **3,176.12 ns** | **495,951.5 ns** | **501,539.3 ns** |  **1.00** | **Baseline**        |   **3.82** | **15.20** |       **16.946** |         **-** |          **NA** |
+| Current  | long   | 131072 | 213,419.4 ns | 24,049.05 ns | 6,245.46 ns | 206,911.3 ns | 214,006.7 ns |  0.43 | Faster          |   1.63 | 35.62 |        7.230 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:ViewValidationBenchmarks -->
+
+<!-- results: kernel:ZstdExpandBenchmarks -->
+### `ZstdExpandBenchmarks`
+
+| Method   | Shape       | Rows   | Mean      | Error     | StdDev    | Min       | Median    | Ratio | MannWhitney(5%) | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |------------ |------- |----------:|----------:|----------:|----------:|----------:|------:|---------------- |-------:|------:|-------------:|----------:|------------:|
+| **Original** | **u32-quarter** | **8192**   |  **4.688 μs** | **0.1906 μs** | **0.0495 μs** |  **4.623 μs** |  **4.698 μs** |  **1.00** | **Baseline**        |   **0.57** |  **6.99** |        **2.541** |         **-** |          **NA** |
+| Current  | u32-quarter | 8192   |  3.499 μs | 0.0838 μs | 0.0218 μs |  3.479 μs |  3.493 μs |  0.75 | Same            |   0.43 |  9.37 |        1.896 |         - |          NA |
+|          |             |        |           |           |           |           |           |       |                 |        |       |              |           |             |
+| **Original** | **u32-quarter** | **131072** | **73.694 μs** | **0.8919 μs** | **0.1380 μs** | **73.544 μs** | **73.695 μs** |  **1.00** | **Baseline**        |   **0.56** |  **7.11** |        **2.496** |         **-** |          **NA** |
+| Current  | u32-quarter | 131072 | 55.992 μs | 1.9498 μs | 0.5064 μs | 55.537 μs | 55.820 μs |  0.76 | Same            |   0.43 |  9.36 |        1.897 |         - |          NA |
+|          |             |        |           |           |           |           |           |       |                 |        |       |              |           |             |
+| **Original** | **u64-random**  | **8192**   |  **3.109 μs** | **0.0689 μs** | **0.0179 μs** |  **3.089 μs** |  **3.104 μs** |  **1.00** | **Baseline**        |   **0.38** | **21.08** |        **1.685** |         **-** |          **NA** |
+| Current  | u64-random  | 8192   |  2.469 μs | 0.1205 μs | 0.0186 μs |  2.442 μs |  2.475 μs |  0.79 | Same            |   0.30 | 26.54 |        1.338 |         - |          NA |
+|          |             |        |           |           |           |           |           |       |                 |        |       |              |           |             |
+| **Original** | **u64-random**  | **131072** | **49.775 μs** | **0.6573 μs** | **0.1017 μs** | **49.651 μs** | **49.777 μs** |  **1.00** | **Baseline**        |   **0.38** | **21.07** |        **1.686** |         **-** |          **NA** |
+| Current  | u64-random  | 131072 | 46.709 μs | 0.5304 μs | 0.1377 μs | 46.538 μs | 46.690 μs |  0.94 | Same            |   0.36 | 22.45 |        1.582 |         - |          NA |
+|          |             |        |           |           |           |           |           |       |                 |        |       |              |           |             |
+| **Original** | **u64-seventh** | **8192**   |  **5.247 μs** | **0.0350 μs** | **0.0054 μs** |  **5.242 μs** |  **5.246 μs** |  **1.00** | **Baseline**        |   **0.64** | **12.49** |        **2.844** |         **-** |          **NA** |
+| Current  | u64-seventh | 8192   |  3.819 μs | 0.1019 μs | 0.0265 μs |  3.779 μs |  3.818 μs |  0.73 | Same            |   0.47 | 17.16 |        2.070 |         - |          NA |
+|          |             |        |           |           |           |           |           |       |                 |        |       |              |           |             |
+| **Original** | **u64-seventh** | **131072** | **85.976 μs** | **3.2148 μs** | **0.8349 μs** | **85.061 μs** | **85.670 μs** |  **1.00** | **Baseline**        |   **0.66** | **12.20** |        **2.912** |         **-** |          **NA** |
+| Current  | u64-seventh | 131072 | 59.151 μs | 0.7766 μs | 0.1202 μs | 59.050 μs | 59.119 μs |  0.69 | Same            |   0.45 | 17.73 |        2.004 |         - |          NA |
+|          |             |        |           |           |           |           |           |       |                 |        |       |              |           |             |
+| **Original** | **u64-sparse**  | **8192**   |  **4.040 μs** | **0.1367 μs** | **0.0355 μs** |  **3.982 μs** |  **4.044 μs** |  **1.00** | **Baseline**        |   **0.49** | **16.22** |        **2.189** |         **-** |          **NA** |
+| Current  | u64-sparse  | 8192   |  2.696 μs | 0.0574 μs | 0.0149 μs |  2.680 μs |  2.693 μs |  0.67 | Faster          |   0.33 | 24.30 |        1.461 |         - |          NA |
+|          |             |        |           |           |           |           |           |       |                 |        |       |              |           |             |
+| **Original** | **u64-sparse**  | **131072** | **63.520 μs** | **1.3966 μs** | **0.3627 μs** | **62.937 μs** | **63.645 μs** |  **1.00** | **Baseline**        |   **0.48** | **16.51** |        **2.152** |         **-** |          **NA** |
+| Current  | u64-sparse  | 131072 | 42.486 μs | 0.8063 μs | 0.1248 μs | 42.339 μs | 42.481 μs |  0.67 | Same            |   0.32 | 24.68 |        1.439 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:ZstdExpandBenchmarks -->
+
+<!-- results: kernel:ZstdStreamBenchmarks -->
+### `ZstdStreamBenchmarks`
+
+| Method   | Shape      | Rows   | Mean         | Error      | StdDev     | Min          | Median       | Ratio | MannWhitney(5%) | ns/row | GB/s  | cycles/value | Allocated | Alloc Ratio |
+|--------- |----------- |------- |-------------:|-----------:|-----------:|-------------:|-------------:|------:|---------------- |-------:|------:|-------------:|----------:|------------:|
+| **Original** | **codes**      | **8192**   |    **41.000 μs** |  **0.9565 μs** |  **0.2484 μs** |    **40.719 μs** |    **40.955 μs** |  **1.00** | **Baseline**        |   **5.00** |  **3.20** |       **22.222** |         **-** |          **NA** |
+| Current  | codes      | 8192   |     5.791 μs |  0.1597 μs |  0.0247 μs |     5.756 μs |     5.799 μs |  0.14 | Faster          |   0.71 | 22.63 |        3.139 |         - |          NA |
+|          |            |        |              |            |            |              |              |       |                 |        |       |              |           |             |
+| **Original** | **codes**      | **131072** |   **699.666 μs** | **95.6315 μs** | **24.8352 μs** |   **673.248 μs** |   **693.105 μs** |  **1.00** | **Baseline**        |   **5.34** |  **3.00** |       **23.701** |         **-** |          **NA** |
+| Current  | codes      | 131072 |    90.885 μs |  1.7328 μs |  0.2682 μs |    90.602 μs |    90.861 μs |  0.13 | Faster          |   0.69 | 23.07 |        3.079 |         - |          NA |
+|          |            |        |              |            |            |              |              |       |                 |        |       |              |           |             |
+| **Original** | **mixed**      | **8192**   |    **61.179 μs** |  **6.2870 μs** |  **1.6327 μs** |    **58.879 μs** |    **61.105 μs** |  **1.00** | **Baseline**        |   **7.47** |  **2.14** |       **33.159** |         **-** |          **NA** |
+| Current  | mixed      | 8192   |    11.625 μs |  0.4480 μs |  0.1163 μs |    11.441 μs |    11.652 μs |  0.19 | Faster          |   1.42 | 11.28 |        6.301 |         - |          NA |
+|          |            |        |              |            |            |              |              |       |                 |        |       |              |           |             |
+| **Original** | **mixed**      | **131072** | **1,463.310 μs** | **39.4833 μs** |  **6.1101 μs** | **1,456.541 μs** | **1,463.052 μs** |  **1.00** | **Baseline**        |  **11.16** |  **1.43** |       **49.569** |         **-** |          **NA** |
+| Current  | mixed      | 131072 |   185.749 μs |  9.2087 μs |  2.3915 μs |   181.769 μs |   186.446 μs |  0.13 | Faster          |   1.42 | 11.29 |        6.292 |         - |          NA |
+|          |            |        |              |            |            |              |              |       |                 |        |       |              |           |             |
+| **Original** | **urls**       | **8192**   |    **49.774 μs** |  **3.0010 μs** |  **0.7793 μs** |    **48.782 μs** |    **49.616 μs** |  **1.00** | **Baseline**        |   **6.08** |  **2.63** |       **26.977** |         **-** |          **NA** |
+| Current  | urls       | 8192   |    13.007 μs |  0.2123 μs |  0.0551 μs |    12.949 μs |    13.000 μs |  0.26 | Faster          |   1.59 | 10.08 |        7.050 |         - |          NA |
+|          |            |        |              |            |            |              |              |       |                 |        |       |              |           |             |
+| **Original** | **urls**       | **131072** |   **816.017 μs** | **30.3196 μs** |  **7.8739 μs** |   **808.495 μs** |   **812.164 μs** |  **1.00** | **Baseline**        |   **6.23** |  **2.57** |       **27.642** |         **-** |          **NA** |
+| Current  | urls       | 131072 |   214.035 μs |  7.8712 μs |  1.2181 μs |   212.871 μs |   213.971 μs |  0.26 | Faster          |   1.63 |  9.80 |        7.250 |         - |          NA |
+|          |            |        |              |            |            |              |              |       |                 |        |       |              |           |             |
+| **Original** | **urls-nulls** | **8192**   |    **58.795 μs** |  **6.3357 μs** |  **1.6454 μs** |    **56.634 μs** |    **58.398 μs** |  **1.00** | **Baseline**        |   **7.18** |  **2.23** |       **31.866** |         **-** |          **NA** |
+| Current  | urls-nulls | 8192   |    19.391 μs |  0.5079 μs |  0.1319 μs |    19.179 μs |    19.405 μs |  0.33 | Faster          |   2.37 |  6.76 |       10.510 |         - |          NA |
+|          |            |        |              |            |            |              |              |       |                 |        |       |              |           |             |
+| **Original** | **urls-nulls** | **131072** |   **929.632 μs** | **20.3471 μs** |  **5.2841 μs** |   **920.329 μs** |   **931.878 μs** |  **1.00** | **Baseline**        |   **7.09** |  **2.26** |       **31.491** |         **-** |          **NA** |
+| Current  | urls-nulls | 131072 |   314.431 μs | 11.6968 μs |  3.0376 μs |   310.434 μs |   314.373 μs |  0.34 | Faster          |   2.40 |  6.67 |       10.651 |         - |          NA |
+|          |            |        |              |            |            |              |              |       |                 |        |       |              |           |             |
+| **Original** | **uuids**      | **8192**   |    **45.150 μs** |  **2.4842 μs** |  **0.6451 μs** |    **44.351 μs** |    **45.059 μs** |  **1.00** | **Baseline**        |   **5.51** |  **2.90** |       **24.471** |         **-** |          **NA** |
+| Current  | uuids      | 8192   |    11.775 μs |  0.2350 μs |  0.0364 μs |    11.730 μs |    11.777 μs |  0.26 | Faster          |   1.44 | 11.13 |        6.382 |         - |          NA |
+|          |            |        |              |            |            |              |              |       |                 |        |       |              |           |             |
+| **Original** | **uuids**      | **131072** |   **728.161 μs** | **22.8821 μs** |  **5.9424 μs** |   **719.233 μs** |   **729.438 μs** |  **1.00** | **Baseline**        |   **5.56** |  **2.88** |       **24.666** |         **-** |          **NA** |
+| Current  | uuids      | 131072 |   192.955 μs |  7.2569 μs |  1.8846 μs |   190.792 μs |   192.477 μs |  0.27 | Faster          |   1.47 | 10.87 |        6.536 |         - |          NA |
+
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+<!-- /results: kernel:ZstdStreamBenchmarks -->
 
 ## What this does not measure
 
