@@ -8,22 +8,36 @@ namespace Vorticity.Aggregating;
 /// the keys packed in one buffer. It holds text keys, the row-encoded tuples of a composite key and
 /// the (group, value) pairs of a distinct count, with no allocation per key.
 /// </summary>
+/// <remarks>
+/// Keys can be built offline to share the low bits of their unseeded hash, and so one run of the
+/// probe sequence: a key that would land <see cref="MaxProbes"/> slots past its own reseeds the hash
+/// with a value of the table's own and rehashes every key, which such keys cannot have been built
+/// against. Until then every key sits closer than that to its own slot, so no lookup probes further:
+/// a growth places the keys again in the order they came, and none lands further than it was.
+/// </remarks>
 internal sealed class ByteKeyTable
 {
+    /// <summary>How far past its own slot a key lands before the table reseeds: linear probing at half load keeps its runs far shorter.</summary>
+    private const int MaxProbes = 128;
+
     private byte[] _bytes = new byte[1024];
     private int _used;
     private int[] _offsets = new int[16];
     private int[] _lengths = new int[16];
     private ulong[] _hashes = new ulong[16];
     private int[] _slots = new int[32];
+    private long _seed;
 
     /// <summary>The number of distinct keys.</summary>
     internal int Count { get; private set; }
 
+    /// <summary>Whether a key landed far enough from its own slot for the table to take a seed.</summary>
+    internal bool Reseeded => _seed != 0;
+
     /// <summary>The number of <paramref name="key"/>, which is added when it is new.</summary>
     internal int GetOrAdd(ReadOnlySpan<byte> key, out bool added)
     {
-        ulong hash = XxHash3.HashToUInt64(key);
+        ulong hash = XxHash3.HashToUInt64(key, _seed);
         int mask = _slots.Length - 1;
         int slot = (int)hash & mask;
         while (true)
@@ -44,13 +58,19 @@ internal sealed class ByteKeyTable
             slot = (slot + 1) & mask;
         }
 
+        if (((slot - (int)hash) & mask) >= MaxProbes && _seed == 0)
+        {
+            Reseed();
+            return GetOrAdd(key, out added);
+        }
+
         int number = Count;
         Append(key, hash);
         _slots[slot] = number + 1;
         added = true;
         if (Count * 2 > _slots.Length)
         {
-            Rehash();
+            Rehash(_slots.Length * 2);
         }
 
         return number;
@@ -83,9 +103,21 @@ internal sealed class ByteKeyTable
         Count = index + 1;
     }
 
-    private void Rehash()
+    /// <summary>Hashes every key again under a seed of the table's own.</summary>
+    private void Reseed()
     {
-        int[] slots = new int[_slots.Length * 2];
+        _seed = Random.Shared.NextInt64(1, long.MaxValue);
+        for (int index = 0; index < Count; index++)
+        {
+            _hashes[index] = XxHash3.HashToUInt64(KeyOf(index), _seed);
+        }
+
+        Rehash(_slots.Length);
+    }
+
+    private void Rehash(int size)
+    {
+        int[] slots = new int[size];
         int mask = slots.Length - 1;
         for (int index = 0; index < Count; index++)
         {

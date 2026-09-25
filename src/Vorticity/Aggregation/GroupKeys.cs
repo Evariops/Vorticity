@@ -115,7 +115,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 {
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
-    private readonly Dictionary<TValue, int> _index = [];
+    private GroupIndex<TValue> _index = new GroupIndex<TValue>();
     private TValue[] _keys = new TValue[16];
     private int _null = -1;
     private TValue[] _values = [];
@@ -317,10 +317,13 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     private int Lookup(TValue value)
     {
-        ref int group = ref CollectionsMarshal.GetValueRefOrAddDefault(_index, value, out bool exists);
+        ref int group = ref _index.Slot(value, out bool exists);
         if (!exists)
         {
-            group = Add(value);
+            // Filled before the key is stored: storing it may double the keys and move the index to
+            // another dictionary, which copies the slot; the one read below keeps the number too.
+            group = Count;
+            Add(value);
         }
 
         return group;
@@ -341,6 +344,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         if (Count == _keys.Length)
         {
             Array.Resize(ref _keys, Count * 2);
+            _index.Doubled();
         }
 
         _keys[Count] = value;
