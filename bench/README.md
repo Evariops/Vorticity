@@ -40,7 +40,8 @@ classes it ran. The page's head lists the command behind each section.
 | a writer's dictionary of strings | `-- DictBuildBenchmarks` | 15 s | `DistinctTable` against a frozen copy of it, codes compared first, on 200 and 5 short labels, 64 out-of-line names and distinct UUIDs |
 | a writer's bit-packing decision | `-- BitPackPlanBenchmarks` | 10 s | `BitPackPlan.TryBuild` against a frozen copy of it, plans compared first, on signed, unsigned and nullable 64-bit columns and a nullable 32-bit one whose minimum it takes |
 | the stream a zstd trial compresses for a string column | `-- ZstdStreamBenchmarks` | 15 s | `ZstdPlan.StreamBytes` and `ZstdPlan.LayViews` against a frozen copy of the passes, streams compared first, on inline, out-of-line, mixed and nullable text |
-| anything, want a direction | no argument at all | **3 min** | the twenty-five default classes, 81 benchmarks, fast profile |
+| a validity mask's row lookup | `-- ValidityLookupBenchmarks` | 10 s | `ValidityMask.IsValid` against a frozen copy of it, asked row by row over columns without nulls, with periodic ones and with random ones |
+| anything, want a direction | no argument at all | **3 min** | the twenty-six default classes, 83 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
@@ -165,7 +166,7 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 
 ## The classes
 
-Thirty-one, and `-- --list flat` is what answers this question for real: twenty-five in the default run,
+Thirty-two, and `-- --list flat` is what answers this question for real: twenty-six in the default run,
 six more behind `--explore`.
 
 | class | in the default run |
@@ -186,6 +187,7 @@ six more behind `--explore`.
 | `DictBuildBenchmarks` | yes — 200 and 5 labels, names and UUIDs, a block and a chunk |
 | `BitPackPlanBenchmarks` | yes — signed, unsigned and nullable columns, a small and a large chunk |
 | `ZstdStreamBenchmarks` | yes — five kinds of text, one block and sixteen |
+| `ValidityLookupBenchmarks` | yes — three validities, one block and sixteen |
 | `FsstKernelBenchmarks` | yes |
 | `OnPairKernelBenchmarks` | yes |
 | `FilterKernelBenchmarks` | yes |
@@ -204,7 +206,7 @@ six more behind `--explore`.
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
 answered their question once and do not guard against anything. They stay runnable and stay out of
-the default run: 81 benchmarks become 103 with `--explore`.
+the default run: 83 benchmarks become 105 with `--explore`.
 
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went

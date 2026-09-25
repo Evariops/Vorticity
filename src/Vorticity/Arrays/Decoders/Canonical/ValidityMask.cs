@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Canonical;
@@ -10,18 +11,33 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// pass needs it because a null slot's payload is garbage by construction, and reading it would be
 /// exactly the out-of-bounds access this library promises never to perform.
 /// </summary>
+/// <remarks>
+/// A row's answer is one bit read whatever the kind, rather than a switch on the kind at every row:
+/// a uniform kind reads bit 0 of a one-byte bitmap of its own, every row's index masked to zero.
+/// </remarks>
 internal readonly ref struct ValidityMask
 {
-    private readonly ReadOnlySpan<byte> _bits;
+    private readonly ReadOnlySpan<byte> _lookup;
     private readonly int _bitOffset;
+    private readonly int _rowMask;
     private readonly ValidityKind _kind;
 
     private ValidityMask(ValidityKind kind, ReadOnlySpan<byte> bits, int bitOffset)
     {
         _kind = kind;
-        _bits = bits;
         _bitOffset = bitOffset;
+        _rowMask = kind == ValidityKind.Bitmap ? -1 : 0;
+        _lookup = kind switch
+        {
+            ValidityKind.Bitmap => bits,
+            ValidityKind.AllInvalid => Nothing,
+            _ => Everything,
+        };
     }
+
+    private static ReadOnlySpan<byte> Everything => [0x01];
+
+    private static ReadOnlySpan<byte> Nothing => [0x00];
 
     /// <summary>Resolves <paramref name="validity"/> against the batch's canonical arena.</summary>
     /// <param name="context">The decode context owning the arena.</param>
@@ -59,17 +75,17 @@ internal readonly ref struct ValidityMask
     /// The backing bits, for a caller that has ruled out the two uniform kinds and wants to read a
     /// range of them through <see cref="BitmapKernels"/> rather than a row at a time.
     /// </summary>
-    internal ReadOnlySpan<byte> Bits => _bits;
+    internal ReadOnlySpan<byte> Bits => _kind == ValidityKind.Bitmap ? _lookup : default;
 
     /// <summary>The bit this mask's row 0 sits at.</summary>
     internal int BitOffset => _bitOffset;
 
     /// <summary>Whether row <paramref name="index"/> holds a value.</summary>
     /// <param name="index">Row index; the caller has already bounds-checked it against the length.</param>
-    internal bool IsValid(int index) => _kind switch
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool IsValid(int index)
     {
-        ValidityKind.NonNullable or ValidityKind.AllValid => true,
-        ValidityKind.AllInvalid => false,
-        _ => CanonicalSupport.BitAt(_bits, _bitOffset + index),
-    };
+        int at = (_bitOffset + index) & _rowMask;
+        return ((_lookup[at >> 3] >> (at & 7)) & 1) != 0;
+    }
 }
