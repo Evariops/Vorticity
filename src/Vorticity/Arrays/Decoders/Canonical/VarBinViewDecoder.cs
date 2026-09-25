@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Text.Unicode;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -165,9 +166,12 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
         highest.Clear();
 
         ref byte view = ref MemoryMarshal.GetReference(views);
-        ref ulong lowMasks = ref MemoryMarshal.GetReference(InlineLowMasks);
-        ref ulong highMasks = ref MemoryMarshal.GetReference(InlineHighMasks);
-        ulong inline = 0;
+
+        // Every byte of every inline view, gathered by or: its length, below 0x80, its value and
+        // its padding, which writers leave zero. A high bit here is a value that is not ASCII or
+        // padding that is not zero, and either goes to the view-by-view validation, which masks
+        // the padding off and decides the value.
+        Vector128<byte> inline = Vector128<byte>.Zero;
         uint prefixes = 0;
         uint bufferCount = (uint)dataBuffers.Length;
 
@@ -178,15 +182,38 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
         ulong currentLength = 0;
         uint low = uint.MaxValue;
         uint high = 0;
-        for (int i = 0; i < length; i++, view = ref Unsafe.Add(ref view, CanonicalSupport.ViewSize))
+        int i = 0;
+        int scalarUntil = 0;
+        while (i < length)
         {
+            // Four views at a time while all four are inline: one maximum of their lengths decides
+            // it, and their bytes join the gathered ones with no further look. Four that are not
+            // go one by one before the next four are tried.
+            if (i >= scalarUntil && i <= length - 4)
+            {
+                Vector128<byte> a = Vector128.LoadUnsafe(ref view);
+                Vector128<byte> b = Vector128.LoadUnsafe(ref view, (nuint)CanonicalSupport.ViewSize);
+                Vector128<byte> c = Vector128.LoadUnsafe(ref view, (nuint)(2 * CanonicalSupport.ViewSize));
+                Vector128<byte> d = Vector128.LoadUnsafe(ref view, (nuint)(3 * CanonicalSupport.ViewSize));
+                Vector128<uint> longest = Vector128.Max(
+                    Vector128.Max(a.AsUInt32(), b.AsUInt32()), Vector128.Max(c.AsUInt32(), d.AsUInt32()));
+                if (longest.ToScalar() <= CanonicalSupport.MaxInlineViewLength)
+                {
+                    inline |= (a | b) | (c | d);
+                    i += 4;
+                    view = ref Unsafe.Add(ref view, 4 * CanonicalSupport.ViewSize);
+                    continue;
+                }
+
+                scalarUntil = i + 4;
+            }
+
             uint size = Unsafe.ReadUnaligned<uint>(ref view);
             if (size <= CanonicalSupport.MaxInlineViewLength)
             {
-                // The value is the first `size` of the twelve bytes after the length, all readable
-                // whatever `size` is; the masks keep the value's bytes and drop the padding.
-                inline |= (Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref view, 4)) & Unsafe.Add(ref lowMasks, size)) |
-                    (Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref view, 12)) & Unsafe.Add(ref highMasks, size));
+                inline |= Vector128.LoadUnsafe(ref view);
+                i++;
+                view = ref Unsafe.Add(ref view, CanonicalSupport.ViewSize);
                 continue;
             }
 
@@ -223,6 +250,8 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
                 Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref currentBase, offset));
             low = Math.Min(low, offset);
             high = Math.Max(high, (uint)end);
+            i++;
+            view = ref Unsafe.Add(ref view, CanonicalSupport.ViewSize);
         }
 
         if (current != uint.MaxValue)
@@ -241,7 +270,7 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
             return true;
         }
 
-        if ((inline & 0x8080_8080_8080_8080UL) != 0)
+        if (inline.ExtractMostSignificantBits() != 0)
         {
             return false;
         }
@@ -257,16 +286,6 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
 
         return true;
     }
-
-    /// <summary>The bytes of an inline value of each length that fall in the view's bytes 4 to 12.</summary>
-    private static ReadOnlySpan<ulong> InlineLowMasks =>
-    [
-        0, 0xFF, 0xFFFF, 0xFF_FFFF, 0xFFFF_FFFF, 0xFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF, 0xFF_FFFF_FFFF_FFFF,
-        ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue,
-    ];
-
-    /// <summary>The bytes of an inline value of each length that fall in the view's bytes 12 to 16.</summary>
-    private static ReadOnlySpan<ulong> InlineHighMasks => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFFFF, 0xFF_FFFF, 0xFFFF_FFFF];
 
     /// <summary>
     /// Bounds-checks (and, for Utf8, UTF-8-checks) every view a consumer may dereference, one at a

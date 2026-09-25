@@ -87,6 +87,20 @@ public class ViewValidationBenchmarks
         Refuses("a value that is not UTF-8", (views, data) => Corrupt(views, data, referencing: true, (v, d, offset) => d[offset + 5] = 0xFF));
         Refuses("an inline value that is not UTF-8", (views, data) => Corrupt(views, data, referencing: false, (v, d, offset) => v[5] = 0xFF));
         Refuses("a view past its buffer", (views, data) => Corrupt(views, data, referencing: true, (v, d, offset) => BinaryPrimitives.WriteUInt32LittleEndian(v[12..], (uint)d.Length)));
+
+        // Padding is not the value: a short inline value followed by bytes that are not text is
+        // still a valid view.
+        byte[] padded = (byte[])_views.Clone();
+        for (int row = 0; row < Rows; row++)
+        {
+            Span<byte> view = padded.AsSpan(row * ViewSize, ViewSize);
+            if (BinaryPrimitives.ReadUInt32LittleEndian(view) < 12)
+            {
+                view[15] = 0xFF;
+                VarBinViewDecoder.ValidateViews(padded, _buffers, ValidityMask.NonNullable, Rows, requireUtf8: true);
+                break;
+            }
+        }
     }
 
     private void Refuses(string what, Func<byte[], byte[], bool> corrupt)
