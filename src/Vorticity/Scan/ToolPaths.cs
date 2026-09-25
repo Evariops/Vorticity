@@ -234,7 +234,7 @@ internal static class ToolPaths
             return Expression(field, SymLowering.CompareAt(column, op, at));
         }
 
-        if (!Convert(field, type, literal, op, out FilterLiteral converted, out _))
+        if (!Convert(field, type, literal, out FilterLiteral converted))
         {
             throw new VortexSchemaException(
                 $"'{field.Path}' is a column of {type} and the filter compares it with {Describe(literal)}; no comparison relates the two.");
@@ -282,10 +282,9 @@ internal static class ToolPaths
     }
 
     /// <summary>A literal in the column's domain: a text date made storage units, a text uuid made bytes; false when the two cannot compare.</summary>
-    private static bool Convert(FieldExpr field, VortexType type, FilterLiteral literal, ComparisonOp op, out FilterLiteral converted, out bool exact)
+    private static bool Convert(FieldExpr field, VortexType type, FilterLiteral literal, out FilterLiteral converted)
     {
         converted = literal;
-        exact = true;
         VortexType storage = Storage(type);
         if (literal.Kind == FilterLiteralKind.Bytes && type.Kind == VortexTypeKind.Extension)
         {

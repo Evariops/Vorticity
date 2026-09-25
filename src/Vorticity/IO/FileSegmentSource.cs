@@ -44,7 +44,6 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
     private int _disposed;
     private int _slicedRuns;
     private int _copiedRuns;
-    private int _unpooledBlocks;
 
     /// <summary>
     /// A run at or below this size is always published by slicing, however sparse it is: holding
@@ -94,17 +93,6 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
 
     /// <summary>Diagnostics: runs whose segments were copied out so the run buffer could go back.</summary>
     internal int CopiedRunCount => Volatile.Read(ref _copiedRuns);
-
-    /// <summary>Diagnostics: blocks too large for the pool, allocated and freed per read.</summary>
-    /// <remarks>
-    /// Two ceilings disagree by a factor of two —
-    /// <see cref="SegmentReadOptions.DefaultMaxCoalescedReadBytes"/> lets a run reach 16 MiB while
-    /// <see cref="SegmentReadOptions.DefaultMaxPooledBytes"/> and
-    /// <see cref="AlignedBufferPool.Shared"/> both stop at 8 — so a run in that band is a fresh
-    /// native allocation and a free on every read. This counts how often that happens, which is
-    /// what deciding whether the gap is worth closing needs.
-    /// </remarks>
-    internal int UnpooledBlockCount => Volatile.Read(ref _unpooledBlocks);
 
     /// <summary>Opens <paramref name="path"/> read-only for asynchronous positional reads.</summary>
     /// <param name="path">A local file path.</param>
@@ -495,7 +483,6 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
             return AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
         }
 
-        Interlocked.Increment(ref _unpooledBlocks);
         return NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
     }
 

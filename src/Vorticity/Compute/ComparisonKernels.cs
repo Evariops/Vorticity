@@ -29,9 +29,6 @@ namespace Vorticity.Compute;
 /// </remarks>
 internal static partial class ComparisonKernels
 {
-    private const int ViewSize = 16;
-    private const int MaxInlineLength = 12;
-
     /// <summary>
     /// Evaluates <c>column op literal</c> into <paramref name="destination"/>.
     /// </summary>

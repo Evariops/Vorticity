@@ -106,7 +106,7 @@ public class CompressorBenchmarks
     public int Choose() => (int)ColumnCompressor.Choose(_arena, _node).Scheme;
 
     [Benchmark(Description = "candidate: sequence")]
-    public bool Sequence() => SequencePlan.TryBuild(_arena, _arena.GetNode(_node)) is not null;
+    public bool Sequence() => SequencePlan.TryBuild(_arena.GetNode(_node)) is not null;
 
     [Benchmark(Description = "candidate: bit packing")]
     public bool BitPacking() =>

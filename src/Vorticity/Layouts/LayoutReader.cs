@@ -140,12 +140,6 @@ internal abstract class LayoutReader
         return buffer;
     }
 
-    /// <summary>The reader for one child, resolved through the table.</summary>
-    /// <param name="child">The child node.</param>
-    /// <returns>The shared reader.</returns>
-    /// <exception cref="VortexUnsupportedException">This build does not read that layout.</exception>
-    protected static LayoutReader ChildReader(in LayoutNode child) => LayoutReaderTable.Require(in child);
-
     /// <summary>Registers one child's segments.</summary>
     /// <param name="child">The child node.</param>
     /// <param name="rows">The child-local row range.</param>

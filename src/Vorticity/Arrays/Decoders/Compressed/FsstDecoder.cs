@@ -269,7 +269,7 @@ internal sealed class FsstDecoder : ArrayDecoder
         uint escapeBits = 0;
         if (selective)
         {
-            DecodeRows(table, codesOffsets, offsetsPType, length, codes, uncompressedLengths,
+            DecodeRows(table, codesOffsets, offsetsPType, codes, uncompressedLengths,
                 lengthsPType, wanted, destination, ref escapeBits);
         }
         else
@@ -331,7 +331,6 @@ internal sealed class FsstDecoder : ArrayDecoder
         in FsstDecodeTable table,
         CanonicalNode offsets,
         PType offsetsPType,
-        int length,
         VortexBuffer codes,
         CanonicalNode lengths,
         PType lengthsPType,

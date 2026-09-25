@@ -1104,7 +1104,7 @@ internal sealed class ScanBuilder
         Projection read = Union(keep, [.. _filterPaths ?? [], Expr.Field(_orderPath!)]);
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
         return _descending
-            ? ReversedAsync(tree, rows, read, keep, plan, filter, cap)
+            ? ReversedAsync(tree, rows, read, keep, plan, filter)
             : new FilteredBatches(
                 new BatchAsyncEnumerable(_file, tree, read, keep, plan, _degree, filter, null, _metrics),
                 filter, _prune, _indexes, rows);
@@ -1112,7 +1112,7 @@ internal sealed class ScanBuilder
 
     /// <summary>The splits of <paramref name="plan"/> last first, each batch's rows reversed.</summary>
     private async IAsyncEnumerable<RecordBatch> ReversedAsync(
-        LayoutTree tree, RowRange rows, Projection read, Projection keep, SplitPlan plan, VortexExpr filter, long cap)
+        LayoutTree tree, RowRange rows, Projection read, Projection keep, SplitPlan plan, VortexExpr filter)
     {
         // One pipeline for the whole walk, reading the plan's splits last one first. Building one
         // per split would cost a plan, an enumerable and a filter for every batch -- a split is a

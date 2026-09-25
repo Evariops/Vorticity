@@ -1029,9 +1029,6 @@ internal sealed partial class SortedRunsSource : KeySource
     private static VortexFormatException Lie(string what) =>
         new VortexFormatException($"A key index run segment does not hold what it claims: {what}.");
 
-    /// <summary>Payload arrays per segment of this source's runs.</summary>
-    private int Stride => HasRows ? KeyRunOptions.SortedStride : KeyRunOptions.PostingsStride;
-
     private static int DecodeRoot(ScanContext context, VortexBuffer blob, DType dtype, int length)
     {
         context.Decode.LoadBlob(blob);

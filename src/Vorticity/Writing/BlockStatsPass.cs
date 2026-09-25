@@ -183,7 +183,7 @@ internal static class BlockStatsPass
                 {
                     bool wasProgression = !stats.DeltaBroken;
                     bool hadPrevious = previous is not null && previous.HasValue;
-                    Deltas(node, in mask, start, count, valid, startsBlock, ref stats, previous);
+                    Deltas(node, start, count, valid, startsBlock, ref stats, previous);
 
                     if (wasProgression && stats.DeltaKnown && !stats.DeltaBroken)
                     {
@@ -381,7 +381,7 @@ internal static class BlockStatsPass
     /// a break of its own.
     /// </remarks>
     private static void Deltas(
-        CanonicalNode node, in ValidityMask mask, int start, int count, int valid, bool startsBlock,
+        CanonicalNode node, int start, int count, int valid, bool startsBlock,
         ref BlockStats stats, PreviousRow? previous)
     {
         if (stats.DeltaBroken)

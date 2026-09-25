@@ -360,7 +360,6 @@ internal readonly ref struct PcoBatchScratch
 internal sealed class PcoLatentState
 {
     private PcoAnsTable _table;
-    private int _ansSizeLog;
     private int _binCount;
     private int _deltaOrder;
 
@@ -390,7 +389,6 @@ internal sealed class PcoLatentState
         ref PcoBitReader reader, PcoLatentVar variable, int deltaOrder)
     {
         _table = variable.Table;
-        _ansSizeLog = variable.AnsSizeLog;
         _binCount = variable.Bins.Length;
         _deltaOrder = deltaOrder;
         for (int i = 0; i < deltaOrder; i++)

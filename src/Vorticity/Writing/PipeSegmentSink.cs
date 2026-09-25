@@ -28,8 +28,6 @@ internal sealed class PipeSegmentSink : ISegmentSink
     /// <summary>Bytes written into the pipe and not yet flushed.</summary>
     internal long UnflushedBytes => _unflushed;
 
-    internal PipeWriter Pipe => _pipe;
-
     public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();

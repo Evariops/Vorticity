@@ -231,12 +231,6 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
 /// </summary>
 internal static class VariantStorage
 {
-    /// <summary>The struct field holding each row's variant metadata bytes.</summary>
-    internal const int MetadataField = 0;
-
-    /// <summary>The struct field holding each row's variant value bytes.</summary>
-    internal const int ValueField = 1;
-
     /// <summary>Refuses a node that is not <c>Struct{metadata, value}</c> of the right length.</summary>
     /// <param name="node">The decoded node.</param>
     /// <param name="length">The row count it must have.</param>

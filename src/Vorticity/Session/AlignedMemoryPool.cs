@@ -19,7 +19,6 @@ namespace Vorticity;
 public sealed class AlignedMemoryPool : MemoryPool<byte>
 {
     private readonly int _alignment = VortexLimits.MaxAlignment;
-    private long _outstanding;
 
     internal AlignedMemoryPool(AlignedBufferPool inner)
     {
@@ -47,9 +46,6 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
     /// <summary>The engine's pool behind this one.</summary>
     internal AlignedBufferPool Inner { get; }
 
-    /// <summary>Bytes rented through <see cref="Rent"/> and not yet returned.</summary>
-    internal long Outstanding => Interlocked.Read(ref _outstanding);
-
     /// <inheritdoc/>
     public override int MaxBufferSize => int.MaxValue - VortexLimits.MaxAlignment;
 
@@ -60,7 +56,6 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
     {
         int length = minBufferSize < 0 ? 4096 : minBufferSize;
         NativeSegmentOwner block = Inner.Rent(length, _alignment);
-        Interlocked.Add(ref _outstanding, length);
         GC.AddMemoryPressure(Math.Max(length, 1));
         return new Lease(this, block, length);
     }
@@ -113,7 +108,6 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
             }
 
             _pool.Inner.Return(block);
-            Interlocked.Add(ref _pool._outstanding, -_length);
             GC.RemoveMemoryPressure(Math.Max(_length, 1));
         }
     }

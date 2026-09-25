@@ -968,7 +968,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// with the same value by all of them, which is why it needs no lock: the answer is a property
     /// of the encoding, not of the split that happened to ask.
     /// </summary>
-    private byte _push;
+    private byte _push = PushUnasked;
 
     /// <summary>
     /// The one comparison this scan may offer to an encoding, or null when it has none to offer.

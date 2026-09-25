@@ -95,8 +95,6 @@ internal static class EncodingAdvisor
 
     private static readonly VortexWriteOptions Plain = new() { Compression = CompressionProfile.None, Statistics = false };
 
-    private static long s_sink;
-
     /// <summary>Advises on every column of <paramref name="file"/> the advice can measure.</summary>
     internal static async ValueTask<EncodingAdvice> AdviseAsync(
         VortexFile file, EncodingGoal goal, VortexSession session, CancellationToken cancellationToken)
@@ -508,8 +506,8 @@ internal static class EncodingAdvisor
             {
                 foreach ((VortexFile file, long[] lookups) in slices)
                 {
-                    s_sink += await ReadAsync(file, null, cancellationToken).ConfigureAwait(false);
-                    s_sink += await ReadAsync(file, lookups, cancellationToken).ConfigureAwait(false);
+                    await ReadAsync(file, null, cancellationToken).ConfigureAwait(false);
+                    await ReadAsync(file, lookups, cancellationToken).ConfigureAwait(false);
                 }
 
                 long now = JitInfo.GetCompiledMethodCount();
@@ -603,14 +601,14 @@ internal static class EncodingAdvisor
     /// </summary>
     private static async ValueTask<double> LeastSecondsAsync(VortexFile file, long[]? take, CancellationToken cancellationToken)
     {
-        s_sink += await ReadAsync(file, take, cancellationToken).ConfigureAwait(false);
+        await ReadAsync(file, take, cancellationToken).ConfigureAwait(false);
         long enough = (long)(MeasureAtLeast.TotalSeconds * Stopwatch.Frequency);
         long least = long.MaxValue;
         long spent = 0;
         for (int pass = 0; pass < MaxPasses && (pass < Passes || spent < enough); pass++)
         {
             long start = Stopwatch.GetTimestamp();
-            s_sink += await ReadAsync(file, take, cancellationToken).ConfigureAwait(false);
+            await ReadAsync(file, take, cancellationToken).ConfigureAwait(false);
             long elapsed = Stopwatch.GetTimestamp() - start;
             spent += elapsed;
             least = Math.Min(least, elapsed);

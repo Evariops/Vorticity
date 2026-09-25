@@ -33,8 +33,7 @@ internal readonly struct SequencePlan
     /// Whether the column is an arithmetic progression with no nulls. A caller that has already
     /// established a constant step passes it, which skips the walk.
     /// </summary>
-    internal static SequencePlan? TryBuild(
-        CanonicalArena arena, CanonicalNode node, bool stepsAreConstant = false)
+    internal static SequencePlan? TryBuild(CanonicalNode node, bool stepsAreConstant = false)
     {
         if (node.Kind != CanonicalKind.Primitive || !node.PType.IsInteger() || node.Length < 2)
         {

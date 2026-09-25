@@ -77,7 +77,7 @@ internal static class CanonicalFilter
             CanonicalKind.Decimal => FilterDecimal(arena, node, indices),
             CanonicalKind.VarBinView => FilterVarBinView(arena, node, indices),
             CanonicalKind.ListView => FilterListView(arena, node, indices),
-            CanonicalKind.FixedSizeList => FilterFixedSizeList(arena, node, nodeIndex, indices),
+            CanonicalKind.FixedSizeList => FilterFixedSizeList(arena, node, indices),
             CanonicalKind.Struct => FilterStruct(arena, node, indices),
             CanonicalKind.Extension => FilterExtension(arena, node, indices),
             // Filtering a constant yields a constant: only the length and the validity change, the
@@ -209,7 +209,7 @@ internal static class CanonicalFilter
     }
 
     private static int FilterFixedSizeList(
-        CanonicalArena arena, CanonicalNode node, int nodeIndex, ReadOnlySpan<int> indices)
+        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
     {
         int count = indices.Length;
         Validity validity = FilterValidity(arena, node.Validity, indices);
@@ -262,7 +262,7 @@ internal static class CanonicalFilter
             {
                 // Re-read the node each time: Apply adds nodes, and the arena may have moved its
                 // record array out from under a stale CanonicalNode.
-                children[i] = Apply(arena, arena.GetNode(NodeIndexOfField(arena, node, i)), indices);
+                children[i] = Apply(arena, arena.GetNode(node.GetFieldIndex(i)), indices);
             }
 
             return arena.AddStruct(node.DType, count, validity, children.AsSpan(0, fields));
@@ -369,9 +369,6 @@ internal static class CanonicalFilter
             arena.GetNode(validity.CanonicalNodeIndex).DType, count, Validity.NonNullable, bits, 0);
         return Validity.Bitmap(node);
     }
-
-    private static int NodeIndexOfField(CanonicalArena arena, CanonicalNode node, int field) =>
-        node.GetFieldIndex(field);
 
     private static int Apply(CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices) =>
         Apply(arena, node.Index, indices);

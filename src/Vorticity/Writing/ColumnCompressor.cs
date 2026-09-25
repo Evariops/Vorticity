@@ -301,8 +301,7 @@ internal static class ColumnCompressor
     /// those.
     /// </para>
     /// </remarks>
-    private static ColumnPlan TryRuns(
-        CanonicalArena arena, in CanonicalNode node, in RowComparer comparer, int length)
+    private static ColumnPlan TryRuns(in CanonicalNode node, in RowComparer comparer, int length)
     {
         int ceiling = length / RunEndRatio;
         if (ceiling < 1)
@@ -787,7 +786,7 @@ internal static class ColumnCompressor
             bool knownSteps = measured && stats.DeltaKnown;
             if (!knownSteps || !stats.DeltaBroken)
             {
-                if (SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps) is { } sequence)
+                if (SequencePlan.TryBuild(node, stepsAreConstant: knownSteps) is { } sequence)
                 {
                     return ColumnPlan.ForSequence(sequence);
                 }
@@ -837,7 +836,7 @@ internal static class ColumnCompressor
 
             if (!known || stats.RunCount <= length / RunEndRatio)
             {
-                ColumnPlan runs = TryRuns(arena, in node, in comparer, length);
+                ColumnPlan runs = TryRuns(in node, in comparer, length);
                 if (runs.Scheme != ColumnScheme.None)
                 {
                     return runs;
@@ -1433,7 +1432,7 @@ internal static class ColumnCompressor
         // nothing to save by standing in front of it. Letting it stand there writes a remembered
         // bit-packing over every progression that follows the one chunk with a jump in it: a buffer
         // per chunk where the metadata alone would have been exact.
-        ColumnPlan progression = SequenceOf(arena, node, target, in stats, cascade, measured);
+        ColumnPlan progression = SequenceOf(node, target, in stats, cascade, measured);
         if (progression.Scheme != ColumnScheme.None)
         {
             return progression;
@@ -1474,7 +1473,7 @@ internal static class ColumnCompressor
             runEndCost = RunEndCostOf(runs, length, plain);
             if (!runEndCompetes && runEndCost != long.MaxValue)
             {
-                return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns, runEndCost);
+                return MaterializeRuns(in node, in comparer, length, runs, in walkedRuns, runEndCost);
             }
         }
 
@@ -1504,13 +1503,13 @@ internal static class ColumnCompressor
         // the gather still waits for the verdict.
         if (runEndAllowed && !runsCounted)
         {
-            walkedRuns = TryRuns(arena, in node, in comparer, length);
+            walkedRuns = TryRuns(in node, in comparer, length);
             runs = walkedRuns.Scheme == ColumnScheme.None ? long.MaxValue : walkedRuns.Codes.Length;
             runEndCost = RunEndCostOf(runs, length, plain);
             if (!runEndCompetes && runEndCost != long.MaxValue)
             {
                 // The rule in force: inside the ratio, run-end wins before anything else is priced.
-                return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns, runEndCost);
+                return MaterializeRuns(in node, in comparer, length, runs, in walkedRuns, runEndCost);
             }
         }
 
@@ -1585,7 +1584,7 @@ internal static class ColumnCompressor
         switch (bestScheme)
         {
             case ColumnScheme.RunEnd:
-                return MaterializeRuns(arena, in node, in comparer, length, runs, in walkedRuns, runEndCost);
+                return MaterializeRuns(in node, in comparer, length, runs, in walkedRuns, runEndCost);
 
             case ColumnScheme.BitPacked:
                 BitPackPlan chosen = packed.GetValueOrDefault();
@@ -1625,7 +1624,7 @@ internal static class ColumnCompressor
 
     /// <summary>The progression plan when the column is one, priced; canonical otherwise.</summary>
     private static ColumnPlan SequenceOf(
-        CanonicalArena arena, CanonicalNode node, VortexEdition target, in BlockStats stats,
+        CanonicalNode node, VortexEdition target, in BlockStats stats,
         Cascade cascade, bool measured)
     {
         if (!Allows(target, "vortex.sequence") || cascade.SequenceIsDead)
@@ -1641,7 +1640,7 @@ internal static class ColumnCompressor
 
         // A progression writes no buffer -- the base and the step go in the metadata -- so the
         // prediction plan memory checks is zero, and holds exactly when the encoder wrote none.
-        return SequencePlan.TryBuild(arena, node, stepsAreConstant: knownSteps) is { } sequence
+        return SequencePlan.TryBuild(node, stepsAreConstant: knownSteps) is { } sequence
             ? ColumnPlan.ForSequence(sequence) with { PredictedBytes = 0 }
             : ColumnPlan.Canonical;
     }
@@ -1669,7 +1668,7 @@ internal static class ColumnCompressor
                 return ColumnPlan.Canonical with { PredictedBytes = plain };
 
             case ColumnScheme.Sequence:
-                return SequenceOf(arena, node, target, in stats, cascade, measured: true);
+                return SequenceOf(node, target, in stats, cascade, measured: true);
 
             case ColumnScheme.RunEnd:
             {
@@ -1688,7 +1687,7 @@ internal static class ColumnCompressor
 
                 RowComparer comparer = new RowComparer(arena, nodeIndex);
                 ColumnPlan none = ColumnPlan.Canonical;
-                return MaterializeRuns(arena, in node, in comparer, length, runs, in none, cost);
+                return MaterializeRuns(in node, in comparer, length, runs, in none, cost);
             }
 
             case ColumnScheme.BitPacked:
@@ -1796,14 +1795,14 @@ internal static class ColumnCompressor
 
     /// <summary>The run-end plan for a winner: one run needs no gather, a walked count already has it.</summary>
     private static ColumnPlan MaterializeRuns(
-        CanonicalArena arena, in CanonicalNode node, in RowComparer comparer, int length, long runs,
+        in CanonicalNode node, in RowComparer comparer, int length, long runs,
         in ColumnPlan walked, long cost)
     {
         ColumnPlan plan = walked.Scheme != ColumnScheme.None
             ? walked
             : runs == 1
                 ? ColumnPlan.Runs([0], [length])
-                : TryRuns(arena, in node, in comparer, length);
+                : TryRuns(in node, in comparer, length);
         // The 256 is framing, which the encoder's buffers do not hold; the prediction plan memory
         // checks is the ends and the values alone.
         return plan with { PredictedBytes = Math.Max(0, cost - 256) };
@@ -1965,7 +1964,6 @@ internal static class ColumnCompressor
     /// </remarks>
     private readonly ref struct RowComparer
     {
-        private readonly CanonicalArena _arena;
         private readonly CanonicalNode _node;
         private readonly ValidityMask _mask;
 
@@ -1996,7 +1994,6 @@ internal static class ColumnCompressor
 
         internal RowComparer(CanonicalArena arena, int nodeIndex)
         {
-            _arena = arena;
             _node = arena.GetNode(nodeIndex);
             _mask = ValidityMask.From(arena, _node.Validity);
             _width = _node.Kind switch
