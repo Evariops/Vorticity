@@ -19,7 +19,8 @@ namespace Vorticity.Benchmarks;
 /// <para>
 /// <c>i64</c> is signed values with the minimum known and no ingest pass, so both histograms are
 /// taken; <c>u64</c> unsigned ones, the framed histogram alone; <c>i64-nulls</c> the signed values
-/// with one row in ten null. The values span about twenty bits over a random base.
+/// with one row in ten null; <c>i32-nulls</c> 32-bit ones with one row in ten null and the minimum
+/// left to the plan. The values span about twenty bits over a random base.
 /// </para>
 /// <para>The arms' plans are checked against each other before anything is timed.</para>
 /// </remarks>
@@ -32,9 +33,9 @@ public class BitPackPlanBenchmarks
 {
     private CanonicalArena _arena = null!;
     private int _node;
-    private ulong _minimum;
+    private ulong? _minimum;
 
-    /// <summary>The column: <c>i64</c>, <c>u64</c> or <c>i64-nulls</c>.</summary>
+    /// <summary>The column: <c>i64</c>, <c>u64</c>, <c>i64-nulls</c> or <c>i32-nulls</c>.</summary>
     [ParamsSource(nameof(Shapes))]
     public string Shape { get; set; } = "i64";
 
@@ -43,7 +44,7 @@ public class BitPackPlanBenchmarks
     public int Rows { get; set; } = 8192;
 
     /// <summary>Every shape in every profile.</summary>
-    public static IEnumerable<string> Shapes => ["i64", "u64", "i64-nulls"];
+    public static IEnumerable<string> Shapes => ["i64", "u64", "i64-nulls", "i32-nulls"];
 
     /// <summary>A small chunk, and a large one.</summary>
     public static IEnumerable<int> RowCounts => [8192, 131_072];
@@ -54,7 +55,7 @@ public class BitPackPlanBenchmarks
     public static (long Rows, long Bytes) BenchmarkWork(string method, IReadOnlyDictionary<string, object?> parameters)
     {
         int rows = (int)parameters[nameof(Rows)]!;
-        return (rows, (long)rows * 8);
+        return (rows, (long)rows * ((string)parameters[nameof(Shape)]! == "i32-nulls" ? 4 : 8));
     }
 
     [GlobalSetup]
@@ -63,18 +64,28 @@ public class BitPackPlanBenchmarks
         _arena = new CanonicalArena();
         DTypeArena types = new DTypeArena();
         bool signed = Shape != "u64";
-        bool nulls = Shape == "i64-nulls";
+        bool nulls = Shape.EndsWith("-nulls", StringComparison.Ordinal);
+        bool narrow = Shape == "i32-nulls";
+        int width = narrow ? 4 : 8;
         Random random = new Random(20260925);
-        VortexBuffer values = _arena.Allocate(Rows * 8, 64, out Span<byte> bytes);
+        VortexBuffer values = _arena.Allocate(Rows * width, 64, out Span<byte> bytes);
         long least = long.MaxValue;
         for (int row = 0; row < Rows; row++)
         {
             long value = 1_000_000_007L + random.Next(1 << 20);
-            BitConverter.TryWriteBytes(bytes[(row * 8)..], value);
+            if (narrow)
+            {
+                BitConverter.TryWriteBytes(bytes[(row * 4)..], (int)value);
+            }
+            else
+            {
+                BitConverter.TryWriteBytes(bytes[(row * 8)..], value);
+            }
+
             least = Math.Min(least, value);
         }
 
-        _minimum = (ulong)least;
+        _minimum = narrow ? null : (ulong)least;
         Validity validity = Validity.NonNullable;
         if (nulls)
         {
@@ -90,12 +101,13 @@ public class BitPackPlanBenchmarks
             validity = Validity.Bitmap(_arena.AddBool(types.Bool(Nullability.NonNullable), Rows, Validity.NonNullable, bits, 0));
         }
 
-        PType ptype = signed ? PType.I64 : PType.U64;
+        PType ptype = narrow ? PType.I32 : signed ? PType.I64 : PType.U64;
         _node = _arena.AddPrimitive(types.Primitive(ptype, nulls ? Nullability.Nullable : Nullability.NonNullable), Rows, validity, ptype, values);
 
         BitPackPlanOriginal? expected = BitPackPlanOriginal.TryBuild(_arena, _arena.GetNode(_node), reference: _minimum);
         BitPackPlan? got = BitPackPlan.TryBuild(_arena, _arena.GetNode(_node), reference: _minimum);
-        if (expected?.BitWidth != got?.BitWidth || expected?.Transform != got?.Transform || expected?.Exceptions != got?.Exceptions)
+        if (expected?.BitWidth != got?.BitWidth || expected?.Transform != got?.Transform ||
+            expected?.Exceptions != got?.Exceptions || expected?.Reference != got?.Reference || expected?.Cost != got?.Cost)
         {
             throw new InvalidOperationException($"{Shape}: the library's plan differs from the original's.");
         }

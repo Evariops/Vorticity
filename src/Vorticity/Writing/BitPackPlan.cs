@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -366,32 +367,101 @@ internal readonly struct BitPackPlan
             return;
         }
 
-        for (int row = 0; row < values.Length; row++)
+        // A null row is packed as zero, which is a different statement from "its value is zero": the
+        // histogram counts the width the pack will write, so running the transform over the raw
+        // value would encode it as `-reference` under a frame of reference, at the full element
+        // width, and make every null an exception. The zigzag side is left alone when the caller
+        // holds it from the ingest pass and is here only for the framed one.
+        if (mask.AllInvalid)
         {
-            if (!mask.IsValid(row))
-            {
-                // A null row is packed as zero, which is a different statement from "its value is
-                // zero": the histogram counts the width the pack will write, so running the
-                // transform over the raw value would encode it as `-reference` under a frame of
-                // reference, at the full element width, and make every null an exception.
-                //
-                // The zigzag side is guarded like the value path below it, because the caller may
-                // already hold that half from the ingest pass and be here only for the framed one;
-                // an unconditional increment would count every null twice.
-                frames[0]++;
-                if (signed)
-                {
-                    zigzags[0]++;
-                }
-
-                continue;
-            }
-
-            T value = values[row];
-            frames[Width(unchecked(value - reference), elementBits)]++;
+            frames[0] += length;
             if (signed)
             {
-                zigzags[Width(ZigZag(value, shift), elementBits)]++;
+                zigzags[0] += length;
+            }
+
+            return;
+        }
+
+        ReadOnlySpan<byte> bits = mask.Bits[..((mask.BitOffset + length + 7) >> 3)];
+        if (signed)
+        {
+            MaskedWidths(values, bits, mask.BitOffset, reference, elementBits, frames, zigzags);
+        }
+        else
+        {
+            MaskedWidths(values, bits, mask.BitOffset, reference, elementBits, frames, default);
+        }
+    }
+
+    /// <summary>
+    /// The framed widths, and the zigzag ones unless <paramref name="zigzags"/> is empty, of a
+    /// column with nulls: a null row counts at width zero through its index rather than through a
+    /// branch, four rows per step into four histograms of each.
+    /// </summary>
+    private static void MaskedWidths<T>(
+        ReadOnlySpan<T> values, ReadOnlySpan<byte> bits, int bitOffset, T reference, int elementBits,
+        Span<int> frames, Span<int> zigzags)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int shift = elementBits - 1;
+        bool both = !zigzags.IsEmpty;
+        Span<int> spare = stackalloc int[65 * 7];
+        spare.Clear();
+        ref int f0 = ref MemoryMarshal.GetReference(frames);
+        ref int f1 = ref MemoryMarshal.GetReference(spare);
+        ref int f2 = ref Unsafe.Add(ref f1, 65);
+        ref int f3 = ref Unsafe.Add(ref f1, 130);
+        ref int z0 = ref both ? ref MemoryMarshal.GetReference(zigzags) : ref Unsafe.Add(ref f1, 195);
+        ref int z1 = ref Unsafe.Add(ref f1, 260);
+        ref int z2 = ref Unsafe.Add(ref f1, 325);
+        ref int z3 = ref Unsafe.Add(ref f1, 390);
+        ref T value = ref MemoryMarshal.GetReference(values);
+        ref byte bit = ref MemoryMarshal.GetReference(bits);
+        int length = values.Length;
+        nint row = 0;
+        // The two bitmap bytes a step reads stay inside the rows' own while eight rows are left past it.
+        for (; row + 8 < length; row += 4)
+        {
+            nint at = row + bitOffset;
+            int word = Unsafe.ReadUnaligned<ushort>(ref Unsafe.Add(ref bit, at >> 3)) >> (int)(at & 7);
+            int first = -(word & 1);
+            int second = -((word >> 1) & 1);
+            int third = -((word >> 2) & 1);
+            int fourth = -((word >> 3) & 1);
+            T a = Unsafe.Add(ref value, row);
+            T b = Unsafe.Add(ref value, row + 1);
+            T c = Unsafe.Add(ref value, row + 2);
+            T d = Unsafe.Add(ref value, row + 3);
+            Unsafe.Add(ref f0, Width(unchecked(a - reference), elementBits) & first)++;
+            Unsafe.Add(ref f1, Width(unchecked(b - reference), elementBits) & second)++;
+            Unsafe.Add(ref f2, Width(unchecked(c - reference), elementBits) & third)++;
+            Unsafe.Add(ref f3, Width(unchecked(d - reference), elementBits) & fourth)++;
+            Unsafe.Add(ref z0, Width(ZigZag(a, shift), elementBits) & first)++;
+            Unsafe.Add(ref z1, Width(ZigZag(b, shift), elementBits) & second)++;
+            Unsafe.Add(ref z2, Width(ZigZag(c, shift), elementBits) & third)++;
+            Unsafe.Add(ref z3, Width(ZigZag(d, shift), elementBits) & fourth)++;
+        }
+
+        for (; row < length; row++)
+        {
+            nint at = row + bitOffset;
+            int one = -((Unsafe.Add(ref bit, at >> 3) >> (int)(at & 7)) & 1);
+            T a = Unsafe.Add(ref value, row);
+            Unsafe.Add(ref f0, Width(unchecked(a - reference), elementBits) & one)++;
+            Unsafe.Add(ref z0, Width(ZigZag(a, shift), elementBits) & one)++;
+        }
+
+        for (int w = 0; w < 65; w++)
+        {
+            frames[w] += Unsafe.Add(ref f1, w) + Unsafe.Add(ref f2, w) + Unsafe.Add(ref f3, w);
+        }
+
+        if (both)
+        {
+            for (int w = 0; w < 65; w++)
+            {
+                zigzags[w] += Unsafe.Add(ref z1, w) + Unsafe.Add(ref z2, w) + Unsafe.Add(ref z3, w);
             }
         }
     }
@@ -517,40 +587,117 @@ internal readonly struct BitPackPlan
         int length, ValidityMask mask, ReadOnlySpan<byte> values, PType ptype, out ulong reference)
     {
         reference = 0;
-        bool any = false;
-
-        if (ptype.IsSignedInteger())
+        if (length == 0 || mask.AllInvalid)
         {
-            long minimum = long.MaxValue;
-            for (int row = 0; row < length; row++)
-            {
-                if (!mask.IsValid(row))
-                {
-                    continue;
-                }
-
-                any = true;
-                minimum = Math.Min(minimum, CanonicalSupport.ReadInteger(values, ptype, row));
-            }
-
-            reference = unchecked((ulong)minimum);
-            return any;
+            return false;
         }
 
-        ulong smallest = ulong.MaxValue;
-        for (int row = 0; row < length; row++)
+        ReadOnlySpan<byte> bits = mask.AllValid ? default : mask.Bits[..((mask.BitOffset + length + 7) >> 3)];
+        int offset = mask.BitOffset;
+        bool any;
+        reference = ptype switch
         {
-            if (!mask.IsValid(row))
-            {
-                continue;
-            }
-
-            any = true;
-            smallest = Math.Min(smallest, CompressedValues.ReadUnsigned(values, ptype, row));
-        }
-
-        reference = smallest;
+            PType.I8 => unchecked((ulong)Least<sbyte>(values, length, bits, offset, out any)),
+            PType.I16 => unchecked((ulong)Least<short>(values, length, bits, offset, out any)),
+            PType.I32 => unchecked((ulong)Least<int>(values, length, bits, offset, out any)),
+            PType.I64 => unchecked((ulong)Least<long>(values, length, bits, offset, out any)),
+            PType.U8 => Least<byte>(values, length, bits, offset, out any),
+            PType.U16 => Least<ushort>(values, length, bits, offset, out any),
+            PType.U32 => Least<uint>(values, length, bits, offset, out any),
+            _ => Least<ulong>(values, length, bits, offset, out any),
+        };
         return any;
+    }
+
+    /// <summary>
+    /// The least of the valid values in the element's own reading, four vectors at a time over a
+    /// column without nulls, and over one with nulls with each null standing for the type's
+    /// maximum rather than behind a branch.
+    /// </summary>
+    /// <param name="bytes">The column's value buffer.</param>
+    /// <param name="length">How many rows.</param>
+    /// <param name="bits">The validity bitmap, covering the rows; empty when no row is null.</param>
+    /// <param name="bitOffset">The bit of row 0 in <paramref name="bits"/>.</param>
+    /// <param name="any">Whether a row is valid.</param>
+    private static T Least<T>(ReadOnlySpan<byte> bytes, int length, ReadOnlySpan<byte> bits, int bitOffset, out bool any)
+        where T : unmanaged, IBinaryInteger<T>, IMinMaxValue<T>
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes)[..length];
+        ref T value = ref MemoryMarshal.GetReference(values);
+        if (bits.IsEmpty)
+        {
+            any = true;
+            return LeastOf(ref value, length);
+        }
+
+        ref byte bit = ref MemoryMarshal.GetReference(bits);
+        T a = T.MaxValue;
+        T b = T.MaxValue;
+        nint valid = 0;
+        nint row = 0;
+        for (; row <= length - 2; row += 2)
+        {
+            nint at = row + bitOffset;
+            bool first = ((Unsafe.Add(ref bit, at >> 3) >> (int)(at & 7)) & 1) != 0;
+            at++;
+            bool second = ((Unsafe.Add(ref bit, at >> 3) >> (int)(at & 7)) & 1) != 0;
+            T x = first ? Unsafe.Add(ref value, row) : T.MaxValue;
+            T y = second ? Unsafe.Add(ref value, row + 1) : T.MaxValue;
+            a = x < a ? x : a;
+            b = y < b ? y : b;
+            valid |= (first ? 1 : 0) | (second ? 1 : 0);
+        }
+
+        for (; row < length; row++)
+        {
+            nint at = row + bitOffset;
+            bool one = ((Unsafe.Add(ref bit, at >> 3) >> (int)(at & 7)) & 1) != 0;
+            T x = one ? Unsafe.Add(ref value, row) : T.MaxValue;
+            a = x < a ? x : a;
+            valid |= one ? 1 : 0;
+        }
+
+        any = valid != 0;
+        return b < a ? b : a;
+    }
+
+    /// <summary>The least of <paramref name="length"/> values, in four vector minimums so no step waits on the one before.</summary>
+    private static T LeastOf<T>(ref T value, int length)
+        where T : unmanaged, IBinaryInteger<T>, IMinMaxValue<T>
+    {
+        T least = T.MaxValue;
+        nint row = 0;
+        int lanes = Vector128<T>.Count;
+        if (Vector128.IsHardwareAccelerated && length >= 4 * lanes)
+        {
+            Vector128<T> a = Vector128.Create(T.MaxValue);
+            Vector128<T> b = a;
+            Vector128<T> c = a;
+            Vector128<T> d = a;
+            for (; row <= length - (4 * lanes); row += 4 * lanes)
+            {
+                ref T at = ref Unsafe.Add(ref value, row);
+                a = Vector128.Min(a, Vector128.LoadUnsafe(ref at));
+                b = Vector128.Min(b, Vector128.LoadUnsafe(ref at, (nuint)lanes));
+                c = Vector128.Min(c, Vector128.LoadUnsafe(ref at, (nuint)(2 * lanes)));
+                d = Vector128.Min(d, Vector128.LoadUnsafe(ref at, (nuint)(3 * lanes)));
+            }
+
+            Vector128<T> all = Vector128.Min(Vector128.Min(a, b), Vector128.Min(c, d));
+            for (int lane = 0; lane < lanes; lane++)
+            {
+                T x = all.GetElement(lane);
+                least = x < least ? x : least;
+            }
+        }
+
+        for (; row < length; row++)
+        {
+            T x = Unsafe.Add(ref value, row);
+            least = x < least ? x : least;
+        }
+
+        return least;
     }
 
     private static PType ToUnsigned(PType ptype) => ptype switch

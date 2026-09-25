@@ -38,7 +38,7 @@ classes it ran. The page's head lists the command behind each section.
 | a writer's string zone bounds | `-- StringBoundsBenchmarks` | 15 s | `StringZones` against a frozen copy of `StringBounds`, zones of 8 192 rows compared first, on URLs sharing their first bytes, short labels and UUIDs |
 | a string column's block statistics | `-- StringStatsBenchmarks` | 15 s | `BlockStatsPass.Accumulate` against a frozen copy of the pass, compared block for block first, on sorted URLs, sorted short codes, labels and UUIDs |
 | a writer's dictionary of strings | `-- DictBuildBenchmarks` | 15 s | `DistinctTable` against a frozen copy of it, codes compared first, on 200 and 5 short labels, 64 out-of-line names and distinct UUIDs |
-| a writer's bit-packing decision | `-- BitPackPlanBenchmarks` | 10 s | `BitPackPlan.TryBuild` against a frozen copy of it, plans compared first, on signed, unsigned and nullable 64-bit columns |
+| a writer's bit-packing decision | `-- BitPackPlanBenchmarks` | 10 s | `BitPackPlan.TryBuild` against a frozen copy of it, plans compared first, on signed, unsigned and nullable 64-bit columns and a nullable 32-bit one whose minimum it takes |
 | the stream a zstd trial compresses for a string column | `-- ZstdStreamBenchmarks` | 15 s | `ZstdPlan.StreamBytes` and `ZstdPlan.LayViews` against a frozen copy of the passes, streams compared first, on inline, out-of-line, mixed and nullable text |
 | anything, want a direction | no argument at all | **3 min** | the twenty-five default classes, 81 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
