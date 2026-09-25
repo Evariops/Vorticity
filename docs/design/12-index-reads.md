@@ -241,12 +241,12 @@ Four predicates beyond comparisons, `IN` and nullity, each with its pruning:
 |---|---|---|---|
 | `StartsWith(p)` | the value's bytes begin with `p` | unknown | as a range `[p, succ(p))`, where `succ` increments the last byte after dropping trailing `0xFF`s: the zone bounds and a sorted run answer it, a count by exact cover |
 | `Contains(p)` | `p` occurs in the value | unknown | the trigram filter and postings when `p` has three bytes or more ([10-indexes.md](10-indexes.md) §4.2, §5.3) |
-| `Like(pattern)` | SQL `LIKE`: `%` any run, `_` any one **byte**, an escape quoting either | unknown | a leading literal as `StartsWith`, every literal run of three bytes or more through the trigram structures; always re-evaluated on survivors |
+| `Like(pattern)` | SQL `LIKE`: `%` any run, `_` any one character of a utf8 column and one byte of a binary one, an escape quoting either | unknown | a leading literal as `StartsWith`, every literal run of three bytes or more through the trigram structures; always re-evaluated on survivors |
 | `ListContains(list, v)` | an element of the row's list equals `v`, under the comparison kernels' equality | unknown on a null list or under a null `v`; a null element matches nothing | the list's null counts; the Bloom filter over the elements ([10-indexes.md](10-indexes.md) §4.1) |
 
-Matching is bytewise and case-sensitive; `NOT StartsWith` claims nothing from a zone map, which is
-the safe answer. On the typed path these are members of `Sym<string>` and of a list member's
-symbol; on the tool path, expressions of `VortexExpr`.
+Matching is bytewise, but for `_` over utf8, and case-sensitive; `NOT StartsWith` claims nothing
+from a zone map, which is the safe answer. On the typed path these are members of `Sym<string>` and
+of a list member's symbol; on the tool path, expressions of `VortexExpr`.
 
 ## 7. What is not on the surface, on purpose
 
