@@ -36,7 +36,8 @@ classes it ran. The page's head lists the command behind each section.
 | the sum of a column's lengths | `-- LengthSumBenchmarks` | 8 s | `ViewKernels.SumLengths` against the frozen copy of the view kernels, checked against it first, on `u32` and `i32` lengths |
 | a chunk's views moved into a concatenation | `-- ViewRebaseBenchmarks` | 6 s | `CanonicalConcat.RebaseInto` against a frozen copy of the copy and rebase it replaced, checked against it first, on the corpus's chunked views |
 | a writer's string zone bounds | `-- StringBoundsBenchmarks` | 15 s | `StringZones` against a frozen copy of `StringBounds`, zones of 8 192 rows compared first, on URLs sharing their first bytes, short labels and UUIDs |
-| anything, want a direction | no argument at all | **3 min** | the twenty-one default classes, 73 benchmarks, fast profile |
+| a string column's block statistics | `-- StringStatsBenchmarks` | 15 s | `BlockStatsPass.Accumulate` against a frozen copy of the pass, compared block for block first, on sorted URLs, sorted short codes, labels and UUIDs |
+| anything, want a direction | no argument at all | **3 min** | the twenty-two default classes, 75 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
@@ -161,7 +162,7 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 
 ## The classes
 
-Twenty-seven, and `-- --list flat` is what answers this question for real: twenty-one in the default run,
+Twenty-eight, and `-- --list flat` is what answers this question for real: twenty-two in the default run,
 six more behind `--explore`.
 
 | class | in the default run |
@@ -178,6 +179,7 @@ six more behind `--explore`.
 | `LengthSumBenchmarks` | yes — `u32` and `i32` lengths, 1 024 and 131 072 rows |
 | `ViewRebaseBenchmarks` | yes — the corpus's chunked views, 1 024 and 131 072 rows |
 | `StringBoundsBenchmarks` | yes — URLs, labels and UUIDs, a zone and sixteen |
+| `StringStatsBenchmarks` | yes — URLs, codes, labels and UUIDs, a block and sixteen |
 | `FsstKernelBenchmarks` | yes |
 | `OnPairKernelBenchmarks` | yes |
 | `FilterKernelBenchmarks` | yes |
@@ -196,7 +198,7 @@ six more behind `--explore`.
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
 answered their question once and do not guard against anything. They stay runnable and stay out of
-the default run: 73 benchmarks become 95 with `--explore`.
+the default run: 75 benchmarks become 97 with `--explore`.
 
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went

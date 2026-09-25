@@ -8,10 +8,16 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
+using Vorticity.Writing;
 
-namespace Vorticity.Writing;
+namespace Vorticity.Benchmarks;
 
-/// <summary>Fills a <see cref="BlockStats"/> from a row range of a canonical column.</summary>
+/// <summary>
+/// The library's <c>BlockStatsPass</c> as it was, copied whole and kept here unchanged as the
+/// baseline every change to it is measured against in the same process. What follows is the
+/// original's own description: fills a <see cref="BlockStats"/> from a row range of a canonical
+/// column.
+/// </summary>
 /// <remarks>
 /// One loop per (column, block) produces everything the zone map needs, at ingest and over a row
 /// range of the batch, so a block is summarized from the batches that cover it rather than from the
@@ -20,7 +26,7 @@ namespace Vorticity.Writing;
 /// switch on it for every value, and a constant column is summarized from its single element
 /// without the column the constant form exists to not build ever being materialized.
 /// </remarks>
-internal static class BlockStatsPass
+internal static class BlockStatsPassOriginal
 {
     /// <summary>
     /// Folds rows <c>[start, start + count)</c> of <paramref name="nodeIndex"/> into
@@ -1268,9 +1274,9 @@ internal static class BlockStatsPass
                 bool same = size == (uint)pairs[b]
                     && (size <= 12
                         ? InlineEqual(pairs[a], pairs[a + 1], pairs[b], pairs[b + 1], (int)size)
-                        : (pairs[a] >> 32) == (pairs[b] >> 32) && (oneHeap
-                            ? Compare(Value(views, heap, row - 1), Value(views, heap, row)) == 0
-                            : SameValue(node, views, pairs, row - 1, row)));
+                        : oneHeap
+                            ? Value(views, heap, row - 1).SequenceEqual(Value(views, heap, row))
+                            : SameValue(node, views, pairs, row - 1, row));
                 if (!same)
                 {
                     boundaries++;
@@ -1280,8 +1286,8 @@ internal static class BlockStatsPass
             }
 
             int order = oneHeap
-                ? Order(views, heap, pairs, row - 1, row)
-                : Compare(Value(node, views, row - 1), Value(node, views, row));
+                ? Value(views, heap, row - 1).SequenceCompareTo(Value(views, heap, row))
+                : Value(node, views, row - 1).SequenceCompareTo(Value(node, views, row));
             if (order == 0)
             {
                 repeats = true;
@@ -1349,14 +1355,6 @@ internal static class BlockStatsPass
 
             if (size > 12)
             {
-                // Two out-of-line values of one size whose views' prefixes differ are different
-                // values; only equal prefixes need the bytes.
-                if ((a0 >> 32) != (b0 >> 32))
-                {
-                    found++;
-                    continue;
-                }
-
                 break;
             }
 
@@ -1388,87 +1386,6 @@ internal static class BlockStatsPass
         ulong headMask = size >= 4 ? uint.MaxValue : (1UL << (8 * size)) - 1;
         ulong tailMask = size >= 12 ? ulong.MaxValue : size <= 4 ? 0 : (1UL << (8 * (size - 4))) - 1;
         return ((head & headMask) | (tail & tailMask)) == 0;
-    }
-
-    /// <summary>
-    /// How row <paramref name="a"/>'s value compares with row <paramref name="b"/>'s, bytewise, over
-    /// a column that keeps its bytes in one buffer: from their views when those decide it.
-    /// </summary>
-    /// <remarks>
-    /// A view holds a value's first four bytes whatever its length, and the whole of a value of
-    /// twelve bytes or fewer. So two inline values compare as their payloads read big-endian, then
-    /// their lengths; two values whose first four bytes differ compare as those; and only two whose
-    /// first four agree, one of them out of line, read their bytes.
-    /// </remarks>
-    private static int Order(ReadOnlySpan<byte> views, ReadOnlySpan<byte> heap, ReadOnlySpan<ulong> pairs, int a, int b)
-    {
-        ulong a0 = pairs[a * 2];
-        ulong b0 = pairs[b * 2];
-        uint aSize = (uint)a0;
-        uint bSize = (uint)b0;
-        ulong aHead = BinaryPrimitives.ReverseEndianness(a0 >> 32) >> 32;
-        ulong bHead = BinaryPrimitives.ReverseEndianness(b0 >> 32) >> 32;
-        ulong headMask = uint.MaxValue ^ (uint.MaxValue >> (8 * (int)Math.Min(Math.Min(aSize, bSize), 4u)));
-        if (Math.Min(aSize, bSize) < 4)
-        {
-            // A value shorter than its prefix field: padding past it is not the value's.
-            aHead &= headMask;
-            bHead &= headMask;
-        }
-
-        if (aHead != bHead)
-        {
-            return aHead < bHead ? -1 : 1;
-        }
-
-        if ((aSize | bSize) <= 12)
-        {
-            ulong aTail = BinaryPrimitives.ReverseEndianness(pairs[(a * 2) + 1]);
-            ulong bTail = BinaryPrimitives.ReverseEndianness(pairs[(b * 2) + 1]);
-            int common = (int)Math.Min(aSize, bSize);
-            ulong tailMask = common <= 4 ? 0 : ulong.MaxValue << (8 * (12 - common));
-            aTail &= tailMask;
-            bTail &= tailMask;
-            if (aTail != bTail)
-            {
-                return aTail < bTail ? -1 : 1;
-            }
-
-            return aSize.CompareTo(bSize);
-        }
-
-        return Compare(Value(views, heap, a), Value(views, heap, b));
-    }
-
-    /// <summary>Two byte strings compared as <c>SequenceCompareTo</c> does, sixteen bytes a step and no call.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int Compare(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b)
-    {
-        int shorter = Math.Min(a.Length, b.Length);
-        ref byte x = ref MemoryMarshal.GetReference(a);
-        ref byte y = ref MemoryMarshal.GetReference(b);
-        int i = 0;
-        for (; i <= shorter - Vector128<byte>.Count; i += Vector128<byte>.Count)
-        {
-            Vector128<byte> differ = ~Vector128.Equals(Vector128.LoadUnsafe(ref x, (nuint)i), Vector128.LoadUnsafe(ref y, (nuint)i));
-            if (differ != Vector128<byte>.Zero)
-            {
-                int at = i + BitOperations.TrailingZeroCount(differ.ExtractMostSignificantBits());
-                return Unsafe.Add(ref x, at) < Unsafe.Add(ref y, at) ? -1 : 1;
-            }
-        }
-
-        for (; i < shorter; i++)
-        {
-            byte p = Unsafe.Add(ref x, i);
-            byte q = Unsafe.Add(ref y, i);
-            if (p != q)
-            {
-                return p < q ? -1 : 1;
-            }
-        }
-
-        return a.Length.CompareTo(b.Length);
     }
 
     /// <summary>
