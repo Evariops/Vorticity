@@ -308,7 +308,7 @@ internal sealed class OnPairDecoder : ArrayDecoder
         try
         {
             Span<long> tokens = rented.AsSpan(0, tokenCount);
-            BuildTokenTable(dictOffsets, offsetsPType, tokenCount, tokens);
+            BuildTokenTable(dictOffsets, offsetsPType, tokenCount, tokens, dictionary.Length);
 
             int written = 0;
             for (int k = 0; k < wanted.Length; k++)
@@ -362,7 +362,7 @@ internal sealed class OnPairDecoder : ArrayDecoder
         try
         {
             Span<long> tokens = rented.AsSpan(0, tokenCount);
-            BuildTokenTable(dictOffsets, offsetsPType, tokenCount, tokens);
+            BuildTokenTable(dictOffsets, offsetsPType, tokenCount, tokens, dictionary.Length);
             return Concatenate(
                 codes, codesPType, codeStart, codeEnd, tokens, dictionary, destination);
         }
@@ -384,13 +384,16 @@ internal sealed class OnPairDecoder : ArrayDecoder
     /// its own and every size fits comfortably in the high half.
     /// </remarks>
     internal static void BuildTokenTable(
-        ReadOnlySpan<byte> dictOffsets, PType offsetsPType, int tokenCount, Span<long> tokens)
+        ReadOnlySpan<byte> dictOffsets, PType offsetsPType, int tokenCount, Span<long> tokens, int dictionaryLength)
     {
+        // A token whose sixteen bytes from its start would run past the blob carries NearEnd, so
+        // the concatenation finds such a token among many with one or rather than a compare each.
+        int wideStart = dictionaryLength - MaxTokenSize;
         int previous = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, 0);
         for (int t = 0; t < tokenCount; t++)
         {
             int next = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, t + 1);
-            tokens[t] = (uint)previous | ((long)(next - previous) << 32);
+            tokens[t] = (uint)previous | (previous > wideStart ? NearEnd : 0) | ((long)(next - previous) << 32);
             previous = next;
         }
     }
@@ -436,6 +439,211 @@ internal sealed class OnPairDecoder : ArrayDecoder
     /// </para>
     /// </remarks>
     private static int ConcatenateCore<TCode>(
+        ReadOnlySpan<byte> codes,
+        int codeStart,
+        int codeEnd,
+        ReadOnlySpan<long> tokens,
+        ReadOnlySpan<byte> dictionary,
+        Span<byte> destination)
+        where TCode : unmanaged
+    {
+        if (destination.Length >= 2 * StageBytes)
+        {
+            return Staged<TCode>(codes, codeStart, codeEnd, tokens, dictionary, destination);
+        }
+
+        return Direct<TCode>(codes, codeStart, codeEnd, tokens, dictionary, destination);
+    }
+
+    /// <summary>Bytes of output gathered in a first-level-cache buffer before they go out.</summary>
+    private const int StageBytes = 8 * 1024;
+
+    /// <summary>A token whose sixteen bytes from its start would run past the blob: bit 31 of its start.</summary>
+    private const long NearEnd = 1L << 31;
+
+    /// <summary>
+    /// The concatenation of a large output: the tokens go into a buffer of
+    /// <see cref="StageBytes"/> that stays in the first-level cache, eight at a time, and each full
+    /// buffer goes out in one copy.
+    /// </summary>
+    /// <remarks>
+    /// A token is written as sixteen bytes and the next overwrites the slack, so every line of the
+    /// output takes several stores that overlap. Into memory the cache does not hold, each line
+    /// is fetched before those stores can land, and the stores queue behind it: a scan window's
+    /// output took three times as long a code as a node's that fits the first level. Gathered in
+    /// a buffer that stays there, they land at once, and the copy out writes whole lines.
+    /// </remarks>
+    private static int Staged<TCode>(
+        ReadOnlySpan<byte> codes,
+        int codeStart,
+        int codeEnd,
+        ReadOnlySpan<long> tokens,
+        ReadOnlySpan<byte> dictionary,
+        Span<byte> destination)
+        where TCode : unmanaged
+    {
+        ReadOnlySpan<TCode> typed = MemoryMarshal.Cast<byte, TCode>(codes);
+        Span<byte> stage = stackalloc byte[StageBytes + (Block * MaxTokenSize)];
+        ref byte stageRef = ref MemoryMarshal.GetReference(stage);
+        ref TCode codeRef = ref MemoryMarshal.GetReference(typed);
+        ref long tokenRef = ref MemoryMarshal.GetReference(tokens);
+        ref byte source = ref MemoryMarshal.GetReference(dictionary);
+        int wideStart = dictionary.Length - MaxTokenSize;
+        int written = 0;
+        nint i = codeStart;
+        nint filled = 0;
+        while (i < codeEnd)
+        {
+            i = Blocks(ref codeRef, i, codeEnd, ref tokenRef, (uint)tokens.Length, ref source, ref stageRef, StageBytes, ref filled);
+            if (i < codeEnd && filled < StageBytes)
+            {
+                // A block the fast loop would not take: a code past the dictionary, which raises
+                // here, or a token too near the blob's end, copied exactly.
+                uint code = WidenToken(typed[(int)i]);
+                if (code >= (uint)tokens.Length)
+                {
+                    CompressedThrow.Format(
+                        $"{Id} code {code} names a token the {tokens.Length}-entry dictionary does " +
+                        "not hold.");
+                }
+
+                long packed = tokens[(int)code];
+                int start = (int)(packed & (NearEnd - 1));
+                int size = (int)(packed >> 32);
+                if (start <= wideStart)
+                {
+                    Vector128.LoadUnsafe(ref Unsafe.Add(ref source, (uint)start)).StoreUnsafe(ref Unsafe.Add(ref stageRef, filled));
+                }
+                else
+                {
+                    dictionary.Slice(start, size).CopyTo(stage.Slice((int)filled, size));
+                }
+
+                filled += size;
+                i++;
+            }
+
+            if (filled >= StageBytes || i >= codeEnd)
+            {
+                if ((uint)written + (uint)filled > (uint)destination.Length)
+                {
+                    CompressedThrow.Format(
+                        $"{Id}: the code stream decodes to more than the {destination.Length} bytes " +
+                        "its uncompressed lengths account for.");
+                }
+
+                stage[..(int)filled].CopyTo(destination[written..]);
+                written += (int)filled;
+                filled = 0;
+            }
+        }
+
+        return written;
+    }
+
+    /// <summary>Codes a step of <see cref="Blocks{TCode}"/>.</summary>
+    private const int Block = 8;
+
+    /// <summary>
+    /// Eight codes at a time into <paramref name="stage"/> while their tokens all lie in the
+    /// dictionary, none too near the blob's end, and the stage has not reached
+    /// <paramref name="limit"/>; returns where it stopped.
+    /// </summary>
+    /// <remarks>
+    /// The codes are checked against the dictionary by one vector compare and the tokens' ends by
+    /// one or of their packed words, so a code costs its load, its token's load, its sixteen-byte
+    /// copy and its share of a tree of sums of the sizes before it, three additions deep. Calls
+    /// nothing, so that its state stays in registers.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static nint Blocks<TCode>(
+        ref TCode codes, nint i, nint end, ref long tokens, uint tokenCount, ref byte source, ref byte stage, nint limit,
+        ref nint filled)
+        where TCode : unmanaged
+    {
+        nint at = filled;
+        while (i <= end - Block && at < limit)
+        {
+            ref TCode block = ref Unsafe.Add(ref codes, i);
+            if (!AllTokens(ref block, tokenCount))
+            {
+                break;
+            }
+
+            long p0 = Unsafe.Add(ref tokens, (nint)WidenToken(block));
+            long p1 = Unsafe.Add(ref tokens, (nint)WidenToken(Unsafe.Add(ref block, 1)));
+            long p2 = Unsafe.Add(ref tokens, (nint)WidenToken(Unsafe.Add(ref block, 2)));
+            long p3 = Unsafe.Add(ref tokens, (nint)WidenToken(Unsafe.Add(ref block, 3)));
+            long p4 = Unsafe.Add(ref tokens, (nint)WidenToken(Unsafe.Add(ref block, 4)));
+            long p5 = Unsafe.Add(ref tokens, (nint)WidenToken(Unsafe.Add(ref block, 5)));
+            long p6 = Unsafe.Add(ref tokens, (nint)WidenToken(Unsafe.Add(ref block, 6)));
+            long p7 = Unsafe.Add(ref tokens, (nint)WidenToken(Unsafe.Add(ref block, 7)));
+            if (((((p0 | p1) | (p2 | p3)) | ((p4 | p5) | (p6 | p7))) & NearEnd) != 0)
+            {
+                break;
+            }
+
+            nint w0 = (nint)(p0 >> 32);
+            nint w2 = (nint)(p2 >> 32);
+            nint w4 = (nint)(p4 >> 32);
+            nint w6 = (nint)(p6 >> 32);
+            nint w01 = w0 + (nint)(p1 >> 32);
+            nint w23 = w2 + (nint)(p3 >> 32);
+            nint w45 = w4 + (nint)(p5 >> 32);
+            nint w67 = w6 + (nint)(p7 >> 32);
+            nint w03 = w01 + w23;
+            nint w05 = w03 + w45;
+
+            ref byte into = ref Unsafe.Add(ref stage, at);
+            Copy(ref source, p0, ref into);
+            Copy(ref source, p1, ref Unsafe.Add(ref into, w0));
+            Copy(ref source, p2, ref Unsafe.Add(ref into, w01));
+            Copy(ref source, p3, ref Unsafe.Add(ref into, w01 + w2));
+            Copy(ref source, p4, ref Unsafe.Add(ref into, w03));
+            Copy(ref source, p5, ref Unsafe.Add(ref into, w03 + w4));
+            Copy(ref source, p6, ref Unsafe.Add(ref into, w05));
+            Copy(ref source, p7, ref Unsafe.Add(ref into, w05 + w6));
+            at += w03 + (w45 + w67);
+            i += Block;
+        }
+
+        filled = at;
+        return i;
+
+        static void Copy(ref byte source, long packed, ref byte into) =>
+            Vector128.LoadUnsafe(ref Unsafe.Add(ref source, (nint)(uint)packed)).StoreUnsafe(ref into);
+    }
+
+    /// <summary>Whether each of eight codes names a token of a dictionary of <paramref name="tokenCount"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool AllTokens<TCode>(ref TCode block, uint tokenCount)
+        where TCode : unmanaged
+    {
+        if (typeof(TCode) == typeof(ushort))
+        {
+            return tokenCount > ushort.MaxValue ||
+                !Vector128.GreaterThanOrEqualAny(
+                    Vector128.LoadUnsafe(ref Unsafe.As<TCode, ushort>(ref block)), Vector128.Create((ushort)tokenCount));
+        }
+
+        if (typeof(TCode) == typeof(byte))
+        {
+            return tokenCount > byte.MaxValue ||
+                !Vector64.GreaterThanOrEqualAny(
+                    Vector64.LoadUnsafe(ref Unsafe.As<TCode, byte>(ref block)), Vector64.Create((byte)tokenCount));
+        }
+
+        bool inside = true;
+        for (int k = 0; k < Block; k++)
+        {
+            inside &= WidenToken(Unsafe.Add(ref block, k)) < tokenCount;
+        }
+
+        return inside;
+    }
+
+    /// <summary>The concatenation of an output small enough to be written where it goes.</summary>
+    private static int Direct<TCode>(
         ReadOnlySpan<byte> codes,
         int codeStart,
         int codeEnd,
@@ -507,7 +715,7 @@ internal sealed class OnPairDecoder : ArrayDecoder
             int sb = (int)pb;
             int sc = (int)pc;
             int sd = (int)pd;
-            if (Math.Max(Math.Max(sa, sb), Math.Max(sc, sd)) > wideStart)
+            if (((pa | pb | pc | pd) & NearEnd) != 0)
             {
                 // A token too near the end of the blob for a 16-byte read. Step one and retry the
                 // block: a `break` here would give up on the wide path for the whole rest of the
@@ -565,7 +773,7 @@ internal sealed class OnPairDecoder : ArrayDecoder
         }
 
         long packed = tokens[(int)code];
-        int start = (int)packed;
+        int start = (int)(packed & (NearEnd - 1));
         int size = (int)(packed >> 32);
 
         if (written <= wideLimit && start <= wideStart)

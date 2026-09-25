@@ -115,7 +115,7 @@ public class OnPairKernelBenchmarks
     [Benchmark(Description = "concatenate, library")]
     public int ConcatLibrary()
     {
-        OnPairDecoder.BuildTokenTable(_offsets, OffsetsType, Tokens, _table);
+        OnPairDecoder.BuildTokenTable(_offsets, OffsetsType, Tokens, _table, _dictionary.Length);
         return OnPairDecoder.Concatenate(
             _codes, CodesType, 0, Codes, _table, _dictionary, _destination);
     }
