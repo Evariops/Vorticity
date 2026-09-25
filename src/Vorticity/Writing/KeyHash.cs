@@ -1,5 +1,6 @@
 using System;
 using System.IO.Hashing;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -34,12 +35,11 @@ internal static class KeyHash
     /// </summary>
     internal static ulong Bytes(ReadOnlySpan<byte> bytes)
     {
+        ref byte first = ref MemoryMarshal.GetReference(bytes);
         if (bytes.Length > 16)
         {
-            return XxHash3.HashToUInt64(bytes);
+            return bytes.Length <= 64 ? Words(ref first, bytes.Length) : XxHash3.HashToUInt64(bytes);
         }
-
-        ref byte first = ref MemoryMarshal.GetReference(bytes);
         ulong word;
         if (bytes.Length >= 8)
         {
@@ -65,5 +65,34 @@ internal static class KeyHash
 
         // The length is mixed in because "a" and "a\0" fold to the same word.
         return Mix(word ^ ((ulong)bytes.Length * Golden));
+    }
+
+    /// <summary>
+    /// A string of 17 to 64 bytes: its words read from both ends, overlapping for the lengths
+    /// between, folded into two sums by multiplies and mixed once, with no call.
+    /// </summary>
+    /// <remarks>
+    /// Two equal strings read the same words, which is all a bucket asks; a string's every byte
+    /// lies in some word read, so strings that differ anywhere fold differently but by accident.
+    /// </remarks>
+    private static ulong Words(ref byte first, int length)
+    {
+        ulong a = Unsafe.ReadUnaligned<ulong>(ref first);
+        ulong b = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, 8));
+        ulong c = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, length - 16));
+        ulong d = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, length - 8));
+        ulong left = (a * Golden) ^ BitOperations.RotateLeft(c * Spread, 31);
+        ulong right = (b * Spread) ^ BitOperations.RotateLeft(d * Golden, 27);
+        if (length > 32)
+        {
+            ulong e = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, 16));
+            ulong f = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, 24));
+            ulong g = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, length - 32));
+            ulong h = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, length - 24));
+            left ^= BitOperations.RotateLeft(e * Spread, 17) ^ (g * Golden);
+            right ^= BitOperations.RotateLeft(f * Golden, 43) ^ (h * Spread);
+        }
+
+        return Mix(left ^ BitOperations.RotateLeft(right, 32) ^ ((ulong)length * Golden));
     }
 }

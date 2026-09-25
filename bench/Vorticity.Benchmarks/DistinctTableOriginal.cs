@@ -4,22 +4,26 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 
-namespace Vorticity.Writing;
+using Vorticity.Writing;
+
+namespace Vorticity.Benchmarks;
 
 /// <summary>
+/// The library's <c>DistinctTable</c> as it was, copied whole and kept here unchanged as the
+/// baseline every change to it is measured against in the same process. What follows is the
+/// original's own description.
 /// A column's distinct values over one chunk, with a code per row in order of first appearance,
 /// built as rows arrive. The table owns its keys and never references a row of the batch, because a
 /// chunk straddles batches and the previous batch's arena is recycled as soon as the next one is
 /// decoded; a chunk's tail carried into the next chunk is re-probed into a fresh table.
 /// </summary>
-internal sealed class DistinctTable
+internal sealed class DistinctTableOriginal
 {
     private const int InitialCapacity = 64;
 
@@ -78,7 +82,7 @@ internal sealed class DistinctTable
     private int _lastRows;
     private int _lastHeap;
 
-    private DistinctTable(Shape shape, CanonicalKind kind, int width)
+    private DistinctTableOriginal(Shape shape, CanonicalKind kind, int width)
     {
         _shape = shape;
         _kind = kind;
@@ -115,7 +119,7 @@ internal sealed class DistinctTable
     /// A table for the column <paramref name="node"/> is an instance of, or <see langword="null"/>
     /// for a kind that has no row equality and is offered no dictionary.
     /// </summary>
-    internal static DistinctTable? For(CanonicalNode node) => node.Kind switch
+    internal static DistinctTableOriginal? For(CanonicalNode node) => node.Kind switch
     {
         // No table below three bytes of width, by arithmetic rather than policy: a column of `w`
         // bytes has at most 2^(8w) distinct values, so its codes are `w` bytes wide too and the
@@ -123,17 +127,17 @@ internal sealed class DistinctTable
         CanonicalKind.Bool => null,
         CanonicalKind.Primitive => node.PType.ByteWidth() <= 2
             ? null
-            : new DistinctTable(Shape.Fixed, node.Kind, node.PType.ByteWidth()),
+            : new DistinctTableOriginal(Shape.Fixed, node.Kind, node.PType.ByteWidth()),
 
         // The next batch of the same column may be an ordinary primitive, so a constant batch feeds
         // the primitive table rather than getting a table of its own.
         CanonicalKind.Constant => node.DType.PType.ByteWidth() <= 2
             ? null
-            : new DistinctTable(Shape.Fixed, CanonicalKind.Primitive, node.DType.PType.ByteWidth()),
+            : new DistinctTableOriginal(Shape.Fixed, CanonicalKind.Primitive, node.DType.PType.ByteWidth()),
         CanonicalKind.Decimal => DecimalStorage.ByteWidth(node.Storage) is int w && w <= 8
-            ? (w <= 2 ? null : new DistinctTable(Shape.Fixed, node.Kind, w))
-            : new DistinctTable(Shape.Bytes, node.Kind, w),
-        CanonicalKind.VarBinView => new DistinctTable(Shape.Bytes, node.Kind, 0),
+            ? (w <= 2 ? null : new DistinctTableOriginal(Shape.Fixed, node.Kind, w))
+            : new DistinctTableOriginal(Shape.Bytes, node.Kind, w),
+        CanonicalKind.VarBinView => new DistinctTableOriginal(Shape.Bytes, node.Kind, 0),
         _ => null,
     };
 
@@ -599,7 +603,7 @@ internal sealed class DistinctTable
                 int size = (int)(uint)low;
                 if (size <= 12)
                 {
-                    InsertInline(low, high, size, views.Slice((row * ViewSize) + 4, size));
+                    InsertBytes(views.Slice((row * ViewSize) + 4, size));
                     if (!_abandoned)
                     {
                         int slot = RecentSlot(low, high);
@@ -752,7 +756,7 @@ internal sealed class DistinctTable
             // Equality is on bytes: the stored hash and the length are cheap rejections in front of
             // the compare, never a substitute for it.
             if (_slotKey[slot] == hash && lengths[slot] == bytes.Length
-                && Same(ref _heap![offsets[slot]], ref MemoryMarshal.GetReference(bytes), bytes.Length))
+                && _heap.AsSpan(offsets[slot], bytes.Length).SequenceEqual(bytes))
             {
                 _codes[_rows++] = occupant - 1;
                 return;
@@ -760,100 +764,6 @@ internal sealed class DistinctTable
 
             slot = (slot + 1) & _mask;
         }
-    }
-
-    /// <summary>
-    /// <see cref="InsertBytes"/> for a value of twelve bytes or fewer, which a view always holds
-    /// inline: hashed from the view's two words and matched against a stored value by two masked
-    /// reads of it, with no call.
-    /// </summary>
-    /// <remarks>
-    /// A value this short is never out of line, and a longer one never inline, so no value hashed
-    /// here can equal one <see cref="InsertBytes"/> hashed: the length rejects the pair before any
-    /// byte. The heap keeps <see cref="HeapSlack"/> bytes past its last value, so a stored value's
-    /// twelve bytes can be read as words whatever its own length.
-    /// </remarks>
-    private void InsertInline(ulong low, ulong high, int size, ReadOnlySpan<byte> bytes)
-    {
-        // The payload as two words, the padding past the size masked off: bytes 0 to 7 and 8 to 11.
-        ulong headMask = size >= 8 ? ulong.MaxValue : (1UL << (8 * size)) - 1;
-        ulong tailMask = size <= 8 ? 0 : (1UL << (8 * (size - 8))) - 1;
-        ulong head = ((low >> 32) | (high << 32)) & headMask;
-        ulong tail = (high >> 32) & tailMask;
-        ulong hash = KeyHash.Mix(head ^ (tail * 0x9E3779B97F4A7C15UL) ^ ((ulong)size << 56));
-
-        int[] offsets = _slotOffset!;
-        int[] lengths = _slotLength!;
-        int slot = (int)hash & _mask;
-        while (true)
-        {
-            int occupant = _slotCode[slot];
-            if (occupant == 0)
-            {
-                int code = NewCode();
-                if (_abandoned)
-                {
-                    return;
-                }
-
-                int offset = Append(bytes);
-                _slotCode[slot] = code + 1;
-                _slotKey[slot] = hash;
-                offsets[slot] = offset;
-                lengths[slot] = size;
-                _codeOffset![code] = offset;
-                _codeLength![code] = size;
-                _codes[_rows++] = code;
-                GrowIfLoaded();
-                return;
-            }
-
-            if (_slotKey[slot] == hash && lengths[slot] == size)
-            {
-                ref byte stored = ref _heap![offsets[slot]];
-                if ((Unsafe.ReadUnaligned<ulong>(ref stored) & headMask) == head
-                    && (Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref stored, 8)) & tailMask) == tail)
-                {
-                    _codes[_rows++] = occupant - 1;
-                    return;
-                }
-            }
-
-            slot = (slot + 1) & _mask;
-        }
-    }
-
-    /// <summary>Bytes the heap keeps free past its last value, for <see cref="InsertInline"/>'s reads.</summary>
-    private const int HeapSlack = 16;
-
-    /// <summary>Whether <paramref name="length"/> bytes at two places are equal, sixteen at a time and no call.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool Same(ref byte a, ref byte b, int length)
-    {
-        int i = 0;
-        for (; i <= length - 16; i += 16)
-        {
-            if (Vector128.LoadUnsafe(ref a, (nuint)i) != Vector128.LoadUnsafe(ref b, (nuint)i))
-            {
-                return false;
-            }
-        }
-
-        if (i < length && length >= 16)
-        {
-            // The last sixteen bytes, overlapping those already compared.
-            return Vector128.LoadUnsafe(ref a, (nuint)(length - 16)) == Vector128.LoadUnsafe(ref b, (nuint)(length - 16));
-        }
-
-        for (; i < length; i++)
-        {
-            if (Unsafe.Add(ref a, i) != Unsafe.Add(ref b, i))
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     /// <summary>Hands out the next code, recording where it first occurred, or abandons at the cap.</summary>
@@ -885,10 +795,10 @@ internal sealed class DistinctTable
     private int Append(ReadOnlySpan<byte> bytes)
     {
         byte[] heap = _heap!;
-        if (_heapUsed + bytes.Length + HeapSlack > heap.Length)
+        if (_heapUsed + bytes.Length > heap.Length)
         {
             int grown = heap.Length * 2;
-            while (grown < _heapUsed + bytes.Length + HeapSlack)
+            while (grown < _heapUsed + bytes.Length)
             {
                 grown *= 2;
             }
