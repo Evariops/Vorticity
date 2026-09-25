@@ -333,9 +333,7 @@ internal static class DatasetVerifier
 
         private async ValueTask CheckFileAsync(ObjectEntry entry, List<ReadOnlyMemory<byte>> fragments)
         {
-            VortexOpenOptions options = fragments.Count == 0
-                ? new VortexOpenOptions()
-                : new VortexOpenOptions { Read = new VortexReadOptions { IndexFragments = fragments } };
+            VortexOpenOptions options = ObjectCache.OpenOptionsWith(fragments);
             ObjectSegmentSource source = new ObjectSegmentSource(store, entry.Key);
             await using (source.ConfigureAwait(false))
             {

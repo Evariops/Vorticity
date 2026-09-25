@@ -314,7 +314,7 @@ public sealed class VortexDataset : IAsyncDisposable
         await using (source.ConfigureAwait(false))
         {
             VortexFile file = await VortexFile
-                .OpenAsync(source, new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
+                .OpenAsync(source, ObjectCache.OpenOptions, cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
                 // Every object has the dataset's schema; one with another is refused here rather
@@ -755,7 +755,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         MemorySegmentSource source = new MemorySegmentSource(bytes);
         VortexFile file = await VortexFile
-            .OpenAsync(source, new VortexOpenOptions(), cancellationToken).ConfigureAwait(false);
+            .OpenAsync(source, ObjectCache.OpenOptions, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
             ObjectSummaries summaries = Summaries(file);

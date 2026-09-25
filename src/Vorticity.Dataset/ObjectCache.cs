@@ -11,8 +11,9 @@ namespace Vorticity.Dataset;
 /// <summary>
 /// Keeps a bounded number of the dataset's data objects open, saving the tail read and footer parse
 /// an open costs. Leases are reference-counted, since two scans may hold the same object and one of
-/// them finishing must not close the file the other is reading; opens are serialised under the
-/// gate, which makes a double open impossible without a map of in-flight opens.
+/// them finishing must not close the file the other is reading. Opens run outside the gate, side by
+/// side for different objects, and a rent that finds its object being opened waits for that open
+/// rather than starting another.
 /// </summary>
 internal sealed class ObjectCache : IAsyncDisposable
 {
@@ -21,6 +22,7 @@ internal sealed class ObjectCache : IAsyncDisposable
     private readonly VortexSession _session;
     private readonly SemaphoreSlim _gate = new SemaphoreSlim(1, 1);
     private readonly Dictionary<string, Held> _open = new Dictionary<string, Held>(StringComparer.Ordinal);
+    private readonly Dictionary<string, Task<Held>> _opening = new Dictionary<string, Task<Held>>(StringComparer.Ordinal);
     private readonly LinkedList<string> _idle = new LinkedList<string>();
     private bool _disposed;
 
@@ -31,8 +33,18 @@ internal sealed class ObjectCache : IAsyncDisposable
         _session = session ?? VortexSession.Default;
     }
 
+    /// <summary>
+    /// How a data object opens. An object is written once and never appended to, so an end that does
+    /// not parse is a corrupt object, not a torn append with a whole version before it to walk back to.
+    /// </summary>
+    internal static VortexOpenOptions OpenOptions { get; } = new VortexOpenOptions { TornTail = VortexTornTailPolicy.Refuse };
+
     /// <summary>How many objects are open, leased or idle.</summary>
     internal int Count => _open.Count;
+
+    /// <summary><see cref="OpenOptions"/> with the index fragments an object's entry names.</summary>
+    internal static VortexOpenOptions OpenOptionsWith(List<ReadOnlyMemory<byte>> fragments) =>
+        fragments.Count == 0 ? OpenOptions : OpenOptions with { Read = new VortexReadOptions { IndexFragments = fragments } };
 
     /// <summary>How many rents were answered without opening anything.</summary>
     internal long Hits { get; private set; }
@@ -49,72 +61,149 @@ internal sealed class ObjectCache : IAsyncDisposable
         ObjectEntry entry, CommitPageSource pages, CancellationToken cancellationToken)
     {
         string handle = HandleOf(entry);
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        while (true)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_open.TryGetValue(handle, out Held? held))
-            {
-                Hits++;
-                held.Leases++;
-                if (held.Idle is { } node)
-                {
-                    _idle.Remove(node);
-                    held.Idle = null;
-                }
-
-                return new ObjectLease(this, handle, held.File, cached: true) { FragmentRefusals = held.FragmentRefusals };
-            }
-
-            Misses++;
-            // A fragment whose bytes are not what its reference says is left out rather than fatal:
-            // an index claims nothing it cannot prove, and the object answers exactly without it. A
-            // missing commit object is not that -- the version is gone, and the read says so.
-            List<ReadOnlyMemory<byte>> fragments = [];
-            List<string> refused = [];
-            foreach (PageReference reference in entry.Fragments)
-            {
-                ReadOnlyMemory<byte> fragment;
-                try
-                {
-                    fragment = await pages.ReadFragmentAsync(reference, cancellationToken).ConfigureAwait(false);
-                }
-                catch (CommitFormatException torn)
-                {
-                    refused.Add(string.Create(
-                        CultureInfo.InvariantCulture,
-                        $"the fragment in version {reference.Version} at {reference.Offset}+{reference.Length}: {torn.Message}"));
-                    continue;
-                }
-
-                fragments.AddRange(FragmentBundle.Unpack(fragment));
-            }
-
-            VortexOpenOptions options = fragments.Count == 0
-                ? new VortexOpenOptions()
-                : new VortexOpenOptions { Read = new VortexReadOptions { IndexFragments = fragments } };
-            // Through the session, so the store sees at most its reads in flight and a segment read
-            // once is served from its cache to every scan that asks again.
-            ObjectSegmentSource source = new ObjectSegmentSource(_store, entry.Key);
-            VortexFile file;
+            TaskCompletionSource<Held>? mine = null;
+            Task<Held>? theirs;
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                file = await VortexFile.OpenAsync(SessionReader.Wrap(source, _session), options, cancellationToken).ConfigureAwait(false);
-                file.Session = _session;
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (_open.TryGetValue(handle, out Held? held))
+                {
+                    Hits++;
+                    held.Leases++;
+                    if (held.Idle is { } node)
+                    {
+                        _idle.Remove(node);
+                        held.Idle = null;
+                    }
+
+                    return new ObjectLease(this, handle, held.File, cached: true) { FragmentRefusals = held.FragmentRefusals };
+                }
+
+                if (!_opening.TryGetValue(handle, out theirs))
+                {
+                    Misses++;
+                    mine = new TaskCompletionSource<Held>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    _opening[handle] = mine.Task;
+                }
             }
-            catch
+            finally
             {
-                await source.DisposeAsync().ConfigureAwait(false);
-                throw;
+                _gate.Release();
             }
 
-            _open[handle] = new Held(file, source) { Leases = 1, FragmentRefusals = refused };
-            await EvictAsync().ConfigureAwait(false);
-            return new ObjectLease(this, handle, file, cached: false) { FragmentRefusals = refused };
+            if (mine is not null)
+            {
+                return await OpenAsync(entry, pages, handle, mine, cancellationToken).ConfigureAwait(false);
+            }
+
+            // Another rent is opening this object, and shares it once open. An open cancelled by its
+            // own caller is not this rent's failure: it tries again.
+            try
+            {
+                await theirs!.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+            }
+        }
+    }
+
+    /// <summary>Opens an object outside the gate, then publishes it to the rents waiting on it.</summary>
+    private async ValueTask<ObjectLease> OpenAsync(
+        ObjectEntry entry, CommitPageSource pages, string handle, TaskCompletionSource<Held> opening, CancellationToken cancellationToken)
+    {
+        Held held;
+        try
+        {
+            held = await OpenHeldAsync(entry, pages, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception failure)
+        {
+            await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                _opening.Remove(handle);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+
+            opening.TrySetException(failure);
+            throw;
+        }
+
+        bool disposed;
+        await _gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            _opening.Remove(handle);
+            disposed = _disposed;
+            if (!disposed)
+            {
+                _open[handle] = held;
+                await EvictAsync().ConfigureAwait(false);
+            }
         }
         finally
         {
             _gate.Release();
+        }
+
+        if (disposed)
+        {
+            await CloseAsync(held).ConfigureAwait(false);
+            ObjectDisposedException closed = new ObjectDisposedException(nameof(ObjectCache));
+            opening.TrySetException(closed);
+            throw closed;
+        }
+
+        opening.TrySetResult(held);
+        return new ObjectLease(this, handle, held.File, cached: false) { FragmentRefusals = held.FragmentRefusals };
+    }
+
+    /// <summary>Opens an object with the index fragments its entry names, leased once to the caller.</summary>
+    private async ValueTask<Held> OpenHeldAsync(ObjectEntry entry, CommitPageSource pages, CancellationToken cancellationToken)
+    {
+        // A fragment whose bytes are not what its reference says is left out rather than fatal: an
+        // index claims nothing it cannot prove, and the object answers exactly without it. A missing
+        // commit object is not that -- the version is gone, and the read says so.
+        List<ReadOnlyMemory<byte>> fragments = [];
+        List<string> refused = [];
+        foreach (PageReference reference in entry.Fragments)
+        {
+            ReadOnlyMemory<byte> fragment;
+            try
+            {
+                fragment = await pages.ReadFragmentAsync(reference, cancellationToken).ConfigureAwait(false);
+            }
+            catch (CommitFormatException torn)
+            {
+                refused.Add(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"the fragment in version {reference.Version} at {reference.Offset}+{reference.Length}: {torn.Message}"));
+                continue;
+            }
+
+            fragments.AddRange(FragmentBundle.Unpack(fragment));
+        }
+
+        // Through the session, so the store sees at most its reads in flight and a segment read once
+        // is served from its cache to every scan that asks again.
+        ObjectSegmentSource source = new ObjectSegmentSource(_store, entry.Key);
+        try
+        {
+            VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(source, _session), OpenOptionsWith(fragments), cancellationToken).ConfigureAwait(false);
+            file.Session = _session;
+            return new Held(file, source) { Leases = 1, FragmentRefusals = refused };
+        }
+        catch
+        {
+            await source.DisposeAsync().ConfigureAwait(false);
+            throw;
         }
     }
 
@@ -145,6 +234,7 @@ internal sealed class ObjectCache : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        Task[] opening;
         await _gate.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -154,6 +244,19 @@ internal sealed class ObjectCache : IAsyncDisposable
             }
 
             _disposed = true;
+            opening = [.. _opening.Values];
+        }
+        finally
+        {
+            _gate.Release();
+        }
+
+        // An open under way publishes nothing once the cache is disposed: it closes what it opened,
+        // and needs the gate until it has.
+        await Task.WhenAll(opening).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
             foreach (Held held in _open.Values)
             {
                 await CloseAsync(held).ConfigureAwait(false);

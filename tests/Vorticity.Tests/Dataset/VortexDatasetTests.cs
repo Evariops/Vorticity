@@ -312,6 +312,121 @@ public sealed class VortexDatasetTests
         yield break;
     }
 
+    // Two objects asked for at once open together, their requests in flight side by side; one object
+    // asked for twice at once opens once.
+    [Fact]
+    public async Task ObjectsOpenSideBySideAndEachOnce()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using (VortexDataset writer = await VortexDataset.CreateAsync(store, schema, Options(), ct))
+        {
+            await writer.AppendAsync(Batches(types, schema, 0, 1_000), ct);
+            await writer.AppendAsync(Batches(types, schema, 1_000, 1_000), ct);
+        }
+
+        inner.Latency = TimeSpan.FromMilliseconds(20);
+        async Task<(long Steps, long Reads)> OpenAsync(bool both, bool twice)
+        {
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options(), ct);
+            List<PositionedObject> objects = [];
+            await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync())
+            {
+                objects.Add(held);
+            }
+
+            Assert.Equal(2, objects.Count);
+            store.Reset();
+            ObjectEntry second = both ? objects[1].Entry : objects[0].Entry;
+            ValueTask<ObjectLease> first = dataset.RentAsync(objects[0].Entry, ct);
+            ValueTask<ObjectLease> other = both || twice ? dataset.RentAsync(second, ct) : default;
+            await using (await first)
+            {
+                if (both || twice)
+                {
+                    await using ObjectLease _ = await other;
+                }
+            }
+
+            return (store.DependentSteps, store.CountOf(ObjectOperation.GetRange));
+        }
+
+        (long alone, long aloneReads) = await OpenAsync(both: false, twice: false);
+        (long together, _) = await OpenAsync(both: true, twice: false);
+        (_, long twiceReads) = await OpenAsync(both: false, twice: true);
+        Assert.True(together < 2 * alone, $"{together} dependent steps for two opens, {alone} for one");
+        Assert.Equal(aloneReads, twiceReads);
+    }
+
+    // A data object is written once and never appended to, so an end that does not parse is a corrupt
+    // object and not a torn append: it is refused as it stands, not walked back through window by
+    // window, a request each.
+    [Fact]
+    public async Task ACorruptObjectIsRefusedWithoutAWalkBackThroughIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using (VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct))
+        {
+            await dataset.AppendAsync(Noise(types, schema, 500_000), ct);
+        }
+
+        string key = Assert.Single(await inner.ListAsync(CommitKey.DataPrefix, null, 10, ct));
+        ObjectHead head = Assert.NotNull(await inner.HeadAsync(key, ct));
+        byte[] bytes;
+        using (ObjectRange range = await inner.GetRangeAsync(key, 0, checked((int)head.Length), ct))
+        {
+            bytes = System.Buffers.BuffersExtensions.ToArray(range.Bytes);
+        }
+
+        bytes.AsSpan(bytes.Length - VortexFileFormat.EofSize).Clear();
+        await inner.DeleteAsync([key], ct);
+        await inner.PutIfAbsentAsync(key, bytes, ct);
+
+        await using VortexDataset reopened = await VortexDataset.OpenAsync(store, Options(), ct);
+        store.Reset();
+        await Assert.ThrowsAsync<VortexFormatException>(async () => await KeysAsync(reopened.ScanBuilder()));
+        Assert.True(store.BytesRead < bytes.Length / 4, $"{store.BytesRead} bytes read to refuse a {bytes.Length}-byte object");
+    }
+
+    /// <summary>Rows whose measure is random, so that the object they make is as large as their values.</summary>
+    private static async IAsyncEnumerable<RecordBatch> Noise(DTypeArena types, DType schema, int rows)
+    {
+        const int size = 50_000;
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
+        Random random = new Random(19);
+        for (int start = 0; start < rows; start += size)
+        {
+            int count = Math.Min(size, rows - start);
+            CanonicalArena arena = new CanonicalArena();
+            VortexBuffer keys = arena.Allocate(count * sizeof(long), sizeof(long), out Span<byte> keyBytes);
+            VortexBuffer measures = arena.Allocate(count * sizeof(double), sizeof(double), out Span<byte> measureBytes);
+            Span<long> keyValues = MemoryMarshal.Cast<byte, long>(keyBytes);
+            Span<double> measureValues = MemoryMarshal.Cast<byte, double>(measureBytes);
+            for (int row = 0; row < count; row++)
+            {
+                keyValues[row] = start + row;
+                measureValues[row] = random.NextDouble();
+            }
+
+            int keyNode = arena.AddPrimitive(i64, count, Validity.NonNullable, PType.I64, keys);
+            int measureNode = arena.AddPrimitive(f64, count, Validity.NonNullable, PType.F64, measures);
+            int root = arena.AddStruct(schema, count, Validity.NonNullable, [keyNode, measureNode]);
+            using RecordBatch batch = new RecordBatch(arena, root, start);
+            yield return batch;
+            await Task.CompletedTask;
+        }
+    }
+
     private static async IAsyncEnumerable<RecordBatch> Batches(
         DTypeArena types, DType schema, long from, int rows)
     {
