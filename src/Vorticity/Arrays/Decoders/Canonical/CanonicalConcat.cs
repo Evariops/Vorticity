@@ -2,6 +2,8 @@ using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -714,8 +716,7 @@ internal static class CanonicalConcat
                 {
                     int chunkBytes = chunk.Length * CanonicalSupport.ViewSize;
                     Span<byte> block = writable.Slice(row * CanonicalSupport.ViewSize, chunkBytes);
-                    source[..chunkBytes].CopyTo(block);
-                    Rebase(block, chunk.Length, bufferBase, chunk.DataBufferCount, i);
+                    RebaseInto(source[..chunkBytes], block, chunk.Length, bufferBase, chunk.DataBufferCount, i);
                     row += chunk.Length;
                 }
                 else
@@ -783,8 +784,54 @@ internal static class CanonicalConcat
     /// it. An inline view leaves after one load, since it references no buffer at all.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Copies a chunk's views into the concatenated ones, each referencing view's buffer index
+    /// moved past the buffers of the chunks before it.
+    /// </summary>
+    /// <remarks>
+    /// On Arm, four views at a time in one pass: loaded with their words taken apart, lengths,
+    /// prefixes, buffer indices and offsets, a referencing view is one whose length is past the
+    /// inline limit, its index is moved by a mask of that, an index past the chunk's buffers is
+    /// gathered by or, and the four go back together into place. A chunk with a bad index is
+    /// walked again view by view to name it. Elsewhere the views are copied and then rebased.
+    /// </remarks>
+    internal static unsafe void RebaseInto(
+        ReadOnlySpan<byte> source, Span<byte> block, int rows, int bufferBase, int dataBufferCount, int chunkIndex)
+    {
+        int j = 0;
+        if (AdvSimd.Arm64.IsSupported)
+        {
+            fixed (byte* from = source)
+            fixed (byte* into = block)
+            {
+                Vector128<uint> inline = Vector128.Create((uint)CanonicalSupport.MaxInlineViewLength);
+                Vector128<uint> limit = Vector128.Create((uint)dataBufferCount);
+                Vector128<uint> shift = Vector128.Create((uint)bufferBase);
+                Vector128<uint> bad = Vector128<uint>.Zero;
+                for (; j <= rows - 4; j += 4)
+                {
+                    (Vector128<uint> sizes, Vector128<uint> prefixes, Vector128<uint> indices, Vector128<uint> offsets) =
+                        AdvSimd.Arm64.Load4xVector128AndUnzip((uint*)(from + (j * CanonicalSupport.ViewSize)));
+                    Vector128<uint> referencing = Vector128.GreaterThan(sizes, inline);
+                    bad |= referencing & Vector128.GreaterThanOrEqual(indices, limit);
+                    AdvSimd.Arm64.StoreVectorAndZip(
+                        (uint*)(into + (j * CanonicalSupport.ViewSize)),
+                        (sizes, prefixes, indices + (shift & referencing), offsets));
+                }
+
+                if (bad != Vector128<uint>.Zero)
+                {
+                    j = 0;
+                }
+            }
+        }
+
+        source[(j * CanonicalSupport.ViewSize)..].CopyTo(block[(j * CanonicalSupport.ViewSize)..]);
+        Rebase(block[(j * CanonicalSupport.ViewSize)..], rows - j, bufferBase, dataBufferCount, chunkIndex, j);
+    }
+
     private static void Rebase(
-        Span<byte> block, int rows, int bufferBase, int dataBufferCount, int chunkIndex)
+        Span<byte> block, int rows, int bufferBase, int dataBufferCount, int chunkIndex, int firstRow)
     {
         Span<uint> words = MemoryMarshal.Cast<byte, uint>(block);
         uint limit = (uint)dataBufferCount;
@@ -801,7 +848,7 @@ internal static class CanonicalConcat
             if (index >= limit)
             {
                 throw new VortexFormatException(
-                    $"Row {j} of chunk {chunkIndex} references data buffer {index}; the chunk has " +
+                    $"Row {firstRow + j} of chunk {chunkIndex} references data buffer {index}; the chunk has " +
                     $"{dataBufferCount}.");
             }
 

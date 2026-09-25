@@ -34,7 +34,8 @@ classes it ran. The page's head lists the command behind each section.
 | a heap cut into views | `-- ViewBuildBenchmarks` | 20 s | `ViewKernels.BuildFromOffsets` and `BuildFromLengths` against a frozen copy of the kernels, checked view for view first, on the corpus's varbin, FSST, OnPair and mixed shapes |
 | the OnPair concatenation | `-- OnPairConcatBenchmarks` | 10 s | `OnPairDecoder.Concatenate` against a frozen copy of the four-codes-a-step kernel, checked against it first, on 300 long tokens and 4 096 of every size, a node's codes and a scan window's |
 | the sum of a column's lengths | `-- LengthSumBenchmarks` | 8 s | `ViewKernels.SumLengths` against the frozen copy of the view kernels, checked against it first, on `u32` and `i32` lengths |
-| anything, want a direction | no argument at all | **3 min** | the nineteen default classes, 69 benchmarks, fast profile |
+| a chunk's views moved into a concatenation | `-- ViewRebaseBenchmarks` | 6 s | `CanonicalConcat.RebaseInto` against a frozen copy of the copy and rebase it replaced, checked against it first, on the corpus's chunked views |
+| anything, want a direction | no argument at all | **3 min** | the twenty default classes, 71 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
@@ -159,7 +160,7 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 
 ## The classes
 
-Twenty-five, and `-- --list flat` is what answers this question for real: nineteen in the default run,
+Twenty-six, and `-- --list flat` is what answers this question for real: twenty in the default run,
 six more behind `--explore`.
 
 | class | in the default run |
@@ -174,6 +175,7 @@ six more behind `--explore`.
 | `ViewBuildBenchmarks` | yes — varbin, FSST, OnPair and mixed values, 1 024 and 131 072 rows |
 | `OnPairConcatBenchmarks` | yes — 300 and 4 096 tokens, 2 048 and 262 144 codes |
 | `LengthSumBenchmarks` | yes — `u32` and `i32` lengths, 1 024 and 131 072 rows |
+| `ViewRebaseBenchmarks` | yes — the corpus's chunked views, 1 024 and 131 072 rows |
 | `FsstKernelBenchmarks` | yes |
 | `OnPairKernelBenchmarks` | yes |
 | `FilterKernelBenchmarks` | yes |
@@ -192,7 +194,7 @@ six more behind `--explore`.
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
 answered their question once and do not guard against anything. They stay runnable and stay out of
-the default run: 69 benchmarks become 91 with `--explore`.
+the default run: 71 benchmarks become 93 with `--explore`.
 
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went
