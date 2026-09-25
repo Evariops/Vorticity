@@ -136,8 +136,14 @@ from then on:
   default): the next open of the same file, known by its device and inode, takes it over with every
   page already mapped in it, so a file scanned again pays neither the mapping nor a page fault per
   page. A file whose length changed is mapped again, one replaced under its name leaves the cache at
-  once, and the mapping holds neither the handle nor its lock, so a writer is never kept out. On
-  Windows, where a mapped file can be neither deleted nor replaced, nothing is kept.
+  once, and the mapping holds neither the handle nor its lock, so a writer is never kept out. A
+  file deleted once closed keeps its disk space while it is kept, and `ReleaseMappedFiles` lets
+  every kept mapping go. On Windows, where a mapped file can be neither deleted nor replaced,
+  nothing is kept;
+- a session created with `MapFiles = false` maps nothing: a path is read by a `FileSegmentSource`
+  under the session's bound on reads and segment cache, as any source that does I/O. On Linux and
+  macOS a mapped file cut short by another process faults on the pages past its new end, which
+  kills the process; a positional read of it throws `VortexFormatException` instead.
 
 **Coalescing against alignment.** A buffer for a coalesced range `[start, end)` places a segment at
 file offset `o` at memory offset `o − start`, arbitrary for an arbitrary `start`. So the start is

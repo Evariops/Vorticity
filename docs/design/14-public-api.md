@@ -52,6 +52,7 @@ record can implement its interface by hand without referencing the generator.
 | the degree of parallelism, `MaxDegreeOfParallelism`, 1 by default | where every scan and writer of the session starts ([09-contracts.md](09-contracts.md) §2) |
 | the index cache, `IndexCacheBytes` | what each open file keeps of decoded index runs |
 | the files kept mapped once closed, `MappedFileCacheCount` | opening a file again takes over its mapping and every page already mapped in it |
+| whether a path is mapped at all, `MapFiles`, true by default | a service that reads files others may truncate reads them positionally, so that a cut file fails a read rather than the process |
 | the extension registry | dtype ids this process knows beyond the editions, so a registered type binds to a record member or a `Column<T>`; binding checks the storage type the registration declares |
 
 `VortexSession.Default` is immutable and is what `VortexFile.OpenAsync(path)` uses. A session is
