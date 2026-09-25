@@ -6,22 +6,27 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push to the same branch or pull request supersedes the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
   DOTNET_NOLOGO: 'true'
   DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
 
 jobs:
-  build:
-    name: build & test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # Linux only: hosted macOS and Windows runners cost several times as much, and the one
-        # OS-specific path, the file identity behind the mapping cache, answers "cannot tell" where
-        # it has no binding. The arm64 leg stays, because every kernel has a NEON path by contract.
-        os: [ubuntu-latest, ubuntu-24.04-arm]
+  ci:
+    # One job on one Linux x64 runner, so the solution is built once and every check reuses it. The
+    # library's one OS-specific path, the file identity behind the mapping cache, answers that it
+    # cannot tell where it has no binding.
+    name: build, test and cross-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -35,8 +40,12 @@ jobs:
       - name: Build
         run: dotnet build Vorticity.slnx --no-restore -c Release
 
+      # The variable also has the suite write the corpus out for the Rust cross-check below; the
+      # test that writes it skips when the variable is unset.
       - name: Test
         run: dotnet test Vorticity.slnx --no-build -c Release
+        env:
+          VORTICITY_WRITE_CORPUS: ${{ runner.temp }}/written
 
       # Every SIMD kernel has a scalar fallback, and the fallback is only real if it is exercised.
       # Running the whole suite with intrinsics disabled is the cheapest way to keep that honest as
@@ -53,14 +62,15 @@ jobs:
       - name: Pack
         run: dotnet pack Vorticity.slnx --no-build -c Release
 
-  aot:
-    name: native aot over the corpus
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          global-json-file: global.json
+      # The long campaign belongs to a nightly run rather than to each commit, and the per-commit
+      # half already runs as FuzzSmokeTests. This is the middle: enough mutations to be worth the
+      # minute, with a fixed seed so a finding is reproducible from the log alone. The
+      # program exits non-zero on a finding and warns when too few mutations got past the open
+      # path -- a campaign that died in the postscript every time has proved nothing.
+      - name: Fuzz the parser
+        run: |
+          dotnet run --project tests/Vorticity.Fuzz -c Release --no-build -- \
+            tests/Vorticity.Conformance/corpus 100000 20260912
 
       # A library cannot prove it is AOT-clean; an executable that opens a file and walks its
       # layout tree can, because a reflection-shaped mistake is a trim warning at publish or a
@@ -69,7 +79,7 @@ jobs:
       - name: Publish vxdump as Native AOT
         run: dotnet publish tools/vxdump -c Release -r linux-x64
 
-      - name: Run it over every corpus file
+      - name: Open every corpus file with the AOT vxdump
         run: |
           BIN=tools/vxdump/bin/Release/net11.0/linux-x64/publish/vxdump
           opened=0
@@ -94,7 +104,7 @@ jobs:
       # Exit 3 (unsupported) and 4 (malformed) are expected answers for parts of this corpus; any
       # other non-zero exit is an unhandled exception and fails the job. The coverage floor is what
       # makes "0 failures" mean something: a run where every file refused would otherwise pass.
-      - name: Scan every corpus file
+      - name: Scan every corpus file with the AOT vxdump
         run: |
           BIN=tools/vxdump/bin/Release/net11.0/linux-x64/publish/vxdump
           scanned=0
@@ -115,68 +125,44 @@ jobs:
           test "$crashed" = 0
           test "$scanned" -ge 800
 
-  fuzz:
-    name: parser fuzzing
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          global-json-file: global.json
-
-      # The long campaign belongs to a nightly run rather than to each commit, and the per-commit
-      # half already runs as FuzzSmokeTests. This is the middle: enough mutations to be worth the
-      # minute, with a fixed seed so a finding is reproducible from the log alone. The
-      # program exits non-zero on a finding and warns when too few mutations got past the open
-      # path -- a campaign that died in the postscript every time has proved nothing.
-      - name: Fuzz the parser
+      # The runner image ships rustup, and its stable can trail the minimum the pinned crates need.
+      - name: Update the Rust toolchain
+        id: rust
         run: |
-          dotnet run --project tests/Vorticity.Fuzz -c Release -- \
-            tests/Vorticity.Conformance/corpus 100000 20260912
+          rustup update stable --no-self-update && rustup default stable
+          echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
+
+      # Building the reference's crates is the longest step of the job, so their build is kept
+      # from one run to the next until the lock file or the compiler changes.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            tools/conformance-gen/target
+          key: cargo-${{ runner.os }}-${{ steps.rust.outputs.version }}-${{ hashFiles('tools/conformance-gen/Cargo.lock') }}
+
+      # The reference reading what we write is the only check that can catch a writer and a reader
+      # agreeing on the same mistake.
+      - name: Read the written corpus with the reference and compare scalar by scalar
+        working-directory: tools/conformance-gen
+        run: |
+          cargo run --release --example verify_written -- \
+            ../../tests/Vorticity.Conformance/corpus "${{ runner.temp }}/written"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: fuzz-findings
           path: fuzz/artifacts/
-
-  cross-check:
-    name: Vortex Rust reads what we write
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          global-json-file: global.json
-
-      # The runner image ships rustup, and its stable can trail the minimum the pinned crates need.
-      - name: Update the Rust toolchain
-        run: rustup update stable --no-self-update && rustup default stable
-
-      # The reference reading what we write is the only check that can catch a writer and a reader
-      # agreeing on the same mistake. The .NET step skips when the variable is unset, so this job
-      # sets it explicitly rather than relying on a default.
-      - name: Write the corpus with Vorticity
-        run: dotnet test Vorticity.slnx -c Release --filter-method '*WritesTheCorpusOutForTheRustCrossCheck*'
-        env:
-          VORTICITY_WRITE_CORPUS: ${{ runner.temp }}/written
-
-      - name: Read it with the reference and compare scalar by scalar
-        working-directory: tools/conformance-gen
-        run: |
-          cargo run --release --example verify_written -- \
-            ../../tests/Vorticity.Conformance/corpus "${{ runner.temp }}/written"
-
-  spec-drift:
-    name: upstream schema drift
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+          if-no-files-found: ignore
 
       # A change here is a format change, not a dependency bump: it must be reviewed against the
-      # component registry and the conformance corpus regenerated. This job reports drift on a
-      # schedule-friendly path without blocking unrelated PRs.
-      - name: Re-vendor and diff
+      # component registry and the conformance corpus regenerated. It is reported as a warning,
+      # after everything else, so that it never blocks an unrelated change.
+      - name: Report upstream schema drift
+        if: ${{ !cancelled() }}
         continue-on-error: true
         run: |
           ./spec/refresh.sh
