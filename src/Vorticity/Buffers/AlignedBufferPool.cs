@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Vorticity.Buffers;
@@ -29,6 +30,13 @@ namespace Vorticity.Buffers;
 /// A coalesced read is served from a block whose start is the coalesced start rounded down to
 /// 64, so every block is allocated at that 64-byte cap; blocks are therefore interchangeable
 /// between callers that asked for different segment alignments.
+/// </para>
+/// <para>
+/// A swept pool, as the ones the library rents from are, frees after a collection of the oldest
+/// generation what a class no rent has asked for over a minute keeps parked, and everything
+/// parked when the machine's memory load is high: what a process needed while it read some large
+/// files goes back once it has moved on. A class in use keeps its blocks, and a rent pays one read
+/// of a flag for it.
 /// </para>
 /// </remarks>
 internal sealed class AlignedBufferPool
@@ -77,6 +85,15 @@ internal sealed class AlignedBufferPool
     /// demand: what the base retention of every class of the shared pool already comes to.
     /// </summary>
     private const long DemandBudget = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// How long a class goes without a rent before a sweep frees what it keeps parked: the minute
+    /// <c>ArrayPool&lt;T&gt;.Shared</c> gives its own buffers.
+    /// </summary>
+    private const long IdleMilliseconds = 60_000;
+
+    /// <summary>The sweeps of each watched pool, counted; null until a pool is watched, so that a pool nobody watches does not look.</summary>
+    private static ConditionalWeakTable<AlignedBufferPool, StrongBox<int>>? SweepCounts;
 
     private readonly Bucket[] _buckets;
 
@@ -179,7 +196,7 @@ internal sealed class AlignedBufferPool
 
     /// <summary>The process-wide pool used by the default segment sources.</summary>
     public static AlignedBufferPool Shared { get; }
-        = new AlignedBufferPool(32 * 1024 * 1024, 8, graded: true);
+        = new AlignedBufferPool(32 * 1024 * 1024, 8, graded: true).Swept();
 
     /// <summary>A pool graded as <see cref="Shared"/> is, with a budget of its own for the demand past the base retention.</summary>
     /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
@@ -265,20 +282,45 @@ internal sealed class AlignedBufferPool
     /// <summary>Frees every retained block. Blocks currently rented out are untouched.</summary>
     public void Trim()
     {
-        Bucket[] buckets = _buckets;
-        for (int i = 0; i < buckets.Length; i++)
+        for (int i = 0; i < _buckets.Length; i++)
         {
-            Bucket bucket = buckets[i];
-            while (true)
-            {
-                NativeSegmentOwner? owner = bucket.TryPop();
-                if (owner is null)
-                {
-                    break;
-                }
+            Free(i);
+        }
+    }
 
-                Interlocked.Add(ref _parkedBytes, -(MinBlockSize << i));
-                owner.FreeParked();
+    /// <summary>This pool, swept after each collection of the oldest generation for as long as it lives.</summary>
+    /// <returns>This pool.</returns>
+    /// <remarks>
+    /// Asked once, where the pool is made: a pool is swept only once asked, so that its trimming can
+    /// also be driven by hand (<see cref="TrimIdle"/>).
+    /// </remarks>
+    internal AlignedBufferPool Swept()
+    {
+        Sweeper.Register(this);
+        return this;
+    }
+
+    /// <summary>Counts, from now on, the sweeps of <paramref name="pool"/>.</summary>
+    /// <param name="pool">The pool to watch.</param>
+    /// <returns>The count, raised by each sweep.</returns>
+    internal static StrongBox<int> WatchSweeps(AlignedBufferPool pool) =>
+        LazyInitializer.EnsureInitialized(ref SweepCounts).GetValue(pool, static _ => new StrongBox<int>());
+
+    /// <summary>
+    /// Frees what the classes keep parked: the blocks of every class no rent has asked for over
+    /// <see cref="IdleMilliseconds"/> before <paramref name="now"/>, or of every class when
+    /// <paramref name="everything"/>. A class asked for since the last sweep starts its idle time
+    /// at <paramref name="now"/>.
+    /// </summary>
+    /// <param name="now">The time of the sweep, in the milliseconds of <see cref="Environment.TickCount64"/>.</param>
+    /// <param name="everything">Whether every parked block goes: the machine's memory load is high.</param>
+    internal void TrimIdle(long now, bool everything)
+    {
+        for (int i = 0; i < _buckets.Length; i++)
+        {
+            if (_buckets[i].Idle(now, IdleMilliseconds) || everything)
+            {
+                Free(i);
             }
         }
     }
@@ -331,6 +373,28 @@ internal sealed class AlignedBufferPool
         return _buckets[BucketIndexOf(RoundedSize(length))].Count;
     }
 
+    /// <summary>Frees every block class <paramref name="index"/> keeps parked.</summary>
+    private void Free(int index)
+    {
+        Bucket bucket = _buckets[index];
+        while (bucket.TryTake() is { } owner)
+        {
+            Interlocked.Add(ref _parkedBytes, -(MinBlockSize << index));
+            owner.FreeParked();
+        }
+    }
+
+    /// <summary>A sweep after a collection: the idle classes, or every class when the machine's memory load is high.</summary>
+    private void Sweep()
+    {
+        GCMemoryInfo memory = GC.GetGCMemoryInfo();
+        TrimIdle(Environment.TickCount64, memory.MemoryLoadBytes >= memory.HighMemoryLoadThresholdBytes);
+        if (SweepCounts is { } watched && watched.TryGetValue(this, out StrongBox<int>? count))
+        {
+            Interlocked.Increment(ref count.Value);
+        }
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int RoundedSize(int length) =>
         length <= MinBlockSize ? MinBlockSize : (int)BitOperations.RoundUpToPowerOf2((uint)length);
@@ -347,6 +411,38 @@ internal sealed class AlignedBufferPool
             "recycle memory this pool does not own.",
             "owner");
 
+    /// <summary>
+    /// An object nothing references, whose finalizer runs after a collection, and after collections
+    /// of the oldest generation only once it has been promoted there: each run sweeps the pool and
+    /// registers the sweeper again, for as long as the pool lives.
+    /// </summary>
+    private sealed class Sweeper
+    {
+        // A handle and not a WeakReference, whose own finalizer would run with this one and let
+        // the pool go first.
+        private WeakGCHandle<AlignedBufferPool> _pool;
+
+        private Sweeper(AlignedBufferPool pool)
+        {
+            _pool = new WeakGCHandle<AlignedBufferPool>(pool);
+        }
+
+        ~Sweeper()
+        {
+            if (_pool.TryGetTarget(out AlignedBufferPool? pool))
+            {
+                pool.Sweep();
+                GC.ReRegisterForFinalize(this);
+            }
+            else
+            {
+                _pool.Dispose();
+            }
+        }
+
+        internal static void Register(AlignedBufferPool pool) => _ = new Sweeper(pool);
+    }
+
     /// <summary>One size class: a bounded LIFO stack of parked blocks.</summary>
     private sealed class Bucket
     {
@@ -355,6 +451,12 @@ internal sealed class AlignedBufferPool
         private readonly int _ceiling;
         private NativeSegmentOwner?[] _items;
         private int _count;
+
+        /// <summary>Whether a rent has asked for the class since the last sweep.</summary>
+        private bool _rented;
+
+        /// <summary>When the sweep that last found the class asked for ran.</summary>
+        private long _idleSince;
 
         /// <summary>
         /// A class keeping <paramref name="floor"/> blocks, and up to <paramref name="ceiling"/>
@@ -381,19 +483,48 @@ internal sealed class AlignedBufferPool
         /// </remarks>
         internal int Count => Volatile.Read(ref _count);
 
+        /// <summary>A parked block for a rent, or null when none is parked; either way the class is in use.</summary>
         internal NativeSegmentOwner? TryPop()
         {
             lock (_gate)
             {
-                if (_count == 0)
+                // Written once per sweep, so that concurrent renters do not keep taking the cache
+                // line from one another.
+                if (!_rented)
                 {
-                    return null;
+                    _rented = true;
                 }
 
-                int index = --_count;
-                NativeSegmentOwner? owner = _items[index];
-                _items[index] = null;
-                return owner;
+                return Take();
+            }
+        }
+
+        /// <summary>A parked block to free, or null when none is left.</summary>
+        internal NativeSegmentOwner? TryTake()
+        {
+            lock (_gate)
+            {
+                return Take();
+            }
+        }
+
+        /// <summary>
+        /// Whether no rent has asked for the class over <paramref name="idleAfter"/> milliseconds
+        /// before <paramref name="now"/>; a class asked for since the last sweep starts its idle
+        /// time at <paramref name="now"/>.
+        /// </summary>
+        internal bool Idle(long now, long idleAfter)
+        {
+            lock (_gate)
+            {
+                if (_rented)
+                {
+                    _rented = false;
+                    _idleSince = now;
+                    return false;
+                }
+
+                return now - _idleSince >= idleAfter;
             }
         }
 
@@ -418,6 +549,19 @@ internal sealed class AlignedBufferPool
                 _items[_count++] = owner;
                 return true;
             }
+        }
+
+        private NativeSegmentOwner? Take()
+        {
+            if (_count == 0)
+            {
+                return null;
+            }
+
+            int index = --_count;
+            NativeSegmentOwner? owner = _items[index];
+            _items[index] = null;
+            return owner;
         }
     }
 }

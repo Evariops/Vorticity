@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity;
 using Vorticity.Buffers;
@@ -467,6 +469,88 @@ public sealed class AlignedBufferPoolTests
             pool.Trim();
         }
     }
+
+    [Fact]
+    public void A_sweep_frees_a_class_no_rent_asked_for_over_a_minute_and_keeps_one_in_use()
+    {
+        AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 4);
+        try
+        {
+            pool.Return(pool.Rent(4096, 64));
+            pool.Return(pool.Rent(65_536, 64));
+            pool.TrimIdle(now: 1_000, everything: false);
+            Assert.Equal(1, pool.ParkedCount(4096));
+            Assert.Equal(1, pool.ParkedCount(65_536));
+
+            pool.Return(pool.Rent(4096, 64));
+            pool.TrimIdle(now: 60_999, everything: false);
+            Assert.Equal(1, pool.ParkedCount(65_536));
+
+            pool.TrimIdle(now: 61_000, everything: false);
+            Assert.Equal(1, pool.ParkedCount(4096));
+            Assert.Equal(0, pool.ParkedCount(65_536));
+
+            pool.TrimIdle(now: 120_999, everything: false);
+            Assert.Equal(0, pool.ParkedCount(4096));
+        }
+        finally
+        {
+            pool.Trim();
+        }
+    }
+
+    [Fact]
+    public void A_sweep_under_memory_pressure_frees_every_parked_block()
+    {
+        AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 4);
+        try
+        {
+            pool.Return(pool.Rent(4096, 64));
+            pool.TrimIdle(now: 0, everything: true);
+            Assert.Equal(0, pool.ParkedCount(4096));
+
+            // Still usable afterwards.
+            pool.Return(pool.Rent(4096, 64));
+            Assert.Equal(1, pool.ParkedCount(4096));
+        }
+        finally
+        {
+            pool.Trim();
+        }
+    }
+
+    [Fact]
+    public void The_pools_the_library_rents_from_are_swept_by_a_full_collection()
+    {
+        AlignedBufferPool pool = new AlignedBufferPool(maxRetainedBytes: 1 << 20).Swept();
+        AlignedMemoryPool session = new AlignedMemoryPool();
+        StrongBox<int> sweeps = AlignedBufferPool.WatchSweeps(pool);
+        StrongBox<int> shared = AlignedBufferPool.WatchSweeps(AlignedMemoryPool.Shared.Inner);
+        StrongBox<int> sessions = AlignedBufferPool.WatchSweeps(session.Inner);
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+        GC.WaitForPendingFinalizers();
+        Assert.True(Volatile.Read(ref sweeps.Value) > 0, "a pool made swept");
+        Assert.True(Volatile.Read(ref shared.Value) > 0, "the shared pool");
+        Assert.True(Volatile.Read(ref sessions.Value) > 0, "a session's pool");
+        GC.KeepAlive(pool);
+        GC.KeepAlive(session);
+    }
+
+    [Fact]
+    public void A_swept_pool_nothing_else_holds_is_collected()
+    {
+        WeakReference pool = SweptPool();
+        for (int i = 0; i < 3 && pool.IsAlive; i++)
+        {
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+            GC.WaitForPendingFinalizers();
+        }
+
+        Assert.False(pool.IsAlive);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static WeakReference SweptPool() => new WeakReference(new AlignedBufferPool(maxRetainedBytes: 1 << 20).Swept());
 
     [Fact]
     public void The_shared_pool_rents_and_recycles()

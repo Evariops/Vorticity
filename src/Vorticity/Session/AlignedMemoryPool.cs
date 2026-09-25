@@ -11,10 +11,13 @@ namespace Vorticity;
 /// </summary>
 /// <remarks>
 /// Blocks are native, so a <see cref="ReadOnlySpan{T}"/> over one never moves and every
-/// <c>Values</c> span a column hands out is aligned for the widest vector. The pool reports what it
-/// holds to the GC as memory pressure, so a process under load collects as if the bytes were
-/// managed. Requests round up to a power of two from 4 KiB; a request above 8 MiB is allocated and
-/// freed directly.
+/// <c>Values</c> span a column hands out is aligned for the widest vector. A block rented through
+/// <see cref="Rent"/> is reported to the GC as memory pressure until it is disposed, so a process
+/// under load collects as if the bytes were managed; the blocks the pool keeps parked for reuse,
+/// and those the engine rents from it directly, are not. What a size class keeps parked is freed
+/// after a collection of the oldest generation once no rent has asked for the class over a minute,
+/// and every parked block is freed when the machine's memory load is high. Requests round up to a
+/// power of two from 4 KiB; a request above 8 MiB is allocated and freed directly.
 /// </remarks>
 public sealed class AlignedMemoryPool : MemoryPool<byte>
 {
@@ -37,7 +40,7 @@ public sealed class AlignedMemoryPool : MemoryPool<byte>
         }
 
         _alignment = alignment;
-        Inner = new AlignedBufferPool(maxRetainedBytes);
+        Inner = new AlignedBufferPool(maxRetainedBytes).Swept();
     }
 
     /// <summary>The process-wide pool, which <see cref="VortexSession.Default"/> uses.</summary>
