@@ -99,7 +99,10 @@ bytes, and the file grew by 1 856 371: the directory and the tail written again 
 `VortexFileIndexer.BuildFragmentAsync`
 builds the same index into an `IndexFragment` instead and leaves the file untouched: a reader passes
 it with `VortexOpenOptions.IndexFragments`, which is how an index reaches a file that cannot be
-rewritten.
+rewritten. A fragment is bound to the file's identity, which every file this library writes carries;
+a file from another writer has none, and its fragment is bound by the file's length and modification
+time, which a copy that keeps both can fool. `VortexOpenOptions.IndexFragmentsNeedIdentity` leaves
+such a fragment out, with the reason in `IndexFragmentRefusals`.
 
 A composite key names its encoder, from the row-encoding package:
 

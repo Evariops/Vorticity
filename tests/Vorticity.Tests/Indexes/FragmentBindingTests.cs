@@ -108,19 +108,7 @@ public sealed class FragmentBindingTests
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         using Temp temp = new Temp();
-
-        // A file of this writer's shape whose identity entry is renamed, one byte: to a reader it
-        // is a file from another writer, with a metadata key it does not know.
-        await WriteAsync(temp.Path, Guid.NewGuid());
-        byte[] bytes = await System.IO.File.ReadAllBytesAsync(temp.Path, ct);
-        int key = bytes.AsSpan().LastIndexOf(FileIdentity.MetadataKeyUtf8);
-        Assert.True(key > 0);
-        bytes[key + FileIdentity.MetadataKeyUtf8.Length - 1] = (byte)'Y';
-        await System.IO.File.WriteAllBytesAsync(temp.Path, bytes, ct);
-        await using (VortexFile foreign = await VortexFile.OpenAsync(temp.Path, ct))
-        {
-            Assert.Null(foreign.StoredIdentity);
-        }
+        await WriteWithoutIdentityAsync(temp.Path, ct);
 
         byte[] fragment = await FragmentAsync(temp.Path);
         IndexDirectory recorded = await RecordedAsync(temp.Path, fragment);
@@ -144,6 +132,35 @@ public sealed class FragmentBindingTests
         await using VortexFile touched = await VortexFile.OpenAsync(temp.Path, With(fragment), ct);
         Assert.Null(await touched.ReadIndexDirectoryAsync(ct));
         Assert.Contains("heuristic", Assert.Single(touched.IndexFragmentRefusals), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AnOpenThatWantsAnIdentityRefusesAFragmentBoundByAStoreToken()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        using Temp foreign = new Temp();
+        await WriteWithoutIdentityAsync(foreign.Path, ct);
+        byte[] tokenBound = await FragmentAsync(foreign.Path);
+
+        // The open still succeeds, and says why it left the fragment out.
+        await using (VortexFile strict = await VortexFile.OpenAsync(foreign.Path, Strictly(tokenBound), ct))
+        {
+            Assert.Null(await strict.ReadIndexDirectoryAsync(ct));
+            Assert.Contains("identity", Assert.Single(strict.IndexFragmentRefusals), StringComparison.Ordinal);
+        }
+
+        // A fragment bound by the identity is bound as before.
+        using Temp owned = new Temp();
+        await WriteAsync(owned.Path, Guid.NewGuid());
+        await using VortexFile file = await VortexFile.OpenAsync(owned.Path, Strictly(await FragmentAsync(owned.Path)), ct);
+        Assert.True(await file.ReadIndexDirectoryAsync(ct) is not null, string.Join("; ", file.IndexFragmentRefusals));
+
+        static VortexOpenOptions Strictly(byte[] fragment) => new VortexOpenOptions
+        {
+            IndexFragments = [new IndexFragment(fragment, [])],
+            IndexFragmentsNeedIdentity = true,
+        };
     }
 
     [Fact]
@@ -259,6 +276,22 @@ public sealed class FragmentBindingTests
         }
 
         public ValueTask DisposeAsync() => inner.DisposeAsync();
+    }
+
+    /// <summary>
+    /// A file of this writer's shape whose identity entry is renamed, one byte: to a reader it is a
+    /// file from another writer, with a metadata key it does not know.
+    /// </summary>
+    private static async Task WriteWithoutIdentityAsync(string path, CancellationToken ct)
+    {
+        await WriteAsync(path, Guid.NewGuid());
+        byte[] bytes = await System.IO.File.ReadAllBytesAsync(path, ct);
+        int key = bytes.AsSpan().LastIndexOf(FileIdentity.MetadataKeyUtf8);
+        Assert.True(key > 0);
+        bytes[key + FileIdentity.MetadataKeyUtf8.Length - 1] = (byte)'Y';
+        await System.IO.File.WriteAllBytesAsync(path, bytes, ct);
+        await using VortexFile foreign = await VortexFile.OpenAsync(path, ct);
+        Assert.Null(foreign.StoredIdentity);
     }
 
     private static async Task WriteAsync(string path, Guid identity)

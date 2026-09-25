@@ -97,7 +97,14 @@ internal sealed class VortexReadOptions
     /// file's footer, so the bytes are the same wherever they are stored. Binding reads no byte of
     /// the file: the length and the identity come from the tail the open read, and a file written
     /// without an identity is bound by its store token -- its length and modification time, taken
-    /// when it is opened from a path -- which is a heuristic.
+    /// when it is opened from a path -- which is a heuristic that
+    /// <see cref="IndexFragmentsNeedIdentity"/> refuses.
     /// </remarks>
     public IReadOnlyList<ReadOnlyMemory<byte>> IndexFragments { get; init; } = [];
+
+    /// <summary>
+    /// Whether an index fragment is bound only by the file's identity, one bound by a store token
+    /// being left out with its reason. Default <see langword="false"/>.
+    /// </summary>
+    public bool IndexFragmentsNeedIdentity { get; init; }
 }

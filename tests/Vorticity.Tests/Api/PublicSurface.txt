@@ -1339,6 +1339,7 @@ Vorticity:     property Nullable<long> Length { get; init; }
 Vorticity:     property Nullable<long> MaxBatchDecompressedSize { get; init; }
 Vorticity:     property VortexSchema Schema { get; init; }
 Vorticity:     property VortexTornTailPolicy TornTail { get; init; }
+Vorticity:     property bool IndexFragmentsNeedIdentity { get; init; }
 Vorticity:     property bool VerifyStatistics { get; init; }
 Vorticity:     property int InitialReadSize { get; init; }
 Vorticity:     property long MaxDecompressedSize { get; init; }

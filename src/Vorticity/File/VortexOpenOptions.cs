@@ -41,6 +41,7 @@ public sealed record VortexOpenOptions
     /// <summary>The batch ceiling, or 0 for none, a value no ceiling takes: a nullable would widen the record.</summary>
     private readonly long _maxBatchDecompressedSize;
     private readonly VortexReadOptions? _read;
+    private readonly Switches _switches;
 
     /// <summary>The defaults.</summary>
     internal static VortexOpenOptions Default { get; } = new VortexOpenOptions();
@@ -77,7 +78,11 @@ public sealed record VortexOpenOptions
     public VortexTornTailPolicy TornTail { get; init; } = VortexTornTailPolicy.ReadPrevious;
 
     /// <summary>Whether a statistic is checked against what is decoded rather than trusted; a statistic is a claim.</summary>
-    public bool VerifyStatistics { get; init; }
+    public bool VerifyStatistics
+    {
+        get => Has(Switches.VerifyStatistics);
+        init => _switches = With(Switches.VerifyStatistics, value);
+    }
 
     /// <summary>The schema of a file written without one, or to skip reading the one it embeds; it wins over the file's.</summary>
     public VortexSchema? Schema { get; init; }
@@ -119,6 +124,18 @@ public sealed record VortexOpenOptions
     /// <summary>Index fragments built for this file elsewhere, consulted with its own indexes.</summary>
     public ImmutableArray<IndexFragment> IndexFragments { get; init; }
 
+    /// <summary>
+    /// Whether an index fragment binds only by the file's identity. A file this library writes has
+    /// one; a file without, from another writer, is otherwise bound by its length and modification
+    /// time, which a copy that keeps both can fool, and a fragment bound so is then left out, with
+    /// the reason in <see cref="VortexFile.IndexFragmentRefusals"/>.
+    /// </summary>
+    public bool IndexFragmentsNeedIdentity
+    {
+        get => Has(Switches.IndexFragmentsNeedIdentity);
+        init => _switches = With(Switches.IndexFragmentsNeedIdentity, value);
+    }
+
     /// <summary>The file's dtype, from <see cref="Schema"/>, or default to read the embedded one.</summary>
     internal DType DType { get; init; }
 
@@ -134,10 +151,18 @@ public sealed record VortexOpenOptions
     }
 
     /// <summary>Whether disposing the file leaves a caller's source open.</summary>
-    internal bool LeaveSourceOpen { get; init; }
+    internal bool LeaveSourceOpen
+    {
+        get => Has(Switches.LeaveSourceOpen);
+        init => _switches = With(Switches.LeaveSourceOpen, value);
+    }
 
     /// <summary>Whether the open also reads the index directory, rather than the first scan that needs it.</summary>
-    internal bool PreloadIndexes { get; init; }
+    internal bool PreloadIndexes
+    {
+        get => Has(Switches.PreloadIndexes);
+        init => _switches = With(Switches.PreloadIndexes, value);
+    }
 
     /// <summary>The bytes the index run cache of the file may hold.</summary>
     internal long IndexCacheBytes { get; init; } = VortexReadOptions.DefaultIndexCacheBytes;
@@ -158,6 +183,7 @@ public sealed record VortexOpenOptions
                 VerifyStatistics = VerifyStatistics,
                 IndexCacheBytes = IndexCacheBytes,
                 IndexFragments = Fragments(IndexFragments),
+                IndexFragmentsNeedIdentity = IndexFragmentsNeedIdentity,
             });
         init => _read = value;
     }
@@ -168,7 +194,8 @@ public sealed record VortexOpenOptions
         && MaxBatchDecompressedSize is null
         && !VerifyStatistics
         && IndexCacheBytes == VortexReadOptions.DefaultIndexCacheBytes
-        && IndexFragments.IsDefaultOrEmpty;
+        && IndexFragments.IsDefaultOrEmpty
+        && !IndexFragmentsNeedIdentity;
 
     /// <summary>These options for the first <paramref name="fileLength"/> bytes, refusing a torn tail there.</summary>
     /// <param name="fileLength">The prefix's length.</param>
@@ -192,5 +219,20 @@ public sealed record VortexOpenOptions
         }
 
         return bytes;
+    }
+
+    private bool Has(Switches switches) => (_switches & switches) != 0;
+
+    private Switches With(Switches switches, bool on) => on ? _switches | switches : _switches & ~switches;
+
+    /// <summary>The options that are a yes or a no, a bit each, so that one field holds them all.</summary>
+    [Flags]
+    private enum Switches : byte
+    {
+        None = 0,
+        VerifyStatistics = 1,
+        IndexFragmentsNeedIdentity = 2,
+        LeaveSourceOpen = 4,
+        PreloadIndexes = 8,
     }
 }

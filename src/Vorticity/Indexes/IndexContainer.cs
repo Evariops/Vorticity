@@ -133,6 +133,11 @@ internal static class IndexContainer
 
         if (directory.FileToken is { } token)
         {
+            if (file.ReadOptions.IndexFragmentsNeedIdentity)
+            {
+                return "the fragment binds a file without an identity by its store token, and the open takes fragments bound by an identity only";
+            }
+
             if (TokenOf(file) is not { } current)
             {
                 return "the fragment binds a file without an identity by its store token, and this file was not opened from a path that gives one";
