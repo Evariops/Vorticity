@@ -12,7 +12,8 @@ namespace Vorticity;
 /// <remarks>
 /// A scan reads each segment it needs once whether or not a cache is set; the cache is what makes a
 /// second scan, or a scan of the same footer and index regions from another request, read nothing.
-/// Thread-safe.
+/// The budget counts what the cache holds: a segment read as a view of a larger block, one run of
+/// a coalesced read, is copied into a block of its own as it is kept. Thread-safe.
 /// </remarks>
 public sealed class SegmentCache
 {
@@ -90,7 +91,12 @@ public sealed class SegmentCache
         return false;
     }
 
-    /// <summary>Keeps a reference to <paramref name="owner"/> for the segment <paramref name="buffer"/>, evicting the least recently used to make room.</summary>
+    /// <summary>
+    /// Keeps the segment <paramref name="buffer"/>, evicting the least recently used to make room: a
+    /// reference to <paramref name="owner"/> when the segment is all it holds, and a copy when the
+    /// segment is a view of a larger block, which the budget would count at the segment's length
+    /// while the block stayed whole.
+    /// </summary>
     internal void Add(object source, long offset, SegmentOwner owner, VortexBuffer buffer)
     {
         int length = buffer.Length;
@@ -99,28 +105,30 @@ public sealed class SegmentCache
             return;
         }
 
+        SegmentOwner? copy = owner.Buffer.Length > length ? Copy(buffer) : null;
         List<SegmentOwner>? evicted = null;
         lock (_gate)
         {
             Key key = new Key(source, offset, length);
-            if (_entries.ContainsKey(key))
+            if (!_entries.ContainsKey(key))
             {
-                return;
-            }
+                while (_size + length > Capacity && _order.Last is { } last)
+                {
+                    _order.RemoveLast();
+                    _entries.Remove(last.Value.Key);
+                    _size -= last.Value.Buffer.Length;
+                    (evicted ??= []).Add(last.Value.Owner);
+                }
 
-            while (_size + length > Capacity && _order.Last is { } last)
-            {
-                _order.RemoveLast();
-                _entries.Remove(last.Value.Key);
-                _size -= last.Value.Buffer.Length;
-                (evicted ??= []).Add(last.Value.Owner);
+                Entry entry = copy is null ? new Entry(key, owner.Retain(), buffer) : new Entry(key, copy, copy.Buffer);
+                copy = null;
+                _entries[key] = _order.AddFirst(entry);
+                _size += length;
             }
-
-            LinkedListNode<Entry> node = _order.AddFirst(new Entry(key, owner.Retain(), buffer));
-            _entries[key] = node;
-            _size += length;
         }
 
+        // Another scan kept the segment first.
+        copy?.Release();
         if (evicted is not null)
         {
             foreach (SegmentOwner old in evicted)
@@ -159,6 +167,14 @@ public sealed class SegmentCache
                 owner.Release();
             }
         }
+    }
+
+    /// <summary>The bytes of <paramref name="segment"/> in a 64-byte aligned block of their own, which keeps every alignment a segment may declare.</summary>
+    private static NativeSegmentOwner Copy(VortexBuffer segment)
+    {
+        NativeSegmentOwner copy = AlignedBufferPool.Shared.Rent(segment.Length, VortexLimits.MaxAlignment);
+        segment.Span.CopyTo(copy.WritableSpan);
+        return copy;
     }
 
     private readonly record struct Key(object Source, long Offset, int Length);
