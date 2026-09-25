@@ -282,6 +282,71 @@ public sealed class TornTailTests
         }
     }
 
+    [Fact]
+    public async Task AnIndexingCanceledWhileItsTailIsCopiedLeavesNoTear()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        string path = TempPath();
+        try
+        {
+            // A Bloom filter over a million distinct values: a tail of about 2 MiB, which goes behind
+            // the file in several pieces.
+            long[] ids = new long[1_000_000];
+            Random random = new Random(16);
+            for (int i = 0; i < ids.Length; i++)
+            {
+                ids[i] = random.NextInt64();
+            }
+
+            VortexSchema schema = [("id", VortexType.Int64)];
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter(path, schema, new VortexWriteOptions { WritePolicy = WritePolicy.None }))
+            {
+                ColumnsBuilder builder = writer.Builder();
+                builder.Column<long>(0).Append(ids);
+                await writer.WriteAsync(builder, ct);
+                await writer.CompleteAsync(ct);
+            }
+
+            byte[] before = await System.IO.File.ReadAllBytesAsync(path, ct);
+            for (int attempt = 0; attempt < 5; attempt++)
+            {
+                await System.IO.File.WriteAllBytesAsync(path, before, ct);
+                using CancellationTokenSource cancel = new CancellationTokenSource();
+                Task indexing = VortexFileIndexer.AppendIndexesAsync(
+                    path, WritePolicy.None.For("id", IndexSpec.Bloom()), cancellationToken: cancel.Token).AsTask();
+
+                // Canceled as soon as the file grows, which is while the tail is being copied.
+                Task watcher = Task.Run(
+                    () =>
+                    {
+                        while (!indexing.IsCompleted && new FileInfo(path).Length == before.Length)
+                        {
+                        }
+
+                        cancel.Cancel();
+                    },
+                    ct);
+                await watcher;
+                try
+                {
+                    await indexing;
+                }
+                catch (OperationCanceledException)
+                {
+                }
+
+                // The file before the indexing or the file after it, never one in between.
+                await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+                Assert.Null(file.TornTail);
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     // ------------------------------------------------------------------------------ helpers
 
     /// <summary>Counts what an open reads.</summary>

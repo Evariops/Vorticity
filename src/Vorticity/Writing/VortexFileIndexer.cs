@@ -49,7 +49,7 @@ public static class VortexFileIndexer
     /// What to build. An index the file already has is kept, unless one of the same kind on the same
     /// column is built, which replaces it.
     /// </param>
-    /// <param name="cancellationToken">Cancels the read and the writes.</param>
+    /// <param name="cancellationToken">Cancels the read and the build; the copy behind the file, once begun, completes.</param>
     /// <returns>What became of every index the policy asked for, built or abandoned with its reason.</returns>
     /// <remarks>
     /// The runs are built beside the file and copied behind it only once they are whole, so a
@@ -152,7 +152,7 @@ public static class VortexFileIndexer
     /// <param name="path">The file: this writer's shape, a struct of chunked flat columns.</param>
     /// <param name="policy">What to build; an old entry of another kind or column is kept.</param>
     /// <param name="options">The budget, the key encoder and the block length when the file has no zone map; null for the defaults.</param>
-    /// <param name="cancellationToken">Cancels the read and the writes.</param>
+    /// <param name="cancellationToken">Cancels the read and the build; the copy behind the file, once begun, completes.</param>
     /// <exception cref="VortexUnsupportedException">The file's layout is not one this can index.</exception>
     internal static ValueTask<IReadOnlyList<IndexWriteReport>> AppendIndexesAsync(
         string path, WritePolicy policy, VortexWriteOptions? options = null, CancellationToken cancellationToken = default)
@@ -250,7 +250,18 @@ public static class VortexFileIndexer
 
             using SafeFileHandle source = System.IO.File.OpenHandle(
                 scratch, FileMode.Open, FileAccess.Read, FileShare.None, FileOptions.Asynchronous | FileOptions.SequentialScan);
-            await CopyBehindAsync(source, target, length, cancellationToken).ConfigureAwait(false);
+
+            // Bytes behind the file all go or none stay: a cancellation here would tear the file, so
+            // the copy is not cancellable, and a failure truncates what it wrote.
+            try
+            {
+                await CopyBehindAsync(source, target, length).ConfigureAwait(false);
+            }
+            catch
+            {
+                RandomAccess.SetLength(target, length);
+                throw;
+            }
         }
         finally
         {
@@ -261,8 +272,7 @@ public static class VortexFileIndexer
     }
 
     /// <summary>Every byte of <paramref name="source"/>, written into <paramref name="target"/> from <paramref name="at"/> on.</summary>
-    private static async ValueTask CopyBehindAsync(
-        SafeFileHandle source, SafeFileHandle target, long at, CancellationToken cancellationToken)
+    private static async ValueTask CopyBehindAsync(SafeFileHandle source, SafeFileHandle target, long at)
     {
         const int ChunkBytes = 1 << 20;
         long length = RandomAccess.GetLength(source);
@@ -272,15 +282,13 @@ public static class VortexFileIndexer
             for (long done = 0; done < length;)
             {
                 int wanted = (int)Math.Min(chunk.Length, length - done);
-                int read = await RandomAccess.ReadAsync(source, chunk.AsMemory(0, wanted), done, cancellationToken)
-                    .ConfigureAwait(false);
+                int read = await RandomAccess.ReadAsync(source, chunk.AsMemory(0, wanted), done).ConfigureAwait(false);
                 if (read <= 0)
                 {
                     throw new IOException($"The index scratch ended at {done} of its {length} bytes.");
                 }
 
-                await RandomAccess.WriteAsync(target, chunk.AsMemory(0, read), at + done, cancellationToken)
-                    .ConfigureAwait(false);
+                await RandomAccess.WriteAsync(target, chunk.AsMemory(0, read), at + done).ConfigureAwait(false);
                 done += read;
             }
         }
