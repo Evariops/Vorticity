@@ -188,6 +188,9 @@ public sealed record VortexOpenOptions
         init => _read = value;
     }
 
+    /// <summary>Whether <see cref="Read"/> consults index fragments, answered without building it.</summary>
+    internal bool ReadsIndexFragments => _read is { } read ? read.IndexFragments.Count > 0 : !IndexFragments.IsDefaultOrEmpty;
+
     /// <summary>Whether every value the read policy takes from these options is its default.</summary>
     private bool ReadsAsDefault =>
         MaxDecompressedSize == VortexLimits.DefaultMaxDecompressedSize

@@ -141,7 +141,7 @@ public sealed partial class VortexFile : IAsyncDisposable
             ? LocalFileSource.Open(path, session.Mappings)
             : SessionReader.Wrap(new FileSegmentSource(path), session);
         ValueTask<VortexFile> open = OpenCoreAsync(source, options, ownsSource: true, cancellationToken);
-        string? tokenPath = options.Read.IndexFragments.Count == 0 ? null : path;
+        string? tokenPath = options.ReadsIndexFragments ? path : null;
         return tokenPath is null && !options.PreloadIndexes
             ? open
             : FinishOpenAsync(open, tokenPath, options.PreloadIndexes, cancellationToken);
