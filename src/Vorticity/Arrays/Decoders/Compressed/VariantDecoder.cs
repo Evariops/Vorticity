@@ -174,7 +174,7 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, 3, Id);
         int first = node.ChildCount == 3 ? 1 : 0;
 
-        DTypeArena types = dtype.Arena;
+        DTypeArena types = context.Types;
         DType metadataType = types.Binary(Nullability.NonNullable);
         DType valueType = types.Binary(
             metadata.ValueNullable ? Nullability.Nullable : Nullability.NonNullable);

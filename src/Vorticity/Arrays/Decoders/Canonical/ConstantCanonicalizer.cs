@@ -178,8 +178,7 @@ internal static class ConstantCanonicalizer
         {
             ParquetVariant.WriteValue(in inner, nestedType, scratch.Span);
 
-            DTypeArena types = dtype.Arena;
-            DType binary = types.Binary(Nullability.NonNullable);
+            DType binary = context.Types.Binary(Nullability.NonNullable);
             int metadataField = BuildConstantBinary(
                 context, binary, length, ParquetVariant.EmptyMetadata);
             int valueField = BuildConstantBinary(context, binary, length, scratch.Span);

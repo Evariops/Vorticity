@@ -34,6 +34,8 @@ public sealed class ScanArenaIsolationTests
     [InlineData("encodings/masked")]
     [InlineData("distributions/float_specials_f32_r8193")]
     [InlineData("distributions/high_cardinality_i64_r8193")]
+    [InlineData("encodings/parquet_variant")]
+    [InlineData("encodings/variant")]
     public async Task ScanningNeverDerivesIntoTheFileArena(string entry)
     {
         Decoders.EnsureRegistered();
