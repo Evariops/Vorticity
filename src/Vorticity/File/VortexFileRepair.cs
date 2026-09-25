@@ -37,7 +37,14 @@ public sealed record VortexTornTail(long FileLength, long ValidLength, string Re
 /// </remarks>
 public static class VortexFileRepair
 {
-    private const int Window = 1 << 20;
+    /// <summary>The bytes the backward walk reads at a time.</summary>
+    internal const int Window = 1 << 20;
+
+    /// <summary>
+    /// The end-of-file records a walk tries before it gives up: a torn append leaves one before the
+    /// tear, while forged bytes can hold one every eight bytes.
+    /// </summary>
+    private const int MaxCandidates = 16;
 
     /// <summary>
     /// Leaves a valid file alone, and truncates an invalid one to the longest prefix that opens.
@@ -85,7 +92,14 @@ public static class VortexFileRepair
                 return length;
             }
 
-            long end = await PreviousEndAsync(source, length, cancellationToken).ConfigureAwait(false);
+            if (await ForeignVersionAsync(source, length, cancellationToken).ConfigureAwait(false) is ushort version)
+            {
+                FileThrow.UnsupportedVersion(version);
+            }
+
+            long end = await BeginsAsVortexAsync(source, length, cancellationToken).ConfigureAwait(false)
+                ? await PreviousEndAsync(source, length, cancellationToken).ConfigureAwait(false)
+                : -1;
             if (end > 0)
             {
                 return end;
@@ -104,30 +118,31 @@ public static class VortexFileRepair
     /// <param name="cancellationToken">Cancels the walk.</param>
     internal static async ValueTask<long> PreviousEndAsync(ISegmentReader source, long length, CancellationToken cancellationToken)
     {
-        // Walk back window by window; a marker may straddle two windows, so they overlap.
-        int magicLength = VortexFileFormat.MagicBytes.Length;
+        // Walk back window by window, trying the records of a window from the last down before the
+        // next is read. A record is recognised only when its eight bytes are all in one window, and
+        // may straddle two, so the next window reaches the seven of them this one could hold.
+        int candidates = 0;
         long high = length;
         while (high > VortexFileFormat.EofSize)
         {
             cancellationToken.ThrowIfCancellationRequested();
             long low = Math.Max(0, high - Window);
             int size = (int)(high - low);
-            long found;
             using (SegmentOwner owner = await source.ReadRangeAsync(low, size, 1, cancellationToken).ConfigureAwait(false))
             {
-                found = LastMarker(owner.Buffer, low, length);
-            }
-
-            if (found > 0)
-            {
-                if (await OpensAsync(source, found, cancellationToken).ConfigureAwait(false))
+                for (int at = LastMarker(owner.Buffer.Span, low, length, size); at >= 0; at = LastMarker(owner.Buffer.Span, low, length, at))
                 {
-                    return found;
-                }
+                    long end = low + at + VortexFileFormat.MagicBytes.Length;
+                    if (await OpensAsync(source, end, cancellationToken).ConfigureAwait(false))
+                    {
+                        return end;
+                    }
 
-                // Not a file end after all: keep walking below it.
-                high = found - 1;
-                continue;
+                    if (++candidates == MaxCandidates)
+                    {
+                        return -1;
+                    }
+                }
             }
 
             if (low == 0)
@@ -135,7 +150,7 @@ public static class VortexFileRepair
                 break;
             }
 
-            high = low + magicLength;
+            high = low + VortexFileFormat.EofSize - 1;
         }
 
         return -1;
@@ -174,21 +189,52 @@ public static class VortexFileRepair
     }
 
     /// <summary>
-    /// The end of the last EOF record inside a window that ends before the file does, or -1: the
-    /// magic, preceded by the format's version.
+    /// The version a whole end-of-file record at the end of <paramref name="source"/> names, when it is
+    /// not this reader's; null otherwise. Such a file is not torn: its last version is one this reader
+    /// cannot read, and an older one is no substitute.
     /// </summary>
-    private static long LastMarker(VortexBuffer window, long low, long length)
+    /// <param name="source">The file.</param>
+    /// <param name="length">Its length.</param>
+    /// <param name="cancellationToken">Cancels the read.</param>
+    internal static async ValueTask<ushort?> ForeignVersionAsync(ISegmentReader source, long length, CancellationToken cancellationToken)
+    {
+        if (length < VortexFileFormat.EofSize)
+        {
+            return null;
+        }
+
+        using SegmentOwner record = await source.ReadRangeAsync(
+            length - VortexFileFormat.EofSize, VortexFileFormat.EofSize, 1, cancellationToken).ConfigureAwait(false);
+        return ForeignVersion(record.Buffer.Span);
+    }
+
+    private static ushort? ForeignVersion(ReadOnlySpan<byte> record)
+    {
+        if (record.Length != VortexFileFormat.EofSize
+            || !record.Slice(VortexFileFormat.EofMagicOffset, VortexFileFormat.MagicBytes.Length).SequenceEqual(VortexFileFormat.MagicBytes))
+        {
+            return null;
+        }
+
+        ushort version = BinaryPrimitives.ReadUInt16LittleEndian(record[VortexFileFormat.EofVersionOffset..]);
+        return version == VortexFileFormat.Version ? null : version;
+    }
+
+    /// <summary>
+    /// Where the magic of the last end-of-file record of a window begins, below
+    /// <paramref name="below"/>, or -1: the magic, preceded by the format's version, in a record that
+    /// ends before the file does.
+    /// </summary>
+    private static int LastMarker(ReadOnlySpan<byte> bytes, long low, long length, int below)
     {
         ReadOnlySpan<byte> magic = VortexFileFormat.MagicBytes;
-        ReadOnlySpan<byte> bytes = window.Span;
-        for (int at = bytes.Length - magic.Length; at >= 4; at--)
+        for (int at = Math.Min(bytes.Length - magic.Length, below - 1); at >= 4; at--)
         {
-            long end = low + at + magic.Length;
-            if (end < length
+            if (low + at + magic.Length < length
                 && bytes.Slice(at, magic.Length).SequenceEqual(magic)
                 && BinaryPrimitives.ReadUInt16LittleEndian(bytes[(at - 4)..]) == VortexFileFormat.Version)
             {
-                return end;
+                return at;
             }
         }
 

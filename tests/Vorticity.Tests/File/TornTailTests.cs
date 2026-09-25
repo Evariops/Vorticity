@@ -7,6 +7,7 @@
 // policy keeps the failure, and so does a file with no whole version; and neither an append, an
 // index nor a fragment is built behind a tear.
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -85,6 +86,96 @@ public sealed class TornTailTests
             await using VortexFile second = await OpenAsync(twice.AsSpan(0, twice.Length - 11).ToArray());
             Assert.Equal((long)appended.Length, second.TornTail!.ValidLength);
             Assert.Equal(Expected(0, 9_000), await ReadAsync(second));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(8)]
+    public async Task AnEndRecordAcrossTwoWindowsOfTheWalkIsFound(int below)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        byte[] whole = await WriteAsync(0, 3_000);
+
+        // Torn bytes sized so that `below` bytes of the end-of-file record fall under the first
+        // window the walk reads back from the end.
+        byte[] torn = new byte[whole.Length + VortexFileRepair.Window - VortexFileFormat.EofSize + below];
+        whole.CopyTo(torn, 0);
+
+        await using VortexFile file = await OpenAsync(torn);
+        Assert.Equal(whole.LongLength, file.TornTail!.ValidLength);
+        Assert.Equal(Expected(0, 3_000), await ReadAsync(file));
+
+        string path = TempPath();
+        try
+        {
+            await System.IO.File.WriteAllBytesAsync(path, torn, ct);
+            Assert.Equal(whole.LongLength, await VortexFileRepair.ValidLengthAsync(path, ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task FalseEndRecordsBoundTheWalk()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Begins as Vortex, then nothing but end-of-file records that open nothing, one every eight bytes.
+        byte[] forged = new byte[128 << 10];
+        VortexFileFormat.MagicBytes.CopyTo(forged);
+        for (int at = VortexFileFormat.EofSize; at + VortexFileFormat.EofSize <= forged.Length; at += VortexFileFormat.EofSize)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(forged.AsSpan(at), VortexFileFormat.Version);
+            VortexFileFormat.MagicBytes.CopyTo(forged.AsSpan(at + VortexFileFormat.EofMagicOffset));
+        }
+
+        CountingSource source = new CountingSource(new MemorySegmentSource(forged));
+        await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFile.OpenAsync(source, VortexOpenOptions.Default, ct));
+
+        // The file once, and the tail of each record tried: not a window per record.
+        Assert.True(source.Reads < 64, $"{source.Reads} reads");
+        Assert.True(source.Bytes < 32L * forged.Length, $"{source.Bytes} bytes read for a {forged.Length}-byte file");
+    }
+
+    [Fact]
+    public async Task AnEndRecordOfAnotherVersionIsNotATear()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        string path = TempPath();
+        try
+        {
+            await System.IO.File.WriteAllBytesAsync(path, await WriteAsync(0, 3_000), ct);
+            await AppendAsync(path, 3_000, 9_000);
+            byte[] newer = await System.IO.File.ReadAllBytesAsync(path, ct);
+            BinaryPrimitives.WriteUInt16LittleEndian(
+                newer.AsSpan(newer.Length - VortexFileFormat.EofSize + VortexFileFormat.EofVersionOffset), VortexFileFormat.Version + 1);
+            await System.IO.File.WriteAllBytesAsync(path, newer, ct);
+
+            // A whole record of a version this reader does not know is refused as it stands, with no
+            // walk back to an older version.
+            CountingSource source = new CountingSource(new MemorySegmentSource(newer));
+            VortexFormatException refused = await Assert.ThrowsAsync<VortexFormatException>(
+                async () => await VortexFile.OpenAsync(source, VortexOpenOptions.Default, ct));
+            Assert.Contains("unsupported version", refused.Message, StringComparison.Ordinal);
+            Assert.True(source.Bytes < 2L * newer.Length, $"{source.Bytes} bytes read for a {newer.Length}-byte file");
+
+            // And a repair does not cut it.
+            await Assert.ThrowsAsync<VortexFormatException>(async () => await VortexFileRepair.RepairAsync(path, ct));
+            Assert.Equal(newer, await System.IO.File.ReadAllBytesAsync(path, ct));
         }
         finally
         {

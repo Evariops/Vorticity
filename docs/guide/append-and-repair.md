@@ -90,6 +90,13 @@ statistics, indexes. `VortexTornTailPolicy.Refuse` in `VortexOpenOptions.TornTai
 `VortexFormatException` instead. An append refuses a torn file, with the same exception and a message
 that says what to do.
 
+`ReadPrevious`, the default, looks for that version from the end of the file backwards, a mebibyte at
+a time, and tries at most 16 end records on the way. Two consequences. A file whose only footer is
+damaged, rather than torn, is read to its first byte before the open fails. And a file whose last
+version was damaged opens at the one before without an error: `TornTail` is the only sign. A reader
+that must never read an older version without knowing it, or that opens files it did not write, sets
+`Refuse`.
+
 ## Repairing
 
 ```csharp

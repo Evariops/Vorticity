@@ -236,7 +236,7 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     /// <summary>
     /// The last whole version of a file whose tail did not parse, or null when the file does not
-    /// begin as a Vortex file or no prefix of it opens.
+    /// begin as a Vortex file, ends with a whole record of another version, or no prefix of it opens.
     /// </summary>
     private static async ValueTask<VortexFile?> OpenPreviousAsync(
         ISegmentReader source, VortexOpenOptions options, bool ownsSource, VortexFormatException torn,
@@ -245,7 +245,8 @@ public sealed partial class VortexFile : IAsyncDisposable
         long length = options.FileLength >= 0
             ? options.FileLength
             : await source.GetLengthAsync(cancellationToken).ConfigureAwait(false);
-        if (!await VortexFileRepair.BeginsAsVortexAsync(source, length, cancellationToken).ConfigureAwait(false))
+        if (!await VortexFileRepair.BeginsAsVortexAsync(source, length, cancellationToken).ConfigureAwait(false)
+            || await VortexFileRepair.ForeignVersionAsync(source, length, cancellationToken).ConfigureAwait(false) is not null)
         {
             return null;
         }

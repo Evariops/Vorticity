@@ -13,6 +13,10 @@ public enum VortexTornTailPolicy : byte
     /// last whole version before it -- what a torn append leaves -- and says so in
     /// <see cref="VortexFile.TornTail"/>.
     /// </summary>
+    /// <remarks>
+    /// The version is looked for from the end backwards, a mebibyte at a time, trying at most 16 end
+    /// records: a file whose only footer is damaged is read to its first byte before the open fails.
+    /// </remarks>
     ReadPrevious = 0,
 
     /// <summary>The tail must parse, or the open fails with <see cref="VortexFormatException"/>.</summary>
