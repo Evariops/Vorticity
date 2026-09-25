@@ -260,7 +260,20 @@ internal sealed class PackedThroughputColumn : IColumn
         benchmarkCase.Parameters.Items.ToDictionary(item => item.Name, item => item.Value, StringComparer.Ordinal);
 }
 
-/// <summary>Cycles per decoded value, at a clock measured on this machine when the summary is built.</summary>
+/// <summary>The cycles column alone, for a kernel class that declares its work.</summary>
+[AttributeUsage(AttributeTargets.Class)]
+internal sealed class CyclesColumnAttribute : ColumnConfigBaseAttribute
+{
+    public CyclesColumnAttribute()
+        : base(new CyclesPerValueColumn())
+    {
+    }
+}
+
+/// <summary>
+/// Cycles per value, a row of the work the class declares, at a clock measured on this machine
+/// when the summary is built.
+/// </summary>
 /// <remarks>
 /// The clock is timed on a chain of dependent single-cycle integer operations, which runs at one
 /// operation per cycle on any out-of-order core, so the figure is the core's frequency under a
@@ -286,7 +299,7 @@ internal sealed class CyclesPerValueColumn : IColumn
 
     public string Legend => string.Create(
         CultureInfo.InvariantCulture,
-        $"Mean in cycles over the values written, at {Gigahertz.Value:F2} GHz timed on a dependent integer chain");
+        $"Mean in cycles over the values, the rows of the declared work, at {Gigahertz.Value:F2} GHz timed on a dependent integer chain");
 
     public bool IsDefault(Summary summary, BenchmarkCase benchmarkCase) => false;
 
@@ -295,8 +308,7 @@ internal sealed class CyclesPerValueColumn : IColumn
     public string GetValue(Summary summary, BenchmarkCase benchmarkCase)
     {
         double? mean = summary[benchmarkCase]?.ResultStatistics?.Mean;
-        Dictionary<string, object?> parameters = PackedThroughputColumn.Parameters(benchmarkCase);
-        (long values, _) = BitPackingBenchmarks.BenchmarkWork(string.Empty, parameters);
+        long values = Work.Of(benchmarkCase)?.Rows ?? 0;
         if (mean is null || values <= 0)
         {
             return "-";

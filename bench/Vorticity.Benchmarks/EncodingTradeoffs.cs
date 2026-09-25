@@ -835,7 +835,8 @@ internal static class EncodingTradeoffs
         yield return new Bools("bool, 1 % true", row => Mix(row) % 100 == 0);
     }
 
-    private static int Uuid(long row, Span<byte> destination)
+    /// <summary>A unique UUID a row, as ASCII text; also the kernel benchmarks' text of that shape.</summary>
+    internal static int Uuid(long row, Span<byte> destination)
     {
         Span<byte> raw = stackalloc byte[16];
         MemoryMarshal.Write(raw, Mix(row));
@@ -846,7 +847,8 @@ internal static class EncodingTradeoffs
         return Ascii(text, destination);
     }
 
-    private static int LogLine(long row, Span<byte> destination)
+    /// <summary>A log line of about a hundred bytes a row; also the kernel benchmarks' text of that shape.</summary>
+    internal static int LogLine(long row, Span<byte> destination)
     {
         ulong r = Mix(row);
         string level = (r % 50) switch { 0 => "ERROR", < 5 => "WARN", _ => "INFO" };
