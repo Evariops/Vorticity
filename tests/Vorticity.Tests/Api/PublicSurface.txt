@@ -1512,6 +1512,7 @@ Vorticity:     property ImmutableDictionary<string, int> ColumnChunkTargetBytes 
 Vorticity:     property IndexPolicy Indexes { get; init; }
 Vorticity:     property Nullable<Guid> Identity { get; init; }
 Vorticity:     property VortexEdition TargetEdition { get; init; }
+Vorticity:     property bool Durable { get; init; }
 Vorticity:     property bool Statistics { get; init; }
 Vorticity:     property int BlockRows { get; init; }
 Vorticity:     property int ChunkTargetBytes { get; init; }

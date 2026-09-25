@@ -367,7 +367,10 @@ public sealed partial class VortexFileWriter
         return BuildReport();
     }
 
-    /// <summary>Gives the file up: a created file is deleted, an appended one is truncated back to what it was.</summary>
+    /// <summary>
+    /// Gives the file up: a created file is deleted, and whatever was at its path stays as it was;
+    /// an appended one is truncated back to what it was.
+    /// </summary>
     /// <remarks>
     /// The caller's pipe is completed with an error, so that whatever it feeds knows the bytes are
     /// not a file. Nothing is written after this; safe to call more than once, and a no-op on a
@@ -389,7 +392,6 @@ public sealed partial class VortexFileWriter
         {
             _sinkClosed = true;
             file.Abandon();
-            DeleteCreated();
         }
         else if (_callerPipe is { } pipe)
         {
@@ -482,7 +484,6 @@ public sealed partial class VortexFileWriter
             // After the sink, which holds the file with FileShare.None.
             if (_abandoned)
             {
-                DeleteCreated();
                 TruncateAppended();
             }
         }
@@ -781,28 +782,6 @@ public sealed partial class VortexFileWriter
 
     /// <summary>Whether the file was given up, by <see cref="Abandon"/> or by a disposal before completion.</summary>
     internal bool IsAbandoned => _abandoned;
-
-    private void DeleteCreated()
-    {
-        if (_createdPath is null)
-        {
-            return;
-        }
-
-        try
-        {
-            System.IO.File.Delete(_createdPath);
-        }
-        catch (IOException)
-        {
-            // A file already gone is the outcome asked for, and one the caller has since replaced
-            // is not this writer's to judge.
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // The same answer for a read-only file or a path that has become a directory.
-        }
-    }
 
     /// <summary>Truncates an append made over another sink back to the file's length before it.</summary>
     private void TruncateAppended()

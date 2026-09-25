@@ -237,12 +237,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private bool _finished;
     private bool _abandoned;
 
-    /// <summary>
-    /// The path this writer created, or null when the caller brought the sink: what
-    /// <see cref="Abandon"/> deletes, since a created file holds nothing but a half-written attempt.
-    /// </summary>
-    private string? _createdPath;
-
     /// <summary>The file an append continues, which an abandon truncates back to <see cref="_appendOrigin"/>.</summary>
     private string? _appendedPath;
     private long _appendOrigin;
@@ -631,7 +625,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>Creates a file at <paramref name="path"/>.</summary>
-    /// <param name="path">The destination path; truncated if it exists.</param>
+    /// <param name="path">The destination path; a file there is replaced once this one completes.</param>
     /// <param name="schema">The file's dtype.</param>
     /// <returns>The writer, which owns the underlying stream.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
@@ -639,7 +633,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         Create(path, schema, VortexWriteOptions.Default);
 
     /// <summary>Creates a file at <paramref name="path"/> with explicit options.</summary>
-    /// <param name="path">The destination path; truncated if it exists.</param>
+    /// <param name="path">The destination path; a file there is replaced once this one completes.</param>
     /// <param name="schema">The file's dtype.</param>
     /// <param name="options">Write-time policy.</param>
     /// <returns>The writer, which owns the underlying stream.</returns>
@@ -653,11 +647,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         ArgumentNullException.ThrowIfNull(path);
         Validate(schema, options, session.Options.Extensions);
-        FilePipeWriter pipe = FilePipeWriter.Create(path, session.Options.MemoryPool);
+        FilePipeWriter pipe = FilePipeWriter.Create(path, session.Options.MemoryPool, options.Durable);
         try
         {
             VortexFileWriter writer = Create(new PipeSegmentSink(pipe), schema, options, session);
-            writer._createdPath = path;
             writer._filePipe = pipe;
             writer.Session = session;
             return writer;
@@ -665,7 +658,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         catch
         {
             pipe.Abandon();
-            System.IO.File.Delete(path);
             throw;
         }
     }
@@ -681,6 +673,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>The session the writer belongs to.</summary>
     internal VortexSession Session { get; private set; } = VortexSession.Default;
+
+    /// <summary>The pipe over the file this writer opened, created or appended to; null over a caller's sink.</summary>
+    internal FilePipeWriter? FilePipe => _filePipe;
 
     /// <summary>An append to <paramref name="path"/>, in <paramref name="session"/>.</summary>
     internal static async ValueTask<VortexFileWriter> AppendInSessionAsync(
@@ -1699,7 +1694,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _identity,
             _metadata,
             cancellationToken,
-            builder).ConfigureAwait(false);
+            builder,
+            _filePipe is { Durable: true } durable ? durable : null).ConfigureAwait(false);
 
         await FlushSinkAsync(cancellationToken).ConfigureAwait(false);
 
@@ -2092,6 +2088,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <param name="metadata">The user metadata, each value a segment the postscript names by its key.</param>
     /// <param name="cancellationToken">Cancels the writes.</param>
     /// <param name="cleared">A builder the caller lends, cleared, for the postscript; one of its own otherwise.</param>
+    /// <param name="durable">The durable file under the sink, which is put on the device before the postscript; null for none.</param>
     /// <remarks>
     /// The metadata and the identity go last before the postscript, so the tail every open reads
     /// covers them.
@@ -2099,7 +2096,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal static async ValueTask WriteEndAsync(
         ISegmentSink sink, PostscriptPlacement placement, Guid? identity,
         IReadOnlyList<KeyValuePair<string, ReadOnlyMemory<byte>>> metadata, CancellationToken cancellationToken,
-        FlatBufferBuilder? cleared = null)
+        FlatBufferBuilder? cleared = null, FilePipeWriter? durable = null)
     {
         long[] metadataOffsets = metadata.Count == 0 ? [] : new long[metadata.Count];
         for (int i = 0; i < metadata.Count; i++)
@@ -2110,6 +2107,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         long identityOffset = sink.Position;
         await FileIdentity.WriteAsync(sink, identity, cancellationToken).ConfigureAwait(false);
+
+        // Everything the postscript names is on the device before it: a file system may persist the
+        // end of a file before the bytes it points back at.
+        if (durable is not null)
+        {
+            await sink.FlushAsync(cancellationToken).ConfigureAwait(false);
+            durable.FlushToDisk();
+        }
 
         int postscriptLength;
         FlatBufferBuilder builder = cleared ?? new FlatBufferBuilder();

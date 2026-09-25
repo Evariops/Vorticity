@@ -237,11 +237,20 @@ public sealed class VortexSession : IAsyncDisposable
         return file;
     }
 
-    /// <summary>Starts a file at <paramref name="path"/>, replacing whatever is there.</summary>
+    /// <summary>
+    /// Starts a file at <paramref name="path"/>, which replaces whatever is there once it completes:
+    /// until then the path holds what it held, and a file given up leaves it so.
+    /// </summary>
+    /// <remarks>
+    /// The file is written beside the destination, as <c>.name.token.tmp</c>, and renamed over it,
+    /// so its directory must be writable. A symbolic link is written through to its target, and a
+    /// file replaced passes its Unix permissions on. A process that dies before completing leaves
+    /// that file behind.
+    /// </remarks>
     /// <param name="path">The destination.</param>
     /// <param name="schema">The file's columns.</param>
     /// <param name="options">What the file looks like; null for the defaults.</param>
-    /// <returns>The writer; the caller completes and disposes it. Disposed without completing, it deletes the file.</returns>
+    /// <returns>The writer; the caller completes and disposes it. Disposed without completing, it deletes what it wrote and leaves the path as it was.</returns>
     /// <exception cref="ArgumentException">A hint or an index names a column the schema does not have, or the metadata does not fit a postscript.</exception>
     /// <exception cref="VortexUnsupportedException">The schema names a component the target edition does not carry.</exception>
     public VortexFileWriter CreateWriter(string path, VortexSchema schema, VortexWriteOptions? options = null)
@@ -256,9 +265,9 @@ public sealed class VortexSession : IAsyncDisposable
 
     /// <summary>Starts a file at <paramref name="path"/> whose columns are the members of <typeparamref name="TRecord"/>.</summary>
     /// <typeparam name="TRecord">The record type; its schema is the file's.</typeparam>
-    /// <param name="path">The destination, replaced if it exists.</param>
+    /// <param name="path">The destination, replaced once the file completes.</param>
     /// <param name="options">What the file looks like; null for the defaults.</param>
-    /// <returns>The writer; the caller completes and disposes it. Disposed without completing, it deletes the file.</returns>
+    /// <returns>The writer; the caller completes and disposes it. Disposed without completing, it deletes what it wrote and leaves the path as it was.</returns>
     /// <exception cref="ArgumentException">A hint or an index names a column the record does not have.</exception>
     public VortexFileWriter CreateWriter<TRecord>(string path, VortexWriteOptions? options = null)
         where TRecord : IVortexRecord<TRecord>

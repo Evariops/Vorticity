@@ -154,6 +154,20 @@ public sealed record VortexWriteOptions
     /// <summary>Whether the file carries its statistics: per column the null count and the order, and the exact minimum and maximum of a numeric column.</summary>
     public bool Statistics { get; init; } = true;
 
+    /// <summary>
+    /// Whether a file this library opens, created or appended to, is on the device when
+    /// <c>CompleteAsync</c> returns; false by default.
+    /// </summary>
+    /// <remarks>
+    /// Everything the postscript names reaches the device before the postscript is written, then
+    /// the rest, so that a power cut never leaves a postscript over bytes that are not there: an
+    /// append cut short is then a torn tail, which an open steps back from. A created file is then
+    /// renamed over its path, and after a power cut the path holds either it, whole, or what was
+    /// there before; the rename is made durable by the file system's own journal. A sink the caller
+    /// brings is the caller's to make durable. Each completion costs two flushes to the device.
+    /// </remarks>
+    public bool Durable { get; init; }
+
     /// <summary>The byte limit of the bounds a text or binary column's zones carry, so that text filters prune; 0 for none.</summary>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     public int StringBoundBytes

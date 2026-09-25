@@ -150,7 +150,7 @@ public sealed partial class VortexFileWriter
                 throw new IOException($"{path} changed while it was being opened for an append.");
             }
 
-            pipe = new FilePipeWriter(handle, plan.FileLength, session.Options.MemoryPool);
+            pipe = new FilePipeWriter(handle, plan.FileLength, session.Options.MemoryPool) { Durable = options.Durable };
             VortexFileWriter writer = Create(new PipeSegmentSink(pipe, plan.FileLength), plan.Schema, options, session);
             writer._filePipe = pipe;
             return writer;

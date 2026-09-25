@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipelines;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
@@ -16,11 +17,19 @@ namespace Vorticity.Writing;
 /// <remarks>
 /// It owns the handle. <see cref="Abandon"/> drops what was not flushed, gives the file back its
 /// length at open, and closes the handle, which is how a writer gives up a file without writing a
-/// byte of what it still held.
+/// byte of what it still held. A file it creates is written under a name of its own beside the
+/// destination and renamed over it once complete, so that until then, and after an abandon,
+/// whatever was at the destination stays as it was.
 /// </remarks>
-internal sealed class FilePipeWriter : PipeWriter
+internal class FilePipeWriter : PipeWriter
 {
     private const int SegmentBytes = 256 * 1024;
+
+    /// <summary>
+    /// The file lengths the device flushes of each watched pipe covered, in order; null until a pipe
+    /// is watched, so that a pipe nobody watches does not look.
+    /// </summary>
+    private static ConditionalWeakTable<FilePipeWriter, List<long>>? DiskFlushes;
 
     private readonly SafeFileHandle _handle;
     private readonly MemoryPool<byte> _pool;
@@ -42,9 +51,48 @@ internal sealed class FilePipeWriter : PipeWriter
         _offset = offset;
     }
 
-    /// <summary>Creates <paramref name="path"/>, replacing a file already there.</summary>
-    internal static FilePipeWriter Create(string path, MemoryPool<byte> pool) =>
-        new FilePipeWriter(System.IO.File.OpenHandle(path, FileMode.Create, FileAccess.Write, FileShare.None, FileOptions.Asynchronous), 0, pool);
+    /// <summary>
+    /// Starts a file that replaces <paramref name="path"/> once complete. A symbolic link is written
+    /// through to its target, as opening the path would, and a file replaced passes its Unix
+    /// permissions on to the new one.
+    /// </summary>
+    /// <remarks>
+    /// The file is written as <c>.name.token.tmp</c> in the destination's directory, which needs to be
+    /// writable: the rename that publishes it is atomic only within one file system. A process that
+    /// dies before the rename leaves that file behind.
+    /// </remarks>
+    internal static FilePipeWriter Create(string path, MemoryPool<byte> pool, bool durable)
+    {
+        string destination = Path.GetFullPath(path);
+        FileInfo named = new FileInfo(destination);
+        if (named.LinkTarget is not null && named.ResolveLinkTarget(returnFinalTarget: true) is { } target)
+        {
+            destination = target.FullName;
+        }
+
+        string temporary = Path.Join(
+            Path.GetDirectoryName(destination), $".{Path.GetFileName(destination)}.{Guid.NewGuid():N}.tmp");
+        SafeFileHandle handle = System.IO.File.OpenHandle(
+            temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
+        try
+        {
+            if (!OperatingSystem.IsWindows() && System.IO.File.Exists(destination))
+            {
+                System.IO.File.SetUnixFileMode(handle, System.IO.File.GetUnixFileMode(destination));
+            }
+
+            return new CreatedFile(handle, pool, temporary, destination) { Durable = durable };
+        }
+        catch
+        {
+            handle.Dispose();
+            System.IO.File.Delete(temporary);
+            throw;
+        }
+    }
+
+    /// <summary>Whether <see cref="FlushToDisk"/> puts the file on the device, and completing it does.</summary>
+    internal bool Durable { get; init; }
 
     public override bool CanGetUnflushedBytes => true;
 
@@ -108,17 +156,63 @@ internal sealed class FilePipeWriter : PipeWriter
     /// <summary>Closes the handle; what was not flushed is dropped, since a synchronous write here would be a blocking one.</summary>
     public override void Complete(Exception? exception = null) => Close();
 
+    /// <summary>
+    /// Flushes, closes, and puts a created file in place of its destination. With an exception, a
+    /// created file is given up, and one written from an offset keeps what was flushed.
+    /// </summary>
     public override async ValueTask CompleteAsync(Exception? exception = null)
     {
-        if (!_completed && exception is null)
+        if (_completed)
         {
-            await FlushAsync(CancellationToken.None).ConfigureAwait(false);
+            return;
         }
 
-        Close();
+        if (exception is not null)
+        {
+            Fail();
+            return;
+        }
+
+        try
+        {
+            await FlushAsync(CancellationToken.None).ConfigureAwait(false);
+            FlushToDisk();
+            Close();
+            Publish();
+        }
+        catch
+        {
+            Close();
+            Discard();
+            throw;
+        }
     }
 
-    /// <summary>Drops what was not flushed, truncates the file back to where this writer started, and closes it.</summary>
+    /// <summary>Puts what was flushed on the device, when the file is durable; nothing otherwise.</summary>
+    internal void FlushToDisk()
+    {
+        if (!Durable)
+        {
+            return;
+        }
+
+        RandomAccess.FlushToDisk(_handle);
+        if (DiskFlushes is { } watched && watched.TryGetValue(this, out List<long>? flushes))
+        {
+            flushes.Add(_offset);
+        }
+    }
+
+    /// <summary>Records, from now on, the file length each device flush of <paramref name="pipe"/> covers.</summary>
+    /// <param name="pipe">The pipe to watch.</param>
+    /// <returns>The lengths, one per flush, in order.</returns>
+    internal static List<long> WatchDiskFlushes(FilePipeWriter pipe) =>
+        LazyInitializer.EnsureInitialized(ref DiskFlushes).GetValue(pipe, static _ => []);
+
+    /// <summary>
+    /// Drops what was not flushed and closes the file: a created one is deleted, and its destination
+    /// keeps what it held; one written from an offset is truncated back to it.
+    /// </summary>
     internal void Abandon()
     {
         if (_completed)
@@ -128,12 +222,29 @@ internal sealed class FilePipeWriter : PipeWriter
 
         try
         {
-            RandomAccess.SetLength(_handle, _origin);
+            Rewind();
         }
         finally
         {
             Close();
+            Discard();
         }
+    }
+
+    /// <summary>What a completion with an error does: a file written from an offset keeps what was flushed.</summary>
+    private protected virtual void Fail() => Close();
+
+    /// <summary>Gives the file back its length at open, before an abandon closes it.</summary>
+    private protected virtual void Rewind() => RandomAccess.SetLength(_handle, _origin);
+
+    /// <summary>Puts a completed, closed file in place; one written from an offset already is.</summary>
+    private protected virtual void Publish()
+    {
+    }
+
+    /// <summary>Removes what a closed file that failed or was given up leaves behind; one written from an offset leaves nothing.</summary>
+    private protected virtual void Discard()
+    {
     }
 
     private void Close()
@@ -180,5 +291,47 @@ internal sealed class FilePipeWriter : PipeWriter
         }
 
         _filled.Clear();
+    }
+
+    /// <summary>
+    /// A file written under a name of its own beside its destination: renamed over it once complete,
+    /// deleted when it fails or is given up. Only such a file carries the two names.
+    /// </summary>
+    private sealed class CreatedFile : FilePipeWriter
+    {
+        private readonly string _temporary;
+        private readonly string _destination;
+
+        internal CreatedFile(SafeFileHandle handle, MemoryPool<byte> pool, string temporary, string destination)
+            : base(handle, 0, pool)
+        {
+            _temporary = temporary;
+            _destination = destination;
+        }
+
+        private protected override void Fail() => Abandon();
+
+        private protected override void Rewind()
+        {
+        }
+
+        private protected override void Publish() => System.IO.File.Move(_temporary, _destination, overwrite: true);
+
+        private protected override void Discard()
+        {
+            try
+            {
+                System.IO.File.Delete(_temporary);
+            }
+            catch (IOException)
+            {
+                // The file is this writer's alone, under a name no other writer takes: a failure here
+                // leaves it behind, and is not worth hiding the error that led here.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // The same, for a directory that has become read-only.
+            }
+        }
     }
 }

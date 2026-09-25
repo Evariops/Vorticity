@@ -126,6 +126,104 @@ public sealed class AbandonTests
     }
 
     [Fact]
+    public async Task AbandoningAWriterOverAFileLeavesTheFileThatWasThere()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string directory = TempDirectory();
+        string path = Path.Combine(directory, "rows.vortex");
+        try
+        {
+            await WriteAsync(path, 0, 3_000);
+            byte[] before = System.IO.File.ReadAllBytes(path);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            {
+                await using VortexFileWriter writer = VortexFileWriter.Create(path, Schema, Options());
+                await FeedAsync(writer, 0, 1_000, ct);
+                await FeedAsync(writer, 1_000, 2_000, ct);
+
+                // Until the writer completes, the path holds the file that was there.
+                Assert.Equal(before, System.IO.File.ReadAllBytes(path));
+                throw new InvalidOperationException("producer failed at batch 2");
+            });
+
+            Assert.Equal(before, System.IO.File.ReadAllBytes(path));
+            Assert.Equal([path], Directory.GetFiles(directory));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ACompletedWriterReplacesTheFileAndLeavesNothingElse()
+    {
+        string directory = TempDirectory();
+        string path = Path.Combine(directory, "rows.vortex");
+        try
+        {
+            await WriteAsync(path, 0, 3_000);
+            await WriteAsync(path, 10_000, 10_500);
+
+            Assert.Equal(500, (await RowsOfAsync(path)).Count);
+            Assert.Equal([path], Directory.GetFiles(directory));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AWriterOverASymbolicLinkWritesItsTarget()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "a symbolic link needs a privilege there");
+        string directory = TempDirectory();
+        string target = Path.Combine(directory, "target.vortex");
+        string link = Path.Combine(directory, "link.vortex");
+        try
+        {
+            await WriteAsync(target, 0, 3_000);
+            System.IO.File.CreateSymbolicLink(link, target);
+            await WriteAsync(link, 10_000, 10_500);
+
+            Assert.Equal(target, new FileInfo(link).LinkTarget);
+            Assert.Equal(500, (await RowsOfAsync(target)).Count);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task AReplacedFileKeepsItsPermissions()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Unix permissions");
+            return;
+        }
+
+        string directory = TempDirectory();
+        string path = Path.Combine(directory, "rows.vortex");
+        try
+        {
+            await WriteAsync(path, 0, 3_000);
+            UnixFileMode mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead;
+            System.IO.File.SetUnixFileMode(path, mode);
+            await WriteAsync(path, 10_000, 10_500);
+
+            Assert.Equal(mode, System.IO.File.GetUnixFileMode(path));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task AbandoningAnAppendKeepsTheRowsTheFileAlreadyHad()
     {
         // 5 000 rows over blocks of 1 024 leaves a part block, so the append re-opens the last
@@ -330,6 +428,11 @@ public sealed class AbandonTests
     private static string TempPath() =>
         System.IO.Path.Combine(
             System.IO.Path.GetTempPath(), $"vorticity-abandon-{Guid.NewGuid():N}.vortex");
+
+    /// <summary>A directory of its own, so that what a writer leaves in it can be listed.</summary>
+    private static string TempDirectory() =>
+        Directory.CreateDirectory(
+            System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-abandon-{Guid.NewGuid():N}")).FullName;
 
     private static void Delete(string path)
     {

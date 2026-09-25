@@ -48,6 +48,7 @@ does not fit throws `ArgumentException` there, before a byte is written.
 | `Indexes` | `IndexPolicy.None` | the indexes to build ([indexes.md](indexes.md)) |
 | `Identity` | drawn per write | the sixteen bytes naming this version of the file |
 | `Metadata` | empty | small values by key, read back through `file.Metadata` |
+| `Durable` | `false` | a file created or appended to is on the device when `CompleteAsync` returns, everything its postscript names before the postscript: two flushes to the device per completion |
 
 ## Compression
 

@@ -59,7 +59,9 @@ a created file disposed without CompleteAsync: exists False
 ```
 
 `Abandon()` on an append truncates the file back to the length it had, flushed bytes included; on a
-created file it deletes the file. A writer disposed without `CompleteAsync` does the same. Over a
+created file it deletes what it wrote. A created file is written beside its path and renamed over it
+by `CompleteAsync`, so a file that was already there stays as it was until then, and after an
+abandon. A writer disposed without `CompleteAsync` does the same. Over a
 caller's `PipeWriter` there is nothing to delete, and the pipe is completed with an error instead
 ([stream-to-an-object.md](stream-to-an-object.md)).
 
