@@ -21,6 +21,7 @@ public sealed class VortexSessionOptions
     private int _maxDegreeOfParallelism = 1;
     private long _indexCacheBytes = 64L * 1024 * 1024;
     private int _mappedFileCacheCount = 64;
+    private bool _mapFiles = true;
     private bool _frozen;
 
     internal VortexSessionOptions()
@@ -93,8 +94,10 @@ public sealed class VortexSessionOptions
     /// </summary>
     /// <remarks>
     /// A kept file is recognized by its device and inode, and mapped again when its length changed.
-    /// None is kept on Windows, where a mapped file can be neither deleted nor replaced, nor where
-    /// the platform cannot tell one file from another.
+    /// A file deleted once closed keeps its disk space for as long as its mapping is kept: until
+    /// files mapped since fill the cache, or until <see cref="VortexSession.ReleaseMappedFiles"/>.
+    /// None is kept on Windows, where a mapped file can be neither deleted nor replaced, nor
+    /// where the platform cannot tell one file from another, nor when <see cref="MapFiles"/> is false.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     public int MappedFileCacheCount
@@ -105,6 +108,25 @@ public sealed class VortexSessionOptions
             ArgumentOutOfRangeException.ThrowIfNegative(value);
             _mappedFileCacheCount = Set(value);
         }
+    }
+
+    /// <summary>
+    /// Whether a file opened from a path is mapped into memory by its first scan; true by default.
+    /// False reads it positionally, as a <see cref="FileSegmentSource"/> does, through the session's
+    /// <see cref="SegmentCache"/> and <see cref="MaxConcurrentReads"/>, and keeps no file mapped.
+    /// </summary>
+    /// <remarks>
+    /// A mapping serves reads faster and with no buffer per batch. On Linux and macOS, though, a file
+    /// cut short while it is mapped faults on the pages past its new end, and the fault kills the
+    /// process. A writer of this library cannot cut a file a reader holds open; another process, or
+    /// a writer that shares the file, can. Positional reads turn that into a
+    /// <see cref="VortexFormatException"/> on the read: the choice of a service that reads files
+    /// others may truncate.
+    /// </remarks>
+    public bool MapFiles
+    {
+        get => _mapFiles;
+        set => _mapFiles = Set(value);
     }
 
     /// <summary>The extension dtypes this session knows beyond the frozen editions.</summary>
@@ -147,7 +169,7 @@ public sealed class VortexSession : IAsyncDisposable
     {
         Options = options;
         ReadGate = new SemaphoreSlim(options.MaxConcurrentReads, options.MaxConcurrentReads);
-        Mappings = options.MappedFileCacheCount > 0 && FileInode.IsSupported
+        Mappings = options.MapFiles && options.MappedFileCacheCount > 0 && FileInode.IsSupported
             ? new MappedFileCache(options.MappedFileCacheCount)
             : null;
     }
@@ -182,7 +204,8 @@ public sealed class VortexSession : IAsyncDisposable
     /// <summary>
     /// Opens the file at <paramref name="path"/>: its tail read positionally, the file mapped into
     /// memory by the first scan that reads data, and kept mapped once closed for the next open of
-    /// the same file, as <see cref="VortexSessionOptions.MappedFileCacheCount"/> says.
+    /// the same file, as <see cref="VortexSessionOptions.MappedFileCacheCount"/> says; or every read
+    /// positional, when <see cref="VortexSessionOptions.MapFiles"/> is false.
     /// </summary>
     /// <param name="path">A local file path.</param>
     /// <param name="options">What the open reads, trusts and refuses; null for the defaults.</param>
@@ -193,7 +216,7 @@ public sealed class VortexSession : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(path);
         ThrowIfDisposed();
-        VortexFile file = await VortexFile.OpenAsync(path, Effective(options), Mappings, cancellationToken).ConfigureAwait(false);
+        VortexFile file = await VortexFile.OpenAsync(path, Effective(options), this, cancellationToken).ConfigureAwait(false);
         Attach(file, path);
         return file;
     }
@@ -327,6 +350,13 @@ public sealed class VortexSession : IAsyncDisposable
         ThrowIfDisposed();
         return EncodingAdvisor.AdviseAsync(rows, goal ?? EncodingGoal.Default, this, cancellationToken);
     }
+
+    /// <summary>
+    /// Lets go of the files the session keeps mapped once closed, <see cref="Default"/>'s included:
+    /// a file deleted since it was closed gets its disk space back. The files still open keep
+    /// reading, and the next open of a file let go maps it again.
+    /// </summary>
+    public void ReleaseMappedFiles() => Mappings?.Clear();
 
     /// <summary>Clears the segment cache, lets the kept mappings go and trims the pool. A file of the session still open makes this throw.</summary>
     /// <returns>A completed task.</returns>

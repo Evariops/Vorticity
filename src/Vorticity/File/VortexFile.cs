@@ -108,35 +108,38 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>The session the file was opened in, whose pool, cache and parallelism its scans use.</summary>
     public VortexSession Session { get; internal set; } = VortexSession.Default;
 
-    /// <summary>Opens a Vortex file from a path, in <see cref="VortexSession.Default"/>'s kept mappings.</summary>
+    /// <summary>Opens a Vortex file from a path, in <see cref="VortexSession.Default"/>.</summary>
     /// <param name="path">A local file path.</param>
     /// <param name="options">Open-time policy.</param>
     /// <param name="cancellationToken">Cancels the open.</param>
     /// <returns>The open file. The caller disposes it.</returns>
     internal static ValueTask<VortexFile> OpenAsync(
         string path, VortexOpenOptions options, CancellationToken cancellationToken = default) =>
-        OpenAsync(path, options, VortexSession.Default.Mappings, cancellationToken);
+        OpenAsync(path, options, VortexSession.Default, cancellationToken);
 
     /// <summary>Opens a Vortex file from a path.</summary>
     /// <param name="path">A local file path.</param>
     /// <param name="options">Open-time policy.</param>
-    /// <param name="mappings">The session's kept mappings, or null to map the file for this open alone.</param>
+    /// <param name="session">The session whose mappings, or whose bound on reads and segment cache, the file reads through.</param>
     /// <param name="cancellationToken">Cancels the open.</param>
     /// <returns>The open file. The caller disposes it.</returns>
     /// <remarks>
-    /// The open reads the tail positionally, and the file is mapped when a scan's plan announces
-    /// enough bytes to pay for it, or its kept mapping taken over; from then on segment reads are
-    /// zero-copy. The source created here is always owned by the returned file:
+    /// The open reads the tail positionally. In a session that maps files, the file is mapped when a
+    /// scan's plan announces enough bytes to pay for it, or its kept mapping taken over, and from
+    /// then on segment reads are zero-copy; in one that does not, every read is positional. The
+    /// source created here is always owned by the returned file:
     /// <see cref="VortexOpenOptions.LeaveSourceOpen"/> applies only to a source the caller supplied.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="path"/> or <paramref name="options"/> is null.</exception>
     /// <exception cref="VortexFormatException">The file is not a well-formed Vortex file.</exception>
     internal static ValueTask<VortexFile> OpenAsync(
-        string path, VortexOpenOptions options, MappedFileCache? mappings, CancellationToken cancellationToken = default)
+        string path, VortexOpenOptions options, VortexSession session, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(path);
         ArgumentNullException.ThrowIfNull(options);
-        LocalFileSource source = LocalFileSource.Open(path, mappings);
+        ISegmentReader source = session.Options.MapFiles
+            ? LocalFileSource.Open(path, session.Mappings)
+            : SessionReader.Wrap(new FileSegmentSource(path), session);
         ValueTask<VortexFile> open = OpenCoreAsync(source, options, ownsSource: true, cancellationToken);
         string? tokenPath = options.Read.IndexFragments.Count == 0 ? null : path;
         return tokenPath is null && !options.PreloadIndexes

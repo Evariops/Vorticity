@@ -41,6 +41,7 @@ A `VortexSession` holds what would otherwise be process-wide state, so that a ho
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer compresses on |
 | `IndexCacheBytes` | 64 MiB | decoded index runs |
 | `MappedFileCacheCount` | 64 | files opened from a path kept mapped once closed, so the next open of one takes over its mapping |
+| `MapFiles` | true | whether a file opened from a path is mapped by its first scan; false reads it positionally, and a file cut short under a scan then fails the read instead of the process |
 | `Extensions` | empty | extension types the session reads beyond the editions |
 
 The options are set inside `Create` and frozen when it returns; setting one afterwards throws
@@ -55,7 +56,8 @@ the session.` Two `await using` declarations in that order, as above, do it righ
 **The cache and the bound on reads apply to a source that does I/O**: a `FileSegmentSource`, as
 above, or your own `ISegmentSource` ([object-store.md](object-store.md)). A path opened with
 `session.OpenAsync(path)` is memory-mapped by its first scan, and a mapping has nothing to bound or
-to cache. With the
+to cache, unless the session sets `MapFiles` to false: the path is then read as a
+`FileSegmentSource` would read it, through both. With the
 cache, a fifth scan of the file made 51 requests and the cache served all 51; over the five scans
 it counted 195 hits and 60 misses, and held 1 459 KiB, the data segments of a 1.5 MB file. The
 concurrent scans missed a few more than the file's 51 segments: two scans that ask for one at the

@@ -160,6 +160,16 @@ Over a source where a read is a request, that is the reason to give the session 
   session they share one mapping, which the session keeps once both are closed, for the next open
   of the same file (`MappedFileCacheCount`). A file is immutable once open and safe to scan from
   several threads at once.
+* **A file deleted once closed keeps its disk space while the session keeps it mapped**, up to 64
+  files by default. A process that deletes the files it has read calls `ReleaseMappedFiles()` on
+  their session, `VortexSession.Default` for a file opened with `VortexFile.OpenAsync(path)`, or
+  creates its session with `MappedFileCacheCount = 0`.
+* **A mapped file must not be cut short under a scan.** On Linux and macOS, a file that another
+  process truncates while a scan reads it through its mapping faults on the pages past its new
+  end, and the fault kills the process. A writer of this library cannot do it while the file is
+  open. A service that reads files other processes may truncate creates its session with
+  `MapFiles = false`: every read is then positional, and a cut file throws
+  `VortexFormatException`.
 
 The figures come from one run of the sample on the demonstration file of a million rows.
 

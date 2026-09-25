@@ -175,6 +175,48 @@ public sealed class MappedFileCacheTests
         Assert.Throws<ArgumentOutOfRangeException>(() => VortexSession.Create(options => options.MappedFileCacheCount = -1));
     }
 
+    // A file deleted once closed keeps its disk space for as long as its mapping is kept.
+    [Fact]
+    public async Task ASessionLetsGoOfTheFilesItKeepsMappedWhenAsked()
+    {
+        Assert.SkipUnless(FileInode.IsSupported, "the platform does not tell one file from another");
+        string directory = Path.Combine(AppContext.BaseDirectory, "kept-mappings");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"ids-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        long[] ids = new long[4_096];
+        for (int i = 0; i < ids.Length; i++)
+        {
+            ids[i] = i;
+        }
+
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter(path, [("id", VortexType.Int64)]))
+        {
+            ColumnsBuilder builder = writer.Builder();
+            builder.Column<long>(0).Append(ids);
+            await writer.WriteAsync(builder, CancellationToken.None);
+            await writer.CompleteAsync(CancellationToken.None);
+        }
+
+        await using VortexSession session = VortexSession.Create(options => options.MappedFileCacheCount = 4);
+        long sum = 0;
+        await using (VortexFile file = await session.OpenAsync(path, cancellationToken: TestContext.Current.CancellationToken))
+        {
+            await foreach (BatchView batch in file.Scan("id").WithCancellation(TestContext.Current.CancellationToken))
+            {
+                foreach (long id in batch.Column<long>("id").Values)
+                {
+                    sum += id;
+                }
+            }
+        }
+
+        Assert.Equal(4_096L * 4_095 / 2, sum);
+        Assert.Equal(1, session.Mappings!.Count);
+        global::System.IO.File.Delete(path);
+        session.ReleaseMappedFiles();
+        Assert.Equal(0, session.Mappings.Count);
+    }
+
     /// <summary>Opens the file through the cache, maps it, checks every byte, and returns the mapping it read.</summary>
     private static async Task<MappedFileOwner> MappedAndReadAsync(string path, MappedFileCache cache, byte[] expected)
     {

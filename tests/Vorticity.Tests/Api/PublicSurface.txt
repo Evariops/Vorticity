@@ -1399,12 +1399,14 @@ Vorticity:     method VortexFileWriter CreateWriter(PipeWriter, VortexSchema, Vo
 Vorticity:     method VortexFileWriter CreateWriter(string, VortexSchema, VortexWriteOptions = default)
 Vorticity:     method VortexFileWriter CreateWriter<TRecord>(string, VortexWriteOptions = default)
 Vorticity:     method VortexSession Create(Action<VortexSessionOptions>)
+Vorticity:     method void ReleaseMappedFiles()
 Vorticity:     property VortexSession Default { get; }
 Vorticity:     property VortexSessionOptions Options { get; }
 Vorticity: sealed class Vorticity.VortexSessionOptions
 Vorticity:     property MemoryPool<byte> MemoryPool { get; set; }
 Vorticity:     property SegmentCache SegmentCache { get; set; }
 Vorticity:     property VortexExtensionRegistry Extensions { get; }
+Vorticity:     property bool MapFiles { get; set; }
 Vorticity:     property int MappedFileCacheCount { get; set; }
 Vorticity:     property int MaxConcurrentReads { get; set; }
 Vorticity:     property int MaxDegreeOfParallelism { get; set; }
