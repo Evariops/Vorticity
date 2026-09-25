@@ -8,8 +8,8 @@
 // pruning on and off over a real file, the shape `ScanFilterTests` uses for every comparison.
 //
 // The adversarial patterns: empty, longer than the value, all 0xFF, non-ASCII,
-// escapes, and `_` across a multi-byte code point — which matches one BYTE of it, and the test says
-// so rather than pretending the operator is text-aware.
+// escapes, and `_` across a multi-byte code point, which matches one character of utf8 text and one
+// byte of binary.
 using System;
 using System.Collections.Generic;
 using System.Text;
@@ -106,12 +106,112 @@ public sealed class StringMatchTests
     [Fact]
     public void UnderscoreMatchesOneByteOfAMultiByteCodePoint()
     {
-        // "é" is two bytes in UTF-8, so `_` matches half of it and `__` matches it whole. That is
-        // the documented contract, not an accident: these operators are bytewise.
+        // "é" is two bytes in UTF-8, so over binary `_` matches half of it and `__` matches it whole.
         byte[] value = Encoding.UTF8.GetBytes("é");
         Assert.Equal(2, value.Length);
         Assert.False(BytePattern.Like(value, "_"u8, (byte)'\\'));
         Assert.True(BytePattern.Like(value, "__"u8, (byte)'\\'));
+    }
+
+    [Theory]
+    [InlineData("é", "_", true)]
+    [InlineData("é", "__", false)]
+    [InlineData("René", "Ren_", true)]
+    [InlineData("Rene", "Ren_", true)]
+    [InlineData("Renée", "Ren_", false)]
+    [InlineData("Renée", "Ren__", true)]
+    [InlineData("€x", "_x", true)]
+    [InlineData("a𝄞b", "a_b", true)]
+    [InlineData("a𝄞b", "a%_", true)]
+    [InlineData("éa", "%_a", true)]
+    [InlineData("é", "%__", false)]
+    public void UnderscoreMatchesOneCharacterOfText(string value, string pattern, bool expected)
+    {
+        byte[] v = Encoding.UTF8.GetBytes(value);
+        byte[] p = Encoding.UTF8.GetBytes(pattern);
+        Assert.Equal(expected, BytePattern.LikeText(v, p, (byte)'\\'));
+        Assert.Equal(expected, NaiveText(v, p));
+    }
+
+    /// <summary>
+    /// Generated utf8 values and patterns, with characters of one to four bytes, against the naive
+    /// matcher over characters; and without an unescaped <c>_</c>, the byte matcher agrees too.
+    /// </summary>
+    [Fact]
+    public void LikeTextMatchesTheNaiveMatcherOnGeneratedPatterns()
+    {
+        string[] alphabet = ["a", "%", "_", "\\", "é", "€", "𝄞"];
+        List<byte[]> values = [];
+        List<byte[]> patterns = [];
+        Build(alphabet, 3, values);
+        Build(alphabet, 3, patterns);
+
+        foreach (byte[] value in values)
+        {
+            foreach (byte[] pattern in patterns)
+            {
+                bool naive = NaiveText(value, pattern);
+                bool actual = BytePattern.LikeText(value, pattern, (byte)'\\');
+                Assert.True(
+                    naive == actual,
+                    $"LIKE '{Show(pattern)}' over '{Show(value)}': text matcher says {actual}, the naive reference says {naive}");
+                if (!BytePattern.HasUnescapedOne(pattern, (byte)'\\'))
+                {
+                    Assert.Equal(naive, BytePattern.Like(value, pattern, (byte)'\\'));
+                }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task UnderscoreTakesACharacterOfTextAndAByteOfBinary()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string[] names = ["René", "Rene", "Renée", "é", "ab"];
+        string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-like-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            VortexSchema schema = [("text", VortexType.Utf8), ("bytes", VortexType.Binary)];
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter(path, schema))
+            {
+                ColumnsBuilder builder = writer.Builder();
+                foreach (string name in names)
+                {
+                    builder.Column<string>(0).Append(name);
+                    builder.Column<ReadOnlyMemory<byte>>(1).Append(Encoding.UTF8.GetBytes(name));
+                }
+
+                await writer.WriteAsync(builder, ct);
+                await writer.CompleteAsync(ct);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            Assert.Equal(["René", "Rene"], await MatchingAsync(file, "text", "Ren_", ct));
+            Assert.Equal(["é"], await MatchingAsync(file, "text", "_", ct));
+            Assert.Equal(["ab"], await MatchingAsync(file, "text", "__", ct));
+            Assert.Equal(["Rene"], await MatchingAsync(file, "bytes", "Ren_", ct));
+            Assert.Equal(["é", "ab"], await MatchingAsync(file, "bytes", "__", ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>The rows of <paramref name="file"/> whose <paramref name="column"/> is <c>like</c> <paramref name="pattern"/>, as text.</summary>
+    private static async Task<List<string>> MatchingAsync(VortexFile file, string column, string pattern, CancellationToken ct)
+    {
+        VortexExpr filter = Expr.Like(Expr.Field(column), FilterLiteral.From(Encoding.UTF8.GetBytes(pattern)));
+        List<string> rows = [];
+        await foreach (RecordBatch batch in file.ScanBuilder().Project("text").Where(filter).ExecuteAsync().WithCancellation(ct))
+        {
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                rows.Add(batch.Column("text"u8).AsBinary().GetString(row)!);
+            }
+        }
+
+        return rows;
     }
 
     [Fact]
@@ -211,7 +311,7 @@ public sealed class StringMatchTests
             {
                 StringMatchOp.StartsWith => BytePattern.StartsWith(v, bytes),
                 StringMatchOp.Contains => BytePattern.Contains(v, bytes),
-                _ => BytePattern.Like(v, bytes, (byte)'\\'),
+                _ => BytePattern.LikeText(v, bytes, (byte)'\\'),
             };
 
             if (holds)
@@ -289,6 +389,65 @@ public sealed class StringMatchTests
         }
 
         return token == value[v] && Naive(value, v + 1, pattern, p + 1, escape);
+    }
+
+    /// <summary>
+    /// SQL <c>LIKE</c> over the characters of UTF-8 text, written the obvious way on decoded runes,
+    /// with <c>\</c> as the escape.
+    /// </summary>
+    private static bool NaiveText(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern) =>
+        NaiveText(Runes(value), 0, Runes(pattern), 0);
+
+    private static bool NaiveText(List<Rune> value, int v, List<Rune> pattern, int p)
+    {
+        if (p == pattern.Count)
+        {
+            return v == value.Count;
+        }
+
+        Rune token = pattern[p];
+        if (token.Value == '%')
+        {
+            for (int take = v; take <= value.Count; take++)
+            {
+                if (NaiveText(value, take, pattern, p + 1))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        if (v == value.Count)
+        {
+            return false;
+        }
+
+        if (token.Value == '\\' && p + 1 < pattern.Count)
+        {
+            return pattern[p + 1] == value[v] && NaiveText(value, v + 1, pattern, p + 2);
+        }
+
+        if (token.Value == '_')
+        {
+            return NaiveText(value, v + 1, pattern, p + 1);
+        }
+
+        return token == value[v] && NaiveText(value, v + 1, pattern, p + 1);
+    }
+
+    private static List<Rune> Runes(ReadOnlySpan<byte> utf8)
+    {
+        List<Rune> runes = [];
+        while (!utf8.IsEmpty)
+        {
+            Rune.DecodeFromUtf8(utf8, out Rune rune, out int consumed);
+            runes.Add(rune);
+            utf8 = utf8[consumed..];
+        }
+
+        return runes;
     }
 
     private static void Build(string[] alphabet, int depth, List<byte[]> into)

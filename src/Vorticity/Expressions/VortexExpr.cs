@@ -42,10 +42,10 @@ internal enum ExprKind : byte
 
 /// <summary>The three byte-pattern predicates a filter can apply to a column.</summary>
 /// <remarks>
-/// These match bytes, not text, and the distinction is the whole contract: the comparison is
-/// bytewise, which for UTF-8 is code-point order, and <c>_</c> in a <see cref="Like"/> pattern
-/// matches one byte rather than one code point. Case folding would need a definition of "case" for
-/// UTF-8 that the library does not carry, so every operator here is case-sensitive.
+/// The comparison is bytewise, which for UTF-8 is code-point order, and <c>_</c> in a
+/// <see cref="Like"/> pattern matches one character of a utf8 column and one byte of a binary one.
+/// Case folding would need a definition of "case" for UTF-8 that the library does not carry, so
+/// every operator here is case-sensitive.
 /// </remarks>
 internal enum StringMatchOp : byte
 {
@@ -55,7 +55,7 @@ internal enum StringMatchOp : byte
     /// <summary>The pattern occurs somewhere in the value; an empty pattern always does.</summary>
     Contains = 1,
 
-    /// <summary>The SQL wildcard match: <c>%</c> any run, <c>_</c> any one byte, the escape quotes either.</summary>
+    /// <summary>The SQL wildcard match: <c>%</c> any run, <c>_</c> any one character (byte, in binary), the escape quotes either.</summary>
     Like = 2,
 }
 
@@ -566,7 +566,7 @@ internal static class Expr
 
     /// <summary>The SQL <c>like</c> match, <c>field like pattern</c>.</summary>
     /// <param name="field">The column; utf8 or binary, or an extension over one.</param>
-    /// <param name="pattern">The pattern: <c>%</c> any run, <c>_</c> any one byte.</param>
+    /// <param name="pattern">The pattern: <c>%</c> any run, <c>_</c> any one character of utf8, one byte of binary.</param>
     /// <param name="escape">The byte that quotes a wildcard or itself. Default <c>\</c>.</param>
     /// <exception cref="ArgumentNullException"><paramref name="field"/> is null.</exception>
     /// <exception cref="ArgumentException"><paramref name="pattern"/> is not a bytes literal.</exception>

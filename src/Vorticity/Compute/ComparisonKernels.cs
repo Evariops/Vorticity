@@ -180,17 +180,20 @@ internal static partial class ComparisonKernels
             return;
         }
 
+        // A `_` takes one character of text and one byte of binary; without one, both match alike, and
+        // the byte matcher serves text too.
+        ReadOnlySpan<byte> needle = pattern.BytesValue;
+        bool text = op == StringMatchOp.Like && node.DType.Kind == DTypeKind.Utf8 && BytePattern.HasUnescapedOne(needle, escape);
         if (constant)
         {
             // One value, so one match decides every row -- the same collapse the comparisons make,
             // and it reaches further here because a pattern search is dearer than a compare.
-            MatchConstant(node, mask, op, pattern.BytesValue, escape, destination);
+            MatchConstant(node, mask, op, needle, escape, text, destination);
             return;
         }
 
         // The operator becomes a type argument: the switch is asked once per column instead of once
         // per row, and the framework's vectorised search is what runs inside.
-        ReadOnlySpan<byte> needle = pattern.BytesValue;
         switch (op)
         {
             case StringMatchOp.StartsWith:
@@ -200,7 +203,15 @@ internal static partial class ComparisonKernels
                 MatchCore<ContainsMatch>(node, mask, needle, escape, destination);
                 return;
             default:
-                MatchCore<LikeMatch>(node, mask, needle, escape, destination);
+                if (text)
+                {
+                    MatchCore<LikeTextMatch>(node, mask, needle, escape, destination);
+                }
+                else
+                {
+                    MatchCore<LikeMatch>(node, mask, needle, escape, destination);
+                }
+
                 return;
         }
     }
@@ -208,13 +219,14 @@ internal static partial class ComparisonKernels
     /// <summary>A byte-pattern predicate over a constant column: one match, then a fill.</summary>
     private static void MatchConstant(
         CanonicalNode node, ValidityMask mask, StringMatchOp op, ReadOnlySpan<byte> pattern,
-        byte escape, Span<byte> destination)
+        byte escape, bool text, Span<byte> destination)
     {
         ReadOnlySpan<byte> value = node.ConstantElement;
         bool holds = op switch
         {
             StringMatchOp.StartsWith => StartsWithMatch.Holds(value, pattern, escape),
             StringMatchOp.Contains => ContainsMatch.Holds(value, pattern, escape),
+            _ when text => LikeTextMatch.Holds(value, pattern, escape),
             _ => LikeMatch.Holds(value, pattern, escape),
         };
 
@@ -277,6 +289,12 @@ internal static partial class ComparisonKernels
     {
         public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
             BytePattern.Like(value, pattern, escape);
+    }
+
+    private readonly struct LikeTextMatch : IBytesMatch
+    {
+        public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
+            BytePattern.LikeText(value, pattern, escape);
     }
 
     /// <summary>Evaluates <c>column IN (literals)</c>, which is an OR of equalities.</summary>

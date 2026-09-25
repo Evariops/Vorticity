@@ -5,13 +5,13 @@ namespace Vorticity.Compute;
 
 /// <summary>Matching a value's bytes against a pattern.</summary>
 /// <remarks>
-/// These are predicates over bytes, not over text, and every consequence of that is deliberate:
-/// comparison is bytewise, which for UTF8 is code-point order; <c>_</c> matches one byte, so it can
-/// match a single third of a three-byte code point; and there is no case folding, which would need
-/// a definition of "case" this layer does not have. <c>StartsWith</c> and <c>Contains</c> delegate
-/// to the runtime's vectorised span search rather than to hand-written loops. The <c>like</c>
-/// matcher backtracks greedily on <c>%</c> and is linear on any pattern without adjacent wildcards;
-/// its quadratic case is bounded by the pattern the caller wrote, never by the file.
+/// Comparison is bytewise, which for UTF8 is code-point order, and there is no case folding, which
+/// would need a definition of "case" this layer does not have. <c>_</c> matches one byte of binary
+/// and one character of UTF8 text: <see cref="Like"/> and <see cref="LikeText"/>, which agree on
+/// any pattern without an unescaped <c>_</c>. <c>StartsWith</c> and <c>Contains</c> delegate to the
+/// runtime's vectorised span search rather than to hand-written loops. The <c>like</c> matchers
+/// backtrack greedily on <c>%</c> and are linear on any pattern without adjacent wildcards; their
+/// quadratic case is bounded by the pattern the caller wrote, never by the file.
 /// </remarks>
 internal static class BytePattern
 {
@@ -90,6 +90,97 @@ internal static class BytePattern
         }
 
         return p == pattern.Length;
+    }
+
+    /// <summary>Whether UTF8 <paramref name="value"/> matches a SQL <c>like</c> pattern, <c>_</c> taking one character.</summary>
+    /// <remarks>
+    /// <see cref="Like"/> with its two steps widened to a character: a <c>_</c> takes one, and a
+    /// <c>%</c> widens by one after a mismatch, so no step lands inside a character. A literal byte
+    /// still matches a byte, which in valid UTF8 can only begin at a character's start.
+    /// </remarks>
+    /// <param name="value">The row's bytes, UTF8.</param>
+    /// <param name="pattern">The pattern, UTF8.</param>
+    /// <param name="escape">The byte that quotes a wildcard or itself.</param>
+    internal static bool LikeText(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape)
+    {
+        int v = 0;
+        int p = 0;
+        int star = -1;
+        int resume = 0;
+
+        while (v < value.Length)
+        {
+            if (p < pattern.Length)
+            {
+                byte token = pattern[p];
+                if (token == Any)
+                {
+                    star = p;
+                    p++;
+                    resume = v;
+                    continue;
+                }
+
+                bool escaped = token == escape && p + 1 < pattern.Length;
+                if (!escaped && token == One)
+                {
+                    p++;
+                    v += CharacterWidth(value, v);
+                    continue;
+                }
+
+                if ((escaped ? pattern[p + 1] : token) == value[v])
+                {
+                    p += escaped ? 2 : 1;
+                    v++;
+                    continue;
+                }
+            }
+
+            if (star < 0)
+            {
+                return false;
+            }
+
+            p = star + 1;
+            resume += CharacterWidth(value, resume);
+            v = resume;
+        }
+
+        while (p < pattern.Length && pattern[p] == Any)
+        {
+            p++;
+        }
+
+        return p == pattern.Length;
+    }
+
+    /// <summary>Whether a pattern holds a <c>_</c> no escape quotes: the one token a byte and a character match differ on.</summary>
+    /// <param name="pattern">The pattern.</param>
+    /// <param name="escape">The byte that quotes a wildcard or itself.</param>
+    internal static bool HasUnescapedOne(ReadOnlySpan<byte> pattern, byte escape)
+    {
+        for (int p = 0; p < pattern.Length; p++)
+        {
+            if (pattern[p] == escape && p + 1 < pattern.Length)
+            {
+                p++;
+            }
+            else if (pattern[p] == One)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>The bytes of the character <paramref name="at"/> begins, by its lead byte; one for a byte no character begins with, and never past the value.</summary>
+    private static int CharacterWidth(ReadOnlySpan<byte> value, int at)
+    {
+        byte lead = value[at];
+        int width = lead < 0xC0 ? 1 : lead < 0xE0 ? 2 : lead < 0xF0 ? 3 : 4;
+        return Math.Min(width, value.Length - at);
     }
 
     /// <summary>
