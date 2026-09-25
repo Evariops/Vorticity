@@ -3,17 +3,17 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Runtime.Intrinsics;
-using System.Runtime.Intrinsics.Arm;
 using System.Text.Unicode;
 
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
 
-namespace Vorticity.Arrays.Decoders.Canonical;
+namespace Vorticity.Benchmarks;
 
 /// <summary>
-/// Builds Arrow binary views over a decoded heap, in one place for the several encodings that cut
-/// a heap into rows the same way.
+/// The library's <c>ViewKernels</c> as they were, copied whole and kept here unchanged as the
+/// baseline every change to them is measured against in the same process. What follows is the
+/// original's own description.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -35,7 +35,7 @@ namespace Vorticity.Arrays.Decoders.Canonical;
 /// row is valid, and the row-at-a-time path otherwise.
 /// </para>
 /// </remarks>
-internal static class ViewKernels
+internal static class ViewKernelsOriginal
 {
     /// <summary>Bytes in one view.</summary>
     private const int ViewSize = CanonicalSupport.ViewSize;
@@ -875,122 +875,14 @@ internal static class ViewKernels
             return CutOutOfLine<T, TSizes, TStarts>(ref rows, start, count, ref heap, ref views);
         }
 
-        // The rows that start too near the heap's end to be read as words, only ever the last few
-        // of the block holding its last row, are cut byte-exact, and the rows before them as the
-        // others are.
-        bool vector = AdvSimd.IsSupported;
-        nint reach = heapLength - (vector ? Vector128<byte>.Count : Inline);
-        if (lastStart > reach)
+        if (lastStart > heapLength - Inline)
         {
-            int head = count - 1;
-            nint tailStart = lastStart;
-            while (head > 0 && TSizes.StartBefore(ref rows, head, tailStart) > reach)
-            {
-                tailStart = TSizes.StartBefore(ref rows, head, tailStart);
-                head--;
-            }
-
-            if (head == 0 && tailStart > reach)
-            {
-                return CutExactly<T, TSizes>(ref rows, start, count, ref heap, heapLength, ref views, TStarts.Checked);
-            }
-
-            nint headLastStart = TSizes.StartBefore(ref rows, head, tailStart);
-            return CutBlock<T, TSizes, TStarts>(ref rows, start, head, shortest, longest, headLastStart, ref heap, heapLength, ref views)
-                && CutExactly<T, TSizes>(
-                    ref Unsafe.Add(ref rows, head), tailStart, count - head, ref heap, heapLength,
-                    ref Unsafe.Add(ref views, head * ViewSize), TStarts.Checked);
+            return CutExactly<T, TSizes>(ref rows, start, count, ref heap, heapLength, ref views, TStarts.Checked);
         }
 
-        if (longest <= Inline)
-        {
-            return vector
-                ? CutInlineVector<T, TSizes, TStarts>(ref rows, start, count, ref heap, ref views)
-                : CutInline<T, TSizes, TStarts>(ref rows, start, count, ref heap, ref views);
-        }
-
-        return vector
-            ? CutMixedVector<T, TSizes, TStarts>(ref rows, start, count, ref heap, ref views)
+        return longest <= Inline
+            ? CutInline<T, TSizes, TStarts>(ref rows, start, count, ref heap, ref views)
             : CutMixed<T, TSizes, TStarts>(ref rows, start, count, ref heap, ref views);
-    }
-
-    /// <summary>
-    /// <see cref="CutMixed{T, TSizes, TStarts}"/> on vectors, each row with sixteen bytes of heap
-    /// from its start: the inline view is composed as <see cref="CutInlineVector"/> composes it,
-    /// from the value masked to at most twelve bytes, and a value too long to inline has the upper
-    /// half, its buffer and its offset, selected over it by a mask made of its size.
-    /// </summary>
-    /// <remarks>
-    /// The two views share their first eight bytes, the length and the first four bytes of the
-    /// value, so one select of the upper half makes either, with no branch on a row.
-    /// </remarks>
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static bool CutMixedVector<T, TSizes, TStarts>(ref T rows, nint start, int count, ref byte heap, ref byte views)
-        where T : unmanaged
-        where TSizes : struct, IRowSizes
-        where TStarts : struct, IStartCheck
-    {
-        Vector128<byte> positions = Vector128.Create((byte)0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        Vector128<byte> firstHigh = Vector128.Create((byte)0xC0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-        Vector128<byte> firstFollower = Vector128.Create((byte)0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
-        Vector128<byte> offChar = Vector128<byte>.Zero;
-        for (nint i = 0; i < count; i++)
-        {
-            nint size = TSizes.SizeAt(ref rows, i, start);
-            nint kept = Math.Min(size, Inline);
-            Vector128<byte> value = Vector128.LoadUnsafe(ref Unsafe.Add(ref heap, start)) &
-                Vector128.LessThan(positions, Vector128.Create((byte)kept));
-            if (TStarts.Checked)
-            {
-                offChar |= Vector128.Equals(value & firstHigh, firstFollower);
-            }
-
-            Vector128<byte> view = AdvSimd.ExtractVector128(Vector128.Create((uint)size).AsByte(), value, 12);
-            ulong outOfLine = size > Inline ? ulong.MaxValue : 0;
-            view = Vector128.ConditionalSelect(
-                Vector128.Create(0, outOfLine).AsByte(), Vector128.Create(0, (ulong)start << 32).AsByte(), view);
-            view.StoreUnsafe(ref Unsafe.Add(ref views, i * ViewSize));
-            start += size;
-        }
-
-        return offChar == Vector128<byte>.Zero;
-    }
-
-    /// <summary>
-    /// <see cref="CutInline{T, TSizes, TStarts}"/> on vectors, each row with sixteen bytes of heap
-    /// from its start: a row is one load of its sixteen bytes, masked to its size by a compare of
-    /// their positions against it, set behind its length by one extract, and one store.
-    /// </summary>
-    /// <remarks>
-    /// Whether a row starts off a character is gathered in a vector from the first byte of each,
-    /// masked to the size so that an empty row starts nothing, and tested once the loop is done.
-    /// </remarks>
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static bool CutInlineVector<T, TSizes, TStarts>(ref T rows, nint start, int count, ref byte heap, ref byte views)
-        where T : unmanaged
-        where TSizes : struct, IRowSizes
-        where TStarts : struct, IStartCheck
-    {
-        Vector128<byte> positions = Vector128.Create((byte)0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        Vector128<byte> firstHigh = Vector128.Create((byte)0xC0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-        Vector128<byte> firstFollower = Vector128.Create((byte)0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
-        Vector128<byte> offChar = Vector128<byte>.Zero;
-        for (nint i = 0; i < count; i++)
-        {
-            nint size = TSizes.SizeAt(ref rows, i, start);
-            Vector128<byte> value = Vector128.LoadUnsafe(ref Unsafe.Add(ref heap, start)) &
-                Vector128.LessThan(positions, Vector128.Create((byte)size));
-            if (TStarts.Checked)
-            {
-                offChar |= Vector128.Equals(value & firstHigh, firstFollower);
-            }
-
-            Vector128<byte> view = AdvSimd.ExtractVector128(Vector128.Create((uint)size).AsByte(), value, 12);
-            view.StoreUnsafe(ref Unsafe.Add(ref views, i * ViewSize));
-            start += size;
-        }
-
-        return offChar == Vector128<byte>.Zero;
     }
 
     /// <summary>
@@ -1148,10 +1040,6 @@ internal static class ViewKernels
         /// <summary>The size of row <paramref name="row"/> of a block, which starts at <paramref name="start"/>.</summary>
         static abstract nint SizeAt<T>(ref T rows, nint row, nint start)
             where T : unmanaged;
-
-        /// <summary>Where row <paramref name="row"/> - 1 of a block starts, row <paramref name="row"/> starting at <paramref name="start"/>.</summary>
-        static abstract nint StartBefore<T>(ref T rows, nint row, nint start)
-            where T : unmanaged;
     }
 
     /// <summary>Rows cut by offsets: row i ends where offset i + 1 says.</summary>
@@ -1160,10 +1048,6 @@ internal static class ViewKernels
         public static nint SizeAt<T>(ref T rows, nint row, nint start)
             where T : unmanaged =>
             (nint)Widen(Unsafe.Add(ref rows, row + 1)) - start;
-
-        public static nint StartBefore<T>(ref T rows, nint row, nint start)
-            where T : unmanaged =>
-            (nint)Widen(Unsafe.Add(ref rows, row - 1));
     }
 
     /// <summary>Rows cut by lengths: row i is length i long.</summary>
@@ -1172,10 +1056,6 @@ internal static class ViewKernels
         public static nint SizeAt<T>(ref T rows, nint row, nint start)
             where T : unmanaged =>
             (nint)Widen(Unsafe.Add(ref rows, row));
-
-        public static nint StartBefore<T>(ref T rows, nint row, nint start)
-            where T : unmanaged =>
-            start - (nint)Widen(Unsafe.Add(ref rows, row - 1));
     }
 
     /// <summary>Whether a kernel checks that each row starts on a character, as a type.</summary>

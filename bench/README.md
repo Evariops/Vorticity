@@ -31,7 +31,8 @@ classes it ran. The page's head lists the command behind each section.
 | a dictionary of strings | `-- DictGatherBenchmarks` | 20 s | `RowKernels.Gather` and `GatherMasked` on sixteen-byte views against a frozen copy of the kernels, checked against each other first, on the corpus's nullable codes, nullable values, 64-bit and 8-bit codes |
 | a datetimeparts recomposition | `-- RecomposeBenchmarks` | 10 s | `IntegerKernels.Recompose` against a frozen copy of the loop, checked against it first, on the corpus's parts and on the same values in narrow types |
 | a listview's range check | `-- ListViewValidationBenchmarks` | 10 s | `ListViewDecoder.ValidateRanges` against a frozen copy of the loop, after checking what it must refuse, on 64-bit and 32-bit offsets and sizes |
-| anything, want a direction | no argument at all | **3 min** | the sixteen default classes, 63 benchmarks, fast profile |
+| a heap cut into views | `-- ViewBuildBenchmarks` | 20 s | `ViewKernels.BuildFromOffsets` and `BuildFromLengths` against a frozen copy of the kernels, checked view for view first, on the corpus's varbin, FSST, OnPair and mixed shapes |
+| anything, want a direction | no argument at all | **3 min** | the seventeen default classes, 65 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
@@ -156,7 +157,7 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 
 ## The classes
 
-Twenty-two, and `-- --list flat` is what answers this question for real: sixteen in the default run,
+Twenty-three, and `-- --list flat` is what answers this question for real: seventeen in the default run,
 six more behind `--explore`.
 
 | class | in the default run |
@@ -168,6 +169,7 @@ six more behind `--explore`.
 | `DictGatherBenchmarks` | yes — nullable codes, nullable values, `u64` and `u8` codes, 1 024 and 131 072 rows |
 | `RecomposeBenchmarks` | yes — the corpus's parts and narrow ones, 1 024 and 131 072 rows |
 | `ListViewValidationBenchmarks` | yes — `u64`, `u32` and `i32` offsets and sizes, 1 024 and 131 072 rows |
+| `ViewBuildBenchmarks` | yes — varbin, FSST, OnPair and mixed values, 1 024 and 131 072 rows |
 | `FsstKernelBenchmarks` | yes |
 | `OnPairKernelBenchmarks` | yes |
 | `FilterKernelBenchmarks` | yes |
@@ -186,7 +188,7 @@ six more behind `--explore`.
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
 answered their question once and do not guard against anything. They stay runnable and stay out of
-the default run: 63 benchmarks become 85 with `--explore`.
+the default run: 65 benchmarks become 87 with `--explore`.
 
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went
