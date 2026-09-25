@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -207,6 +208,7 @@ internal sealed class StringBounds
 
         ReadOnlySpan<byte> views = node.Views.Span;
         ReadOnlySpan<byte> heap = node.DataBufferCount == 1 ? node.GetDataBuffer(0).Span : default;
+        ReadOnlySpan<VortexBuffer> buffers = node.DataBuffers;
         ReadOnlySpan<byte> bits = mask.AllValid ? default : mask.Bits;
         int end = start + count;
         for (int row = start; row < end; row++)
@@ -217,7 +219,7 @@ internal sealed class StringBounds
                 break;
             }
 
-            Fold(node, views, in mask, row);
+            Fold(buffers, views, in mask, row);
         }
     }
 
@@ -390,7 +392,7 @@ internal sealed class StringBounds
     ];
 
     /// <summary>Folds one row into the bounds: a row <see cref="Settled"/> stopped at.</summary>
-    private void Fold(CanonicalNode node, ReadOnlySpan<byte> views, in ValidityMask mask, int row)
+    private void Fold(ReadOnlySpan<VortexBuffer> buffers, ReadOnlySpan<byte> views, in ValidityMask mask, int row)
     {
         if (!mask.AllValid && !mask.IsValid(row))
         {
@@ -402,7 +404,7 @@ internal sealed class StringBounds
         ReadOnlySpan<byte> view = views.Slice(row * 16, 16);
         int size = BinaryPrimitives.ReadInt32LittleEndian(view);
         int length = Math.Min(size, _limit + 1);
-        ReadOnlySpan<byte> whole = size <= 12 ? view.Slice(4, 12) : BlockStatsPass.Value(node, views, row);
+        ReadOnlySpan<byte> whole = size <= 12 ? view.Slice(4, 12) : BlockStatsPass.Value(buffers, views, row);
         ReadOnlySpan<byte> value = whole[..length];
         ulong key = Key(whole, length);
         if (_minLength < 0

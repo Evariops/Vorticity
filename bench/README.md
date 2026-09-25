@@ -36,7 +36,7 @@ classes it ran. The page's head lists the command behind each section.
 | the sum of a column's lengths | `-- LengthSumBenchmarks` | 8 s | `ViewKernels.SumLengths` against the frozen copy of the view kernels, checked against it first, on `u32` and `i32` lengths |
 | a chunk's views moved into a concatenation | `-- ViewRebaseBenchmarks` | 6 s | `CanonicalConcat.RebaseInto` against a frozen copy of the copy and rebase it replaced, checked against it first, on the corpus's chunked views |
 | a writer's string zone bounds | `-- StringBoundsBenchmarks` | 15 s | `StringZones` against a frozen copy of `StringBounds`, zones of 8 192 rows compared first, on URLs sharing their first bytes, short labels and UUIDs |
-| a string column's block statistics | `-- StringStatsBenchmarks` | 15 s | `BlockStatsPass.Accumulate` against a frozen copy of the pass, compared block for block first, on sorted URLs, sorted short codes, labels and UUIDs |
+| a string column's block statistics | `-- StringStatsBenchmarks` | 15 s | `BlockStatsPass.Accumulate` against a frozen copy of the pass, compared block for block first, on sorted URLs, sorted short codes, labels, UUIDs and URLs over four data buffers |
 | a writer's dictionary of strings | `-- DictBuildBenchmarks` | 15 s | `DistinctTable` against a frozen copy of it, codes compared first, on 200 and 5 short labels, 64 out-of-line names and distinct UUIDs |
 | a writer's bit-packing decision | `-- BitPackPlanBenchmarks` | 10 s | `BitPackPlan.TryBuild` against a frozen copy of it, plans compared first, on signed, unsigned and nullable 64-bit columns and a nullable 32-bit one whose minimum it takes |
 | the stream a zstd trial compresses for a string column | `-- ZstdStreamBenchmarks` | 15 s | `ZstdPlan.StreamBytes` and `ZstdPlan.LayViews` against a frozen copy of the passes, streams compared first, on inline, out-of-line, mixed and nullable text |
@@ -186,7 +186,7 @@ six more behind `--explore`.
 | `LengthSumBenchmarks` | yes — `u32` and `i32` lengths, 1 024 and 131 072 rows |
 | `ViewRebaseBenchmarks` | yes — the corpus's chunked views, 1 024 and 131 072 rows |
 | `StringBoundsBenchmarks` | yes — URLs, labels and UUIDs, a zone and sixteen |
-| `StringStatsBenchmarks` | yes — URLs, codes, labels and UUIDs, a block and sixteen |
+| `StringStatsBenchmarks` | yes — URLs, codes, labels, UUIDs and split URLs, a block and sixteen |
 | `DictBuildBenchmarks` | yes — 200 and 5 labels, names and UUIDs, a block and a chunk |
 | `BitPackPlanBenchmarks` | yes — signed, unsigned and nullable columns, a small and a large chunk |
 | `ZstdStreamBenchmarks` | yes — five kinds of text, one block and sixteen |

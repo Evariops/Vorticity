@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 
@@ -1286,6 +1287,7 @@ internal static class BlockStatsPass
         // it. A column with several falls through to the slow pair below, which asks the node.
         bool oneHeap = node.DataBufferCount == 1;
         ReadOnlySpan<byte> heap = oneHeap ? node.GetDataBuffer(0).Span : default;
+        ReadOnlySpan<VortexBuffer> buffers = node.DataBuffers;
         bool allValid = mask.AllValid;
         bool previousValid = firstValid;
         bool tracking = !stats.OrderUntracked && !stats.Unsorted;
@@ -1356,7 +1358,7 @@ internal static class BlockStatsPass
                         ? InlineEqual(pairs[a], pairs[a + 1], pairs[b], pairs[b + 1], (int)size)
                         : (pairs[a] >> 32) == (pairs[b] >> 32) && (oneHeap
                             ? Compare(Value(views, heap, row - 1), Value(views, heap, row)) == 0
-                            : SameValue(node, views, pairs, row - 1, row)));
+                            : SameValue(buffers, views, pairs, row - 1, row)));
                 if (!same)
                 {
                     boundaries++;
@@ -1367,7 +1369,7 @@ internal static class BlockStatsPass
 
             int order = oneHeap
                 ? Order(views, heap, pairs, row - 1, row)
-                : Compare(Value(node, views, row - 1), Value(node, views, row));
+                : Compare(Value(buffers, views, row - 1), Value(buffers, views, row));
             if (order == 0)
             {
                 repeats = true;
@@ -1523,39 +1525,80 @@ internal static class BlockStatsPass
             return aSize.CompareTo(bSize);
         }
 
-        return Compare(Value(views, heap, a), Value(views, heap, b));
+        // The first four bytes were found equal in the views.
+        return Compare(Value(views, heap, a), Value(views, heap, b), from: 4);
     }
 
-    /// <summary>Two byte strings compared as <c>SequenceCompareTo</c> does, sixteen bytes a step and no call.</summary>
+    /// <summary>
+    /// Two byte strings compared as <c>SequenceCompareTo</c> does, from byte <paramref name="from"/>
+    /// on, the bytes before it known equal, and no call.
+    /// </summary>
+    /// <remarks>
+    /// Sixteen bytes a step as two word differences, which on Arm is cheaper than a vector compare
+    /// reduced to a test; the first word that differs is ordered read big-endian. The tail is the
+    /// last word of the shorter string, overlapping bytes already found equal.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int Compare(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b)
+    private static int Compare(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, int from = 0)
     {
         int shorter = Math.Min(a.Length, b.Length);
         ref byte x = ref MemoryMarshal.GetReference(a);
         ref byte y = ref MemoryMarshal.GetReference(b);
-        int i = 0;
-        for (; i <= shorter - Vector128<byte>.Count; i += Vector128<byte>.Count)
+        int i = from;
+        for (; i <= shorter - 16; i += 16)
         {
-            Vector128<byte> differ = ~Vector128.Equals(Vector128.LoadUnsafe(ref x, (nuint)i), Vector128.LoadUnsafe(ref y, (nuint)i));
-            if (differ != Vector128<byte>.Zero)
+            ulong x0 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref x, i));
+            ulong y0 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref y, i));
+            ulong x1 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref x, i + 8));
+            ulong y1 = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref y, i + 8));
+            if (((x0 ^ y0) | (x1 ^ y1)) != 0)
             {
-                int at = i + BitOperations.TrailingZeroCount(differ.ExtractMostSignificantBits());
-                return Unsafe.Add(ref x, at) < Unsafe.Add(ref y, at) ? -1 : 1;
+                return x0 != y0 ? WordOrder(x0, y0) : WordOrder(x1, y1);
             }
         }
 
-        for (; i < shorter; i++)
+        if (i < shorter)
         {
-            byte p = Unsafe.Add(ref x, i);
-            byte q = Unsafe.Add(ref y, i);
-            if (p != q)
+            if (shorter < 8)
             {
-                return p < q ? -1 : 1;
+                for (; i < shorter; i++)
+                {
+                    byte p = Unsafe.Add(ref x, i);
+                    byte q = Unsafe.Add(ref y, i);
+                    if (p != q)
+                    {
+                        return p < q ? -1 : 1;
+                    }
+                }
+            }
+            else
+            {
+                if (shorter - i > 8)
+                {
+                    ulong p = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref x, i));
+                    ulong q = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref y, i));
+                    if (p != q)
+                    {
+                        return WordOrder(p, q);
+                    }
+                }
+
+                ulong last = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref x, shorter - 8));
+                ulong other = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref y, shorter - 8));
+                if (last != other)
+                {
+                    return WordOrder(last, other);
+                }
             }
         }
 
         return a.Length.CompareTo(b.Length);
     }
+
+    /// <summary>Two words that differ, ordered as their bytes are in memory.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int WordOrder(ulong a, ulong b) =>
+        BinaryPrimitives.ReverseEndianness(a) < BinaryPrimitives.ReverseEndianness(b) ? -1 : 1;
 
     /// <summary>
     /// Whether two rows of a varbinview hold the same bytes, their views already known to differ.
@@ -1567,7 +1610,7 @@ internal static class BlockStatsPass
     /// written twice must not split a run.
     /// </remarks>
     private static bool SameValue(
-        CanonicalNode node, ReadOnlySpan<byte> views, ReadOnlySpan<ulong> pairs, int a, int b)
+        ReadOnlySpan<VortexBuffer> buffers, ReadOnlySpan<byte> views, ReadOnlySpan<ulong> pairs, int a, int b)
     {
         // The size is the view's low four bytes, so it is the low half of the first word.
         if ((uint)pairs[a * 2] != (uint)pairs[b * 2])
@@ -1575,11 +1618,18 @@ internal static class BlockStatsPass
             return false;
         }
 
-        return Value(node, views, a).SequenceEqual(Value(node, views, b));
+        return Value(buffers, views, a).SequenceEqual(Value(buffers, views, b));
     }
 
     /// <summary>One varbinview row's bytes, inline or through its data buffer.</summary>
-    internal static ReadOnlySpan<byte> Value(CanonicalNode node, ReadOnlySpan<byte> views, int row)
+    internal static ReadOnlySpan<byte> Value(CanonicalNode node, ReadOnlySpan<byte> views, int row) =>
+        Value(node.DataBuffers, views, row);
+
+    /// <summary>
+    /// The same, over the node's data buffers resolved once: a loop over rows that asks the node
+    /// for a row's buffer pays a kind check and a record lookup per row.
+    /// </summary>
+    internal static ReadOnlySpan<byte> Value(ReadOnlySpan<VortexBuffer> buffers, ReadOnlySpan<byte> views, int row)
     {
         ReadOnlySpan<byte> view = views.Slice(row * 16, 16);
         int size = BinaryPrimitives.ReadInt32LittleEndian(view);
@@ -1590,7 +1640,12 @@ internal static class BlockStatsPass
 
         int buffer = BinaryPrimitives.ReadInt32LittleEndian(view[8..12]);
         int offset = BinaryPrimitives.ReadInt32LittleEndian(view[12..16]);
-        return node.GetDataBuffer(buffer).Span.Slice(offset, size);
+        if ((uint)buffer >= (uint)buffers.Length)
+        {
+            return ArraysThrow.BufferIndex(buffer, buffers.Length).Span;
+        }
+
+        return buffers[buffer].Span.Slice(offset, size);
     }
 
     /// <summary>
@@ -1601,6 +1656,7 @@ internal static class BlockStatsPass
     /// column has exactly one. Asking the node per row costs a kind check, a bound and a span built
     /// over native memory, twice for every pair the run pass compares.
     /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ReadOnlySpan<byte> Value(
         ReadOnlySpan<byte> views, ReadOnlySpan<byte> heap, int row)
     {

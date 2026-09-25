@@ -23,7 +23,8 @@ namespace Vorticity.Benchmarks;
 /// <c>urls</c> is the per-encoding corpus FSST file's text, 52-byte URLs rising row by row, so the
 /// order stays tracked to the end and every pair shares 43 bytes; <c>codes</c> short values rising
 /// the same way, every one inline; <c>labels</c> sixteen short labels in no order; <c>uuids</c>
-/// random 36-byte text, in no order either.
+/// random 36-byte text, in no order either; <c>urls-split</c> the URLs spread over four data
+/// buffers, as a batch concatenated from several chunks holds them.
 /// </para>
 /// <para>The arms' statistics are checked against each other before anything is timed.</para>
 /// </remarks>
@@ -39,7 +40,7 @@ public class StringStatsBenchmarks
     private CanonicalArena _arena = null!;
     private int _node;
 
-    /// <summary>The text: <c>urls</c>, <c>codes</c>, <c>labels</c> or <c>uuids</c>.</summary>
+    /// <summary>The text: <c>urls</c>, <c>codes</c>, <c>labels</c>, <c>uuids</c> or <c>urls-split</c>.</summary>
     [ParamsSource(nameof(Shapes))]
     public string Shape { get; set; } = "urls";
 
@@ -48,7 +49,7 @@ public class StringStatsBenchmarks
     public int Rows { get; set; } = BlockRows;
 
     /// <summary>Every shape in every profile.</summary>
-    public static IEnumerable<string> Shapes => ["urls", "codes", "labels", "uuids"];
+    public static IEnumerable<string> Shapes => ["urls", "codes", "labels", "uuids", "urls-split"];
 
     /// <summary>One block, and a scan window of sixteen.</summary>
     public static IEnumerable<int> RowCounts => [BlockRows, 131_072];
@@ -68,7 +69,13 @@ public class StringStatsBenchmarks
         _arena = new CanonicalArena();
         DTypeArena types = new DTypeArena();
         byte[] views = new byte[Rows * 16];
-        List<byte> heap = [];
+        int heapCount = Shape == "urls-split" ? 4 : 1;
+        List<byte>[] heaps = new List<byte>[heapCount];
+        for (int h = 0; h < heapCount; h++)
+        {
+            heaps[h] = [];
+        }
+
         Span<byte> scratch = stackalloc byte[64];
         Span<byte> raw = stackalloc byte[16];
         for (int row = 0; row < Rows; row++)
@@ -77,7 +84,7 @@ public class StringStatsBenchmarks
             BinaryPrimitives.WriteUInt64LittleEndian(raw[8..], ~(ulong)row * 0xC2B2AE3D27D4EB4FUL);
             string text = Shape switch
             {
-                "urls" => string.Create(CultureInfo.InvariantCulture, $"https://example.invalid/vortex/conformance/{row:D9}"),
+                "urls" or "urls-split" => string.Create(CultureInfo.InvariantCulture, $"https://example.invalid/vortex/conformance/{row:D9}"),
                 "codes" => string.Create(CultureInfo.InvariantCulture, $"v{row:D7}"),
                 "labels" => string.Create(CultureInfo.InvariantCulture, $"label-{(row * 7) % 16:D2}"),
                 _ => new Guid(raw).ToString("D"),
@@ -91,16 +98,23 @@ public class StringStatsBenchmarks
                 continue;
             }
 
+            int buffer = row % heapCount;
             scratch[..4].CopyTo(view[4..]);
-            BinaryPrimitives.WriteUInt32LittleEndian(view[12..], (uint)heap.Count);
-            heap.AddRange(scratch[..length].ToArray());
+            BinaryPrimitives.WriteUInt32LittleEndian(view[8..], (uint)buffer);
+            BinaryPrimitives.WriteUInt32LittleEndian(view[12..], (uint)heaps[buffer].Count);
+            heaps[buffer].AddRange(scratch[..length].ToArray());
         }
 
         VortexBuffer viewBuffer = _arena.Allocate(views.Length, 16, out Span<byte> viewBytes);
         views.CopyTo(viewBytes);
-        VortexBuffer heapBuffer = _arena.Allocate(Math.Max(heap.Count, 1), 16, out Span<byte> heapBytes);
-        heap.ToArray().CopyTo(heapBytes);
-        _node = _arena.AddVarBinView(types.Utf8(Nullability.NonNullable), Rows, Validity.NonNullable, viewBuffer, [heapBuffer]);
+        VortexBuffer[] heapBuffers = new VortexBuffer[heapCount];
+        for (int h = 0; h < heapCount; h++)
+        {
+            heapBuffers[h] = _arena.Allocate(Math.Max(heaps[h].Count, 1), 16, out Span<byte> heapBytes);
+            heaps[h].ToArray().CopyTo(heapBytes);
+        }
+
+        _node = _arena.AddVarBinView(types.Utf8(Nullability.NonNullable), Rows, Validity.NonNullable, viewBuffer, heapBuffers);
 
         for (int start = 0; start < Rows; start += BlockRows)
         {

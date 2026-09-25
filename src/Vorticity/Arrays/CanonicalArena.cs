@@ -256,6 +256,20 @@ internal readonly ref struct CanonicalNode
     /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.VarBinView"/>.</exception>
     public int DataBufferCount => RequireMaterialized(CanonicalKind.VarBinView).DataBufferCount;
 
+    /// <summary>
+    /// Every data buffer the views may reference, <see cref="DataBufferCount"/> of them, for a loop
+    /// that resolves a row's buffer by its index rather than through <see cref="GetDataBuffer"/>.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.VarBinView"/>.</exception>
+    internal ReadOnlySpan<VortexBuffer> DataBuffers
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref RequireMaterialized(CanonicalKind.VarBinView);
+            return _arena.DataBufferRange(r.DataBufferStart, r.DataBufferCount);
+        }
+    }
+
     /// <summary>Data buffer <paramref name="index"/>.</summary>
     /// <param name="index">0-based, below <see cref="DataBufferCount"/>.</param>
     /// <exception cref="VortexFormatException">The kind is wrong or the index is out of range.</exception>
@@ -1313,6 +1327,14 @@ internal sealed partial class CanonicalArena
 
         return _dataBuffers[slot];
     }
+
+    /// <summary>
+    /// Data buffers <paramref name="start"/> to <paramref name="start"/> + <paramref name="count"/>.
+    /// A buffer added later may move the list, but not the entries of this span, which stay valid.
+    /// A record without buffers has no start worth reading.
+    /// </summary>
+    internal ReadOnlySpan<VortexBuffer> DataBufferRange(int start, int count) =>
+        count == 0 ? default : _dataBuffers.AsSpan(0, _dataBufferCount).Slice(start, count);
 
     private static CanonicalRecord New(CanonicalKind kind, DType dtype, int length, Validity validity)
     {

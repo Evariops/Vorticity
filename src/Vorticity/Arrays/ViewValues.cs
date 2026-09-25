@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 
 namespace Vorticity.Arrays;
 
@@ -10,27 +11,27 @@ namespace Vorticity.Arrays;
 /// </summary>
 /// <remarks>
 /// A node's accessors check its kind and look its record up each time, which a loop over its rows
-/// pays per row, twice for a value held out of line. A node of several data buffers still reads
-/// them through the accessor, which is also what refuses a view naming a buffer the node lacks.
+/// pays per row, twice for a value held out of line. A node of several data buffers reads them
+/// from their range in the arena, resolved once too.
 /// </remarks>
 internal readonly ref struct ViewValues
 {
     private const int ViewSize = 16;
     private const int InlineBytes = 12;
 
-    private readonly CanonicalNode _node;
     private readonly ReadOnlySpan<byte> _views;
     private readonly ReadOnlySpan<byte> _heap;
+    private readonly ReadOnlySpan<VortexBuffer> _buffers;
     private readonly bool _oneHeap;
 
-    /// <summary>Resolves the views and the data buffer of <paramref name="node"/>.</summary>
+    /// <summary>Resolves the views and the data buffers of <paramref name="node"/>.</summary>
     /// <param name="node">A varbinview node.</param>
     internal ViewValues(CanonicalNode node)
     {
-        _node = node;
         _views = node.Views.Span;
-        _oneHeap = node.DataBufferCount == 1;
-        _heap = _oneHeap ? node.GetDataBuffer(0).Span : default;
+        _buffers = node.DataBuffers;
+        _oneHeap = _buffers.Length == 1;
+        _heap = _oneHeap ? _buffers[0].Span : default;
     }
 
     /// <summary>The bytes of row <paramref name="row"/>: inline in its view, or in a data buffer.</summary>
@@ -47,7 +48,16 @@ internal readonly ref struct ViewValues
 
         uint buffer = BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
         uint offset = BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
-        ReadOnlySpan<byte> heap = _oneHeap && buffer == 0 ? _heap : _node.GetDataBuffer((int)buffer).Span;
-        return heap.Slice((int)offset, (int)size);
+        if (_oneHeap && buffer == 0)
+        {
+            return _heap.Slice((int)offset, (int)size);
+        }
+
+        if (buffer >= (uint)_buffers.Length)
+        {
+            return ArraysThrow.BufferIndex((int)buffer, _buffers.Length).Span;
+        }
+
+        return _buffers[(int)buffer].Span.Slice((int)offset, (int)size);
     }
 }
