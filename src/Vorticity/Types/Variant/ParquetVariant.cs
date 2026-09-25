@@ -271,10 +271,11 @@ internal static class ParquetVariant
             case DTypeKind.Primitive:
                 return dtype.PType switch
                 {
-                    PType.I8 or PType.U8 => 2,
-                    PType.I16 or PType.U16 => 3,
-                    PType.I32 or PType.U32 => 5,
-                    PType.I64 or PType.U64 => 9,
+                    PType.I8 => 2,
+                    PType.I16 => 3,
+                    PType.I32 => 5,
+                    PType.I64 => 9,
+                    PType.U8 or PType.U16 or PType.U32 or PType.U64 when SignedWidth(scalar.AsUInt64, dtype.PType) is int width and > 0 => 1 + width,
                     PType.F32 => 5,
                     PType.F64 => 9,
                     _ => -1,
@@ -346,25 +347,36 @@ internal static class ParquetVariant
         switch (ptype)
         {
             case PType.I8:
-            case PType.U8:
-                destination[0] = Primitive(3);
-                destination[1] = unchecked((byte)scalar.AsInt64);
+                WriteSigned(scalar.AsInt64, 1, destination);
                 return;
             case PType.I16:
-            case PType.U16:
-                destination[0] = Primitive(4);
-                BinaryPrimitives.WriteInt16LittleEndian(destination[1..], unchecked((short)scalar.AsInt64));
+                WriteSigned(scalar.AsInt64, 2, destination);
                 return;
             case PType.I32:
-            case PType.U32:
-                destination[0] = Primitive(5);
-                BinaryPrimitives.WriteInt32LittleEndian(destination[1..], unchecked((int)scalar.AsInt64));
+                WriteSigned(scalar.AsInt64, 4, destination);
                 return;
             case PType.I64:
-            case PType.U64:
-                destination[0] = Primitive(6);
-                BinaryPrimitives.WriteInt64LittleEndian(destination[1..], scalar.AsInt64);
+                WriteSigned(scalar.AsInt64, 8, destination);
                 return;
+            case PType.U8:
+            case PType.U16:
+            case PType.U32:
+            case PType.U64:
+            {
+                ulong value = scalar.AsUInt64;
+                int width = SignedWidth(value, ptype);
+                if (width == 0)
+                {
+                    throw new VortexUnsupportedException(
+                        "vortex.variant",
+                        VortexComponentKind.Array,
+                        $"a constant variant of {ptype.Name()} {value} has no encoding: a variant integer is signed, 64 bits at most.");
+                }
+
+                WriteSigned((long)value, width, destination);
+                return;
+            }
+
             case PType.F32:
                 destination[0] = Primitive(14);
                 BinaryPrimitives.WriteSingleLittleEndian(destination[1..], scalar.AsF32);
@@ -378,6 +390,43 @@ internal static class ParquetVariant
                     "vortex.variant",
                     VortexComponentKind.Array,
                     $"a constant variant of physical type {ptype.Name()} has no encoding here.");
+        }
+    }
+
+    /// <summary>
+    /// The bytes of the signed integer an unsigned value of <paramref name="ptype"/> is written as,
+    /// a variant having no unsigned integer: its own width when it fits, twice that when it does not,
+    /// and 0 past 64 bits.
+    /// </summary>
+    private static int SignedWidth(ulong value, PType ptype) => ptype switch
+    {
+        PType.U8 => value <= (ulong)sbyte.MaxValue ? 1 : 2,
+        PType.U16 => value <= (ulong)short.MaxValue ? 2 : 4,
+        PType.U32 => value <= int.MaxValue ? 4 : 8,
+        _ => value <= long.MaxValue ? 8 : 0,
+    };
+
+    /// <summary>Writes <paramref name="value"/> as the variant integer of <paramref name="width"/> bytes.</summary>
+    private static void WriteSigned(long value, int width, Span<byte> destination)
+    {
+        switch (width)
+        {
+            case 1:
+                destination[0] = Primitive(3);
+                destination[1] = unchecked((byte)value);
+                return;
+            case 2:
+                destination[0] = Primitive(4);
+                BinaryPrimitives.WriteInt16LittleEndian(destination[1..], unchecked((short)value));
+                return;
+            case 4:
+                destination[0] = Primitive(5);
+                BinaryPrimitives.WriteInt32LittleEndian(destination[1..], unchecked((int)value));
+                return;
+            default:
+                destination[0] = Primitive(6);
+                BinaryPrimitives.WriteInt64LittleEndian(destination[1..], value);
+                return;
         }
     }
 
