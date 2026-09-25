@@ -297,7 +297,7 @@ secondary index is excluded, since every compaction would rewrite it.
 - **The store's token** — a version id or an entity tag, or on a file system the length and the
   modification time — is recorded when the store gives one and compared as an opaque string. It is the
   only binding for a foreign file without a uid; on a file system it is a heuristic, and the entry
-  says so.
+  says so. `VortexOpenOptions.IndexFragmentsNeedIdentity` refuses a fragment bound so.
 - **The content hash is the writer's.** The writer sees every byte it emits, so an XXH3-128 of the
   object costs nothing then and is recorded in the leaf entry. **No reader computes it**: `verify`
   does, offline.
