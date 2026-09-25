@@ -24,7 +24,8 @@ namespace Vorticity.Benchmarks;
 /// order stays tracked to the end and every pair shares 43 bytes; <c>codes</c> short values rising
 /// the same way, every one inline; <c>labels</c> sixteen short labels in no order; <c>uuids</c>
 /// random 36-byte text, in no order either; <c>urls-split</c> the URLs spread over four data
-/// buffers, as a batch concatenated from several chunks holds them.
+/// buffers, as a batch concatenated from several chunks holds them; <c>ids</c> random 20-byte
+/// identifiers sharing their prefix, so the views leave every pair to the bytes.
 /// </para>
 /// <para>The arms' statistics are checked against each other before anything is timed.</para>
 /// </remarks>
@@ -40,7 +41,7 @@ public class StringStatsBenchmarks
     private CanonicalArena _arena = null!;
     private int _node;
 
-    /// <summary>The text: <c>urls</c>, <c>codes</c>, <c>labels</c>, <c>uuids</c> or <c>urls-split</c>.</summary>
+    /// <summary>The text: <c>urls</c>, <c>codes</c>, <c>labels</c>, <c>uuids</c>, <c>urls-split</c> or <c>ids</c>.</summary>
     [ParamsSource(nameof(Shapes))]
     public string Shape { get; set; } = "urls";
 
@@ -49,7 +50,7 @@ public class StringStatsBenchmarks
     public int Rows { get; set; } = BlockRows;
 
     /// <summary>Every shape in every profile.</summary>
-    public static IEnumerable<string> Shapes => ["urls", "codes", "labels", "uuids", "urls-split"];
+    public static IEnumerable<string> Shapes => ["urls", "codes", "labels", "uuids", "urls-split", "ids"];
 
     /// <summary>One block, and a scan window of sixteen.</summary>
     public static IEnumerable<int> RowCounts => [BlockRows, 131_072];
@@ -78,12 +79,14 @@ public class StringStatsBenchmarks
 
         Span<byte> scratch = stackalloc byte[64];
         Span<byte> raw = stackalloc byte[16];
+        Random random = new Random(20260925);
         for (int row = 0; row < Rows; row++)
         {
             BinaryPrimitives.WriteUInt64LittleEndian(raw, (ulong)row * 0x9E3779B97F4A7C15UL);
             BinaryPrimitives.WriteUInt64LittleEndian(raw[8..], ~(ulong)row * 0xC2B2AE3D27D4EB4FUL);
             string text = Shape switch
             {
+                "ids" => string.Create(CultureInfo.InvariantCulture, $"customer-{random.Next(100_000_000):D8}-eu"),
                 "urls" or "urls-split" => string.Create(CultureInfo.InvariantCulture, $"https://example.invalid/vortex/conformance/{row:D9}"),
                 "codes" => string.Create(CultureInfo.InvariantCulture, $"v{row:D7}"),
                 "labels" => string.Create(CultureInfo.InvariantCulture, $"label-{(row * 7) % 16:D2}"),

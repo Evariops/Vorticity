@@ -1305,8 +1305,16 @@ internal static class BlockStatsPass
                 // Past the order, the pairs the views settle are counted by a loop of their own
                 // that calls nothing; the pair it stops at is this loop's. Every row it passed
                 // was valid.
-                int settled = ViewBoundaries(
-                    pairs, bits, mask.BitOffset, start + i, start + count, ref boundaries, ref repeats) - start;
+                int settled = ViewBoundaries<ViewsOnly>(
+                    pairs, bits, mask.BitOffset, start + i, start + count, heap, ref boundaries, ref repeats);
+                if (oneHeap && settled < start + count)
+                {
+                    // Stopped at a pair only its bytes settle: the loop that reads them takes over.
+                    settled = ViewBoundaries<WithBytes>(
+                        pairs, bits, mask.BitOffset, settled, start + count, heap, ref boundaries, ref repeats);
+                }
+
+                settled -= start;
                 previousValid |= settled > i;
                 i = settled;
                 if (i == count)
@@ -1398,14 +1406,19 @@ internal static class BlockStatsPass
     /// settle the question; returns the first row they do not, or <paramref name="end"/>.
     /// </summary>
     /// <remarks>
-    /// Views settle every pair but two out-of-line values of one size, which only their bytes can
-    /// tell apart. The loop calls nothing, so that what it holds stays in registers: in the loop of
-    /// every case, the calls of the rare ones cost each row a trip through the stack.
+    /// Views settle every pair but two out-of-line values of one size and prefix, which only their
+    /// bytes can tell apart. <see cref="ViewsOnly"/> stops there; <see cref="WithBytes"/> compares
+    /// them itself over the column's one data buffer, <paramref name="heap"/>, word by word past
+    /// the prefix, and stops only at a value in another buffer or too near the end of this one.
+    /// Two bodies from one source, so that the loop of the common case keeps its own shape: the
+    /// byte compare in it slows the pairs that never reach it. The loop calls nothing, so that what
+    /// it holds stays in registers.
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static int ViewBoundaries(
+    private static int ViewBoundaries<TMode>(
         ReadOnlySpan<ulong> pairs, ReadOnlySpan<byte> bits, int bitOffset, int row, int end,
-        ref long boundaries, ref bool repeats)
+        ReadOnlySpan<byte> heap, ref long boundaries, ref bool repeats)
+        where TMode : struct
     {
         long found = 0;
         bool repeat = false;
@@ -1435,29 +1448,58 @@ internal static class BlockStatsPass
                 continue;
             }
 
-            if (size > 12)
+            if (size <= 12)
             {
-                // Two out-of-line values of one size whose views' prefixes differ are different
-                // values; only equal prefixes need the bytes.
-                if ((a0 >> 32) != (b0 >> 32))
-                {
-                    found++;
-                    continue;
-                }
+                found += InlineEqual(a0, a1, b0, b1, (int)size) ? 0 : 1;
+                continue;
+            }
 
+            // Two out-of-line values of one size whose views' prefixes differ are different values;
+            // only equal prefixes need the bytes.
+            if ((a0 >> 32) != (b0 >> 32))
+            {
+                found++;
+                continue;
+            }
+
+            if (typeof(TMode) == typeof(ViewsOnly))
+            {
                 break;
             }
 
-            if (!InlineEqual(a0, a1, b0, b1, (int)size))
+            // The low half of a view's second word is its buffer, the high half its offset.
+            long from = (long)(a1 >> 32);
+            long to = (long)(b1 >> 32);
+            if (((uint)a1 | (uint)b1) != 0 || from + size > heap.Length || to + size > heap.Length)
             {
-                found++;
+                break;
             }
+
+            // Past the prefix, a word at a time and the last word overlapping, no early exit: a
+            // value is a few words, and a branch per word would cost more than the words.
+            ref byte x = ref Unsafe.Add(ref MemoryMarshal.GetReference(heap), (nint)from + 4);
+            ref byte y = ref Unsafe.Add(ref MemoryMarshal.GetReference(heap), (nint)to + 4);
+            nint rest = (nint)size - 4;
+            ulong differ = 0;
+            for (nint k = 0; k + 8 < rest; k += 8)
+            {
+                differ |= Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref x, k)) ^ Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref y, k));
+            }
+
+            differ |= Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref x, rest - 8)) ^ Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref y, rest - 8));
+            found += differ != 0 ? 1 : 0;
         }
 
         boundaries += found;
         repeats |= repeat;
         return row;
     }
+
+    /// <summary>The <see cref="ViewBoundaries{TMode}"/> that leaves to its caller the pairs only bytes settle.</summary>
+    private readonly struct ViewsOnly;
+
+    /// <summary>The <see cref="ViewBoundaries{TMode}"/> that settles them over the column's one data buffer.</summary>
+    private readonly struct WithBytes;
 
     /// <summary>
     /// Whether two inline views of <paramref name="size"/> bytes hold the same value: their first
