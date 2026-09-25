@@ -14,4 +14,10 @@
     <EnableSingleFileAnalyzer Condition="'$(EnableSingleFileAnalyzer)' == ''">true</EnableSingleFileAnalyzer>
   </PropertyGroup>
 
+  <!-- Deterministic source paths are for what ships. Elsewhere they would rewrite every
+       [CallerFilePath] to /_/, and the tests find the corpus by walking up from their own source. -->
+  <PropertyGroup Condition="'$(IsPackable)' != 'true'">
+    <DeterministicSourcePaths>false</DeterministicSourcePaths>
+  </PropertyGroup>
+
 </Project>
