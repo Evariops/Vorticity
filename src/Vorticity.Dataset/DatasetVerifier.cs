@@ -75,7 +75,7 @@ internal static class DatasetVerifier
     {
         ArgumentNullException.ThrowIfNull(store);
         options ??= new VerifyOptions();
-        ulong version = options.Version ?? (await DatasetCommitter.LatestAsync(store, cancellationToken).ConfigureAwait(false)).Version;
+        ulong version = options.Version ?? await DatasetCommitter.NewestVersionAsync(store, cancellationToken).ConfigureAwait(false);
         if (version == 0)
         {
             throw ObjectNotFoundException.For(CommitKey.Prefix);
@@ -215,7 +215,7 @@ internal static class DatasetVerifier
                     {
                         bytes = await _pages.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false);
                     }
-                    catch (Exception unreadable) when (unreadable is CommitFormatException or ObjectNotFoundException)
+                    catch (Exception unreadable) when (unreadable is TornCommitException or ObjectNotFoundException)
                     {
                         continue;
                     }
@@ -269,9 +269,9 @@ internal static class DatasetVerifier
                 Pages++;
                 return page;
             }
-            catch (Exception unreadable) when (unreadable is CommitFormatException or ObjectNotFoundException or ArgumentOutOfRangeException)
+            catch (Exception unreadable) when (unreadable is TornCommitException or ObjectNotFoundException or ArgumentOutOfRangeException)
             {
-                Problems.Add(Invariant($"the page of version {reference.Version} at {reference.Offset}+{reference.Length}: {unreadable.Message}"));
+                Problems.Add(Invariant($"the page of version {reference.Version} at {reference.Offset}+{reference.Length}: {(unreadable is TornCommitException { InnerException: { } cause } ? cause : unreadable).Message}"));
                 return null;
             }
         }

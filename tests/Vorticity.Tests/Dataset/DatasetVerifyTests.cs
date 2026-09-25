@@ -223,9 +223,10 @@ public sealed class DatasetVerifyTests
                 await using VortexDataset reader = await VortexDataset.OpenAsync(store, Options());
                 Assert.Equal(expected, (await KeysAsync(reader.ScanBuilder())).Order());
             }
-            catch (CommitFormatException)
+            catch (TornCommitException refusal)
             {
-                // A reader that refuses is a reader that did not answer wrong.
+                // A reader that refuses is a reader that did not answer wrong, and it names the commit.
+                Assert.Equal(region.Version, refusal.Version);
                 refused++;
             }
 

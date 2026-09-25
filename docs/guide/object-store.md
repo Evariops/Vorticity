@@ -74,7 +74,9 @@ await using CountingObjectStore counting = new CountingObjectStore(memory);   //
 `FileObjectStore` maps keys to files under a root directory; its `Durable` option flushes every
 put to the device before it returns, for a store that is the system of record. Claiming a key is
 atomic there, but writing the content is not: a process that dies mid-put leaves a short object
-under a taken key, which the format detects when the object is read. `MemoryObjectStore` is a test double with the seams to prove your
+under a taken key, which the format detects when the object is read. A read that meets a put still
+writing waits for it; a commit left short throws `TornCommitException`, which names its version, and
+`VortexDataset.RemoveTornCommitAsync` removes it. `MemoryObjectStore` is a test double with the seams to prove your
 own error paths: `Fails` refuses a chosen operation, `CrashesAfterPut` throws after a put has
 landed, so the object exists and its writer never learned it, `Latency` delays every call, and
 `TimeProvider` stamps the objects it creates.

@@ -362,6 +362,40 @@ public sealed class VortexDatasetTests
         Assert.Equal(aloneReads, twiceReads);
     }
 
+    // A writer that stops before its last byte leaves a commit that is not whole under the next
+    // version's key. Every reader and writer that meets it names it, and removing it on request gives
+    // the dataset back its previous version and the number to the next commit.
+    [Fact]
+    public async Task ATornCommitIsNamedAndRemovedOnRequest()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        await writer.AppendAsync(Batches(types, schema, 0, 1_000), ct);
+        Assert.Equal(2UL, writer.Version);
+        Assert.Null(await VortexDataset.RemoveTornCommitAsync(store, ct));
+
+        string key = CommitKey.For(3);
+        await store.PutIfAbsentAsync(key, new byte[4_096], ct);
+
+        TornCommitException opened = await Assert.ThrowsAsync<TornCommitException>(
+            async () => await VortexDataset.OpenAsync(store, Options(), ct));
+        Assert.Equal((3UL, key), (opened.Version, opened.Key));
+        Assert.Contains(nameof(VortexDataset.RemoveTornCommitAsync), opened.Message, StringComparison.Ordinal);
+        TornCommitException appended = await Assert.ThrowsAsync<TornCommitException>(
+            async () => await writer.AppendAsync(Batches(types, schema, 1_000, 1_000), ct));
+        Assert.Equal(3UL, appended.Version);
+
+        Assert.Equal(3UL, await VortexDataset.RemoveTornCommitAsync(store, ct));
+        Assert.Null(await VortexDataset.RemoveTornCommitAsync(store, ct));
+        await using VortexDataset reopened = await VortexDataset.OpenAsync(store, Options(), ct);
+        Assert.Equal(2UL, reopened.Version);
+        Assert.Equal(3UL, await reopened.AppendAsync(Batches(types, schema, 1_000, 1_000), ct));
+    }
+
     // A data object is written once and never appended to, so an end that does not parse is a corrupt
     // object and not a torn append: it is refused as it stands, not walked back through window by
     // window, a request each.

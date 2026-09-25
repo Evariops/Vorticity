@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Pipelines;
@@ -12,12 +13,23 @@ using Vorticity.IO;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// An <see cref="IObjectStore"/> over a directory. Claiming a key is atomic, but writing its
-/// content is not: a process that dies mid-write leaves a short object under a taken key, which the
-/// format detects on read rather than the store preventing it.
+/// An <see cref="IObjectStore"/> over a directory. Claiming a key is atomic, but writing its content
+/// is not: a read that meets a put still writing waits for it, and a process that dies mid-write
+/// leaves a short object under a taken key. The dataset names such a commit with
+/// <see cref="TornCommitException"/>, and <see cref="VortexDataset.RemoveTornCommitAsync"/> removes it.
 /// </summary>
 public sealed class FileObjectStore : IObjectStore
 {
+    /// <summary>How long a read waits for a put that still holds its object.</summary>
+    private static readonly TimeSpan PutPatience = TimeSpan.FromSeconds(10);
+
+    /// <summary>The <c>HResult</c> of an open refused by a lock another handle holds: Windows' sharing violation, and <c>EWOULDBLOCK</c> elsewhere.</summary>
+    private const int SharingViolation = unchecked((int)0x80070020);
+
+    private const int LinuxWouldBlock = 11;
+
+    private const int BsdWouldBlock = 35;
+
     private readonly string _root;
     private bool _disposed;
 
@@ -53,7 +65,7 @@ public sealed class FileObjectStore : IObjectStore
         SafeFileHandle handle;
         try
         {
-            handle = System.IO.File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.Asynchronous);
+            handle = await OpenToReadAsync(path, key, cancellationToken).ConfigureAwait(false);
         }
         catch (FileNotFoundException cause)
         {
@@ -273,6 +285,39 @@ public sealed class FileObjectStore : IObjectStore
         _disposed = true;
         return ValueTask.CompletedTask;
     }
+
+    /// <summary>
+    /// Opens an object to read it. A put holds its object exclusively until its last byte, so a read
+    /// that meets one waits for the put to let go, and then reads the object whole.
+    /// </summary>
+    private static async ValueTask<SafeFileHandle> OpenToReadAsync(string path, string key, CancellationToken cancellationToken)
+    {
+        long started = Stopwatch.GetTimestamp();
+        int pause = 1;
+        while (true)
+        {
+            try
+            {
+                return System.IO.File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.Asynchronous);
+            }
+            catch (IOException held) when (HeldByAPut(held))
+            {
+                if (Stopwatch.GetElapsedTime(started) >= PutPatience)
+                {
+                    throw new ObjectStoreException(
+                        $"'{key}' is still being written: its put has held it for {PutPatience.TotalSeconds:0} seconds.", held);
+                }
+
+                await Task.Delay(pause, cancellationToken).ConfigureAwait(false);
+                pause = Math.Min(pause * 2, 64);
+            }
+        }
+    }
+
+    /// <summary>Whether an open failed because another handle holds the file exclusively, as a put does.</summary>
+    private static bool HeldByAPut(IOException failure) =>
+        failure.HResult == (OperatingSystem.IsWindows() ? SharingViolation
+            : OperatingSystem.IsLinux() || OperatingSystem.IsAndroid() ? LinuxWouldBlock : BsdWouldBlock);
 
     /// <summary>The object's path, under the root and never outside it.</summary>
     private string PathOf(string key)

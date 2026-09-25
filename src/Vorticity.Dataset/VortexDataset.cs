@@ -138,6 +138,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the requests.</param>
     /// <returns>The handle, pinned to the latest version until it commits or refreshes; the caller disposes it.</returns>
     /// <exception cref="ObjectNotFoundException">The store holds no dataset.</exception>
+    /// <exception cref="TornCommitException">The newest commit is not whole; <see cref="RemoveTornCommitAsync"/> removes it.</exception>
     public static async ValueTask<VortexDataset> OpenAsync(
         IObjectStore store, DatasetOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -159,6 +160,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>Moves this handle to the latest version.</summary>
     /// <param name="cancellationToken">Cancels the requests.</param>
     /// <returns>The version the handle now reads.</returns>
+    /// <exception cref="TornCommitException">The newest commit is not whole; <see cref="RemoveTornCommitAsync"/> removes it.</exception>
     public async ValueTask<ulong> RefreshAsync(CancellationToken cancellationToken = default)
     {
         (ulong version, CommitObject? commit) = await DatasetCommitter
@@ -169,6 +171,32 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         Volatile.Write(ref _snapshot, new DatasetSnapshot(commit.Header, PagesOf(_store, version, commit), _objects));
+        return version;
+    }
+
+    /// <summary>
+    /// Removes the newest commit when it is not whole, as a writer that stopped before its last byte
+    /// leaves it on a store that claims a key before it writes the object. The dataset then reads as
+    /// the version before it, and the next commit takes the number again.
+    /// </summary>
+    /// <param name="store">The store holding the dataset.</param>
+    /// <param name="cancellationToken">Cancels the requests.</param>
+    /// <returns>The version removed, or null when the newest commit is whole or there is none.</returns>
+    /// <remarks>
+    /// The commit is read whole and checked from its preamble to its trailer first. A store whose
+    /// writer still holds the object makes the read wait for it, so a commit being written is never
+    /// taken for a torn one.
+    /// </remarks>
+    public static async ValueTask<ulong?> RemoveTornCommitAsync(IObjectStore store, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        ulong version = await DatasetCommitter.NewestVersionAsync(store, cancellationToken).ConfigureAwait(false);
+        if (version == 0 || await DatasetCommitter.IsWholeAsync(store, version, cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        await store.DeleteAsync([CommitKey.For(version)], cancellationToken).ConfigureAwait(false);
         return version;
     }
 

@@ -98,7 +98,15 @@ internal sealed class CommitPageSource : IPageSource
             return fresh;
         }
 
-        byte[] page = await ReadStoredAsync(reference, cancellationToken).ConfigureAwait(false);
+        byte[] page;
+        try
+        {
+            page = await ReadStoredAsync(reference, cancellationToken).ConfigureAwait(false);
+        }
+        catch (CommitFormatException torn)
+        {
+            throw TornCommitException.Of(reference.Version, torn);
+        }
 
         // Kept because a page is immutable and a commit reads the same ones twice by construction:
         // the descent that looks a key up and the merge that rewrites its leaf are the same page.

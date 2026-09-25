@@ -11,6 +11,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Pipelines;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -228,6 +229,42 @@ public sealed class ObjectStoreContractTests : IDisposable
         Assert.Equal(PutOutcome.Created, await store.PutIfAbsentAsync("data/gone", Bytes("two"), ct));
         using ObjectRange range = await store.GetRangeAsync("data/gone", 0, 3, ct);
         Assert.Equal(Bytes("two"), range.Bytes.ToArray());
+    }
+
+    [Theory]
+    [MemberData(nameof(Stores))]
+    public async Task AReadSeesAnObjectWholeOrNotAtAll(string kind)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // A reader may meet a key a put has not finished, since the commit protocol reads the newest
+        // key it lists: it finds the object absent, or waits for its last byte, and never reads a part.
+        await using IObjectStore store = Open(kind);
+        const string key = "commit/00000000000000000001.vxc";
+        Pipe pipe = new Pipe();
+        ValueTask<PutOutcome> put = store.PutIfAbsentAsync(key, pipe.Reader, 8, ct);
+        await pipe.Writer.WriteAsync(Bytes("half"), ct);
+
+        Task<byte[]?> read = ReadWholeOrAbsentAsync(store, key, ct);
+        await pipe.Writer.WriteAsync(Bytes("done"), ct);
+        await pipe.Writer.CompleteAsync();
+        Assert.Equal(PutOutcome.Created, await put);
+
+        byte[]? seen = await read;
+        Assert.True(seen is null || seen.AsSpan().SequenceEqual(Bytes("halfdone")), seen is null ? null : Encoding.UTF8.GetString(seen));
+    }
+
+    private static async Task<byte[]?> ReadWholeOrAbsentAsync(IObjectStore store, string key, CancellationToken ct)
+    {
+        try
+        {
+            using ObjectRange range = await store.GetRangeAsync(key, 0, 64, ct);
+            return BuffersExtensions.ToArray(range.Bytes);
+        }
+        catch (ObjectNotFoundException)
+        {
+            return null;
+        }
     }
 
     [Theory]

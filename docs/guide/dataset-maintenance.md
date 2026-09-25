@@ -142,6 +142,10 @@ before. On a store where a request costs 30 ms, it is what a job takes. See
 * Compaction commits like any writer, so a concurrent writer can win the race; look at `Outcome`.
   Vacuum deletes only what no retained version references, and deletes nothing until every
   retained version is marked.
+* **A writer that dies mid-commit on `FileObjectStore` leaves a commit that is not whole.** Every
+  open and every commit then throws `TornCommitException`, which names the version;
+  `VortexDataset.RemoveTornCommitAsync(store)` removes it once no writer holds it, and the dataset
+  reads as the version before.
 * Nothing here changes the data: after all three, the same rows read back.
 
 ## Run it

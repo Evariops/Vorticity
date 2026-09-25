@@ -1790,6 +1790,12 @@ Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property OperationOutcome Outcome { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.TornCommitException : VortexException
+Vorticity.Dataset:     ctor TornCommitException()
+Vorticity.Dataset:     ctor TornCommitException(string)
+Vorticity.Dataset:     ctor TornCommitException(string, Exception)
+Vorticity.Dataset:     property string Key { get; init; }
+Vorticity.Dataset:     property ulong Version { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.VacuumOptions : IEquatable<VacuumOptions>
 Vorticity.Dataset:     ctor VacuumOptions()
 Vorticity.Dataset:     method VacuumOptions <Clone>$()
@@ -1825,6 +1831,7 @@ Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     method ValueTask<CompactionPlan> PlanCompactionAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<CompactionResult> CompactAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<DatasetVerification> VerifyAsync(Nullable<ulong> = default, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<Nullable<ulong>> RemoveTornCommitAsync(IObjectStore, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> RemoveAsync(IReadOnlyList<DataObject>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> ReplaceAsync(IReadOnlyList<DataObject>, IReadOnlyList<ObjectDraft>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VacuumResult> VacuumAsync(VacuumOptions = default, CancellationToken = default)

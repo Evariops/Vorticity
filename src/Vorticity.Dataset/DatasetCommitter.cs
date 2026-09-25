@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -168,15 +169,68 @@ internal static class DatasetCommitter
     public static async ValueTask<(ulong Version, CommitObject? Commit)> LatestAsync(
         IObjectStore store, CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(store);
-        IReadOnlyList<string> newest = await store
-            .ListAsync(CommitKey.Prefix, null, 1, cancellationToken).ConfigureAwait(false);
-        if (newest.Count == 0 || !CommitKey.TryParse(newest[0], out ulong version))
+        ulong version = await NewestVersionAsync(store, cancellationToken).ConfigureAwait(false);
+        if (version == 0)
         {
             return (0, null);
         }
 
-        return (version, await CommitObject.OpenAsync(store, newest[0], cancellationToken).ConfigureAwait(false));
+        try
+        {
+            return (version, await CommitObject.OpenAsync(store, CommitKey.For(version), cancellationToken).ConfigureAwait(false));
+        }
+        catch (CommitFormatException torn)
+        {
+            throw TornCommitException.Of(version, torn);
+        }
+    }
+
+    /// <summary>The version of the newest commit object, without opening it; 0 when there is none.</summary>
+    public static async ValueTask<ulong> NewestVersionAsync(IObjectStore store, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(store);
+        IReadOnlyList<string> newest = await store
+            .ListAsync(CommitKey.Prefix, null, 1, cancellationToken).ConfigureAwait(false);
+        return newest.Count == 1 && CommitKey.TryParse(newest[0], out ulong version) ? version : 0;
+    }
+
+    /// <summary>
+    /// Whether the commit object of <paramref name="version"/> is whole: read in full and checked from
+    /// its preamble to its trailer, which a writer that stopped early never wrote.
+    /// </summary>
+    public static async ValueTask<bool> IsWholeAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
+    {
+        string key = CommitKey.For(version);
+        ObjectHead head = await store.HeadAsync(key, cancellationToken).ConfigureAwait(false)
+            ?? throw ObjectNotFoundException.For(key);
+        if (head.Length > int.MaxValue)
+        {
+            return false;
+        }
+
+        const int Chunk = 1 << 20;
+        byte[] bytes = new byte[head.Length];
+        for (int at = 0; at < bytes.Length; at += Chunk)
+        {
+            int length = Math.Min(Chunk, bytes.Length - at);
+            using ObjectRange range = await store.GetRangeAsync(key, at, length, cancellationToken).ConfigureAwait(false);
+            if (range.Length != length)
+            {
+                return false;
+            }
+
+            range.Bytes.CopyTo(bytes.AsSpan(at));
+        }
+
+        try
+        {
+            CommitObject.Open(bytes, bytes.Length);
+            return true;
+        }
+        catch (CommitFormatException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
