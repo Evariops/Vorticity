@@ -598,16 +598,7 @@ internal static class ArrayBlobWriter
                     wide[count..].Clear();
                 }
 
-                // Two methods, neither inlined: with both loops in one body the masked path's code
-                // crowds the lanes' and slows the blocks that take them, for identical bytes.
-                if (mask.AllValid)
-                {
-                    TransformValid(values, ptype, start, count, plan, elementBits, wide);
-                }
-                else
-                {
-                    TransformMasked(values, in mask, ptype, start, count, plan, elementBits, wide);
-                }
+                TransformBlock(values, in mask, ptype, start, count, plan, elementBits, wide);
 
                 // The patches are gathered from `wide` in a loop of their own, and not from the
                 // transform loop above with a branch per row: a per-row test there costs the pack
@@ -640,6 +631,31 @@ internal static class ArrayBlobWriter
             throw new InvalidOperationException(
                 $"The width histogram counted {exceptions} values above {bitWidth} bits and the " +
                 $"pack found {found}.");
+        }
+    }
+
+    /// <summary>One block's transformed values, a null row as zero.</summary>
+    /// <param name="values">The column's values, from its first row.</param>
+    /// <param name="mask">The column's validity.</param>
+    /// <param name="ptype">The column's element type.</param>
+    /// <param name="start">The block's first row.</param>
+    /// <param name="count">The block's rows.</param>
+    /// <param name="plan">The transform and its reference.</param>
+    /// <param name="elementBits">The element width.</param>
+    /// <param name="wide">The block's transformed values.</param>
+    internal static void TransformBlock(
+        ReadOnlySpan<byte> values, in ValidityMask mask, PType ptype, int start, int count,
+        in BitPackPlan plan, int elementBits, Span<ulong> wide)
+    {
+        // Two methods, neither inlined: with both loops in one body the masked path's code crowds
+        // the lanes' and slows the blocks that take them, for identical bytes.
+        if (mask.AllValid)
+        {
+            TransformValid(values, ptype, start, count, plan, elementBits, wide);
+        }
+        else
+        {
+            TransformMasked(values, in mask, ptype, start, count, plan, elementBits, wide);
         }
     }
 
@@ -756,23 +772,34 @@ internal static class ArrayBlobWriter
         return found;
     }
 
-    /// <summary>The transform of a block that may hold nulls, row by row.</summary>
+    /// <summary>
+    /// The transform of a block that may hold nulls: <see cref="TransformValid"/> over every row,
+    /// then each row anded with its validity bit spread over the word.
+    /// </summary>
+    /// <remarks>
+    /// A null row encodes as zero under either transform: its value is never read back and a
+    /// stable zero compresses better than whatever the buffer held. Transforming the garbage and
+    /// clearing it costs less than a test per row in front of the transform.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void TransformMasked(
         ReadOnlySpan<byte> values, in ValidityMask mask, PType ptype, int start, int count,
         in BitPackPlan plan, int elementBits, Span<ulong> wide)
     {
-        for (int i = 0; i < count; i++)
+        if (mask.AllInvalid)
         {
-            int row = start + i;
+            wide[..count].Clear();
+            return;
+        }
 
-            // A null row encodes as zero under either transform: its value is never read back and
-            // a stable zero compresses better than whatever the buffer held.
-            wide[i] = mask.IsValid(row)
-                ? BitPackPlan.Encode(
-                    CompressedValues.ReadUnsigned(values, ToUnsigned(ptype), row),
-                    plan.Transform, plan.Reference, elementBits)
-                : 0;
+        TransformValid(values, ptype, start, count, plan, elementBits, wide);
+        int firstBit = mask.BitOffset + start;
+        ref byte bits = ref MemoryMarshal.GetReference(mask.Bits[..((firstBit + count + 7) >> 3)]);
+        ref ulong value = ref MemoryMarshal.GetReference(wide[..count]);
+        for (nint i = 0; i < count; i++)
+        {
+            nint at = firstBit + i;
+            Unsafe.Add(ref value, i) &= 0UL - (ulong)((Unsafe.Add(ref bits, at >> 3) >> (int)(at & 7)) & 1);
         }
     }
 
@@ -789,35 +816,87 @@ internal static class ArrayBlobWriter
 
         bool frame = transform == BitPackTransform.Frame;
         ref ulong destination = ref MemoryMarshal.GetReference(wide);
-        int i = 0;
         if (byteWidth == sizeof(ulong))
         {
             ref ulong source = ref Unsafe.Add(
                 ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, ulong>(values)), start);
-            Vector128<ulong> origin = Vector128.Create(reference);
-            for (; i + 2 <= count; i += 2)
-            {
-                Vector128<ulong> value = Vector128.LoadUnsafe(ref source, (nuint)i);
-                Vector128<ulong> encoded = frame
-                    ? value - origin
-                    : (value << 1) ^ Vector128.ShiftRightArithmetic(value.AsInt64(), 63).AsUInt64();
-                encoded.StoreUnsafe(ref destination, (nuint)i);
-            }
+            return frame
+                ? FrameLanes(ref source, ref destination, count, reference)
+                : ZigZagLanes(ref source, ref destination, count);
         }
-        else if (byteWidth == sizeof(uint))
+
+        if (byteWidth == sizeof(uint))
         {
             ref uint source = ref Unsafe.Add(
                 ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, uint>(values)), start);
-            Vector128<uint> origin = Vector128.Create(unchecked((uint)reference));
-            for (; i + 4 <= count; i += 4)
-            {
-                Vector128<uint> value = Vector128.LoadUnsafe(ref source, (nuint)i);
-                Vector128<uint> encoded = frame
-                    ? value - origin
-                    : (value << 1) ^ Vector128.ShiftRightArithmetic(value.AsInt32(), 31).AsUInt32();
-                Vector128.WidenLower(encoded).StoreUnsafe(ref destination, (nuint)i);
-                Vector128.WidenUpper(encoded).StoreUnsafe(ref destination, (nuint)(i + 2));
-            }
+            return frame
+                ? FrameLanes(ref source, ref destination, count, unchecked((uint)reference))
+                : ZigZagLanes(ref source, ref destination, count);
+        }
+
+        return 0;
+    }
+
+    // The lanes' loops, one per transform and width, two registers a step: a loop this small moves
+    // by half its time with where it lands in the code, and one unrolled holds its speed.
+
+    private static int FrameLanes(ref ulong source, ref ulong destination, int count, ulong reference)
+    {
+        Vector128<ulong> origin = Vector128.Create(reference);
+        int i = 0;
+        for (; i + 4 <= count; i += 4)
+        {
+            (Vector128.LoadUnsafe(ref source, (nuint)i) - origin).StoreUnsafe(ref destination, (nuint)i);
+            (Vector128.LoadUnsafe(ref source, (nuint)(i + 2)) - origin).StoreUnsafe(ref destination, (nuint)(i + 2));
+        }
+
+        return i;
+    }
+
+    private static int ZigZagLanes(ref ulong source, ref ulong destination, int count)
+    {
+        int i = 0;
+        for (; i + 4 <= count; i += 4)
+        {
+            Vector128<ulong> low = Vector128.LoadUnsafe(ref source, (nuint)i);
+            Vector128<ulong> high = Vector128.LoadUnsafe(ref source, (nuint)(i + 2));
+            ((low << 1) ^ Vector128.ShiftRightArithmetic(low.AsInt64(), 63).AsUInt64()).StoreUnsafe(ref destination, (nuint)i);
+            ((high << 1) ^ Vector128.ShiftRightArithmetic(high.AsInt64(), 63).AsUInt64()).StoreUnsafe(ref destination, (nuint)(i + 2));
+        }
+
+        return i;
+    }
+
+    private static int FrameLanes(ref uint source, ref ulong destination, int count, uint reference)
+    {
+        Vector128<uint> origin = Vector128.Create(reference);
+        int i = 0;
+        for (; i + 8 <= count; i += 8)
+        {
+            Vector128<uint> low = Vector128.LoadUnsafe(ref source, (nuint)i) - origin;
+            Vector128<uint> high = Vector128.LoadUnsafe(ref source, (nuint)(i + 4)) - origin;
+            Vector128.WidenLower(low).StoreUnsafe(ref destination, (nuint)i);
+            Vector128.WidenUpper(low).StoreUnsafe(ref destination, (nuint)(i + 2));
+            Vector128.WidenLower(high).StoreUnsafe(ref destination, (nuint)(i + 4));
+            Vector128.WidenUpper(high).StoreUnsafe(ref destination, (nuint)(i + 6));
+        }
+
+        return i;
+    }
+
+    private static int ZigZagLanes(ref uint source, ref ulong destination, int count)
+    {
+        int i = 0;
+        for (; i + 8 <= count; i += 8)
+        {
+            Vector128<uint> low = Vector128.LoadUnsafe(ref source, (nuint)i);
+            Vector128<uint> high = Vector128.LoadUnsafe(ref source, (nuint)(i + 4));
+            low = (low << 1) ^ Vector128.ShiftRightArithmetic(low.AsInt32(), 31).AsUInt32();
+            high = (high << 1) ^ Vector128.ShiftRightArithmetic(high.AsInt32(), 31).AsUInt32();
+            Vector128.WidenLower(low).StoreUnsafe(ref destination, (nuint)i);
+            Vector128.WidenUpper(low).StoreUnsafe(ref destination, (nuint)(i + 2));
+            Vector128.WidenLower(high).StoreUnsafe(ref destination, (nuint)(i + 4));
+            Vector128.WidenUpper(high).StoreUnsafe(ref destination, (nuint)(i + 6));
         }
 
         return i;
@@ -871,16 +950,6 @@ internal static class ArrayBlobWriter
                 return;
         }
     }
-
-    /// <remarks>
-    /// Arithmetic rather than a switch, and the enum is what makes it legitimate: U8..U64 are 0..3
-    /// and I8..I64 are 4..7, so the signed block sits exactly <c>I8</c> above the unsigned one --
-    /// the same fact <see cref="PTypeExtensions.IsSignedInteger"/> is already written from. Naming
-    /// the four mappings by hand would say nothing more and would leave every other PType to a
-    /// <c>_</c> arm that reads as a fallthrough.
-    /// </remarks>
-    private static PType ToUnsigned(PType ptype) =>
-        ptype.IsSignedInteger() ? (PType)(ptype - PType.I8) : ptype;
 
     private static ReadOnlySpan<byte> BitPackedBytes(
         Workspace blob, uint bitWidth, bool hasPatches, in PatchesMetadata patches)

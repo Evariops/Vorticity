@@ -42,7 +42,8 @@ classes it ran. The page's head lists the command behind each section.
 | the stream a zstd trial compresses for a string column | `-- ZstdStreamBenchmarks` | 15 s | `ZstdPlan.StreamBytes` and `ZstdPlan.LayViews` against a frozen copy of the passes, streams compared first, on inline, out-of-line, mixed and nullable text |
 | a validity mask's row lookup | `-- ValidityLookupBenchmarks` | 10 s | `ValidityMask.IsValid` against a frozen copy of it, asked row by row over columns without nulls, with periodic ones and with random ones |
 | a writer's statistics of an integer column | `-- IntegerStatsBenchmarks` | 15 s | `BlockStatsPass.Accumulate` against a frozen copy of the pass, statistics and histograms compared first, on random, progressing and nullable columns |
-| anything, want a direction | no argument at all | **3 min** | the twenty-seven default classes, 85 benchmarks, fast profile |
+| the transform before a block is packed | `-- TransformBenchmarks` | 10 s | `ArrayBlobWriter.TransformBlock` against a frozen copy of it, blocks compared first, on 64- and 32-bit columns with and without nulls |
+| anything, want a direction | no argument at all | **3 min** | the twenty-eight default classes, 87 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
@@ -167,7 +168,7 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 
 ## The classes
 
-Thirty-three, and `-- --list flat` is what answers this question for real: twenty-seven in the default run,
+Thirty-four, and `-- --list flat` is what answers this question for real: twenty-eight in the default run,
 six more behind `--explore`.
 
 | class | in the default run |
@@ -190,6 +191,7 @@ six more behind `--explore`.
 | `ZstdStreamBenchmarks` | yes — five kinds of text, one block and sixteen |
 | `ValidityLookupBenchmarks` | yes — three validities, one block and sixteen |
 | `IntegerStatsBenchmarks` | yes — five integer columns, one block and sixteen |
+| `TransformBenchmarks` | yes — four integer columns, a small and a large chunk |
 | `FsstKernelBenchmarks` | yes |
 | `OnPairKernelBenchmarks` | yes |
 | `FilterKernelBenchmarks` | yes |
@@ -208,7 +210,7 @@ six more behind `--explore`.
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
 answered their question once and do not guard against anything. They stay runnable and stay out of
-the default run: 85 benchmarks become 107 with `--explore`.
+the default run: 87 benchmarks become 109 with `--explore`.
 
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went
