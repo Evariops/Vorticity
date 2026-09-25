@@ -7,19 +7,14 @@ using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;
 
-namespace Vorticity.Writing;
+using Vorticity.Writing;
 
-/// <summary>Which reversible map turns a column into the unsigned one that bit-packs.</summary>
-internal enum BitPackTransform : byte
-{
-    /// <summary>Subtract the minimum. Serialized as <c>fastlanes.for</c> over the packed child.</summary>
-    Frame = 0,
-
-    /// <summary>Interleave the sign bit. Serialized as <c>vortex.zigzag</c> over the packed child.</summary>
-    ZigZag = 1,
-}
+namespace Vorticity.Benchmarks;
 
 /// <summary>
+/// The library's <c>BitPackPlan</c> as it was, copied whole and kept here unchanged as the baseline
+/// every change to it is measured against in the same process. What follows is the original's
+/// own description.
 /// A bit-packing decision: the transform, the width, and the values that did not fit. The width is
 /// not a property of the data but the minimum of a cost function — packed bytes plus what the
 /// exceptions cost as patches — and both transforms are priced under it so the cheaper wins:
@@ -28,7 +23,7 @@ internal enum BitPackTransform : byte
 /// decide and loses on columns with a huge offset but a narrow span.
 /// </summary>
 /// <remarks>A value, not an object: one is priced per integer column per chunk, and it holds nothing to share.</remarks>
-internal readonly struct BitPackPlan
+internal readonly struct BitPackPlanOriginal
 {
     /// <summary>
     /// What a frame-of-reference or zigzag node costs beyond its packed bytes: one more array
@@ -43,7 +38,7 @@ internal readonly struct BitPackPlan
     /// </summary>
     private const long PatchOverhead = 256;
 
-    private BitPackPlan(
+    private BitPackPlanOriginal(
         BitPackTransform transform, ulong reference, int bitWidth, long cost, long exceptions)
     {
         Transform = transform;
@@ -58,8 +53,8 @@ internal readonly struct BitPackPlan
     /// speak of, no exception, nothing measured. For the children of an encoding that cut its
     /// values to their widths itself, as ALP-RD does.
     /// </summary>
-    internal static BitPackPlan Fitting(int bitWidth) =>
-        new BitPackPlan(BitPackTransform.Frame, 0, bitWidth, 0, 0);
+    internal static BitPackPlanOriginal Fitting(int bitWidth) =>
+        new BitPackPlanOriginal(BitPackTransform.Frame, 0, bitWidth, 0, 0);
 
     /// <summary>Which map was chosen.</summary>
     internal BitPackTransform Transform { get; }
@@ -118,7 +113,7 @@ internal readonly struct BitPackPlan
     /// <paramref name="reference"/> is zero, and only then.
     /// </param>
     /// <returns>The plan, or <see langword="null"/> when packing does not pay.</returns>
-    internal static BitPackPlan? TryBuild(
+    internal static BitPackPlanOriginal? TryBuild(
         CanonicalArena arena, CanonicalNode node, bool zigzag = true, ulong? reference = null,
         ReadOnlySpan<int> ingested = default)
     {
@@ -202,7 +197,7 @@ internal readonly struct BitPackPlan
         }
 
         ulong transformReference = best.Transform == BitPackTransform.Frame ? minimum : 0;
-        return new BitPackPlan(
+        return new BitPackPlanOriginal(
             best.Transform, transformReference, best.BitWidth, best.Cost + NodeOverhead,
             best.Exceptions);
     }
@@ -362,7 +357,16 @@ internal readonly struct BitPackPlan
 
         if (mask.AllValid)
         {
-            BothWidths(values, reference, elementBits, frames, zigzags);
+            for (int row = 0; row < values.Length; row++)
+            {
+                T value = values[row];
+                frames[Width(unchecked(value - reference), elementBits)]++;
+                if (signed)
+                {
+                    zigzags[Width(ZigZag(value, shift), elementBits)]++;
+                }
+            }
+
             return;
         }
 
@@ -393,59 +397,6 @@ internal readonly struct BitPackPlan
             {
                 zigzags[Width(ZigZag(value, shift), elementBits)]++;
             }
-        }
-    }
-
-    /// <summary>
-    /// The framed and the zigzag widths of an all-valid column, four rows per step into four
-    /// histograms of each, as <see cref="FramedWidths"/> takes the framed ones alone.
-    /// </summary>
-    private static void BothWidths<T>(
-        ReadOnlySpan<T> values, T reference, int elementBits, Span<int> frames, Span<int> zigzags)
-        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
-    {
-        const int Lanes = 4;
-        int shift = elementBits - 1;
-        Span<int> spare = stackalloc int[65 * 2 * (Lanes - 1)];
-        spare.Clear();
-        ref int f0 = ref MemoryMarshal.GetReference(frames);
-        ref int z0 = ref MemoryMarshal.GetReference(zigzags);
-        ref int f1 = ref MemoryMarshal.GetReference(spare);
-        ref int f2 = ref Unsafe.Add(ref f1, 65);
-        ref int f3 = ref Unsafe.Add(ref f1, 130);
-        ref int z1 = ref Unsafe.Add(ref f1, 195);
-        ref int z2 = ref Unsafe.Add(ref f1, 260);
-        ref int z3 = ref Unsafe.Add(ref f1, 325);
-        ref T value = ref MemoryMarshal.GetReference(values);
-        int length = values.Length - (values.Length % Lanes);
-        int row = 0;
-        for (; row < length; row += Lanes)
-        {
-            T a = Unsafe.Add(ref value, row);
-            T b = Unsafe.Add(ref value, row + 1);
-            T c = Unsafe.Add(ref value, row + 2);
-            T d = Unsafe.Add(ref value, row + 3);
-            Unsafe.Add(ref f0, Width(unchecked(a - reference), elementBits))++;
-            Unsafe.Add(ref f1, Width(unchecked(b - reference), elementBits))++;
-            Unsafe.Add(ref f2, Width(unchecked(c - reference), elementBits))++;
-            Unsafe.Add(ref f3, Width(unchecked(d - reference), elementBits))++;
-            Unsafe.Add(ref z0, Width(ZigZag(a, shift), elementBits))++;
-            Unsafe.Add(ref z1, Width(ZigZag(b, shift), elementBits))++;
-            Unsafe.Add(ref z2, Width(ZigZag(c, shift), elementBits))++;
-            Unsafe.Add(ref z3, Width(ZigZag(d, shift), elementBits))++;
-        }
-
-        for (; row < values.Length; row++)
-        {
-            T a = Unsafe.Add(ref value, row);
-            Unsafe.Add(ref f0, Width(unchecked(a - reference), elementBits))++;
-            Unsafe.Add(ref z0, Width(ZigZag(a, shift), elementBits))++;
-        }
-
-        for (int w = 0; w < 65; w++)
-        {
-            frames[w] += Unsafe.Add(ref f1, w) + Unsafe.Add(ref f2, w) + Unsafe.Add(ref f3, w);
-            zigzags[w] += Unsafe.Add(ref z1, w) + Unsafe.Add(ref z2, w) + Unsafe.Add(ref z3, w);
         }
     }
 
