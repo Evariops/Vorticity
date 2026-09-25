@@ -1,6 +1,5 @@
 using System;
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using Vorticity.Types;
@@ -87,7 +86,14 @@ public readonly record struct VortexField(string Name, VortexType Type)
 /// </remarks>
 public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8SpanFormattable
 {
-    private static readonly ConcurrentDictionary<VortexType, VortexType> Interned = new();
+    /// <summary>
+    /// What the types kept for reuse weigh at most: a type weighs one, a field one and its name's
+    /// length, and an extension its id and metadata. Past it, a new type is not kept and compares by
+    /// structure.
+    /// </summary>
+    private const long MaxInternedWeight = 1L << 20;
+
+    private static readonly InternTable<VortexType> Interned = new InternTable<VortexType>(MaxInternedWeight);
 
     private readonly VortexField[]? _fields;
     private readonly byte[]? _metadata;
@@ -381,7 +387,21 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
         return twin;
     }
 
-    private static VortexType Intern(VortexType type) => Interned.GetOrAdd(type, type);
+    private static VortexType Intern(VortexType type) => Interned.Intern(type, type.InternWeight());
+
+    private long InternWeight()
+    {
+        long weight = 1 + (ExtensionId?.Length ?? 0) + (_metadata?.Length ?? 0);
+        if (_fields is not null)
+        {
+            foreach (VortexField field in _fields)
+            {
+                weight += 1 + field.Name.Length;
+            }
+        }
+
+        return weight;
+    }
 
     private int ComputeHash()
     {
