@@ -18,9 +18,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every kernel has a NEON path by contract, so the arm64 leg is not optional - without it
-        # that contract is untested.
-        os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest]
+        # Linux only: hosted macOS and Windows runners cost several times as much, and the one
+        # OS-specific path, the file identity behind the mapping cache, answers "cannot tell" where
+        # it has no binding. The arm64 leg stays, because every kernel has a NEON path by contract.
+        os: [ubuntu-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
