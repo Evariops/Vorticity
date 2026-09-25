@@ -16,7 +16,7 @@
 // strategy, same statistics, same MemoryDiagnoser.
 //
 // THE PROFILE IS FAST BY DEFAULT, AND `--full` IS THE EXCEPTION. A class under `Job.Default` spends its
-// time in the job, not in the kernel: FsstKernelBenchmarks reads 102 s for four cases, of which the
+// time in the job, not in the kernel: an FSST kernel class read 102 s for four cases, of which the
 // kernel is microseconds. Measured the same evening on the same three classes:
 //
 //     profile                                   Fsst (4)   Take (8)   FastLanes (4)   fidelity vs full

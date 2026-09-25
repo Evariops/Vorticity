@@ -42,7 +42,7 @@ namespace Vorticity.Benchmarks;
 [GroupBenchmarksBy(BenchmarkLogicalGroupRule.ByCategory)]
 public class VarBinFormBenchmarks
 {
-    /// <summary>Rows per operation, as <see cref="ViewKernelBenchmarks"/> uses.</summary>
+    /// <summary>Rows per operation.</summary>
     private const int Rows = 1 << 16;
 
     /// <summary>Bytes in one Arrow view.</summary>

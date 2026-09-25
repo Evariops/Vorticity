@@ -660,7 +660,7 @@ internal sealed class ZstdDecoder : ArrayDecoder
     /// Walking the set bits instead chains each value's row to the bit before it, which pays only
     /// for a word of few values, <see cref="SparseScatter"/> or fewer.
     /// </remarks>
-    internal static void Expand<T>(
+    private static void Expand<T>(
         ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length)
         where T : unmanaged, IBinaryInteger<T>
     {

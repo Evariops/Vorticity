@@ -25,28 +25,7 @@ classes it ran. The page's head lists the command behind each section.
 | you changed | you run | it costs | what it answers |
 |---|---|---|---|
 | a kernel | `-- fastlanes` (its class) | 1–8 s | did the kernel move, against the ported arm on the same clock |
-| the bit-packing unpack | `-- BitPackingBenchmarks` | 12 s | `FastLanes.UnpackBlocks` against a frozen copy of the row-at-a-time kernel and against storing the same output bare, checked value for value first, on 8 blocks whose output stays in the first-level cache and on a scan window of 128: ns/value, GB/s in and out, cycles per value. `--full` adds eight shapes, the corpus file's 977 blocks and buffers half a cache line off |
-| the FSST decode | `-- FsstDecodeBenchmarks` | 20 s | `FsstDecodeTable.Decode` against a frozen copy of the eight-codes-a-word kernel and against copying the decoded bytes, checked against the text first, on URLs, UUIDs and log lines the writer compressed, 1 024 rows and a scan window of 131 072 |
-| a varbinview's view validation | `-- ViewValidationBenchmarks` | 15 s | `VarBinViewDecoder.ValidateViews` against a frozen copy of the view-at-a-time loop, after checking what it must refuse and accept, on the corpus file's mix of inline and referencing views, all inline, all referencing |
-| a dictionary of strings | `-- DictGatherBenchmarks` | 20 s | `RowKernels.Gather` and `GatherMasked` on sixteen-byte views against a frozen copy of the kernels, checked against each other first, on the corpus's nullable codes, nullable values, 64-bit and 8-bit codes |
-| a datetimeparts recomposition | `-- RecomposeBenchmarks` | 10 s | `IntegerKernels.Recompose` against a frozen copy of the loop, checked against it first, on the corpus's parts and on the same values in narrow types |
-| a listview's range check | `-- ListViewValidationBenchmarks` | 10 s | `ListViewDecoder.ValidateRanges` against a frozen copy of the loop, after checking what it must refuse, on 64-bit and 32-bit offsets and sizes |
-| a heap cut into views | `-- ViewBuildBenchmarks` | 20 s | `ViewKernels.BuildFromOffsets` and `BuildFromLengths` against a frozen copy of the kernels, checked view for view first, on the corpus's varbin, FSST, OnPair and mixed shapes |
-| the OnPair concatenation | `-- OnPairConcatBenchmarks` | 10 s | `OnPairDecoder.Concatenate` against a frozen copy of the four-codes-a-step kernel, checked against it first, on 300 long tokens and 4 096 of every size, a node's codes and a scan window's |
-| the sum of a column's lengths | `-- LengthSumBenchmarks` | 8 s | `ViewKernels.SumLengths` against the frozen copy of the view kernels, checked against it first, on `u32` and `i32` lengths |
-| a chunk's views moved into a concatenation | `-- ViewRebaseBenchmarks` | 6 s | `CanonicalConcat.RebaseInto` against a frozen copy of the copy and rebase it replaced, checked against it first, on the corpus's chunked views |
-| a writer's string zone bounds | `-- StringBoundsBenchmarks` | 15 s | `StringZones` against a frozen copy of `StringBounds`, zones of 8 192 rows compared first, on URLs sharing their first bytes, short labels and UUIDs |
-| a string column's block statistics | `-- StringStatsBenchmarks` | 15 s | `BlockStatsPass.Accumulate` against a frozen copy of the pass, compared block for block first, on sorted URLs, sorted short codes, labels, UUIDs, URLs over four data buffers and identifiers sharing a prefix |
-| a writer's dictionary of strings | `-- DictBuildBenchmarks` | 15 s | `DistinctTable` against a frozen copy of it, codes compared first, on 200 and 5 short labels, 64 out-of-line names and distinct UUIDs |
-| a writer's bit-packing decision | `-- BitPackPlanBenchmarks` | 10 s | `BitPackPlan.TryBuild` against a frozen copy of it, plans compared first, on signed, unsigned and nullable 64-bit columns and a nullable 32-bit one whose minimum it takes |
-| the stream a zstd trial compresses for a string column | `-- ZstdStreamBenchmarks` | 15 s | `ZstdPlan.StreamBytes` and `ZstdPlan.LayViews` against a frozen copy of the passes, streams compared first, on inline, out-of-line, mixed and nullable text |
-| a validity mask's row lookup | `-- ValidityLookupBenchmarks` | 10 s | `ValidityMask.IsValid` against a frozen copy of it, asked row by row over columns without nulls, with periodic ones and with random ones |
-| a writer's statistics of an integer column | `-- IntegerStatsBenchmarks` | 15 s | `BlockStatsPass.Accumulate` against a frozen copy of the pass, statistics and histograms compared first, on random, progressing and nullable columns |
-| the transform before a block is packed | `-- TransformBenchmarks` | 10 s | `ArrayBlobWriter.TransformBlock` against a frozen copy of it, blocks compared first, on 64- and 32-bit columns with and without nulls |
-| a float column's ALP encoding | `-- AlpEncodeBenchmarks` | 10 s | `AlpPlan.TryBuild` against a frozen copy of it, plans compared first, on double and single columns with and without nulls |
-| the bytes a text column's rows name | `-- NamedBytesBenchmarks` | 10 s | `CanonicalArena.NamedBytes` against a frozen copy of the view walk, totals compared first, on out-of-line, inline and mixed views |
-| a nullable zstd column's scatter | `-- ZstdExpandBenchmarks` | 10 s | `ZstdDecoder.Expand` against a frozen copy of it, rows compared first, on 64- and 32-bit values from one null in a hundred to half |
-| anything, want a direction | no argument at all | **3 min** | the thirty-one default classes, 93 benchmarks, fast profile |
+| anything, want a direction | no argument at all | **1 min** | the four default classes, 17 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
@@ -98,7 +77,7 @@ rest, so `-- --full fastlanes` works as written. Everything else is forwarded.
 
 **`--full` runs out of process; the fast profile does not.** BenchmarkDotNet 0.16.0-preview.1 is the
 first version that can build a `net11.0` host, so the reference profile now gets process isolation
-per case, GC and runtime jobs, and `--disasm` (41 874 bytes of arm64 for `FsstKernelBenchmarks`).
+per case, GC and runtime jobs, and `--disasm`.
 It costs the host's build: `--full` on a two-case class is 2 min 10 rather than 7 s, which is why
 the fast profile stays in this process. `--full --inprocess` is the escape hatch.
 
@@ -143,9 +122,9 @@ Two routes, and they answer slightly different questions.
 ```sh
 # The whole class, through BenchmarkDotNet. Needs --full, because the disassembler needs the
 # out-of-process toolchain (bench/README's profile table). Writes <Class>-asm.md under the
-# artifacts directory: 41 874 bytes of arm64 for FsstKernelBenchmarks, in 36 s.
+# artifacts directory.
 dotnet run -c Release --project bench/Vorticity.Benchmarks -- \
-    --full --filter '*FsstKernelBenchmarks.Library*' --disasm
+    --full --filter '*FastLanesKernelBenchmarks.Vector64*' --disasm
 
 # One named method, no harness, no benchmark. Seconds, and it works in any run of anything.
 DOTNET_TieredCompilation=0 \
@@ -171,39 +150,12 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 
 ## The classes
 
-Thirty-seven, and `-- --list flat` is what answers this question for real: thirty-one in the default run,
-six more behind `--explore`.
+Ten, and `-- --list flat` is what answers this question for real: four in the default run, six more
+behind `--explore`.
 
 | class | in the default run |
 |---|---|
 | `FastLanesKernelBenchmarks` | yes — 17 bits; `--full` adds 10 and 33 |
-| `BitPackingBenchmarks` | yes — 32-bit values at 10 bits, 8 and 128 blocks; `--full` adds eight shapes, 977 blocks and misaligned buffers |
-| `FsstDecodeBenchmarks` | yes — URLs, UUIDs and log lines, 1 024 and 131 072 rows |
-| `ViewValidationBenchmarks` | yes — mixed, inline and referencing views, 1 024 and 131 072 rows |
-| `DictGatherBenchmarks` | yes — nullable codes, nullable values, `u64` and `u8` codes, 1 024 and 131 072 rows |
-| `RecomposeBenchmarks` | yes — the corpus's parts and narrow ones, 1 024 and 131 072 rows |
-| `ListViewValidationBenchmarks` | yes — `u64`, `u32` and `i32` offsets and sizes, 1 024 and 131 072 rows |
-| `ViewBuildBenchmarks` | yes — varbin, FSST, OnPair and mixed values, 1 024 and 131 072 rows |
-| `OnPairConcatBenchmarks` | yes — 300 and 4 096 tokens, 2 048 and 262 144 codes |
-| `LengthSumBenchmarks` | yes — `u32` and `i32` lengths, 1 024 and 131 072 rows |
-| `ViewRebaseBenchmarks` | yes — the corpus's chunked views, 1 024 and 131 072 rows |
-| `StringBoundsBenchmarks` | yes — URLs, labels and UUIDs, a zone and sixteen |
-| `StringStatsBenchmarks` | yes — URLs, codes, labels, UUIDs, split URLs and identifiers, a block and sixteen |
-| `DictBuildBenchmarks` | yes — 200 and 5 labels, names and UUIDs, a block and a chunk |
-| `BitPackPlanBenchmarks` | yes — signed, unsigned and nullable columns, a small and a large chunk |
-| `ZstdStreamBenchmarks` | yes — five kinds of text, one block and sixteen |
-| `ValidityLookupBenchmarks` | yes — three validities, one block and sixteen |
-| `IntegerStatsBenchmarks` | yes — five integer columns, one block and sixteen |
-| `TransformBenchmarks` | yes — four integer columns, a small and a large chunk |
-| `AlpEncodeBenchmarks` | yes — four float columns, a small and a large chunk |
-| `NamedBytesBenchmarks` | yes — three kinds of views, a window and a batch |
-| `ZstdExpandBenchmarks` | yes — four validities, a small and a large window |
-| `FsstKernelBenchmarks` | yes |
-| `OnPairKernelBenchmarks` | yes |
-| `FilterKernelBenchmarks` | yes |
-| `BitmapKernelBenchmarks` | yes |
-| `RowKernelBenchmarks` | yes |
-| `ViewKernelBenchmarks` | yes |
 | `RowEncodingBenchmarks` | yes |
 | `CompressorBenchmarks` | yes |
 | `LanesBenchmarks` | yes |
@@ -216,7 +168,7 @@ six more behind `--explore`.
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
 answered their question once and do not guard against anything. They stay runnable and stay out of
-the default run: 93 benchmarks become 115 with `--explore`.
+the default run: 17 benchmarks become 39 with `--explore`.
 
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went

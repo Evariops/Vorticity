@@ -10,7 +10,7 @@
 //     public static (long Rows, long Bytes) BenchmarkWork(string method, IReadOnlyDictionary<…> p)
 //
 // which takes the ARM's name and the case's parameters, and returns the work one invocation does.
-// The arm's name is not optional: `ViewKernelBenchmarks` declared one byte count for the class and
+// The arm's name is not optional: a view kernel class declared one byte count for the class and its
 // `require ascending` came out at 292 GB/s, which this machine cannot do -- that arm reads the
 // offsets and nothing else, where `build views` moves the heap and the views. A wrong GB/s is worse
 // than no GB/s, because it looks like a measurement. Static and

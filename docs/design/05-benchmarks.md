@@ -124,12 +124,12 @@ a ceiling (`--throughput --take`, `--throughput --write`):
   gather, no scatter. The kernel walks a block a packed word at a time, keeping the word in
   registers for every row inside it; what a step does depends on the width alone and is laid out
   once per width, so no branch looks at the data. The scalar loop stays as fallback and oracle
-  (`FastLanesKernelBenchmarks` and `BitPackingBenchmarks` on the benchmark page).
+  (`FastLanesKernelBenchmarks` on the benchmark page).
 * **FSST and OnPair: one wide store per symbol.** A symbol of one to eight bytes is written as one
   unaligned 8-byte store, and the output advances by its real length; an OnPair token of up to 16
   bytes, as one `Vector128` store. An exact copy only where the slack runs out at the end of a
   buffer. Checking that every code names a symbol and stays inside the destination costs next to
-  nothing against the bare loop (`FsstKernelBenchmarks`).
+  nothing against the bare loop.
 * **Zstd: a frame per block, and only the frames a take needs.** Our writer compresses a zstd column
   a block of 8 192 rows to a frame, and our reader inflates only the frames that hold the rows it is
   asked for.

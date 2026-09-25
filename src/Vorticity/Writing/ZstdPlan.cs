@@ -35,7 +35,7 @@ internal readonly struct ZstdPlan
     private const int Reach = 44;
 
     /// <summary>Bytes past a stream's end that <see cref="LayViews"/> writes over.</summary>
-    internal const int StreamSlack = 48;
+    private const int StreamSlack = 48;
 
     private readonly int[] _frames;
 
@@ -150,7 +150,7 @@ internal readonly struct ZstdPlan
     /// <param name="arena">The arena holding the node.</param>
     /// <param name="node">A varbinview node.</param>
     /// <param name="valueCount">Its valid values.</param>
-    internal static long StreamBytes(CanonicalArena arena, CanonicalNode node, out int valueCount)
+    private static long StreamBytes(CanonicalArena arena, CanonicalNode node, out int valueCount)
     {
         int rows = node.Length;
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
@@ -191,7 +191,7 @@ internal readonly struct ZstdPlan
     /// <param name="frames">Per block, the end of its values in the stream and the values up to it, cumulative.</param>
     /// <param name="blocks">Blocks of the node.</param>
     /// <param name="frameRows">Rows of a block.</param>
-    internal static void LayViews(
+    private static void LayViews(
         CanonicalArena arena, CanonicalNode node, Span<byte> stream, Span<int> frames, int blocks, int frameRows)
     {
         int rows = node.Length;

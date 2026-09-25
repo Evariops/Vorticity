@@ -643,7 +643,7 @@ internal static class ArrayBlobWriter
     /// <param name="plan">The transform and its reference.</param>
     /// <param name="elementBits">The element width.</param>
     /// <param name="wide">The block's transformed values.</param>
-    internal static void TransformBlock(
+    private static void TransformBlock(
         ReadOnlySpan<byte> values, in ValidityMask mask, PType ptype, int start, int count,
         in BitPackPlan plan, int elementBits, Span<ulong> wide)
     {
