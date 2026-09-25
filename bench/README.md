@@ -29,7 +29,8 @@ classes it ran. The page's head lists the command behind each section.
 | the FSST decode | `-- FsstDecodeBenchmarks` | 20 s | `FsstDecodeTable.Decode` against a frozen copy of the eight-codes-a-word kernel and against copying the decoded bytes, checked against the text first, on URLs, UUIDs and log lines the writer compressed, 1 024 rows and a scan window of 131 072 |
 | a varbinview's view validation | `-- ViewValidationBenchmarks` | 15 s | `VarBinViewDecoder.ValidateViews` against a frozen copy of the view-at-a-time loop, after checking what it must refuse and accept, on the corpus file's mix of inline and referencing views, all inline, all referencing |
 | a dictionary of strings | `-- DictGatherBenchmarks` | 20 s | `RowKernels.Gather` and `GatherMasked` on sixteen-byte views against a frozen copy of the kernels, checked against each other first, on the corpus's nullable codes, nullable values, 64-bit and 8-bit codes |
-| anything, want a direction | no argument at all | **3 min** | the fourteen default classes, 59 benchmarks, fast profile |
+| a datetimeparts recomposition | `-- RecomposeBenchmarks` | 10 s | `IntegerKernels.Recompose` against a frozen copy of the loop, checked against it first, on the corpus's parts and on the same values in narrow types |
+| anything, want a direction | no argument at all | **3 min** | the fifteen default classes, 61 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
@@ -154,7 +155,7 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 
 ## The classes
 
-Twenty, and `-- --list flat` is what answers this question for real: fourteen in the default run,
+Twenty-one, and `-- --list flat` is what answers this question for real: fifteen in the default run,
 six more behind `--explore`.
 
 | class | in the default run |
@@ -164,6 +165,7 @@ six more behind `--explore`.
 | `FsstDecodeBenchmarks` | yes — URLs, UUIDs and log lines, 1 024 and 131 072 rows |
 | `ViewValidationBenchmarks` | yes — mixed, inline and referencing views, 1 024 and 131 072 rows |
 | `DictGatherBenchmarks` | yes — nullable codes, nullable values, `u64` and `u8` codes, 1 024 and 131 072 rows |
+| `RecomposeBenchmarks` | yes — the corpus's parts and narrow ones, 1 024 and 131 072 rows |
 | `FsstKernelBenchmarks` | yes |
 | `OnPairKernelBenchmarks` | yes |
 | `FilterKernelBenchmarks` | yes |
@@ -182,7 +184,7 @@ six more behind `--explore`.
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
 answered their question once and do not guard against anything. They stay runnable and stay out of
-the default run: 59 benchmarks become 81 with `--explore`.
+the default run: 61 benchmarks become 83 with `--explore`.
 
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went

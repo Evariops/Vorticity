@@ -300,17 +300,40 @@ internal static class IntegerKernels
         where TC : unmanaged, IBinaryInteger<TC>
     {
         int count = destination.Length;
-        ReadOnlySpan<TA> sa = MemoryMarshal.Cast<byte, TA>(a)[..count];
-        ReadOnlySpan<TB> sb = MemoryMarshal.Cast<byte, TB>(b)[..count];
-        ReadOnlySpan<TC> sc = MemoryMarshal.Cast<byte, TC>(c)[..count];
 
-        for (int i = 0; i < count; i++)
+        // Sliced to the row count here, so every index below is in range: four rows a step, each a
+        // load of each part and two multiply-adds, and no bounds check or loop test between them.
+        ref TA sa = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, TA>(a)[..count]);
+        ref TB sb = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, TB>(b)[..count]);
+        ref TC sc = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, TC>(c)[..count]);
+        ref long into = ref MemoryMarshal.GetReference(destination);
+
+        // The cursors move rather than an index being formed per row, so each load is at a constant
+        // offset from its cursor.
+        int i = 0;
+        for (; i <= count - 4; i += 4)
         {
-            destination[i] = unchecked(
-                (long.CreateTruncating(sa[i]) * scaleA) +
-                (long.CreateTruncating(sb[i]) * scaleB) +
-                long.CreateTruncating(sc[i]));
+            into = Row(ref sa, ref sb, ref sc, 0, scaleA, scaleB);
+            Unsafe.Add(ref into, 1) = Row(ref sa, ref sb, ref sc, 1, scaleA, scaleB);
+            Unsafe.Add(ref into, 2) = Row(ref sa, ref sb, ref sc, 2, scaleA, scaleB);
+            Unsafe.Add(ref into, 3) = Row(ref sa, ref sb, ref sc, 3, scaleA, scaleB);
+            sa = ref Unsafe.Add(ref sa, 4);
+            sb = ref Unsafe.Add(ref sb, 4);
+            sc = ref Unsafe.Add(ref sc, 4);
+            into = ref Unsafe.Add(ref into, 4);
         }
+
+        for (int k = 0; i < count; i++, k++)
+        {
+            Unsafe.Add(ref into, k) = Row(ref sa, ref sb, ref sc, k, scaleA, scaleB);
+        }
+
+        // Two multiply-adds: the subseconds plus the seconds scaled, plus the days scaled.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static long Row(ref TA sa, ref TB sb, ref TC sc, int k, long scaleA, long scaleB) => unchecked(
+            long.CreateTruncating(Unsafe.Add(ref sc, k)) +
+            (long.CreateTruncating(Unsafe.Add(ref sb, k)) * scaleB) +
+            (long.CreateTruncating(Unsafe.Add(ref sa, k)) * scaleA));
     }
 
     // CreateTruncating, never CreateChecked or CreateSaturating: the reference widens with Rust's
