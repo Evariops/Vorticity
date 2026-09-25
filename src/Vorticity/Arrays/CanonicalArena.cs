@@ -1,6 +1,8 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -1469,16 +1471,42 @@ internal sealed partial class CanonicalArena
     }
 
     /// <summary>The heap bytes <paramref name="rows"/> views name: the length of each that is not inline.</summary>
-    private static long ViewedBytes(ReadOnlySpan<byte> views, int rows)
+    /// <remarks>
+    /// Every view of a batch's text columns, once per batch: on Arm, four views a load with their
+    /// sizes gathered into one register, masked to the out-of-line ones and added widening into
+    /// sixty-four-bit lanes, eight views a step on two sums.
+    /// </remarks>
+    private static unsafe long ViewedBytes(ReadOnlySpan<byte> views, int rows)
     {
         const int ViewSize = Decoders.Canonical.CanonicalSupport.ViewSize;
         const uint MaxInline = Decoders.Canonical.CanonicalSupport.MaxInlineViewLength;
 
-        ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(views[..(rows * ViewSize)]);
+        ReadOnlySpan<byte> used = views[..(rows * ViewSize)];
         long bytes = 0;
-        for (int row = 0; row < words.Length; row += ViewSize / sizeof(uint))
+        int row = 0;
+        if (AdvSimd.Arm64.IsSupported)
         {
-            uint length = words[row];
+            fixed (byte* from = used)
+            {
+                Vector128<uint> inline = Vector128.Create(MaxInline);
+                Vector128<ulong> first = Vector128<ulong>.Zero;
+                Vector128<ulong> second = Vector128<ulong>.Zero;
+                for (; row <= rows - 8; row += 8)
+                {
+                    Vector128<uint> a = AdvSimd.Arm64.Load4xVector128AndUnzip((uint*)(from + (row * ViewSize))).Value1;
+                    Vector128<uint> b = AdvSimd.Arm64.Load4xVector128AndUnzip((uint*)(from + ((row + 4) * ViewSize))).Value1;
+                    first = AdvSimd.AddPairwiseWideningAndAdd(first, a & Vector128.GreaterThan(a, inline));
+                    second = AdvSimd.AddPairwiseWideningAndAdd(second, b & Vector128.GreaterThan(b, inline));
+                }
+
+                bytes = (long)Vector128.Sum(first + second);
+            }
+        }
+
+        ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(used);
+        for (int word = row * (ViewSize / sizeof(uint)); word < words.Length; word += ViewSize / sizeof(uint))
+        {
+            uint length = words[word];
             bytes += length > MaxInline ? length : 0u;
         }
 
