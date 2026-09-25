@@ -43,7 +43,8 @@ classes it ran. The page's head lists the command behind each section.
 | a validity mask's row lookup | `-- ValidityLookupBenchmarks` | 10 s | `ValidityMask.IsValid` against a frozen copy of it, asked row by row over columns without nulls, with periodic ones and with random ones |
 | a writer's statistics of an integer column | `-- IntegerStatsBenchmarks` | 15 s | `BlockStatsPass.Accumulate` against a frozen copy of the pass, statistics and histograms compared first, on random, progressing and nullable columns |
 | the transform before a block is packed | `-- TransformBenchmarks` | 10 s | `ArrayBlobWriter.TransformBlock` against a frozen copy of it, blocks compared first, on 64- and 32-bit columns with and without nulls |
-| anything, want a direction | no argument at all | **3 min** | the twenty-eight default classes, 87 benchmarks, fast profile |
+| a float column's ALP encoding | `-- AlpEncodeBenchmarks` | 10 s | `AlpPlan.TryBuild` against a frozen copy of it, plans compared first, on double and single columns with and without nulls |
+| anything, want a direction | no argument at all | **3 min** | the twenty-nine default classes, 89 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
@@ -168,7 +169,7 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 
 ## The classes
 
-Thirty-four, and `-- --list flat` is what answers this question for real: twenty-eight in the default run,
+Thirty-five, and `-- --list flat` is what answers this question for real: twenty-nine in the default run,
 six more behind `--explore`.
 
 | class | in the default run |
@@ -192,6 +193,7 @@ six more behind `--explore`.
 | `ValidityLookupBenchmarks` | yes — three validities, one block and sixteen |
 | `IntegerStatsBenchmarks` | yes — five integer columns, one block and sixteen |
 | `TransformBenchmarks` | yes — four integer columns, a small and a large chunk |
+| `AlpEncodeBenchmarks` | yes — four float columns, a small and a large chunk |
 | `FsstKernelBenchmarks` | yes |
 | `OnPairKernelBenchmarks` | yes |
 | `FilterKernelBenchmarks` | yes |
@@ -210,7 +212,7 @@ six more behind `--explore`.
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
 answered their question once and do not guard against anything. They stay runnable and stay out of
-the default run: 87 benchmarks become 109 with `--explore`.
+the default run: 89 benchmarks become 111 with `--explore`.
 
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went

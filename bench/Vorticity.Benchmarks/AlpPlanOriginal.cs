@@ -1,7 +1,5 @@
 using System;
 using System.Buffers;
-using System.Numerics;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
@@ -9,9 +7,14 @@ using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;
 
-namespace Vorticity.Writing;
+using Vorticity.Writing;
+
+namespace Vorticity.Benchmarks;
 
 /// <summary>
+/// A frozen copy of the library's ALP plan as it was, kept as the baseline of
+/// <see cref="AlpEncodeBenchmarks"/>.
+/// <para>
 /// One column encoded with ALP: the exponents, the integers, and the exceptions. A float with few
 /// significant digits scales to a small integer that bit-packs like any other, and the encoder's
 /// whole job is choosing the pair of exponents; a value is encoded only when decoding its integer
@@ -20,15 +23,16 @@ namespace Vorticity.Writing;
 /// on purpose: <c>-0.0</c> must not round-trip to <c>+0.0</c> and a NaN must not round-trip to a
 /// different NaN, or the writer would silently change values that compare equal without being the
 /// same.
+/// </para>
 /// </summary>
-internal readonly struct AlpPlan
+internal readonly struct AlpPlanOriginal
 {
     private readonly byte[] _encoded;
     private readonly int[] _patchIndices;
     private readonly byte[] _patchValues;
     private readonly int _patchWidth;
 
-    private AlpPlan(
+    private AlpPlanOriginal(
         byte exponentE, byte exponentF, byte[] encoded, int encodedLength, PType encodedPType,
         int[] patchIndices, byte[] patchValues, int patchCount, int patchWidth, long encodedSize)
     {
@@ -137,7 +141,7 @@ internal readonly struct AlpPlan
     /// <param name="nodeIndex">A canonical Primitive node of F32 or F64.</param>
     /// <param name="plain">What the column costs written as it is.</param>
     /// <returns>The plan, or null.</returns>
-    internal static AlpPlan? TryBuild(CanonicalArena arena, int nodeIndex, long plain)
+    internal static AlpPlanOriginal? TryBuild(CanonicalArena arena, int nodeIndex, long plain)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         return node.PType switch
@@ -148,7 +152,7 @@ internal readonly struct AlpPlan
         };
     }
 
-    private static AlpPlan? BuildDouble(CanonicalArena arena, CanonicalNode node, long plain)
+    private static AlpPlanOriginal? BuildDouble(CanonicalArena arena, CanonicalNode node, long plain)
     {
         int rows = node.Length;
         ReadOnlySpan<double> values = MemoryMarshal.Cast<byte, double>(node.Values.Span)[..rows];
@@ -184,8 +188,8 @@ internal readonly struct AlpPlan
         try
         {
         long? fill = null;
-        int done = !mask.AllInvalid && Vector128.IsHardwareAccelerated
-            ? LanesDouble(values, encoded, e, f, LaneValidity(in mask, rows), mask.BitOffset, indices, patches, ref patchCount, ref fill)
+        int done = mask.AllValid && Vector128.IsHardwareAccelerated
+            ? LanesDouble(values, encoded, e, f, indices, patches, ref patchCount, ref fill)
             : 0;
 
         for (int i = done; i < rows; i++)
@@ -225,7 +229,7 @@ internal readonly struct AlpPlan
             return null;
         }
 
-        AlpPlan plan = new AlpPlan(
+        AlpPlanOriginal plan = new AlpPlanOriginal(
             (byte)e, (byte)f, encodedBytes, encodedLength, PType.I64,
             RentedCopy(indices.AsSpan(0, patchCount)),
             RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
@@ -244,7 +248,7 @@ internal readonly struct AlpPlan
         }
     }
 
-    private static AlpPlan? BuildSingle(CanonicalArena arena, CanonicalNode node, long plain)
+    private static AlpPlanOriginal? BuildSingle(CanonicalArena arena, CanonicalNode node, long plain)
     {
         int rows = node.Length;
         ReadOnlySpan<float> values = MemoryMarshal.Cast<byte, float>(node.Values.Span)[..rows];
@@ -266,8 +270,8 @@ internal readonly struct AlpPlan
         try
         {
         int? fill = null;
-        int done = !mask.AllInvalid && Vector128.IsHardwareAccelerated
-            ? LanesSingle(values, encoded, e, f, LaneValidity(in mask, rows), mask.BitOffset, indices, patches, ref patchCount, ref fill)
+        int done = mask.AllValid && Vector128.IsHardwareAccelerated
+            ? LanesSingle(values, encoded, e, f, indices, patches, ref patchCount, ref fill)
             : 0;
 
         for (int i = done; i < rows; i++)
@@ -302,7 +306,7 @@ internal readonly struct AlpPlan
             return null;
         }
 
-        AlpPlan plan = new AlpPlan(
+        AlpPlanOriginal plan = new AlpPlanOriginal(
             (byte)e, (byte)f, encodedBytes, encodedLength, PType.I32,
             RentedCopy(indices.AsSpan(0, patchCount)),
             RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
@@ -339,20 +343,18 @@ internal readonly struct AlpPlan
     }
 
     /// <summary>
-    /// The encode loop, two doubles per step: scale, round, convert, convert back, and compare the
-    /// bit patterns, as the scalar loop does per row.
+    /// The encode loop of an all-valid column, two doubles per step: scale, round, convert,
+    /// convert back, and compare the bit patterns, as the scalar loop does per row.
     /// </summary>
     /// <remarks>
     /// The same arithmetic in the same order, element-wise, so every lane rounds as the scalar row
     /// would: the products are left to right, and <see cref="Vector128.ConvertToInt64(Vector128{double})"/>
     /// saturates and sends a NaN to zero, which is <see cref="ToInt64(double)"/>. A lane that does
     /// not come back is a patch; its integer is stored anyway and <see cref="FillGaps"/> overwrites it.
-    /// A null lane is encoded like the others, its garbage never a patch nor the filler, and
-    /// <see cref="FillGaps"/> overwrites it too.
     /// </remarks>
     /// <returns>The rows handled: the largest multiple of two.</returns>
     private static int LanesDouble(
-        ReadOnlySpan<double> values, Span<long> encoded, int e, int f, ReadOnlySpan<byte> bits, int bitOffset,
+        ReadOnlySpan<double> values, Span<long> encoded, int e, int f,
         int[] indices, double[] patches, ref int patchCount, ref long? fill)
     {
         int length = values.Length & ~1;
@@ -363,8 +365,6 @@ internal readonly struct AlpPlan
         Vector128<double> sweet = Vector128.Create((double)((1UL << 52) + (1UL << 51)));
         ref double source = ref MemoryMarshal.GetReference(values);
         ref long destination = ref MemoryMarshal.GetReference(encoded);
-        bool masked = !bits.IsEmpty;
-        ref byte bit = ref MemoryMarshal.GetReference(bits);
         int patched = patchCount;
         for (int i = 0; i < length; i += 2)
         {
@@ -373,19 +373,13 @@ internal readonly struct AlpPlan
             Vector128<double> decoded = (Vector128.ConvertToDouble(integer) * back) * backInverse;
             integer.StoreUnsafe(ref destination, (nuint)i);
             uint same = Vector128.Equals(decoded.AsInt64(), value.AsInt64()).ExtractMostSignificantBits();
-            uint valid = masked ? LaneBits(ref bit, bitOffset + i, 2) : 0b11;
-            if ((valid & ~same) == 0 && fill.HasValue)
+            if (same == 0b11 && fill.HasValue)
             {
                 continue;
             }
 
             for (int lane = 0; lane < 2; lane++)
             {
-                if ((valid & (1u << lane)) == 0)
-                {
-                    continue;
-                }
-
                 if ((same & (1u << lane)) != 0)
                 {
                     fill ??= integer.GetElement(lane);
@@ -405,7 +399,7 @@ internal readonly struct AlpPlan
     /// <summary>The single-precision form of <see cref="LanesDouble"/>, four floats per step.</summary>
     /// <returns>The rows handled: the largest multiple of four.</returns>
     private static int LanesSingle(
-        ReadOnlySpan<float> values, Span<int> encoded, int e, int f, ReadOnlySpan<byte> bits, int bitOffset,
+        ReadOnlySpan<float> values, Span<int> encoded, int e, int f,
         int[] indices, float[] patches, ref int patchCount, ref int? fill)
     {
         int length = values.Length & ~3;
@@ -416,8 +410,6 @@ internal readonly struct AlpPlan
         Vector128<float> sweet = Vector128.Create((float)((1 << 23) + (1 << 22)));
         ref float source = ref MemoryMarshal.GetReference(values);
         ref int destination = ref MemoryMarshal.GetReference(encoded);
-        bool masked = !bits.IsEmpty;
-        ref byte bit = ref MemoryMarshal.GetReference(bits);
         int patched = patchCount;
         for (int i = 0; i < length; i += 4)
         {
@@ -426,19 +418,13 @@ internal readonly struct AlpPlan
             Vector128<float> decoded = (Vector128.ConvertToSingle(integer) * back) * backInverse;
             integer.StoreUnsafe(ref destination, (nuint)i);
             uint same = Vector128.Equals(decoded.AsInt32(), value.AsInt32()).ExtractMostSignificantBits();
-            uint valid = masked ? LaneBits(ref bit, bitOffset + i, 4) : 0b1111;
-            if ((valid & ~same) == 0 && fill.HasValue)
+            if (same == 0b1111 && fill.HasValue)
             {
                 continue;
             }
 
             for (int lane = 0; lane < 4; lane++)
             {
-                if ((valid & (1u << lane)) == 0)
-                {
-                    continue;
-                }
-
                 if ((same & (1u << lane)) != 0)
                 {
                     fill ??= integer.GetElement(lane);
@@ -489,57 +475,19 @@ internal readonly struct AlpPlan
         _ => float.IsNaN(value) ? 0 : (int)value,
     };
 
-    /// <summary>
-    /// The validity of <paramref name="lanes"/> rows from bit <paramref name="at"/>, lane <c>k</c>
-    /// at bit <c>k</c>, as the lanes' equality mask holds them.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint LaneBits(ref byte bits, int at, int lanes)
-    {
-        uint valid = 0;
-        for (int lane = 0; lane < lanes; lane++)
-        {
-            int position = at + lane;
-            valid |= (uint)((Unsafe.Add(ref bits, position >> 3) >> (position & 7)) & 1) << lane;
-        }
-
-        return valid;
-    }
-
-    /// <summary>The validity bitmap the lanes read, covering the rows; empty when no row is null.</summary>
-    private static ReadOnlySpan<byte> LaneValidity(in ValidityMask mask, int rows) =>
-        mask.AllValid ? default : mask.Bits[..((mask.BitOffset + rows + 7) >> 3)];
-
-    /// <summary>
-    /// The patched rows and the null ones take <paramref name="filler"/>: a null row's slot keeps
-    /// what the lanes wrote only when its validity bit says so, a select rather than a branch.
-    /// </summary>
     private static void FillGaps<T>(Span<T> encoded, ReadOnlySpan<int> indices, ValidityMask mask, int rows, T filler)
-        where T : unmanaged
     {
         foreach (int index in indices)
         {
             encoded[index] = filler;
         }
 
-        if (mask.AllValid)
+        for (int i = 0; i < rows; i++)
         {
-            return;
-        }
-
-        if (mask.AllInvalid)
-        {
-            encoded[..rows].Fill(filler);
-            return;
-        }
-
-        ref byte bits = ref MemoryMarshal.GetReference(mask.Bits[..((mask.BitOffset + rows + 7) >> 3)]);
-        ref T slot = ref MemoryMarshal.GetReference(encoded[..rows]);
-        for (nint i = 0; i < rows; i++)
-        {
-            nint at = mask.BitOffset + i;
-            bool valid = ((Unsafe.Add(ref bits, at >> 3) >> (int)(at & 7)) & 1) != 0;
-            Unsafe.Add(ref slot, i) = valid ? Unsafe.Add(ref slot, i) : filler;
+            if (!mask.IsValid(i))
+            {
+                encoded[i] = filler;
+            }
         }
     }
 
@@ -569,68 +517,28 @@ internal readonly struct AlpPlan
 
         if (intWidth == sizeof(long))
         {
-            (long min, long max) = Extent(MemoryMarshal.Cast<T, long>(encoded));
+            ReadOnlySpan<long> values = MemoryMarshal.Cast<T, long>(encoded);
+            long min = long.MaxValue;
+            long max = long.MinValue;
+            foreach (long value in values)
+            {
+                min = Math.Min(min, value);
+                max = Math.Max(max, value);
+            }
+
             return unchecked((ulong)max) - unchecked((ulong)min);
         }
 
-        (int lo, int hi) = Extent(MemoryMarshal.Cast<T, int>(encoded));
+        ReadOnlySpan<int> ints = MemoryMarshal.Cast<T, int>(encoded);
+        int lo = int.MaxValue;
+        int hi = int.MinValue;
+        foreach (int value in ints)
+        {
+            lo = Math.Min(lo, value);
+            hi = Math.Max(hi, value);
+        }
+
         return unchecked((ulong)(uint)hi) - unchecked((ulong)(uint)lo);
-    }
-
-    /// <summary>The least and the greatest of <paramref name="values"/>, four registers of each at a time.</summary>
-    private static (T Min, T Max) Extent<T>(ReadOnlySpan<T> values)
-        where T : unmanaged, IBinaryInteger<T>, IMinMaxValue<T>
-    {
-        T min = T.MaxValue;
-        T max = T.MinValue;
-        ref T value = ref MemoryMarshal.GetReference(values);
-        int lanes = Vector128<T>.Count;
-        int i = 0;
-        if (Vector128.IsHardwareAccelerated && values.Length >= 4 * lanes)
-        {
-            Vector128<T> low0 = Vector128.Create(T.MaxValue);
-            Vector128<T> low1 = low0;
-            Vector128<T> low2 = low0;
-            Vector128<T> low3 = low0;
-            Vector128<T> high0 = Vector128.Create(T.MinValue);
-            Vector128<T> high1 = high0;
-            Vector128<T> high2 = high0;
-            Vector128<T> high3 = high0;
-            for (; i <= values.Length - (4 * lanes); i += 4 * lanes)
-            {
-                Vector128<T> a = Vector128.LoadUnsafe(ref value, (nuint)i);
-                Vector128<T> b = Vector128.LoadUnsafe(ref value, (nuint)(i + lanes));
-                Vector128<T> c = Vector128.LoadUnsafe(ref value, (nuint)(i + (2 * lanes)));
-                Vector128<T> d = Vector128.LoadUnsafe(ref value, (nuint)(i + (3 * lanes)));
-                low0 = Vector128.Min(low0, a);
-                low1 = Vector128.Min(low1, b);
-                low2 = Vector128.Min(low2, c);
-                low3 = Vector128.Min(low3, d);
-                high0 = Vector128.Max(high0, a);
-                high1 = Vector128.Max(high1, b);
-                high2 = Vector128.Max(high2, c);
-                high3 = Vector128.Max(high3, d);
-            }
-
-            Vector128<T> low = Vector128.Min(Vector128.Min(low0, low1), Vector128.Min(low2, low3));
-            Vector128<T> high = Vector128.Max(Vector128.Max(high0, high1), Vector128.Max(high2, high3));
-            for (int lane = 0; lane < lanes; lane++)
-            {
-                T x = low.GetElement(lane);
-                T y = high.GetElement(lane);
-                min = x < min ? x : min;
-                max = y > max ? y : max;
-            }
-        }
-
-        for (; i < values.Length; i++)
-        {
-            T x = Unsafe.Add(ref value, i);
-            min = x < min ? x : min;
-            max = x > max ? x : max;
-        }
-
-        return (min, max);
     }
 
     // ------------------------------------------------------------------------- exponent search
