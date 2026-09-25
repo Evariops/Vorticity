@@ -704,6 +704,24 @@ internal sealed class ArrayDecodeContext
 
     // ------------------------------------------------------------------------------ internals
 
+    /// <summary>
+    /// Counts <paramref name="byteLength"/> bytes a decode of this batch produces, or stands for,
+    /// against <see cref="VortexReadOptions.MaxBatchDecompressedSize"/>.
+    /// </summary>
+    /// <param name="byteLength">What one decode materializes, already within its own ceiling.</param>
+    /// <exception cref="VortexFormatException">The batch would pass its ceiling.</exception>
+    /// <remarks>Counted on the scan context, in 64-byte units rounded up, where it takes no room this context would add to every scan.</remarks>
+    internal void ChargeBatch(int byteLength)
+    {
+        long units = _scan.BatchDecoded + ((byteLength + 63L) >> 6);
+        if (units << 6 > Options.MaxBatchDecompressedSize)
+        {
+            ThrowOverBatch(Options.MaxBatchDecompressedSize);
+        }
+
+        _scan.BatchDecoded = (int)Math.Min(units, int.MaxValue);
+    }
+
     internal void ResetBatch()
     {
         _depth = 0;
@@ -846,6 +864,13 @@ internal sealed class ArrayDecodeContext
     private static void ThrowLength(ulong value, string encodingId, string what) =>
         throw new VortexFormatException(
             $"{encodingId} {what} is {value}, which does not fit a 32-bit length.");
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
+    private static void ThrowOverBatch(long ceiling) =>
+        throw new VortexFormatException(
+            $"The batch would materialize more than the {ceiling}-byte " +
+            "ceiling of VortexOpenOptions.MaxBatchDecompressedSize.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     [DoesNotReturn]

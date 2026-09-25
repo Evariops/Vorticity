@@ -702,6 +702,12 @@ internal sealed class ScanContext : IDisposable
     /// </remarks>
     internal int WindowSpan { get; set; }
 
+    /// <summary>
+    /// What the decodes of the batch in flight have produced, or stand for, in 64-byte units: the
+    /// most the arena rounds an allocation up to, which lets an <see cref="int"/> count 128 GiB.
+    /// </summary>
+    internal int BatchDecoded { get; set; }
+
     /// <summary>The table of retained chunks, created at the first claim; a context running alone reads a few columns.</summary>
     private RetainedChunks Retained => _retained ??= new RetainedChunks(columns: 3, lanes: 1);
 
@@ -1232,6 +1238,7 @@ internal sealed class ScanContext : IDisposable
         PredicateAnswered = false;
         WindowLead = 0;
         WindowSpan = 0;
+        BatchDecoded = 0;
         Segments.Release();
         _scratchNodes.Reset();
         _memory?.Blobs?.NextBatch();

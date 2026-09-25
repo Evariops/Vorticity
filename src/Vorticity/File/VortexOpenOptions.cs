@@ -33,8 +33,13 @@ public enum VortexTornTailPolicy : byte
 public sealed record VortexOpenOptions
 {
     private readonly int _initialReadSize = 65_536;
-    private readonly long? _length;
+
+    /// <summary>The file length, or -1 for unknown.</summary>
+    private readonly long _length = -1;
     private readonly long _maxDecompressedSize = VortexLimits.DefaultMaxDecompressedSize;
+
+    /// <summary>The batch ceiling, or 0 for none, a value no ceiling takes: a nullable would widen the record.</summary>
+    private readonly long _maxBatchDecompressedSize;
     private readonly VortexReadOptions? _read;
 
     /// <summary>The defaults.</summary>
@@ -56,7 +61,7 @@ public sealed record VortexOpenOptions
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     public long? Length
     {
-        get => _length;
+        get => _length < 0 ? null : _length;
         init
         {
             if (value is < 0)
@@ -64,7 +69,7 @@ public sealed record VortexOpenOptions
                 throw new ArgumentOutOfRangeException(nameof(value), value, "A file length is not negative.");
             }
 
-            _length = value;
+            _length = value ?? -1;
         }
     }
 
@@ -89,6 +94,28 @@ public sealed record VortexOpenOptions
         }
     }
 
+    /// <summary>The most bytes the decodes of one batch may produce together, across its columns; null, the default, sets no such ceiling.</summary>
+    /// <remarks>
+    /// <see cref="MaxDecompressedSize"/> bounds each decode, so a file of many columns, each declared
+    /// to decode near that ceiling, bounds a batch only at the ceiling times the columns. A service
+    /// that reads files it does not trust sets this as well; a batch past it throws
+    /// <see cref="VortexFormatException"/>.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
+    public long? MaxBatchDecompressedSize
+    {
+        get => _maxBatchDecompressedSize == 0 ? null : _maxBatchDecompressedSize;
+        init
+        {
+            if (value is <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(value), value, "A ceiling is positive.");
+            }
+
+            _maxBatchDecompressedSize = value ?? 0;
+        }
+    }
+
     /// <summary>Index fragments built for this file elsewhere, consulted with its own indexes.</summary>
     public ImmutableArray<IndexFragment> IndexFragments { get; init; }
 
@@ -102,8 +129,8 @@ public sealed record VortexOpenOptions
     /// <summary><see cref="Length"/> as the engine reads it: -1 for unknown.</summary>
     internal long FileLength
     {
-        get => _length ?? -1;
-        init => _length = value < 0 ? null : value;
+        get => _length;
+        init => _length = value < 0 ? -1 : value;
     }
 
     /// <summary>Whether disposing the file leaves a caller's source open.</summary>
@@ -127,6 +154,7 @@ public sealed record VortexOpenOptions
             : new VortexReadOptions
             {
                 MaxDecompressedSize = MaxDecompressedSize,
+                MaxBatchDecompressedSize = MaxBatchDecompressedSize ?? long.MaxValue,
                 VerifyStatistics = VerifyStatistics,
                 IndexCacheBytes = IndexCacheBytes,
                 IndexFragments = Fragments(IndexFragments),
@@ -137,6 +165,7 @@ public sealed record VortexOpenOptions
     /// <summary>Whether every value the read policy takes from these options is its default.</summary>
     private bool ReadsAsDefault =>
         MaxDecompressedSize == VortexLimits.DefaultMaxDecompressedSize
+        && MaxBatchDecompressedSize is null
         && !VerifyStatistics
         && IndexCacheBytes == VortexReadOptions.DefaultIndexCacheBytes
         && IndexFragments.IsDefaultOrEmpty;

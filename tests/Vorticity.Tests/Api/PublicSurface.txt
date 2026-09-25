@@ -1336,6 +1336,7 @@ Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
 Vorticity:     property ImmutableArray<IndexFragment> IndexFragments { get; init; }
 Vorticity:     property Nullable<long> Length { get; init; }
+Vorticity:     property Nullable<long> MaxBatchDecompressedSize { get; init; }
 Vorticity:     property VortexSchema Schema { get; init; }
 Vorticity:     property VortexTornTailPolicy TornTail { get; init; }
 Vorticity:     property bool VerifyStatistics { get; init; }

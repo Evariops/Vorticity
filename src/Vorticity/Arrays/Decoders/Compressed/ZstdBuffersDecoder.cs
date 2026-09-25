@@ -117,6 +117,7 @@ internal sealed class ZstdBuffersDecoder : ArrayDecoder
             }
 
             int alignment = alignments[i] <= 0 ? 1 : alignments[i];
+            context.ChargeBatch((int)size);
             VortexBuffer destination = context.Canonical.Allocate(
                 (int)size, alignment, out Span<byte> writable);
 

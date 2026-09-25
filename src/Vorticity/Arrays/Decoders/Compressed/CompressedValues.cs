@@ -889,6 +889,7 @@ internal static class CompressedValues
                 $"{ceiling}-byte decompression ceiling.");
         }
 
+        ctx.ChargeBatch(byteLength);
         return ctx.Canonical.AllocateUninitialized(byteLength, alignment, out destination);
     }
     /// <summary>
@@ -934,6 +935,7 @@ internal static class CompressedValues
                 $"{ceiling}-byte decompression ceiling.");
         }
 
+        ctx.ChargeBatch(byteLength);
         return ctx.Canonical.Allocate(byteLength, alignment, out destination);
     }
 

@@ -9,7 +9,12 @@ namespace Vorticity.File;
 /// </summary>
 internal sealed class VortexReadOptions
 {
-    private readonly long _maxDecompressedSize = VortexLimits.DefaultMaxDecompressedSize;
+    /// <summary>
+    /// The per-decode ceiling, kept as an <see cref="int"/>: a decode produces buffers of an
+    /// <see cref="int"/>'s length at most, which a larger ceiling bounds no further.
+    /// </summary>
+    private readonly int _maxDecompressedSize = (int)VortexLimits.DefaultMaxDecompressedSize;
+    private readonly long _maxBatchDecompressedSize = long.MaxValue;
     private readonly long _indexCacheBytes = DefaultIndexCacheBytes;
 
     /// <summary>The default of <see cref="IndexCacheBytes"/>: 64 MiB.</summary>
@@ -29,7 +34,22 @@ internal sealed class VortexReadOptions
         init
         {
             ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
-            _maxDecompressedSize = value;
+            _maxDecompressedSize = (int)Math.Min(value, int.MaxValue);
+        }
+    }
+
+    /// <summary>
+    /// Ceiling on the bytes the decodes of one batch may produce together, across its columns;
+    /// <see cref="long.MaxValue"/>, none, by default.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
+    public long MaxBatchDecompressedSize
+    {
+        get => _maxBatchDecompressedSize;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            _maxBatchDecompressedSize = value;
         }
     }
 

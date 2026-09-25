@@ -87,6 +87,12 @@ first decode the sample makes produces 131 072 bytes, which is why 4 096 is refu
 is plenty. Lower the ceiling for input you did not write; raise it only for a file you trust whose
 chunks are genuinely large, such as long text values.
 
+`VortexOpenOptions.MaxBatchDecompressedSize` bounds what the decodes of one batch produce together,
+across its columns. It is off by default: a thousand columns each decoding near the ceiling above
+make a batch a thousand times that, which is legitimate for a wide table you wrote and a bomb in a
+file you did not. Set it for input you do not trust, at a few times the widest batch you expect;
+a batch past it throws `VortexFormatException`.
+
 ## Statistics are claims
 
 A file's statistics and zone maps are what the writer said about the values, and the reader
@@ -130,7 +136,8 @@ before scanning.
 ## Watch out
 
 * **The ceiling is per decode, not per scan.** A scan that decodes a thousand blocks of 1 MiB never
-  approaches a 256 MiB ceiling; one block that claims 300 MiB trips it.
+  approaches a 256 MiB ceiling; one block that claims 300 MiB trips it. The batch ceiling, when
+  set, adds the decodes of a batch's columns together, and starts again at the next batch.
 * The open reads the file's tail in one request of `InitialReadSize` bytes, 64 KiB by default and
   never less; a footer larger than that costs a second read, not a refusal.
 * `IndexCacheBytes` on the session bounds what each open file keeps of decoded index runs. It is a

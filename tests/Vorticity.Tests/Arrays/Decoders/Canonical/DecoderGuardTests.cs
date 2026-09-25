@@ -201,6 +201,45 @@ public sealed class DecoderGuardTests
         GC.KeepAlive(segment);
     }
 
+    // Four columns of 128 i64 rows stand for 1024 bytes each: each at the ceiling of one decode,
+    // together past a batch ceiling of three.
+    [Fact]
+    public void MaxBatchDecompressedSizeBoundsTheColumnsOfABatchTogether()
+    {
+        BlobBuilder b = new BlobBuilder();
+        BlobNode node = new BlobNode("vortex.struct").WithChildren(Constant(b), Constant(b), Constant(b), Constant(b));
+        PinnedSegment segment = b.Build(node);
+
+        using ScanContext narrow = new ScanContext(
+            TestEncodings.Ids, new VortexReadOptions { MaxDecompressedSize = 1024, MaxBatchDecompressedSize = 3 * 1024 });
+        ArrayBlobReader.Load(narrow.Nodes, segment.Buffer, narrow.ArrayEncodings);
+        VortexFormatException error = Assert.Throws<VortexFormatException>(
+            () => narrow.Decode.Decode(narrow.Nodes.Root, FourLongs(narrow), 128));
+        Assert.Contains("MaxBatchDecompressedSize", error.Message, StringComparison.Ordinal);
+
+        using ScanContext wide = new ScanContext(
+            TestEncodings.Ids, new VortexReadOptions { MaxDecompressedSize = 1024, MaxBatchDecompressedSize = 4 * 1024 });
+        for (int batch = 0; batch < 2; batch++)
+        {
+            // Each batch starts from nothing.
+            wide.ResetBatch();
+            ArrayBlobReader.Load(wide.Nodes, segment.Buffer, wide.ArrayEncodings);
+            int index = wide.Decode.Decode(wide.Nodes.Root, FourLongs(wide), 128);
+            Assert.Equal(CanonicalKind.Struct, wide.Canonical.GetNode(index).Kind);
+        }
+
+        GC.KeepAlive(segment);
+
+        static BlobNode Constant(BlobBuilder b) =>
+            new BlobNode("vortex.constant").WithBuffers(b.AddBuffer(TestMetadata.ScalarInt64(1)));
+
+        static DType FourLongs(ScanContext scan)
+        {
+            DType i64 = scan.Types.Primitive(PType.I64, Nullability.NonNullable);
+            return scan.Types.Struct(["a", "b", "c", "d"], [i64, i64, i64, i64], Nullability.NonNullable);
+        }
+    }
+
     [Fact]
     public void ResetBatchLetsTheSameContextDecodeAgain()
     {

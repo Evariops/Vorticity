@@ -98,6 +98,8 @@ internal static class CanonicalSupport
         {
             ThrowOverBudget(byteLength, context.Options.MaxDecompressedSize);
         }
+
+        context.ChargeBatch(byteLength);
     }
 
     /// <summary>Requires <paramref name="dtype"/> to be of <paramref name="kind"/>.</summary>

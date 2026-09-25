@@ -194,6 +194,16 @@ public sealed class VortexFileResourceTests
     }
 
     [Fact]
+    public void ABatchHasNoDecompressionCeilingUnlessAsked()
+    {
+        Assert.Null(VortexOpenOptions.Default.MaxBatchDecompressedSize);
+        Assert.Equal(long.MaxValue, VortexOpenOptions.Default.Read.MaxBatchDecompressedSize);
+        Assert.Equal(4096, new VortexOpenOptions { MaxBatchDecompressedSize = 4096 }.Read.MaxBatchDecompressedSize);
+        Assert.Throws<ArgumentOutOfRangeException>(() => new VortexOpenOptions { MaxBatchDecompressedSize = 0 });
+        Assert.Throws<ArgumentOutOfRangeException>(() => new VortexReadOptions { MaxBatchDecompressedSize = -1 });
+    }
+
+    [Fact]
     public async Task ReadOptionsReachTheOpenFile()
     {
         VortexReadOptions read = new VortexReadOptions { VerifyStatistics = true, MaxDecompressedSize = 1024 };
