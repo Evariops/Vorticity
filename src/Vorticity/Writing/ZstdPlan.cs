@@ -2,6 +2,9 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Compression;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -24,6 +27,15 @@ internal readonly struct ZstdPlan
 {
     /// <summary>Numbers kept per frame: its end in <see cref="Data"/>, the bytes it decompresses to, its values.</summary>
     private const int FrameFields = 3;
+
+    private const int ViewSize = 16;
+    private const int InlineBytes = 12;
+    private const int Block = 16;
+    /// <summary>Bytes of a value <see cref="Blend"/> writes without a loop: twelve in the first block, then two more blocks.</summary>
+    private const int Reach = 44;
+
+    /// <summary>Bytes past a stream's end that <see cref="LayViews"/> writes over.</summary>
+    internal const int StreamSlack = 48;
 
     private readonly int[] _frames;
 
@@ -106,29 +118,8 @@ internal readonly struct ZstdPlan
         bool anyGain)
     {
         int rows = node.Length;
-        long streamBytes = 0;
-        int valueCount = 0;
-
-        // The validity kind is a property of the node, so it is resolved once rather than switched
-        // on per row.
-        ValidityReader valid = ValidityReader.Of(arena, node.Validity);
-        ViewValues strings = new ViewValues(node);
-        for (int i = 0; i < rows; i++)
-        {
-            if (!valid.IsValid(i))
-            {
-                continue;
-            }
-
-            valueCount++;
-            streamBytes += sizeof(uint) + strings.At(i).Length;
-            if (streamBytes > int.MaxValue)
-            {
-                return null;
-            }
-        }
-
-        if (valueCount == 0)
+        long streamBytes = StreamBytes(arena, node, out int valueCount);
+        if (valueCount == 0 || streamBytes > int.MaxValue - StreamSlack)
         {
             return null;
         }
@@ -137,37 +128,11 @@ internal readonly struct ZstdPlan
         // candidate that may lose. A block's frame ends where its values end, so the stream is cut
         // as it is laid out: its end and its values, per block, go into the frame table.
         int blocks = Blocks(rows, frameRows);
-        byte[] stream = ArrayPool<byte>.Shared.Rent((int)streamBytes);
+        byte[] stream = ArrayPool<byte>.Shared.Rent((int)streamBytes + StreamSlack);
         int[] frames = ArrayPool<int>.Shared.Rent(blocks * FrameFields);
         try
         {
-            // The copy is the encoding: the wire form is `u32 length` then the bytes, value after
-            // value, and the column's views point at bytes that are neither contiguous nor
-            // length-prefixed, so there is nothing to compress in place.
-            int offset = 0;
-            int values = 0;
-            for (int block = 0; block < blocks; block++)
-            {
-                int end = (int)Math.Min((long)(block + 1) * frameRows, rows);
-                for (int i = (int)Math.Min((long)block * frameRows, rows); i < end; i++)
-                {
-                    if (!valid.IsValid(i))
-                    {
-                        continue;
-                    }
-
-                    ReadOnlySpan<byte> value = strings.At(i);
-                    BinaryPrimitives.WriteUInt32LittleEndian(stream.AsSpan(offset, sizeof(uint)), (uint)value.Length);
-                    offset += sizeof(uint);
-                    value.CopyTo(stream.AsSpan(offset));
-                    offset += value.Length;
-                    values++;
-                }
-
-                frames[(block * FrameFields) + 1] = offset;
-                frames[(block * FrameFields) + 2] = values;
-            }
-
+            LayViews(arena, node, stream, frames, blocks, frameRows);
             return Compress(
                 workspace, stream.AsSpan(0, (int)streamBytes), frames, blocks,
                 canonicalSize, anyGain ? 1 : MarginNumerator, anyGain ? 1 : MarginDenominator);
@@ -175,6 +140,330 @@ internal readonly struct ZstdPlan
         finally
         {
             ArrayPool<byte>.Shared.Return(stream);
+        }
+    }
+
+    /// <summary>
+    /// The bytes the stream of a <c>VarBinView</c> node's valid values takes, each behind its
+    /// <c>u32</c> length, read from the views' sizes alone.
+    /// </summary>
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="node">A varbinview node.</param>
+    /// <param name="valueCount">Its valid values.</param>
+    internal static long StreamBytes(CanonicalArena arena, CanonicalNode node, out int valueCount)
+    {
+        int rows = node.Length;
+        ValidityReader valid = ValidityReader.Of(arena, node.Validity);
+        if (rows == 0 || valid.IsAllInvalid)
+        {
+            valueCount = 0;
+            return 0;
+        }
+
+        ref byte views = ref MemoryMarshal.GetReference(node.Views.Span[..(rows * ViewSize)]);
+        if (valid.IsAllValid)
+        {
+            valueCount = rows;
+            return Sizes(ref views, rows) + ((long)rows * sizeof(uint));
+        }
+
+        ReadOnlySpan<byte> bits = valid.Bits[..((valid.BitOffset + rows + 7) >> 3)];
+        return MaskedSizes(ref views, ref MemoryMarshal.GetReference(bits), valid.BitOffset, rows, out valueCount);
+    }
+
+    /// <summary>
+    /// Lays a <c>VarBinView</c> node's valid values out as the frames store them, each behind its
+    /// <c>u32</c> length, and describes where each block of <paramref name="frameRows"/> rows ends.
+    /// </summary>
+    /// <remarks>
+    /// The copy is the encoding: the column's views point at bytes that are neither contiguous nor
+    /// length-prefixed, so there is nothing to compress in place. An inline view already is the
+    /// wire form, its size then its bytes, and a value in the data buffer is its size then 16-byte
+    /// blocks of it: both are written past the value, over what the next one writes, hence
+    /// <see cref="StreamSlack"/>.
+    /// </remarks>
+    /// <param name="arena">The arena holding the node.</param>
+    /// <param name="node">A varbinview node.</param>
+    /// <param name="stream">
+    /// At least <see cref="StreamBytes"/> plus <see cref="StreamSlack"/> bytes; the bytes past the
+    /// stream are garbage afterwards.
+    /// </param>
+    /// <param name="frames">Per block, the end of its values in the stream and the values up to it, cumulative.</param>
+    /// <param name="blocks">Blocks of the node.</param>
+    /// <param name="frameRows">Rows of a block.</param>
+    internal static void LayViews(
+        CanonicalArena arena, CanonicalNode node, Span<byte> stream, Span<int> frames, int blocks, int frameRows)
+    {
+        int rows = node.Length;
+        ValidityReader valid = ValidityReader.Of(arena, node.Validity);
+        if (valid.IsAllInvalid)
+        {
+            frames[..(blocks * FrameFields)].Clear();
+            return;
+        }
+
+        ViewValues strings = new ViewValues(node);
+        ReadOnlySpan<byte> views = node.Views.Span[..(rows * ViewSize)];
+        ReadOnlySpan<byte> heap = node.DataBufferCount == 1 ? node.GetDataBuffer(0).Span : default;
+        bool masked = !valid.IsAllValid;
+        ReadOnlySpan<byte> bits = masked ? valid.Bits[..((valid.BitOffset + rows + 7) >> 3)] : default;
+        ref byte view = ref MemoryMarshal.GetReference(views);
+        ref byte data = ref MemoryMarshal.GetReference(heap);
+        ref byte into = ref MemoryMarshal.GetReference(stream);
+        ref byte bit = ref MemoryMarshal.GetReference(bits);
+        nint at = 0;
+        int values = 0;
+        for (int block = 0; block < blocks; block++)
+        {
+            nint row = (nint)Math.Min((long)block * frameRows, rows);
+            nint end = (nint)Math.Min((long)(block + 1) * frameRows, rows);
+            while (true)
+            {
+                row = masked
+                    ? heap.Length >= Reach
+                        ? BlendMasked(ref view, ref data, heap.Length, ref into, ref at, ref bit, valid.BitOffset, row, end, ref values)
+                        : LayMasked(ref view, ref data, heap.Length, ref into, ref at, ref bit, valid.BitOffset, row, end, ref values)
+                    : heap.Length >= Reach
+                        ? Blend(ref view, ref data, heap.Length, ref into, ref at, row, end)
+                        : Lay(ref view, ref data, heap.Length, ref into, ref at, row, end);
+                if (row == end)
+                {
+                    break;
+                }
+
+                // A value the loop left: in another data buffer, or too near the end of its own for
+                // a 16-byte read. The accessor resolves the buffer and refuses a view out of it.
+                ReadOnlySpan<byte> value = strings.At((int)row);
+                Span<byte> slot = stream[(int)at..];
+                BinaryPrimitives.WriteUInt32LittleEndian(slot, (uint)value.Length);
+                value.CopyTo(slot[sizeof(uint)..]);
+                at += sizeof(uint) + value.Length;
+                values++;
+                row++;
+            }
+
+            if (!masked)
+            {
+                values = (int)end;
+            }
+
+            frames[(block * FrameFields) + 1] = (int)at;
+            frames[(block * FrameFields) + 2] = values;
+        }
+    }
+
+    /// <summary>The sizes of <paramref name="rows"/> views, summed into four totals so no add waits on the one before.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static long Sizes(ref byte views, int rows)
+    {
+        ulong a = 0;
+        ulong b = 0;
+        ulong c = 0;
+        ulong d = 0;
+        nint row = 0;
+        for (; row <= rows - 4; row += 4)
+        {
+            ref byte at = ref Unsafe.Add(ref views, row * ViewSize);
+            a += Unsafe.ReadUnaligned<uint>(ref at);
+            b += Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref at, ViewSize));
+            c += Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref at, 2 * ViewSize));
+            d += Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref at, 3 * ViewSize));
+        }
+
+        for (; row < rows; row++)
+        {
+            a += Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref views, row * ViewSize));
+        }
+
+        return (long)(a + b + c + d);
+    }
+
+    /// <summary><see cref="Sizes"/> over the valid rows alone: a null row's view is garbage, so its size counts for nothing.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static long MaskedSizes(ref byte views, ref byte bits, int bitOffset, int rows, out int valueCount)
+    {
+        ulong total = 0;
+        nint count = 0;
+        for (nint row = 0; row < rows; row++)
+        {
+            nint at = row + bitOffset;
+            nint valid = (Unsafe.Add(ref bits, at >> 3) >> (int)(at & 7)) & 1;
+            total += (ulong)(nint)(((nint)Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref views, row * ViewSize)) + sizeof(uint)) & -valid);
+            count += valid;
+        }
+
+        valueCount = (int)count;
+        return (long)total;
+    }
+
+    /// <summary>
+    /// <see cref="Lay"/> without a branch between inline and out-of-line values, which text of
+    /// mixed lengths mispredicts about every other row: each row's first block is made both ways
+    /// and one kept, and the next <see cref="Reach"/> bytes are copied whatever the value's size.
+    /// An inline row reads the first bytes of the data buffer, which must hold that many.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static nint Blend(ref byte views, ref byte heap, nint heapLength, ref byte stream, ref nint at, nint row, nint end)
+    {
+        Vector128<byte> spread = Vector128.Create((byte)16, 16, 16, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+        Vector128<uint> low = Vector128.Create(uint.MaxValue, 0, 0, 0);
+        nint to = at;
+        for (; row < end; row++)
+        {
+            Vector128<uint> view = Vector128.LoadUnsafe(ref Unsafe.Add(ref views, row * ViewSize)).AsUInt32();
+            nint size = (nint)view.ToScalar();
+            nint outside = (InlineBytes - size) >> 63;
+            nint offset = (nint)view.GetElement(3) & outside;
+            if ((((nint)view.GetElement(2) | ((heapLength - offset - size - Reach) >> 63)) & outside) != 0)
+            {
+                break;
+            }
+
+            ref byte from = ref Unsafe.Add(ref heap, offset);
+            ref byte into = ref Unsafe.Add(ref stream, to);
+            Vector128<byte> head = Vector128.Shuffle(Vector128.LoadUnsafe(ref from), spread) | (view & low).AsByte();
+            Vector128.ConditionalSelect(Vector128.Create((byte)outside), head, view.AsByte()).StoreUnsafe(ref into);
+            Vector128.LoadUnsafe(ref from, 12).StoreUnsafe(ref into, 16);
+            Vector128.LoadUnsafe(ref from, 28).StoreUnsafe(ref into, 32);
+            for (nint copied = Reach; copied < size; copied += Block)
+            {
+                Vector128.LoadUnsafe(ref from, (nuint)copied).StoreUnsafe(ref into, (nuint)(copied + sizeof(uint)));
+            }
+
+            to += sizeof(uint) + size;
+        }
+
+        at = to;
+        return row;
+    }
+
+    /// <summary><see cref="Blend"/> over a column with nulls: a null row stands for an empty inline value the stream does not advance past.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static nint BlendMasked(
+        ref byte views, ref byte heap, nint heapLength, ref byte stream, ref nint at, ref byte bits, int bitOffset,
+        nint row, nint end, ref int values)
+    {
+        Vector128<byte> spread = Vector128.Create((byte)16, 16, 16, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
+        Vector128<uint> low = Vector128.Create(uint.MaxValue, 0, 0, 0);
+        nint to = at;
+        nint count = values;
+        for (; row < end; row++)
+        {
+            nint position = row + bitOffset;
+            nint valid = -((Unsafe.Add(ref bits, position >> 3) >> (int)(position & 7)) & 1);
+            Vector128<uint> view = Vector128.LoadUnsafe(ref Unsafe.Add(ref views, row * ViewSize)).AsUInt32();
+            nint size = (nint)view.ToScalar() & valid;
+            nint outside = (InlineBytes - size) >> 63;
+            nint offset = (nint)view.GetElement(3) & outside;
+            if ((((nint)view.GetElement(2) | ((heapLength - offset - size - Reach) >> 63)) & outside) != 0)
+            {
+                break;
+            }
+
+            ref byte from = ref Unsafe.Add(ref heap, offset);
+            ref byte into = ref Unsafe.Add(ref stream, to);
+            Vector128<byte> head = Vector128.Shuffle(Vector128.LoadUnsafe(ref from), spread) | (view & low).AsByte();
+            Vector128.ConditionalSelect(Vector128.Create((byte)outside), head, view.AsByte()).StoreUnsafe(ref into);
+            Vector128.LoadUnsafe(ref from, 12).StoreUnsafe(ref into, 16);
+            Vector128.LoadUnsafe(ref from, 28).StoreUnsafe(ref into, 32);
+            for (nint copied = Reach; copied < size; copied += Block)
+            {
+                Vector128.LoadUnsafe(ref from, (nuint)copied).StoreUnsafe(ref into, (nuint)(copied + sizeof(uint)));
+            }
+
+            to += (sizeof(uint) + size) & valid;
+            count -= valid;
+        }
+
+        at = to;
+        values = (int)count;
+        return row;
+    }
+
+    /// <summary>
+    /// Lays rows <paramref name="row"/> up to <paramref name="end"/> of a column without nulls,
+    /// returning <paramref name="end"/>, or the first row whose value it leaves to the caller: one
+    /// in another data buffer than the first, or too near the end of it for a 16-byte read.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static nint Lay(ref byte views, ref byte heap, nint heapLength, ref byte stream, ref nint at, nint row, nint end)
+    {
+        nint to = at;
+        for (; row < end; row++)
+        {
+            Vector128<uint> view = Vector128.LoadUnsafe(ref Unsafe.Add(ref views, row * ViewSize)).AsUInt32();
+            nint size = (nint)view.ToScalar();
+            if (size > InlineBytes)
+            {
+                nint offset = (nint)view.GetElement(3);
+                if (view.GetElement(2) != 0 || offset + size + (Block - 1) > heapLength)
+                {
+                    break;
+                }
+
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref stream, to), (uint)size);
+                CopyBlocks(ref Unsafe.Add(ref heap, offset), ref Unsafe.Add(ref stream, to + sizeof(uint)), size);
+                to += sizeof(uint) + size;
+                continue;
+            }
+
+            view.AsByte().StoreUnsafe(ref Unsafe.Add(ref stream, to));
+            to += sizeof(uint) + size;
+        }
+
+        at = to;
+        return row;
+    }
+
+    /// <summary>
+    /// <see cref="Lay"/> over a column with nulls: every row's view is stored, and the stream
+    /// advances past the valid ones alone, so a null row's garbage is written over by the next.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static nint LayMasked(
+        ref byte views, ref byte heap, nint heapLength, ref byte stream, ref nint at, ref byte bits, int bitOffset,
+        nint row, nint end, ref int values)
+    {
+        nint to = at;
+        nint count = values;
+        for (; row < end; row++)
+        {
+            nint position = row + bitOffset;
+            nint valid = (Unsafe.Add(ref bits, position >> 3) >> (int)(position & 7)) & 1;
+            Vector128<uint> view = Vector128.LoadUnsafe(ref Unsafe.Add(ref views, row * ViewSize)).AsUInt32();
+            nint size = (nint)view.ToScalar();
+            if ((size > InlineBytes) & (valid != 0))
+            {
+                nint offset = (nint)view.GetElement(3);
+                if (view.GetElement(2) != 0 || offset + size + (Block - 1) > heapLength)
+                {
+                    break;
+                }
+
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref stream, to), (uint)size);
+                CopyBlocks(ref Unsafe.Add(ref heap, offset), ref Unsafe.Add(ref stream, to + sizeof(uint)), size);
+                to += sizeof(uint) + size;
+                count++;
+                continue;
+            }
+
+            view.AsByte().StoreUnsafe(ref Unsafe.Add(ref stream, to));
+            to += (sizeof(uint) + size) & -valid;
+            count += valid;
+        }
+
+        at = to;
+        values = (int)count;
+        return row;
+    }
+
+    /// <summary>Copies <paramref name="size"/> bytes 16 at a time, reading and writing up to 15 past them.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CopyBlocks(ref byte from, ref byte to, nint size)
+    {
+        for (nint copied = 0; copied < size; copied += Block)
+        {
+            Vector128.LoadUnsafe(ref Unsafe.Add(ref from, copied)).StoreUnsafe(ref Unsafe.Add(ref to, copied));
         }
     }
 
