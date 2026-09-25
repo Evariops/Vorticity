@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
+using Vorticity.Compute;
 
 namespace Vorticity.Expressions;
 
@@ -206,7 +209,10 @@ internal sealed class LogicalExpr : VortexExpr
         IsAnd = isAnd;
         Left = left;
         Right = right;
+        Height = ExprDepth.Over(left, right);
     }
+
+    internal override int Height { get; }
 
     /// <summary><see langword="true"/> for <c>AND</c>, <see langword="false"/> for <c>OR</c>.</summary>
     public bool IsAnd { get; }
@@ -231,16 +237,56 @@ internal sealed class LogicalExpr : VortexExpr
 /// <summary><c>NOT</c> over one operand.</summary>
 internal sealed class NotExpr : VortexExpr
 {
-    internal NotExpr(VortexExpr operand) => Operand = operand;
+    internal NotExpr(VortexExpr operand)
+    {
+        _ = ExprDepth.Over(operand, operand);
+        Operand = operand;
+    }
 
     /// <summary>The negated operand.</summary>
     public VortexExpr Operand { get; }
+
+    /// <remarks>
+    /// Counted down the operand rather than kept in a field every negation would carry: a run of
+    /// negations is no longer than the evaluator's depth.
+    /// </remarks>
+    internal override int Height => Operand.Height + 1;
 
     /// <inheritdoc/>
     internal override ExprKind Kind => ExprKind.Not;
 
     /// <inheritdoc/>
     internal override void CollectFields(ICollection<string> paths) => Operand.CollectFields(paths);
+}
+
+/// <summary>The bound on how deep a filter nests, checked as each level is built.</summary>
+/// <remarks>
+/// Every walk over a filter recurses, so one nested deeper than the evaluator takes is refused where
+/// it is built rather than where a walk runs out of stack, which ends the process.
+/// </remarks>
+internal static class ExprDepth
+{
+    /// <summary>The height of a node over <paramref name="left"/> and <paramref name="right"/>.</summary>
+    /// <exception cref="ArgumentException">The node would nest deeper than the evaluator takes.</exception>
+    internal static int Over(VortexExpr left, VortexExpr right)
+    {
+        int height = Math.Max(left.Height, right.Height) + 1;
+        if (height > FilterEvaluator.MaxDepth)
+        {
+            ThrowTooDeep();
+        }
+
+        return height;
+    }
+
+    /// <summary>Whether a node over <paramref name="left"/> and <paramref name="right"/> would nest too deep.</summary>
+    internal static bool TooDeep(VortexExpr left, VortexExpr right) =>
+        Math.Max(left.Height, right.Height) >= FilterEvaluator.MaxDepth;
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowTooDeep() =>
+        throw new ArgumentException($"A filter expression nests deeper than {FilterEvaluator.MaxDepth} levels.");
 }
 
 /// <summary><c>is null</c> or <c>is not null</c>.</summary>

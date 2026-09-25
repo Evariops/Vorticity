@@ -550,12 +550,7 @@ public sealed partial class VortexFileWriter
             ZonePruner? zones = null;
             if (boundary > 0 && zoneLength > 0)
             {
-                VortexExpr every = Expr.IsNotNull(Expr.Field(schema.GetFieldName(0)));
-                for (int field = 1; field < fields; field++)
-                {
-                    every = Expr.And(every, Expr.IsNotNull(Expr.Field(schema.GetFieldName(field))));
-                }
-
+                VortexExpr every = NoneNull(schema, 0, fields);
                 zones = (await ZonePruningPlan.PlanAsync(file, tree, every, cancellationToken).ConfigureAwait(false)).Zones;
             }
 
@@ -735,6 +730,21 @@ public sealed partial class VortexFileWriter
             }
 
             return PlanSeed.Of(context.Nodes.Root, dtype);
+        }
+
+        /// <summary>
+        /// That no column in <c>[<paramref name="first"/>, <paramref name="end"/>)</c> is null, halving
+        /// the range at each level so that the filter nests as deep as the logarithm of its width.
+        /// </summary>
+        private static VortexExpr NoneNull(DType schema, int first, int end)
+        {
+            if (end - first == 1)
+            {
+                return Expr.IsNotNull(Expr.Field(schema.GetFieldName(first)));
+            }
+
+            int middle = first + ((end - first) / 2);
+            return Expr.And(NoneNull(schema, first, middle), NoneNull(schema, middle, end));
         }
 
         /// <summary>Per column, the blocks a dictionary probe claimed.</summary>

@@ -543,6 +543,62 @@ public sealed class AppendTests
         return rows;
     }
 
+    // An append reads the zones of every column it keeps through one filter over all of them, which
+    // must not nest a level per column: a filter nests no deeper than the evaluator's depth.
+    [Fact]
+    public async Task AFileWithMoreColumnsThanAFilterNestsLevelsIsAppendedTo()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const int Columns = FilterEvaluator.MaxDepth * 2;
+        VortexField[] fields = new VortexField[Columns];
+        for (int c = 0; c < Columns; c++)
+        {
+            fields[c] = new VortexField("c" + c.ToString(CultureInfo.InvariantCulture), VortexType.Int64);
+        }
+
+        VortexSchema schema = VortexSchema.Create(fields);
+        VortexWriteOptions options = new VortexWriteOptions { RowBlockSize = Block };
+        long[] values = new long[3 * Block];
+        for (int i = 0; i < values.Length; i++)
+        {
+            values[i] = i;
+        }
+
+        string path = TempPath();
+        try
+        {
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter(path, schema, options))
+            {
+                await FeedColumnsAsync(writer, Columns, values, ct);
+                await writer.CompleteAsync(ct);
+            }
+
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, options, ct))
+            {
+                await FeedColumnsAsync(writer, Columns, values, ct);
+                await writer.CompleteAsync(ct);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            Assert.Equal(2L * values.Length, file.RowCount);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    private static async Task FeedColumnsAsync(VortexFileWriter writer, int columns, long[] values, CancellationToken ct)
+    {
+        ColumnsBuilder builder = writer.Builder();
+        for (int c = 0; c < columns; c++)
+        {
+            builder.Column<long>(c).Append(values);
+        }
+
+        await writer.WriteAsync(builder, ct);
+    }
+
     // ------------------------------------------------------------------------------ the files
 
     private static string TempPath() =>

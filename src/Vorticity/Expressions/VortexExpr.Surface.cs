@@ -48,6 +48,9 @@ public abstract class VortexExpr
     /// <summary>What this node is, so a consumer can switch without a type test.</summary>
     internal abstract ExprKind Kind { get; }
 
+    /// <summary>The levels of <c>and</c>, <c>or</c> and <c>not</c> from this node down, no more than the evaluator takes.</summary>
+    internal virtual int Height => 0;
+
     /// <summary>Adds every field path this expression reads to <paramref name="paths"/>.</summary>
     /// <param name="paths">The set to add to.</param>
     /// <remarks>

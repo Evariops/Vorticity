@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using System.Text.Unicode;
+using Vorticity.Compute;
 
 namespace Vorticity.Expressions;
 
@@ -40,7 +41,7 @@ internal static class ExprText
     {
         List<Token> tokens = Tokenize(text, parameters);
         int at = 0;
-        VortexExpr expr = ParseOr(tokens, ref at);
+        VortexExpr expr = ParseOr(tokens, ref at, 0);
         if (at != tokens.Count)
         {
             throw new FormatException($"Unexpected '{tokens[at].Text}' at position {tokens[at].Position} of the filter.");
@@ -207,48 +208,65 @@ internal static class ExprText
         }
     }
 
-    private static VortexExpr ParseOr(List<Token> tokens, ref int at)
+    private static VortexExpr ParseOr(List<Token> tokens, ref int at, int nesting)
     {
-        VortexExpr left = ParseAnd(tokens, ref at);
+        VortexExpr left = ParseAnd(tokens, ref at, nesting);
         while (IsWord(tokens, at, "or"))
         {
-            at++;
-            left = Expr.Or(left, ParseAnd(tokens, ref at));
+            Token or = tokens[at++];
+            left = Logical(false, left, ParseAnd(tokens, ref at, nesting), or);
         }
 
         return left;
     }
 
-    private static VortexExpr ParseAnd(List<Token> tokens, ref int at)
+    private static VortexExpr ParseAnd(List<Token> tokens, ref int at, int nesting)
     {
-        VortexExpr left = ParseUnary(tokens, ref at);
+        VortexExpr left = ParseUnary(tokens, ref at, nesting);
         while (IsWord(tokens, at, "and"))
         {
-            at++;
-            left = Expr.And(left, ParseUnary(tokens, ref at));
+            Token and = tokens[at++];
+            left = Logical(true, left, ParseUnary(tokens, ref at, nesting), and);
         }
 
         return left;
     }
 
-    private static VortexExpr ParseUnary(List<Token> tokens, ref int at)
+    /// <remarks>
+    /// Each <c>not</c> and each parenthesis recurses, so their nesting is bounded before the
+    /// recursion: a filter nested deeper than the evaluator takes would otherwise exhaust the stack
+    /// here, which ends the process.
+    /// </remarks>
+    private static VortexExpr ParseUnary(List<Token> tokens, ref int at, int nesting)
     {
-        if (IsWord(tokens, at, "not"))
+        bool not = IsWord(tokens, at, "not");
+        if (!not && !IsSymbol(tokens, at, "("))
         {
-            at++;
-            return Expr.Not(ParseUnary(tokens, ref at));
+            return ParsePredicate(tokens, ref at);
         }
 
-        if (IsSymbol(tokens, at, "("))
+        Token opening = tokens[at++];
+        if (nesting == FilterEvaluator.MaxDepth)
         {
-            at++;
-            VortexExpr inner = ParseOr(tokens, ref at);
-            Expect(tokens, ref at, ")");
-            return inner;
+            throw TooDeep(opening);
         }
 
-        return ParsePredicate(tokens, ref at);
+        if (not)
+        {
+            VortexExpr operand = ParseUnary(tokens, ref at, nesting + 1);
+            return ExprDepth.TooDeep(operand, operand) ? throw TooDeep(opening) : Expr.Not(operand);
+        }
+
+        VortexExpr inner = ParseOr(tokens, ref at, nesting + 1);
+        Expect(tokens, ref at, ")");
+        return inner;
     }
+
+    private static LogicalExpr Logical(bool isAnd, VortexExpr left, VortexExpr right, Token at) =>
+        ExprDepth.TooDeep(left, right) ? throw TooDeep(at) : Expr.Logical(isAnd, left, right);
+
+    private static FormatException TooDeep(Token at) =>
+        new FormatException($"The filter nests deeper than {FilterEvaluator.MaxDepth} levels at position {at.Position}.");
 
     private static VortexExpr ParsePredicate(List<Token> tokens, ref int at)
     {
