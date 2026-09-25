@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text.Unicode;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -126,6 +128,153 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
         bool requireUtf8)
     {
         ValidityMask mask = ValidityMask.From(context, validity);
+        ValidateViews(views, dataBuffers, mask, length, requireUtf8);
+    }
+
+    /// <summary>The validation itself, over the rows <paramref name="mask"/> says are valid.</summary>
+    /// <remarks>
+    /// A column without nulls takes a pass that decides every view without a call and defers what a
+    /// view cannot decide alone: the bytes of inline values, the prefixes against their values, and
+    /// the span of each data buffer the values reference, which one vector sweep then finds to be
+    /// ASCII. A column that fails any of it, or has nulls, is validated view by view, which accepts
+    /// every valid UTF-8 value and names the row that is not.
+    /// </remarks>
+    internal static void ValidateViews(
+        ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> dataBuffers, in ValidityMask mask, int length, bool requireUtf8)
+    {
+        if (mask.AllValid && dataBuffers.Length <= MaxSweptBuffers && Swept(views, dataBuffers, length, requireUtf8))
+        {
+            return;
+        }
+
+        ValidateEach(views, dataBuffers, mask, length, requireUtf8);
+    }
+
+    /// <summary>Data buffers whose referenced spans the sweeping pass tracks on the stack.</summary>
+    private const int MaxSweptBuffers = 64;
+
+    /// <summary>
+    /// Every view of a column without nulls, bounds checked as it goes; true when every prefix
+    /// matched and, for Utf8, every inline value and every referenced span is ASCII.
+    /// </summary>
+    private static bool Swept(ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> dataBuffers, int length, bool requireUtf8)
+    {
+        Span<uint> lowest = stackalloc uint[MaxSweptBuffers];
+        Span<uint> highest = stackalloc uint[MaxSweptBuffers];
+        lowest.Fill(uint.MaxValue);
+        highest.Clear();
+
+        ref byte view = ref MemoryMarshal.GetReference(views);
+        ref ulong lowMasks = ref MemoryMarshal.GetReference(InlineLowMasks);
+        ref ulong highMasks = ref MemoryMarshal.GetReference(InlineHighMasks);
+        ulong inline = 0;
+        uint prefixes = 0;
+        uint bufferCount = (uint)dataBuffers.Length;
+
+        // The buffer the last referencing view named, whose span is kept in registers: views name
+        // their buffers in runs, and the arrays are written when the run ends.
+        uint current = uint.MaxValue;
+        ref byte currentBase = ref Unsafe.NullRef<byte>();
+        ulong currentLength = 0;
+        uint low = uint.MaxValue;
+        uint high = 0;
+        for (int i = 0; i < length; i++, view = ref Unsafe.Add(ref view, CanonicalSupport.ViewSize))
+        {
+            uint size = Unsafe.ReadUnaligned<uint>(ref view);
+            if (size <= CanonicalSupport.MaxInlineViewLength)
+            {
+                // The value is the first `size` of the twelve bytes after the length, all readable
+                // whatever `size` is; the masks keep the value's bytes and drop the padding.
+                inline |= (Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref view, 4)) & Unsafe.Add(ref lowMasks, size)) |
+                    (Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref view, 12)) & Unsafe.Add(ref highMasks, size));
+                continue;
+            }
+
+            uint bufferIndex = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref view, 8));
+            uint offset = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref view, 12));
+            if (bufferIndex != current)
+            {
+                if (bufferIndex >= bufferCount)
+                {
+                    ThrowBufferIndex(i, bufferIndex, dataBuffers.Length);
+                }
+
+                if (current != uint.MaxValue)
+                {
+                    lowest[(int)current] = low;
+                    highest[(int)current] = high;
+                }
+
+                current = bufferIndex;
+                ReadOnlySpan<byte> target = dataBuffers[(int)bufferIndex].Span;
+                currentBase = ref MemoryMarshal.GetReference(target);
+                currentLength = (uint)target.Length;
+                low = lowest[(int)bufferIndex];
+                high = highest[(int)bufferIndex];
+            }
+
+            ulong end = (ulong)offset + size;
+            if (end > currentLength)
+            {
+                ThrowViewRange(i, offset, size, (int)currentLength);
+            }
+
+            prefixes |= Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref view, 4)) ^
+                Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref currentBase, offset));
+            low = Math.Min(low, offset);
+            high = Math.Max(high, (uint)end);
+        }
+
+        if (current != uint.MaxValue)
+        {
+            lowest[(int)current] = low;
+            highest[(int)current] = high;
+        }
+
+        if (prefixes != 0)
+        {
+            return false;
+        }
+
+        if (!requireUtf8)
+        {
+            return true;
+        }
+
+        if ((inline & 0x8080_8080_8080_8080UL) != 0)
+        {
+            return false;
+        }
+
+        for (int b = 0; b < dataBuffers.Length; b++)
+        {
+            if (highest[b] > lowest[b] &&
+                !System.Text.Ascii.IsValid(dataBuffers[b].Span[(int)lowest[b]..(int)highest[b]]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>The bytes of an inline value of each length that fall in the view's bytes 4 to 12.</summary>
+    private static ReadOnlySpan<ulong> InlineLowMasks =>
+    [
+        0, 0xFF, 0xFFFF, 0xFF_FFFF, 0xFFFF_FFFF, 0xFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF, 0xFF_FFFF_FFFF_FFFF,
+        ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue, ulong.MaxValue,
+    ];
+
+    /// <summary>The bytes of an inline value of each length that fall in the view's bytes 12 to 16.</summary>
+    private static ReadOnlySpan<ulong> InlineHighMasks => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFFFF, 0xFF_FFFF, 0xFFFF_FFFF];
+
+    /// <summary>
+    /// Bounds-checks (and, for Utf8, UTF-8-checks) every view a consumer may dereference, one at a
+    /// time; the rows <paramref name="mask"/> says are null are skipped.
+    /// </summary>
+    private static void ValidateEach(
+        ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> dataBuffers, in ValidityMask mask, int length, bool requireUtf8)
+    {
         if (mask.AllInvalid)
         {
             return;

@@ -47,6 +47,9 @@ internal readonly ref struct ValidityMask
     }
 
     /// <summary><see langword="true"/> when no row is null; callers can then skip the per-row test.</summary>
+    /// <summary>The mask of a column without nulls.</summary>
+    internal static ValidityMask NonNullable => new(ValidityKind.NonNullable, default, 0);
+
     internal bool AllValid => _kind is ValidityKind.NonNullable or ValidityKind.AllValid;
 
     /// <summary><see langword="true"/> when every row is null.</summary>
