@@ -241,6 +241,24 @@ internal static class RowKernels
         ref TValue targetRef = ref MemoryMarshal.GetReference(target);
         ref byte flagRef = ref MemoryMarshal.GetReference(flags);
 
+        // Sixty-four rows at a time whose codes are all proven in range by one vector compare: they
+        // are gathered with no test, and their validity is their values' flags. A word that holds a
+        // code past the dictionary goes row by row below, which finds it.
+        int words = target.Length & ~63;
+        int start = 0;
+        for (; start < words; start += 64)
+        {
+            ref TCode wordCodes = ref Unsafe.Add(ref codeRef, start);
+            if (!AllBelow(ref wordCodes, 64, limit))
+            {
+                break;
+            }
+
+            ulong output = GatherInside<TCode, TValue, ValuesFlagged>(
+                ref wordCodes, ref sourceRef, ref Unsafe.Add(ref targetRef, start), ref flagRef, 64);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(outputBits.Slice(start >> 3, 8), output);
+        }
+
         // The gather and the mask stay in one body rather than becoming two passes: a second walk
         // over the codes costs more than the register pressure it relieves, and there is no
         // dependency between the value store and the mask arithmetic for a split to break.
@@ -249,7 +267,7 @@ internal static class RowKernels
         // bitmap form below gives: a variable trip count costs the unroll, and with it the constant
         // shift amounts and the eight independent gathers in flight at once.
         int whole = target.Length & ~7;
-        for (int block = 0; block < whole; block += 8)
+        for (int block = start; block < whole; block += 8)
         {
             int mask = 0;
             for (int k = 0; k < 8; k++)
@@ -534,15 +552,28 @@ internal static class RowKernels
                 ulong all = BitWords.Mask(span);
                 ulong valid = BitWords.Load(codeBits, codeBitOffset + row) & all;
                 ref TValue rows = ref Unsafe.Add(ref targetRef, row);
-                bool faulted;
-                ulong output = valuesAllValid
-                    ? GatherWord<TCode, TValue, AllValuesValid>(
-                        ref Unsafe.Add(ref codeRef, row), ref sourceRef, ref rows, ref flagRef, span, valid, limit, out faulted)
-                    : GatherWord<TCode, TValue, ValuesFlagged>(
-                        ref Unsafe.Add(ref codeRef, row), ref sourceRef, ref rows, ref flagRef, span, valid, limit, out faulted);
-                if (faulted)
+                ref TCode wordCodes = ref Unsafe.Add(ref codeRef, row);
+                ulong output;
+                if (AllBelow(ref wordCodes, span, limit))
                 {
-                    return FirstFault(codes, valid, limit, row, span);
+                    // Every code of the word names an entry, the null rows' included: each row is
+                    // gathered as it stands, and the null rows emptied after.
+                    output = valuesAllValid
+                        ? GatherInside<TCode, TValue, AllValuesValid>(ref wordCodes, ref sourceRef, ref rows, ref flagRef, span) & valid
+                        : GatherInside<TCode, TValue, ValuesFlagged>(ref wordCodes, ref sourceRef, ref rows, ref flagRef, span) & valid;
+                }
+                else
+                {
+                    bool faulted;
+                    output = valuesAllValid
+                        ? GatherWord<TCode, TValue, AllValuesValid>(
+                            ref wordCodes, ref sourceRef, ref rows, ref flagRef, span, valid, limit, out faulted)
+                        : GatherWord<TCode, TValue, ValuesFlagged>(
+                            ref wordCodes, ref sourceRef, ref rows, ref flagRef, span, valid, limit, out faulted);
+                    if (faulted)
+                    {
+                        return FirstFault(codes, valid, limit, row, span);
+                    }
                 }
 
                 for (ulong nulls = ~valid & all; nulls != 0; nulls &= nulls - 1)
@@ -603,6 +634,122 @@ internal static class RowKernels
 
         faulted = fault != 0;
         return TValidity.Flagged ? output : valid;
+    }
+
+    /// <summary>
+    /// Gathers <paramref name="count"/> rows whose codes all name an entry; returns, a bit a row,
+    /// whether each row's value is valid, every bit set when the values carry no validity.
+    /// </summary>
+    /// <remarks>
+    /// Eight rows a step with no test and no select between them: the codes were proven in range
+    /// before, so a row is its code's load, its value's load and its store, and its value's flag
+    /// one load and one shifted or.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ulong GatherInside<TCode, TValue, TValidity>(
+        ref TCode codes, ref TValue source, ref TValue target, ref byte flags, int count)
+        where TCode : unmanaged
+        where TValue : unmanaged
+        where TValidity : struct, IValueValidity
+    {
+        ulong output = 0;
+        int k = 0;
+        for (; k <= count - 8; k += 8)
+        {
+            ref TCode at = ref Unsafe.Add(ref codes, k);
+            nint c0 = (nint)WidenCode(at);
+            nint c1 = (nint)WidenCode(Unsafe.Add(ref at, 1));
+            nint c2 = (nint)WidenCode(Unsafe.Add(ref at, 2));
+            nint c3 = (nint)WidenCode(Unsafe.Add(ref at, 3));
+            nint c4 = (nint)WidenCode(Unsafe.Add(ref at, 4));
+            nint c5 = (nint)WidenCode(Unsafe.Add(ref at, 5));
+            nint c6 = (nint)WidenCode(Unsafe.Add(ref at, 6));
+            nint c7 = (nint)WidenCode(Unsafe.Add(ref at, 7));
+
+            ref TValue into = ref Unsafe.Add(ref target, k);
+            into = Unsafe.Add(ref source, c0);
+            Unsafe.Add(ref into, 1) = Unsafe.Add(ref source, c1);
+            Unsafe.Add(ref into, 2) = Unsafe.Add(ref source, c2);
+            Unsafe.Add(ref into, 3) = Unsafe.Add(ref source, c3);
+            Unsafe.Add(ref into, 4) = Unsafe.Add(ref source, c4);
+            Unsafe.Add(ref into, 5) = Unsafe.Add(ref source, c5);
+            Unsafe.Add(ref into, 6) = Unsafe.Add(ref source, c6);
+            Unsafe.Add(ref into, 7) = Unsafe.Add(ref source, c7);
+
+            if (TValidity.Flagged)
+            {
+                uint mask = Unsafe.Add(ref flags, c0) |
+                    ((uint)Unsafe.Add(ref flags, c1) << 1) |
+                    ((uint)Unsafe.Add(ref flags, c2) << 2) |
+                    ((uint)Unsafe.Add(ref flags, c3) << 3) |
+                    ((uint)Unsafe.Add(ref flags, c4) << 4) |
+                    ((uint)Unsafe.Add(ref flags, c5) << 5) |
+                    ((uint)Unsafe.Add(ref flags, c6) << 6) |
+                    ((uint)Unsafe.Add(ref flags, c7) << 7);
+                output |= (ulong)mask << k;
+            }
+        }
+
+        for (; k < count; k++)
+        {
+            nint code = (nint)WidenCode(Unsafe.Add(ref codes, k));
+            Unsafe.Add(ref target, k) = Unsafe.Add(ref source, code);
+            if (TValidity.Flagged)
+            {
+                output |= (ulong)Unsafe.Add(ref flags, code) << k;
+            }
+        }
+
+        return TValidity.Flagged ? output : ulong.MaxValue;
+    }
+
+    /// <summary>
+    /// Whether each of <paramref name="count"/> codes names an entry of a dictionary of
+    /// <paramref name="limit"/>, a negative one never: a vector compare over the codes as unsigned
+    /// integers, against a bound that leaves out a signed code's negative half.
+    /// </summary>
+    private static bool AllBelow<TCode>(ref TCode first, int count, uint limit)
+        where TCode : unmanaged
+    {
+        bool signed = typeof(TCode) == typeof(sbyte) || typeof(TCode) == typeof(short) ||
+            typeof(TCode) == typeof(int) || typeof(TCode) == typeof(long);
+        int bits = Unsafe.SizeOf<TCode>() * 8;
+        ulong span = signed ? 1UL << (bits - 1) : bits == 64 ? ulong.MaxValue : 1UL << bits;
+        ulong bound = Math.Min(limit, span);
+        return Unsafe.SizeOf<TCode>() switch
+        {
+            1 => Below(ref Unsafe.As<TCode, byte>(ref first), count, bound),
+            2 => Below(ref Unsafe.As<TCode, ushort>(ref first), count, bound),
+            4 => Below(ref Unsafe.As<TCode, uint>(ref first), count, bound),
+            _ => Below(ref Unsafe.As<TCode, ulong>(ref first), count, bound),
+        };
+    }
+
+    /// <summary>Whether each of <paramref name="count"/> unsigned values is below <paramref name="bound"/>.</summary>
+    private static bool Below<T>(ref T first, int count, ulong bound)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>, IMinMaxValue<T>
+    {
+        if (bound > ulong.CreateTruncating(T.MaxValue))
+        {
+            return true;
+        }
+
+        T limit = T.CreateTruncating(bound);
+        Vector128<T> limits = Vector128.Create(limit);
+        Vector128<T> past = Vector128<T>.Zero;
+        int k = 0;
+        for (; k <= count - Vector128<T>.Count; k += Vector128<T>.Count)
+        {
+            past |= Vector128.GreaterThanOrEqual(Vector128.LoadUnsafe(ref first, (nuint)k), limits);
+        }
+
+        bool inside = past == Vector128<T>.Zero;
+        for (; k < count; k++)
+        {
+            inside &= Unsafe.Add(ref first, k) < limit;
+        }
+
+        return inside;
     }
 
     /// <summary>The first valid row of a word whose code is past the dictionary; an error path.</summary>

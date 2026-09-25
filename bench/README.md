@@ -28,7 +28,8 @@ classes it ran. The page's head lists the command behind each section.
 | the bit-packing unpack | `-- BitPackingBenchmarks` | 12 s | `FastLanes.UnpackBlocks` against a frozen copy of the row-at-a-time kernel and against storing the same output bare, checked value for value first, on 8 blocks whose output stays in the first-level cache and on a scan window of 128: ns/value, GB/s in and out, cycles per value. `--full` adds eight shapes, the corpus file's 977 blocks and buffers half a cache line off |
 | the FSST decode | `-- FsstDecodeBenchmarks` | 20 s | `FsstDecodeTable.Decode` against a frozen copy of the eight-codes-a-word kernel and against copying the decoded bytes, checked against the text first, on URLs, UUIDs and log lines the writer compressed, 1 024 rows and a scan window of 131 072 |
 | a varbinview's view validation | `-- ViewValidationBenchmarks` | 15 s | `VarBinViewDecoder.ValidateViews` against a frozen copy of the view-at-a-time loop, after checking what it must refuse and accept, on the corpus file's mix of inline and referencing views, all inline, all referencing |
-| anything, want a direction | no argument at all | **3 min** | the thirteen default classes, 57 benchmarks, fast profile |
+| a dictionary of strings | `-- DictGatherBenchmarks` | 20 s | `RowKernels.Gather` and `GatherMasked` on sixteen-byte views against a frozen copy of the kernels, checked against each other first, on the corpus's nullable codes, nullable values, 64-bit and 8-bit codes |
+| anything, want a direction | no argument at all | **3 min** | the fourteen default classes, 59 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
@@ -153,7 +154,7 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 
 ## The classes
 
-Nineteen, and `-- --list flat` is what answers this question for real: thirteen in the default run,
+Twenty, and `-- --list flat` is what answers this question for real: fourteen in the default run,
 six more behind `--explore`.
 
 | class | in the default run |
@@ -162,6 +163,7 @@ six more behind `--explore`.
 | `BitPackingBenchmarks` | yes — 32-bit values at 10 bits, 8 and 128 blocks; `--full` adds eight shapes, 977 blocks and misaligned buffers |
 | `FsstDecodeBenchmarks` | yes — URLs, UUIDs and log lines, 1 024 and 131 072 rows |
 | `ViewValidationBenchmarks` | yes — mixed, inline and referencing views, 1 024 and 131 072 rows |
+| `DictGatherBenchmarks` | yes — nullable codes, nullable values, `u64` and `u8` codes, 1 024 and 131 072 rows |
 | `FsstKernelBenchmarks` | yes |
 | `OnPairKernelBenchmarks` | yes |
 | `FilterKernelBenchmarks` | yes |
@@ -180,7 +182,7 @@ six more behind `--explore`.
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
 answered their question once and do not guard against anything. They stay runnable and stay out of
-the default run: 57 benchmarks become 79 with `--explore`.
+the default run: 59 benchmarks become 81 with `--explore`.
 
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went
