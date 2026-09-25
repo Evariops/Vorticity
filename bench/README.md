@@ -45,7 +45,8 @@ classes it ran. The page's head lists the command behind each section.
 | the transform before a block is packed | `-- TransformBenchmarks` | 10 s | `ArrayBlobWriter.TransformBlock` against a frozen copy of it, blocks compared first, on 64- and 32-bit columns with and without nulls |
 | a float column's ALP encoding | `-- AlpEncodeBenchmarks` | 10 s | `AlpPlan.TryBuild` against a frozen copy of it, plans compared first, on double and single columns with and without nulls |
 | the bytes a text column's rows name | `-- NamedBytesBenchmarks` | 10 s | `CanonicalArena.NamedBytes` against a frozen copy of the view walk, totals compared first, on out-of-line, inline and mixed views |
-| anything, want a direction | no argument at all | **3 min** | the thirty default classes, 91 benchmarks, fast profile |
+| a nullable zstd column's scatter | `-- ZstdExpandBenchmarks` | 10 s | `ZstdDecoder.Expand` against a frozen copy of it, rows compared first, on 64- and 32-bit values from one null in a hundred to half |
+| anything, want a direction | no argument at all | **3 min** | the thirty-one default classes, 93 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
@@ -170,7 +171,7 @@ class to run, which makes the default run do nothing under a script or in CI. `P
 
 ## The classes
 
-Thirty-six, and `-- --list flat` is what answers this question for real: thirty in the default run,
+Thirty-seven, and `-- --list flat` is what answers this question for real: thirty-one in the default run,
 six more behind `--explore`.
 
 | class | in the default run |
@@ -196,6 +197,7 @@ six more behind `--explore`.
 | `TransformBenchmarks` | yes — four integer columns, a small and a large chunk |
 | `AlpEncodeBenchmarks` | yes — four float columns, a small and a large chunk |
 | `NamedBytesBenchmarks` | yes — three kinds of views, a window and a batch |
+| `ZstdExpandBenchmarks` | yes — four validities, a small and a large window |
 | `FsstKernelBenchmarks` | yes |
 | `OnPairKernelBenchmarks` | yes |
 | `FilterKernelBenchmarks` | yes |
@@ -214,7 +216,7 @@ six more behind `--explore`.
 
 `explore` holds the **curves** — a selectivity sweep, a take sweep, a complexity probe — which
 answered their question once and do not guard against anything. They stay runnable and stay out of
-the default run: 91 benchmarks become 113 with `--explore`.
+the default run: 93 benchmarks become 115 with `--explore`.
 
 Classes have been deleted rather than demoted whenever another instrument measured the same thing
 with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went

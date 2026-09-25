@@ -1,5 +1,6 @@
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Buffers.Binary;
 using System.IO.Compression;
@@ -654,15 +655,17 @@ internal sealed class ZstdDecoder : ArrayDecoder
     /// <typeparam name="T">The value type, chosen from the byte width by the caller.</typeparam>
     /// <remarks>
     /// Sixty-four rows at a time: a word of valid rows is one copy of its values, a word of nulls is
-    /// nothing, since the destination is zeroed, and a mixed word walks its set bits. Asking the
-    /// mask row by row is a call and a switch a row, and was most of a nullable decode.
+    /// nothing, since the destination is zeroed, and a mixed word of many values writes every one of
+    /// its rows, the next value or zero as its bit says, the next value moving on by the bit.
+    /// Walking the set bits instead chains each value's row to the bit before it, which pays only
+    /// for a word of few values, <see cref="SparseScatter"/> or fewer.
     /// </remarks>
-    private static void Expand<T>(
+    internal static void Expand<T>(
         ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length)
-        where T : unmanaged
+        where T : unmanaged, IBinaryInteger<T>
     {
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(source);
-        Span<T> rows = MemoryMarshal.Cast<byte, T>(destination);
+        Span<T> rows = MemoryMarshal.Cast<byte, T>(destination)[..length];
         ReadOnlySpan<byte> bits = mask.Bits;
         int bitOffset = mask.BitOffset;
         int next = 0;
@@ -678,12 +681,67 @@ internal sealed class ZstdDecoder : ArrayDecoder
                 continue;
             }
 
-            while (word != 0)
+            if (word == 0)
             {
-                rows[row + BitOperations.TrailingZeroCount(word)] = values[next++];
-                word &= word - 1;
+                continue;
             }
+
+            int count = BitOperations.PopCount(word);
+            if (next + count > values.Length)
+            {
+                CompressedThrow.Format($"{Id} has more valid rows than decompressed values.");
+            }
+
+            next = count > SparseScatter
+                ? Scatter(values, ref MemoryMarshal.GetReference(rows[row..]), span, word, next)
+                : Walk(values, ref MemoryMarshal.GetReference(rows[row..]), word, next);
         }
+    }
+
+    /// <summary>
+    /// The valid rows of a word at or under which its set bits are walked rather than every row
+    /// written: a written row costs about as much as a walked bit whose word holds this many.
+    /// </summary>
+    private const int SparseScatter = 36;
+
+    /// <summary>
+    /// One mixed word's rows: each takes the next value or zero as its bit says, and the next value
+    /// moves on by the bit; the value read is held to the last one, so a word's trailing nulls read
+    /// nothing past the values.
+    /// </summary>
+    /// <returns>The next value after the word.</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int Scatter<T>(ReadOnlySpan<T> values, ref T rows, int span, ulong word, int next)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        ref T value = ref MemoryMarshal.GetReference(values);
+        int last = values.Length - 1;
+        for (int k = 0; k < span; k++)
+        {
+            int bit = (int)(word >> k) & 1;
+            // Past the last value by one at most, and then held to it: the sign of last - next.
+            int at = next - (int)((uint)(last - next) >> 31);
+            Unsafe.Add(ref rows, k) = Unsafe.Add(ref value, at) & (T.Zero - T.CreateTruncating(bit));
+            next += bit;
+        }
+
+        return next;
+    }
+
+    /// <summary>A word of few values: its set bits walked, each taking the next value.</summary>
+    /// <returns>The next value after the word.</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int Walk<T>(ReadOnlySpan<T> values, ref T rows, ulong word, int next)
+        where T : unmanaged
+    {
+        ref T value = ref MemoryMarshal.GetReference(values);
+        while (word != 0)
+        {
+            Unsafe.Add(ref rows, BitOperations.TrailingZeroCount(word)) = Unsafe.Add(ref value, next++);
+            word &= word - 1;
+        }
+
+        return next;
     }
 
     /// <summary>The same, for a width no primitive type has. Kept so the switch is total.</summary>
