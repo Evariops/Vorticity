@@ -283,7 +283,9 @@ internal sealed class StringBounds
         {
             Span<byte> padded = stackalloc byte[24];
             padded.Clear();
-            bound.CopyTo(padded);
+            // Ranks are compared only under a limit that keeps bounds within seventeen bytes; a
+            // longer bound, under a larger limit, is cut so that it fits and is never compared.
+            bound[..Math.Min(bound.Length, ExactBytes)].CopyTo(padded);
             return new Rank(
                 BinaryPrimitives.ReadUInt64BigEndian(padded),
                 BinaryPrimitives.ReadUInt64BigEndian(padded[8..]),

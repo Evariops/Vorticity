@@ -234,6 +234,55 @@ public sealed class StringBoundsTests
         }
     }
 
+    [Fact]
+    public async Task BoundsLongerThanTheRankedPrefixAreKept()
+    {
+        // The reference's limit: extremes of 35 and 94 bytes, both past the seventeen that the
+        // settled-row check ranks, one kept whole and one cut.
+        const int limit = 64;
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        string path = TempPath();
+        try
+        {
+            await using (VortexFileWriter writer = VortexFileWriter.Create(
+                path, Schema, new VortexWriteOptions { RowBlockSize = Block, StringBoundBytes = limit }))
+            {
+                CanonicalArena arena = new CanonicalArena();
+                try
+                {
+                    int root = arena.AddStruct(
+                        Schema,
+                        Block,
+                        Validity.NonNullable,
+                        [Ids(arena, 0, Block), Views(arena, Schema.GetField(1), 0, Block, Long), Views(arena, Schema.GetField(2), 0, Block, Long)]);
+                    using RecordBatch batch = new RecordBatch(arena, root, 0);
+                    await writer.WriteAsync(batch, ct);
+                }
+                finally
+                {
+                    arena.Reset();
+                }
+
+                await writer.CompleteAsync(ct);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            foreach ((string name, bool utf8) in new[] { ("u", true), ("b", false) })
+            {
+                ZoneColumn? zones = await ZonesOf(file, name);
+                Assert.NotNull(zones);
+                ZoneBounds bounds = zones.Bounds(0);
+                Assert.Equal(Long(0), bounds.Min.BytesValue.ToArray());
+                Assert.Equal(StringBounds.UpperBound(Long(Block - 1)!, limit, utf8), bounds.Max.BytesValue.ToArray());
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     // ------------------------------------------------------------------------------ the oracle
 
     private static int Blocks => (Rows + Block - 1) / Block;
@@ -359,6 +408,10 @@ public sealed class StringBoundsTests
 
         return longer;
     }
+
+    /// <summary>A key in row order and a tail that grows from 30 to 89 bytes over one block.</summary>
+    private static byte[]? Long(int row) =>
+        Bytes("v" + row.ToString("D4", CultureInfo.InvariantCulture) + new string('a', 30 + (row * 59 / (Block - 1))));
 
     private static byte[] Bytes(string text) => Encoding.UTF8.GetBytes(text);
 
