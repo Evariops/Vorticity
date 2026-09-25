@@ -610,31 +610,7 @@ public sealed class DTypeFlatBuffersTests
     [Fact]
     public void StructWithSharedChildTables_IsDecodedOncePerPositionNotOncePerPath()
     {
-        const int Levels = VortexLimits.MaxDTypeDepth - 1;
-
-        using FlatBufferBuilder builder = new FlatBufferBuilder(16384);
-        int child = WriteI32DType(builder);
-        for (int i = 0; i < Levels; i++)
-        {
-            int a = builder.CreateString("a");
-            int b = builder.CreateString("b");
-            int names = builder.CreateOffsetVector([a, b]);
-
-            // The whole point: one child offset, referenced twice.
-            int dtypes = builder.CreateOffsetVector([child, child]);
-
-            builder.StartTable();
-            builder.AddOffset(0, names);
-            builder.AddOffset(1, dtypes);
-            int value = builder.EndTable();
-
-            builder.StartTable();
-            builder.AddUInt8(0, 7);
-            builder.AddOffset(1, value);
-            child = builder.EndTable();
-        }
-
-        byte[] buffer = builder.FinishToArray(child);
+        byte[] buffer = SharedStructChain(VortexLimits.MaxDTypeDepth - 1);
         DTypeArena arena = new DTypeArena();
         DType d = DTypeFlatBuffers.Read(buffer, arena);
 
@@ -644,6 +620,54 @@ public sealed class DTypeFlatBuffersTests
 
         // The arena dedups, so a correct decode is one node per level plus the i32 leaf.
         Assert.Equal(VortexLimits.MaxDTypeDepth, arena.NodeCount);
+    }
+
+    /// <summary>
+    /// The engine walks a shared dtype once per node, but its public form spells out every path.
+    /// One that spells out to more types than a FlatBuffer may hold tables is refused rather than
+    /// expanded; a shared dtype that spells out to less converts as before.
+    /// </summary>
+    [Fact]
+    public void ASharedDTypeIsRefusedAsAPublicTypeRatherThanSpelledOut()
+    {
+        VortexType small = VortexTypes.FromDType(DTypeFlatBuffers.Read(SharedStructChain(10), new DTypeArena()));
+        Assert.Equal(VortexTypeKind.Struct, small.Kind);
+        Assert.Equal(2, small.Fields.Length);
+
+        DType wide = DTypeFlatBuffers.Read(SharedStructChain(21), new DTypeArena());
+        Assert.Throws<VortexFormatException>(() => VortexTypes.FromDType(wide));
+
+        DType deepest = DTypeFlatBuffers.Read(SharedStructChain(VortexLimits.MaxDTypeDepth - 1), new DTypeArena());
+        Assert.Throws<VortexFormatException>(() => VortexTypes.SchemaOf(deepest));
+    }
+
+    /// <summary>
+    /// Every field name of a struct may point at one string. The names still to intern size the
+    /// arena's growth, which must not count that string once per field: here 4 096 references to
+    /// 16 KiB would reserve 64 MiB for a 48 KiB buffer.
+    /// </summary>
+    [Fact]
+    public void FieldNamesSharingOneStringReserveNoMoreThanTheBufferHolds()
+    {
+        byte[] buffer = StructOfOneSharedName(fields: 4_096, nameLength: 16 << 10);
+        DTypeArena arena = new DTypeArena();
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        DType d = DTypeFlatBuffers.Read(buffer, arena);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(4_096, d.FieldCount);
+        Assert.True(allocated < 8L * buffer.Length, $"{allocated} bytes allocated to read a {buffer.Length}-byte dtype");
+    }
+
+    /// <summary>
+    /// The public form spells a shared name out once per field: 8 192 references to 16 KiB would
+    /// be 256 MiB of strings from a 80 KiB buffer, so the conversion refuses it.
+    /// </summary>
+    [Fact]
+    public void FieldNamesSharingOneStringAreNotSpelledOutWithoutBound()
+    {
+        DType d = DTypeFlatBuffers.Read(StructOfOneSharedName(fields: 8_192, nameLength: 16 << 10), new DTypeArena());
+        Assert.Throws<VortexFormatException>(() => VortexTypes.FromDType(d));
     }
 
     /// <summary>
@@ -1192,6 +1216,63 @@ public sealed class DTypeFlatBuffersTests
         builder.AddUInt8(0, 5);
         builder.AddOffset(1, value);
         return builder.EndTable();
+    }
+
+    /// <summary>
+    /// <paramref name="levels"/> structs, each pointing both its fields at the same child, over an
+    /// i32: 2^levels root-to-leaf paths in a few bytes per level.
+    /// </summary>
+    private static byte[] SharedStructChain(int levels)
+    {
+        using FlatBufferBuilder builder = new FlatBufferBuilder(16384);
+        int child = WriteI32DType(builder);
+        for (int i = 0; i < levels; i++)
+        {
+            int a = builder.CreateString("a");
+            int b = builder.CreateString("b");
+            int names = builder.CreateOffsetVector([a, b]);
+
+            // The whole point: one child offset, referenced twice.
+            int dtypes = builder.CreateOffsetVector([child, child]);
+
+            builder.StartTable();
+            builder.AddOffset(0, names);
+            builder.AddOffset(1, dtypes);
+            int value = builder.EndTable();
+
+            builder.StartTable();
+            builder.AddUInt8(0, 7);
+            builder.AddOffset(1, value);
+            child = builder.EndTable();
+        }
+
+        return builder.FinishToArray(child);
+    }
+
+    /// <summary>A struct of <paramref name="fields"/> i32 fields whose names are all one string.</summary>
+    private static byte[] StructOfOneSharedName(int fields, int nameLength)
+    {
+        using FlatBufferBuilder builder = new FlatBufferBuilder(nameLength + (fields * 8) + 1024);
+        byte[] text = new byte[nameLength];
+        text.AsSpan().Fill((byte)'n');
+        int name = builder.CreateStringUtf8(text);
+        int leaf = WriteI32DType(builder);
+        int[] names = new int[fields];
+        int[] dtypes = new int[fields];
+        names.AsSpan().Fill(name);
+        dtypes.AsSpan().Fill(leaf);
+        int nameVector = builder.CreateOffsetVector(names);
+        int dtypeVector = builder.CreateOffsetVector(dtypes);
+
+        builder.StartTable();
+        builder.AddOffset(0, nameVector);
+        builder.AddOffset(1, dtypeVector);
+        int value = builder.EndTable();
+
+        builder.StartTable();
+        builder.AddUInt8(0, 7);
+        builder.AddOffset(1, value);
+        return builder.FinishToArray(builder.EndTable());
     }
 
     private static int WrapInList(FlatBufferBuilder builder, int elementDTypeOffset)

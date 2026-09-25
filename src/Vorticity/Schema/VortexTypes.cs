@@ -1,4 +1,7 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
+using System.Text;
 using Vorticity.Types;
 
 namespace Vorticity;
@@ -6,17 +9,25 @@ namespace Vorticity;
 /// <summary>The bridge between the public <see cref="VortexType"/> and the engine's arena dtypes.</summary>
 internal static class VortexTypes
 {
+    /// <summary>
+    /// The name bytes one conversion spells out at most. A writer stores every name it spells, so
+    /// only names sharing one string spell out more than their buffer holds, and a few kilobytes of
+    /// them would otherwise spell out gigabytes.
+    /// </summary>
+    private const long MaxSpelledNameBytes = 64L << 20;
+
     internal static VortexSchema SchemaOf(DType root)
     {
+        Budget budget = default;
         if (root.Kind != DTypeKind.Struct)
         {
-            return VortexSchema.Single(FromDType(root));
+            return VortexSchema.Single(Convert(root, ref budget));
         }
 
         VortexField[] fields = new VortexField[root.FieldCount];
         for (int i = 0; i < fields.Length; i++)
         {
-            fields[i] = new VortexField(root.GetFieldName(i), FromDType(root.GetField(i)));
+            fields[i] = new VortexField(budget.Name(root, i), Convert(root.GetField(i), ref budget));
         }
 
         return VortexSchema.Create(fields);
@@ -24,6 +35,13 @@ internal static class VortexTypes
 
     internal static VortexType FromDType(DType d)
     {
+        Budget budget = default;
+        return Convert(d, ref budget);
+    }
+
+    private static VortexType Convert(DType d, ref Budget budget)
+    {
+        budget.Visit();
         bool nullable = d.IsNullable;
         VortexType type;
         switch (d.Kind)
@@ -50,7 +68,7 @@ internal static class VortexTypes
                 VortexField[] fields = new VortexField[d.FieldCount];
                 for (int i = 0; i < fields.Length; i++)
                 {
-                    fields[i] = new VortexField(d.GetFieldName(i), FromDType(d.GetField(i)));
+                    fields[i] = new VortexField(budget.Name(d, i), Convert(d.GetField(i), ref budget));
                 }
 
                 type = VortexType.Struct(fields);
@@ -58,23 +76,27 @@ internal static class VortexTypes
             }
 
             case DTypeKind.List:
-                type = VortexType.List(FromDType(d.ElementType));
+                type = VortexType.List(Convert(d.ElementType, ref budget));
                 break;
             case DTypeKind.FixedSizeList:
-                type = VortexType.FixedSizeList(FromDType(d.ElementType), checked((int)d.FixedSize));
+                type = VortexType.FixedSizeList(Convert(d.ElementType, ref budget), checked((int)d.FixedSize));
                 break;
             case DTypeKind.Extension:
-                return string.IsNullOrEmpty(d.ExtensionId)
+            {
+                string id = budget.ExtensionId(d);
+                return id.Length == 0
                     ? throw new VortexFormatException("An extension dtype names no extension id.")
-                    : VortexType.Extension(d.ExtensionId, FromDType(d.StorageType), d.ExtensionMetadata.ToArray());
+                    : VortexType.Extension(id, Convert(d.StorageType, ref budget), d.ExtensionMetadata.ToArray());
+            }
+
             case DTypeKind.Map:
-                return VortexType.Map(FromDType(d.KeyType), FromDType(d.ValueType), nullable);
+                return VortexType.Map(Convert(d.KeyType, ref budget), Convert(d.ValueType, ref budget), nullable);
             case DTypeKind.Union:
             {
                 VortexField[] variants = new VortexField[d.FieldCount];
                 for (int i = 0; i < variants.Length; i++)
                 {
-                    variants[i] = new VortexField(d.GetFieldName(i), FromDType(d.GetField(i)));
+                    variants[i] = new VortexField(budget.Name(d, i), Convert(d.GetField(i), ref budget));
                 }
 
                 return VortexType.Union(variants, nullable);
@@ -88,6 +110,12 @@ internal static class VortexTypes
 
         return nullable ? type.Nullable : type;
     }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowSpelledOut() => throw new VortexFormatException(
+        $"The dtype spells out to more than {VortexLimits.MaxFlatBufferTables} types or {MaxSpelledNameBytes} name bytes: " +
+        "no stored dtype does, only one whose tables or names are shared.");
 
     internal static DType ToDType(VortexSchema schema, DTypeArena arena)
     {
@@ -150,6 +178,41 @@ internal static class VortexTypes
                 return arena.Variant(nullability);
             default:
                 throw new VortexUnsupportedException(type.Kind.ToString(), ComponentKind.DType, "A union cannot be written: its type ids are not part of the public type.");
+        }
+    }
+
+    /// <summary>What one conversion has spelled out: the types, and the bytes of the names.</summary>
+    /// <remarks>
+    /// The engine walks a dtype once per node, while its public form spells out every path through
+    /// it: a dtype whose tables are shared level after level spells out 2^depth types. No stored
+    /// dtype spells out more types than a FlatBuffer may hold tables.
+    /// </remarks>
+    private struct Budget
+    {
+        private int _types;
+        private long _nameBytes;
+
+        internal void Visit()
+        {
+            if (++_types > VortexLimits.MaxFlatBufferTables)
+            {
+                ThrowSpelledOut();
+            }
+        }
+
+        internal string Name(DType d, int index) => Spell(d.GetFieldNameUtf8(index));
+
+        internal string ExtensionId(DType d) => Spell(d.ExtensionIdUtf8);
+
+        private string Spell(ReadOnlySpan<byte> utf8)
+        {
+            _nameBytes += utf8.Length;
+            if (_nameBytes > MaxSpelledNameBytes)
+            {
+                ThrowSpelledOut();
+            }
+
+            return Encoding.UTF8.GetString(utf8);
         }
     }
 }
