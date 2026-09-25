@@ -93,8 +93,8 @@ public sealed partial class PerRowDispatchTests
         ("Compute/LiteralReader.cs", 2, 0, "legitimate: a single literal"),
         ("Layouts/DictLayoutReader.cs", 1, 0, "R6 done: the one left is an error path"),
         ("Types/Variant/ParquetVariant.cs", 2, 0, "a local method of the same name, not these"),
-        ("Writing/ArrayBlobWriter.cs", 1, 1, "W-13"),
-        ("Writing/BitPackPlan.cs", 2, 2, "W-11"),
+        ("Writing/ArrayBlobWriter.cs", 0, 0, "W-13 done: a block with nulls takes the lanes and clears its nulls by their bits"),
+        ("Writing/BitPackPlan.cs", 0, 0, "W-11 done: the minimum is read at the element's own width"),
     ];
 
     /// <summary>The table's two grand totals, starting with every call it allows.</summary>
@@ -102,7 +102,7 @@ public sealed partial class PerRowDispatchTests
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
-    private const int TotalCalls = 57;
+    private const int TotalCalls = 54;
 
     /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -110,7 +110,7 @@ public sealed partial class PerRowDispatchTests
     /// left in the file is an error path: that change of COMPOSITION is what this column exists
     /// to record.
     /// </remarks>
-    private const int TotalPerRow = 14;
+    private const int TotalPerRow = 11;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()
