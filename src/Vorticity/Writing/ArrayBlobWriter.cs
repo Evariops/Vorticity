@@ -763,52 +763,11 @@ internal static class ArrayBlobWriter
     private static void ClearLanes<T>(ref T rows, ulong word, in WordBytes spread)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
-        if (typeof(T) == typeof(byte))
+        int lanes = Vector512<T>.Count;
+        for (int group = 0; group * lanes < 64; group++)
         {
-            ref byte at = ref Unsafe.As<T, byte>(ref rows);
-            Vector512.AndNot(Vector512.LoadUnsafe(ref at), spread.Clear(word)).StoreUnsafe(ref at);
-            return;
-        }
-
-        if (typeof(T) == typeof(ushort))
-        {
-            ref ushort at = ref Unsafe.As<T, ushort>(ref rows);
-            Vector512<ushort> bit = Vector512.Create(
-                (ushort)1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768,
-                1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768);
-            for (int v = 0; v < 2; v++)
-            {
-                uint half = (uint)(word >> (32 * v));
-                Vector512<ushort> held = Vector512.Create(Vector256.Create((ushort)half), Vector256.Create((ushort)(half >> 16)));
-                Vector512<ushort> keep = ~Vector512.Equals(held & bit, Vector512<ushort>.Zero);
-                (Vector512.LoadUnsafe(ref at, (nuint)(32 * v)) & keep).StoreUnsafe(ref at, (nuint)(32 * v));
-            }
-
-            return;
-        }
-
-        if (typeof(T) == typeof(uint))
-        {
-            ref uint at = ref Unsafe.As<T, uint>(ref rows);
-            Vector512<uint> bit = Vector512.Create(
-                1u, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768);
-            for (int v = 0; v < 4; v++)
-            {
-                Vector512<uint> held = Vector512.Create((uint)(word >> (16 * v)) & 0xFFFF);
-                Vector512<uint> keep = ~Vector512.Equals(held & bit, Vector512<uint>.Zero);
-                (Vector512.LoadUnsafe(ref at, (nuint)(16 * v)) & keep).StoreUnsafe(ref at, (nuint)(16 * v));
-            }
-
-            return;
-        }
-
-        ref ulong words = ref Unsafe.As<T, ulong>(ref rows);
-        Vector512<ulong> lane = Vector512.Create(1UL, 2, 4, 8, 16, 32, 64, 128);
-        for (int v = 0; v < 8; v++)
-        {
-            Vector512<ulong> held = Vector512.Create((word >> (8 * v)) & 0xFF);
-            Vector512<ulong> keep = ~Vector512.Equals(held & lane, Vector512<ulong>.Zero);
-            (Vector512.LoadUnsafe(ref words, (nuint)(8 * v)) & keep).StoreUnsafe(ref words, (nuint)(8 * v));
+            nuint at = (nuint)(group * lanes);
+            (Vector512.LoadUnsafe(ref rows, at) & spread.Lanes<T>(word, group)).StoreUnsafe(ref rows, at);
         }
     }
 

@@ -970,7 +970,33 @@ internal static class BlockStatsPass
         long boundaries = 0;
         int i = 1;
         int lanes = Vector128<T>.IsSupported ? Vector128<T>.Count : 0;
-        if (Vector128.IsHardwareAccelerated && lanes > 0 && values.Length > lanes)
+        int wide = Vector512<T>.IsSupported ? Vector512<T>.Count : 0;
+        if (Vector512.IsHardwareAccelerated && wide > 0 && values.Length > wide)
+        {
+            // The same count four times as wide, where the machine has 512-bit vectors.
+            ref T head = ref MemoryMarshal.GetReference(values);
+            int last = values.Length - wide;
+            while (i <= last)
+            {
+                Vector512<T> equal = Vector512<T>.Zero;
+                int steps = Math.Min(255, ((last - i) / wide) + 1);
+                for (int step = 0; step < steps; step++, i += wide)
+                {
+                    Vector512<T> here = Vector512.LoadUnsafe(ref head, (nuint)i);
+                    Vector512<T> before = Vector512.LoadUnsafe(ref head, (nuint)(i - 1));
+                    equal -= Vector512.Equals(here, before);
+                }
+
+                long matches = 0;
+                for (int lane = 0; lane < wide; lane++)
+                {
+                    matches += long.CreateTruncating(equal.GetElement(lane));
+                }
+
+                boundaries += ((long)steps * wide) - matches;
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated && lanes > 0 && values.Length > lanes)
         {
             ref T head = ref MemoryMarshal.GetReference(values);
             int last = values.Length - lanes;
@@ -1057,8 +1083,24 @@ internal static class BlockStatsPass
         ref byte bit = ref MemoryMarshal.GetReference(bits);
         ref T value = ref MemoryMarshal.GetReference(values[..count]);
         nint boundaries = 0;
-        nint previous = BitAt(ref bit, firstBit);
-        for (nint i = 1; i < count; i++)
+        nint start1 = 1;
+
+        // With 512-bit vectors, 64 rows a word: the rows' validity, their predecessors', and which
+        // differ from their predecessor, the three combined as the scalar row combines them and
+        // counted by one popcount.
+        if (Vector512.IsHardwareAccelerated && Vector512<T>.IsSupported && count > 64)
+        {
+            for (; start1 + 64 <= count; start1 += 64)
+            {
+                ulong valid = BitWords.Load(bits, firstBit + (int)start1);
+                ulong before = BitWords.Load(bits, firstBit + (int)start1 - 1);
+                ulong differs = ~Equalities(ref Unsafe.Add(ref value, start1));
+                boundaries += BitOperations.PopCount((valid ^ before) | (valid & before & differs));
+            }
+        }
+
+        nint previous = BitAt(ref bit, firstBit + start1 - 1);
+        for (nint i = start1; i < count; i++)
         {
             nint valid = BitAt(ref bit, firstBit + i);
             nint differs = Unsafe.Add(ref value, i).Equals(Unsafe.Add(ref value, i - 1)) ? 0 : 1;
@@ -1067,6 +1109,25 @@ internal static class BlockStatsPass
         }
 
         return boundaries;
+    }
+
+    /// <summary>
+    /// Which of the 64 rows from <paramref name="at"/> equal the row before each, bit <c>i</c> for
+    /// row <c>i</c>: a vector of them against the vector one row behind, by a second load.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Equalities<T>(ref T at)
+    {
+        int lanes = Vector512<T>.Count;
+        ulong equal = 0;
+        for (int row = 0; row < 64; row += lanes)
+        {
+            Vector512<T> here = Vector512.LoadUnsafe(ref at, (nuint)row);
+            Vector512<T> before = Vector512.LoadUnsafe(ref Unsafe.Subtract(ref at, 1), (nuint)row);
+            equal |= Vector512.Equals(here, before).ExtractMostSignificantBits() << row;
+        }
+
+        return equal;
     }
 
     /// <summary>Rows from which <see cref="CountWidths{T}"/> spreads a range over four pairs of histograms.</summary>
@@ -2078,7 +2139,13 @@ internal static class BlockStatsPass
         }
 
         int i = 1;
-        if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported && Vector128<T>.Count >= 4
+        if (Vector512.IsHardwareAccelerated && Vector512<T>.IsSupported)
+        {
+            // Eight lanes or more at every width, 64-bit values included.
+            i = OrderLanes512(values, ref repeats);
+            last = values[i - 1];
+        }
+        else if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported && Vector128<T>.Count >= 4
 )
         {
             // The lanes clear every window in which nothing happens; the scalar loop takes over at
@@ -2152,6 +2219,30 @@ internal static class BlockStatsPass
         return i;
     }
 
+    /// <summary><see cref="OrderLanes{T}"/> on 512-bit vectors, which hold eight 64-bit lanes.</summary>
+    private static int OrderLanes512<T>(ReadOnlySpan<T> values, ref bool repeats)
+        where T : unmanaged, INumber<T>
+    {
+        int lanes = Vector512<T>.Count;
+        ref T head = ref MemoryMarshal.GetReference(values);
+        Vector512<T> equal = Vector512<T>.Zero;
+        int i = 1;
+        for (; i + lanes <= values.Length; i += lanes)
+        {
+            Vector512<T> current = Vector512.LoadUnsafe(ref head, (nuint)i);
+            Vector512<T> previous = Vector512.LoadUnsafe(ref head, (nuint)(i - 1));
+            if (Vector512.LessThanAny(current, previous) || !Vector512.EqualsAll(current, current))
+            {
+                break;
+            }
+
+            equal |= Vector512.Equals(current, previous);
+        }
+
+        repeats |= equal != Vector512<T>.Zero;
+        return i;
+    }
+
     /// <summary>
     /// The extremes of a range, four to sixteen lanes at a time.
     /// </summary>
@@ -2178,7 +2269,47 @@ internal static class BlockStatsPass
         max = T.MinValue;
         int i = 0;
         int lanes = Vector128<T>.IsSupported ? Vector128<T>.Count : 0;
-        if (Vector128.IsHardwareAccelerated && lanes > 0 && values.Length >= lanes * 2)
+        int wide = Vector512<T>.IsSupported ? Vector512<T>.Count : 0;
+        if (Vector512.IsHardwareAccelerated && wide > 0 && values.Length >= wide * 2)
+        {
+            // The same two pairs of accumulators four times as wide, with a 64-bit minimum and
+            // maximum of the machine's own (vpminsq, vpminuq) where NEON emulates them.
+            ref T head = ref MemoryMarshal.GetReference(values);
+            Vector512<T> lowA = Vector512.LoadUnsafe(ref head);
+            Vector512<T> lowB = Vector512.LoadUnsafe(ref head, (nuint)wide);
+            Vector512<T> highA = lowA;
+            Vector512<T> highB = lowB;
+
+            int step = wide * 2;
+            int last = values.Length - step;
+            for (i = step; i <= last; i += step)
+            {
+                Vector512<T> a = Vector512.LoadUnsafe(ref head, (nuint)i);
+                Vector512<T> b = Vector512.LoadUnsafe(ref head, (nuint)(i + wide));
+                lowA = Vector512.Min(lowA, a);
+                lowB = Vector512.Min(lowB, b);
+                highA = Vector512.Max(highA, a);
+                highB = Vector512.Max(highB, b);
+            }
+
+            Vector512<T> low = Vector512.Min(lowA, lowB);
+            Vector512<T> high = Vector512.Max(highA, highB);
+            for (int lane = 0; lane < wide; lane++)
+            {
+                T small = low.GetElement(lane);
+                T large = high.GetElement(lane);
+                if (small < min)
+                {
+                    min = small;
+                }
+
+                if (large > max)
+                {
+                    max = large;
+                }
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated && lanes > 0 && values.Length >= lanes * 2)
         {
             ref T head = ref MemoryMarshal.GetReference(values);
             Vector128<T> lowA = Vector128.LoadUnsafe(ref head);
@@ -2292,6 +2423,44 @@ internal static class BlockStatsPass
         T otherHigh = T.MinValue;
         nint any = 0;
         nint i = 0;
+
+        // With AVX-512, 64 rows a validity word: each vector of them under its lanes' mask, a null
+        // lane standing for the far end of either bound through a select, as the scalar rows do.
+        if (Vector512.IsHardwareAccelerated && Vector512<T>.IsSupported && WordBytes.IsAccelerated && count >= 64)
+        {
+            WordBytes spread = WordBytes.Create();
+            int lanes = Vector512<T>.Count;
+            Vector512<T> ceiling = Vector512.Create(T.MaxValue);
+            Vector512<T> floor = Vector512.Create(T.MinValue);
+            Vector512<T> lows = ceiling;
+            Vector512<T> highs = floor;
+            ulong seen = 0;
+            int whole = count & ~63;
+            for (int row = 0; row < whole; row += 64)
+            {
+                ulong word = BitWords.Load(mask.Bits, firstBit + row);
+                seen |= word;
+                for (int group = 0; group * lanes < 64; group++)
+                {
+                    Vector512<T> v = Vector512.LoadUnsafe(ref value, (nuint)(row + (group * lanes)));
+                    Vector512<T> held = spread.Lanes<T>(word, group);
+                    lows = Vector512.Min(lows, Vector512.ConditionalSelect(held, v, ceiling));
+                    highs = Vector512.Max(highs, Vector512.ConditionalSelect(held, v, floor));
+                }
+            }
+
+            for (int lane = 0; lane < lanes; lane++)
+            {
+                T small = lows.GetElement(lane);
+                T large = highs.GetElement(lane);
+                low = small < low ? small : low;
+                high = large > high ? large : high;
+            }
+
+            any = seen != 0 ? 1 : 0;
+            i = whole;
+        }
+
         for (; i + 1 < count; i += 2)
         {
             nint first = BitAt(ref bit, firstBit + i);
