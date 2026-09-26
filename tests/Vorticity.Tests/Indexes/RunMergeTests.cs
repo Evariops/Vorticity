@@ -230,6 +230,37 @@ public sealed class RunMergeTests
     }
 
     [Fact]
+    public async Task AScratchOnDiskIsNoOneElsesToReadAndLeavesNoFileBehind()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "Windows deletes a delete-on-close file itself, however the process ends");
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string directory = Path.Combine(Path.GetTempPath(), $"vorticity-scratch-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            using RunScratch scratch = new RunScratch(memoryBudget: 5_000, directory);
+            await scratch.AppendAsync(new byte[8_000], ct);
+            Assert.True(scratch.OnDisk);
+
+            // The keys a spill holds are column values: the file is its owner's alone, and has no
+            // name to be opened by, or to be left behind by a process killed before it closes.
+            if (!OperatingSystem.IsWindows())
+            {
+                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, global::System.IO.File.GetUnixFileMode(FileOf(scratch)!));
+            }
+
+            Assert.Empty(Directory.GetFiles(directory));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [System.Runtime.CompilerServices.UnsafeAccessor(System.Runtime.CompilerServices.UnsafeAccessorKind.Field, Name = "_file")]
+    private static extern ref Microsoft.Win32.SafeHandles.SafeFileHandle? FileOf(RunScratch scratch);
+
+    [Fact]
     public async Task TheScratchMovesToDiskPastItsBudgetAndReadsBack()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -249,7 +280,9 @@ public sealed class RunMergeTests
                 long second = await scratch.AppendAsync(bytes.AsMemory(4_000), ct);
                 Assert.True(scratch.OnDisk);
                 long third = await scratch.AppendAsync(tail, ct);
-                Assert.Single(Directory.GetFiles(directory));
+
+                // Named in the directory on Windows, which deletes it on close; nameless elsewhere.
+                Assert.Equal(OperatingSystem.IsWindows() ? 1 : 0, Directory.GetFiles(directory).Length);
 
                 // On disk, the synchronous members refuse rather than block on the file.
                 Assert.Throws<InvalidOperationException>(() => scratch.Append(tail));

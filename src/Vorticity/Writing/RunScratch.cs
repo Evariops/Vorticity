@@ -21,6 +21,11 @@ internal sealed class RunScratch : IDisposable
     private readonly long _memoryBudget;
     private readonly string _directory;
     private readonly List<byte[]> _pages = [];
+
+    /// <summary>The stream that created the file and owns its handle.</summary>
+    private FileStream? _stream;
+
+    /// <summary>The file's handle, which every read and write goes through.</summary>
     private SafeFileHandle? _file;
     private long _length;
     private long _admitted;
@@ -186,11 +191,37 @@ internal sealed class RunScratch : IDisposable
             return;
         }
 
+        // The keys a spill holds are column values, so the file is its owner's alone, and set so by a
+        // stream, the one way to give a mode as the file is created. Outside Windows, which deletes it
+        // however the process ends, its name goes as soon as it is open: a killed process never
+        // reaches the close that would delete it.
         string path = Path.Combine(_directory, $"vorticity-runs-{Guid.NewGuid():N}.tmp");
-        SafeFileHandle file = System.IO.File.OpenHandle(
-            path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, FileOptions.DeleteOnClose | FileOptions.Asynchronous);
+        FileStreamOptions options = new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.ReadWrite,
+            Share = FileShare.None,
+            Options = FileOptions.Asynchronous,
+            BufferSize = 0,
+        };
+        if (OperatingSystem.IsWindows())
+        {
+            options.Options |= FileOptions.DeleteOnClose;
+        }
+        else
+        {
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        }
+
+        FileStream stream = new FileStream(path, options);
+        SafeFileHandle file = stream.SafeFileHandle;
         try
         {
+            if (!OperatingSystem.IsWindows())
+            {
+                System.IO.File.Delete(path);
+            }
+
             long position = 0;
             for (int i = 0; i < _pages.Count; i++)
             {
@@ -201,11 +232,12 @@ internal sealed class RunScratch : IDisposable
         }
         catch
         {
-            file.Dispose();
+            await stream.DisposeAsync().ConfigureAwait(false);
             throw;
         }
 
         // The pages go only once the file holds them: a spill that fails leaves the store in memory.
+        _stream = stream;
         _file = file;
         foreach (byte[] page in _pages)
         {
@@ -217,7 +249,8 @@ internal sealed class RunScratch : IDisposable
 
     public void Dispose()
     {
-        _file?.Dispose();
+        _stream?.Dispose();
+        _stream = null;
         _file = null;
         foreach (byte[] page in _pages)
         {
