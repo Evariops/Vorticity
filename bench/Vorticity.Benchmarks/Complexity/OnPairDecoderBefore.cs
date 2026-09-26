@@ -1,17 +1,17 @@
 using System;
 using System.Buffers;
-using System.Diagnostics.CodeAnalysis;
-using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Text;
+using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Types;
 
-namespace Vorticity.Arrays.Decoders.Compressed;
+namespace Vorticity.Benchmarks.Complexity;
 
 /// <summary>
 /// Decodes <c>vortex.onpair</c> into a canonical varbin view. A code is a <c>u16</c> naming one of
@@ -24,7 +24,7 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// and their lengths come from the metadata rather than from the wire, because slot children do
 /// not persist their own.
 /// </remarks>
-internal sealed class OnPairDecoder : ArrayDecoder
+internal sealed class OnPairDecoderBefore : ArrayDecoder
 {
     /// <summary>The wire id.</summary>
     public const string Id = "vortex.onpair";
@@ -46,9 +46,9 @@ internal sealed class OnPairDecoder : ArrayDecoder
     private const int MaxTokenCount = 1 << 16;
 
     /// <summary>The shared, stateless instance.</summary>
-    public static readonly OnPairDecoder Instance = new OnPairDecoder();
+    public static readonly OnPairDecoderBefore Instance = new OnPairDecoderBefore();
 
-    private OnPairDecoder()
+    private OnPairDecoderBefore()
     {
     }
 
@@ -112,9 +112,8 @@ internal sealed class OnPairDecoder : ArrayDecoder
     /// all the views need.
     ///
     /// The dictionary offset table is built once and shared across the wanted rows rather than per
-    /// row. It is sized by the dictionary and not by the selection, so a take whose rows hold fewer
-    /// codes than the dictionary holds tokens does without it and copies each token from the
-    /// offsets.
+    /// row. It is also the part of this decode that a take does not shrink: it is sized by the
+    /// dictionary, not by the selection.
     /// </remarks>
     /// <inheritdoc/>
     public override int DecodeSelected(
@@ -136,36 +135,18 @@ internal sealed class OnPairDecoder : ArrayDecoder
         OnPairMetadata metadata = OnPairMetadata.Read(node.Metadata);
         bool ranged = !selective && (start != 0 || count != length);
 
-        // Child 0: the dictionary's offsets, dict_size + 1 of them, which every read of the node
-        // reads whole: decoded once for all of them when there is more than one.
+        // Child 0: the dictionary's offsets, dict_size + 1 of them.
         int tokenCount = CheckedTokenCount(metadata.DictionarySize);
         CanonicalNode dictOffsets = DecodePart(
-            context, in node, 0, Id + " dict_offsets", metadata.DictionaryOffsetsPType, tokenCount + 1,
-            shared: selective || ranged);
+            context, in node, 0, Id + " dict_offsets", metadata.DictionaryOffsetsPType, tokenCount + 1);
 
-        // A take whose rows hold fewer codes than the dictionary holds tokens copies each token
-        // through checked spans, straight from the offsets, rather than building a table of every
-        // token for a few of them. Its kernel needs no proof about the offsets to stay in bounds, so
-        // the dictionary is checked once for the node and not before every batch; the unchecked
-        // kernels below rely on the check, and make it at every read.
-        int codesLength = ArrayDecodeContext.CheckedLength(metadata.CodesLength, Id + " codes_len");
-        bool fewCodes = selective && FewCodes(codesLength, length, wanted.Length, tokenCount);
         VortexBuffer dictionary = node.GetBuffer(0);
-        int dictionaryBytes;
-        if (!fewCodes || !context.IsNodeChecked(in node))
-        {
-            dictionaryBytes = ValidateDictionary(
-                dictOffsets, metadata.DictionaryOffsetsPType, tokenCount, dictionary);
-            context.MarkNodeChecked(in node);
-        }
-        else
-        {
-            dictionaryBytes = (int)CanonicalSupport.ReadInteger(
-                dictOffsets.Values.Span, metadata.DictionaryOffsetsPType, tokenCount);
-        }
+        int dictionaryBytes = ValidateDictionary(
+            dictOffsets, metadata.DictionaryOffsetsPType, tokenCount, dictionary);
 
         // Child 1: the code stream, whose length the metadata carries. A range decodes only the
         // slice its code offsets bound, once it has them.
+        int codesLength = ArrayDecodeContext.CheckedLength(metadata.CodesLength, Id + " codes_len");
         CanonicalNode codes = ranged
             ? default
             : DecodePart(context, in node, 1, Id + " codes", metadata.CodesPType, codesLength);
@@ -223,16 +204,7 @@ internal sealed class OnPairDecoder : ArrayDecoder
             heap = CanonicalSupport.AllocateUninitialized(context, total, 1, out destination);
         }
 
-        if (fewCodes)
-        {
-            DecodeRowsChecked(
-                codes.Values.Span, metadata.CodesPType, codesOffsets.Values.Span,
-                metadata.CodesOffsetsPType, codesLength,
-                dictOffsets.Values.Span, metadata.DictionaryOffsetsPType, tokenCount,
-                dictionary.Span, uncompressedLengths.Values.Span,
-                metadata.UncompressedLengthsPType, wanted, destination);
-        }
-        else if (selective)
+        if (selective)
         {
             DecodeRows(
                 codes.Values.Span, metadata.CodesPType, codesOffsets.Values.Span,
@@ -240,6 +212,7 @@ internal sealed class OnPairDecoder : ArrayDecoder
                 dictOffsets.Values.Span, metadata.DictionaryOffsetsPType, tokenCount,
                 dictionary.Span, uncompressedLengths.Values.Span,
                 metadata.UncompressedLengthsPType, wanted, destination);
+
         }
         else
         {
@@ -279,10 +252,9 @@ internal sealed class OnPairDecoder : ArrayDecoder
         //
         // The blob is bounded by its last offset and not by its length: `ValidateDictionary` has
         // already established that bound, and the bytes past it are the read padding the reference
-        // implementation requires, which no token ever emits. A take of few codes sweeps the few
-        // bytes it decoded instead of the whole dictionary.
-        bool heapIsAscii = dtype.Kind == DTypeKind.Utf8 && !fewCodes
-            && Ascii.IsValid(dictionary.Span[..Math.Min(dictionaryBytes, dictionary.Length)]);
+        // implementation requires, which no token ever emits.
+        bool heapIsAscii = dtype.Kind == DTypeKind.Utf8
+            && Ascii.IsValid(dictionary.Span[..dictionaryBytes]);
 
         bool referenced = ViewKernels.BuildFromLengths(
             uncompressedLengths.Values.Span, metadata.UncompressedLengthsPType,
@@ -371,90 +343,6 @@ internal sealed class OnPairDecoder : ArrayDecoder
         }
     }
 
-    /// <summary>
-    /// Whether the wanted rows hold fewer codes than the dictionary holds tokens, by the node's
-    /// average: then copying each of their tokens through checked spans costs less than a table of
-    /// every token.
-    /// </summary>
-    private static bool FewCodes(int codesLength, int length, int wanted, int tokenCount) =>
-        (long)codesLength * wanted * FewCodesFactor < (long)tokenCount * Math.Max(length, 1);
-
-    /// <summary>
-    /// How many times a token copied through checked spans costs one copied through the table,
-    /// the table's own cost being a token's worth per token.
-    /// </summary>
-    private const int FewCodesFactor = 2;
-
-    /// <summary>
-    /// Concatenates the wanted rows token by token from the dictionary's offsets, through checked
-    /// spans, with no table: for a take whose codes are fewer than the dictionary's tokens.
-    /// </summary>
-    /// <remarks>
-    /// Every bound is asked again rather than taken from the dictionary's check, which this read may
-    /// have skipped as already made for the node: a file rewritten under the scan then costs an
-    /// exception here, never a read or a write out of bounds.
-    /// </remarks>
-    private static void DecodeRowsChecked(
-        ReadOnlySpan<byte> codes,
-        PType codesPType,
-        ReadOnlySpan<byte> codesOffsets,
-        PType codesOffsetsPType,
-        int codesLength,
-        ReadOnlySpan<byte> dictOffsets,
-        PType offsetsPType,
-        int tokenCount,
-        ReadOnlySpan<byte> dictionary,
-        ReadOnlySpan<byte> lengths,
-        PType lengthsPType,
-        ReadOnlySpan<int> wanted,
-        Span<byte> destination)
-    {
-        int written = 0;
-        for (int k = 0; k < wanted.Length; k++)
-        {
-            int row = wanted[k];
-            long start = CanonicalSupport.ReadInteger(codesOffsets, codesOffsetsPType, row);
-            long end = CanonicalSupport.ReadInteger(codesOffsets, codesOffsetsPType, row + 1);
-            if (start < 0 || end < start || end > codesLength)
-            {
-                CompressedThrow.Format(
-                    $"{Id} row {row} spans codes [{start}, {end}) of a {codesLength}-code stream.");
-            }
-
-            int expected = (int)CanonicalSupport.ReadInteger(lengths, lengthsPType, row);
-            Span<byte> into = destination.Slice(written, expected);
-            int got = 0;
-            for (int c = (int)start; c < (int)end; c++)
-            {
-                long code = CanonicalSupport.ReadInteger(codes, codesPType, c);
-                if ((ulong)code >= (ulong)tokenCount)
-                {
-                    CompressedThrow.Format(
-                        $"{Id} code {code} names a token the {tokenCount}-entry dictionary does not hold.");
-                }
-
-                long from = CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, (int)code);
-                long to = CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, (int)code + 1);
-                if (from < 0 || to <= from || to > dictionary.Length || to - from > into.Length - got)
-                {
-                    CompressedThrow.Format(
-                        $"{Id} row {row} decodes past the {expected} bytes it declares, or through a " +
-                        $"token outside its {dictionary.Length}-byte dictionary.");
-                }
-
-                dictionary[(int)from..(int)to].CopyTo(into[got..]);
-                got += (int)(to - from);
-            }
-
-            if (got != expected)
-            {
-                CompressedThrow.Format($"{Id} row {row} decoded to {got} bytes; it declares {expected}.");
-            }
-
-            written += got;
-        }
-    }
-
     /// <summary>Concatenates the tokens the codes name, in order.</summary>
     private static int DecodeCodes(
         ReadOnlySpan<byte> codes,
@@ -500,72 +388,17 @@ internal sealed class OnPairDecoder : ArrayDecoder
     internal static void BuildTokenTable(
         ReadOnlySpan<byte> dictOffsets, PType offsetsPType, int tokenCount, Span<long> tokens, int dictionaryLength)
     {
-        // The offsets' type is resolved once for the table, not once an offset.
-        switch (offsetsPType)
-        {
-            case PType.U8:
-                Tokens<byte>(dictOffsets, tokenCount, tokens, dictionaryLength);
-                break;
-            case PType.U16:
-                Tokens<ushort>(dictOffsets, tokenCount, tokens, dictionaryLength);
-                break;
-            case PType.U32:
-                Tokens<uint>(dictOffsets, tokenCount, tokens, dictionaryLength);
-                break;
-            case PType.U64:
-                Tokens<ulong>(dictOffsets, tokenCount, tokens, dictionaryLength);
-                break;
-            case PType.I8:
-                Tokens<sbyte>(dictOffsets, tokenCount, tokens, dictionaryLength);
-                break;
-            case PType.I16:
-                Tokens<short>(dictOffsets, tokenCount, tokens, dictionaryLength);
-                break;
-            case PType.I32:
-                Tokens<int>(dictOffsets, tokenCount, tokens, dictionaryLength);
-                break;
-            case PType.I64:
-                Tokens<long>(dictOffsets, tokenCount, tokens, dictionaryLength);
-                break;
-            default:
-                NotIntegers(offsetsPType);
-                break;
-        }
-    }
-
-    [DoesNotReturn]
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void NotIntegers(PType ptype) =>
-        CompressedThrow.Format($"{Id}'s dictionary offsets must be an integer physical type; the file says {(byte)ptype}.");
-
-    private static void Tokens<T>(ReadOnlySpan<byte> bytes, int tokenCount, Span<long> tokens, int dictionaryLength)
-        where T : unmanaged, IBinaryInteger<T>
-    {
-        ReadOnlySpan<T> offsets = MemoryMarshal.Cast<byte, T>(bytes)[..(tokenCount + 1)];
-        tokens = tokens[..tokenCount];
-
         // A token whose sixteen bytes from its start would run past the blob carries NearEnd, so
         // the concatenation finds such a token among many with one or rather than a compare each.
         int wideStart = dictionaryLength - MaxTokenSize;
-        int previous = (int)Offset(offsets[0]);
-        for (int t = 0; t < tokens.Length; t++)
+        int previous = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, 0);
+        for (int t = 0; t < tokenCount; t++)
         {
-            int next = (int)Offset(offsets[t + 1]);
+            int next = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, t + 1);
             tokens[t] = (uint)previous | (previous > wideStart ? NearEnd : 0) | ((long)(next - previous) << 32);
             previous = next;
         }
     }
-
-    /// <summary>
-    /// An offset as <see cref="CanonicalSupport.ReadInteger"/> reads one: a 64-bit unsigned one
-    /// saturated to <see cref="long.MaxValue"/>, the others extended as their sign says.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static long Offset<T>(T value)
-        where T : unmanaged, IBinaryInteger<T> =>
-        typeof(T) == typeof(ulong)
-            ? (long)Math.Min(Unsafe.As<T, ulong>(ref value), (ulong)long.MaxValue)
-            : long.CreateTruncating(value);
 
     /// <summary>The concatenation itself, with the code width resolved once.</summary>
     /// <remarks>
@@ -993,52 +826,6 @@ internal sealed class OnPairDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// The offsets' walk of <see cref="ValidateDictionary"/>, with their type resolved once: each
-    /// token's size, one unsigned compare for both of its bounds.
-    /// </summary>
-    /// <returns>The last offset.</returns>
-    private static long LastOffset<T>(ReadOnlySpan<byte> bytes, int tokenCount)
-        where T : unmanaged, IBinaryInteger<T>
-    {
-        ReadOnlySpan<T> offsets = MemoryMarshal.Cast<byte, T>(bytes)[..(tokenCount + 1)];
-        long previous = Offset(offsets[0]);
-        if (previous != 0)
-        {
-            CompressedThrow.Format($"{Id}'s dictionary offsets start at {previous}, not 0.");
-        }
-
-        for (int i = 1; i < offsets.Length; i++)
-        {
-            long current = Offset(offsets[i]);
-            if ((ulong)(current - previous - 1) >= MaxTokenSize)
-            {
-                BadToken(i - 1, previous, current);
-            }
-
-            previous = current;
-        }
-
-        return previous;
-    }
-
-    /// <summary>Reports a token that is empty, runs backwards, or is longer than a token can be.</summary>
-    [DoesNotReturn]
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void BadToken(int token, long start, long end)
-    {
-        long size = end - start;
-        if (size <= 0)
-        {
-            CompressedThrow.Format(
-                $"{Id} dictionary token {token} spans [{start}, {end}); tokens are " +
-                "non-empty and their offsets increase.");
-        }
-
-        CompressedThrow.Format(
-            $"{Id} dictionary token {token} is {size} bytes; the maximum is {MaxTokenSize}.");
-    }
-
-    /// <summary>
     /// <c>validate_safety</c>: the offsets must start at zero, be strictly increasing (no empty
     /// token), describe tokens of at most <see cref="MaxTokenSize"/> bytes, and end inside the blob.
     /// </summary>
@@ -1053,18 +840,31 @@ internal sealed class OnPairDecoder : ArrayDecoder
         CanonicalNode dictOffsets, PType ptype, int tokenCount, VortexBuffer dictionary)
     {
         ReadOnlySpan<byte> offsets = dictOffsets.Values.Span;
-        long previous = ptype switch
+        long previous = CanonicalSupport.ReadInteger(offsets, ptype, 0);
+        if (previous != 0)
         {
-            PType.U8 => LastOffset<byte>(offsets, tokenCount),
-            PType.U16 => LastOffset<ushort>(offsets, tokenCount),
-            PType.U32 => LastOffset<uint>(offsets, tokenCount),
-            PType.U64 => LastOffset<ulong>(offsets, tokenCount),
-            PType.I8 => LastOffset<sbyte>(offsets, tokenCount),
-            PType.I16 => LastOffset<short>(offsets, tokenCount),
-            PType.I32 => LastOffset<int>(offsets, tokenCount),
-            PType.I64 => LastOffset<long>(offsets, tokenCount),
-            _ => CanonicalSupport.ReadInteger(offsets, ptype, 0),
-        };
+            CompressedThrow.Format($"{Id}'s dictionary offsets start at {previous}, not 0.");
+        }
+
+        for (int i = 1; i <= tokenCount; i++)
+        {
+            long current = CanonicalSupport.ReadInteger(offsets, ptype, i);
+            long size = current - previous;
+            if (size <= 0)
+            {
+                CompressedThrow.Format(
+                    $"{Id} dictionary token {i - 1} spans [{previous}, {current}); tokens are " +
+                    "non-empty and their offsets increase.");
+            }
+
+            if (size > MaxTokenSize)
+            {
+                CompressedThrow.Format(
+                    $"{Id} dictionary token {i - 1} is {size} bytes; the maximum is {MaxTokenSize}.");
+            }
+
+            previous = current;
+        }
 
         // The logical end, not the reference implementation's read-padded one. That decoder copies
         // a fixed sixteen bytes per token and so needs padding past the last token's start; this
@@ -1151,21 +951,17 @@ internal sealed class OnPairDecoder : ArrayDecoder
     /// <param name="name">The child, as a message names it: a constant, so that naming it costs nothing until it is needed.</param>
     /// <param name="ptype">The child's integer type.</param>
     /// <param name="length">The child's rows.</param>
-    /// <param name="shared">Whether every read of the node reads the child whole, which then decodes it once for all of them.</param>
     private static CanonicalNode DecodePart(
         ArrayDecodeContext context,
         in ArrayNode node,
         int childIndex,
         string name,
         PType ptype,
-        int length,
-        bool shared = false)
+        int length)
     {
         CanonicalSupport.RequireIntegerPType(ptype, name);
         DType childType = context.Types.Primitive(ptype, Nullability.NonNullable);
-        int index = shared
-            ? context.DecodeWholeChild(in node, childIndex, childType, length)
-            : context.DecodeChild(in node, childIndex, childType, length);
+        int index = context.DecodeChild(in node, childIndex, childType, length);
         return CanonicalSupport.RequirePrimitiveChild(context, index, ptype, length, name);
     }
 

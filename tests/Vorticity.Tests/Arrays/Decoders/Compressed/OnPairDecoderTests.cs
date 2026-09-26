@@ -206,6 +206,109 @@ public sealed class OnPairDecoderTests
         }
     }
 
+    /// <summary>
+    /// A selection decodes as the whole array picked at its rows, whether its codes are few enough
+    /// to be copied straight from the offsets or many enough for the token table, and whether the
+    /// dictionary was checked by an earlier read of the node or not.
+    /// </summary>
+    [Fact]
+    public void ASelectionDecodesAsTheWholeArrayPicked()
+    {
+        Random random = new Random(13);
+        string[] tokens = new string[300];
+        for (int t = 0; t < tokens.Length; t++)
+        {
+            char[] text = new char[1 + (t % 15)];
+            for (int c = 0; c < text.Length; c++)
+            {
+                text[c] = (char)('a' + random.Next(26));
+            }
+
+            tokens[t] = t % 50 == 0 ? "é" + new string(text) : new string(text);
+        }
+
+        int rows = 400;
+        List<ushort> codes = [];
+        uint[] codeOffsets = new uint[rows + 1];
+        uint[] lengths = new uint[rows];
+        for (int i = 0; i < rows; i++)
+        {
+            int count = random.Next(6);
+            for (int c = 0; c < count; c++)
+            {
+                int token = random.Next(tokens.Length);
+                codes.Add((ushort)token);
+                lengths[i] += (uint)Encoding.UTF8.GetByteCount(tokens[token]);
+            }
+
+            codeOffsets[i + 1] = (uint)codes.Count;
+        }
+
+        byte[] dictionary = Encoding.UTF8.GetBytes(string.Concat(tokens));
+        uint[] dictOffsets = new uint[tokens.Length + 1];
+        for (int i = 0; i < tokens.Length; i++)
+        {
+            dictOffsets[i + 1] = dictOffsets[i] + (uint)Encoding.UTF8.GetByteCount(tokens[i]);
+        }
+
+        using DecodeHarness harness = DecodeHarness.Load(
+            Root((uint)tokens.Length, (ulong)codes.Count, validityBuffer: -1),
+            dictionary,
+            TestBuffers.UInt32(dictOffsets),
+            TestBuffers.UInt16([.. codes]),
+            TestBuffers.UInt32(codeOffsets),
+            TestBuffers.UInt32(lengths));
+        DType dtype = harness.Types.Utf8(Nullability.NonNullable);
+        CanonicalNode whole = harness.Node(harness.DecodeRoot(dtype, rows));
+
+        uint? outer = harness.Scan.Decode.BeginNodeCheckScope(9);
+        try
+        {
+            foreach (int size in new[] { 1, 3, 20, 200, rows })
+            {
+                for (int trial = 0; trial < 5; trial++)
+                {
+                    SortedSet<int> picked = [];
+                    while (picked.Count < size)
+                    {
+                        picked.Add(random.Next(rows));
+                    }
+
+                    int[] wanted = [.. picked];
+                    CanonicalNode selected = harness.Node(harness.DecodeRootSelected(dtype, rows, wanted));
+                    Assert.Equal(wanted.Length, selected.Length);
+                    for (int i = 0; i < wanted.Length; i++)
+                    {
+                        Assert.Equal(Text(whole, wanted[i]), Text(selected, i));
+                    }
+                }
+            }
+        }
+        finally
+        {
+            harness.Scan.Decode.EndNodeCheckScope(outer);
+        }
+    }
+
+    /// <summary>A take of one row refuses a dictionary whose offsets are malformed, whatever tokens the row reads.</summary>
+    [Fact]
+    public void ATakeRefusesAMalformedDictionaryWhateverRowsItReads()
+    {
+        // The offsets start at 1, which the check refuses, while the one row taken reads only token
+        // 1. Three empty rows make its one code fewer than the two tokens, so the take copies from
+        // the offsets rather than through the table.
+        using DecodeHarness harness = DecodeHarness.Load(
+            Root(2, 1, validityBuffer: -1),
+            Encoding.UTF8.GetBytes("xab"),
+            TestBuffers.UInt32(1, 2, 3),
+            TestBuffers.UInt16(1),
+            TestBuffers.UInt32(0, 1, 1, 1, 1),
+            TestBuffers.UInt32(1, 0, 0, 0));
+        DType dtype = harness.Types.Utf8(Nullability.NonNullable);
+
+        Assert.Throws<VortexFormatException>(() => harness.DecodeRootSelected(dtype, 4, [0]));
+    }
+
     // ------------------------------------------------------------------------------- fixtures
 
     private static string[] Decode(string[] tokens, ushort[] codes, int[] uncompressedLengths)
