@@ -137,8 +137,10 @@ internal sealed class FsstPlan
         // trained on, and the heap, row tables and code stream are all garbage the moment this
         // column is priced against zstd and loses. A plan that wins keeps the row tables and the
         // code stream, and hands them back once the writer has them.
+        // Eight bytes of slack past the values, cleared, so the compressor reads every position as
+        // one eight-byte word however near the end of its value.
         int heapBytes = Math.Max((int)plain, 1);
-        byte[] heap = ArrayPool<byte>.Shared.Rent(heapBytes);
+        byte[] heap = ArrayPool<byte>.Shared.Rent(heapBytes + FsstSymbols.MaxSymbolLength);
         int[] starts = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
         int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
         byte[]? codes = null;
@@ -173,23 +175,17 @@ internal sealed class FsstPlan
             }
 
             // An escape costs two bytes, so the worst case is twice the input.
-            codes = ArrayPool<byte>.Shared.Rent((int)Math.Max(plain * 2, 1));
+            int codeRoom = (int)Math.Max(plain * 2, 1);
+            codes = ArrayPool<byte>.Shared.Rent(codeRoom);
             offsets = ArrayPool<int>.Shared.Rent(rows + 1);
-            int written = 0;
-
-            for (int i = 0; i < rows; i++)
+            heap.AsSpan(at, FsstSymbols.MaxSymbolLength).Clear();
+            int written = table.CompressAll(
+                heap.AsSpan(0, at + FsstSymbols.MaxSymbolLength), starts.AsSpan(0, rows), lengths.AsSpan(0, rows),
+                codes.AsSpan(0, codeRoom), offsets.AsSpan(0, rows + 1), sizeCeiling);
+            if (written < 0)
             {
-                offsets[i] = written;
-                written += table.Compress(
-                    heap.AsSpan(starts[i], lengths[i]), codes.AsSpan(written));
-
-                if (written > sizeCeiling)
-                {
-                    return null;
-                }
+                return null;
             }
-
-            offsets[rows] = written;
 
             long encoded = ((long)table.Count * (FsstSymbols.MaxSymbolLength + 1)) + written
                 + ((long)rows * Width(MaxOf(lengths.AsSpan(0, rows))))

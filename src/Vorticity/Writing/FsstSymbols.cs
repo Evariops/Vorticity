@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
@@ -126,6 +127,20 @@ internal sealed class FsstSymbols
     /// </summary>
     private readonly short[] _prefixHeads = new short[SlotCount];
     private readonly short[] _prefixChain = new short[MaxSymbols];
+
+    /// <summary>
+    /// The symbol of three bytes or more in each slot of the reference's matcher, or -1: at most
+    /// one, because <see cref="Optimize"/> skips a candidate whose slot is taken. A symbol and the
+    /// input it matches share their first three bytes, and so their slot, so one probe finds the
+    /// only symbol that can match where the chain walks every symbol of the bucket.
+    /// </summary>
+    private readonly short[] _slots = new short[ReferenceSlotCount];
+
+    /// <summary>
+    /// Whether every symbol of three bytes or more has a slot of its own, which a table
+    /// <see cref="Optimize"/> built always has; the chain answers otherwise.
+    /// </summary>
+    private bool _slotsUnique = true;
 
     private int _count;
 
@@ -304,6 +319,87 @@ internal sealed class FsstSymbols
         }
 
         return written;
+    }
+
+    /// <summary>
+    /// Compresses every row, back to back, as <see cref="Compress"/> compresses one: each row's
+    /// codes start where the one before ended, and <paramref name="offsets"/> records each start
+    /// and the total.
+    /// </summary>
+    /// <param name="heap">
+    /// The rows' bytes, followed by at least eight readable bytes of slack: every position is read
+    /// as the next eight bytes in one load, however near the end of its row, and the bytes past the
+    /// row never decide a symbol, whose width is capped at what the row has left.
+    /// </param>
+    /// <param name="starts">Each row's first byte in <paramref name="heap"/>.</param>
+    /// <param name="lengths">Each row's length.</param>
+    /// <param name="codes">Room for the worst case, two code bytes per input byte.</param>
+    /// <param name="offsets">Room for a start per row and the total.</param>
+    /// <param name="ceiling">Past this many code bytes the compression gives up.</param>
+    /// <returns>The code bytes written, or -1 when they passed <paramref name="ceiling"/>.</returns>
+    /// <remarks>
+    /// One call for the column rather than one a row, and writes through a reference rather than a
+    /// bounds-checked index: the worst case sizes <paramref name="codes"/>, as it does for
+    /// <see cref="Compress"/>.
+    /// </remarks>
+    internal int CompressAll(
+        ReadOnlySpan<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, Span<byte> codes,
+        Span<int> offsets, long ceiling)
+    {
+        int rows = starts.Length;
+        if (offsets.Length <= rows || lengths.Length < rows)
+        {
+            throw new ArgumentException("The offsets cannot hold a start per row and the total.", nameof(offsets));
+        }
+
+        long input = 0;
+        for (int i = 0; i < rows; i++)
+        {
+            input += lengths[i];
+            if ((uint)starts[i] > (uint)heap.Length || (long)starts[i] + lengths[i] + MaxSymbolLength > heap.Length)
+            {
+                throw new ArgumentException("A row with its eight bytes of slack lies outside the heap.", nameof(heap));
+            }
+        }
+
+        if (codes.Length < 2 * input)
+        {
+            throw new ArgumentException("The codes cannot hold the worst case.", nameof(codes));
+        }
+
+        ref byte bytes = ref MemoryMarshal.GetReference(heap);
+        ref byte into = ref MemoryMarshal.GetReference(codes);
+        nint written = 0;
+        for (int row = 0; row < rows; row++)
+        {
+            offsets[row] = (int)written;
+            nint read = starts[row];
+            nint end = read + lengths[row];
+            while (read < end)
+            {
+                ulong word = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bytes, read));
+                int code = FindLongest(word, (int)(end - read), out int length);
+                if (code >= CodeBase)
+                {
+                    Unsafe.Add(ref into, written++) = (byte)(code - CodeBase);
+                }
+                else
+                {
+                    Unsafe.Add(ref into, written++) = EscapeCode;
+                    Unsafe.Add(ref into, written++) = (byte)code;
+                }
+
+                read += length;
+            }
+
+            if (written > ceiling)
+            {
+                return -1;
+            }
+        }
+
+        offsets[rows] = (int)written;
+        return (int)written;
     }
 
     /// <summary>
@@ -593,7 +689,20 @@ internal sealed class FsstSymbols
     private int FindLongest(ulong word, int remaining, out int length)
     {
         int limit = Math.Min(MaxSymbolLength, remaining);
-        if (limit >= 3)
+        if (limit >= 3 && _slotsUnique)
+        {
+            int code = _slots[ReferenceSlot(word)];
+            if (code >= 0)
+            {
+                int width = _lengths[code];
+                if (width <= limit && (word & Mask(width)) == _bits[code])
+                {
+                    length = width;
+                    return CodeBase + code;
+                }
+            }
+        }
+        else if (limit >= 3)
         {
             int best = -1;
             int bestLength = 2;
@@ -739,6 +848,16 @@ internal sealed class FsstSymbols
             int bucket = Bucket(bits);
             _prefixChain[code] = _prefixHeads[bucket];
             _prefixHeads[bucket] = (short)code;
+
+            int slot = ReferenceSlot(bits);
+            if (_slots[slot] >= 0)
+            {
+                _slotsUnique = false;
+            }
+            else
+            {
+                _slots[slot] = (short)code;
+            }
         }
 
         _bits[code] = bits;
@@ -752,6 +871,8 @@ internal sealed class FsstSymbols
         Array.Fill(_oneByte, (short)-1);
         Array.Fill(_twoByte, (short)-1);
         Array.Fill(_prefixHeads, (short)-1);
+        Array.Fill(_slots, (short)-1);
+        _slotsUnique = true;
     }
 
     /// <summary>

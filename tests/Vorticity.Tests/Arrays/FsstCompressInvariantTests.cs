@@ -118,6 +118,61 @@ public sealed class FsstCompressInvariantTests
         }
     }
 
+    /// <summary>
+    /// The whole-column compressor writes what the per-value one writes, value after value, and
+    /// records where each value's codes start: every position read as one eight-byte word, the
+    /// bytes past a value never deciding its symbols.
+    /// </summary>
+    [Fact]
+    public void CompressingTheColumnWritesEachValuesCodesInTurn()
+    {
+        List<byte[]> values = Corpus();
+        values.Add([]);
+        values.Add([0x7A]);
+        values.Add(Encoding.UTF8.GetBytes("ht"));
+        FsstSymbols? trained = FsstSymbols.Train(values.ConvertAll(v => new ReadOnlyMemory<byte>(v)));
+        Assert.NotNull(trained);
+
+        // The values back to back in one heap, eight bytes of slack after the last, and the slack
+        // made of bytes a symbol could match, so reading into it would show.
+        int total = 0;
+        foreach (byte[] value in values)
+        {
+            total += value.Length;
+        }
+
+        byte[] heap = new byte[total + 8];
+        heap.AsSpan().Fill((byte)'h');
+        int[] starts = new int[values.Count];
+        int[] lengths = new int[values.Count];
+        int at = 0;
+        for (int i = 0; i < values.Count; i++)
+        {
+            starts[i] = at;
+            lengths[i] = values[i].Length;
+            values[i].CopyTo(heap, at);
+            at += values[i].Length;
+        }
+
+        byte[] codes = new byte[Math.Max(total * 2, 1)];
+        int[] offsets = new int[values.Count + 1];
+        int written = trained.CompressAll(heap, starts, lengths, codes, offsets, long.MaxValue);
+
+        int expectedAt = 0;
+        for (int i = 0; i < values.Count; i++)
+        {
+            byte[] one = new byte[Math.Max(values[i].Length * 2, 1)];
+            int oneWritten = trained.Compress(values[i], one);
+            Assert.Equal(expectedAt, offsets[i]);
+            Assert.Equal(one.AsSpan(0, oneWritten).ToArray(), codes.AsSpan(expectedAt, oneWritten).ToArray());
+            expectedAt += oneWritten;
+        }
+
+        Assert.Equal(expectedAt, written);
+        Assert.Equal(expectedAt, offsets[values.Count]);
+        Assert.Equal(-1, trained.CompressAll(heap, starts, lengths, codes, offsets, ceiling: written / 2));
+    }
+
     /// <summary>Values shaped like the corpus's text columns, with bytes no symbol will cover.</summary>
     private static List<byte[]> Corpus()
     {
