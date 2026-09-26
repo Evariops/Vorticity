@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
@@ -999,6 +1000,24 @@ internal static class RowKernels
         ref byte source = ref MemoryMarshal.GetReference(codes);
         ref uint target = ref MemoryMarshal.GetReference(destination);
         int row = 0;
+        if (Avx512F.IsSupported)
+        {
+            // Sixteen codes widened by one vpmovzxbd and stored whole, where the ladder of widens
+            // below takes three and four stores.
+            for (; row + 16 <= destination.Length; row += 16)
+            {
+                Vector128<byte> block = Vector128.LoadUnsafe(ref source, (nuint)row);
+                if (bounded && Vector128.GreaterThanOrEqualAny(block, bound))
+                {
+                    return row;
+                }
+
+                Avx512F.ConvertToVector512UInt32(block).StoreUnsafe(ref target, (nuint)row);
+            }
+
+            return row;
+        }
+
         for (; row + 16 <= destination.Length; row += 16)
         {
             Vector128<byte> block = Vector128.LoadUnsafe(ref source, (nuint)row);
@@ -1031,6 +1050,24 @@ internal static class RowKernels
         ref ushort source = ref MemoryMarshal.GetReference(codes);
         ref uint target = ref MemoryMarshal.GetReference(destination);
         int row = 0;
+        if (Avx512F.IsSupported)
+        {
+            // Sixteen codes widened by one vpmovzxwd and stored whole.
+            Vector256<ushort> wide = Vector256.Create((ushort)Math.Min(limit, 65535u));
+            for (; row + 16 <= destination.Length; row += 16)
+            {
+                Vector256<ushort> block = Vector256.LoadUnsafe(ref source, (nuint)row);
+                if (bounded && Vector256.GreaterThanOrEqualAny(block, wide))
+                {
+                    return row;
+                }
+
+                Avx512F.ConvertToVector512UInt32(block).StoreUnsafe(ref target, (nuint)row);
+            }
+
+            return row;
+        }
+
         for (; row + 8 <= destination.Length; row += 8)
         {
             Vector128<ushort> block = Vector128.LoadUnsafe(ref source, (nuint)row);
@@ -1072,17 +1109,139 @@ internal static class RowKernels
         Span<byte> destination, int count)
         where TCode : unmanaged
     {
-        ReadOnlySpan<TCode> typed = MemoryMarshal.Cast<byte, TCode>(codes)[..count];
-        return width switch
+        // A small dictionary of narrow values through byte codes is a shuffle: the rows it takes
+        // are the caller's no longer, and the rest, a bad code's block included, go on below.
+        int done = typeof(TCode) == typeof(byte) ? Permuted(codes[..count], values, width, valuesLength, destination) : 0;
+        if (done == count)
         {
-            1 => GatherCore<TCode, byte>(typed, values, valuesLength, destination, count),
-            2 => GatherCore<TCode, ushort>(typed, values, valuesLength, destination, count),
-            4 => GatherCore<TCode, uint>(typed, values, valuesLength, destination, count),
-            8 => GatherCore<TCode, ulong>(typed, values, valuesLength, destination, count),
-            16 => GatherCore<TCode, Vector128<byte>>(typed, values, valuesLength, destination, count),
-            32 => GatherCore<TCode, Block32>(typed, values, valuesLength, destination, count),
-            _ => GatherWide(typed, values, width, valuesLength, destination, count),
+            return -1;
+        }
+
+        ReadOnlySpan<TCode> typed = MemoryMarshal.Cast<byte, TCode>(codes)[done..count];
+        Span<byte> rest = destination[(done * width)..];
+        int left = count - done;
+        int bad = width switch
+        {
+            1 => GatherCore<TCode, byte>(typed, values, valuesLength, rest, left),
+            2 => GatherCore<TCode, ushort>(typed, values, valuesLength, rest, left),
+            4 => GatherCore<TCode, uint>(typed, values, valuesLength, rest, left),
+            8 => GatherCore<TCode, ulong>(typed, values, valuesLength, rest, left),
+            16 => GatherCore<TCode, Vector128<byte>>(typed, values, valuesLength, rest, left),
+            32 => GatherCore<TCode, Block32>(typed, values, valuesLength, rest, left),
+            _ => GatherWide(typed, values, width, valuesLength, rest, left),
         };
+        return bad < 0 ? -1 : bad + done;
+    }
+
+    /// <summary>
+    /// Gathers whole blocks of rows through byte codes by permuting a dictionary held in two
+    /// registers, where there are 512-bit permutes and the dictionary fits them: up to 128 values
+    /// of one byte, 64 of two, 32 of four or 16 of eight.
+    /// </summary>
+    /// <returns>
+    /// The rows written, a multiple of the block, stopping short of the first block with a code
+    /// at or past <paramref name="valuesLength"/>; the caller finds that code and does the rest.
+    /// </returns>
+    /// <remarks>
+    /// A block is 64 bytes of output: 64 codes permuting bytes, 32 widened to words, 16 to
+    /// doublewords or 8 to quadwords, each widening one <c>vpmovzx</c> and each block one
+    /// two-table permute and one store, where the scalar gather is a load and a store a row. The
+    /// codes are bounded before they index, as everywhere: the permute reads only the index bits
+    /// that address the two tables, so an unchecked code would wrap onto a value it does not name.
+    /// </remarks>
+    private static int Permuted(ReadOnlySpan<byte> codes, ReadOnlySpan<byte> values, int width, int valuesLength, Span<byte> destination)
+    {
+        if (!Avx512Vbmi.IsSupported || width is not (1 or 2 or 4 or 8) || valuesLength == 0 || valuesLength * width > 128)
+        {
+            return 0;
+        }
+
+        int count = codes.Length;
+        Span<byte> table = stackalloc byte[128];
+        table.Clear();
+        values[..(valuesLength * width)].CopyTo(table);
+        Vector512<byte> lower = Vector512.Create<byte>(table[..64]);
+        Vector512<byte> upper = Vector512.Create<byte>(table[64..]);
+        ref byte from = ref MemoryMarshal.GetReference(codes);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        byte limit = (byte)valuesLength;
+        int row = 0;
+        switch (width)
+        {
+            case 1:
+            {
+                Vector512<byte> bound = Vector512.Create(limit);
+                for (; row <= count - 64; row += 64)
+                {
+                    Vector512<byte> block = Vector512.LoadUnsafe(ref from, (nuint)row);
+                    if (Vector512.GreaterThanOrEqualAny(block, bound))
+                    {
+                        break;
+                    }
+
+                    Avx512Vbmi.PermuteVar64x8x2(lower, block, upper).StoreUnsafe(ref into, (nuint)row);
+                }
+
+                break;
+            }
+
+            case 2:
+            {
+                Vector256<byte> bound = Vector256.Create(limit);
+                for (; row <= count - 32; row += 32)
+                {
+                    Vector256<byte> block = Vector256.LoadUnsafe(ref from, (nuint)row);
+                    if (Vector256.GreaterThanOrEqualAny(block, bound))
+                    {
+                        break;
+                    }
+
+                    Avx512BW.PermuteVar32x16x2(lower.AsUInt16(), Avx512BW.ConvertToVector512UInt16(block), upper.AsUInt16())
+                        .AsByte().StoreUnsafe(ref into, (nuint)(row * 2));
+                }
+
+                break;
+            }
+
+            case 4:
+            {
+                Vector128<byte> bound = Vector128.Create(limit);
+                for (; row <= count - 16; row += 16)
+                {
+                    Vector128<byte> block = Vector128.LoadUnsafe(ref from, (nuint)row);
+                    if (Vector128.GreaterThanOrEqualAny(block, bound))
+                    {
+                        break;
+                    }
+
+                    Avx512F.PermuteVar16x32x2(lower.AsUInt32(), Avx512F.ConvertToVector512UInt32(block), upper.AsUInt32())
+                        .AsByte().StoreUnsafe(ref into, (nuint)(row * 4));
+                }
+
+                break;
+            }
+
+            default:
+            {
+                Vector128<byte> bound = Vector128.Create(limit);
+                for (; row <= count - 8; row += 8)
+                {
+                    // Eight codes in the low half and zeros above, which the bound, at least one, passes.
+                    Vector128<byte> block = Vector128.CreateScalar(Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref from, row))).AsByte();
+                    if (Vector128.GreaterThanOrEqualAny(block, bound))
+                    {
+                        break;
+                    }
+
+                    Avx512F.PermuteVar8x64x2(lower.AsUInt64(), Avx512F.ConvertToVector512UInt64(block), upper.AsUInt64())
+                        .AsByte().StoreUnsafe(ref into, (nuint)(row * 8));
+                }
+
+                break;
+            }
+        }
+
+        return row;
     }
 
     private static int GatherCore<TCode, TValue>(

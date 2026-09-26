@@ -157,6 +157,59 @@ public sealed class RowKernelsTests
         Assert.Equal(row, fault);
     }
 
+    /// <summary>
+    /// Byte codes through a dictionary small enough to be permuted, where there are 512-bit
+    /// permutes: every width that has a permute, dictionaries either side of what one and two
+    /// registers hold, row counts either side of a block; and a code past the dictionary reported
+    /// at its own row wherever it falls in a block, the rows before it gathered.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(4)]
+    [InlineData(8)]
+    internal void ByteCodesThroughASmallDictionaryGatherAsRowByRow(int width)
+    {
+        Random random = new Random(width * 977);
+        foreach (int entries in new[] { 1, 8, 9, 16, 17, 32, 33, 64, 65, 128, 129 })
+        {
+            byte[] values = new byte[entries * width];
+            random.NextBytes(values);
+            foreach (int rows in new[] { 0, 7, 8, 63, 64, 65, 1003 })
+            {
+                int[] codes = new int[rows];
+                for (int row = 0; row < rows; row++)
+                {
+                    codes[row] = random.Next(entries);
+                }
+
+                byte[] destination = new byte[rows * width];
+                int fault = RowKernels.Gather(Codes(codes, PType.U8), PType.U8, values, width, entries, destination, rows);
+                Assert.Equal(-1, fault);
+                for (int row = 0; row < rows; row++)
+                {
+                    Assert.True(
+                        values.AsSpan(codes[row] * width, width).SequenceEqual(destination.AsSpan(row * width, width)),
+                        $"entries {entries}, rows {rows}, row {row}");
+                }
+
+                foreach (int bad in new[] { 0, 5, 63, 64, 500, rows - 1 })
+                {
+                    if (bad < 0 || bad >= rows || entries > 255)
+                    {
+                        continue;
+                    }
+
+                    int[] faulty = (int[])codes.Clone();
+                    faulty[bad] = random.Next(2) == 0 ? entries : 255;
+                    Array.Clear(destination);
+                    fault = RowKernels.Gather(Codes(faulty, PType.U8), PType.U8, values, width, entries, destination, rows);
+                    Assert.Equal(bad, fault);
+                }
+            }
+        }
+    }
+
     /// <summary><paramref name="codes"/> as <paramref name="ptype"/>, little-endian.</summary>
     private static byte[] Codes(int[] codes, PType ptype)
     {
