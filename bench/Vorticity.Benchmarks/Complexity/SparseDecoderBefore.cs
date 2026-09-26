@@ -1,11 +1,13 @@
 using System;
 using System.Buffers.Binary;
+using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 
-namespace Vorticity.Arrays.Decoders.Compressed;
+namespace Vorticity.Benchmarks.Complexity;
 
 /// <summary>
 /// Decodes <c>vortex.sparse</c>: a fill value everywhere, patched at the listed rows. The fill
@@ -13,12 +15,12 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// scalar. The node always carries exactly two children, the patch indices and the patch values,
 /// even when the patch descriptor declares chunk offsets, so a third child would be a bug.
 /// </summary>
-internal sealed class SparseDecoder : ArrayDecoder
+internal sealed class SparseDecoderBefore : ArrayDecoder
 {
     private const string Id = "vortex.sparse";
 
     /// <summary>The shared, stateless instance.</summary>
-    public static readonly SparseDecoder Instance = new();
+    public static readonly SparseDecoderBefore Instance = new();
 
     /// <inheritdoc/>
     public override ReadOnlySpan<byte> IdUtf8 => "vortex.sparse"u8;
@@ -70,16 +72,10 @@ internal sealed class SparseDecoder : ArrayDecoder
         int patchCount = ArrayDecodeContext.CheckedLength(
             patchesMetadata.Length, $"{Id} patch count");
 
-        // A selective read is one of the reads of a node larger than the batch, and each reads the
-        // whole patch set: decoded once for all of them, as a range's is.
         DType indicesType = context.Types.Primitive(
             patchesMetadata.IndicesPType, Nullability.NonNullable);
-        int indicesIndex = selective
-            ? context.DecodeWholeChild(in node, 0, indicesType, patchCount)
-            : context.DecodeChild(in node, 0, indicesType, patchCount);
-        int valuesIndex = selective
-            ? context.DecodeWholeChild(in node, 1, dtype, patchCount)
-            : context.DecodeChild(in node, 1, dtype, patchCount);
+        int indicesIndex = context.DecodeChild(in node, 0, indicesType, patchCount);
+        int valuesIndex = context.DecodeChild(in node, 1, dtype, patchCount);
 
         bool walked = context.IsNodeChecked(in node);
         Patches patches = Patches.Create(
