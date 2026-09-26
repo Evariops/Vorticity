@@ -200,7 +200,7 @@ internal static partial class ComparisonKernels
         switch (op)
         {
             case StringMatchOp.StartsWith:
-                MatchCore<StartsWithMatch>(node, mask, needle, escape, destination);
+                StartsWithViews(node, mask, needle, destination);
                 return;
             case StringMatchOp.Contains:
                 MatchCore<ContainsMatch>(node, mask, needle, escape, destination);
@@ -486,7 +486,7 @@ internal static partial class ComparisonKernels
                     throw Mismatch("utf8 or binary", literal.Kind);
                 }
 
-                // `Apply(op, order)` is what `BytesCore` evaluates per row, so the operator's
+                // `Apply(op, order)` is what `OrderViews` evaluates per row, so the operator's
                 // semantics are the ones already written down rather than a second copy.
                 state = Trilean.From(
                     true, Apply(op, node.ConstantElement.SequenceCompareTo(literal.BytesValue)));
@@ -1270,50 +1270,23 @@ internal static partial class ComparisonKernels
         switch (op)
         {
             case ComparisonOp.Equal:
-                BytesCore<EqualOp>(node, mask, wanted, destination);
+                EqualViews(node, mask, wanted, equal: true, destination);
                 break;
             case ComparisonOp.NotEqual:
-                BytesCore<NotEqualOp>(node, mask, wanted, destination);
+                EqualViews(node, mask, wanted, equal: false, destination);
                 break;
             case ComparisonOp.Less:
-                BytesCore<LessOp>(node, mask, wanted, destination);
+                OrderViews<LessOp>(node, mask, wanted, destination);
                 break;
             case ComparisonOp.LessOrEqual:
-                BytesCore<LessOrEqualOp>(node, mask, wanted, destination);
+                OrderViews<LessOrEqualOp>(node, mask, wanted, destination);
                 break;
             case ComparisonOp.Greater:
-                BytesCore<GreaterOp>(node, mask, wanted, destination);
+                OrderViews<GreaterOp>(node, mask, wanted, destination);
                 break;
             default:
-                BytesCore<GreaterOrEqualOp>(node, mask, wanted, destination);
+                OrderViews<GreaterOrEqualOp>(node, mask, wanted, destination);
                 break;
-        }
-    }
-
-    /// <summary>The byte comparison with the operator and the validity resolved.</summary>
-    /// <remarks>
-    /// Ordinal byte order, which for utf8 is also code-point order: UTF-8 is designed so that
-    /// memcmp of the encoded bytes equals comparison of the code points. Never a culture-aware
-    /// string comparison.
-    /// </remarks>
-    private static void BytesCore<TOp>(
-        CanonicalNode node, ValidityMask mask, ReadOnlySpan<byte> wanted, Span<byte> destination)
-        where TOp : struct, IOrderOp
-    {
-        ViewValues values = new ViewValues(node);
-        bool allValid = mask.AllValid;
-        for (int i = 0; i < destination.Length; i++)
-        {
-            if (!allValid && !mask.IsValid(i))
-            {
-                destination[i] = Trilean.Unknown;
-                continue;
-            }
-
-            ReadOnlySpan<byte> value = values.At(i);
-            destination[i] = TOp.Holds(value.SequenceCompareTo(wanted), 0)
-                ? Trilean.True
-                : Trilean.False;
         }
     }
 
