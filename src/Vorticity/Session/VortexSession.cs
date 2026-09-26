@@ -81,9 +81,13 @@ public sealed class VortexSessionOptions
     /// How many chunks a scan of the session decodes and aggregates at once, unless its
     /// <see cref="ScanOptions.DegreeOfParallelism"/> says otherwise, and how many threads a writer of
     /// the session works on, unless its <see cref="VortexWriteOptions.DegreeOfParallelism"/> does.
-    /// 1 by default: a library does not
-    /// take a host's cores without being asked.
+    /// 1 by default: a library does not take a host's cores without being asked.
     /// </summary>
+    /// <remarks>
+    /// A scan at 1 still decodes the batch after the one the caller holds, on the thread pool, as
+    /// <see cref="ScanOptions.Prefetch"/> asks by default: one thread of the pool beside the
+    /// caller's. A <see cref="ScanOptions.Prefetch"/> of 0 keeps the scan on the caller's thread.
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
     public int MaxDegreeOfParallelism
     {

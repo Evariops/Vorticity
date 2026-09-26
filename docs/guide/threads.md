@@ -115,9 +115,10 @@ and the ratios are what to read.
 
 `ScanOptions.Prefetch` is how many batches are decoded ahead of the loop, 1 by default, so that the
 decode of the next batch overlaps your work on this one; the scan holds at most that many batches
-more. On a mapped file with a loop that works on every value it changed nothing measurable, 4.7 ms,
-4.8 ms and 4.7 ms at 0, 1 and 2. It pays when the source has latency to hide, which a remote one
-does.
+more. The batch ahead is decoded on the thread pool, so a scan at the default degree of 1 takes one
+pool thread beside yours; `Prefetch = 0` keeps it on your thread. On a mapped file with a loop that
+works on every value it changed nothing measurable, 4.7 ms, 4.8 ms and 4.7 ms at 0, 1 and 2. It
+pays when the source has latency to hide, which a remote one does.
 
 ## Local and remote
 
