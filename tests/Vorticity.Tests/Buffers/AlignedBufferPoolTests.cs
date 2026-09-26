@@ -553,6 +553,31 @@ public sealed class AlignedBufferPoolTests
     private static WeakReference SweptPool() => new WeakReference(new AlignedBufferPool(maxRetainedBytes: 1 << 20).Swept());
 
     [Fact]
+    public void A_pool_bounded_in_bytes_keeps_what_is_given_back_in_any_class_up_to_its_budget()
+    {
+        const int megabyte = 1024 * 1024;
+        AlignedBufferPool large = new AlignedBufferPool(maxRetainedBytes: 16L * megabyte);
+        AlignedBufferPool small = new AlignedBufferPool(maxRetainedBytes: megabyte);
+        try
+        {
+            ReturnAll(large, RentAll(large, 4 * megabyte, 2));
+            Assert.Equal(2, large.ParkedCount(4 * megabyte));
+
+            // The two blocks above hold half the budget: eight blocks of a megabyte fill the rest.
+            ReturnAll(large, RentAll(large, megabyte, 12));
+            Assert.Equal(8, large.ParkedCount(megabyte));
+
+            ReturnAll(small, RentAll(small, 4096, 100));
+            Assert.Equal(100, small.ParkedCount(4096));
+        }
+        finally
+        {
+            large.Trim();
+            small.Trim();
+        }
+    }
+
+    [Fact]
     public void The_shared_pool_rents_and_recycles()
     {
         NativeSegmentOwner first = AlignedBufferPool.Shared.Rent(64 * 1024, 64);

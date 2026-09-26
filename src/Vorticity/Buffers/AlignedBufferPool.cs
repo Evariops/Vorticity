@@ -81,8 +81,8 @@ internal sealed class AlignedBufferPool
     private const int DemandBlocks = 4096;
 
     /// <summary>
-    /// Bytes the pool keeps parked across every class past their base retention, whatever the
-    /// demand: what the base retention of every class of the shared pool already comes to.
+    /// Bytes parked across every class, base retention included, under which a class may keep more
+    /// than its base retention: what the base retention of every class of the shared pool comes to.
     /// </summary>
     private const long DemandBudget = 256L * 1024 * 1024;
 
@@ -97,7 +97,7 @@ internal sealed class AlignedBufferPool
 
     private readonly Bucket[] _buckets;
 
-    /// <summary>The bytes this pool keeps parked past the base retention of its classes.</summary>
+    /// <summary>The bytes parked across every class, base retention included, under which a class may keep more than its base retention.</summary>
     private readonly long _demandBudget;
 
     /// <summary>Bytes parked across every class.</summary>
@@ -143,7 +143,7 @@ internal sealed class AlignedBufferPool
     /// </param>
     /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
     /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
-    /// <param name="demandBudget">Bytes kept parked past the base retention of the classes.</param>
+    /// <param name="demandBudget">Bytes parked across every class, base retention included, under which a class may keep more than its base retention.</param>
     /// <summary>Creates a pool, optionally grading retention by size class.</summary>
     private AlignedBufferPool(int maxPooledLength, int maxPerBucket, bool graded, long demandBudget = DemandBudget)
     {
@@ -180,17 +180,19 @@ internal sealed class AlignedBufferPool
             ? floor
             : (int)Math.Max(floor, Math.Min(DemandBlocks, DemandClassBudget / blockSize));
 
-    /// <summary>A pool whose retention is bounded by bytes: each size class keeps its share of <paramref name="maxRetainedBytes"/>.</summary>
+    /// <summary>
+    /// A pool whose retention is bounded by bytes: a class keeps a block given back while the pool
+    /// parks less than <paramref name="maxRetainedBytes"/> across every class, so the budget goes to
+    /// the classes in demand rather than in equal shares that most classes would leave unused.
+    /// </summary>
     /// <param name="maxRetainedBytes">The most bytes the pool keeps parked across every class.</param>
     internal AlignedBufferPool(long maxRetainedBytes)
-        : this(8 * 1024 * 1024, 0, graded: false)
+        : this(8 * 1024 * 1024, 0, graded: false, demandBudget: maxRetainedBytes)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(maxRetainedBytes);
-        long share = maxRetainedBytes / _buckets.Length;
         for (int i = 0; i < _buckets.Length; i++)
         {
-            int blocks = (int)Math.Min(share / (MinBlockSize << i), 64);
-            _buckets[i] = new Bucket(blocks, blocks);
+            _buckets[i] = new Bucket(0, DemandFor(0, MinBlockSize << i));
         }
     }
 
@@ -198,10 +200,10 @@ internal sealed class AlignedBufferPool
     public static AlignedBufferPool Shared { get; }
         = new AlignedBufferPool(32 * 1024 * 1024, 8, graded: true).Swept();
 
-    /// <summary>A pool graded as <see cref="Shared"/> is, with a budget of its own for the demand past the base retention.</summary>
+    /// <summary>A pool graded as <see cref="Shared"/> is, with a budget of its own for widening its classes.</summary>
     /// <param name="maxPooledLength">Requests above this length bypass the pool.</param>
     /// <param name="maxPerBucket">Blocks retained per size class, before grading.</param>
-    /// <param name="demandBudget">Bytes the pool keeps parked past the base retention of its classes.</param>
+    /// <param name="demandBudget">Bytes parked across every class, base retention included, under which a class may keep more than its base retention.</param>
     internal static AlignedBufferPool Graded(int maxPooledLength, int maxPerBucket, long demandBudget) =>
         new AlignedBufferPool(maxPooledLength, maxPerBucket, graded: true, demandBudget);
 
