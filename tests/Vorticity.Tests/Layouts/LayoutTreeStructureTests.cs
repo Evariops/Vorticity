@@ -70,6 +70,21 @@ public sealed class LayoutTreeStructureTests
     }
 
     [Fact]
+    public void AParseOfALargeTreeLeavesTheSharedBuilderNoMoreThanItKeeps()
+    {
+        // Thirty thousand chunks: more records and chunk offsets than an ordinary tree needs.
+        SyntheticLayout[] chunks = new SyntheticLayout[30_000];
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            chunks[i] = SyntheticLayout.Flat(1, 0);
+        }
+
+        LayoutTree tree = Parse(new SyntheticLayout("vortex.chunked", (ulong)chunks.Length).With(chunks), I64, segmentCount: 1);
+        Assert.Equal(chunks.Length, tree.Root.ChildCount);
+        Assert.InRange(LayoutTree.Builder.CachedScratchBytes, 0, LayoutTree.Builder.KeptScratchBytes);
+    }
+
+    [Fact]
     public void ChunkedWithNoChildrenAndRowsIsRejected()
     {
         SyntheticLayout root = new SyntheticLayout("vortex.chunked", 5);

@@ -241,10 +241,23 @@ internal sealed class LayoutTree
     /// </remarks>
     internal sealed class Builder
     {
+        /// <summary>The scratch the shared builder keeps from one parse to the next: what an ordinary tree needs.</summary>
+        internal const long KeptScratchBytes = 1L << 20;
+
         /// <summary>The builder parses share; null while a parse holds it.</summary>
         private static Builder? Cached;
 
         private LayoutEncodingId[]? _detachedEncodings;
+
+        /// <summary>The scratch the shared builder keeps now, or 0 while a parse holds it.</summary>
+        internal static long CachedScratchBytes => Volatile.Read(ref Cached)?.ScratchBytes ?? 0;
+
+        private long ScratchBytes =>
+            ((long)Records.Length * Unsafe.SizeOf<LayoutNodeRecord>())
+            + ((long)ChildIndices.Length * sizeof(int))
+            + ((long)ZoneMaps.Length * Unsafe.SizeOf<ZoneMap>())
+            + ((long)ChunkOffsets.Length * sizeof(long))
+            + ((long)ZoneAggregates.Length * sizeof(int));
 
         private Builder()
         {
@@ -278,6 +291,14 @@ internal sealed class LayoutTree
             Buffer = [];
             _detachedEncodings = null;
             _types = null;
+
+            // A large tree, or a hostile one refused midway, leaves its scratch to the shared pools,
+            // which trim what no rent asks for: kept here, it would stay for the process's life.
+            if (ScratchBytes > KeptScratchBytes)
+            {
+                ReturnScratch();
+            }
+
             if (Interlocked.CompareExchange(ref Cached, this, null) is not null)
             {
                 ReturnScratch();
