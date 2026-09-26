@@ -130,7 +130,8 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
             path,
             FileMode.Open,
             FileAccess.Read,
-            FileShare.Read,
+            // Delete: on Windows as on Unix, a file being read can be deleted or replaced.
+            FileShare.Read | FileShare.Delete,
             // Asynchronous is what makes RandomAccess.ReadAsync genuinely overlapped on Windows;
             // RandomAccess is what makes it a positional, thread-safe read everywhere.
             FileOptions.Asynchronous | FileOptions.RandomAccess);

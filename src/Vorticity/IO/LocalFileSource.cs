@@ -40,7 +40,10 @@ internal interface IReadAnticipation
 /// <para>
 /// With the session's <see cref="MappedFileCache"/>, the mapping outlives the reader: the next open
 /// of the same file takes it over with every page already mapped in it, so a file scanned again
-/// pays neither the mapping nor a fault per page nor the unmapping.
+/// pays neither the mapping nor a fault per page nor the unmapping. Where the platform reads a
+/// file's identity from its name, Windows 11 24H2 and later, such an open does not open the file at
+/// all: the mapping kept for that identity and length serves every read, the tail's included. An
+/// open is the dearest thing there, a hundred microseconds where endpoint filters inspect each one.
 /// </para>
 /// <para>
 /// A read already under way when the mapping is published finishes positionally. The mapping
@@ -50,7 +53,8 @@ internal interface IReadAnticipation
 /// </remarks>
 internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
 {
-    private readonly SafeFileHandle _handle;
+    // Null when the open took over a kept mapping without opening the file.
+    private readonly SafeFileHandle? _handle;
     private readonly string _path;
     private readonly MappedFileCache? _mappings;
     private MappedFileOwner? _mapping;
@@ -64,6 +68,14 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
         Length = RandomAccess.GetLength(handle);
     }
 
+    private LocalFileSource(MappedFileOwner kept, string path, MappedFileCache mappings, long length)
+    {
+        _path = path;
+        _mappings = mappings;
+        _mapping = kept;
+        Length = length;
+    }
+
     /// <summary>Opens <paramref name="path"/> read-only; nothing is mapped yet.</summary>
     /// <param name="path">A local file path.</param>
     /// <param name="mappings">The session's kept mappings, or null to map the file for this reader alone.</param>
@@ -73,9 +85,19 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     {
         ArgumentNullException.ThrowIfNull(path);
 
+        // A file kept mapped, still under this name at the same length, needs no open: its mapping
+        // is the file, rewritten in place or not.
+        if (mappings is not null && FileInode.TryGetByName(path, out FileInode named, out long length)
+            && length > 0 && mappings.TryTake(named, length) is { } kept)
+        {
+            return new LocalFileSource(kept, path, mappings, length);
+        }
+
         // System.IO.File spelled out: this library has a `Vorticity.File` namespace of its own.
+        // FileShare.Delete gives Windows what Unix has without asking: a file being read can be
+        // deleted or replaced under its name, the reader keeping the bytes it opened.
         SafeFileHandle handle = System.IO.File.OpenHandle(
-            path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.RandomAccess);
+            path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.RandomAccess);
         try
         {
             return new LocalFileSource(handle, path, mappings);
@@ -99,7 +121,8 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     /// <inheritdoc/>
     public void AnticipateData()
     {
-        if (Length == 0 || Volatile.Read(ref _mapping) is not null || Volatile.Read(ref _disposed) != 0)
+        // A reader without a handle took its mapping over at the open, and has it until disposed.
+        if (Length == 0 || Volatile.Read(ref _mapping) is not null || Volatile.Read(ref _disposed) != 0 || _handle is null)
         {
             return;
         }
@@ -220,7 +243,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
         }
 
         Interlocked.Exchange(ref _mapping, null)?.Release();
-        _handle.Dispose();
+        _handle?.Dispose();
         return ValueTask.CompletedTask;
     }
 
@@ -248,6 +271,8 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     /// </summary>
     private NativeSegmentOwner ReadPositionally(long offset, int length)
     {
+        // Only a disposed reader without a handle gets here: its mapping is gone with its dispose.
+        SafeFileHandle handle = _handle ?? throw new ObjectDisposedException(nameof(LocalFileSource));
         NativeSegmentOwner owner = length <= SegmentReadOptions.DefaultMaxPooledBytes
             ? AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment)
             : NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
@@ -259,7 +284,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
             {
                 // A short count is legal and not the end; none at all is a file shorter than its
                 // footer says.
-                int read = RandomAccess.Read(_handle, destination[done..], offset + done);
+                int read = RandomAccess.Read(handle, destination[done..], offset + done);
                 if (read <= 0)
                 {
                     SegmentIo.ThrowTruncatedRead(offset, length, done);

@@ -116,11 +116,14 @@ public sealed class VortexSessionOptions
     /// opening one again takes over its mapping and every page already mapped in it; 0 keeps none.
     /// </summary>
     /// <remarks>
-    /// A kept file is recognized by its device and inode, and mapped again when its length changed.
-    /// A file deleted once closed keeps its disk space for as long as its mapping is kept: until
-    /// files mapped since fill the cache, or until <see cref="VortexSession.ReleaseMappedFiles"/>.
-    /// None is kept on Windows, where a mapped file can be neither deleted nor replaced, nor
-    /// where the platform cannot tell one file from another, nor when <see cref="MapFiles"/> is false.
+    /// A kept file is recognized by its device and inode, on Windows by its volume and file id, and
+    /// mapped again when its length changed. A file deleted once closed keeps its disk space for as
+    /// long as its mapping is kept: until files mapped since fill the cache, or until
+    /// <see cref="VortexSession.ReleaseMappedFiles"/>. On Windows a kept file can be deleted and
+    /// replaced under its name, but another writer can neither cut it short nor overwrite it from
+    /// its start, <c>File.WriteAllBytes</c> included, until the session lets it go; the writers of
+    /// this library let it go themselves. None is kept where the platform cannot tell one file from
+    /// another, nor when <see cref="MapFiles"/> is false.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     public int MappedFileCacheCount
@@ -142,7 +145,8 @@ public sealed class VortexSessionOptions
     /// A mapping serves reads faster and with no buffer per batch. On Linux and macOS, though, a file
     /// cut short while it is mapped faults on the pages past its new end, and the fault kills the
     /// process. A writer of this library cannot cut a file a reader holds open; another process, or
-    /// a writer that shares the file, can. Positional reads turn that into a
+    /// a writer that shares the file, can. Windows refuses the cut to the writer instead, as long as
+    /// the file is mapped, kept mappings included. Positional reads turn that into a
     /// <see cref="VortexFormatException"/> on the read: the choice of a service that reads files
     /// others may truncate.
     /// </remarks>

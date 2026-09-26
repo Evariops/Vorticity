@@ -149,6 +149,12 @@ for the segment seam. Everything else in the assembly is internal.
   session by `MaxConcurrentReads`.
 * **`VortexUnsupportedException.Kind` is a `ComponentKind`**, which gains `Compression`,
   `Encryption`, `Index` and `Feature`.
+* **Windows keeps closed files mapped too.** A file is known there by its volume and file id, so
+  `MappedFileCacheCount` applies as on Linux and macOS, and a file scanned again no longer faults
+  every page in anew. A kept file can be deleted and replaced under its name, but another writer
+  cannot cut it short or overwrite it from its start until the session lets it go
+  (`ReleaseMappedFiles`); the writers of this library let it go themselves. A file open for reading
+  can be deleted or replaced on Windows, as on Unix.
 
 **Not in this release**, each by decision rather than omission:
 

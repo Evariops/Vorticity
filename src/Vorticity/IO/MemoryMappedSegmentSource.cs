@@ -67,8 +67,9 @@ public sealed class MemoryMappedSegmentSource : ISegmentSource, ISegmentReader
 
         // System.IO.File spelled out: this library has a `Vorticity.File` type of its own, and it
         // shadows a bare `File` everywhere in the assembly because namespace lookup beats a using.
+        // Delete: on Windows as on Unix, a file being read can be deleted or replaced.
         SafeFileHandle handle = System.IO.File.OpenHandle(
-            path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.None);
+            path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.None);
 
         try
         {

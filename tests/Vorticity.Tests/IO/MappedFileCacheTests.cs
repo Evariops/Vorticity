@@ -20,14 +20,15 @@ public sealed class MappedFileCacheTests
     private const int FileLength = 40_000;
 
     [Fact]
-    public void ASixtyFourBitLinuxOrMacOSTellsOneFileFromAnother()
+    public void ASixtyFourBitLinuxMacOSOrWindowsTellsOneFileFromAnother()
     {
         // The tests below skip where the platform cannot tell; this one keeps a platform that
         // should from losing it without a failure.
         Assert.SkipUnless(
-            (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-                && RuntimeInformation.ProcessArchitecture is Architecture.X64 or Architecture.Arm64,
-            "only 64-bit Linux and macOS read a file's inode");
+            OperatingSystem.IsWindows()
+                || ((OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+                    && RuntimeInformation.ProcessArchitecture is Architecture.X64 or Architecture.Arm64),
+            "only Windows and 64-bit Linux and macOS read a file's identity");
         Assert.True(FileInode.IsSupported);
     }
 
@@ -65,6 +66,50 @@ public sealed class MappedFileCacheTests
         Assert.Same(first, second);
         Assert.Equal(1, cache.Count);
         cache.Clear();
+    }
+
+    [Fact]
+    public async Task AKeptFileReadFromItsNameOpensOnItsMappingAndReadsItsTail()
+    {
+        // Where the platform reads a file's identity from its name, an open of a kept file takes
+        // the mapping over before any scan, and serves the tail an open reads from it.
+        Assert.SkipUnless(ReadsIdentityFromName(), "the platform reads no identity from a name");
+        byte[] content = Pattern(FileLength);
+        using TempFile file = new TempFile(content);
+        MappedFileCache cache = new MappedFileCache(4);
+        MappedFileOwner first = await MappedAndReadAsync(file.Path_, cache, content);
+
+        await using (LocalFileSource again = LocalFileSource.Open(file.Path_, cache))
+        {
+            Assert.Same(first, again.Mapping);
+            using SegmentOwner tail = await ((ISegmentReader)again).ReadRangeAsync(FileLength - 1_000, 1_000, 1, CancellationToken.None);
+            Assert.True(tail.Buffer.Span.SequenceEqual(content.AsSpan(FileLength - 1_000)));
+        }
+
+        // Replaced under its name, it is another file: opened, and mapped by its first scan.
+        byte[] after = Pattern(FileLength);
+        after[0] ^= 0xFF;
+        global::System.IO.File.WriteAllBytes(file.Path_ + ".next", after);
+        global::System.IO.File.Move(file.Path_ + ".next", file.Path_, overwrite: true);
+        await using (LocalFileSource replaced = LocalFileSource.Open(file.Path_, cache))
+        {
+            Assert.Null(replaced.Mapping);
+        }
+
+        cache.Clear();
+
+        static bool ReadsIdentityFromName()
+        {
+            string probe = Path.GetTempFileName();
+            try
+            {
+                return FileInode.TryGetByName(probe, out _, out _);
+            }
+            finally
+            {
+                global::System.IO.File.Delete(probe);
+            }
+        }
     }
 
     [Fact]

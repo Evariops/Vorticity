@@ -315,7 +315,18 @@ internal class FilePipeWriter : PipeWriter
         {
         }
 
-        private protected override void Publish() => System.IO.File.Move(_temporary, _destination, overwrite: true);
+        private protected override void Publish()
+        {
+            // The file being replaced may be kept mapped. NTFS and ReFS let the rename replace it all
+            // the same; a file system without POSIX deletes would refuse to, and the old file is of no
+            // use to a cache once its name names the new one.
+            if (System.IO.File.Exists(_destination))
+            {
+                Vorticity.IO.MappedFileCache.ReleaseEverywhere(_destination);
+            }
+
+            System.IO.File.Move(_temporary, _destination, overwrite: true);
+        }
 
         private protected override void Discard()
         {

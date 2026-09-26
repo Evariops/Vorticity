@@ -196,9 +196,14 @@ public sealed class FragmentBindingTests
             Assert.True(clean.Held > 0);
         }
 
+        // In place, one byte: a rewrite from the start would cut the file first, which Windows
+        // refuses while the session keeps it mapped.
         byte[] bytes = await System.IO.File.ReadAllBytesAsync(temp.Path, ct);
-        bytes[bytes.Length / 3] ^= 0x10;
-        await System.IO.File.WriteAllBytesAsync(temp.Path, bytes, ct);
+        int at = bytes.Length / 3;
+        using (Microsoft.Win32.SafeHandles.SafeFileHandle handle = System.IO.File.OpenHandle(temp.Path, FileMode.Open, FileAccess.Write))
+        {
+            RandomAccess.Write(handle, [(byte)(bytes[at] ^ 0x10)], at);
+        }
 
         await using VortexFile file = await VortexFile.OpenAsync(temp.Path, With(fragment), ct);
         Assert.True(await file.ReadIndexDirectoryAsync(ct) is not null, Assert.Single(file.IndexFragmentRefusals));

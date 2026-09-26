@@ -248,6 +248,10 @@ public static class VortexFileIndexer
                 throw new IOException($"{path} changed while it was being indexed.");
             }
 
+            // The reader that built the index may have left the file mapped: on Windows a mapping
+            // would forbid the truncation a failed copy undoes itself with.
+            Vorticity.IO.MappedFileCache.ReleaseEverywhere(target);
+
             using SafeFileHandle source = System.IO.File.OpenHandle(
                 scratch, FileMode.Open, FileAccess.Read, FileShare.None, FileOptions.Asynchronous | FileOptions.SequentialScan);
 

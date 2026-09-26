@@ -150,6 +150,9 @@ public sealed partial class VortexFileWriter
                 throw new IOException($"{path} changed while it was being opened for an append.");
             }
 
+            // Planning the append read the file, and may have left it mapped: on Windows a mapping
+            // would forbid the rewind an abandoned append cuts the file back with.
+            Vorticity.IO.MappedFileCache.ReleaseEverywhere(handle);
             pipe = new FilePipeWriter(handle, plan.FileLength, session.Options.MemoryPool) { Durable = options.Durable };
             VortexFileWriter writer = Create(new PipeSegmentSink(pipe, plan.FileLength), plan.Schema, options, session);
             writer._filePipe = pipe;
@@ -183,6 +186,7 @@ public sealed partial class VortexFileWriter
                 throw new IOException($"{path} changed while it was being opened for an append.");
             }
 
+            Vorticity.IO.MappedFileCache.ReleaseEverywhere(stream.SafeFileHandle);
             stream.Seek(0, SeekOrigin.End);
             return Create(wrap(stream, plan.FileLength), plan.Schema, options);
         }
