@@ -72,7 +72,7 @@ public sealed partial class PerRowDispatchTests
     /// </remarks>
     private static readonly (string File, int Calls, int PerRow, string Point)[] Sites =
     [
-        ("Arrays/Decoders/Canonical/CanonicalConcat.cs", 4, 4, "R7"),
+        ("Arrays/Decoders/Canonical/CanonicalConcat.cs", 0, 0, "R7 done: a list view's offsets and sizes are read with their types resolved once a chunk"),
         ("Arrays/Decoders/Canonical/ConstantCanonicalizer.cs", 1, 0, "legitimate: one write, then Tile"),
         ("Arrays/Decoders/Canonical/ListDecoder.cs", 2, 0, "legitimate: bounds"),
         ("Arrays/Decoders/Canonical/VarBinDecoder.cs", 2, 0, "legitimate: bounds"),
@@ -102,7 +102,7 @@ public sealed partial class PerRowDispatchTests
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
-    private const int TotalCalls = 51;
+    private const int TotalCalls = 47;
 
     /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -110,7 +110,7 @@ public sealed partial class PerRowDispatchTests
     /// left in the file is an error path: that change of COMPOSITION is what this column exists
     /// to record.
     /// </remarks>
-    private const int TotalPerRow = 11;
+    private const int TotalPerRow = 7;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()
