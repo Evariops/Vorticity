@@ -56,6 +56,11 @@ internal readonly ref struct LayoutView
     /// Identifiers of the <c>SegmentSpec</c>s this layout needs, reinterpreted in place. Absent
     /// means empty.
     /// </summary>
+    /// <remarks>
+    /// Their address is what is tested, so they are read over a buffer whose base is aligned as its
+    /// FlatBuffer: the layout tree reads them from a copy. An open reads the root in the window it
+    /// read, which lands wherever the file's length puts it, for its row count alone.
+    /// </remarks>
     /// <exception cref="VortexFormatException">
     /// The elements escape the buffer or are not 4-byte aligned.
     /// </exception>

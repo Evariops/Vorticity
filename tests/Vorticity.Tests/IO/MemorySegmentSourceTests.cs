@@ -4,7 +4,11 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity;
 using Vorticity.Buffers;
+using Vorticity.Columns;
+using Vorticity.File;
 using Vorticity.IO;
+using Vorticity.Scanning;
+using Vorticity.Tests.File;
 using Xunit;
 using static Vorticity.Tests.IO.IoTestData;
 
@@ -132,6 +136,59 @@ public sealed class MemorySegmentSourceTests
         Assert.True(System.Runtime.InteropServices.MemoryMarshal.TryGetArray(bytes, out ArraySegment<byte> segment));
         _ = new MemorySegmentSource(bytes);
         return new WeakReference(segment.Array);
+    }
+
+    [Fact]
+    public async Task A_file_whose_tail_lands_off_its_alignment_reads_as_from_its_path()
+    {
+        // Past 64 KiB an open reads its tail from where the file's length puts it, off an eight-byte
+        // boundary for most lengths, and the source copies that window onto one: every structure
+        // sliced out of it lands off the alignment its file gave it. Nothing read there in place
+        // may depend on that alignment.
+        int probed = 0;
+        foreach (CorpusEntry entry in CorpusManifest.Entries)
+        {
+            if (entry.SizeBytes <= 70_000 || !entry.HasDTypeSegment || (entry.SizeBytes - 65_535) % 8 == 0)
+            {
+                continue;
+            }
+
+            probed++;
+            string path = CorpusManifest.FullPath(entry);
+            (long Rows, long Valid) fromPath;
+            await using (VortexFile file = await VortexFile.OpenAsync(path, VortexOpenOptions.Default, TestContext.Current.CancellationToken))
+            {
+                fromPath = await WalkAsync(file);
+            }
+
+            await using MemorySegmentSource source = new MemorySegmentSource(global::System.IO.File.ReadAllBytes(path));
+            await using VortexFile memory = await VortexFile.OpenAsync(
+                source, new VortexOpenOptions { LeaveSourceOpen = true }, TestContext.Current.CancellationToken);
+            Assert.Equal(fromPath, await WalkAsync(memory));
+            Assert.Equal(entry.RowCount, fromPath.Rows);
+        }
+
+        Assert.True(probed > 30, "the corpus holds files past 64 KiB");
+    }
+
+    private static async Task<(long Rows, long Valid)> WalkAsync(VortexFile file)
+    {
+        long rows = 0;
+        long valid = 0;
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync().WithCancellation(TestContext.Current.CancellationToken))
+        {
+            rows += batch.RowCount;
+            for (int field = 0; field < batch.FieldCount; field++)
+            {
+                VortexColumn column = batch.Column(field);
+                for (int row = 0; row < batch.RowCount; row++)
+                {
+                    valid += column.IsValid(row) ? 1 : 0;
+                }
+            }
+        }
+
+        return (rows, valid);
     }
 
     [Fact]

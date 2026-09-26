@@ -125,6 +125,10 @@ internal readonly ref struct ArrayNodeView
     /// <summary>
     /// Indices into <c>Array.buffers</c>, reinterpreted in place. Absent means empty.
     /// </summary>
+    /// <remarks>
+    /// Their address is what is tested, so the view is read over a buffer whose base is aligned as
+    /// its FlatBuffer: the blob reader parses the arena's copy, never the segment in place.
+    /// </remarks>
     /// <exception cref="VortexFormatException">
     /// The elements escape the buffer or are not 2-byte aligned.
     /// </exception>
