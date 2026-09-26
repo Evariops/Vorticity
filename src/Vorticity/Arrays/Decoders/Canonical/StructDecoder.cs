@@ -168,20 +168,13 @@ internal sealed class StructDecoder : ArrayDecoder
             return false;
         }
 
-        int selected = 0;
-        for (int i = 0; i < fieldCount; i++)
+        int selected = projection.SelectedCount(fieldCount);
+        for (int s = 0; s < selected; s++)
         {
-            if (!projection.Includes(i))
-            {
-                continue;
-            }
-
-            if (!projection.Descend(i).IsAll)
+            if (!projection.SelectedMask(s).IsAll)
             {
                 return false;
             }
-
-            selected++;
         }
 
         return selected < fieldCount;
@@ -203,16 +196,7 @@ internal sealed class StructDecoder : ArrayDecoder
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Validity validity,
         int fieldBase, in Layouts.FieldMask projection, int start, int count, bool ranged)
     {
-        int fieldCount = dtype.FieldCount;
-        int selected = 0;
-        for (int i = 0; i < fieldCount; i++)
-        {
-            if (projection.Includes(i))
-            {
-                selected++;
-            }
-        }
-
+        int selected = projection.SelectedCount(dtype.FieldCount);
         Scratch<int> children = new Scratch<int>(selected, default);
         Scratch<int> names = new Scratch<int>(selected, default);
         Scratch<DType> types = new Scratch<DType>(selected, default);
@@ -222,25 +206,19 @@ internal sealed class StructDecoder : ArrayDecoder
             Span<int> nameSpan = names.Span;
             Span<DType> typeSpan = types.Span;
 
-            int next = 0;
-            for (int i = 0; i < fieldCount; i++)
+            for (int s = 0; s < selected; s++)
             {
-                if (!projection.Includes(i))
-                {
-                    continue;
-                }
-
+                int i = projection.SelectedField(s);
                 int child = ranged
                     ? context.DecodeChildRange(in node, fieldBase + i, dtype.GetField(i), length, start, count)
                     : context.DecodeChild(in node, fieldBase + i, dtype.GetField(i), length);
-                childSpan[next] = child;
-                nameSpan[next] = context.Types.InternName(dtype.GetFieldNameUtf8(i));
+                childSpan[s] = child;
+                nameSpan[s] = context.Types.InternName(dtype.GetFieldNameUtf8(i));
 
                 // Imported, not passed through: the field's DType belongs to the file's arena and a
                 // struct built here must have children of this one.
-                typeSpan[next] = DTypeImport.Into(
+                typeSpan[s] = DTypeImport.Into(
                     context.Types, context.Canonical.GetNode(child).DType);
-                next++;
             }
 
             context.Scan.FieldsHonoured = true;

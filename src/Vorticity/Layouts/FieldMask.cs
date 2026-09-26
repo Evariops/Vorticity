@@ -120,6 +120,40 @@ internal readonly struct FieldMask
         _ => _node!.Count,
     };
 
+    /// <summary>
+    /// How many fields of a struct of <paramref name="fieldCount"/> fields this mask selects, which
+    /// are the positions <see cref="SelectedField"/> and <see cref="SelectedMask"/> take.
+    /// </summary>
+    /// <param name="fieldCount">The struct's field count.</param>
+    /// <remarks>
+    /// A reader walks the selected fields by position rather than every field of the struct asking
+    /// <see cref="Includes"/>: a projection of two columns out of a thousand costs two steps and
+    /// not a thousand searches, at every batch.
+    /// </remarks>
+    public int SelectedCount(int fieldCount) => _kind switch
+    {
+        KindAll => fieldCount,
+        KindEmpty => 0,
+        KindSingle => _field < fieldCount ? 1 : 0,
+        _ => _node!.CountBelow(fieldCount),
+    };
+
+    /// <summary>The field at <paramref name="position"/> among those this mask selects, ascending.</summary>
+    /// <param name="position">0-based, below <see cref="SelectedCount"/>.</param>
+    public int SelectedField(int position) => _kind switch
+    {
+        KindAll => position,
+        KindSingle => _field,
+        _ => _node!.FieldAt(position),
+    };
+
+    /// <summary>
+    /// The mask to hand the subtree of the field at <paramref name="position"/> among those this mask
+    /// selects: what <see cref="Descend"/> gives for it, without searching for it again.
+    /// </summary>
+    /// <param name="position">0-based, below <see cref="SelectedCount"/>.</param>
+    public FieldMask SelectedMask(int position) => _kind == KindSubset ? _node!.ChildAt(position) : All;
+
     /// <summary>The <paramref name="index"/>-th field index this mask names, ascending.</summary>
     /// <param name="index">0-based, below <see cref="NamedFieldCount"/>.</param>
     /// <exception cref="ArgumentOutOfRangeException">The mask is <see cref="All"/>, or the index is out of range.</exception>
@@ -171,6 +205,36 @@ internal sealed class FieldMaskNode
     }
 
     internal FieldMask ChildAt(int slot) => _children is null ? FieldMask.All : _children[slot];
+
+    /// <summary>
+    /// How many of the fields lie below <paramref name="fieldCount"/>: all of them, unless the mask
+    /// names more fields than the struct has.
+    /// </summary>
+    internal int CountBelow(int fieldCount)
+    {
+        int[] fields = _fields;
+        if (fields.Length == 0 || fields[^1] < fieldCount)
+        {
+            return fields.Length;
+        }
+
+        int lo = 0;
+        int hi = fields.Length;
+        while (lo < hi)
+        {
+            int mid = (int)(((uint)lo + (uint)hi) >> 1);
+            if (fields[mid] < fieldCount)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        return lo;
+    }
 
     /// <summary>Binary search: the field list is built ascending and distinct.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

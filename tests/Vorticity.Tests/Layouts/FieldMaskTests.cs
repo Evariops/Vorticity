@@ -159,4 +159,83 @@ public sealed class FieldMaskTests
         Assert.True(mixed.Descend(3).Includes(2));
         Assert.False(mixed.Descend(3).Includes(0));
     }
+
+    /// <summary>
+    /// The fields a mask selects, read by position, are the ones a walk over every field of the
+    /// struct keeps, with the same masks below them, whether the mask names fields past the
+    /// struct's width or not.
+    /// </summary>
+    [Fact]
+    public void TheSelectedFieldsByPositionAreThoseAWalkOverEveryFieldKeeps()
+    {
+        Random random = new Random(9);
+        for (int trial = 0; trial < 500; trial++)
+        {
+            FieldMask mask = RandomMask(random);
+            int fieldCount = random.Next(0, 48);
+            int selected = mask.SelectedCount(fieldCount);
+            int position = 0;
+            for (int field = 0; field < fieldCount; field++)
+            {
+                if (!mask.Includes(field))
+                {
+                    continue;
+                }
+
+                Assert.True(position < selected, $"{Describe(mask)} over {fieldCount} fields selects {selected}.");
+                Assert.Equal(field, mask.SelectedField(position));
+                Assert.Equal(Describe(mask.Descend(field)), Describe(mask.SelectedMask(position)));
+                position++;
+            }
+
+            Assert.Equal(position, selected);
+        }
+    }
+
+    private static FieldMask RandomMask(Random random)
+    {
+        switch (random.Next(8))
+        {
+            case 0:
+                return FieldMask.All;
+            case 1:
+                return FieldMask.Empty;
+            case 2:
+                return FieldMask.Single(random.Next(51));
+        }
+
+        FieldMaskBuilder builder = new FieldMaskBuilder();
+        int paths = random.Next(1, 11);
+        for (int i = 0; i < paths; i++)
+        {
+            int[] path = new int[random.Next(1, 4)];
+            for (int level = 0; level < path.Length; level++)
+            {
+                path[level] = random.Next(51);
+            }
+
+            builder.Include(path);
+        }
+
+        return builder.Build();
+    }
+
+    /// <summary>A mask's shape, as far down as it narrows.</summary>
+    private static string Describe(FieldMask mask)
+    {
+        if (mask.IsAll)
+        {
+            return "*";
+        }
+
+        int count = mask.NamedFieldCount;
+        string[] fields = new string[count];
+        for (int i = 0; i < count; i++)
+        {
+            int field = mask.GetNamedField(i);
+            fields[i] = $"{field}:{Describe(mask.Descend(field))}";
+        }
+
+        return "(" + string.Join(",", fields) + ")";
+    }
 }

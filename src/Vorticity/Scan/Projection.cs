@@ -266,30 +266,15 @@ internal readonly struct Projection
             return DTypeImport.Into(arena, dtype);
         }
 
-        int fieldCount = dtype.FieldCount;
-        int selected = 0;
-        for (int i = 0; i < fieldCount; i++)
-        {
-            if (mask.Includes(i))
-            {
-                selected++;
-            }
-        }
-
+        int selected = mask.SelectedCount(dtype.FieldCount);
         int[] names = new int[selected];
         DType[] fields = new DType[selected];
-        int next = 0;
-        for (int i = 0; i < fieldCount; i++)
+        for (int s = 0; s < selected; s++)
         {
-            if (!mask.Includes(i))
-            {
-                continue;
-            }
-
-            FieldMask child = mask.Descend(i);
-            names[next] = arena.InternName(dtype.GetFieldNameUtf8(i));
-            fields[next] = Project(arena, dtype.GetField(i), in child, depth + 1);
-            next++;
+            int i = mask.SelectedField(s);
+            FieldMask child = mask.SelectedMask(s);
+            names[s] = arena.InternName(dtype.GetFieldNameUtf8(i));
+            fields[s] = Project(arena, dtype.GetField(i), in child, depth + 1);
         }
 
         return arena.Struct(new ReadOnlySpan<int>(names), new ReadOnlySpan<DType>(fields), dtype.Nullability);

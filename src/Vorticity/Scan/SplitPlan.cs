@@ -341,16 +341,11 @@ internal sealed class SplitPlan
             Walk(in validity, local, rowOffset, in all, ref list, depth + 1);
         }
 
-        int fieldCount = dtype.FieldCount;
-        for (int k = 0; k < fieldCount; k++)
+        int selected = mask.SelectedCount(dtype.FieldCount);
+        for (int s = 0; s < selected; s++)
         {
-            if (!mask.Includes(k))
-            {
-                continue;
-            }
-
-            LayoutNode child = node.GetChild(k + validityChildren);
-            FieldMask childMask = mask.Descend(k);
+            LayoutNode child = node.GetChild(mask.SelectedField(s) + validityChildren);
+            FieldMask childMask = mask.SelectedMask(s);
             Walk(in child, local, rowOffset, in childMask, ref list, depth + 1);
         }
 
