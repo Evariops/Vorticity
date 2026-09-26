@@ -148,8 +148,8 @@ either way, since they are what the counters are made of.
 * **The counters carry no tags.** Tell two files or two tenants apart with one session each and
   the scan's `Statistics`, or with the activities, which nest under your own.
 * The scan counters are added when the scan ends, each for whoever listens to it.
-* A scan's `Statistics.CacheHits` is the session cache's hits between the scan's start and its end:
-  a scan running beside another on the same session counts the other's hits too.
+* A scan's `Statistics.CacheHits` counts the segments the cache served to that scan alone, even
+  while other scans of the session run; the cache's own `Hits` counts the whole session's.
 
 ## Run it
 
