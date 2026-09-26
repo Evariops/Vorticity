@@ -1434,9 +1434,9 @@ public sealed partial class VortexFile : IAsyncDisposable
 
         Session.Detach(this);
         _tail.Release();
-        if (_indexState is { } indexes)
+        if (Volatile.Read(ref _indexState) is { } indexes)
         {
-            await DisposeIndexSourcesAsync(indexes).ConfigureAwait(false);
+            await DisposeIndexSourcesAsync(indexes.Origins).ConfigureAwait(false);
         }
 
         if (_ownsSource)

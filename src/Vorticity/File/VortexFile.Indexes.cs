@@ -273,7 +273,14 @@ public sealed partial class VortexFile
         if (Interlocked.CompareExchange(ref _indexState, state, null) is not null)
         {
             // Another reader won the race; its sources are the ones kept.
-            await DisposeIndexSourcesAsync(state).ConfigureAwait(false);
+            await DisposeIndexSourcesAsync(state.Origins).ConfigureAwait(false);
+        }
+        else if (Volatile.Read(ref _disposed) != 0)
+        {
+            // A dispose that ran while the state was read found none to close. Closing a source
+            // twice, when it did find this one, is harmless.
+            await DisposeIndexSourcesAsync(state.Origins).ConfigureAwait(false);
+            ThrowIfDisposed();
         }
 
         return _indexState!.Directory;
@@ -299,8 +306,20 @@ public sealed partial class VortexFile
             // Bound by the identity or the store token the fragment records: a fragment of another
             // object, or of another version of this one, is refused whole.
             MemorySegmentSource source = new MemorySegmentSource(blobs[i]);
-            (IndexDirectory? fragment, string? why) = await IndexContainer
-                .ReadAsync(source, blobs[i].Length, this, cancellationToken).ConfigureAwait(false);
+            IndexDirectory? fragment;
+            string? why;
+            try
+            {
+                (fragment, why) = await IndexContainer
+                    .ReadAsync(source, blobs[i].Length, this, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                await source.DisposeAsync().ConfigureAwait(false);
+                await DisposeIndexSourcesAsync(origins).ConfigureAwait(false);
+                throw;
+            }
+
             origins.Add(new IndexOrigin(source, fragment?.ArrayEncodings, Owned: true, fragment?.FileHash));
             fragments.Add(fragment);
             refusals[i] = why;
@@ -397,10 +416,10 @@ public sealed partial class VortexFile
     /// <summary>An entry as a refusal names it: its kind and its column.</summary>
     private string EntryName(IndexEntry entry) => $"{entry.Kind} on '{ColumnOf(entry)}'";
 
-    /// <summary>Closes the fragment sources a state opened; the file's own is not its to close.</summary>
-    private static async ValueTask DisposeIndexSourcesAsync(IndexState state)
+    /// <summary>Closes the fragment sources among <paramref name="origins"/>; the file's own is not theirs to close.</summary>
+    private static async ValueTask DisposeIndexSourcesAsync(IReadOnlyList<IndexOrigin> origins)
     {
-        foreach (IndexOrigin origin in state.Origins)
+        foreach (IndexOrigin origin in origins)
         {
             if (origin.Owned)
             {

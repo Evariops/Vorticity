@@ -19,6 +19,7 @@
 // cache keyed by the offset alone would hand the second fragment's run the first one's keys, which
 // the walk across both would show.
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -384,6 +385,78 @@ public sealed class IndexFragmentTests
         }
 
         return keys;
+    }
+
+    [Fact]
+    public async Task AReadOfTheFragmentsCanceledMidwayReleasesTheSourceItOpened()
+    {
+        Decoders.EnsureRegistered();
+        byte[] data = await WriteAsync(Guid.NewGuid(), WritePolicy.None);
+        CountedPins fragment = new CountedPins(4_096);
+        await using VortexFile file = await OpenAsync(data, fragment.Memory);
+
+        using CancellationTokenSource canceled = new CancellationTokenSource();
+        await canceled.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await file.ReadIndexDirectoryAsync(canceled.Token));
+        Assert.Equal(1, fragment.Pins);
+        Assert.Equal(1, fragment.Unpins);
+    }
+
+    [Fact]
+    public async Task AFileDisposedWhileItsFragmentsAreReadReleasesThem()
+    {
+        Decoders.EnsureRegistered();
+        byte[] data = await WriteAsync(Guid.NewGuid(), WritePolicy.None);
+
+        // Too short for a trailer: refused without a read, so nothing but the dispose stops the read.
+        CountedPins fragment = new CountedPins(8);
+        VortexFile file = await OpenAsync(data, fragment.Memory);
+        fragment.OnPin = () => file.DisposeAsync().AsTask().GetAwaiter().GetResult();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            async () => await file.ReadIndexDirectoryAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(1, fragment.Pins);
+        Assert.Equal(1, fragment.Unpins);
+    }
+
+    /// <summary>Bytes on a 64-byte boundary, which a source pins where they lie, and the pins taken of them and given back.</summary>
+    private sealed unsafe class CountedPins : MemoryManager<byte>
+    {
+        private readonly byte[] _array;
+        private readonly int _offset;
+        private readonly int _length;
+
+        internal CountedPins(int length)
+        {
+            _array = GC.AllocateArray<byte>(length + 64, pinned: true);
+            fixed (byte* first = _array)
+            {
+                _offset = (int)((64 - ((nuint)first & 63)) & 63);
+            }
+
+            _length = length;
+        }
+
+        internal int Pins { get; private set; }
+
+        internal int Unpins { get; private set; }
+
+        internal Action? OnPin { get; set; }
+
+        public override Span<byte> GetSpan() => _array.AsSpan(_offset, _length);
+
+        public override MemoryHandle Pin(int elementIndex = 0)
+        {
+            Pins++;
+            OnPin?.Invoke();
+            return new MemoryHandle(System.Runtime.CompilerServices.Unsafe.AsPointer(ref _array[_offset + elementIndex]), default, this);
+        }
+
+        public override void Unpin() => Unpins++;
+
+        protected override void Dispose(bool disposing)
+        {
+        }
     }
 
     /// <summary>A fragment of the file in <paramref name="data"/>, built from a copy opened on its own.</summary>
