@@ -179,7 +179,9 @@ internal static class RecordAnalysis
         }
 
         // The extension class sits in the namespace, so it can name the record only when a namespace can.
-        string containerNames = string.Concat(containers.Select(c => c.Name.TrimStart('@')));
+        // Its containers are joined to the name by underscores: run together, A.B.Rec and AB.Rec would
+        // name one class twice.
+        string containerNames = string.Concat(containers.Select(c => c.Name.TrimStart('@') + "_"));
         string? extensions = members.Count == 0 || access == Accessibility.NotApplicable ? null : containerNames + type.Name + "VortexExtensions";
         string hint = (ns is null ? string.Empty : ns.Replace("@", string.Empty) + ".")
             + string.Concat(containers.Select(c => c.Name.TrimStart('@') + ".")) + type.Name + ".g.cs";

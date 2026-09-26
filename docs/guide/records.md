@@ -107,7 +107,8 @@ Order.ColumnNames.Id = "order_id"
 ```
 
 Beside the type, in an `OrderVortexExtensions` class, it adds C# extension members that name the
-columns wherever the library hands you a record's columns:
+columns wherever the library hands you a record's columns (a record declared inside `Shop` gets a
+`Shop_OrderVortexExtensions`):
 
 | on | each member is | a nested record is |
 |---|---|---|
