@@ -57,35 +57,32 @@ internal static class EncodedAnswers
 
         if (node.Kind == CanonicalKind.Dictionary)
         {
-            ReadOnlySpan<uint> codes = MemoryMarshal.Cast<byte, uint>(node.Codes.Span)[..destination.Length];
-            for (int row = 0; row < codes.Length; row++)
+            // The codes were held to the dictionary when the node was built; a null row's is not
+            // read at all.
+            int bad = CodeAnswers.Expand(
+                answers, node.Codes.Span[..(destination.Length * sizeof(uint))], Types.PType.U32,
+                mask.Bits, mask.BitOffset, mask.AllValid, destination);
+            if (bad >= 0)
             {
-                destination[row] = answers[(int)codes[row]];
+                throw new VortexFormatException(
+                    $"A dictionary's code at row {bad} names none of its {answers.Length} values.");
             }
-        }
-        else
-        {
-            ReadOnlySpan<uint> ends = MemoryMarshal.Cast<byte, uint>(node.RunEnds.Span);
-            int start = 0;
-            for (int run = 0; run < ends.Length; run++)
-            {
-                int end = (int)ends[run];
-                destination[start..end].Fill(answers[run]);
-                start = end;
-            }
-        }
 
-        if (mask.AllValid)
-        {
             return;
         }
 
-        for (int row = 0; row < destination.Length; row++)
+        ReadOnlySpan<uint> ends = MemoryMarshal.Cast<byte, uint>(node.RunEnds.Span);
+        int start = 0;
+        for (int run = 0; run < ends.Length; run++)
         {
-            if (!mask.IsValid(row))
-            {
-                destination[row] = Trilean.Unknown;
-            }
+            int end = (int)ends[run];
+            destination[start..end].Fill(answers[run]);
+            start = end;
+        }
+
+        if (!mask.AllValid)
+        {
+            ComparisonKernels.MarkUnknown(mask.Bits, mask.BitOffset, destination);
         }
     }
 }

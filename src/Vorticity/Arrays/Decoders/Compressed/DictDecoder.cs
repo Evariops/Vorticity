@@ -121,21 +121,20 @@ internal sealed class DictDecoder : ArrayDecoder
             ReadOnlySpan<byte> codes = codesNode.Values.Span;
             PType codesPType = metadata.CodesPType;
             ValidityReader codesValidity = ValidityReader.Of(context.Canonical, codesNode.Validity);
-            for (int row = 0; row < length; row++)
+            if (codesValidity.IsAllInvalid)
             {
-                if (!codesValidity.IsValid(row))
-                {
-                    destination[row] = Compute.Trilean.Unknown;
-                    continue;
-                }
+                Compute.Trilean.Fill(destination[..length], Compute.Trilean.Unknown);
+                return true;
+            }
 
-                uint code = RowKernels.CodeAt(codes, codesPType, row);
-                if (code >= (uint)valuesLength)
-                {
-                    ThrowCode(codes, codesPType, row, valuesLength);
-                }
-
-                destination[row] = answers[(int)code];
+            // The codes' type and the validity's mode resolved once, and on AVX-512 VBMI 64 rows a
+            // permute of the answers: see CodeAnswers.
+            int bad = Compute.CodeAnswers.Expand(
+                answers, codes, codesPType, codesValidity.Bits, codesValidity.BitOffset,
+                codesValidity.IsAllValid, destination[..length]);
+            if (bad >= 0)
+            {
+                ThrowCode(codes, codesPType, bad, valuesLength);
             }
 
             return true;

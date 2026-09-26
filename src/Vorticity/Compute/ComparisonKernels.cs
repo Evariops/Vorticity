@@ -569,21 +569,18 @@ internal static partial class ComparisonKernels
     /// <param name="validity">The validity bitmap.</param>
     /// <param name="offset">The bit of row 0.</param>
     /// <param name="destination">One state per row, those of the valid rows kept.</param>
-    private static void MarkUnknown(ReadOnlySpan<byte> validity, int offset, Span<byte> destination)
+    internal static void MarkUnknown(ReadOnlySpan<byte> validity, int offset, Span<byte> destination)
     {
         int i = 0;
-        if (Spreads)
+        if (WordBytes.IsAccelerated)
         {
-            Vector512<byte> index = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadIndex));
-            Vector512<byte> mask = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadBit));
+            WordBytes spread = WordBytes.Create();
             Vector512<byte> unknown = Vector512.Create(Trilean.Unknown);
             ref byte into = ref MemoryMarshal.GetReference(destination);
             for (; i <= destination.Length - 64; i += 64)
             {
                 ulong word = BitWords.Load(validity, offset + i);
-                Vector512<byte> isNull = Vector512.Equals(
-                    Avx512BW.Shuffle(Vector512.Create(word).AsByte(), index) & mask, Vector512<byte>.Zero);
-                Vector512.ConditionalSelect(isNull, unknown, Vector512.LoadUnsafe(ref into, (nuint)i))
+                Vector512.ConditionalSelect(spread.Clear(word), unknown, Vector512.LoadUnsafe(ref into, (nuint)i))
                     .StoreUnsafe(ref into, (nuint)i);
             }
         }
@@ -615,19 +612,16 @@ internal static partial class ComparisonKernels
 
         // Where AVX-512 is, 64 rows a step, however the bitmap is aligned: the word in every lane,
         // shuffled to a byte per bit, and a blend of the two states by the zero bytes.
-        if (Spreads)
+        if (WordBytes.IsAccelerated)
         {
-            Vector512<byte> index = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadIndex));
-            Vector512<byte> mask = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadBit));
+            WordBytes spread = WordBytes.Create();
             Vector512<byte> clear = Vector512.Create(whenFalse);
             Vector512<byte> set = Vector512.Create(whenTrue);
             ref byte into = ref MemoryMarshal.GetReference(destination);
             for (; i <= destination.Length - 64; i += 64)
             {
                 ulong word = BitWords.Load(bits, offset + i);
-                Vector512<byte> bitClear = Vector512.Equals(
-                    Avx512BW.Shuffle(Vector512.Create(word).AsByte(), index) & mask, Vector512<byte>.Zero);
-                Vector512.ConditionalSelect(bitClear, clear, set).StoreUnsafe(ref into, (nuint)i);
+                Vector512.ConditionalSelect(spread.Clear(word), clear, set).StoreUnsafe(ref into, (nuint)i);
             }
         }
 
@@ -913,7 +907,7 @@ internal static partial class ComparisonKernels
         // Where AVX-512 is, 64 rows a step in the column's own type, when the literal is one of its
         // values; the rest, and a literal only the wider type holds, are the scalar loops' below.
         int done = 0;
-        if (Spreads && Vector512<TValue>.IsSupported && InLanes(wanted, out TValue literal))
+        if (WordBytes.IsAccelerated && Vector512<TValue>.IsSupported && InLanes(wanted, out TValue literal))
         {
             done = Lanes<TValue, TOp>(values, literal, mask, destination);
         }
@@ -932,13 +926,6 @@ internal static partial class ComparisonKernels
 
         NullableCore<TValue, TWide, TOp>(values, mask, wanted, destination, done);
     }
-
-    /// <summary>
-    /// Whether the verdicts can be spread from 512-bit masks: a compare of a column's own lanes,
-    /// then a byte shuffle, which is AVX-512BW. ARM keeps the scalar loops, for the reason
-    /// <see cref="CompareCore{TValue, TWide, TOp}"/> gives.
-    /// </summary>
-    private static bool Spreads => Vector512.IsHardwareAccelerated && Avx512BW.IsSupported;
 
     /// <summary>
     /// The literal in the column's own type, when it is exactly one of that type's values: then
@@ -969,8 +956,7 @@ internal static partial class ComparisonKernels
     {
         int rows = destination.Length;
         Vector512<T> right = Vector512.Create(literal);
-        Vector512<byte> index = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadIndex));
-        Vector512<byte> bit = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadBit));
+        WordBytes spread = WordBytes.Create();
         ref T from = ref MemoryMarshal.GetReference(values);
         ref byte into = ref MemoryMarshal.GetReference(destination);
         int i = 0;
@@ -979,20 +965,22 @@ internal static partial class ComparisonKernels
             for (; i <= rows - 64; i += 64)
             {
                 ulong held = Verdicts<T, TOp>(ref Unsafe.Add(ref from, i), right);
-                Ones(held, index, bit).StoreUnsafe(ref into, (nuint)i);
+                spread.Ones(held).StoreUnsafe(ref into, (nuint)i);
             }
 
             return i;
         }
 
+        // A valid row's verdict is 1 or 0 and a null row's 2: the ones of the verdicts it holds,
+        // with the ones of the nulls doubled over them.
         ReadOnlySpan<byte> bits = mask.Bits;
         int offset = mask.BitOffset;
         for (; i <= rows - 64; i += 64)
         {
             ulong valid = BitWords.Load(bits, offset + i);
             ulong held = Verdicts<T, TOp>(ref Unsafe.Add(ref from, i), right) & valid;
-            Vector512<byte> unknown = Ones(~valid, index, bit);
-            (Ones(held, index, bit) | (unknown + unknown)).StoreUnsafe(ref into, (nuint)i);
+            Vector512<byte> unknown = spread.Ones(~valid);
+            (spread.Ones(held) | (unknown + unknown)).StoreUnsafe(ref into, (nuint)i);
         }
 
         return i;
@@ -1012,37 +1000,6 @@ internal static partial class ComparisonKernels
 
         return held;
     }
-
-    /// <summary>
-    /// A byte per bit of <paramref name="word"/>, 1 where it is set and 0 where it is clear, which
-    /// is <see cref="Trilean.True"/> and <see cref="Trilean.False"/>: the word in every lane, each
-    /// byte shuffled to the word's byte holding its bit, masked to that bit, capped at one.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Vector512<byte> Ones(ulong word, Vector512<byte> index, Vector512<byte> bit) =>
-        Vector512.Min(Avx512BW.Shuffle(Vector512.Create(word).AsByte(), index) & bit, Vector512<byte>.One);
-
-    /// <summary>
-    /// For byte <c>j</c> of a 512-bit vector, the byte of a word broadcast to every 64-bit lane that
-    /// holds bit <c>j</c>: <c>j / 8</c>, which a shuffle confined to its own 128-bit lane still
-    /// reaches, since every such lane holds the whole word, twice.
-    /// </summary>
-    private static ReadOnlySpan<byte> SpreadIndex =>
-    [
-        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
-        2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3,
-        4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5,
-        6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7,
-    ];
-
-    /// <summary>For byte <c>j</c>, the bit of its word byte it stands for: <c>1 &lt;&lt; (j % 8)</c>.</summary>
-    private static ReadOnlySpan<byte> SpreadBit =>
-    [
-        1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128,
-        1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128,
-        1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128,
-        1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128,
-    ];
 
     /// <summary>The nullable half of <see cref="CompareOp{TValue,TWide}"/>, eight rows per byte.</summary>
     /// <param name="values">The column's values, already cast and trimmed to the row count.</param>
