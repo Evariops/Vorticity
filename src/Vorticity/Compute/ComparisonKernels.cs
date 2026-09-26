@@ -656,9 +656,10 @@ internal static partial class ComparisonKernels
         // type.
         //
         // IEEE 754 survives that move, which is the thing to watch: `IOrderOp` is written with C#'s
-        // own operators, so every comparison against NaN stays false, inequality included. What
-        // would break the rule is `CompareTo`, which orders NaN and would give the row encoding's
-        // total order -- and nothing here calls it. Widening a `Half` or a `float` to `double` is
+        // own operators, so every ordering and equality against NaN is false, and inequality true,
+        // which the zone pruning agrees with by never pruning on `!=`. What would break the rule is
+        // `CompareTo`, which orders NaN and would give the row encoding's total order -- and
+        // nothing here calls it. Widening a `Half` or a `float` to `double` is
         // exact, so the answers are unchanged.
         ReadOnlySpan<byte> bytes = values;
         switch (ptype)
