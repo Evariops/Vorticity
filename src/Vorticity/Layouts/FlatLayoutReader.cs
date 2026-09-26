@@ -849,9 +849,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         try
         {
             Span<byte> states = rented.AsSpan(0, total);
-            if (!decoder.TryCompare(
-                    context.Decode, in root, node.DType, total,
-                    context.PushedOp, context.PushedLiteral, states))
+            if (!Asked(decoder, in root, node.DType, total, context, states))
             {
                 return false;
             }
@@ -885,6 +883,13 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
     }
 
+    /// <summary>Asks the encoding the pushed predicate: the comparison, or the prefix match.</summary>
+    private static bool Asked(
+        ArrayDecoder decoder, in ArrayNode root, Types.DType dtype, int total, ScanContext context, Span<byte> states) =>
+        context.PushedPrefix
+            ? decoder.TryStartsWith(context.Decode, in root, dtype, total, context.PushedLiteral, states)
+            : decoder.TryCompare(context.Decode, in root, dtype, total, context.PushedOp, context.PushedLiteral, states);
+
     /// <summary>
     /// Offers the pushed comparison to this node's encoding, and turns an answer into the column.
     /// </summary>
@@ -914,9 +919,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         try
         {
             Span<byte> states = rented.AsSpan(0, total);
-            if (!decoder.TryCompare(
-                    context.Decode, in root, node.DType, total,
-                    context.PushedOp, context.PushedLiteral, states))
+            if (!Asked(decoder, in root, node.DType, total, context, states))
             {
                 return -1;
             }

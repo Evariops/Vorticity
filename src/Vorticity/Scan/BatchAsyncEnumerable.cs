@@ -982,12 +982,34 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// purpose. A conjunction is not pushed because answering one arm does not select the rows, a
     /// take is not pushed because its own selection already owns the row space, and a dotted path
     /// is not pushed because only the struct reader resolves one and it resolves a name.
+    /// <para>
+    /// A prefix match is offered too, as the one string match an encoding answers from a part of
+    /// each value: a compressed string has to be decompressed only as far as the prefix is long.
+    /// </para>
     /// </remarks>
-    private ComparisonExpr? Pushable() =>
-        _take is null && !_filterProven && _evaluator?.Filter is ComparisonExpr comparison &&
-        comparison.Field.SegmentsUtf8.Length == 1
-            ? comparison
-            : null;
+    private PushedPredicate? Pushable()
+    {
+        if (_take is not null || _filterProven)
+        {
+            return null;
+        }
+
+        return _evaluator?.Filter switch
+        {
+            ComparisonExpr comparison when comparison.Field.SegmentsUtf8.Length == 1 =>
+                new PushedPredicate(comparison.Field, comparison.Op, comparison.Value, Prefix: false),
+            StringMatchExpr { Op: StringMatchOp.StartsWith } match
+                when match.Field.SegmentsUtf8.Length == 1 && match.Pattern.Kind == FilterLiteralKind.Bytes =>
+                new PushedPredicate(match.Field, ComparisonOp.Equal, match.Pattern, Prefix: true),
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// A predicate an encoding may answer: a comparison of a top-level field, or when
+    /// <paramref name="Prefix"/> a prefix match of it on <paramref name="Literal"/>.
+    /// </summary>
+    private readonly record struct PushedPredicate(FieldExpr Field, ComparisonOp Op, FilterLiteral Literal, bool Prefix);
 
     /// <summary>
     /// Offers the comparison to the predicate's column and, when its encoding answers, reads the
@@ -1000,7 +1022,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// do. When it declines, the first pass has decoded that one column for nothing, once, and no
     /// split of this scan asks again.
     /// </remarks>
-    private int ExecutePushed(Lane lane, RowRange split, ComparisonExpr pushable)
+    private int ExecutePushed(Lane lane, RowRange split, PushedPredicate pushable)
     {
         ScanContext context = lane.Context;
 
@@ -1018,8 +1040,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         FieldMask only = FieldMask.Single(field);
-        (byte[]? Field, ComparisonOp Op, FilterLiteral Literal) saved =
-            context.ExchangePushedPredicate(name, pushable.Op, pushable.Value);
+        (byte[]? Field, ComparisonOp Op, FilterLiteral Literal, bool Prefix) saved =
+            context.ExchangePushedPredicate(name, pushable.Op, pushable.Literal, pushable.Prefix);
         int answer;
         FilterWindow(context, split);
         try
@@ -1028,7 +1050,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         finally
         {
-            context.ExchangePushedPredicate(saved.Field, saved.Op, saved.Literal);
+            context.ExchangePushedPredicate(saved.Field, saved.Op, saved.Literal, saved.Prefix);
             ProjectionWindow(context, split);
         }
 
