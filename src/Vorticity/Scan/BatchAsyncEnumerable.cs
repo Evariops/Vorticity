@@ -1339,30 +1339,37 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     {
         int window = _lanes.Length;
         long assigned = _started;
-        while (assigned - _delivered < window)
+        try
         {
-            if (_drained || !TryNextSplit(out RowRange split))
+            while (assigned - _delivered < window)
             {
-                _drained = true;
-                break;
+                if (_drained || !TryNextSplit(out RowRange split))
+                {
+                    _drained = true;
+                    break;
+                }
+
+                Lane lane = _lanes[(int)(assigned % window)] ??= NextLane();
+                lane.Rows = split;
+                lane.Sequence = assigned;
+                lane.Assign(this);
+                assigned++;
             }
-
-            Lane lane = _lanes[(int)(assigned % window)] ??= NextLane();
-            lane.Rows = split;
-            lane.Sequence = assigned;
-            lane.Assign(this);
-            assigned++;
         }
-
-        lock (_lanes)
+        finally
         {
-            _queued += (int)(assigned - _started);
-            _started = assigned;
-            while (_free > 0 && _queued > 0)
+            // Published even when a split or a lane fails to come: a lane assigned and never
+            // counted would be awaited by the dispose, and run by no one.
+            lock (_lanes)
             {
-                _free--;
-                _lanes[(int)((_started - _queued) % window)]!.Go();
-                _queued--;
+                _queued += (int)(assigned - _started);
+                _started = assigned;
+                while (_free > 0 && _queued > 0)
+                {
+                    _free--;
+                    _lanes[(int)((_started - _queued) % window)]!.Go();
+                    _queued--;
+                }
             }
         }
     }
