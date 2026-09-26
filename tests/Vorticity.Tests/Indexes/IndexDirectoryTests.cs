@@ -184,6 +184,20 @@ public sealed class IndexDirectoryTests
         Assert.Equal(IndexKinds.DictProbe, kept.Kind);
     }
 
+    [Fact]
+    public void ARegionLongerThanOneReadCostsItsEntryAlone()
+    {
+        // A file past 2 GiB can hold such a region, but no reader takes it in one read: it is
+        // refused with its entry, as a region past the data is, rather than by whoever reads it.
+        IndexEntry bad = new IndexEntry(
+            IndexKinds.BloomSbbf, [0u], 1_024, [], [new IndexRun(0, 1, [new IndexSegment(0, int.MaxValue, 0)], [])]);
+        byte[] bytes = new IndexDirectory(Rows, 0, WritePolicy.Auto, [bad, Probe(0, 1)]).ToBytes();
+
+        Assert.True(IndexDirectory.TryParse(bytes, Rows, 4UL << 30, out IndexDirectory? read, out _));
+        IndexEntry kept = Assert.Single(read!.Entries);
+        Assert.Equal(IndexKinds.DictProbe, kept.Kind);
+    }
+
     public static TheoryData<string, byte[]> Garbage() => new()
     {
         { "empty", [] },

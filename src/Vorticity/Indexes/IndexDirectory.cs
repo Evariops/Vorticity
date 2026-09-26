@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
 using System.Text;
+using Vorticity.IO;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Indexes;
@@ -522,8 +523,9 @@ internal sealed record IndexDirectory(
     }
 
     /// <summary>
-    /// Runs disjoint and in order, each segment inside the file and before the footer, and a
-    /// payload wherever the kind needs one. A failure costs that one entry, never the file.
+    /// Runs disjoint and in order, each segment inside the file, before the footer and no longer
+    /// than one read takes, and a payload wherever the kind needs one. A failure costs that one
+    /// entry, never the file.
     /// </summary>
     private static bool RunsAreSound(IndexEntry entry, ulong dataEnd)
     {
@@ -549,7 +551,8 @@ internal sealed record IndexDirectory(
             foreach (IndexSegment segment in run.Payload)
             {
                 ulong end = segment.Offset + segment.Length;
-                if (end < segment.Offset || end > dataEnd || segment.AlignmentExponent > 16)
+                if (end < segment.Offset || end > dataEnd || segment.AlignmentExponent > 16
+                    || segment.Length > SegmentIo.MaxSegmentLength)
                 {
                     return false;
                 }
