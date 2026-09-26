@@ -30,6 +30,11 @@ the rewrite starts:
   flush or completion, so `RowCount` after writing 5 000 rows is 25 000, what the file holds, and
   so is `report.RowCount`.
 
+An append holds the file alone until it completes or is given up: a second append, or a reader,
+meanwhile fails its open with an `IOException`. On Linux and macOS the lock is advisory. A process
+that does not take it, or a file system shared between machines that does not pass it on, is not
+held off, so keep to one writer per file.
+
 ## What an append costs
 
 An append never truncates while it writes: the rewritten chunk's old bytes stay where they were,

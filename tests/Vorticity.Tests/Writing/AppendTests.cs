@@ -207,6 +207,33 @@ public sealed class AppendTests
     }
 
     [Fact]
+    public async Task ASecondAppendToAFileBeingAppendedIsRefused()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        string path = TempPath();
+        try
+        {
+            await WriteAsync(path, 0, 8_192);
+            await using (VortexFileWriter first = await VortexFileWriter.AppendAsync(path, cancellationToken: ct))
+            {
+                // The first holds the file alone until it completes, a lock every writer of this
+                // library takes: the second is refused, before it reads a byte.
+                await Assert.ThrowsAsync<IOException>(async () => await VortexFileWriter.AppendAsync(path, cancellationToken: ct));
+                await FeedAsync(first, 8_192, 8_192 + Block);
+                await first.CompleteAsync(ct);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            Assert.Equal(8_192 + Block, file.RowCount);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task ATornAppendIsRepairedToTheFileBeforeIt()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
