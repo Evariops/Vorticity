@@ -21,7 +21,7 @@ namespace Vorticity.IO;
 /// </remarks>
 internal readonly struct CoalescedRun : IEquatable<CoalescedRun>
 {
-    /// <summary>Creates a run. Used by <see cref="SegmentCoalescer"/> and by external sources.</summary>
+    /// <summary>Creates a run. Used by <see cref="SegmentCoalescer"/>.</summary>
     /// <param name="start">The file offset to read from; must be a multiple of 64.</param>
     /// <param name="length">The number of bytes to read.</param>
     /// <param name="firstIndex">Index of the first covered spec in the caller's sorted list.</param>

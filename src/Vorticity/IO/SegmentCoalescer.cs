@@ -16,9 +16,9 @@ namespace Vorticity.IO;
 /// read path.
 /// </para>
 /// <para>
-/// Public because it is the piece an external <see cref="ISegmentReader"/> implementer most wants
-/// to reuse, and because the alignment rule it enforces has to be testable on its own rather than
-/// only through a file.
+/// A class of its own because <see cref="FileSegmentSource"/> and the dataset's object source both
+/// plan their reads with it, and because the alignment rule it enforces has to be testable on its
+/// own rather than only through a file.
 /// </para>
 /// </remarks>
 internal static class SegmentCoalescer

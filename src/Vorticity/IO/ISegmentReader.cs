@@ -11,10 +11,11 @@ namespace Vorticity.IO;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Object storage stays outside the core — it would need an HTTP client, and the core takes no
-/// dependencies — so this is the seam an outside implementer fills. Everything below is a
-/// requirement on every implementation, stated rather than implied, because such an implementer
-/// has no one to ask.
+/// The seam the library reads every file through. Its own sources implement it, and so does the
+/// dataset's object source, from outside the core; a caller's source implements the public
+/// <see cref="ISegmentSource"/> instead, which <see cref="SourceReader"/> adapts to this one.
+/// Everything below is a requirement on every implementation, stated rather than implied, since
+/// one of them lives in another assembly.
 /// </para>
 /// <para>
 /// <b>Thread safety.</b> Implementations must be thread-safe: concurrent splits read through one
