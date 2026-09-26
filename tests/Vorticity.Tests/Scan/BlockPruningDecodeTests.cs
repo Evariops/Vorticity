@@ -7,8 +7,8 @@
 // rows as a counted range -- and an encoding that selects without a full decode materializes the
 // live block and nothing else.
 //
-// The quantity is `FlatLayoutReader.ValuesDecoded`, the counter `FlatLayoutDecodeCountTests` holds
-// the scan and the take to, and it is EXACT here too: one block's rows, pruned; the whole chunk,
+// The quantity is the scan's `ScanMetrics.ValuesDecoded`, the count `FlatLayoutDecodeCountTests`
+// holds the scan and the take to, and it is exact here too: one block's rows, pruned; the whole chunk,
 // unpruned. Two shapes, because two readers have the branch: a file whose single chunk IS the root
 // (the flat reader sees the mask in file coordinates), and a file of many chunks (the chunked
 // reader translates the mask into a chunk-local selection).
@@ -245,12 +245,12 @@ public sealed class BlockPruningDecodeTests
     private static async Task<(List<int> Values, long Decoded)> ReadField(
         string path, VortexExpr filter, bool prune, int cap)
     {
-        FlatLayoutReader.ValuesDecoded = 0;
+        ScanMetrics metrics = new ScanMetrics();
         List<int> values = [];
         byte[] name = System.Text.Encoding.UTF8.GetBytes(string.Empty);
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
         await foreach (RecordBatch batch in file.ScanBuilder()
-            .Where(filter).WithPruning(prune).WithMaxBatchRows(cap).ExecuteAsync()
+            .Where(filter).WithPruning(prune).WithMaxBatchRows(cap).WithMetrics(metrics).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             VortexColumn view = batch.Column(name);
@@ -260,7 +260,7 @@ public sealed class BlockPruningDecodeTests
             }
         }
 
-        return (values, FlatLayoutReader.ValuesDecoded);
+        return (values, metrics.ValuesDecoded);
     }
 
     /// <summary>The layout tree in one line, with what each zone map answers, for a message.</summary>
@@ -291,11 +291,11 @@ public sealed class BlockPruningDecodeTests
 
     private static async Task<(List<long> Values, long Decoded)> Read(string path, VortexExpr filter, bool prune)
     {
-        FlatLayoutReader.ValuesDecoded = 0;
+        ScanMetrics metrics = new ScanMetrics();
         List<long> values = [];
         byte[] name = System.Text.Encoding.UTF8.GetBytes("v");
         await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
-        await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).WithPruning(prune).ExecuteAsync()
+        await foreach (RecordBatch batch in file.ScanBuilder().Where(filter).WithPruning(prune).WithMetrics(metrics).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
             VortexColumn view = batch.Column(name);
@@ -305,7 +305,7 @@ public sealed class BlockPruningDecodeTests
             }
         }
 
-        return (values, FlatLayoutReader.ValuesDecoded);
+        return (values, metrics.ValuesDecoded);
     }
 
     /// <summary>One i64 column, blocks of <see cref="Block"/> rows, written in the batches asked for.</summary>

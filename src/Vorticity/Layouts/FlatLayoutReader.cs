@@ -31,24 +31,10 @@ internal sealed class FlatLayoutReader : LayoutReader
     public override ReadOnlySpan<byte> IdUtf8 => "vortex.flat"u8;
 
     /// <summary>
-    /// Values this reader has materialized, across every scan in the process.
+    /// Counts <paramref name="values"/> materialized on the scan's metrics, when it has any: the
+    /// count the decode-count tests hold a scan to, per scan and so without a line every core shares.
     /// </summary>
-    /// <remarks>
-    /// Internal and diagnostic. Maintaining it costs one interlocked add per decoded node, beside a
-    /// decode of that whole node, so it does not show; without it, a node decoded far more often
-    /// than the rows delivered justify is invisible to the tests.
-    /// </remarks>
-    internal static long ValuesDecoded;
-
-    /// <summary>
-    /// Counts <paramref name="values"/> materialized: on the process-wide counter the decode-count
-    /// tests read, and on the scan's own sink when it has one.
-    /// </summary>
-    private static void Decoded(ScanContext context, long values)
-    {
-        System.Threading.Interlocked.Add(ref ValuesDecoded, values);
-        context.Metrics?.AddDecoded(values);
-    }
+    private static void Decoded(ScanContext context, long values) => context.Metrics?.AddDecoded(values);
 
     /// <inheritdoc/>
     public override void RegisterSegments(

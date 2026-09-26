@@ -113,11 +113,11 @@ public sealed class FilterOwnPassTests
         string path = Write();
         try
         {
-            FlatLayoutReader.ValuesDecoded = 0;
+            ScanMetrics metrics = new ScanMetrics();
             long rows = 0;
             await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
-                await foreach (RecordBatch batch in file.ScanBuilder().Where(Filter(filter)).ExecuteAsync()
+                await foreach (RecordBatch batch in file.ScanBuilder().Where(Filter(filter)).WithMetrics(metrics).ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     rows += batch.RowCount;
@@ -127,7 +127,7 @@ public sealed class FilterOwnPassTests
             // The filter's column, every row of it, and the zone map it is pruned with, a row a
             // zone: nothing of the three columns the filter keeps no row of.
             Assert.Equal(0, rows);
-            Assert.Equal(Rows + (Rows / 8_192), FlatLayoutReader.ValuesDecoded);
+            Assert.Equal(Rows + (Rows / 8_192), metrics.ValuesDecoded);
         }
         finally
         {
@@ -172,12 +172,12 @@ public sealed class FilterOwnPassTests
             // The first 2 000 rows of every zone: too few of a split to read the projection whole,
             // but every row of what they span, in a chunk of twelve batches that no window smaller
             // than the chunk cuts.
-            FlatLayoutReader.ValuesDecoded = 0;
+            ScanMetrics metrics = new ScanMetrics();
             List<long> got = [];
             await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
                 VortexExpr run = Expr.Lt(Expr.Field("c3"), Expr.Literal(FilterLiteral.From(2_000L)));
-                await foreach (RecordBatch batch in file.ScanBuilder().Where(run).Project("c0", "c1", "c2").ExecuteAsync()
+                await foreach (RecordBatch batch in file.ScanBuilder().Where(run).Project("c0", "c1", "c2").WithMetrics(metrics).ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     for (int row = 0; row < batch.RowCount; row++)
@@ -206,7 +206,7 @@ public sealed class FilterOwnPassTests
 
             // The filter's column once, for its own pass, and its zone map; then each projected
             // column's chunk once, whole, every batch slicing its run out of it.
-            Assert.Equal(Rows + (Rows / 8_192) + (3L * Rows), FlatLayoutReader.ValuesDecoded);
+            Assert.Equal(Rows + (Rows / 8_192) + (3L * Rows), metrics.ValuesDecoded);
         }
         finally
         {
@@ -298,12 +298,12 @@ public sealed class FilterOwnPassTests
     /// <summary>Every column of every row the filter keeps, at a degree, and the values the scan decoded.</summary>
     private static async Task<(List<long> Values, long Decoded)> ReadAsync(string path, string filter, int degree)
     {
-        FlatLayoutReader.ValuesDecoded = 0;
+        ScanMetrics metrics = new ScanMetrics();
         List<long> values = [];
         await using (VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None))
         {
             await foreach (RecordBatch batch in file.ScanBuilder().Where(Filter(filter)).WithDegreeOfParallelism(degree)
-                .ExecuteAsync().WithCancellation(CancellationToken.None))
+                .WithMetrics(metrics).ExecuteAsync().WithCancellation(CancellationToken.None))
             {
                 for (int row = 0; row < batch.RowCount; row++)
                 {
@@ -315,7 +315,7 @@ public sealed class FilterOwnPassTests
             }
         }
 
-        return (values, FlatLayoutReader.ValuesDecoded);
+        return (values, metrics.ValuesDecoded);
     }
 
     private static string Write()

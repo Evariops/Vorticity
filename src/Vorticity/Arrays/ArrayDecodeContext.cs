@@ -384,8 +384,8 @@ internal sealed class ArrayDecodeContext
     /// shared as they should be, once per window or per batch when they are not.
     /// </summary>
     /// <remarks>
-    /// Internal and diagnostic, as <c>FlatLayoutReader.ValuesDecoded</c> is: without it, a child
-    /// decoded once per window rather than once per chunk is invisible to the tests.
+    /// Internal and diagnostic: without it, a child decoded once per window rather than once per
+    /// chunk is invisible to the tests.
     /// </remarks>
     internal static long SharedChildrenDecoded;
 

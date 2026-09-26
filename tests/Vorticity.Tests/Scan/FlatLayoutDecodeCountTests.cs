@@ -54,7 +54,7 @@ public sealed class FlatLayoutDecodeCountTests
         try
         {
 
-        FlatLayoutReader.ValuesDecoded = 0;
+        ScanMetrics metrics = new ScanMetrics();
         long batches = 0;
         long rows = 0;
         await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
@@ -62,14 +62,14 @@ public sealed class FlatLayoutDecodeCountTests
             // Capped at a zone: an unfiltered scan of one narrow column would otherwise take the
             // whole chunk in one batch, and there would be no second batch to decode it again for.
             await foreach (RecordBatch batch in opened.ScanBuilder().WithMaxBatchRows((int)SplitPlan.DefaultBatchRows)
-                .ExecuteAsync().WithCancellation(CancellationToken.None))
+                .WithMetrics(metrics).ExecuteAsync().WithCancellation(CancellationToken.None))
             {
                 batches++;
                 rows += batch.RowCount;
             }
         }
 
-        long decoded = FlatLayoutReader.ValuesDecoded;
+        long decoded = metrics.ValuesDecoded;
         Console.Out.Write(
             "FLAT DECODE: " + rows.ToString(CultureInfo.InvariantCulture) + " rows in one chunk, read as " +
             batches.ToString(CultureInfo.InvariantCulture) + " batches, materialized " +
@@ -205,18 +205,18 @@ public sealed class FlatLayoutDecodeCountTests
                 expected.Add(all[(int)index]);
             }
 
-            FlatLayoutReader.ValuesDecoded = 0;
+            ScanMetrics metrics = new ScanMetrics();
             List<string> taken = [];
             await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
-                await foreach (RecordBatch batch in opened.ScanBuilder().Take(wanted).ExecuteAsync()
+                await foreach (RecordBatch batch in opened.ScanBuilder().Take(wanted).WithMetrics(metrics).ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     Values.DescribeRows(batch, taken);
                 }
             }
 
-            long decoded = FlatLayoutReader.ValuesDecoded;
+            long decoded = metrics.ValuesDecoded;
             Console.Out.Write(
                 "FLAT TAKE: " + wanted.Length.ToString(CultureInfo.InvariantCulture) + " rows wanted from a " +
                 Rows.ToString(CultureInfo.InvariantCulture) + "-row chunk materialized " +
@@ -258,21 +258,21 @@ public sealed class FlatLayoutDecodeCountTests
         string path = await WriteSortedAsync(SortedRows);
         try
         {
-            FlatLayoutReader.ValuesDecoded = 0;
+            ScanMetrics metrics = new ScanMetrics();
             long rows = 0;
             VortexExpr band = Expr.And(
                 Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(Low))),
                 Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(Low + Width))));
             await using (VortexFile opened = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
-                await foreach (RecordBatch batch in opened.ScanBuilder().Where(band).ExecuteAsync()
+                await foreach (RecordBatch batch in opened.ScanBuilder().Where(band).WithMetrics(metrics).ExecuteAsync()
                     .WithCancellation(CancellationToken.None))
                 {
                     rows += batch.RowCount;
                 }
             }
 
-            long decoded = FlatLayoutReader.ValuesDecoded;
+            long decoded = metrics.ValuesDecoded;
             Console.Out.Write(
                 "SORTED FILTER: " + rows.ToString(CultureInfo.InvariantCulture) + " rows kept of " +
                 SortedRows.ToString(CultureInfo.InvariantCulture) + " materialized " +

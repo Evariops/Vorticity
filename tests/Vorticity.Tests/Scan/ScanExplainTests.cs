@@ -69,7 +69,6 @@ public sealed class ScanExplainTests
 
         // The scan that follows, with its metrics set against what a caller counts by hand.
         ScanMetrics metrics = new ScanMetrics();
-        FlatLayoutReader.ValuesDecoded = 0;
         counting.ResetCounters();
         long rows = 0;
         long batches = 0;
@@ -83,7 +82,7 @@ public sealed class ScanExplainTests
         Assert.True(rows > 0);
         Assert.Equal(rows, metrics.Rows);
         Assert.True(metrics.Batches >= batches, "the enumerator produces at least the batches the caller sees");
-        Assert.Equal(FlatLayoutReader.ValuesDecoded, metrics.ValuesDecoded);
+        Assert.True(metrics.ValuesDecoded >= rows, "every row delivered was decoded");
 
         // The zone map the plan read stays with the open file, so the scan asks for the data alone.
         long data = plan.SegmentsToRead - plan.Pruning[0].SegmentsRead;

@@ -1802,10 +1802,10 @@ internal sealed partial class CanonicalArena
     /// Bytes <see cref="CopyFrom"/> has materialized, across every scan in the process.
     /// </summary>
     /// <remarks>
-    /// Internal and diagnostic, for FlatLayoutReader.ValuesDecoded's reason: the quantity that
-    /// catches a per-batch copy is exact and machine-independent, where the timing that catches it
-    /// needs a million rows and a quiet machine. A cross-arena window is supposed to cost records
-    /// and nothing else; this is what lets a test assert that rather than hope it.
+    /// Internal and diagnostic: the quantity that catches a per-batch copy is exact and
+    /// machine-independent, where the timing that catches it needs a million rows and a quiet
+    /// machine. A cross-arena window is supposed to cost records and nothing else; this is what lets
+    /// a test assert that rather than hope it.
     /// </remarks>
     internal static long BytesMaterialized;
 
