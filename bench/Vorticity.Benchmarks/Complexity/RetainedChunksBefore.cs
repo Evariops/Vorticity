@@ -1,61 +1,21 @@
+// The scan's table of retained chunks with its entries in a dense array searched in order, kept
+// line for line as the baseline of RetainedLookupBenchmarks: `RetainedChunks` in the library is the
+// same table with its entries hashed by key.
 using System;
 using System.Collections.Generic;
-using System.Numerics;
 using System.Threading;
 using Vorticity.Buffers;
 
-namespace Vorticity.Arrays;
+namespace Vorticity.Benchmarks.Complexity;
 
-/// <summary>
-/// The chunks one scan has decoded and holds across the batches carved out of them, shared by every
-/// context of the scan: its lanes, and the key source of a key-ordered walk.
-/// </summary>
-/// <remarks>
-/// <para>
-/// A chunk larger than a batch is decoded once and each batch borrows a window of it. The lanes of
-/// a scan take consecutive batches in turn, so a table per lane would decode a chunk once per lane
-/// that meets it; one table per scan decodes it once, and a context that asks for a chunk another
-/// context is decoding waits for that decode instead of starting its own.
-/// </para>
-/// <para>
-/// An entry may view another: a window of a dictionary views the dictionary's values, decoded once
-/// for every window of the chunk under a key of their own and lent to each window that reads them.
-/// A lent entry outlives every entry it is lent to, whatever its own age. A context holds at most
-/// two claims, an entry and a child of the node it is decoding, and it waits only for an entry
-/// while it holds none or for a child of the node it is decoding: every wait is for a node deeper
-/// in the array than any node the waiting context holds, so the waits cannot form a cycle.
-/// </para>
-/// <para>
-/// An entry is borrowed by every batch that touched it, and a batch is dead once the scan has
-/// delivered a later one. <see cref="Release"/> is told the number of the batch just delivered and
-/// drops every entry no batch from it on has touched: a chunk covers a contiguous run of rows and
-/// the batches are numbered in the order the scan walks its rows, so an entry the delivered batch
-/// did not touch is needed by no later batch, and every earlier batch is dead. A context that runs
-/// alone advances the same floor itself, one batch behind, since it learns that a batch is dead only
-/// when the next one begins.
-/// </para>
-/// <para>
-/// Evicted entries keep their arena and are refilled, so a scan that walks many chunks allocates
-/// none per chunk; an entry claimed and given back without a decode never had one. The entries,
-/// two a column or so, are held in a table the scans of the process take in turn, so a scan
-/// allocates no table of its own: in order, which a release walks and a lookup walks too while the
-/// scan reads a few columns, and past that hashed by key again after them, which a lookup probes, so
-/// that a batch looking up each of its columns pays for each column once rather than for every
-/// entry before it. The table is its own lock, since a claim waits on it, and wakes the waiters only
-/// when there are some: a signal with none would still give the object a monitor, allocated for
-/// every scan.
-/// </para>
-/// </remarks>
-internal sealed class RetainedChunks : IDisposable
+using Vorticity.Arrays;
+
+/// <summary>The scan's table of retained chunks, its entries searched in order.</summary>
+internal sealed class RetainedChunksBefore : IDisposable
 {
     private readonly int _capacity;
     private readonly int _lendingCapacity;
     private RetainedChunk?[] _entries = [];
-
-    // How many entries the table has room for, a power of two: in order in the first slots, and past
-    // OrderedHeld, hashed by key again in the twice as many after them, so that the probes run over
-    // slots at most half full.
-    private int _held;
     private int _count;
     private RetainedChunk? _spares;
     private long _floor;
@@ -77,7 +37,7 @@ internal sealed class RetainedChunks : IDisposable
     /// it is made as the first batch is released, sized by what that batch retained, rather than
     /// in the middle of the scan.
     /// </param>
-    internal RetainedChunks(int columns, int lanes)
+    internal RetainedChunksBefore(int columns, int lanes)
     {
         _capacity = Math.Max(2 * columns + 2, 4);
 
@@ -181,9 +141,7 @@ internal sealed class RetainedChunks : IDisposable
                 taken.LastTouched = batch;
                 if (_entries.Length == 0)
                 {
-                    // Sized for this scan whatever the size of the table another scan gave back.
-                    _held = (int)BitOperations.RoundUpToPowerOf2((uint)_capacity);
-                    _entries = Tables.Rent(3 * _held);
+                    _entries = Tables.Rent(_capacity);
                 }
 
                 if (borrower is not null && !_lending)
@@ -385,10 +343,9 @@ internal sealed class RetainedChunks : IDisposable
 
             if (_entries.Length != 0)
             {
-                Array.Clear(_entries, 0, _held > OrderedHeld ? 3 * _held : _count);
+                Array.Clear(_entries, 0, _count);
                 Tables.Return(_entries);
                 _entries = [];
-                _held = 0;
             }
 
             _count = 0;
@@ -458,97 +415,44 @@ internal sealed class RetainedChunks : IDisposable
         }
     }
 
-    /// <summary>The slot of the hash part where <paramref name="key"/>'s probe starts, below <paramref name="mask"/>.</summary>
-    /// <remarks>
-    /// The keys are the file's segment and layout numbers, and a file could number its segments so
-    /// that a fixed mix sends them all to one slot. A seed the file cannot know makes such a set
-    /// impossible to build; it changes where an entry is stored, never what is found.
-    /// </remarks>
-    private static int Home(long key, int mask) =>
-        (int)((((ulong)key ^ HashSeed) * 0x9E3779B97F4A7C15UL) >> 32) & mask;
-
-    private static readonly ulong HashSeed = DrawHashSeed();
-
-    private static ulong DrawHashSeed()
-    {
-        Span<byte> bytes = stackalloc byte[16];
-        Guid.NewGuid().TryWriteBytes(bytes);
-        return BitConverter.ToUInt64(bytes) | 1UL;
-    }
-
-    /// <summary>
-    /// The most entries a table searches in order rather than by hash: a scan of a few columns, which
-    /// a walk over its entries answers sooner than a hash would.
-    /// </summary>
-    private const int OrderedHeld = 16;
-
     /// <summary>The entry under <paramref name="key"/>, or null; the table's lock is held.</summary>
+    /// <remarks>A scan holds two entries a column or so, which a walk in order finds sooner than a hash would.</remarks>
     private RetainedChunk? Find(long key)
     {
         RetainedChunk?[] entries = _entries;
-        int held = _held;
-        if (held <= OrderedHeld)
+        for (int i = 0; i < _count; i++)
         {
-            for (int i = 0; i < _count; i++)
-            {
-                RetainedChunk entry = entries[i]!;
-                if (entry.Key == key)
-                {
-                    return entry;
-                }
-            }
-
-            return null;
-        }
-
-        int mask = (2 * held) - 1;
-        for (int slot = Home(key, mask); ; slot = (slot + 1) & mask)
-        {
-            RetainedChunk? entry = entries[held + slot];
-            if (entry is null || entry.Key == key)
+            RetainedChunk entry = entries[i]!;
+            if (entry.Key == key)
             {
                 return entry;
             }
         }
+
+        return null;
     }
 
     /// <summary>Adds <paramref name="entry"/>, doubling the table when it is full; the table's lock is held.</summary>
     private void Add(RetainedChunk entry)
     {
-        if (_count == _held)
+        if (_count == _entries.Length)
         {
-            Reserve(2 * _count);
+            Reserve(_count * 2);
         }
 
-        entry.Index = _count;
         _entries[_count++] = entry;
-        if (_held > OrderedHeld)
-        {
-            Hash(_entries, _held, entry);
-        }
-    }
-
-    /// <summary>Stores <paramref name="entry"/> at the first free slot of its probe, in a table with room for <paramref name="held"/> entries.</summary>
-    private static void Hash(RetainedChunk?[] entries, int held, RetainedChunk entry)
-    {
-        int mask = (2 * held) - 1;
-        int slot = Home(entry.Key, mask);
-        while (entries[held + slot] is not null)
-        {
-            slot = (slot + 1) & mask;
-        }
-
-        entries[held + slot] = entry;
     }
 
     /// <summary>Removes <paramref name="entry"/> when the table holds it; the table's lock is held.</summary>
     private bool Remove(RetainedChunk entry)
     {
-        int index = entry.Index;
-        if ((uint)index < (uint)_count && ReferenceEquals(_entries[index], entry))
+        for (int i = 0; i < _count; i++)
         {
-            RemoveAt(index);
-            return true;
+            if (ReferenceEquals(_entries[i], entry))
+            {
+                RemoveAt(i);
+                return true;
+            }
         }
 
         return false;
@@ -557,61 +461,18 @@ internal sealed class RetainedChunks : IDisposable
     /// <summary>Removes the entry at <paramref name="index"/>, moving the last one into its place.</summary>
     private void RemoveAt(int index)
     {
-        RetainedChunk?[] entries = _entries;
-        int held = _held;
-        if (held > OrderedHeld)
-        {
-            Unhash(entries, held, entries[index]!);
-        }
-
-        RetainedChunk last = entries[--_count]!;
-        entries[index] = last;
-        last.Index = index;
-        entries[_count] = null;
-    }
-
-    /// <summary>Clears the slot of <paramref name="removed"/> in a table with room for <paramref name="held"/> entries.</summary>
-    private static void Unhash(RetainedChunk?[] entries, int held, RetainedChunk removed)
-    {
-        int mask = (2 * held) - 1;
-        int hole = Home(removed.Key, mask);
-        while (!ReferenceEquals(entries[held + hole], removed))
-        {
-            hole = (hole + 1) & mask;
-        }
-
-        // Every entry after the hole whose probe starts at or before it moves back into it, so that
-        // no probe meets a free slot before the entry it looks for.
-        for (int slot = (hole + 1) & mask; entries[held + slot] is { } moved; slot = (slot + 1) & mask)
-        {
-            if (((slot - Home(moved.Key, mask)) & mask) >= ((slot - hole) & mask))
-            {
-                entries[held + hole] = moved;
-                hole = slot;
-            }
-        }
-
-        entries[held + hole] = null;
+        _entries[index] = _entries[--_count];
+        _entries[_count] = null;
     }
 
     /// <summary>Grows the table to hold <paramref name="capacity"/> entries.</summary>
     private void Reserve(int capacity)
     {
-        if (_held < capacity)
+        if (_entries.Length < capacity)
         {
-            int held = (int)BitOperations.RoundUpToPowerOf2((uint)capacity);
-            RetainedChunk?[] grown = new RetainedChunk?[3 * held];
+            RetainedChunk?[] grown = new RetainedChunk?[capacity];
             Array.Copy(_entries, grown, _count);
-            if (held > OrderedHeld)
-            {
-                for (int i = 0; i < _count; i++)
-                {
-                    Hash(grown, held, grown[i]!);
-                }
-            }
-
             _entries = grown;
-            _held = held;
         }
     }
 
@@ -673,213 +534,6 @@ internal sealed class RetainedChunks : IDisposable
         {
             entry.NextSpare = _spares;
             _spares = entry;
-        }
-    }
-}
-
-/// <summary>One retained chunk: the arena that owns it, the node, who is decoding it, and when it was last borrowed.</summary>
-internal sealed class RetainedChunk
-{
-    /// <summary>The arena the chunk is decoded into, made when its first decode begins; an entry claimed and given back has none.</summary>
-    internal CanonicalArena? Arena;
-
-    internal long Key;
-
-    /// <summary>The decoded node, or -1 while the entry is claimed and not yet published.</summary>
-    internal int NodeIndex = -1;
-
-    /// <summary>Where the entry sits among the table's entries, while a table holds it.</summary>
-    internal int Index;
-
-    /// <summary>The number of the last batch that borrowed this entry.</summary>
-    internal long LastTouched;
-
-    /// <summary>The context decoding the chunk, until it is published.</summary>
-    internal ScanContext? Claimant;
-
-    /// <summary>The next evicted entry, while this one waits to be refilled.</summary>
-    internal RetainedChunk? NextSpare;
-
-    /// <summary>
-    /// The segment its records view. A decode can hand back views onto the segment it read, a
-    /// primitive's values for one, and the batch that read the segment releases it at
-    /// <see cref="ScanContext.ResetBatch"/> while this entry lives on, so the entry holds a
-    /// reference of its own from the moment it is published until it is evicted.
-    /// </summary>
-    internal SegmentOwner? Segment;
-
-    /// <summary>Any further segment the decode read, when it read more than one.</summary>
-    internal List<SegmentOwner>? MoreSegments;
-
-    /// <summary>How many live entries view this one's arena: it outlives every one of them.</summary>
-    internal int Borrowers;
-
-    /// <summary>The first entry this one's records view, a child decoded once for every window of its chunk.</summary>
-    internal RetainedChunk? Borrowed;
-
-    /// <summary>Any further entry this one's records view, when it views more than one.</summary>
-    internal List<RetainedChunk>? MoreBorrowed;
-
-    /// <summary>Records that this entry views <paramref name="lender"/>, once; the table's lock is held.</summary>
-    internal void Borrow(RetainedChunk lender)
-    {
-        if (ReferenceEquals(lender, this) || ReferenceEquals(Borrowed, lender) ||
-            (MoreBorrowed is { } more && more.Contains(lender)))
-        {
-            return;
-        }
-
-        lender.Borrowers++;
-        if (Borrowed is null)
-        {
-            Borrowed = lender;
-            return;
-        }
-
-        (MoreBorrowed ??= []).Add(lender);
-    }
-
-    /// <summary>Clears the loans in both directions without giving anything back, for a table being disposed.</summary>
-    internal void ForgetLoans()
-    {
-        Borrowers = 0;
-        Borrowed = null;
-        MoreBorrowed?.Clear();
-    }
-
-    /// <summary>Adds a segment the decode depends on, once; no reference is taken here.</summary>
-    internal void Depend(SegmentOwner? owner)
-    {
-        if (owner is null || ReferenceEquals(Segment, owner))
-        {
-            return;
-        }
-
-        if (Segment is null)
-        {
-            Segment = owner;
-            return;
-        }
-
-        MoreSegments ??= [];
-        if (!MoreSegments.Contains(owner))
-        {
-            MoreSegments.Add(owner);
-        }
-    }
-
-    /// <summary>Takes a reference on every segment gathered, as the entry is published.</summary>
-    internal void RetainSegments()
-    {
-        Segment?.Retain();
-        if (MoreSegments is { } more)
-        {
-            foreach (SegmentOwner owner in more)
-            {
-                owner.Retain();
-            }
-        }
-    }
-
-    /// <summary>Drops the references <see cref="RetainSegments"/> took.</summary>
-    internal void ReleaseSegments()
-    {
-        Segment?.Release();
-        if (MoreSegments is { } more)
-        {
-            foreach (SegmentOwner owner in more)
-            {
-                owner.Release();
-            }
-        }
-
-        Forget();
-    }
-
-    /// <summary>Clears what the entry gathered without releasing it, for a decode that published nothing.</summary>
-    internal void Forget()
-    {
-        Segment = null;
-        MoreSegments?.Clear();
-    }
-}
-
-/// <summary>
-/// The entries scans give back when they end, for the scans that follow: an entry keeps its arena's
-/// record tables through a reset, so a scan taking one allocates none of what a retained chunk
-/// needs, the second set a chunk boundary claims included.
-/// </summary>
-/// <remarks>
-/// Process-wide, because an entry belongs to no file: its arena's storage went back to the memory
-/// pool with the reset, and what is kept is its managed tables, a few kilobytes an entry. The pool
-/// keeps as many as it is given back, which is what the widest scans so far held at once -- two a
-/// column or so -- up to a bound past which an entry is left to the collector. A fixed 256 made
-/// every scan of 256 columns build the entries past it anew, 1.8 MB a scan; the bound now lets
-/// scans of a couple of thousand columns keep theirs, a few megabytes for the process.
-/// </remarks>
-internal sealed class RetainedChunkPool
-{
-    private readonly int _maxCapacity;
-    private readonly Lock _gate = new Lock();
-    private RetainedChunk?[] _entries;
-    private int _count;
-
-    /// <summary>Creates a pool.</summary>
-    /// <param name="initialCapacity">The entries it has room for before it first grows.</param>
-    /// <param name="maxCapacity">The most entries it keeps.</param>
-    internal RetainedChunkPool(int initialCapacity, int maxCapacity)
-    {
-        _entries = new RetainedChunk?[initialCapacity];
-        _maxCapacity = maxCapacity;
-    }
-
-    /// <summary>The pool the scans of the process share.</summary>
-    internal static RetainedChunkPool Shared { get; } = new RetainedChunkPool(256, 4096);
-
-    /// <summary>The entries it keeps now.</summary>
-    internal int Count
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _count;
-            }
-        }
-    }
-
-    /// <summary>An entry given back by an earlier scan, or a new one when none waits.</summary>
-    internal RetainedChunk Rent()
-    {
-        lock (_gate)
-        {
-            if (_count > 0)
-            {
-                RetainedChunk entry = _entries[--_count]!;
-                _entries[_count] = null;
-                return entry;
-            }
-        }
-
-        return new RetainedChunk();
-    }
-
-    /// <summary>Keeps an entry for a later scan; its arena is reset and it holds no claim, segment or loan.</summary>
-    internal void Return(RetainedChunk entry)
-    {
-        lock (_gate)
-        {
-            if (_count == _entries.Length)
-            {
-                if (_count == _maxCapacity)
-                {
-                    return;
-                }
-
-                Array.Resize(ref _entries, Math.Min(_count * 2, _maxCapacity));
-            }
-
-            _entries[_count++] = entry;
         }
     }
 }
