@@ -1429,26 +1429,51 @@ internal static class ArrayBlobWriter
     /// a per-entry one here.
     /// </para>
     /// </remarks>
+    /// <remarks>
+    /// The width is resolved once, not once an index: a varbin's offsets are one a row, where the
+    /// other index arrays are one a patch or a dictionary entry. The host is little-endian, which
+    /// the writer checks once at start-up, so the indices are written as the typed words they are.
+    /// </remarks>
     private static void WriteIndices(ReadOnlySpan<int> values, int width, Span<byte> destination)
     {
-        for (int i = 0; i < values.Length; i++)
+        switch (width)
         {
-            Span<byte> at = destination.Slice(i * width, width);
-            switch (width)
+            case 1:
             {
-                case 1:
-                    at[0] = (byte)values[i];
-                    break;
-                case 2:
-                    BinaryPrimitives.WriteUInt16LittleEndian(at, (ushort)values[i]);
-                    break;
-                case 8:
-                    BinaryPrimitives.WriteUInt64LittleEndian(at, (ulong)(uint)values[i]);
-                    break;
-                default:
-                    BinaryPrimitives.WriteUInt32LittleEndian(at, (uint)values[i]);
-                    break;
+                Span<byte> into = destination[..values.Length];
+                for (int i = 0; i < into.Length; i++)
+                {
+                    into[i] = (byte)values[i];
+                }
+
+                break;
             }
+
+            case 2:
+            {
+                Span<ushort> into = MemoryMarshal.Cast<byte, ushort>(destination)[..values.Length];
+                for (int i = 0; i < into.Length; i++)
+                {
+                    into[i] = (ushort)values[i];
+                }
+
+                break;
+            }
+
+            case 8:
+            {
+                Span<ulong> into = MemoryMarshal.Cast<byte, ulong>(destination)[..values.Length];
+                for (int i = 0; i < into.Length; i++)
+                {
+                    into[i] = (uint)values[i];
+                }
+
+                break;
+            }
+
+            default:
+                MemoryMarshal.AsBytes(values).CopyTo(destination);
+                break;
         }
     }
 
@@ -1697,64 +1722,53 @@ internal static class ArrayBlobWriter
         result = 0;
         int rows = node.Length;
         ValidityReader mask = ValidityReader.Of(arena, node.Validity);
-        ViewValues values = new ViewValues(node);
 
-        long heapBytes = 0;
-        for (int i = 0; i < rows; i++)
-        {
-            if (mask.IsValid(i))
-            {
-                heapBytes += values.At(i).Length;
-            }
-        }
-
-        if (heapBytes > int.MaxValue)
-        {
-            return false;
-        }
-
-        PType offsetsPType = FsstPlan.IndexPType(heapBytes);
-        long varbinForm = (((long)rows + 1) * offsetsPType.ByteWidth()) + heapBytes;
-        if (varbinForm >= viewForm)
-        {
-            return false;
-        }
-
-        // Rented, and written once without being cleared first. `heapBytes` is the sum of the valid
-        // values' lengths, so the loop below fills exactly that many bytes of the heap, which goes
-        // into the blob as a rental queued before the loop so that the blob's `finally` hands it
-        // back. The offsets are copied into the arena at their own width and go back at once.
-        int heapLength = (int)heapBytes;
-        byte[] heap = ArrayPool<byte>.Shared.Rent(heapLength);
-        int heapBuffer = Add(blob, new PendingBuffer(heap, heapLength, 0, rented: true));
-        int width = offsetsPType.ByteWidth();
-        VortexBuffer offsetBuffer = arena.AllocateUninitialized(
-            (rows + 1) * width, width, out Span<byte> offsetBytes);
-        int[] offsets = ArrayPool<int>.Shared.Rent(rows + 1);
+        // The sizes are read from the views, a null row's as zero: a null row is zero-length, so
+        // offsets stay monotone and the reader never looks at the bytes, because validity already
+        // told it not to. The values are then gathered by `ViewHeap`, each view's start in the
+        // heap being the row's offset.
+        int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        int[]? offsets = null;
+        VortexBuffer offsetBuffer;
+        PType offsetsPType;
+        int heapBuffer;
         try
         {
-            int written = 0;
-            for (int i = 0; i < rows; i++)
+            long heapBytes = ViewHeap.Lengths(node, mask, lengths.AsSpan(0, rows));
+            if (heapBytes > int.MaxValue - ViewHeap.Slack)
             {
-                offsets[i] = written;
-                if (!mask.IsValid(i))
-                {
-                    // A null row is zero-length: offsets stay monotone and the reader never looks
-                    // at the bytes, because validity already told it not to.
-                    continue;
-                }
-
-                ReadOnlySpan<byte> value = values.At(i);
-                value.CopyTo(heap.AsSpan(written));
-                written += value.Length;
+                return false;
             }
 
-            offsets[rows] = written;
+            offsetsPType = FsstPlan.IndexPType(heapBytes);
+            long varbinForm = (((long)rows + 1) * offsetsPType.ByteWidth()) + heapBytes;
+            if (varbinForm >= viewForm)
+            {
+                return false;
+            }
+
+            // Rented, and written once without being cleared first, with the slack the gather
+            // writes past its last value. `heapBytes` is the sum of the valid values' lengths, so
+            // the gather fills exactly that many bytes of the heap, which goes into the blob as a
+            // rental queued before the gather so that the blob's `finally` hands it back. The
+            // offsets are copied into the arena at their own width and go back at once.
+            int heapLength = (int)heapBytes;
+            byte[] heap = ArrayPool<byte>.Shared.Rent(heapLength + ViewHeap.Slack);
+            heapBuffer = Add(blob, new PendingBuffer(heap, heapLength, 0, rented: true));
+            int width = offsetsPType.ByteWidth();
+            offsetBuffer = arena.AllocateUninitialized((rows + 1) * width, width, out Span<byte> offsetBytes);
+            offsets = ArrayPool<int>.Shared.Rent(rows + 1);
+            ViewHeap.Gather(node, lengths.AsSpan(0, rows), heap, offsets.AsSpan(0, rows));
+            offsets[rows] = heapLength;
             WriteIndices(offsets.AsSpan(0, rows + 1), width, offsetBytes);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(offsets);
+            ArrayPool<int>.Shared.Return(lengths);
+            if (offsets is not null)
+            {
+                ArrayPool<int>.Shared.Return(offsets);
+            }
         }
 
         Span<int> children = stackalloc int[2];
