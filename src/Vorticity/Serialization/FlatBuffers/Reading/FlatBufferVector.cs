@@ -18,7 +18,7 @@ internal readonly ref struct FlatBufferVector
     private readonly ReadOnlySpan<byte> _buffer;
 
     // The traversal's remaining table budget, shared by reference with the table this vector came
-    // from. A null ref means the traversal carries no budget - see FlatBufferTable.
+    // from. Only a vector of the null table, which is empty, holds a null ref.
     private readonly ref int _tableBudget;
 
     private readonly int _elementsPos;

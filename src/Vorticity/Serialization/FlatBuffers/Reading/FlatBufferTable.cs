@@ -27,8 +27,8 @@ namespace Vorticity.Serialization.FlatBuffers;
 /// offsets do not exclude sharing, however: two slots at different positions may legally resolve to
 /// the same target, so the object graph is a directed acyclic graph rather than a tree, and a
 /// consumer that walks it as a tree pays exponentially in its depth. Depth alone therefore cannot
-/// bound a traversal, which is why the optional caller-owned budget bounds the total number of
-/// tables visited instead. A table's vtable reference is signed, the vtable may sit on either side
+/// bound a traversal, which is why every root is read with a caller-owned budget that bounds the
+/// total number of tables visited instead. A table's vtable reference is signed, the vtable may sit on either side
 /// of its table, and vtable sharing between tables is legal and routine, so a revisited position is
 /// never rejected.
 /// </para>
@@ -38,7 +38,7 @@ internal readonly ref struct FlatBufferTable
     private readonly ReadOnlySpan<byte> _buffer;
 
     // Caller-owned remaining table budget, shared by reference with every table and vector reached
-    // from this one. A null ref means "no budget": the traversal's owner bounds its own work.
+    // from this one. Only the null table, which is `default` and reaches nothing, holds a null ref.
     private readonly ref int _tableBudget;
 
     private readonly int _tablePos;
@@ -49,19 +49,15 @@ internal readonly ref struct FlatBufferTable
 
     /// <summary>
     /// Resolves and validates the vtable of the table at <paramref name="tablePos"/>, charging one
-    /// table to <paramref name="tableBudget"/> when the traversal carries one.
+    /// table to <paramref name="tableBudget"/>.
     /// </summary>
     internal FlatBufferTable(ReadOnlySpan<byte> buffer, int tablePos, int depth, ref int tableBudget)
     {
         // Charged before anything is read, so a shared-child DAG is stopped by total work and not
-        // only by depth. `Unsafe.IsNullRef` is a pointer compare; a budget-less traversal (and the
-        // null table, which is `default`) pays one predictable branch.
-        if (!Unsafe.IsNullRef(ref tableBudget))
+        // only by depth.
+        if (--tableBudget < 0)
         {
-            if (--tableBudget < 0)
-            {
-                ThrowTableBudget();
-            }
+            ThrowTableBudget();
         }
 
         // The vtable reference is signed and the vtable may sit either side of the table, so the
@@ -99,25 +95,6 @@ internal readonly ref struct FlatBufferTable
         _vtableSize = vtableSize;
         _tableSize = tableSize;
         _depth = depth;
-    }
-
-    /// <summary>
-    /// Reads the root uoffset at position 0 of <paramref name="buffer"/> and returns the root table.
-    /// </summary>
-    /// <remarks>
-    /// The traversal reached from this table carries no total-table budget: forward-only uoffsets
-    /// exclude cycles but not sharing, so a recursive consumer must bound its own work — either by
-    /// memoising revisited positions or by using
-    /// <see cref="Root(ReadOnlySpan{byte}, ref int)"/> with
-    /// <see cref="VortexLimits.MaxFlatBufferTables"/>.
-    /// </remarks>
-    /// <exception cref="VortexFormatException">
-    /// The buffer is shorter than 4 bytes, the root offset is zero, or it points out of range.
-    /// </exception>
-    public static FlatBufferTable Root(ReadOnlySpan<byte> buffer)
-    {
-        int rootPos = RootPosition(buffer);
-        return new FlatBufferTable(buffer, rootPos, 0, ref Unsafe.NullRef<int>());
     }
 
     /// <summary>
