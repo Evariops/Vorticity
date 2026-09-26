@@ -12,8 +12,17 @@ namespace Vorticity;
 /// explicit and fallible.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The value is <c>Unscaled * 10^-Scale</c>. A negative scale is legal and means trailing zeros:
 /// unscaled 123 at scale -2 is 12300.
+/// </para>
+/// <para>
+/// The order is numeric and equality structural, as for Java's <c>BigDecimal</c>: 1.0 at scale 1
+/// and 1 at scale 0 compare as equal, and are not <see cref="Equals(VortexDecimal)"/>. A sorted
+/// collection keeps one of the two where a hash set keeps both, so a set of values of mixed scales
+/// is either sorted or hashed knowingly. No operator is defined, since <c>==</c> would then disagree
+/// with <c>&lt;=</c> and <c>&gt;=</c>.
+/// </para>
 /// </remarks>
 public readonly struct VortexDecimal : IEquatable<VortexDecimal>, IComparable<VortexDecimal>
 {
