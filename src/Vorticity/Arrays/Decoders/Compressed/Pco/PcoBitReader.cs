@@ -1,5 +1,8 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 
@@ -58,42 +61,40 @@ internal ref struct PcoBitReader
 
     private readonly ulong ReadCore(long bitPosition, int width)
     {
+        // Every refusal is one branch, never taken: a read of zero bits is checked for nothing and
+        // reads nothing that matters, since the mask keeps none of the word it loads.
+        long remaining = ((long)_source.Length * 8) - bitPosition;
+        if ((uint)width > 64u || (width != 0 && (bitPosition < 0 || remaining < width)))
+        {
+            Refuse(width, remaining);
+        }
+
+        int byteIndex = (int)(bitPosition >> 3);
+        int bitsPastByte = (int)(bitPosition & 7);
+        ulong value = WordAt(byteIndex) >> bitsPastByte;
+        if (width > 57)
+        {
+            // One word yields at most 57 bits safely, since the offset may consume up to seven of
+            // them. A wider read takes a second word seven bytes on rather than eight: the
+            // one-byte overlap is what keeps the shift below 64 when `bitsPastByte` is zero.
+            value |= WordAt(byteIndex + 7) << (56 - bitsPastByte);
+        }
+
+        // `bzhi` keeps the low bits for any width, 64 included, without the branch the mask takes.
+        return Bmi2.X64.IsSupported ? Bmi2.X64.ZeroHighBits(value, (ulong)width) : value & Mask(width);
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Refuse(int width, long remaining)
+    {
         if ((uint)width > 64u)
         {
             CompressedThrow.Format($"A pco bit read of {width} bits is outside [0, 64].");
         }
 
-        if (width == 0)
-        {
-            return 0;
-        }
-
-        long remaining = ((long)_source.Length * 8) - bitPosition;
-        if (bitPosition < 0 || remaining < width)
-        {
-            CompressedThrow.Format(
-                $"A pco bit read of {width} bits ran past the end: {remaining} bits remain.");
-        }
-
-        int byteIndex = (int)(bitPosition >> 3);
-        int bitsPastByte = (int)(bitPosition & 7);
-
-        ulong first = WordAt(byteIndex) >> bitsPastByte;
-        ulong value;
-        if (width <= 57)
-        {
-            value = first;
-        }
-        else
-        {
-            // One word yields at most 57 bits safely, since the offset may consume up to seven of
-            // them. A wider read takes a second word seven bytes on rather than eight: the
-            // one-byte overlap is what keeps the shift below 64 when `bitsPastByte` is zero.
-            int processed = 56 - bitsPastByte;
-            value = first | (WordAt(byteIndex + 7) << processed);
-        }
-
-        return value & Mask(width);
+        CompressedThrow.Format(
+            $"A pco bit read of {width} bits ran past the end: {remaining} bits remain.");
     }
 
     /// <summary>Moves to an absolute bit position.</summary>
