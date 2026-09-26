@@ -4,6 +4,9 @@ using System.Buffers.Binary;
 using System.Collections;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -345,8 +348,44 @@ internal sealed class StringBounds
         // ranked in full before it is let go, against the bounds' ranks Fold keeps.
         int keep = _limit + 1;
         bool exact = keep <= ExactBytes;
+
+        // Where there are 512-bit vectors, four views are one register, and a row of four bytes or
+        // more whose first four, big-endian, lie strictly between the bounds' is settled from its
+        // view: its key does too. Four rows so settled, or null, pass together; otherwise the four
+        // go through the loop below one at a time.
+        bool lanes = Vector512.IsHardwareAccelerated && Avx512Vbmi.IsSupported;
+        Vector512<uint> lowPrefix = Vector512.Create((uint)(minKey >> 32));
+        Vector512<uint> highPrefix = Vector512.Create((uint)(maxKey >> 32));
+        ref uint words = ref Unsafe.As<byte, uint>(ref MemoryMarshal.GetReference(views));
+        int scalarUntil = row;
         for (; row < end; row++)
         {
+            if (lanes && row >= scalarUntil && row <= end - 4)
+            {
+                Vector512<uint> four = Vector512.LoadUnsafe(ref words, (nuint)(row * 4));
+                Vector512<uint> prefix = Vector512.Shuffle(four.AsByte(), PrefixBytes).AsUInt32();
+                Vector512<uint> lengths = Vector512.Shuffle(four, SizeWords);
+                uint inside = (uint)(Vector512.GreaterThanOrEqual(lengths, Vector512.Create(4u))
+                    & Vector512.GreaterThan(prefix, lowPrefix) & Vector512.LessThan(prefix, highPrefix))
+                    .ExtractMostSignificantBits();
+                // The prefix lanes are 1, 5, 9 and 13; a null row passes at 0, 4, 8 or 12 once its
+                // validity bit is moved there.
+                uint passed = inside >> 1;
+                if (!bits.IsEmpty)
+                {
+                    uint valid = (uint)BitWords.Load(bits, bitOffset + row) & 0xF;
+                    passed |= ~((valid & 1) | ((valid & 2) << 3) | ((valid & 4) << 6) | ((valid & 8) << 9));
+                }
+
+                if ((passed & 0x1111) == 0x1111)
+                {
+                    row += 3;
+                    continue;
+                }
+
+                scalarUntil = row + 4;
+            }
+
             if (!bits.IsEmpty && !CanonicalSupport.BitAt(bits, bitOffset + row))
             {
                 continue;
@@ -384,6 +423,19 @@ internal sealed class StringBounds
 
         return end;
     }
+
+    /// <summary>
+    /// For four views in a 512-bit register, each view's prefix word, bytes 4 to 7, reversed in
+    /// place so that it reads big-endian; the other bytes are don't-cares.
+    /// </summary>
+    private static Vector512<byte> PrefixBytes => Vector512.Create(
+        (byte)0, 0, 0, 0, 7, 6, 5, 4, 0, 0, 0, 0, 0, 0, 0, 0,
+        16, 16, 16, 16, 23, 22, 21, 20, 16, 16, 16, 16, 16, 16, 16, 16,
+        32, 32, 32, 32, 39, 38, 37, 36, 32, 32, 32, 32, 32, 32, 32, 32,
+        48, 48, 48, 48, 55, 54, 53, 52, 48, 48, 48, 48, 48, 48, 48, 48);
+
+    /// <summary>For four views in a 512-bit register, each view's length word spread over its four.</summary>
+    private static Vector512<uint> SizeWords => Vector512.Create(0u, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12);
 
     /// <summary>Per rank, the bits of a key that belong to the value: its first bytes, up to eight.</summary>
     private static ReadOnlySpan<ulong> KeyMasks =>
