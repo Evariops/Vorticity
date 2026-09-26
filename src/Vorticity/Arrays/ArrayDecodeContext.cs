@@ -432,6 +432,13 @@ internal sealed class ArrayDecodeContext
     /// passed in this same scan is spared, and only from the second visit onward. A malformed file
     /// still throws on its first batch, which is the batch that would have thrown anyway.
     /// </para>
+    /// <para>
+    /// The bytes of a mapped file are the file's, and a process that rewrites it under the scan
+    /// changes them after the walk. So a kernel that skips a remembered walk still writes through
+    /// bounds-checked spans, as <c>Patches.Scatter</c> does: the rewrite then costs an exception,
+    /// never memory. One that wrote through an unchecked offset on the strength of this answer
+    /// would be unsound.
+    /// </para>
     /// </remarks>
     public bool IsNodeChecked(in ArrayNode node) =>
         _scan.NodeCheckScope is uint segment &&
