@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -345,5 +346,36 @@ public sealed class SegmentSourceFailureTests
             async () => await ((ISegmentReader)source).ReadAsync(Spec(4096, 128, 6), CancellationToken.None));
 
         Assert.Contains("shorter than its own footer", error.Message, StringComparison.Ordinal);
+    }
+
+    // ---- a path the source refuses -------------------------------------------------------------------
+
+    [Fact]
+    public async Task A_path_that_cannot_be_read_positionally_is_closed_as_it_is_refused()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "a named pipe is not opened by path there");
+        string fifo = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
+        using (Process make = Process.Start("mkfifo", fifo))
+        {
+            await make.WaitForExitAsync(TestContext.Current.CancellationToken);
+            Assert.Equal(0, make.ExitCode);
+        }
+
+        try
+        {
+            // Opening a named pipe waits for its other end.
+            Task<FileStream> writer = Task.Factory.StartNew(
+                () => new FileStream(fifo, FileMode.Open, FileAccess.Write, FileShare.ReadWrite, bufferSize: 1),
+                TaskCreationOptions.LongRunning);
+            Assert.Throws<NotSupportedException>(() => new FileSegmentSource(fifo));
+
+            // With no reader left, a write breaks the pipe.
+            using FileStream end = await writer;
+            Assert.Throws<IOException>(() => end.Write([1]));
+        }
+        finally
+        {
+            global::System.IO.File.Delete(fifo);
+        }
     }
 }

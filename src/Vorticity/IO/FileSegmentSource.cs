@@ -56,8 +56,21 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
     /// <exception cref="ArgumentNullException"><paramref name="path"/> is null.</exception>
     /// <exception cref="IOException">The file could not be opened.</exception>
     public FileSegmentSource(string path)
-        : this(OpenHandle(path), ownsHandle: true, SegmentReadOptions.Default)
     {
+        SafeFileHandle handle = OpenHandle(path);
+        try
+        {
+            Length = RandomAccess.GetLength(handle);
+        }
+        catch
+        {
+            handle.Dispose();
+            throw;
+        }
+
+        _handle = handle;
+        _ownsHandle = true;
+        _options = SegmentReadOptions.Default;
     }
 
     /// <summary>Reads through an already-open handle.</summary>
