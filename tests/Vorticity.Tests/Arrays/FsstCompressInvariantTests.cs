@@ -5,7 +5,7 @@
 // and it does not depend on the order symbols are examined in, because two symbols of equal width
 // that both match the same bytes are the same symbol. So the rule is a function of the symbol set,
 // and any two implementations of it agree. This asserts that of the two the repository has: the
-// writer's, which builds a hash of prefixes and a table of every two-byte pair because it
+// writer's, which probes one slot per symbol and a table of every two-byte pair because it
 // compresses a whole column, and the reader's, which scans the symbols because it compresses one
 // needle.
 //

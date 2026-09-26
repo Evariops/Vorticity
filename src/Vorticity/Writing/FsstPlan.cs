@@ -117,19 +117,14 @@ internal sealed class FsstPlan
             return null;
         }
 
+        // The sizes are read from the views, a null row's as zero: its bytes are unspecified, so it
+        // contributes nothing to the corpus and nothing to the stream, but still occupies a row slot.
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
-        ViewValues values = new ViewValues(node);
-        long plain = 0;
-        for (int i = 0; i < rows; i++)
+        int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        long plain = ViewHeap.Lengths(node, valid, lengths.AsSpan(0, rows));
+        if (plain > int.MaxValue - ViewHeap.Slack)
         {
-            if (valid.IsValid(i))
-            {
-                plain += values.At(i).Length;
-            }
-        }
-
-        if (plain > int.MaxValue)
-        {
+            ArrayPool<int>.Shared.Return(lengths);
             return null;
         }
 
@@ -137,35 +132,20 @@ internal sealed class FsstPlan
         // trained on, and the heap, row tables and code stream are all garbage the moment this
         // column is priced against zstd and loses. A plan that wins keeps the row tables and the
         // code stream, and hands them back once the writer has them.
-        // Eight bytes of slack past the values, cleared, so the compressor reads every position as
-        // one eight-byte word however near the end of its value.
+        // The gather writes past each value, so the heap has its slack; the compressor then reads
+        // every position as one eight-byte word however near the end of its value, so eight bytes
+        // past the values are cleared.
         int heapBytes = Math.Max((int)plain, 1);
-        byte[] heap = ArrayPool<byte>.Shared.Rent(heapBytes + FsstSymbols.MaxSymbolLength);
+        byte[] heap = ArrayPool<byte>.Shared.Rent(heapBytes + ViewHeap.Slack);
         int[] starts = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
-        int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
         byte[]? codes = null;
         int[]? offsets = null;
         FsstSymbols? table = null;
         bool kept = false;
         try
         {
-            int at = 0;
-            for (int i = 0; i < rows; i++)
-            {
-                // A null row's bytes are unspecified, so it contributes nothing to the corpus and
-                // nothing to the stream, but it still occupies a row slot of length zero.
-                starts[i] = at;
-                if (!valid.IsValid(i))
-                {
-                    lengths[i] = 0;
-                    continue;
-                }
-
-                ReadOnlySpan<byte> value = values.At(i);
-                value.CopyTo(heap.AsSpan(at));
-                lengths[i] = value.Length;
-                at += value.Length;
-            }
+            int at = (int)plain;
+            ViewHeap.Gather(node, lengths.AsSpan(0, rows), heap, starts.AsSpan(0, rows));
 
             table = FsstSymbols.Train(
                 heap.AsSpan(0, heapBytes), starts.AsSpan(0, rows), lengths.AsSpan(0, rows));
