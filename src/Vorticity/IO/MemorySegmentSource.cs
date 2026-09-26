@@ -41,7 +41,7 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
         MemoryHandle pin = bytes.Pin();
         if (((nuint)pin.Pointer & (VortexLimits.MaxAlignment - 1)) == 0)
         {
-            _owner = new PinnedOwner(pin);
+            _owner = new PinnedOwner(pin, byManager: MemoryMarshal.TryGetMemoryManager(bytes, out MemoryManager<byte>? _));
             _base = (byte*)pin.Pointer;
             return;
         }
@@ -155,17 +155,49 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
         byte* at = _base + offset;
         if (((nuint)at & (nuint)(alignment - 1)) != 0)
         {
-            return PinnedArraySegmentOwner.CopyOf(new ReadOnlySpan<byte>(at, length), alignment);
+            // Held while it is read: a dispose past the check above would otherwise let the bytes go
+            // under the copy. A view needs no such hold, since it retains the owner before it is used.
+            _owner.Retain();
+            try
+            {
+                return PinnedArraySegmentOwner.CopyOf(new ReadOnlySpan<byte>(at, length), alignment);
+            }
+            finally
+            {
+                _owner.Release();
+            }
         }
 
         return new SliceSegmentOwner(_owner, VortexBuffer.FromPointer(at, length, BitOperations.TrailingZeroCount(alignment)));
     }
 
     /// <summary>The pin on the caller's bytes, released when the source and every view of it are gone.</summary>
-    private sealed class PinnedOwner(MemoryHandle handle) : SegmentOwner
+    private sealed class PinnedOwner : SegmentOwner
     {
-        private MemoryHandle _handle = handle;
+        private MemoryHandle _handle;
 
-        protected override void FreeCore() => _handle.Dispose();
+        /// <param name="handle">The pin.</param>
+        /// <param name="byManager">
+        /// Whether a <see cref="MemoryManager{T}"/> made the pin, which is then its own to release:
+        /// a finalizer does not call a caller's code. Otherwise the pin is a handle on an array, a
+        /// root that would keep the array pinned, and alive, for the process's life if the source
+        /// were dropped without being disposed.
+        /// </param>
+        internal PinnedOwner(MemoryHandle handle, bool byManager)
+        {
+            _handle = handle;
+            if (byManager)
+            {
+                GC.SuppressFinalize(this);
+            }
+        }
+
+        ~PinnedOwner() => _handle.Dispose();
+
+        protected override void FreeCore()
+        {
+            _handle.Dispose();
+            GC.SuppressFinalize(this);
+        }
     }
 }

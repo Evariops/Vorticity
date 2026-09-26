@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity;
@@ -94,6 +95,43 @@ public sealed class MemorySegmentSourceTests
 
         Assert.Equal(0u, AddressOf(segment.Buffer) % 64);
         Assert.True(segment.Buffer.Span.SequenceEqual(bytes.Span.Slice(8, 256)));
+    }
+
+    [Fact]
+    public async Task A_copy_is_refused_once_the_bytes_are_let_go()
+    {
+        // A dispose that lands between the check a read makes and the copy it then takes: the
+        // bytes are let go before the read can see the source disposed.
+        MemorySegmentSource source = new MemorySegmentSource(Placed(Pattern(4096), 8));
+        OwnerOf(source).Dispose();
+
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            async () => await ((ISegmentReader)source).ReadAsync(Spec(8, 256, alignmentExponent: 6), CancellationToken.None));
+    }
+
+    [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_owner")]
+    private static extern ref SegmentOwner OwnerOf(MemorySegmentSource source);
+
+    [Fact]
+    public void A_source_dropped_undisposed_lets_the_array_it_pinned_go()
+    {
+        WeakReference array = DropASourceOverAnAlignedArray();
+        for (int i = 0; i < 3 && array.IsAlive; i++)
+        {
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+            GC.WaitForPendingFinalizers();
+        }
+
+        Assert.False(array.IsAlive);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference DropASourceOverAnAlignedArray()
+    {
+        ReadOnlyMemory<byte> bytes = Placed(Pattern(4096), 0);
+        Assert.True(System.Runtime.InteropServices.MemoryMarshal.TryGetArray(bytes, out ArraySegment<byte> segment));
+        _ = new MemorySegmentSource(bytes);
+        return new WeakReference(segment.Array);
     }
 
     [Fact]
