@@ -20,4 +20,16 @@
     <DeterministicSourcePaths>false</DeterministicSourcePaths>
   </PropertyGroup>
 
+  <!-- A package depends on exactly the version of each project it references, where pack would
+       write "this version or later": the satellites read the internals of the packages they
+       reference, which change from one version to the next, so an update of the core alone would
+       break them at run time. -->
+  <Target Name="PinProjectReferenceVersions" AfterTargets="_GetProjectReferenceVersions">
+    <ItemGroup>
+      <_ProjectReferencesWithVersions>
+        <ProjectVersion>[%(ProjectVersion)]</ProjectVersion>
+      </_ProjectReferencesWithVersions>
+    </ItemGroup>
+  </Target>
+
 </Project>

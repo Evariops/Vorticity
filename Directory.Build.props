@@ -20,11 +20,11 @@
   <!-- The library-only properties are in Directory.Build.targets, where a project's OutputType is
        known: this file is read before the project sets it. -->
 
-  <!-- Package metadata, shared by the three libraries. Nothing here sets a version: nothing has
-       been published, so nothing carries a number, and the job that publishes passes one. A local
-       `dotnet pack` therefore produces the SDK's default 1.0.0, which is a file name and not a
-       claim. Not packable by default either, so a project has to ask: the three libraries do, and
-       the benchmarks, the tools and the tests never will. -->
+  <!-- Package metadata, shared by the three libraries and the generator. Nothing here sets a
+       version: nothing has been published, so nothing carries a number, and the job that publishes
+       passes one. A local `dotnet pack` therefore produces the SDK's default 1.0.0, which is a file
+       name and not a claim. Not packable by default either, so a project has to ask: the three
+       libraries and the generator do, and the benchmarks, the tools and the tests never will. -->
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <Authors>Raphaël Ducom</Authors>

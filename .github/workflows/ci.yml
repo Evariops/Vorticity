@@ -55,12 +55,36 @@ jobs:
         env:
           DOTNET_EnableHWIntrinsic: '0'
 
-      # The three packages are what a consumer gets, and nothing else here builds them. Most of
+      # The four packages are what a consumer gets, and nothing else here builds them. Most of
       # what can go wrong is visible at pack time and nowhere else: a readme or a NOTICE that stops
       # being found, a license expression that stops parsing, a project that becomes packable by
       # accident. Warnings are errors, so a pack warning fails the job.
       - name: Pack
         run: dotnet pack Vorticity.slnx --no-build -c Release
+
+      # A satellite reads the internals of the packages it references, so it must depend on exactly
+      # the version it was built with. Pack writes "this version or later" unless a private target
+      # of the SDK is hooked, as Directory.Build.targets does: this fails when an SDK update leaves
+      # a range behind, or leaves no dependency to check.
+      - name: Check that each package names the exact version of the packages it references
+        run: |
+          set -euo pipefail
+          found=0
+          for package in src/*/bin/Release/*.nupkg; do
+            dependencies=$(unzip -p "$package" '*.nuspec' | grep -o '<dependency id="Vorticity[^"]*" version="[^"]*"' || true)
+            [ -z "$dependencies" ] && continue
+            echo "$package"
+            echo "$dependencies"
+            found=$((found + $(echo "$dependencies" | wc -l)))
+            if echo "$dependencies" | grep -v 'version="\[[^],]*\]"'; then
+              echo "::error::$package accepts a range of a Vorticity package"
+              exit 1
+            fi
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no package depends on a Vorticity package"
+            exit 1
+          fi
 
       # The long campaign belongs to a nightly run rather than to each commit, and the per-commit
       # half already runs as FuzzSmokeTests. This is the middle: enough mutations to be worth the
