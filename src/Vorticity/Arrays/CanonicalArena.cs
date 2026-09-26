@@ -528,19 +528,26 @@ internal sealed partial class CanonicalArena
 
     // Blocks handed out by Allocate, returned to the pool on Reset, and the idle ones
     // ResetKeepingBlocks kept from the batch before. Never handed to a caller as an owner, because a
-    // decoder neither retains nor releases anything. Chained through the blocks themselves, so that
-    // a batch renting more of them than the one before allocates nothing, and so that keeping them
-    // costs no reference of its own.
+    // decoder neither retains nor releases anything. Chained through the blocks themselves, in a
+    // ring, so that a batch renting more of them than the one before allocates nothing, and so that
+    // keeping them costs no reference of its own.
+    //
+    // The field holds the ring's cursor, the block rented last, and the idle blocks make the run just
+    // ahead of it, in the order the batch before rented them. A batch renting the sizes the one
+    // before rented finds each at the cursor's next, and a rent that finds another size class there
+    // looks a few blocks further before it goes to the pool: a rent never walks the blocks already
+    // handed out. While small allocations are carved from a slab, the field holds the slab, outside
+    // the ring, and the slab's next is the cursor.
     private NativeSegmentOwner? _owned;
 
-    // How much of the block at the head of that chain small allocations have carved, or -1 when none
-    // has been made since the reset. The pool's smallest block is 4 KiB, which a buffer of one row
+    // How much of the slab small allocations have carved, or -1 when none has been made since the
+    // slab was put back in the ring. The pool's smallest block is 4 KiB, which a buffer of one row
     // would otherwise hold whole: a writer holding a chunk that came as one-row batches would take a
     // block per column per row, gigabytes for a chunk of a few columns. The first slab is that
     // smallest block and each next one doubles up to 64 KiB, so that an arena with one small buffer
     // holds one smallest block, and one carving thousands rents a block per 64 KiB of them. The slab
-    // stays at the head of the chain, the blocks rented whole going in behind it, so that it costs no
-    // reference of its own on every arena of every scan and every write.
+    // sits in front of the ring, so that it costs no reference of its own on every arena of every
+    // scan and every write.
     private int _slabUsed = -1;
 
     // The 64-bit words ArenaWords has built for a bool node, by node index, until the arena is reset.
@@ -641,7 +648,7 @@ internal sealed partial class CanonicalArena
     public void Reset()
     {
         long held = 0;
-        NativeSegmentOwner? owner = _owned;
+        NativeSegmentOwner? owner = Unchain();
         while (owner is not null)
         {
             // Unlinked before it goes back, because the pool may hand it to another arena at once.
@@ -654,7 +661,6 @@ internal sealed partial class CanonicalArena
             owner = next;
         }
 
-        _owned = null;
         if (held != 0)
         {
             OwnedBatchBytes.Count(_pool, -held);
@@ -671,10 +677,24 @@ internal sealed partial class CanonicalArena
     internal void HoldBlocks()
     {
         long held = 0;
-        for (NativeSegmentOwner? owner = _owned; owner is not null; owner = owner.NextOwned)
+        NativeSegmentOwner? cursor = _owned;
+        if (_slabUsed >= 0)
         {
-            owner.InOwnedBatch = true;
-            held += owner.Capacity;
+            cursor!.InOwnedBatch = true;
+            held += cursor.Capacity;
+            cursor = cursor.NextOwned;
+        }
+
+        if (cursor is not null)
+        {
+            NativeSegmentOwner owner = cursor;
+            do
+            {
+                owner = owner.NextOwned!;
+                owner.InOwnedBatch = true;
+                held += owner.Capacity;
+            }
+            while (owner != cursor);
         }
 
         if (held != 0)
@@ -684,9 +704,9 @@ internal sealed partial class CanonicalArena
     }
 
     /// <summary>
-    /// Clears the counts and keeps the blocks this batch used in the chain, idle, for the next
-    /// batch's allocations of the same size classes, returning those the batch before kept and this
-    /// one did not take.
+    /// Clears the counts and keeps the blocks this batch used in the ring, idle, in the order it
+    /// rented them, for the next batch's allocations of the same size classes, returning those the
+    /// batch before kept and this one did not take.
     /// </summary>
     /// <remarks>
     /// A scan's batches allocate the same blocks batch after batch, and a block rented back from
@@ -697,16 +717,25 @@ internal sealed partial class CanonicalArena
     /// </remarks>
     internal void ResetKeepingBlocks()
     {
-        NativeSegmentOwner? kept = null;
-        NativeSegmentOwner? owner = _owned;
+        NativeSegmentOwner? owner = Unchain();
+        NativeSegmentOwner? first = null;
+        NativeSegmentOwner? last = null;
         while (owner is not null)
         {
             NativeSegmentOwner? next = owner.NextOwned;
             if (!owner.Idle && owner.RefCount == 1)
             {
                 owner.Idle = true;
-                owner.NextOwned = kept;
-                kept = owner;
+                if (last is null)
+                {
+                    first = owner;
+                }
+                else
+                {
+                    last.NextOwned = owner;
+                }
+
+                last = owner;
             }
             else
             {
@@ -718,8 +747,60 @@ internal sealed partial class CanonicalArena
             owner = next;
         }
 
-        _owned = kept;
+        if (last is not null)
+        {
+            last.NextOwned = first;
+        }
+
+        _owned = last;
         Clear();
+    }
+
+    /// <summary>
+    /// Every block of the arena in one chain, from the cursor's next to the cursor, the slab put
+    /// behind the cursor first; the arena holds none of them after it.
+    /// </summary>
+    private NativeSegmentOwner? Unchain()
+    {
+        NativeSegmentOwner? cursor = Settle();
+        _owned = null;
+        if (cursor is null)
+        {
+            return null;
+        }
+
+        NativeSegmentOwner head = cursor.NextOwned!;
+        cursor.NextOwned = null;
+        return head;
+    }
+
+    /// <summary>Puts the slab, while there is one, in the ring behind the cursor, as the block rented last, and returns the cursor.</summary>
+    private NativeSegmentOwner? Settle()
+    {
+        if (_slabUsed < 0)
+        {
+            return _owned;
+        }
+
+        NativeSegmentOwner slab = _owned!;
+        _slabUsed = -1;
+        return _owned = Behind(slab.NextOwned, slab);
+    }
+
+    /// <summary>Links <paramref name="owner"/> into the ring behind <paramref name="cursor"/>, and returns it as the new cursor.</summary>
+    private static NativeSegmentOwner Behind(NativeSegmentOwner? cursor, NativeSegmentOwner owner)
+    {
+        if (cursor is null)
+        {
+            owner.NextOwned = owner;
+        }
+        else
+        {
+            owner.NextOwned = cursor.NextOwned;
+            cursor.NextOwned = owner;
+        }
+
+        return owner;
     }
 
     private void Clear()
@@ -738,40 +819,100 @@ internal sealed partial class CanonicalArena
         _dataBufferCount = 0;
     }
 
+    /// <summary>How many idle blocks a rent looks at, from the cursor on, before it rents from the pool.</summary>
+    /// <remarks>
+    /// A batch renting the sizes the one before rented finds its block at the first. A slab is
+    /// found past the blocks the batch before rented while it carved, 64 of them for a full slab of
+    /// kilobyte buffers, and an idle block a batch passes over stays ahead of the cursor for the next
+    /// rent of its class. The bound keeps a batch whose sizes have nothing to do with the last one's
+    /// linear in its rents.
+    /// </remarks>
+    private const int IdleReach = 64;
+
     /// <summary>
-    /// A block of <paramref name="length"/> bytes, out of the chain: an idle one of its size class,
-    /// or one rented from the pool.
+    /// A block of <paramref name="length"/> bytes: an idle one of its size class from the run ahead
+    /// of the cursor, or one rented from the pool. A block to hand out goes behind the cursor and
+    /// becomes it; a slab leaves the ring.
     /// </summary>
-    private NativeSegmentOwner Rent(int length, int alignment)
+    private NativeSegmentOwner Rent(int length, int alignment, bool slab)
     {
-        NativeSegmentOwner? previous = null;
-        NativeSegmentOwner? idle = _owned;
-        int capacity = idle is null ? 0 : _pool.CapacityFor(length);
-        while (idle is not null && !(idle.Idle && idle.Capacity == capacity))
+        NativeSegmentOwner? cursor = _slabUsed < 0 ? _owned : _owned!.NextOwned;
+        if (cursor is not null && cursor.NextOwned!.Idle)
         {
-            previous = idle;
-            idle = idle.NextOwned;
+            NativeSegmentOwner.CheckLengthAndAlignment(length, alignment);
+            int capacity = _pool.CapacityFor(length);
+            NativeSegmentOwner previous = cursor;
+            NativeSegmentOwner owner = cursor.NextOwned;
+            for (int reach = IdleReach; ;)
+            {
+                if (owner.Capacity == capacity)
+                {
+                    owner.Idle = false;
+                    owner.ResetForRent(length);
+                    if (slab)
+                    {
+                        if (owner == previous)
+                        {
+                            cursor = null;
+                        }
+                        else
+                        {
+                            previous.NextOwned = owner.NextOwned;
+                            if (owner == cursor)
+                            {
+                                cursor = previous;
+                            }
+                        }
+
+                        owner.NextOwned = null;
+                    }
+                    else if (owner != cursor)
+                    {
+                        if (previous != cursor)
+                        {
+                            previous.NextOwned = owner.NextOwned;
+                            owner.NextOwned = cursor.NextOwned;
+                            cursor.NextOwned = owner;
+                        }
+
+                        cursor = owner;
+                    }
+
+                    SetCursor(cursor);
+                    return owner;
+                }
+
+                // The run ends at the first block this batch took, or at the cursor itself when
+                // the batch has taken none.
+                if (owner == cursor || --reach == 0 || !owner.NextOwned!.Idle)
+                {
+                    break;
+                }
+
+                previous = owner;
+                owner = owner.NextOwned;
+            }
         }
 
-        if (idle is null)
+        NativeSegmentOwner rented = _pool.Rent(length, alignment);
+        if (!slab)
         {
-            return _pool.Rent(length, alignment);
+            SetCursor(Behind(cursor, rented));
         }
 
-        if (previous is null)
+        return rented;
+    }
+
+    private void SetCursor(NativeSegmentOwner? cursor)
+    {
+        if (_slabUsed < 0)
         {
-            _owned = idle.NextOwned;
+            _owned = cursor;
         }
         else
         {
-            previous.NextOwned = idle.NextOwned;
+            _owned!.NextOwned = cursor;
         }
-
-        idle.NextOwned = null;
-        idle.Idle = false;
-        NativeSegmentOwner.CheckLengthAndAlignment(length, alignment);
-        idle.ResetForRent(length);
-        return idle;
     }
 
     // ------------------------------------------------------------------------------- builders
@@ -1218,7 +1359,7 @@ internal sealed partial class CanonicalArena
             return Carve(byteLength, alignment, out destination);
         }
 
-        NativeSegmentOwner owner = Own(Rent(byteLength, alignment));
+        NativeSegmentOwner owner = Rent(byteLength, alignment, slab: false);
         destination = owner.WritableSpan;
         return owner.Buffer;
     }
@@ -1262,11 +1403,15 @@ internal sealed partial class CanonicalArena
     {
         int exponent = NativeSegmentOwner.CheckLengthAndAlignment(byteLength, alignment);
         int start = (_slabUsed + alignment - 1) & -alignment;
-        NativeSegmentOwner? slab = _owned;
-        if (_slabUsed < 0 || start + byteLength > slab!.Length)
+        NativeSegmentOwner? slab = _slabUsed < 0 ? null : _owned;
+        if (slab is null || start + byteLength > slab.Length)
         {
-            int slabBytes = _slabUsed < 0 ? FirstSlabBytes : Math.Min(slab!.Length * 2, LargestSlabBytes);
-            slab = Rent(slabBytes, VortexLimits.MaxAlignment);
+            int slabBytes = slab is null ? FirstSlabBytes : Math.Min(slab.Length * 2, LargestSlabBytes);
+
+            // The full slab goes into the ring as a block of this batch, and the next one comes out
+            // of it, or out of the pool.
+            Settle();
+            slab = Rent(slabBytes, VortexLimits.MaxAlignment, slab: true);
             slab.NextOwned = _owned;
             _owned = slab;
             start = 0;
@@ -1276,23 +1421,6 @@ internal sealed partial class CanonicalArena
         destination = slab.WritableSpan.Slice(start, byteLength);
         return VortexBuffer.FromPointer(
             (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(destination)), byteLength, exponent);
-    }
-
-    private NativeSegmentOwner Own(NativeSegmentOwner owner)
-    {
-        // Behind the slab when there is one, which Carve finds at the head.
-        if (_slabUsed < 0)
-        {
-            owner.NextOwned = _owned;
-            _owned = owner;
-        }
-        else
-        {
-            owner.NextOwned = _owned!.NextOwned;
-            _owned.NextOwned = owner;
-        }
-
-        return owner;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
