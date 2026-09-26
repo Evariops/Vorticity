@@ -260,13 +260,29 @@ internal sealed unsafe class BoolStore : ColumnStore
         at = value ? (byte)(at | mask) : (byte)(at & ~mask);
     }
 
+    /// <remarks>
+    /// The values up to the next whole byte of the bitmap are appended one by one, and the rest
+    /// packed a byte per value to a bit per value straight into it, sixty-four to a compare where
+    /// there are 512-bit vectors, where each value read, masked and wrote back a byte.
+    /// </remarks>
     internal void Append(ReadOnlySpan<bool> values)
     {
         GrowTo(Count + values.Length);
-        foreach (bool value in values)
+        int head = Math.Min((8 - (Count & 7)) & 7, values.Length);
+        foreach (bool value in values[..head])
         {
             Append(value);
         }
+
+        ReadOnlySpan<bool> rest = values[head..];
+        if (rest.IsEmpty)
+        {
+            return;
+        }
+
+        BitmapKernels.PackBytes(
+            MemoryMarshal.AsBytes(rest), new Span<byte>(_bits + (Count >> 3), (rest.Length + 7) >> 3));
+        Count += rest.Length;
     }
 
     internal void AppendBits(ReadOnlySpan<ulong> bits, int count)
