@@ -124,6 +124,85 @@ public sealed class WidthHistogramTests
         };
     }
 
+    /// <summary>
+    /// The lane counter with a frame of reference, as the bit-pack plan takes it: each row's width
+    /// is its value less the reference, wrapping at the element width, and its zigzag width is of
+    /// the value itself; a null row is counted nowhere, the caller counting it at width zero.
+    /// </summary>
+    [Theory]
+    [InlineData(8)]
+    [InlineData(16)]
+    [InlineData(32)]
+    [InlineData(64)]
+    public void TheFramedWidthsAreTheRowsLessTheReference(int elementBits)
+    {
+        if (!BlockStatsPass.LanesCountWidths)
+        {
+            return;
+        }
+
+        switch (elementBits)
+        {
+            case 8:
+                Framed<byte>(elementBits);
+                break;
+            case 16:
+                Framed<ushort>(elementBits);
+                break;
+            case 32:
+                Framed<uint>(elementBits);
+                break;
+            default:
+                Framed<ulong>(elementBits);
+                break;
+        }
+    }
+
+    private static void Framed<T>(int elementBits)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        Random random = new Random(elementBits * 31);
+        ulong top = elementBits == 64 ? ulong.MaxValue : (1UL << elementBits) - 1;
+        foreach (int rows in new[] { 64, 65, 1_000, 1_025, 3_000 })
+        {
+            foreach (bool masked in new[] { false, true })
+            {
+                ulong reference = (ulong)random.NextInt64() & top;
+                T[] values = new T[rows];
+                for (int i = 0; i < rows; i++)
+                {
+                    // Near the reference mostly, so the band is narrow; below it now and then, so
+                    // the subtraction wraps.
+                    ulong near = random.Next(4) == 0 ? (ulong)random.NextInt64() : reference + (ulong)random.Next(300);
+                    values[i] = T.CreateTruncating(near & top);
+                }
+
+                byte[] bits = new byte[(rows + 7 + 3) / 8];
+                random.NextBytes(bits);
+                int[] widths = new int[BitPackWidths.Length];
+                BlockStatsPass.CountLaneWidths<T>(values, masked ? bits : default, 3, masked, zigzag: true, widths, reference);
+
+                int[] expected = new int[BitPackWidths.Length];
+                for (int i = 0; i < rows; i++)
+                {
+                    int at = 3 + i;
+                    if (masked && ((bits[at >> 3] >> (at & 7)) & 1) == 0)
+                    {
+                        continue;
+                    }
+
+                    ulong value = ulong.CreateTruncating(values[i]) & top;
+                    ulong framed = (value - reference) & top;
+                    ulong zig = ((value << 1) ^ (0UL - ((value >> (elementBits - 1)) & 1))) & top;
+                    expected[64 - BitOperations.LeadingZeroCount(framed)]++;
+                    expected[BitPackWidths.ZigZagOffset + 64 - BitOperations.LeadingZeroCount(zig)]++;
+                }
+
+                Assert.Equal(expected, widths);
+            }
+        }
+    }
+
     private static int Primitive(CanonicalArena arena, DTypeArena types, PType ptype, byte[] values, bool[] valid, int offset)
     {
         VortexBuffer buffer = arena.Allocate(values.Length, ptype.ByteWidth(), out Span<byte> bytes);

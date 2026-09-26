@@ -2675,7 +2675,7 @@ internal static class BlockStatsPass
     /// Whether the widths are counted by <see cref="CountLaneWidths{T}"/>: a leading-zero count of
     /// 512-bit vectors (AVX-512CD), and byte compares and sums of them (AVX-512BW).
     /// </summary>
-    private static bool LanesCountWidths =>
+    internal static bool LanesCountWidths =>
         Vector512.IsHardwareAccelerated && Avx512CD.IsSupported && Avx512BW.IsSupported;
 
     /// <summary>
@@ -2697,9 +2697,15 @@ internal static class BlockStatsPass
     /// A null row's width is the byte 0xFF, which no band reaches: its zero is counted by the
     /// caller, as on the scalar path.
     /// </para>
+    /// <para>
+    /// The plain widths are of each value less <paramref name="reference"/>, zero for the ingest's
+    /// histograms and a column's least value for a frame of reference's; the zigzag ones are of the
+    /// value itself.
+    /// </para>
     /// </remarks>
-    private static void CountLaneWidths<T>(
-        ReadOnlySpan<T> values, ReadOnlySpan<byte> bits, int firstBit, bool masked, bool zigzag, Span<int> widths)
+    internal static void CountLaneWidths<T>(
+        ReadOnlySpan<T> values, ReadOnlySpan<byte> bits, int firstBit, bool masked, bool zigzag, Span<int> widths,
+        ulong reference = 0)
         where T : unmanaged, IBinaryInteger<T>
     {
         const int Chunk = 1024;
@@ -2709,7 +2715,7 @@ internal static class BlockStatsPass
         for (int at = 0; at < values.Length; at += Chunk)
         {
             int rows = Math.Min(Chunk, values.Length - at);
-            LaneWidthBytes(values.Slice(at, rows), raw, folded, zigzag);
+            LaneWidthBytes(values.Slice(at, rows), raw, folded, zigzag, reference);
             if (masked)
             {
                 NullWidths(raw[..rows], zigzag ? folded[..rows] : default, bits, firstBit + at, in spread);
@@ -2723,8 +2729,11 @@ internal static class BlockStatsPass
         }
     }
 
-    /// <summary>Each row's width as a byte, and its zigzag width when asked.</summary>
-    private static void LaneWidthBytes<T>(ReadOnlySpan<T> values, Span<byte> raw, Span<byte> folded, bool zigzag)
+    /// <summary>
+    /// Each row's width as a byte, of its value less <paramref name="reference"/> wrapping at the
+    /// element width, and its zigzag width, of the value itself, when asked.
+    /// </summary>
+    private static void LaneWidthBytes<T>(ReadOnlySpan<T> values, Span<byte> raw, Span<byte> folded, bool zigzag, ulong reference)
         where T : unmanaged, IBinaryInteger<T>
     {
         int rows = values.Length;
@@ -2736,12 +2745,13 @@ internal static class BlockStatsPass
         {
             ref ulong from = ref Unsafe.As<T, ulong>(ref MemoryMarshal.GetReference(values));
             Vector512<ulong> full = Vector512.Create(64UL);
+            Vector512<ulong> frame = Vector512.Create(reference);
             for (; i <= rows - 8; i += 8)
             {
                 Vector512<ulong> value = Vector512.LoadUnsafe(ref from, (nuint)i);
                 Unsafe.WriteUnaligned(
                     ref Unsafe.Add(ref into, i),
-                    Avx512F.ConvertToVector128Byte(full - Avx512CD.LeadingZeroCount(value)).AsUInt64().ToScalar());
+                    Avx512F.ConvertToVector128Byte(full - Avx512CD.LeadingZeroCount(value - frame)).AsUInt64().ToScalar());
                 if (zigzag)
                 {
                     Vector512<ulong> zig = (value << 1) ^ (Vector512<ulong>.Zero - (value >>> 63));
@@ -2758,6 +2768,7 @@ internal static class BlockStatsPass
             ref byte from = ref Unsafe.As<T, byte>(ref MemoryMarshal.GetReference(values));
             Vector512<uint> full = Vector512.Create(32u);
             Vector512<uint> top = Vector512.Create((uint)BitWords.Mask(elementBits));
+            Vector512<uint> frame = Vector512.Create((uint)reference);
             int sign = elementBits - 1;
             for (; i <= rows - 16; i += 16)
             {
@@ -2767,7 +2778,7 @@ internal static class BlockStatsPass
                     16 => Avx512F.ConvertToVector512UInt32(Vector256.LoadUnsafe(ref Unsafe.As<byte, ushort>(ref from), (nuint)i)),
                     _ => Avx512F.ConvertToVector512UInt32(Vector128.LoadUnsafe(ref from, (nuint)i)),
                 };
-                Avx512F.ConvertToVector128Byte(full - Avx512CD.LeadingZeroCount(value)).StoreUnsafe(ref into, (nuint)i);
+                Avx512F.ConvertToVector128Byte(full - Avx512CD.LeadingZeroCount((value - frame) & top)).StoreUnsafe(ref into, (nuint)i);
                 if (zigzag)
                 {
                     Vector512<uint> zig = ((value << 1) ^ (Vector512<uint>.Zero - (value >>> sign))) & top;
@@ -2780,7 +2791,7 @@ internal static class BlockStatsPass
         for (; i < rows; i++)
         {
             ulong bits = ulong.CreateTruncating(values[i]) & mask;
-            Unsafe.Add(ref into, i) = (byte)(64 - BitOperations.LeadingZeroCount(bits));
+            Unsafe.Add(ref into, i) = (byte)(64 - BitOperations.LeadingZeroCount((bits - reference) & mask));
             if (zigzag)
             {
                 ulong zig = ((bits << 1) ^ (0UL - ((bits >> (elementBits - 1)) & 1))) & mask;
