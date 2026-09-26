@@ -54,6 +54,11 @@ public sealed record DatasetOptions
     /// How many data objects stay open between scans; 8 by default. A data object is immutable, so
     /// an open handle never goes stale: this only bounds the descriptors and parsed footers held.
     /// </summary>
+    /// <remarks>
+    /// A scan in key order holds open at once every object whose keys interleave with another's,
+    /// whatever this bound, and the next such scan opens again those the bound did not keep: a
+    /// bound at the number of objects spares it every open.
+    /// </remarks>
     public int MaxOpenObjects { get; init; } = 8;
 
     /// <summary>The clock a commit's creation time is read from; the system's by default.</summary>

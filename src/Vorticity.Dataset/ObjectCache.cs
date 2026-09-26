@@ -144,8 +144,9 @@ internal sealed class ObjectCache : IAsyncDisposable
             disposed = _disposed;
             if (!disposed)
             {
+                // No eviction here, only at a return: a walk that rents the objects in the same
+                // order every time would close, at each open, the idle object it rents next.
                 _open[handle] = held;
-                await EvictAsync().ConfigureAwait(false);
             }
         }
         finally

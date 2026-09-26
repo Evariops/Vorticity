@@ -85,6 +85,46 @@ public sealed class MergeFanInTests
         Assert.Equal(expected, back);
     }
 
+    // The walk holds all sixty-four objects open at once, far more than the cache keeps between
+    // scans. The next walk opens the others first, in the same order, and must still find the ones
+    // the cache kept.
+    [Fact]
+    public async Task AWalkAgainFindsTheObjectsTheCacheKept()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        DatasetOptions options = Clustered();
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
+        for (int residue = 0; residue < Objects; residue++)
+        {
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
+        }
+
+        Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder(), ct));
+        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder().WithMetrics(metrics), ct));
+
+        Assert.Equal(Objects, metrics.ObjectsOpened);
+        Assert.Equal(options.MaxOpenObjects, metrics.CacheHits);
+    }
+
+    private static async Task<long> WalkAsync(DatasetScanBuilder scan, CancellationToken ct)
+    {
+        long rows = 0;
+        await foreach (RecordBatch batch in scan.InKeyOrder("key").ExecuteAsync(ct).WithCancellation(CancellationToken.None))
+        {
+            using (batch)
+            {
+                rows += batch.RowCount;
+            }
+        }
+
+        return rows;
+    }
+
     private static DType Schema(DTypeArena types) => types.Struct(
         ["key", "measure"],
         [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
