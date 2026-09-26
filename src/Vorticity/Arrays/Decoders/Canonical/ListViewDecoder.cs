@@ -168,7 +168,46 @@ internal sealed class ListViewDecoder : ArrayDecoder
     {
         ulong bad = 0;
         int i = 0;
-        if (typeof(TOffset) == typeof(ulong) && typeof(TSize) == typeof(ulong))
+        if (Vector512.IsHardwareAccelerated && Unsafe.SizeOf<TOffset>() == 8 && Unsafe.SizeOf<TSize>() == 8)
+        {
+            // Eight rows to a vector, signed or not read as unsigned: a negative value sets its top
+            // bit, gathered by or, and with both below 2^63 the end is exact, so the largest end is
+            // kept and tested once, a max where the narrower vectors compare and gather each end.
+            ref ulong o = ref Unsafe.As<TOffset, ulong>(ref MemoryMarshal.GetReference(offsets));
+            ref ulong s = ref Unsafe.As<TSize, ulong>(ref MemoryMarshal.GetReference(sizes));
+            Vector512<ulong> gathered = Vector512<ulong>.Zero;
+            Vector512<ulong> furthest = Vector512<ulong>.Zero;
+            for (; i <= offsets.Length - 8; i += 8)
+            {
+                Vector512<ulong> o0 = Vector512.LoadUnsafe(ref o, (nuint)i);
+                Vector512<ulong> s0 = Vector512.LoadUnsafe(ref s, (nuint)i);
+                gathered |= o0 | s0;
+                furthest = Vector512.Max(furthest, o0 + s0);
+            }
+
+            bad = Vector512.GreaterThanAny(gathered, Vector512.Create((ulong)long.MaxValue))
+                || Vector512.GreaterThanAny(furthest, Vector512.Create(limit)) ? ulong.MaxValue : 0;
+        }
+        else if (Vector512.IsHardwareAccelerated && Unsafe.SizeOf<TOffset>() == 4 && Unsafe.SizeOf<TSize>() == 4
+            && limit <= int.MaxValue)
+        {
+            // Sixteen rows to a vector, as the four below.
+            ref uint o = ref Unsafe.As<TOffset, uint>(ref MemoryMarshal.GetReference(offsets));
+            ref uint s = ref Unsafe.As<TSize, uint>(ref MemoryMarshal.GetReference(sizes));
+            Vector512<uint> gathered = Vector512<uint>.Zero;
+            Vector512<uint> furthest = Vector512<uint>.Zero;
+            for (; i <= offsets.Length - 16; i += 16)
+            {
+                Vector512<uint> o0 = Vector512.LoadUnsafe(ref o, (nuint)i);
+                Vector512<uint> s0 = Vector512.LoadUnsafe(ref s, (nuint)i);
+                gathered = Vector512.Max(gathered, Vector512.Max(o0, s0));
+                furthest = Vector512.Max(furthest, o0 + s0);
+            }
+
+            bad = Vector512.GreaterThanAny(gathered, Vector512.Create((uint)limit))
+                || Vector512.GreaterThanAny(furthest, Vector512.Create((uint)limit)) ? ulong.MaxValue : 0;
+        }
+        else if (typeof(TOffset) == typeof(ulong) && typeof(TSize) == typeof(ulong))
         {
             ref ulong o = ref Unsafe.As<TOffset, ulong>(ref MemoryMarshal.GetReference(offsets));
             ref ulong s = ref Unsafe.As<TSize, ulong>(ref MemoryMarshal.GetReference(sizes));

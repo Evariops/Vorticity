@@ -224,6 +224,44 @@ public sealed class VarBinDecoderTests
         Assert.Equal("xyz", ValueAt(h.Scan, index, 2));
     }
 
+    // Inline views are checked four at a time where they can be, their bytes gathered for one test
+    // at the end: a value that is not UTF-8 must be refused wherever it falls among them, first or
+    // last of a group of four or past the last whole group, and accepted as binary.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    [InlineData(4)]
+    [InlineData(7)]
+    [InlineData(11)]
+    public void VarBinViewRefusesAnInlineValueThatIsNotUtf8AmongOthers(int bad)
+    {
+        const int Rows = 12;
+        byte[] views = new byte[Rows * 16];
+        for (int i = 0; i < Rows; i++)
+        {
+            Span<byte> view = views.AsSpan(i * 16, 16);
+            BinaryPrimitives.WriteUInt32LittleEndian(view, 5);
+            Encoding.UTF8.GetBytes("abcde").CopyTo(view[4..]);
+        }
+
+        views[(bad * 16) + 6] = 0xFF;
+        foreach (bool text in new[] { true, false })
+        {
+            using DecodeHarness h = new DecodeHarness();
+            BlobBuilder b = new BlobBuilder();
+            BlobNode node = new BlobNode("vortex.varbinview").WithBuffers(b.AddBuffer(views, alignmentExponent: 4));
+            DType dtype = text ? h.Types.Utf8(Nullability.NonNullable) : h.Types.Binary(Nullability.NonNullable);
+            if (text)
+            {
+                Assert.Throws<VortexFormatException>(() => h.Decode(b, node, dtype, Rows));
+            }
+            else
+            {
+                Assert.Equal(Rows, h.Node(h.Decode(b, node, dtype, Rows)).Length);
+            }
+        }
+    }
+
     [Fact]
     public void VarBinViewAcceptsZeroDataBuffers()
     {
