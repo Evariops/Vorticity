@@ -198,6 +198,58 @@ public sealed class DateTimePartsDecoderTests
         Assert.Equal(0, harness.Node(ext.StorageIndex).Length);
     }
 
+    [Theory]
+    [InlineData(PType.I8, PType.U16, PType.U32)]
+    [InlineData(PType.U8, PType.I32, PType.I64)]
+    [InlineData(PType.I16, PType.U32, PType.U64)]
+    [InlineData(PType.U16, PType.I64, PType.I8)]
+    [InlineData(PType.I32, PType.U64, PType.U8)]
+    [InlineData(PType.U32, PType.I8, PType.I16)]
+    [InlineData(PType.I64, PType.U8, PType.U16)]
+    [InlineData(PType.U64, PType.I16, PType.I32)]
+    internal void EveryPartTypeWidensAndWrapsAsTheScalarLineDoes(PType daysPType, PType secondsPType, PType subsecondsPType)
+    {
+        // Thirty-seven rows: whole vector steps where a machine has them and a tail after them,
+        // over every bit pattern each type can hold, so a widening that sign-extends an unsigned
+        // part, or a multiply that keeps other than the low 64 bits, shows on some row.
+        const int rows = 37;
+        Random random = new Random(20260926);
+        byte[] days = RandomBytes(random, daysPType, rows);
+        byte[] seconds = RandomBytes(random, secondsPType, rows);
+        byte[] subseconds = RandomBytes(random, subsecondsPType, rows);
+
+        CanonicalNode node = Decode(
+            VortexTimeUnit.Nanoseconds, daysPType, secondsPType, subsecondsPType, days, seconds, subseconds, rows);
+
+        for (int i = 0; i < rows; i++)
+        {
+            long expected = unchecked(
+                Widened(subsecondsPType, subseconds, i)
+                + (Widened(secondsPType, seconds, i) * 1_000_000_000L)
+                + (Widened(daysPType, days, i) * 86_400_000_000_000L));
+            Assert.Equal(expected, Value(node, i));
+        }
+
+        static byte[] RandomBytes(Random random, PType type, int rows)
+        {
+            byte[] bytes = new byte[rows * type.ByteWidth()];
+            random.NextBytes(bytes);
+            return bytes;
+        }
+
+        // long.CreateTruncating, spelled out per type: sign-extended, zero-extended, or the 64 bits as they are.
+        static long Widened(PType type, byte[] bytes, int i) => type switch
+        {
+            PType.I8 => (sbyte)bytes[i],
+            PType.U8 => bytes[i],
+            PType.I16 => BinaryPrimitives.ReadInt16LittleEndian(bytes.AsSpan(i * 2)),
+            PType.U16 => BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(i * 2)),
+            PType.I32 => BinaryPrimitives.ReadInt32LittleEndian(bytes.AsSpan(i * 4)),
+            PType.U32 => BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(i * 4)),
+            _ => BinaryPrimitives.ReadInt64LittleEndian(bytes.AsSpan(i * 8)),
+        };
+    }
+
     private static CanonicalNode Decode(
         VortexTimeUnit unit,
         PType daysPType,

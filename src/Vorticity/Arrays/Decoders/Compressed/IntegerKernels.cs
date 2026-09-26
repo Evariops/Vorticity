@@ -2,6 +2,8 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
@@ -311,6 +313,27 @@ internal static class IntegerKernels
         // The cursors move rather than an index being formed per row, so each load is at a constant
         // offset from its cursor.
         int i = 0;
+
+        // AVX-512 has the 64-bit multiply the scalar loop spends its time in, eight lanes wide
+        // (vpmullq), and a widening load for every part type (vpmovsx/vpmovzx): eight rows a step,
+        // the same low 64 bits as the scalar line. Neither NEON nor AVX2 has the multiply.
+        if (Avx512DQ.IsSupported)
+        {
+            Vector512<long> timesA = Vector512.Create(scaleA);
+            Vector512<long> timesB = Vector512.Create(scaleB);
+            for (; i <= count - 8; i += 8)
+            {
+                (Widen512(ref sc) + (Widen512(ref sb) * timesB) + (Widen512(ref sa) * timesA)).StoreUnsafe(ref into);
+                sa = ref Unsafe.Add(ref sa, 8);
+                sb = ref Unsafe.Add(ref sb, 8);
+                sc = ref Unsafe.Add(ref sc, 8);
+                into = ref Unsafe.Add(ref into, 8);
+            }
+
+            count -= i;
+            i = 0;
+        }
+
         for (; i <= count - 4; i += 4)
         {
             into = Row(ref sa, ref sb, ref sc, 0, scaleA, scaleB);
@@ -334,6 +357,47 @@ internal static class IntegerKernels
             long.CreateTruncating(Unsafe.Add(ref sc, k)) +
             (long.CreateTruncating(Unsafe.Add(ref sb, k)) * scaleB) +
             (long.CreateTruncating(Unsafe.Add(ref sa, k)) * scaleA));
+    }
+
+    /// <summary>
+    /// Eight values at <paramref name="source"/> as <see langword="long"/>, as
+    /// <see cref="long.CreateTruncating{TOther}(TOther)"/> widens each: sign-extended from a signed
+    /// type, zero-extended from an unsigned one, reinterpreted from a 64-bit one. Reads exactly
+    /// eight values, the byte types through one 64-bit load.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector512<long> Widen512<T>(ref T source)
+        where T : unmanaged
+    {
+        if (typeof(T) == typeof(long) || typeof(T) == typeof(ulong))
+        {
+            return Vector512.LoadUnsafe(ref Unsafe.As<T, long>(ref source));
+        }
+
+        if (typeof(T) == typeof(int))
+        {
+            return Avx512F.ConvertToVector512Int64(Vector256.LoadUnsafe(ref Unsafe.As<T, int>(ref source)));
+        }
+
+        if (typeof(T) == typeof(uint))
+        {
+            return Avx512F.ConvertToVector512Int64(Vector256.LoadUnsafe(ref Unsafe.As<T, uint>(ref source)));
+        }
+
+        if (typeof(T) == typeof(short))
+        {
+            return Avx512F.ConvertToVector512Int64(Vector128.LoadUnsafe(ref Unsafe.As<T, short>(ref source)));
+        }
+
+        if (typeof(T) == typeof(ushort))
+        {
+            return Avx512F.ConvertToVector512Int64(Vector128.LoadUnsafe(ref Unsafe.As<T, ushort>(ref source)));
+        }
+
+        Vector128<ulong> eight = Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(ref Unsafe.As<T, byte>(ref source)));
+        return typeof(T) == typeof(sbyte)
+            ? Avx512F.ConvertToVector512Int64(eight.AsSByte())
+            : Avx512F.ConvertToVector512Int64(eight.AsByte());
     }
 
     // CreateTruncating, never CreateChecked or CreateSaturating: the reference widens with Rust's
