@@ -44,8 +44,13 @@ internal static class BlocksAndChunks
         await Pattern(session, path, rows, "98 304 rows, BlockRows 1 024", 98_304, 8_192, flushEach: false, new VortexWriteOptions { BlockRows = 1_024 });
     }
 
-    private static void Show(string what, VortexFileWriter writer, string path) =>
-        Console.WriteLine($"{what}: RowCount {writer.RowCount}, UnflushedBytes {writer.UnflushedBytes}, {new FileInfo(path).Length} bytes on disk");
+    // A created file is written beside its path, and CompleteAsync renames it over the path.
+    private static void Show(string what, VortexFileWriter writer, string path)
+    {
+        FileInfo file = new FileInfo(path);
+        Console.WriteLine($"{what}: RowCount {writer.RowCount}, UnflushedBytes {writer.UnflushedBytes}, " +
+            (file.Exists ? $"{file.Length} bytes at the path" : "nothing at the path yet"));
+    }
 
     private static async Task Pattern(VortexSession session, string path, Reading[] rows, string what, int total, int each, bool flushEach, VortexWriteOptions? options)
     {

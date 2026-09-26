@@ -15,15 +15,20 @@ await writer.FlushAsync(ct);
 WriteReport report = await writer.CompleteAsync(ct);
 ```
 
-After each call the sample prints `RowCount`, `UnflushedBytes` and the file's length on disk:
+After each call the sample prints `RowCount`, `UnflushedBytes` and what the path holds:
 
 ```
-wrote 5 000 rows: RowCount 5000, UnflushedBytes 140625, 0 bytes on disk
-flushed: RowCount 5000, UnflushedBytes 140625, 0 bytes on disk
-wrote 5 000 more: RowCount 10000, UnflushedBytes 281250, 0 bytes on disk
-flushed: RowCount 10000, UnflushedBytes 50850, 14628 bytes on disk
+wrote 5 000 rows: RowCount 5000, UnflushedBytes 140625, nothing at the path yet
+flushed: RowCount 5000, UnflushedBytes 140625, nothing at the path yet
+wrote 5 000 more: RowCount 10000, UnflushedBytes 281250, nothing at the path yet
+flushed: RowCount 10000, UnflushedBytes 50850, nothing at the path yet
 completed: chunk rows 8192, 1808, 22708 bytes
 ```
+
+The first flush leaves `UnflushedBytes` as it was; the second hands out a block of 8 192 rows, and
+only the 1 808 after it stay pending. The flushed bytes go to a file written beside the path, which
+`CompleteAsync` renames over it, so the path shows nothing, or the file it held before, until the
+file is whole ([append-and-repair.md](append-and-repair.md)).
 
 ## Two units
 
