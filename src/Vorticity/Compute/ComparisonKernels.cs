@@ -304,11 +304,11 @@ internal static partial class ComparisonKernels
     /// <param name="destination">One state per row.</param>
     /// <param name="scratch">A second buffer of the same length.</param>
     /// <param name="prepared">
-    /// The candidates already hashed for this column's signedness, or <see langword="null"/>.
+    /// The candidates already hashed for this column's kind, or <see langword="null"/>.
     /// </param>
     internal static void In(
         CanonicalArena arena, int nodeIndex, ReadOnlySpan<FilterLiteral> literals,
-        Span<byte> destination, Span<byte> scratch, InSet? prepared)
+        Span<byte> destination, Span<byte> scratch, CandidateSet? prepared)
     {
         int storage = Unwrap(arena, nodeIndex);
         if (EncodedAnswers.IsEncoded(arena, storage))
@@ -333,12 +333,9 @@ internal static partial class ComparisonKernels
             nodeIndex = arena.MaterializeEncoded(storage);
         }
 
-        if (prepared is not null && TryIntegerColumn(arena, nodeIndex, out PType ptype, out bool signed) &&
-            signed == prepared.Signed)
+        if (prepared is not null && CandidatesFor(arena, nodeIndex) == prepared.Kind)
         {
-            CanonicalNode column = arena.GetNode(Unwrap(arena, nodeIndex));
-            prepared.Apply(
-                ptype, column.Values.Span, ValidityMask.From(arena, column.Validity), destination);
+            Apply(arena, arena.GetNode(Unwrap(arena, nodeIndex)), prepared, destination);
             return;
         }
 
@@ -354,20 +351,19 @@ internal static partial class ComparisonKernels
         }
     }
 
-    /// <summary>Whether <paramref name="nodeIndex"/> is an integer column a set can be read against.</summary>
+    /// <summary>The kind of candidate set <paramref name="nodeIndex"/> can be read against.</summary>
     /// <param name="arena">The arena.</param>
     /// <param name="nodeIndex">The column, before the extension wrapper is removed.</param>
-    /// <param name="ptype">The integer type its values are stored as.</param>
-    /// <param name="signed">Whether it is signed, which decides which set is valid for it.</param>
+    /// <returns><see cref="CandidateKind.None"/> when an OR of equalities is the only answer.</returns>
     /// <remarks>
-    /// A decimal stored in eight bytes or fewer is one: its literals arrive unscaled, at the
-    /// column's scale, so membership is membership of the signed integers it stores.
+    /// A decimal is a kind of its own at every width. Its literals arrive unscaled, at the column's
+    /// scale, so membership is membership of the integers it stores, but it refuses an unsigned
+    /// literal and takes the sixteen and thirty-two byte ones an integer column refuses.
     /// </remarks>
-    internal static bool TryIntegerColumn(
-        CanonicalArena arena, int nodeIndex, out PType ptype, out bool signed)
+    internal static CandidateKind CandidatesFor(CanonicalArena arena, int nodeIndex)
     {
-        // An encoded column is answered through its values, so their signedness is the one a set
-        // is built for.
+        // An encoded column is answered through its values, so theirs is the kind a set is built
+        // for.
         int storage = Unwrap(arena, nodeIndex);
         if (EncodedAnswers.IsEncoded(arena, storage))
         {
@@ -378,25 +374,75 @@ internal static partial class ComparisonKernels
         switch (column.Kind)
         {
             case CanonicalKind.Primitive:
-                ptype = column.PType;
-                signed = ptype.IsSignedInteger();
-                return signed || ptype.IsUnsignedInteger();
+                PType ptype = column.PType;
+                return ptype.IsSignedInteger() ? CandidateKind.Signed
+                    : ptype.IsUnsignedInteger() ? CandidateKind.Unsigned
+                    : ptype.IsFloat() ? CandidateKind.Float
+                    : CandidateKind.None;
 
-            case CanonicalKind.Decimal when column.Storage <= DecimalStorageType.I64:
-                ptype = column.Storage switch
+            case CanonicalKind.Decimal:
+                return column.Storage switch
+                {
+                    <= DecimalStorageType.I64 => CandidateKind.Decimal,
+                    DecimalStorageType.I128 => CandidateKind.Decimal128,
+                    _ => CandidateKind.Decimal256,
+                };
+
+            case CanonicalKind.VarBinView:
+            case CanonicalKind.FixedSizeList:
+                return CandidateKind.Bytes;
+
+            default:
+                return CandidateKind.None;
+        }
+    }
+
+    /// <summary>Answers every row of <paramref name="column"/> from a set built for its kind.</summary>
+    private static void Apply(
+        CanonicalArena arena, CanonicalNode column, CandidateSet set, Span<byte> destination)
+    {
+        ValidityMask mask = ValidityMask.From(arena, column.Validity);
+        if (set is InSet numbers)
+        {
+            PType ptype = column.Kind == CanonicalKind.Primitive
+                ? column.PType
+                : column.Storage switch
                 {
                     DecimalStorageType.I8 => PType.I8,
                     DecimalStorageType.I16 => PType.I16,
                     DecimalStorageType.I32 => PType.I32,
                     _ => PType.I64,
                 };
-                signed = true;
-                return true;
+            numbers.Apply(ptype, column.Values.Span, mask, destination);
+            return;
+        }
+
+        BytesInSet bytes = (BytesInSet)set;
+        switch (column.Kind)
+        {
+            case CanonicalKind.VarBinView:
+                bytes.Apply(column, mask, destination);
+                return;
+
+            case CanonicalKind.FixedSizeList:
+                // In the equality's order: a list of nulls answers before its elements are asked
+                // whether they are bytes.
+                if (mask.AllInvalid)
+                {
+                    Trilean.Fill(destination, Trilean.Unknown);
+                    return;
+                }
+
+                bytes.Apply(
+                    FixedBytes(arena, column, destination.Length), checked((int)column.FixedSize), mask,
+                    destination);
+                return;
 
             default:
-                ptype = default;
-                signed = false;
-                return false;
+                bytes.Apply(
+                    column.Values.Span, column.Storage == DecimalStorageType.I128 ? 16 : Int256.ByteCount,
+                    mask, destination);
+                return;
         }
     }
 

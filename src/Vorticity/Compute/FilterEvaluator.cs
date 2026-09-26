@@ -234,9 +234,9 @@ internal sealed class FilterEvaluator
 
     /// <summary>One <c>IN</c>'s candidates, hashed for the column they were met over.</summary>
     /// <param name="Node">The expression node the set belongs to.</param>
-    /// <param name="Signed">The signedness it was built for.</param>
+    /// <param name="Kind">The kind of column it was built for.</param>
     /// <param name="Set">The set, or null when an OR of equalities is the better answer.</param>
-    private sealed record Prepared(InExpr Node, bool Signed, InSet? Set);
+    private sealed record Prepared(InExpr Node, CandidateKind Kind, CandidateSet? Set);
 
     /// <summary>
     /// Evaluates <paramref name="filter"/> once, keeping nothing. For a caller that has one batch
@@ -294,13 +294,15 @@ internal sealed class FilterEvaluator
     /// <param name="column">The resolved column.</param>
     /// <returns><see langword="null"/> when an OR of equalities is the better answer.</returns>
     /// <remarks>
-    /// Keyed by signedness as well, because a candidate above <c>i64::MaxValue</c> shares its bits
-    /// with a negative value: a set built for one kind of column would answer wrongly for the
-    /// other. Within a scan the schema fixes it, so the rebuild is a guard rather than a cost.
+    /// Keyed by the column's kind as well: a candidate above <c>i64::MaxValue</c> shares its bits
+    /// with a negative value, and a float or a decimal is keyed as an integer is not, so a set built
+    /// for one kind of column would answer wrongly for another. Within a scan the schema fixes it,
+    /// so the rebuild is a guard rather than a cost.
     /// </remarks>
-    private InSet? PreparedFor(InExpr membership, CanonicalArena arena, int column)
+    private CandidateSet? PreparedFor(InExpr membership, CanonicalArena arena, int column)
     {
-        if (!ComparisonKernels.TryIntegerColumn(arena, column, out _, out bool signed))
+        CandidateKind kind = ComparisonKernels.CandidatesFor(arena, column);
+        if (kind == CandidateKind.None)
         {
             return null;
         }
@@ -311,14 +313,14 @@ internal sealed class FilterEvaluator
             for (int i = 0; i < held.Length; i++)
             {
                 Prepared entry = held[i];
-                if (ReferenceEquals(entry.Node, membership) && entry.Signed == signed)
+                if (ReferenceEquals(entry.Node, membership) && entry.Kind == kind)
                 {
                     return entry.Set;
                 }
             }
         }
 
-        Prepared fresh = new Prepared(membership, signed, InSet.TryBuild(membership.Literals, signed));
+        Prepared fresh = new Prepared(membership, kind, CandidateSet.For(membership.Literals, kind));
         int length = held?.Length ?? 0;
         Prepared[] grown = new Prepared[length + 1];
         held?.CopyTo(grown, 0);
@@ -394,7 +396,7 @@ internal sealed class FilterEvaluator
             {
                 InExpr membership = (InExpr)filter;
                 int column = Column(arena, rootIndex, membership.Field, rows, selection);
-                InSet? prepared = PreparedFor(membership, arena, column);
+                CandidateSet? prepared = PreparedFor(membership, arena, column);
                 byte[] scratch = ArrayPool<byte>.Shared.Rent(destination.Length);
                 try
                 {
