@@ -85,6 +85,38 @@ internal sealed class ClusteringKey
     }
 
     /// <summary>
+    /// The row encoding of the key <paramref name="cursor"/> is on, a single column's, written into
+    /// <paramref name="scratch"/>, which grows when it is too small: the bytes <see cref="Encode"/>
+    /// gives for the key, without an array for every key of a walk. A composite cursor's keys are
+    /// the encoding already, and need none of this.
+    /// </summary>
+    /// <returns>How many bytes of <paramref name="scratch"/> hold the encoding.</returns>
+    public int EncodeCurrent(KeyCursor cursor, ref byte[] scratch)
+    {
+        DType dtype = _dtypes[0];
+        RowSortField field = _fields[0];
+        if (cursor.KeyKind == FilterLiteralKind.Bytes)
+        {
+            // Lent by the cursor, where its key would be copied into a literal.
+            ReadOnlySpan<byte> bytes = cursor.KeyBytes;
+            Reserve(ref scratch, RowEncoder.BytesLength(bytes.Length));
+            return RowEncoder.WriteBytes(bytes, field, scratch);
+        }
+
+        FilterLiteral key = cursor.Key;
+        Reserve(ref scratch, RowEncoder.ValueLength(key, dtype));
+        return RowEncoder.WriteValue(key, dtype, field, scratch);
+    }
+
+    private static void Reserve(ref byte[] scratch, int length)
+    {
+        if (scratch.Length < length)
+        {
+            scratch = new byte[Math.Max(length, 2 * scratch.Length)];
+        }
+    }
+
+    /// <summary>
     /// Opens the object's cursor over this key, which the caller disposes, or null when the object
     /// carries no run on the key. Null rather than an exception: a dataset may hold imported objects
     /// it did not write, and every consumer here has an answer for one.
