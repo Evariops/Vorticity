@@ -36,6 +36,13 @@ namespace Vorticity.Buffers;
 /// is <em>not</em> a synonym for an unguarded <see cref="Release"/>: use <see cref="Release"/>
 /// to give back a reference obtained from <see cref="Retain"/>.
 /// </para>
+/// <para>
+/// <b>A pooled owner is the exception.</b> Once released it goes back to its pool, and the next
+/// rent hands out the same object, so no guard can tell a late <see cref="Dispose"/> or
+/// <see cref="Release"/> from the next renter's: it releases the new rental. Its
+/// <see cref="Dispose"/> is to be called once, as <c>ArrayPool&lt;T&gt;.Return</c> is: a second
+/// call throws while it can still be seen, before the block is rented again.
+/// </para>
 /// </remarks>
 internal abstract class SegmentOwner : IDisposable
 {
@@ -100,18 +107,27 @@ internal abstract class SegmentOwner : IDisposable
     }
 
     /// <summary>
-    /// Drops the initial reference created with this owner. Calling it more than once is safe and
-    /// does nothing after the first call.
+    /// Drops the initial reference created with this owner. Calling it more than once does nothing
+    /// after the first call, but for an owner that goes back to a pool.
     /// </summary>
+    /// <exception cref="ObjectDisposedException">A pooled owner is disposed a second time.</exception>
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposeGuard, 1) != 0)
         {
+            if (IsRecycled)
+            {
+                ThrowDisposedTwice();
+            }
+
             return;
         }
 
         Release();
     }
+
+    /// <summary>Whether a release gives this owner back to a pool, to serve another rental.</summary>
+    private protected virtual bool IsRecycled => false;
 
     /// <summary>
     /// Releases the underlying memory. Called exactly once, on the transition to reference count
@@ -138,4 +154,12 @@ internal abstract class SegmentOwner : IDisposable
             GetType().Name,
             "The segment owner's reference count already reached zero; its memory has been " +
             "released. Retain() a buffer before handing it to code that outlives the batch.");
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
+    private void ThrowDisposedTwice() =>
+        throw new ObjectDisposedException(
+            GetType().Name,
+            "A pooled segment owner was disposed twice; its block goes back to the pool at the " +
+            "first call and may already serve another rental.");
 }

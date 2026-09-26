@@ -236,6 +236,24 @@ public sealed class SegmentOwnerTests
     }
 
     [Fact]
+    public void A_second_dispose_of_a_pooled_block_throws()
+    {
+        AlignedBufferPool pool = new AlignedBufferPool();
+        NativeSegmentOwner owner = pool.Rent(4096, 64);
+        owner.Dispose();
+
+        // The next rent hands out this same owner, where a late Dispose would release the new
+        // rental: it is refused while the block is still parked.
+        Assert.Throws<ObjectDisposedException>(owner.Dispose);
+
+        NativeSegmentOwner again = pool.Rent(4096, 64);
+        Assert.Same(owner, again);
+        Assert.Equal(1, again.RefCount);
+        again.Dispose();
+        pool.Trim();
+    }
+
+    [Fact]
     public void Native_memory_is_only_freed_once_even_when_release_races_dispose()
     {
         NativeSegmentOwner owner = NativeSegmentOwner.Allocate(4096, 64);

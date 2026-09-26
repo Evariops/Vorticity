@@ -134,6 +134,9 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     internal bool BelongsTo(AlignedBufferPool pool) => ReferenceEquals(_pool, pool);
 
     /// <inheritdoc/>
+    private protected override bool IsRecycled => _pool is not null;
+
+    /// <inheritdoc/>
     protected override void FreeCore()
     {
         AlignedBufferPool? pool = _pool;
