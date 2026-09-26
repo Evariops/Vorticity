@@ -45,8 +45,17 @@ public readonly record struct SegmentRange(long Offset, int Length)
 
 /// <summary>Bytes a source handed out, held until the lease is disposed.</summary>
 /// <remarks>
+/// <para>
 /// A source builds a lease over memory it keeps alive and names what releases it; a lease over
 /// memory nothing needs to release takes no owner.
+/// </para>
+/// <para>
+/// A lease is a value, and a copy of it names the same owner: dispose one copy, once.
+/// <see cref="Dispose"/> forgets the owner in the copy it is called on only, so disposing a second
+/// copy releases the owner again. Once the lease is disposed, its bytes may already serve another
+/// read or be unmapped: <see cref="Bytes"/> and <see cref="Memory"/> are not read after, as with
+/// the memory of any <see cref="IMemoryOwner{T}"/>.
+/// </para>
 /// </remarks>
 public struct SegmentLease : IDisposable
 {
@@ -81,7 +90,7 @@ public struct SegmentLease : IDisposable
     public readonly ReadOnlyMemory<byte> Memory =>
         Bytes.IsSingleSegment ? Bytes.First : throw new InvalidOperationException("The lease holds several blocks; read Bytes.");
 
-    /// <summary>Releases the bytes. Idempotent.</summary>
+    /// <summary>Releases the bytes. Idempotent for this copy of the lease; another copy still names the owner.</summary>
     public void Dispose()
     {
         IDisposable? owner = _owner;
