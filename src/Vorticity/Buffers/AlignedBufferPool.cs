@@ -2,7 +2,6 @@ using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Vorticity.Buffers;
@@ -39,7 +38,7 @@ namespace Vorticity.Buffers;
 /// of a flag for it.
 /// </para>
 /// </remarks>
-internal sealed class AlignedBufferPool
+internal sealed class AlignedBufferPool : ISweptAfterCollections
 {
     /// <summary>Smallest size class. Below this, pooling costs more than it saves.</summary>
     private const int MinBlockSize = 4096;
@@ -298,7 +297,7 @@ internal sealed class AlignedBufferPool
     /// </remarks>
     internal AlignedBufferPool Swept()
     {
-        Sweeper.Register(this);
+        CollectionSweeper<AlignedBufferPool>.Register(this);
         return this;
     }
 
@@ -387,7 +386,7 @@ internal sealed class AlignedBufferPool
     }
 
     /// <summary>A sweep after a collection: the idle classes, or every class when the machine's memory load is high.</summary>
-    private void Sweep()
+    void ISweptAfterCollections.Sweep()
     {
         GCMemoryInfo memory = GC.GetGCMemoryInfo();
         TrimIdle(Environment.TickCount64, memory.MemoryLoadBytes >= memory.HighMemoryLoadThresholdBytes);
@@ -412,38 +411,6 @@ internal sealed class AlignedBufferPool
             "The segment owner was not rented from this pool; returning it here would free or " +
             "recycle memory this pool does not own.",
             "owner");
-
-    /// <summary>
-    /// An object nothing references, whose finalizer runs after a collection, and after collections
-    /// of the oldest generation only once it has been promoted there: each run sweeps the pool and
-    /// registers the sweeper again, for as long as the pool lives.
-    /// </summary>
-    private sealed class Sweeper
-    {
-        // A handle and not a WeakReference, whose own finalizer would run with this one and let
-        // the pool go first.
-        private WeakGCHandle<AlignedBufferPool> _pool;
-
-        private Sweeper(AlignedBufferPool pool)
-        {
-            _pool = new WeakGCHandle<AlignedBufferPool>(pool);
-        }
-
-        ~Sweeper()
-        {
-            if (_pool.TryGetTarget(out AlignedBufferPool? pool))
-            {
-                pool.Sweep();
-                GC.ReRegisterForFinalize(this);
-            }
-            else
-            {
-                _pool.Dispose();
-            }
-        }
-
-        internal static void Register(AlignedBufferPool pool) => _ = new Sweeper(pool);
-    }
 
     /// <summary>One size class: a bounded LIFO stack of parked blocks.</summary>
     private sealed class Bucket

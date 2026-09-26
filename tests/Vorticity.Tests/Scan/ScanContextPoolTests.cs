@@ -36,7 +36,7 @@ public sealed class ScanContextPoolTests
         await using VortexFile second = await VortexFile.OpenAsync(
             Corpus.Path("encodings/runend"), CancellationToken.None);
 
-        ScanContext context = ScanContexts.Rent(first);
+        ScanContext context = ScanContexts.Shared.Rent(first);
 
         // A dtype the scan derived, which a batch its caller owns may hold.
         DTypeArena types = context.Types;
@@ -54,8 +54,8 @@ public sealed class ScanContextPoolTests
         Assert.True(context.IsNodeChecked(key));
         context.ExchangeSelection([1, 2, 3], 3);
 
-        ScanContexts.Return(context);
-        ScanContext again = ScanContexts.Rent(second);
+        ScanContexts.Shared.Return(context);
+        ScanContext again = ScanContexts.Shared.Rent(second);
         try
         {
             // The pool is the process's, so another test may have taken this context in between;
@@ -84,7 +84,7 @@ public sealed class ScanContextPoolTests
         }
         finally
         {
-            ScanContexts.Return(again);
+            ScanContexts.Shared.Return(again);
         }
     }
 
@@ -94,11 +94,11 @@ public sealed class ScanContextPoolTests
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
 
-        ScanContext context = ScanContexts.Rent(file);
+        ScanContext context = ScanContexts.Shared.Rent(file);
         DTypeArena types = context.Types;
         types.InternName("a name, which no batch holds"u8);
-        ScanContexts.Return(context);
-        ScanContext again = ScanContexts.Rent(file);
+        ScanContexts.Shared.Return(context);
+        ScanContext again = ScanContexts.Shared.Rent(file);
         try
         {
             // No dtype came out of the arena, so nothing a caller owns can hold one of its nodes.
@@ -109,8 +109,45 @@ public sealed class ScanContextPoolTests
         }
         finally
         {
-            ScanContexts.Return(again);
+            ScanContexts.Shared.Return(again);
         }
+    }
+
+    [Fact]
+    public async Task APoolNoScanTookFromOverAMinuteLetsItsContextsGo()
+    {
+        Decoders.EnsureRegistered();
+        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
+        ScanContexts pool = new ScanContexts(4);
+        pool.Return(pool.Rent(file));
+        Assert.Equal(1, pool.Count);
+
+        // Taken since the sweep before, so idle from this one on.
+        pool.TrimIdle(1_000, everything: false);
+        Assert.Equal(1, pool.Count);
+        pool.TrimIdle(1_000 + ScanContexts.IdleMilliseconds - 1, everything: false);
+        Assert.Equal(1, pool.Count);
+        pool.TrimIdle(1_000 + ScanContexts.IdleMilliseconds, everything: false);
+        Assert.Equal(0, pool.Count);
+
+        // A high memory load lets them go at once, taken or not.
+        pool.Return(pool.Rent(file));
+        pool.TrimIdle(1_000, everything: true);
+        Assert.Equal(0, pool.Count);
+    }
+
+    [Fact]
+    public void APoolIsSweptByACollection()
+    {
+        ScanContexts pool = new ScanContexts(4).Swept();
+        int before = pool.Sweeps;
+        for (int i = 0; i < 3 && pool.Sweeps == before; i++)
+        {
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+            GC.WaitForPendingFinalizers();
+        }
+
+        Assert.True(pool.Sweeps > before);
     }
 
     [Fact]

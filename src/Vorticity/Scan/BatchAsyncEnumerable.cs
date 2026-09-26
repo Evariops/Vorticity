@@ -365,7 +365,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // The mask, the metrics sink and the encoded delivery outlive every batch of the scan, so
         // they are set once here and never by `ResetBatch`; the readers read the mask in file
         // coordinates and add what they materialize to the sink.
-        ScanContext context = ScanContexts.Rent(file);
+        ScanContext context = ScanContexts.Shared.Rent(file);
         context.LiveBlocks = live;
         context.Metrics = metrics;
         context.KeepEncodings = keepEncodings;
@@ -1593,7 +1593,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             if (_lanes[i] is { } lane)
             {
                 lane.Stop();
-                ScanContexts.Return(lane.Context);
+                ScanContexts.Shared.Return(lane.Context);
             }
         }
 
