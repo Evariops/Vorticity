@@ -350,7 +350,7 @@ internal sealed class FenceTable
     /// <summary>Whether the table is in pages.</summary>
     internal bool Paged => _root is not null;
 
-    /// <summary>The pages read so far, for the tests and <c>Explain</c>.</summary>
+    /// <summary>The pages asked of the source so far, for the tests and <c>Explain</c>: a page the file holds in its tail is not one.</summary>
     internal int PagesRead { get; private set; }
 
     /// <summary>A table over bounds held in memory, with no regions: a dictionary's run.</summary>
@@ -608,9 +608,11 @@ internal sealed class FenceTable
         }
 
         FencePage page;
+        bool asked;
         using (SegmentRequestSet requests = new SegmentRequestSet(1))
         {
             int slot = requests.Add(new SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0));
+            asked = Scanning.ScanMetrics.Unread(requests, source, out _) > 0;
             await source.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             VortexBuffer bytes = requests.GetBuffer(slot);
             if (!region.Holds(bytes.Span))
@@ -626,7 +628,7 @@ internal sealed class FenceTable
             throw FencePage.Malformed($"a page covers {page.SegmentStarts[^1]} segments where its parent says {segments}");
         }
 
-        PagesRead++;
+        PagesRead += asked ? 1 : 0;
         Diagnostics.VortexEventSource.RunsRead(1);
         if (_pages.Count >= PageCache)
         {

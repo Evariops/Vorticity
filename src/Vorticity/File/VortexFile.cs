@@ -35,6 +35,11 @@ namespace Vorticity;
 /// never enter it, because metadata values are read lazily.
 /// </para>
 /// <para>
+/// A scan of a file whose source does I/O reads from that window every segment lying inside it, so
+/// a file shorter than the window is read once, by its open. Over such a source the window starts
+/// on a 64-byte boundary, which every segment's alignment divides, and so runs up to 63 bytes longer.
+/// </para>
+/// <para>
 /// <b>After disposal</b>, a member throws <see cref="ObjectDisposedException"/> when, and only
 /// when, it reads the retained tail, whose buffer has gone back to the pool:
 /// <see cref="StoredIdentity"/>, <see cref="SegmentSpecs"/>, <see cref="Indexes"/>,
@@ -54,6 +59,9 @@ public sealed partial class VortexFile : IAsyncDisposable
 {
     private readonly ISegmentReader _source;
     private readonly bool _ownsSource;
+
+    /// <summary>Whether the file serves from its tail the segments lying there: when its source fetches its bytes.</summary>
+    private readonly bool _servesTail;
     private readonly SegmentOwner _tail;
     private readonly long _tailOffset;
     private readonly DType _schema;
@@ -77,6 +85,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     {
         _source = state.Source;
         _ownsSource = state.OwnsSource;
+        _servesTail = !state.Source.ReadsInPlace;
         _tail = state.Tail;
         _tailOffset = state.TailOffset;
         FileLength = state.FileLength;
@@ -289,10 +298,15 @@ public sealed partial class VortexFile : IAsyncDisposable
                 FileThrow.FileTooShort(fileLength);
             }
 
-            int initialReadSize = InitialReadSize(options.InitialReadSize, fileLength);
-            long tailOffset = fileLength - initialReadSize;
+            // A file whose scans are served from the tail reads it from a boundary of the alignment
+            // its segments declare, and at that alignment, so that a segment inside keeps it. One
+            // whose source reads in place slices only structures out of it.
+            long startMask = source.ReadsInPlace ? -1L : -(long)VortexLimits.MaxAlignment;
+            int alignment = source.ReadsInPlace ? VortexFileFormat.TailAlignment : VortexLimits.MaxAlignment;
+            long tailOffset = (fileLength - InitialReadSize(options.InitialReadSize, fileLength)) & startMask;
+            int initialReadSize = (int)(fileLength - tailOffset);
             tail = await source
-                .ReadRangeAsync(tailOffset, initialReadSize, VortexFileFormat.TailAlignment, cancellationToken)
+                .ReadRangeAsync(tailOffset, initialReadSize, alignment, cancellationToken)
                 .ConfigureAwait(false);
             if (tail.Length != initialReadSize)
             {
@@ -304,7 +318,7 @@ public sealed partial class VortexFile : IAsyncDisposable
             // The window is extended at most once, which the arithmetic guarantees; the check after
             // the extension stays because "one suffices" is a claim about that arithmetic and not
             // about the file, and a file may say anything.
-            long required = RequiredOffset(in postscript, tailOffset);
+            long required = RequiredOffset(in postscript, tailOffset) & startMask;
             if (required < tailOffset)
             {
                 long gap = tailOffset - required;
@@ -314,7 +328,7 @@ public sealed partial class VortexFile : IAsyncDisposable
                 }
 
                 SegmentOwner prefix = await source
-                    .ReadRangeAsync(required, (int)gap, VortexFileFormat.TailAlignment, cancellationToken)
+                    .ReadRangeAsync(required, (int)gap, alignment, cancellationToken)
                     .ConfigureAwait(false);
                 try
                 {
@@ -323,7 +337,7 @@ public sealed partial class VortexFile : IAsyncDisposable
                         FileThrow.ShortRead(required, (int)gap, prefix.Length);
                     }
 
-                    SegmentOwner combined = Concatenate(prefix, tail);
+                    SegmentOwner combined = Concatenate(prefix, tail, alignment);
                     SegmentOwner previous = tail;
                     tail = combined;
                     previous.Release();
@@ -390,10 +404,9 @@ public sealed partial class VortexFile : IAsyncDisposable
         return Math.Min(required, (long)postscript.FooterSegment.Offset);
     }
 
-    private static SegmentOwner Concatenate(SegmentOwner prefix, SegmentOwner suffix)
+    private static SegmentOwner Concatenate(SegmentOwner prefix, SegmentOwner suffix, int alignment)
     {
-        NativeSegmentOwner combined = NativeSegmentOwner.Allocate(
-            prefix.Length + suffix.Length, VortexFileFormat.TailAlignment);
+        NativeSegmentOwner combined = NativeSegmentOwner.Allocate(prefix.Length + suffix.Length, alignment);
         try
         {
             Span<byte> destination = combined.WritableSpan;
@@ -1090,8 +1103,14 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>The arena that owns <see cref="DType"/>'s nodes. Lives as long as the file.</summary>
     internal DTypeArena Types => _schema.Arena;
 
-    /// <summary>The segment source this file reads through.</summary>
-    internal ISegmentReader Segments => _source;
+    /// <summary>
+    /// The reader this file's scans read through: the source, or, when the source fetches its
+    /// bytes, the file itself, which serves from the tail the open read every segment lying there.
+    /// </summary>
+    internal ISegmentReader Segments => _servesTail ? this : _source;
+
+    /// <summary>The reader the file was opened over.</summary>
+    internal ISegmentReader Source => _source;
 
     /// <summary>Read-time policy, copied into every scan context.</summary>
     internal VortexReadOptions ReadOptions { get; }

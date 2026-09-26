@@ -334,7 +334,7 @@ public sealed partial class VortexFile
     private async ValueTask<(IndexDirectory? Directory, string? Refusal, IndexOrigin Origin)> ReadNamedDirectoryAsync(
         CancellationToken cancellationToken)
     {
-        IndexOrigin file = new IndexOrigin(_source, null, Owned: false);
+        IndexOrigin file = new IndexOrigin(Segments, null, Owned: false);
         if (!TryGetMetadataIndex(IndexDirectory.MetadataKeyUtf8, out int index))
         {
             return (null, null, file);

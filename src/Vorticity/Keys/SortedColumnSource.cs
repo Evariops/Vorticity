@@ -432,6 +432,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         RowRange range = new RowRange(start, end);
         SplitExecution.Alone(_context, range);
         SplitExecution.Register(_context, _tree, in _mask, range);
+        VortexFile.FillFromTail(_file.Segments, _context.Segments);
         held.Claim(_context.Segments, ticket, waiter: null);
         try
         {

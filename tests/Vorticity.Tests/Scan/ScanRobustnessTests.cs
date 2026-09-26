@@ -12,12 +12,16 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 
+using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
+using Vorticity.Tests.File;
+using Vorticity.Types;
+using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Scan;
@@ -189,6 +193,97 @@ public sealed class ScanRobustnessTests
         Assert.False(source.AnyOverReleased);
     }
 
+    // The same failure behind a source that fetches rather than reads in place: its file serves from
+    // the tail the segments lying there, and a batch that took some from it and fails on the others
+    // gives those back too, so that the tail goes with the file.
+    [Fact]
+    public async Task AFailingReadGivesBackWhatTheTailServed()
+    {
+        Decoders.EnsureRegistered();
+        FailAfterSource source = new FailAfterSource(
+            new MemorySegmentSource(await WideThenNarrowAsync()), 0, readsInPlace: false);
+        VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), CancellationToken.None);
+        IAsyncEnumerator<RecordBatch> enumerator =
+            file.ScanBuilder().ExecuteAsync().GetAsyncEnumerator(TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<IOException>(async () => await enumerator.MoveNextAsync());
+        Assert.True(source.FilledBeforeFailure > 0, "the batch that failed took some of its segments from the tail");
+
+        await enumerator.DisposeAsync();
+        await file.DisposeAsync();
+        Assert.Equal(0, source.Live);
+        Assert.All(source.Ranges, range => Assert.Equal(0, range.RefCount));
+    }
+
+    // Batches of one chunk share its segments, and on several lanes a batch that needs a segment
+    // another batch claimed waits for that batch to read it. A segment the tail holds is one no
+    // batch reads, so a batch that claimed it would keep the others waiting for good.
+    [Fact]
+    public async Task LanesSharingSegmentsTheTailHoldsDoNotWaitForEachOther()
+    {
+        Decoders.EnsureRegistered();
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        byte[] bytes = await System.IO.File.ReadAllBytesAsync(Corpus.Path("types/i64_nonnull_r8193"), ct);
+        await using VortexFile file = await VortexFile.OpenAsync(
+            new TestSegmentSource(bytes), new VortexOpenOptions(), CancellationToken.None);
+
+        long rows = await CountAsync(file.ScanBuilder().WithMaxBatchRows(512).WithDegreeOfParallelism(4), ct)
+            .WaitAsync(TimeSpan.FromSeconds(30), ct);
+
+        Assert.Equal(8193, rows);
+    }
+
+    private static async Task<long> CountAsync(ScanBuilder builder, CancellationToken cancellationToken)
+    {
+        long rows = 0;
+        await foreach (RecordBatch batch in builder.ExecuteAsync().WithCancellation(cancellationToken))
+        {
+            rows += batch.RowCount;
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// Uncompressed, a column of random longs, too long for the window an open reads, then a column
+    /// of bytes the window holds: the first batch asks for a segment of each.
+    /// </summary>
+    private static async Task<byte[]> WideThenNarrowAsync()
+    {
+        const int rows = 12_000;
+        DTypeArena types = new DTypeArena();
+        DType schema = types.Struct(
+            ["wide", "narrow"],
+            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.U8, Nullability.NonNullable)],
+            Nullability.NonNullable);
+        CanonicalArena arena = new CanonicalArena();
+        try
+        {
+            VortexBuffer wide = arena.Allocate(rows * sizeof(long), sizeof(long), out Span<byte> wideBytes);
+            VortexBuffer narrow = arena.Allocate(rows, 1, out Span<byte> narrowBytes);
+            new Random(0x7A11).NextBytes(wideBytes);
+            narrowBytes.Fill(7);
+            int wideNode = arena.AddPrimitive(schema.GetField(0), rows, Validity.NonNullable, PType.I64, wide);
+            int narrowNode = arena.AddPrimitive(schema.GetField(1), rows, Validity.NonNullable, PType.U8, narrow);
+            int root = arena.AddStruct(schema, rows, Validity.NonNullable, [wideNode, narrowNode]);
+
+            using MemoryStream stream = new MemoryStream();
+            await using (VortexFileWriter writer = VortexFileWriter.Create(
+                new StreamSegmentSink(stream, ownsStream: false), schema, new VortexWriteOptions { Compress = false }))
+            {
+                using RecordBatch batch = new RecordBatch(arena, root, 0);
+                await writer.WriteAsync(batch);
+                await writer.CompleteAsync();
+            }
+
+            return stream.ToArray();
+        }
+        finally
+        {
+            arena.Reset();
+        }
+    }
+
     // The same failure, delivered the way a REAL source delivers it. FailAfterSource above throws
     // from a non-async method, so its ValueTask is never created and MoveNextAsync's own
     // `catch { lane.Context.ResetBatch(); throw; }` runs. Every async ISegmentSource - including the
@@ -270,7 +365,10 @@ public sealed class ScanRobustnessTests
         {
             _inner = new TrackingSegmentSource(inner);
             _failOnCall = failOnCall;
+            ReadsInPlace = inner.ReadsInPlace;
         }
+
+        public bool ReadsInPlace { get; }
 
         internal List<int> RequestCounts { get; } = new List<int>();
 
@@ -310,22 +408,34 @@ public sealed class ScanRobustnessTests
         public ValueTask DisposeAsync() => _inner.DisposeAsync();
     }
 
-    /// <summary>A tracking source that starts failing after <c>n</c> successful batched reads.</summary>
+    /// <summary>
+    /// A tracking source that starts failing after <c>n</c> successful batched reads. It reads in
+    /// place as the source it wraps does, unless told to stand for a source that fetches.
+    /// </summary>
     private sealed class FailAfterSource : ISegmentReader
     {
         private readonly TrackingSegmentSource _inner;
         private readonly int _allow;
         private int _calls;
 
-        internal FailAfterSource(ISegmentReader inner, int allow)
+        internal FailAfterSource(ISegmentReader inner, int allow, bool? readsInPlace = null)
         {
             _inner = new TrackingSegmentSource(inner);
             _allow = allow;
+            ReadsInPlace = readsInPlace ?? inner.ReadsInPlace;
         }
+
+        public bool ReadsInPlace { get; }
 
         internal int Live => _inner.LiveOwners;
 
         internal bool AnyOverReleased => _inner.AnyOverReleased;
+
+        /// <summary>The ranges handed out, the tail an open reads among them.</summary>
+        internal List<SegmentOwner> Ranges { get; } = [];
+
+        /// <summary>How many slots of the set that failed were filled before it reached this source.</summary>
+        internal int FilledBeforeFailure { get; private set; }
 
         public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken) =>
             _inner.GetLengthAsync(cancellationToken);
@@ -337,15 +447,24 @@ public sealed class ScanRobustnessTests
         {
             if (++_calls > _allow)
             {
+                for (int slot = 0; slot < requests.Count; slot++)
+                {
+                    FilledBeforeFailure += requests.IsFilled(slot) ? 1 : 0;
+                }
+
                 throw new IOException("the disk went away");
             }
 
             return _inner.ReadManyAsync(requests, cancellationToken);
         }
 
-        public ValueTask<SegmentOwner> ReadRangeAsync(
-            long offset, int length, int alignment, CancellationToken cancellationToken) =>
-            _inner.ReadRangeAsync(offset, length, alignment, cancellationToken);
+        public async ValueTask<SegmentOwner> ReadRangeAsync(
+            long offset, int length, int alignment, CancellationToken cancellationToken)
+        {
+            SegmentOwner range = await _inner.ReadRangeAsync(offset, length, alignment, cancellationToken);
+            Ranges.Add(range);
+            return range;
+        }
 
         public ValueTask DisposeAsync() => _inner.DisposeAsync();
     }

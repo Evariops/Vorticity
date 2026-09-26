@@ -58,10 +58,11 @@ above, or your own `ISegmentSource` ([object-store.md](object-store.md)). A path
 `session.OpenAsync(path)` is memory-mapped by its first scan, and a mapping has nothing to bound or
 to cache, unless the session sets `MapFiles` to false: the path is then read as a
 `FileSegmentSource` would read it, through both. With the
-cache, a fifth scan of the file made 51 requests and the cache served all 51; over the five scans
-it counted 195 hits and 60 misses, and held 1 459 KiB, the data segments of a 1.5 MB file. The
-concurrent scans missed a few more than the file's 51 segments: two scans that ask for one at the
-same moment both miss it.
+cache, a fifth scan of the file made 45 requests and the cache served all 45; over the five scans
+it counted 177 hits and 48 misses, and held 1 431 KiB, the data segments of a 1.5 MB file but for
+the six lying in the tail its open read, which the file serves itself. The concurrent scans missed
+a few more than the 45 segments they ask for: two scans that ask for one at the same moment both
+miss it.
 
 ## What is safe to share
 

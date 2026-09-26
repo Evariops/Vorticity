@@ -279,6 +279,7 @@ internal sealed class TerminalScan
         long batch = decodes.Next++;
         SplitExecution.Window(context, decodes.Plan, split);
         SplitExecution.Register(context, _tree, in _mask, split);
+        VortexFile.FillFromTail(_file.Segments, context.Segments);
         decodes.Held.Claim(context.Segments, batch, waiter: null);
         try
         {

@@ -173,6 +173,9 @@ public sealed class ObjectAdapterTests
         DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
         DType schema = types.Struct(["key", "measure"], [i64, f64], Nullability.NonNullable);
 
+        // Measures drawn at random, which no encoding shrinks: the file is several times the window
+        // an open reads at its end, so a scan reads most of it from the store.
+        Random draw = new Random(0x0B1EC7);
         await using ObjectSegmentSink sink = new ObjectSegmentSink(store, key);
         await using (VortexFileWriter writer = VortexFileWriter.Create(
             sink, schema, new VortexWriteOptions { RowBlockSize = 2_048, DataBlockTargetBytes = 64 << 10 }))
@@ -188,7 +191,7 @@ public sealed class ObjectAdapterTests
                 for (int row = 0; row < batchRows; row++)
                 {
                     keyValues[row] = start + row;
-                    measureValues[row] = (start + row) / 8.0;
+                    measureValues[row] = draw.NextDouble();
                 }
 
                 int keyNode = arena.AddPrimitive(i64, batchRows, Validity.NonNullable, PType.I64, keys);

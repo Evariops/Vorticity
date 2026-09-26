@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -69,54 +70,76 @@ internal sealed class SessionReader : ISegmentReader
             return;
         }
 
-        bool[]? served = null;
-        if (_cache is not null)
-        {
-            for (int slot = 0; slot < requests.Count; slot++)
-            {
-                if (requests.IsFilled(slot))
-                {
-                    continue;
-                }
-
-                SegmentSpec spec = requests.GetSpec(slot);
-                if (_cache.TryGet(_inner, (long)spec.Offset, (int)spec.Length, out SegmentOwner owner, out VortexBuffer view))
-                {
-                    try
-                    {
-                        requests.SetSharedResult(slot, owner, view);
-                    }
-                    finally
-                    {
-                        owner.Release();
-                    }
-
-                    requests.NoteCacheHit();
-                    (served ??= new bool[requests.Count])[slot] = true;
-                }
-            }
-        }
-
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // Only what the source reads goes into the cache: a slot filled before the read comes from
+        // memory the caller holds, a segment its scan kept or the tail its file read, and a slot
+        // the cache fills is in it already.
+        bool[]? held = null;
         try
         {
-            await _inner.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            if (_cache is not null)
+            {
+                for (int slot = 0; slot < requests.Count; slot++)
+                {
+                    if (requests.IsFilled(slot))
+                    {
+                        (held ??= Marks(requests.Count))[slot] = true;
+                        continue;
+                    }
+
+                    SegmentSpec spec = requests.GetSpec(slot);
+                    if (_cache.TryGet(_inner, (long)spec.Offset, (int)spec.Length, out SegmentOwner owner, out VortexBuffer view))
+                    {
+                        try
+                        {
+                            requests.SetSharedResult(slot, owner, view);
+                        }
+                        finally
+                        {
+                            owner.Release();
+                        }
+
+                        requests.NoteCacheHit();
+                        (held ??= Marks(requests.Count))[slot] = true;
+                    }
+                }
+            }
+
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await _inner.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+
+            if (_cache is not null)
+            {
+                for (int slot = 0; slot < requests.Count; slot++)
+                {
+                    if (held is null || !held[slot])
+                    {
+                        _cache.Add(_inner, (long)requests.GetSpec(slot).Offset, requests.GetOwner(slot), requests.GetBuffer(slot));
+                    }
+                }
+            }
         }
         finally
         {
-            _gate.Release();
-        }
-
-        if (_cache is not null)
-        {
-            for (int slot = 0; slot < requests.Count; slot++)
+            if (held is not null)
             {
-                if (served is null || !served[slot])
-                {
-                    _cache.Add(_inner, (long)requests.GetSpec(slot).Offset, requests.GetOwner(slot), requests.GetBuffer(slot));
-                }
+                ArrayPool<bool>.Shared.Return(held);
             }
         }
+    }
+
+    /// <summary>One mark per slot, all clear.</summary>
+    private static bool[] Marks(int count)
+    {
+        bool[] marks = ArrayPool<bool>.Shared.Rent(count);
+        Array.Clear(marks, 0, count);
+        return marks;
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]

@@ -48,7 +48,7 @@ CompactionResult? compacted = await dataset.CompactAsync();
 
 ```
 compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128962 bytes in and 79866 out, 50000 rows
-  cost: 56 requests (42 get, 10 head, 2 put, 0 delete, 2 list), 56 dependent steps, 230796 bytes read, 80479 written
+  cost: 26 requests (12 get, 10 head, 2 put, 0 delete, 2 list), 26 dependent steps, 133220 bytes read, 80479 written
 now: 1 objects, lag 0; again: nothing to do
 ```
 
@@ -72,7 +72,7 @@ DatasetVerification since = await dataset.VerifyAsync(since: checkedAt);
 ```
 
 ```
-verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 11 requests (8 get, 3 head, 0 put, 0 delete, 0 list), 11 dependent steps, 147323 bytes read, 0 written
+verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 11 requests (8 get, 3 head, 0 put, 0 delete, 0 list), 11 dependent steps, 147381 bytes read, 0 written
 verify since 12: holds True, 1 objects, 1 pages; cost: 12 requests (9 get, 3 head, 0 put, 0 delete, 0 list), 12 dependent steps, 28850 bytes read, 0 written
 ```
 

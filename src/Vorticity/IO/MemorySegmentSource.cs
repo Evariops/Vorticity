@@ -128,6 +128,8 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
         return new ValueTask<SegmentOwner>(View(offset, available, alignment));
     }
 
+    bool ISegmentReader.ReadsInPlace => true;
+
     /// <summary>Releases the bytes once the last lease is disposed.</summary>
     /// <returns>A completed task.</returns>
     public ValueTask DisposeAsync()

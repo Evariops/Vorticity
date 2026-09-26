@@ -301,17 +301,14 @@ internal sealed class BloomPruner
         }
     }
 
-    /// <summary>Reads one origin's regions, counting them.</summary>
+    /// <summary>Reads one origin's regions, counting those its source is asked for.</summary>
     private async ValueTask ReadAsync(
         VortexFile file, int origin, SegmentRequestSet requests, CancellationToken cancellationToken)
     {
-        Segments += requests.Count;
-        for (int i = 0; i < requests.Count; i++)
-        {
-            Bytes += requests.GetSpec(i).Length;
-        }
-
-        await file.IndexSourceOf(origin).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+        ISegmentReader reader = file.IndexSourceOf(origin);
+        Segments += Scanning.ScanMetrics.Unread(requests, reader, out long bytes);
+        Bytes += bytes;
+        await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

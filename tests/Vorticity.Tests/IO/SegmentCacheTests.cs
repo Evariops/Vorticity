@@ -57,6 +57,38 @@ public sealed class SegmentCacheTests
     }
 
     [Fact]
+    public async Task ASlotFilledBeforeTheReadIsNotKept()
+    {
+        // Filled from memory the caller already holds, a segment its scan kept or the tail its file
+        // read: the session did not read it, and keeping it would hold its bytes twice.
+        byte[] content = Pattern(40_000);
+        using TempFile file = new TempFile(content);
+        SegmentCache cache = new SegmentCache(1 << 20);
+        await using VortexSession session = VortexSession.Create(options => options.SegmentCache = cache);
+        FileSegmentSource source = new FileSegmentSource(file.Path_);
+        ISegmentReader reader = SessionReader.Wrap(source, session);
+        try
+        {
+            using SegmentRequestSet set = new SegmentRequestSet();
+            int held = set.Add(Spec(0, 1_000));
+            set.Add(Spec(8_192, 1_000));
+            using (SegmentOwner owner = PinnedArraySegmentOwner.CopyOf(content.AsSpan(0, 1_000), 64))
+            {
+                set.SetSharedResult(held, owner, owner.Buffer);
+            }
+
+            await reader.ReadManyAsync(set, CancellationToken.None);
+
+            Assert.False(cache.TryGet(source, 0, 1_000, out _, out _));
+            Assert.Equal(1_000, cache.Size);
+        }
+        finally
+        {
+            await reader.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task ASegmentThatIsAllItsBlockHoldsIsKeptWithoutACopy()
     {
         byte[] content = Pattern(40_000);

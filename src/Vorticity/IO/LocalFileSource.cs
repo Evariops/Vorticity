@@ -207,6 +207,9 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
         }
     }
 
+    // A scan maps the file before it reads a data segment.
+    bool ISegmentReader.ReadsInPlace => true;
+
     /// <summary>Drops the reader's reference on the mapping and closes the handle; leases already handed out stay valid.</summary>
     /// <returns>A completed task.</returns>
     public ValueTask DisposeAsync()

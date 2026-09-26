@@ -87,16 +87,33 @@ internal sealed class ScanMetrics
     /// <param name="segments">The request set, registered and not yet read.</param>
     /// <param name="bytes">Their bytes.</param>
     /// <returns>How many.</returns>
-    internal static int Unread(IO.SegmentRequestSet segments, out long bytes)
+    internal static int Unread(IO.SegmentRequestSet segments, out long bytes) => Unread(segments, null, out bytes);
+
+    /// <summary>
+    /// The slots of a set the source is about to be asked for, when the set has not been filled
+    /// from the tail of the file <paramref name="reader"/> may be: those the tail does not hold.
+    /// </summary>
+    /// <param name="segments">The request set, registered and not yet read.</param>
+    /// <param name="reader">The reader the set is read through, or null.</param>
+    /// <param name="bytes">Their bytes.</param>
+    /// <returns>How many.</returns>
+    internal static int Unread(IO.SegmentRequestSet segments, IO.ISegmentReader? reader, out long bytes)
     {
+        VortexFile? file = reader as VortexFile;
         int count = 0;
         bytes = 0;
         for (int i = 0; i < segments.Count; i++)
         {
-            if (!segments.IsFilled(i))
+            if (segments.IsFilled(i))
+            {
+                continue;
+            }
+
+            Serialization.Schemas.SegmentSpec spec = segments.GetSpec(i);
+            if (file is null || !file.Holds(in spec))
             {
                 count++;
-                bytes += segments.GetSpec(i).Length;
+                bytes += spec.Length;
             }
         }
 
@@ -108,7 +125,7 @@ internal sealed class ScanMetrics
     /// the process's counters, when a listener is attached.
     /// </summary>
     /// <param name="metrics">The scan's sink, or null.</param>
-    /// <param name="segments">The request set, registered, filled with what the scan holds, and not yet read.</param>
+    /// <param name="segments">The request set, registered, filled with what the scan and the file's tail hold, and not yet read.</param>
     /// <returns>Whether there is anything to ask: when not, the set is complete already and the source is not called.</returns>
     internal static bool Note(ScanMetrics? metrics, IO.SegmentRequestSet segments)
     {

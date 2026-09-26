@@ -111,6 +111,63 @@ public sealed class MergeFanInTests
         Assert.Equal(options.MaxOpenObjects, metrics.CacheHits);
     }
 
+    // Each object is smaller than the window an open reads at its end, so the open reads it whole
+    // and its rows cost the store nothing more: one read per object the walk opens, and none for
+    // an object the cache kept open.
+    [Fact]
+    public async Task AWalkReadsTheStoreOnlyToOpenAnObject()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        DataReads store = new DataReads(inner);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        for (int residue = 0; residue < Objects; residue++)
+        {
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
+        }
+
+        Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder(), ct));
+        Interlocked.Exchange(ref store.Count, 0);
+        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        Assert.Equal(Objects * PerObject, await WalkAsync(dataset.ScanBuilder().WithMetrics(metrics), ct));
+
+        Assert.Equal(metrics.ObjectsOpened - metrics.CacheHits, Volatile.Read(ref store.Count));
+    }
+
+    /// <summary>A store that counts the ranges read from data objects, and not from commits.</summary>
+    private sealed class DataReads(IObjectStore inner) : IObjectStore
+    {
+        internal long Count;
+
+        public ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken)
+        {
+            if (key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref Count);
+            }
+
+            return inner.GetRangeAsync(key, offset, length, cancellationToken);
+        }
+
+        public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
+            inner.HeadAsync(key, cancellationToken);
+
+        public ValueTask<PutOutcome> PutIfAbsentAsync(
+            string key, System.IO.Pipelines.PipeReader content, long length, CancellationToken cancellationToken) =>
+            inner.PutIfAbsentAsync(key, content, length, cancellationToken);
+
+        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
+            inner.DeleteAsync(keys, cancellationToken);
+
+        public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
+            inner.ListAsync(prefix, startAfter, cancellationToken);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
     private static async Task<long> WalkAsync(DatasetScanBuilder scan, CancellationToken ct)
     {
         long rows = 0;

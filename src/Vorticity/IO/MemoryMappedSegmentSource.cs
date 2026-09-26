@@ -258,6 +258,8 @@ public sealed class MemoryMappedSegmentSource : ISegmentSource, ISegmentReader
         }
     }
 
+    bool ISegmentReader.ReadsInPlace => true;
+
     /// <summary>Drops the source's reference to the mapping; leases still held keep it alive until they are disposed.</summary>
     /// <returns>A completed task.</returns>
     public ValueTask DisposeAsync()

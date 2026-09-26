@@ -178,6 +178,9 @@ internal sealed class RecordingSegmentSource : ISegmentReader
     }
 
     public ValueTask DisposeAsync() => _inner.DisposeAsync();
+
+    // A recording of a mapped file reads in place as the file does, so that it sees every request.
+    bool ISegmentReader.ReadsInPlace => _inner.ReadsInPlace;
 }
 
 /// <summary>

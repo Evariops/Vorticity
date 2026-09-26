@@ -43,13 +43,14 @@ public sealed class RoundTripCountTests
     /// The ceilings of 1 and 2 are exactly the format's promise of one or two round trips to first
     /// data. Raising either number means the format's central promise got worse: say in the commit
     /// message which extra fetch was added and why it cannot be coalesced into the set
-    /// `ReadManyAsync` already receives.
+    /// `ReadManyAsync` already receives. A file shorter than the window an open reads is read whole
+    /// by its open, so its first batch costs no trip of its own.
     /// </remarks>
     private static readonly (string Entry, int OpenCeiling, int FirstBatchCeiling)[] Files =
     [
         ("containers/zoned_many_zones_nulls", 1, 2),
         ("distributions/high_cardinality_i64_r8193", 1, 2),
-        ("types/utf8_nullable_r1025", 1, 2),
+        ("types/utf8_nullable_r1025", 1, 1),
     ];
 
     [Fact]

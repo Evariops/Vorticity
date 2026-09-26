@@ -100,15 +100,16 @@ await using (VortexFile file = await session.OpenAsync(counting))
 ```
 
 ```
-the open: 1 request, 65536 bytes
+the open: 1 request, 65588 bytes
 CountAsync 1000000, MaxAsync 49.9: still 1 request
 ```
 
-One read of the last 64 KiB. It finds the postscript, and through it the schema, the layout, the
-footer and the file statistics; one of them that begins before that window costs one more read,
-issued once for the whole gap. Metadata values are read when asked for, from the tail the open
-already holds when they lie in it. Neither the row count nor `MaxAsync` on a column the statistics
-cover asks for anything more.
+One read of the last 64 KiB, from the 64-byte boundary before them so that the segments inside keep
+their alignment: 52 bytes more here. It finds the postscript, and through it the schema, the
+layout, the footer and the file statistics; one of them that begins before that window costs one
+more read, issued once for the whole gap. Metadata values are read when asked for, from the tail
+the open already holds when they lie in it. Neither the row count nor `MaxAsync` on a column the
+statistics cover asks for anything more.
 
 `VortexOpenOptions` shapes the open:
 
@@ -119,12 +120,12 @@ await using (VortexFile file = await session.OpenAsync(told, wide))
 ```
 
 ```
-InitialReadSize 256 KiB: 1 request, 262144 bytes
+InitialReadSize 256 KiB: 1 request, 262196 bytes
 ```
 
 | option | default | what it changes |
 |---|---|---|
-| `InitialReadSize` | 65 536 | the tail read; raise it for a file whose footer is large, so that the open stays one request |
+| `InitialReadSize` | 65 536 | the tail read; raise it for a file whose footer is large, so that the open stays one request, or, over a source that fetches, to hold a small file whole |
 | `Length` | probed | skips asking the source for its length |
 | `Schema` | the file's | a schema for a file written without one, or to skip reading the embedded one |
 | `TornTail` | `ReadPrevious` | `Refuse` throws on a torn tail instead of opening the version before it |
@@ -138,17 +139,19 @@ await using VortexSession cached = VortexSession.Create(options => options.Segme
 ```
 
 ```
-a full scan: the plan names 51 segments, 1494044 bytes; the source served 51 requests, 1494044 bytes
-with a segment cache, scan 1: the source served 51 requests, 1494044 bytes; 0 cache hits
-with a segment cache, scan 2: the source served 0 requests, 0 bytes; 51 cache hits
+a full scan: the plan names 45 segments, 1465556 bytes; the source served 45 requests, 1465556 bytes
+with a segment cache, scan 1: the source served 45 requests, 1465556 bytes; 0 cache hits
+with a segment cache, scan 2: the source served 0 requests, 0 bytes; 45 cache hits
 ```
 
-The plan of a full scan names 51 segments, 1.49 MB, about the whole file, and the source serves
-exactly that: 51 requests for 1.49 MB. A scan reads each segment once, and a segment that spans
-several batches is shared by them rather than read again for each. The cache works across scans:
-the first scan of a session with a `SegmentCache` reads the same 51 segments and finds none in the
-cache, and a second scan of the same file reads nothing, the 51 segments coming from the cache.
-Over a source where a read is a request, that is the reason to give the session one.
+The plan of a full scan names 45 segments, 1.47 MB of the file's 1.51 MB, and the source serves
+exactly that: 45 requests for 1.47 MB. The file has 51 segments; the six that lie in the window
+the open read are served from it, and a file shorter than the window is read by its open alone. A
+scan reads each segment once, and a segment that spans several batches is shared by them rather
+than read again for each. The cache works across scans: the first scan of a session with a
+`SegmentCache` reads the same 45 segments and finds none in the cache, and a second scan of the
+same file reads nothing, the 45 segments coming from the cache. Over a source where a read is a
+request, that is the reason to give the session one.
 
 ## Watch out
 

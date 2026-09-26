@@ -59,7 +59,7 @@ public sealed class MapFilesTests
             long sum = 0;
             await using (VortexFile file = await session.OpenAsync(path, cancellationToken: TestContext.Current.CancellationToken))
             {
-                Assert.IsType<FileSegmentSource>(SessionReader.Unwrap(file.Segments));
+                Assert.IsType<FileSegmentSource>(SessionReader.Unwrap(file.Source));
                 await foreach (BatchView batch in file.Scan("id").WithCancellation(TestContext.Current.CancellationToken))
                 {
                     foreach (long value in batch.Column<long>("id").Values)

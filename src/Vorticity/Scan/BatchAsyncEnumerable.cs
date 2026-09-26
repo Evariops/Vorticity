@@ -698,8 +698,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <summary>The rows an exact index proved the filter selects, or null.</summary>
     private RowSelection? Proven => _filterProven ? _take : null;
 
-    private void Register(ScanContext context, RowRange rows) =>
+    private void Register(ScanContext context, RowRange rows)
+    {
         SplitExecution.Register(context, _tree, in _mask, rows);
+        VortexFile.FillFromTail(_source, context.Segments);
+    }
 
     /// <summary>
     /// Adds what the batch is about to ask of the source to the scan's sink: the segments it

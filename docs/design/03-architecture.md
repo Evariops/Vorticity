@@ -115,7 +115,10 @@ What an implementer of the seam must honour, since object storage lives outside 
 - **Cancellation** leaves a source's cache consistent: a segment is present whole or absent.
 
 The session adds one segment cache and one bound on reads in flight (`MaxConcurrentReads`) for every
-file it opens, for sources that do I/O; a mapped file and bytes in memory bypass both. A test-only
+file it opens, for sources that do I/O; a mapped file and bytes in memory bypass both. Over a source
+that does I/O, a file also serves every segment lying in the tail its open read, which is then
+neither asked of the source nor cached: the open reads that tail from a 64-byte boundary, so that a
+segment inside keeps the alignment it declares, and a file shorter than the tail is read once. A test-only
 HTTP source with injectable latency (`tests/Vorticity.Tests/IO/HttpRangeSegmentSource.cs`) is
 the proof that the seam holds for a remote store.
 

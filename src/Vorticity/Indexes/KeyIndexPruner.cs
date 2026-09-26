@@ -271,13 +271,10 @@ internal sealed class KeyIndexPruner
                 continue;
             }
 
-            Segments += requests.Count;
-            for (int i = 0; i < requests.Count; i++)
-            {
-                Bytes += requests.GetSpec(i).Length;
-            }
-
-            await file.IndexSourceOf(origin).ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            ISegmentReader reader = file.IndexSourceOf(origin);
+            Segments += Scanning.ScanMetrics.Unread(requests, reader, out long bytes);
+            Bytes += bytes;
+            await reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
             using ScanContext context = file.CreateIndexContext(origin);
             foreach ((Column column, Run run, Fence fence, int[] slots) in batch.Wanted)
             {
@@ -402,7 +399,7 @@ internal sealed class KeyIndexPruner
 
         await using (source.ConfigureAwait(false))
         {
-            Segments += source.Dictionaries;
+            Segments += source.DictionariesRead;
             Bytes += source.DictionaryBytes;
             for (int chunk = 0; chunk < source.Dictionaries; chunk++)
             {

@@ -696,7 +696,7 @@ internal sealed class ScanBuilder
             // The data segments of the live splits, plus what consulting each structure cost:
             // the same asking the metrics count, so that plan and outcome are one quantity. A
             // segment the scan holds is asked for once, so the distinct ones are what it asks for.
-            int toRead = ScanMetrics.Unread(segments, out long bytes);
+            int toRead = ScanMetrics.Unread(segments, _file.Segments, out long bytes);
 
             for (int i = 0; i < steps.Count; i++)
             {

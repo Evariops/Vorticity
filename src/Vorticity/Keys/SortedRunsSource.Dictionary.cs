@@ -53,6 +53,7 @@ internal sealed partial class SortedRunsSource
         }
 
         List<Run> runs = [];
+        int asked = 0;
         long read = 0;
         using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
         foreach (IndexRun meta in entry.Runs)
@@ -67,9 +68,13 @@ internal sealed partial class SortedRunsSource
                 }
 
                 context.ResetBatch();
-                SegmentSpec spec = SpecOf(file, flat);
-                read += spec.Length;
-                int slot = context.Segments.Add(spec);
+                int slot = context.Segments.Add(SpecOf(file, flat));
+                if (Scanning.ScanMetrics.Unread(context.Segments, file.Segments, out long bytes) > 0)
+                {
+                    asked++;
+                    read += bytes;
+                }
+
                 await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
                 Diagnostics.VortexEventSource.RunsRead(1);
                 RunSegment? values = Values(context, flat, slot, layout);
@@ -97,6 +102,7 @@ internal sealed partial class SortedRunsSource
         return (
             new SortedRunsSource(file, layout, storage, kind, [.. runs], KeySourceKind.Dictionary)
             {
+                DictionariesRead = asked,
                 DictionaryBytes = read,
             },
             null);
@@ -242,7 +248,10 @@ internal sealed partial class SortedRunsSource
     /// </summary>
     internal int Dictionaries => _source == KeySourceKind.Dictionary ? _runs.Length : 0;
 
-    /// <summary>What one segment read cost, summed over the chunks read at open.</summary>
+    /// <summary>The chunks read at open whose segment was asked of the source: one the file holds in its tail is not.</summary>
+    internal int DictionariesRead { get; private init; }
+
+    /// <summary>What those segments cost, summed.</summary>
     internal long DictionaryBytes { get; private init; }
 
     /// <summary>Chunk <paramref name="chunk"/>'s first row and its rows.</summary>

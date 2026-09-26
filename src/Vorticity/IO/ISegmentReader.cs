@@ -103,4 +103,10 @@ internal interface ISegmentReader : IAsyncDisposable
     /// <exception cref="VortexFormatException">The range starts past the end of the file.</exception>
     ValueTask<SegmentOwner> ReadRangeAsync(
         long offset, int length, int alignment, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Whether a read hands out the bytes where they lie, in memory or in a mapping, rather than
+    /// fetching them: a file then serves nothing from the tail its open read.
+    /// </summary>
+    bool ReadsInPlace => false;
 }

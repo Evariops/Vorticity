@@ -134,19 +134,20 @@ await using (VortexFile opened = await VortexSession.Default.OpenAsync(new Store
 ```
 
 ```
-open from the store: 1000000 rows; 2 requests (1 get, 1 head, 0 put, 0 list), 2 dependent steps, 65536 bytes read, 0 written
-mean of Celsius for Day >= 900: 30.000; 9 requests (9 get, 0 head, 0 put, 0 list), 9 dependent steps, 175228 bytes read, 0 written
-a full scan, 1000000 rows: 51 requests (51 get, 0 head, 0 put, 0 list), 44 dependent steps, 1494044 bytes read, 0 written
-a full scan through a session with a segment cache, 1000000 rows: 51 requests (51 get, 0 head, 0 put, 0 list), 43 dependent steps, 1494044 bytes read, 0 written
+open from the store: 1000000 rows; 2 requests (1 get, 1 head, 0 put, 0 list), 2 dependent steps, 65588 bytes read, 0 written
+mean of Celsius for Day >= 900: 30.000; 4 requests (4 get, 0 head, 0 put, 0 list), 4 dependent steps, 151392 bytes read, 0 written
+a full scan, 1000000 rows: 45 requests (45 get, 0 head, 0 put, 0 list), 40 dependent steps, 1465556 bytes read, 0 written
+a full scan through a session with a segment cache, 1000000 rows: 45 requests (45 get, 0 head, 0 put, 0 list), 45 dependent steps, 1465556 bytes read, 0 written
 ```
 
 The open costs one ranged read of the tail, plus the head the sample asks for the length. From
 there every projection and filter of the guide works, and each saves requests, not just bytes: a
-filtered mean reads 9 ranges of the file's 51 segments. The session's `MaxConcurrentReads` bounds
+filtered mean fetches 4 of the file's 51 segments. The session's `MaxConcurrentReads` bounds
 the reads in flight across every file it opens this way, and its segment cache applies too. A
-scan fetches each segment once, even a chunk that spans several blocks: 51 requests and 1.49 MB
-for a 1.51 MB file, with a cache or without. The cache pays across scans: a second scan through
-the same session fetches nothing ([open-a-file.md](open-a-file.md)).
+scan fetches each segment once, even a chunk that spans several blocks, and none that lies in the
+tail the open read: 45 requests and 1.47 MB for a 1.51 MB file, with a cache or without. The cache
+pays across scans: a second scan through the same session fetches nothing
+([open-a-file.md](open-a-file.md)).
 
 The source receives the ranges of a batch together, so a source over a network store can coalesce
 neighbouring ranges into one request; the sample's does not, to stay short. Because the reads of a

@@ -184,7 +184,6 @@ public sealed class VortexFileRoundTripTests
 
         await file.DisposeAsync();
         Assert.False(source.Disposed);
-        Assert.Same(source, file.Segments);
     }
 
     [Fact]

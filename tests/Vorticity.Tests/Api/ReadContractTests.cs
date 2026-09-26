@@ -70,10 +70,12 @@ public sealed class ReadContractTests
     {
         CountingSource source = new CountingSource(new MemoryMappedSegmentSource(await ContractFile.PathAsync()));
         await using VortexFile file = await VortexSession.Default.OpenAsync(source, cancellationToken: TestContext.Current.CancellationToken);
-        await using VortexFile planning = await VortexFile.OpenAsync(await ContractFile.PathAsync(), TestContext.Current.CancellationToken);
+        await using VortexFile planning = await VortexSession.Default.OpenAsync(
+            new CountingSource(new MemoryMappedSegmentSource(await ContractFile.PathAsync())), cancellationToken: TestContext.Current.CancellationToken);
 
         // The plan works itself out on a file of its own: an open file keeps the zone maps it
-        // decoded, so a scan after a plan on the same file would not ask for them again.
+        // decoded, so a scan after a plan on the same file would not ask for them again. That file
+        // is opened as this one is, so that its tail holds what this one's holds.
         int planned = 0;
         (ScanPlan plan, ScanStatistics statistics) = await RunAsync(file, planning, query, () => planned = source.Ranges.Length);
         SegmentRange[] asked = source.Ranges[planned..];
@@ -107,7 +109,8 @@ public sealed class ReadContractTests
         }
 
         SegmentRange[] asked = source.Ranges[opened..];
-        await using VortexFile planned = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
+        await using VortexFile planned = await VortexSession.Default.OpenAsync(
+            new CountingSource(new MemoryMappedSegmentSource(path)), cancellationToken: TestContext.Current.CancellationToken);
         ScanPlan plan = await planned.Scan<Reading>().Where(r => r.City == "Lyon").ExplainAsync(TestContext.Current.CancellationToken);
         long expected = 0;
         for (int row = 0; row < ContractFile.Rows; row++)

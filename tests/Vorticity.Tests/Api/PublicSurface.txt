@@ -1198,7 +1198,7 @@ Vorticity:     method string ToString()
 Vorticity:     method void Deconstruct(out string, out VortexType)
 Vorticity:     property VortexType Type { get; init; }
 Vorticity:     property string Name { get; init; }
-Vorticity: sealed class Vorticity.VortexFile : IAsyncDisposable
+Vorticity: sealed class Vorticity.VortexFile : ISegmentReader
 Vorticity:     method Scan Scan(ReadOnlySpan<string>)
 Vorticity:     method Scan<TRecord> Scan<TRecord>()
 Vorticity:     method ValueTask DisposeAsync()
