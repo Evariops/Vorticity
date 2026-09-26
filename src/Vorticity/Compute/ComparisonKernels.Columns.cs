@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Expressions;
@@ -126,6 +127,14 @@ internal static partial class ComparisonKernels
 
         /// <summary>Whether row <paramref name="index"/> holds a value on both sides.</summary>
         internal bool IsValid(int index) => _left.IsValid(index) && _right.IsValid(index);
+
+        /// <summary>Rows <paramref name="row"/> to <c>row + 63</c>, bit <c>i</c> set where both sides hold a value.</summary>
+        internal ulong Word(int row) => Side(_left, row) & Side(_right, row);
+
+        private static ulong Side(ValidityMask mask, int row) =>
+            mask.AllValid ? ulong.MaxValue
+            : mask.AllInvalid ? 0
+            : BitWords.Load(mask.Bits, mask.BitOffset + row);
     }
 
     /// <summary>Two boolean columns: four answers, one per pair of bits, chosen per row.</summary>
@@ -241,6 +250,20 @@ internal static partial class ComparisonKernels
         int rows = destination.Length;
         ReadOnlySpan<T> left = MemoryMarshal.Cast<byte, T>(leftBytes)[..rows];
         ReadOnlySpan<T> right = MemoryMarshal.Cast<byte, T>(rightBytes)[..rows];
+        // Where AVX-512 is, 64 rows a step and the rest, fewer, one at a time; elsewhere the test is
+        // a constant the jit folds, and the loops below are the whole method.
+        if (WordBytes.IsAccelerated && Vector512<T>.IsSupported)
+        {
+            for (int i = PairLanes<T, TOp>(left, right, in valid, destination); i < rows; i++)
+            {
+                destination[i] = valid.IsValid(i)
+                    ? (TOp.Holds(left[i], right[i]) ? Trilean.True : Trilean.False)
+                    : Trilean.Unknown;
+            }
+
+            return;
+        }
+
         if (valid.AllValid)
         {
             for (int i = 0; i < rows; i++)
@@ -257,6 +280,53 @@ internal static partial class ComparisonKernels
                 ? (TOp.Holds(left[i], right[i]) ? Trilean.True : Trilean.False)
                 : Trilean.Unknown;
         }
+    }
+
+    /// <summary>
+    /// The verdicts of whole blocks of 64 rows of two columns: the operator over 512-bit vectors
+    /// of each side, their lanes' masks gathered into a word, the word spread back to a byte a row.
+    /// </summary>
+    /// <returns>The rows answered, a multiple of 64; the rest are the caller's.</returns>
+    /// <remarks>
+    /// A row null on either side is compared like any other and its verdict replaced by unknown:
+    /// the two validities are one word each per block, and their conjunction is the rows that
+    /// hold a verdict.
+    /// </remarks>
+    private static int PairLanes<T, TOp>(
+        ReadOnlySpan<T> left, ReadOnlySpan<T> right, in BothValid valid, Span<byte> destination)
+        where TOp : struct, IOrderOp
+    {
+        int rows = destination.Length;
+        int lanes = Vector512<T>.Count;
+        WordBytes spread = WordBytes.Create();
+        ref T a0 = ref MemoryMarshal.GetReference(left);
+        ref T b0 = ref MemoryMarshal.GetReference(right);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        bool allValid = valid.AllValid;
+        int i = 0;
+        for (; i <= rows - 64; i += 64)
+        {
+            ulong held = 0;
+            for (int row = 0; row < 64; row += lanes)
+            {
+                nuint at = (nuint)(i + row);
+                held |= TOp.Lanes(Vector512.LoadUnsafe(ref a0, at), Vector512.LoadUnsafe(ref b0, at))
+                    .ExtractMostSignificantBits() << row;
+            }
+
+            if (allValid)
+            {
+                spread.Ones(held).StoreUnsafe(ref into, (nuint)i);
+                continue;
+            }
+
+            // A valid row's verdict is 1 or 0 and a null row's 2: Unknown is the ones doubled.
+            ulong both = valid.Word(i);
+            Vector512<byte> unknown = spread.Ones(~both);
+            (spread.Ones(held & both) | (unknown + unknown)).StoreUnsafe(ref into, (nuint)i);
+        }
+
+        return i;
     }
 
     /// <summary>
