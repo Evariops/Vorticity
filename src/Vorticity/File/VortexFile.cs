@@ -44,8 +44,10 @@ namespace Vorticity;
 /// <see cref="FileLength"/>, <see cref="FileStatistics"/>, the metadata keys and specs -- and go on
 /// answering, because the answer is still true and a guard on them would be a branch on a member
 /// a scan reads. A scan built from a disposed file fails at its first read instead: its source is
-/// gone. Treat a disposed file as gone regardless; the distinction is what protects memory, not a
-/// licence to keep using one.
+/// gone. The check is made on entry, so it turns a use after the dispose into that exception, not a
+/// use that races it: dispose a file once nothing uses it, no scan running and no member being
+/// read, as with any disposable. A read that races the dispose may read the tail from a buffer
+/// already given back.
 /// </para>
 /// </remarks>
 public sealed partial class VortexFile : IAsyncDisposable

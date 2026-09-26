@@ -68,7 +68,7 @@ same moment both miss it.
 | | |
 |---|---|
 | `VortexSession` | **thread-safe**, and meant to be shared by every request of a process |
-| `VortexFile` | **thread-safe**: concurrent scans of one open file are expected |
+| `VortexFile` | **thread-safe**: concurrent scans of one open file are expected; dispose it once none runs |
 | `ISegmentSource` | must be thread-safe; the built-in ones are |
 | `Scan<TRecord>`, `Scan` | **single-use, one thread**: build it, then run one sink |
 | `Columns<TRecord>`, `Column<T>`, `BatchView` | valid inside the loop body only; the compiler holds you to it |
