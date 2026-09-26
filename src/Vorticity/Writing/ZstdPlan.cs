@@ -2,11 +2,14 @@ using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.IO.Compression;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;
 
@@ -471,6 +474,94 @@ internal readonly struct ZstdPlan
     /// A primitive column: the stored stream is the valid values back to back, with no length
     /// prefixes, since the decoder scatters them using the fixed width alone.
     /// </summary>
+    /// <summary>Bytes past a compacted stream a vector store may write over: one 512-bit vector.</summary>
+    private const int CompactSlack = 64;
+
+    /// <summary>
+    /// The valid values of rows <paramref name="from"/> to <paramref name="to"/>, laid after the
+    /// <paramref name="count"/> already in <paramref name="stream"/>; the new count.
+    /// </summary>
+    /// <remarks>
+    /// Where there are 512-bit vectors, each vector of rows is compressed to its valid lanes in a
+    /// register -- <c>vpcompress</c>, whose form that writes memory Zen 4 runs slowly -- and stored
+    /// whole at the next free value, the count moving on by the lanes kept: a store past the values
+    /// is written over by the next or lies in the stream's <see cref="CompactSlack"/>. The rows
+    /// left, and every row elsewhere, are written whether valid or not and the count moves by the
+    /// row's bit, a store and an add where a copy a row was a call.
+    /// </remarks>
+    internal static int Compact<T>(
+        ReadOnlySpan<byte> source, in ValidityReader valid, int from, int to, Span<byte> stream, int count)
+        where T : unmanaged
+    {
+        if (valid.IsAllInvalid)
+        {
+            return count;
+        }
+
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(source);
+        Span<T> into = MemoryMarshal.Cast<byte, T>(stream);
+        ReadOnlySpan<byte> bits = valid.Bits;
+        int offset = valid.BitOffset;
+        bool allValid = valid.IsAllValid;
+        ref T value = ref MemoryMarshal.GetReference(values);
+        ref T target = ref MemoryMarshal.GetReference(into);
+        int i = from;
+        if (Compute.WordBytes.IsAccelerated
+            && (Unsafe.SizeOf<T>() >= 4 ? Avx512F.IsSupported : Avx512Vbmi2.IsSupported)
+            && (long)into.Length * Unsafe.SizeOf<T>() >= ((long)count + (to - from)) * Unsafe.SizeOf<T>() + CompactSlack)
+        {
+            Compute.WordBytes spread = Compute.WordBytes.Create();
+            int lanes = Vector512<T>.Count;
+            ulong groupBits = lanes == 64 ? ulong.MaxValue : (1UL << lanes) - 1;
+            for (; i + 64 <= to; i += 64)
+            {
+                ulong word = allValid ? ulong.MaxValue : BitWords.Load(bits, offset + i);
+                for (int group = 0; group < 64 / lanes; group++)
+                {
+                    Vector512<T> row = Vector512.LoadUnsafe(ref value, (nuint)(i + (group * lanes)));
+                    Vector512<T> kept = spread.Lanes<T>(word, group);
+                    Vector512<T> packed = Unsafe.SizeOf<T>() switch
+                    {
+                        1 => Avx512Vbmi2.Compress(Vector512<byte>.Zero, kept.AsByte(), row.AsByte()).As<byte, T>(),
+                        2 => Avx512Vbmi2.Compress(Vector512<ushort>.Zero, kept.AsUInt16(), row.AsUInt16()).As<ushort, T>(),
+                        4 => Avx512F.Compress(Vector512<uint>.Zero, kept.AsUInt32(), row.AsUInt32()).As<uint, T>(),
+                        _ => Avx512F.Compress(Vector512<ulong>.Zero, kept.AsUInt64(), row.AsUInt64()).As<ulong, T>(),
+                    };
+                    packed.StoreUnsafe(ref target, (nuint)count);
+                    count += BitOperations.PopCount((word >> (group * lanes)) & groupBits);
+                }
+            }
+        }
+
+        for (; i < to; i++)
+        {
+            int at = offset + i;
+            int bit = allValid ? 1 : (bits[at >> 3] >> (at & 7)) & 1;
+            Unsafe.Add(ref target, count) = Unsafe.Add(ref value, i);
+            count += bit;
+        }
+
+        return count;
+    }
+
+    /// <summary><see cref="Compact{T}"/> for a width no integer has: a decimal's sixteen or thirty-two bytes, a row at a time.</summary>
+    private static int CompactWide(
+        ReadOnlySpan<byte> source, in ValidityReader valid, int from, int to, int width, Span<byte> stream, int count)
+    {
+        for (int i = from; i < to; i++)
+        {
+            if (!valid.IsValid(i))
+            {
+                continue;
+            }
+
+            source.Slice(i * width, width).CopyTo(stream.Slice(count * width, width));
+            count++;
+        }
+
+        return count;
+    }
+
     private static ZstdPlan? TryBuildPrimitive(
         CanonicalArena arena, CanonicalNode node, long canonicalSize, ArrayBlobWriter.Workspace? workspace, int frameRows,
         bool anyGain)
@@ -489,7 +580,7 @@ internal readonly struct ZstdPlan
         // longer than the rows this node owns, and a longer input is a different frame.
         bool allValid = node.Validity.IsAllValid;
         int blocks = Blocks(rows, frameRows);
-        byte[]? stream = allValid ? null : ArrayPool<byte>.Shared.Rent(rows * width);
+        byte[]? stream = allValid ? null : ArrayPool<byte>.Shared.Rent((rows * width) + CompactSlack);
         int[] frames = ArrayPool<int>.Shared.Rent(Math.Max(blocks, 1) * FrameFields);
         try
         {
@@ -504,16 +595,15 @@ internal readonly struct ZstdPlan
                 }
                 else
                 {
-                    for (int i = (int)Math.Min((long)block * frameRows, rows); i < end; i++)
+                    int from = (int)Math.Min((long)block * frameRows, rows);
+                    valueCount = width switch
                     {
-                        if (!valid.IsValid(i))
-                        {
-                            continue;
-                        }
-
-                        source.Slice(i * width, width).CopyTo(stream.AsSpan(valueCount * width, width));
-                        valueCount++;
-                    }
+                        1 => Compact<byte>(source, in valid, from, end, stream, valueCount),
+                        2 => Compact<ushort>(source, in valid, from, end, stream, valueCount),
+                        4 => Compact<uint>(source, in valid, from, end, stream, valueCount),
+                        8 => Compact<ulong>(source, in valid, from, end, stream, valueCount),
+                        _ => CompactWide(source, in valid, from, end, width, stream, valueCount),
+                    };
                 }
 
                 frames[(block * FrameFields) + 1] = valueCount * width;
