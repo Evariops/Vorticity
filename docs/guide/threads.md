@@ -35,9 +35,9 @@ A `VortexSession` holds what would otherwise be process-wide state, so that a ho
 
 | option | default | what it governs |
 |---|---|---|
-| `MemoryPool` | `AlignedMemoryPool.Shared` | every batch, segment and builder buffer; disposing the session returns them |
-| `SegmentCache` | none | segments kept across scans, one budget for every file of the session |
-| `MaxConcurrentReads` | 16 | reads in flight across every scan of every file of the session |
+| `MemoryPool` | `AlignedMemoryPool.Shared` | every batch and builder buffer, and the segments a source of yours reads; disposing the session returns them. The file sources of the library read into `AlignedMemoryPool.Shared` |
+| `SegmentCache` | none | segments kept across scans, one budget for every file of the session whose reads do I/O |
+| `MaxConcurrentReads` | 16 | reads in flight across every scan of every file of the session whose reads do I/O |
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer compresses on |
 | `IndexCacheBytes` | 64 MiB | decoded index runs |
 | `MappedFileCacheCount` | 64 | files opened from a path kept mapped once closed, so the next open of one takes over its mapping |

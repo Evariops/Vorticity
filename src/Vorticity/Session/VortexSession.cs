@@ -29,24 +29,43 @@ public sealed class VortexSessionOptions
     }
 
     /// <summary>
-    /// Where every batch, segment and builder buffer comes from. The engine decodes into 64-byte
-    /// aligned native blocks, so an <see cref="AlignedMemoryPool"/> serves it directly; another pool
-    /// serves the builders and the owned batches, and the engine falls back to <see cref="AlignedMemoryPool.Shared"/>.
+    /// Where the batches, the builders' buffers and the segments read through a caller's
+    /// <see cref="ISegmentSource"/> come from. The engine decodes into 64-byte aligned native blocks,
+    /// so an <see cref="AlignedMemoryPool"/> serves it directly; another pool serves the builders and
+    /// the owned batches, and the engine falls back to <see cref="AlignedMemoryPool.Shared"/>.
     /// </summary>
+    /// <remarks>
+    /// The sources of this library read segments into <see cref="AlignedMemoryPool.Shared"/>, whatever
+    /// the session's pool: a file opened from a path, a <see cref="FileSegmentSource"/>. A mapped file
+    /// or bytes in memory are read where they lie.
+    /// </remarks>
     public MemoryPool<byte> MemoryPool
     {
         get => _memoryPool;
         set => _memoryPool = Set(value ?? throw new ArgumentNullException(nameof(value)));
     }
 
-    /// <summary>Segments kept across scans, one budget for every file of the session; null keeps none.</summary>
+    /// <summary>
+    /// Segments kept across scans, one budget for every file of the session whose reads do I/O;
+    /// null keeps none.
+    /// </summary>
+    /// <remarks>
+    /// A file does I/O when it is opened from an <see cref="ISegmentSource"/> that reads, or from a
+    /// path while <see cref="MapFiles"/> is false. A mapped file, or bytes in memory, have nothing to
+    /// keep: their segments are read where they lie.
+    /// </remarks>
     public SegmentCache? SegmentCache
     {
         get => _segmentCache;
         set => _segmentCache = Set(value);
     }
 
-    /// <summary>The most reads in flight across every scan of every file of the session.</summary>
+    /// <summary>The most reads in flight across every scan of every file of the session whose reads do I/O.</summary>
+    /// <remarks>
+    /// As for <see cref="SegmentCache"/>: a file opened from an <see cref="ISegmentSource"/> that
+    /// reads, or from a path while <see cref="MapFiles"/> is false. A mapped file faults its pages in
+    /// instead of reading them, and bytes in memory are not read at all.
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
     public int MaxConcurrentReads
     {
