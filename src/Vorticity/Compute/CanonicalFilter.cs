@@ -109,7 +109,8 @@ internal static class CanonicalFilter
         if (count > 0)
         {
             // Uninitialized: the loop writes every code.
-            codes = arena.AllocateUninitialized(count * sizeof(uint), sizeof(uint), out Span<byte> raw);
+            codes = arena.AllocateUninitialized(
+                ArrayDecodeContext.CheckedMultiply(count, sizeof(uint), "filtered dictionary codes"), sizeof(uint), out Span<byte> raw);
             ReadOnlySpan<uint> source = MemoryMarshal.Cast<byte, uint>(node.Codes.Span);
             Span<uint> target = MemoryMarshal.Cast<byte, uint>(raw)[..count];
             for (int i = 0; i < target.Length; i++)
@@ -301,7 +302,8 @@ internal static class CanonicalFilter
             return VortexBuffer.Empty;
         }
 
-        VortexBuffer buffer = arena.AllocateUninitialized(count * width, width, out Span<byte> destination);
+        VortexBuffer buffer = arena.AllocateUninitialized(
+            ArrayDecodeContext.CheckedMultiply(count, width, "gathered values"), width, out Span<byte> destination);
         int outside = RowKernels.Gather(
             MemoryMarshal.AsBytes(indices), PType.I32, source, width, source.Length / width, destination, count);
         if (outside >= 0)

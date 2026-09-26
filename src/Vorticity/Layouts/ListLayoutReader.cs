@@ -166,8 +166,9 @@ internal sealed class ListLayoutReader : LayoutReader
         // `rows + 1` boundaries. Both are materialized here at the offsets' own width, so the
         // elements child is referenced by absolute position and needs no rebasing.
         int width = metadata.OffsetsPType.ByteWidth();
-        VortexBuffer offsetsOut = context.Canonical.Allocate(length * width, width, out Span<byte> starts);
-        VortexBuffer sizesOut = context.Canonical.Allocate(length * width, width, out Span<byte> sizes);
+        int bytes = ArrayDecodeContext.CheckedMultiply(length, width, "list offsets");
+        VortexBuffer offsetsOut = context.Canonical.Allocate(bytes, width, out Span<byte> starts);
+        VortexBuffer sizesOut = context.Canonical.Allocate(bytes, width, out Span<byte> sizes);
         ReadOnlySpan<byte> boundaries = offsets.Values.Span;
 
         // The selection is in the node's row space and the offsets window starts at the batch's

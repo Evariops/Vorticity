@@ -127,7 +127,7 @@ internal sealed class DeltaDecoder : ArrayDecoder
         // large for the pool, which get fresh pages on every scan, are worth leaving uninitialized:
         // the rule is the size, not the encoding.
         VortexBuffer output = CompressedValues.Allocate(
-            context, count * width, width, Id, out Span<byte> destination);
+            context, ArrayDecodeContext.CheckedMultiply(count, width, Id), width, Id, out Span<byte> destination);
 
         int within = first - (firstBlock * BlockSize);
         Undelta(bases.Values.Span, deltas.Values.Span, destination, width, lanes, within, count);

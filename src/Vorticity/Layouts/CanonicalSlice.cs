@@ -200,7 +200,8 @@ internal static class CanonicalSlice
         }
         else
         {
-            rebased = destination.AllocateUninitialized(count * sizeof(uint), sizeof(uint), out Span<byte> raw);
+            rebased = destination.AllocateUninitialized(
+                ArrayDecodeContext.CheckedMultiply(count, sizeof(uint), "sliced run ends"), sizeof(uint), out Span<byte> raw);
             Span<uint> into = MemoryMarshal.Cast<byte, uint>(raw)[..count];
             for (int i = 0; i < into.Length; i++)
             {
