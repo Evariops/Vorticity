@@ -203,6 +203,7 @@ fn take_repeat(args: &mut Vec<String>) -> Result<usize, ExitCode> {
 
 /// The processor time and the peak resident set of this process, the two figures the report pairs
 /// with the wall clock its parent keeps. `ru_maxrss` is bytes on macOS and kilobytes elsewhere.
+#[cfg(unix)]
 fn cost() -> (i64, i64) {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
@@ -219,6 +220,50 @@ fn cost() -> (i64, i64) {
     };
 
     (cpu_ms, rss_bytes)
+}
+
+/// The same two figures on Windows, which has no `getrusage`: the kernel and user times of
+/// `GetProcessTimes`, in 100 ns ticks, and the peak working set, which is what our side reads
+/// through `Process.PeakWorkingSet64`.
+#[cfg(windows)]
+fn cost() -> (i64, i64) {
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn GetProcessTimes(process: isize, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
+        fn K32GetProcessMemoryInfo(process: isize, counters: *mut ProcessMemoryCounters, cb: u32) -> i32;
+    }
+
+    let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+    let mut counters = ProcessMemoryCounters {
+        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        let process = GetCurrentProcess();
+        if GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) == 0
+            || K32GetProcessMemoryInfo(process, &mut counters, counters.cb) == 0
+        {
+            return (-1, -1);
+        }
+    }
+
+    ((kernel + user) as i64 / 10_000, counters.peak_working_set_size as i64)
 }
 
 fn field(args: &[String], at: usize) -> Result<CString, ExitCode> {
