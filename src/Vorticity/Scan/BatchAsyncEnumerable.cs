@@ -1166,7 +1166,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             if (count != rows && !_compact)
             {
                 // The block is delivered whole and the rows that passed are marked, not copied.
-                lane.Selection = SelectionWords(context.Canonical, window, rows);
+                lane.Selection = SelectionWords(context.Canonical, window, rows, out _);
                 lane.Selected = count;
             }
             else if (count != rows)
@@ -1250,8 +1250,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 }
             }
 
-            lane.Selected = Trilean.CountTrue(window);
-            lane.Selection = SelectionWords(context.Canonical, window, rows);
+            lane.Selection = SelectionWords(context.Canonical, window, rows, out int selected);
+            lane.Selected = selected;
         }
         finally
         {
@@ -1266,20 +1266,18 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>The true states of a filter window as 64-bit words, in the batch's arena.</summary>
-    private static Buffers.VortexBuffer SelectionWords(CanonicalArena arena, ReadOnlySpan<byte> window, int rows)
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="window">One state per row.</param>
+    /// <param name="rows">The rows of the window.</param>
+    /// <param name="selected">How many rows are selected: the words' popcount, for no second pass.</param>
+    private static Buffers.VortexBuffer SelectionWords(CanonicalArena arena, ReadOnlySpan<byte> window, int rows, out int selected)
     {
+        // Uninitialized: every word is written, the first one here in case there is no row.
         int words = Math.Max((rows + 63) >> 6, 1);
-        Buffers.VortexBuffer buffer = arena.Allocate(words * 8, 64, out Span<byte> raw);
+        Buffers.VortexBuffer buffer = arena.AllocateUninitialized(words * 8, 64, out Span<byte> raw);
         Span<ulong> bits = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(raw);
-        bits.Clear();
-        for (int row = 0; row < rows; row++)
-        {
-            if (window[row] == Trilean.True)
-            {
-                bits[row >> 6] |= 1UL << (row & 63);
-            }
-        }
-
+        bits[0] = 0;
+        selected = Trilean.ToWords(window[..rows], Trilean.True, equal: true, bits);
         return buffer;
     }
 

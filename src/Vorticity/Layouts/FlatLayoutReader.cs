@@ -943,36 +943,24 @@ internal sealed class FlatLayoutReader : LayoutReader
     private static int Answer(ScanContext context, ReadOnlySpan<byte> states, int total)
     {
         Arrays.CanonicalArena arena = context.Canonical;
-        int bytes = Math.Max((total + 7) / 8, 1);
+        states = states[..total];
 
-        VortexBuffer truth = arena.Allocate(bytes, 1, out Span<byte> bits);
-        bits.Clear();
-        bool unknown = false;
-        for (int row = 0; row < total; row++)
-        {
-            byte state = states[row];
-            if (state == Compute.Trilean.True)
-            {
-                bits[row >> 3] |= (byte)(1 << (row & 7));
-            }
-            else if (state == Compute.Trilean.Unknown)
-            {
-                unknown = true;
-            }
-        }
+        // Whole words, every one written: the first here in case there is no row, the rest by the
+        // kernel, which leaves the bits past the rows clear.
+        int bytes = Math.Max((total + 63) >> 6, 1) * sizeof(ulong);
+        VortexBuffer truth = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> bits);
+        Span<ulong> truthWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bits);
+        truthWords[0] = 0;
+        Compute.Trilean.ToWords(states, Compute.Trilean.True, equal: true, truthWords);
+        bool unknown = states.Contains(Compute.Trilean.Unknown);
 
         Validity validity = Validity.NonNullable;
         if (unknown)
         {
-            VortexBuffer known = arena.Allocate(bytes, 1, out Span<byte> valid);
-            valid.Clear();
-            for (int row = 0; row < total; row++)
-            {
-                if (states[row] != Compute.Trilean.Unknown)
-                {
-                    valid[row >> 3] |= (byte)(1 << (row & 7));
-                }
-            }
+            VortexBuffer known = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> valid);
+            Span<ulong> knownWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(valid);
+            knownWords[0] = 0;
+            Compute.Trilean.ToWords(states, Compute.Trilean.Unknown, equal: false, knownWords);
 
             validity = Validity.Bitmap(arena.AddBool(
                 context.Types.Bool(Types.Nullability.NonNullable), total, Validity.NonNullable,

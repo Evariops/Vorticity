@@ -1,4 +1,6 @@
 using System;
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
@@ -160,4 +162,82 @@ internal static class Trilean
     /// <param name="values">The evaluated predicate.</param>
     /// <remarks>The library's count, which compares a vector of states at a time.</remarks>
     internal static int CountTrue(ReadOnlySpan<byte> values) => values.Count(True);
+
+    /// <summary>
+    /// The rows whose state is <paramref name="state"/>, or is not when <paramref name="equal"/>
+    /// is false, as a bitmap of 64-bit words: bit <c>i % 64</c> of word <c>i / 64</c> for row
+    /// <c>i</c>.
+    /// </summary>
+    /// <param name="values">One state per row.</param>
+    /// <param name="state">The state asked about.</param>
+    /// <param name="equal">Whether a row's bit says it holds the state, or that it does not.</param>
+    /// <param name="words">
+    /// At least <c>ceil(rows / 64)</c> words, of which exactly those are written: the last one's bits
+    /// past the rows are clear whichever way the question is asked.
+    /// </param>
+    /// <returns>How many bits were set.</returns>
+    /// <remarks>
+    /// A compare of 64 states is one mask of 64 bits where there are 512-bit vectors (`vpcmpeqb`
+    /// into a mask register, one `kmovq` out) and four 16-bit ones where there are 128-bit vectors,
+    /// against a test and a branch per row. The count is the words' popcount, which the caller
+    /// would otherwise take with a second pass over the states.
+    /// </remarks>
+    internal static int ToWords(ReadOnlySpan<byte> values, byte state, bool equal, Span<ulong> words)
+    {
+        int rows = values.Length;
+        int full = rows >> 6;
+        if (words.Length < (rows + 63) >> 6)
+        {
+            throw new ArgumentException("The words cannot hold a bit per row.", nameof(words));
+        }
+
+        ref byte from = ref MemoryMarshal.GetReference(values);
+        ref ulong into = ref MemoryMarshal.GetReference(words);
+        ulong flip = equal ? 0 : ulong.MaxValue;
+        int count = 0;
+        int w = 0;
+        if (Vector512.IsHardwareAccelerated)
+        {
+            Vector512<byte> wanted = Vector512.Create(state);
+            for (; w < full; w++)
+            {
+                ulong word = Vector512.Equals(Vector512.LoadUnsafe(ref from, (nuint)w << 6), wanted)
+                    .ExtractMostSignificantBits() ^ flip;
+                Unsafe.Add(ref into, w) = word;
+                count += BitOperations.PopCount(word);
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated)
+        {
+            Vector128<byte> wanted = Vector128.Create(state);
+            for (; w < full; w++)
+            {
+                ref byte at = ref Unsafe.Add(ref from, (nint)w << 6);
+                ulong word = Vector128.Equals(Vector128.LoadUnsafe(ref at), wanted).ExtractMostSignificantBits()
+                    | ((ulong)Vector128.Equals(Vector128.LoadUnsafe(ref at, 16), wanted).ExtractMostSignificantBits() << 16)
+                    | ((ulong)Vector128.Equals(Vector128.LoadUnsafe(ref at, 32), wanted).ExtractMostSignificantBits() << 32)
+                    | ((ulong)Vector128.Equals(Vector128.LoadUnsafe(ref at, 48), wanted).ExtractMostSignificantBits() << 48);
+                word ^= flip;
+                Unsafe.Add(ref into, w) = word;
+                count += BitOperations.PopCount(word);
+            }
+        }
+
+        // What the vectors left, a word at a time: every word where there are none, and the last,
+        // partial one, whose bits past the rows are never set.
+        for (int row = w << 6; row < rows; row += 64)
+        {
+            int take = Math.Min(64, rows - row);
+            ulong word = 0;
+            for (int k = 0; k < take; k++)
+            {
+                word |= (ulong)((Unsafe.Add(ref from, row + k) == state) == equal ? 1 : 0) << k;
+            }
+
+            Unsafe.Add(ref into, row >> 6) = word;
+            count += BitOperations.PopCount(word);
+        }
+
+        return count;
+    }
 }
