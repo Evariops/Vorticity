@@ -34,7 +34,10 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     private readonly AlignedBufferPool? _pool;
     private readonly int _bucketIndex;
     private readonly int _capacity;
-    private readonly int _alignmentExponent;
+
+    // A byte and not an int, which the exponent never needs: the room it leaves holds
+    // DeclaredPressure without growing the object.
+    private readonly byte _alignmentExponent;
 
     private static long s_finalizedBlocks;
 
@@ -43,6 +46,14 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// its blocks through them rather than listing them in an array it would have to grow.
     /// </summary>
     internal NativeSegmentOwner? NextOwned;
+
+    /// <summary>
+    /// The bytes a lease of <see cref="AlignedMemoryPool"/> declared to the GC for this block, and
+    /// takes back when it is disposed. A lease dropped undisposed leaves them to the finalizer,
+    /// which frees the block: the lease itself, a <see cref="System.Buffers.MemoryManager{T}"/>,
+    /// has none, since a span of it can outlive it.
+    /// </summary>
+    internal int DeclaredPressure;
 
     /// <summary>
     /// Whether the arena whose chain holds this block kept it from the batch before, for an
@@ -60,7 +71,7 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     {
         _pointer = (nint)pointer;
         _capacity = capacity;
-        _alignmentExponent = alignmentExponent;
+        _alignmentExponent = (byte)alignmentExponent;
         _pool = pool;
         _bucketIndex = bucketIndex;
         Buffer = VortexBuffer.FromPointer((byte*)pointer, length, alignmentExponent);
@@ -75,6 +86,11 @@ internal sealed class NativeSegmentOwner : SegmentOwner
         if (FreeNative())
         {
             Interlocked.Increment(ref s_finalizedBlocks);
+        }
+
+        if (DeclaredPressure != 0)
+        {
+            AlignedMemoryPool.Declare(_pool, -DeclaredPressure);
         }
     }
 

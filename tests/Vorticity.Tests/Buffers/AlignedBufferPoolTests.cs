@@ -553,6 +553,29 @@ public sealed class AlignedBufferPoolTests
     private static WeakReference SweptPool() => new WeakReference(new AlignedBufferPool(maxRetainedBytes: 1 << 20).Swept());
 
     [Fact]
+    public void A_lease_takes_back_the_pressure_it_declared_disposed_or_dropped()
+    {
+        AlignedMemoryPool pool = new AlignedMemoryPool();
+        StrongBox<long> declared = AlignedMemoryPool.WatchPressure(pool);
+
+        pool.Rent(4096).Dispose();
+        Assert.Equal(0, Volatile.Read(ref declared.Value));
+
+        DropALease(pool);
+        for (int i = 0; i < 3 && Volatile.Read(ref declared.Value) != 0; i++)
+        {
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+            GC.WaitForPendingFinalizers();
+        }
+
+        Assert.Equal(0, Volatile.Read(ref declared.Value));
+        GC.KeepAlive(pool);
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    private static void DropALease(AlignedMemoryPool pool) => _ = pool.Rent(4096);
+
+    [Fact]
     public void A_pool_bounded_in_bytes_keeps_what_is_given_back_in_any_class_up_to_its_budget()
     {
         const int megabyte = 1024 * 1024;
