@@ -1,8 +1,12 @@
 // RecordBatch and the columns it hands out: the boundary row counts, and every malformed shape
 // throwing VortexFormatException and only that.
 using System;
+using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.File;
 using Vorticity.Scanning;
@@ -165,6 +169,40 @@ public sealed class RecordBatchTests
         // column view therefore must not reach the arena at all.
         Assert.Equal(0, context.Canonical.NodeCount);
         Assert.Throws<ObjectDisposedException>(() => { _ = batch.Column(0).Length; });
+    }
+
+    [Fact]
+    public async Task AnOwnedBatchCountsItsBlocksUntilItIsDisposedOrDropped()
+    {
+        AlignedMemoryPool pool = new AlignedMemoryPool();
+        StrongBox<long> held = OwnedBatchBytes.Watch(pool.Inner);
+        await using VortexSession session = VortexSession.Create(options => options.MemoryPool = pool);
+        using ColumnFixture f = new ColumnFixture();
+        int node = f.Int32Node(new int[100_000], Validity.NonNullable);
+
+        RecordBatch owned = RecordBatch.Own(f.Arena, node, 0, null, session, default, 0);
+        Assert.InRange(Volatile.Read(ref held.Value), 400_000L, long.MaxValue);
+        owned.Dispose();
+        Assert.Equal(0, Volatile.Read(ref held.Value));
+
+        // A batch nobody disposes gives its blocks back through their finalizers, which take them
+        // out of the balance.
+        Assert.InRange(DropAnOwnedBatch(f.Arena, node, session, held), 400_000L, long.MaxValue);
+        for (int i = 0; i < 3 && Volatile.Read(ref held.Value) != 0; i++)
+        {
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+            GC.WaitForPendingFinalizers();
+        }
+
+        Assert.Equal(0, Volatile.Read(ref held.Value));
+        GC.KeepAlive(pool);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static long DropAnOwnedBatch(CanonicalArena source, int node, VortexSession session, StrongBox<long> held)
+    {
+        _ = RecordBatch.Own(source, node, 0, null, session, default, 0);
+        return Volatile.Read(ref held.Value);
     }
 
     [Fact]

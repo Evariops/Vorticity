@@ -61,6 +61,12 @@ internal sealed class NativeSegmentOwner : SegmentOwner
     /// </summary>
     internal bool Idle;
 
+    /// <summary>
+    /// Whether the block holds bytes of a batch its caller owns, which <see cref="OwnedBatchBytes"/>
+    /// counts until the batch's arena gives the block back, or the finalizer frees it.
+    /// </summary>
+    internal bool InOwnedBatch;
+
     private unsafe NativeSegmentOwner(
         void* pointer,
         int capacity,
@@ -91,6 +97,11 @@ internal sealed class NativeSegmentOwner : SegmentOwner
         if (DeclaredPressure != 0)
         {
             AlignedMemoryPool.Declare(_pool, -DeclaredPressure);
+        }
+
+        if (InOwnedBatch)
+        {
+            OwnedBatchBytes.Count(_pool, -_capacity);
         }
     }
 

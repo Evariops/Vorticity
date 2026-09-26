@@ -17,9 +17,17 @@ namespace Vorticity;
 /// batch is disposed. Both the typed and the tool paths hand one out.
 /// </summary>
 /// <remarks>
+/// <para>
 /// <see cref="View"/> and <see cref="As{TRecord}"/> borrow from the batch, and everything they hand
 /// out is valid until <see cref="Dispose"/>. A batch is affine to one consumer and is not
 /// thread-safe; it may be handed to another thread, a channel for instance, and disposed there.
+/// </para>
+/// <para>
+/// A batch never disposed keeps its buffers until a collection finalizes it, and they then go back
+/// to the system rather than to the pool. The library asks for a collection in the background once
+/// the batches callers own hold 256 MiB, or an eighth of the memory the GC may use when that is
+/// less, and again each time what they hold doubles.
+/// </para>
 /// </remarks>
 public sealed class RecordBatch : IDisposable
 {
@@ -219,6 +227,7 @@ public sealed class RecordBatch : IDisposable
                 batch.Select(words, selected);
             }
 
+            owned.HoldBlocks();
             return batch;
         }
         catch

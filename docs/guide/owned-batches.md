@@ -64,8 +64,11 @@ A `RecordBatch` has its `Schema`, its `RowCount` and its `StartRow`, and two way
   ([untyped-files.md](untyped-files.md)).
 
 After `Dispose` both throw `ObjectDisposedException`, and so does every other member. A batch that
-is never disposed keeps its buffers from the session's pool; analyzer VX1002 flags one
-([diagnostics.md](diagnostics.md)).
+is never disposed keeps its buffers until a collection finalizes it, and they then go back to the
+system rather than to the pool. So that such batches cannot pile up, the library asks for a
+collection in the background once the batches its callers own hold 256 MiB, or an eighth of the
+memory the GC may use when that is less, and again each time what they hold doubles. Analyzer VX1002
+flags a batch that nothing disposes ([diagnostics.md](diagnostics.md)).
 
 ## Keeping one batch of many
 

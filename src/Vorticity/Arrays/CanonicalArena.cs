@@ -640,6 +640,7 @@ internal sealed partial class CanonicalArena
     /// </summary>
     public void Reset()
     {
+        long held = 0;
         NativeSegmentOwner? owner = _owned;
         while (owner is not null)
         {
@@ -647,12 +648,39 @@ internal sealed partial class CanonicalArena
             NativeSegmentOwner? next = owner.NextOwned;
             owner.NextOwned = null;
             owner.Idle = false;
+            held += owner.InOwnedBatch ? owner.Capacity : 0;
+            owner.InOwnedBatch = false;
             _pool.Return(owner);
             owner = next;
         }
 
         _owned = null;
+        if (held != 0)
+        {
+            OwnedBatchBytes.Count(_pool, -held);
+        }
+
         Clear();
+    }
+
+    /// <summary>
+    /// Counts the blocks of this arena, which a batch its caller owns holds, in
+    /// <see cref="OwnedBatchBytes"/> until <see cref="Reset"/> gives them back or their finalizers
+    /// free them.
+    /// </summary>
+    internal void HoldBlocks()
+    {
+        long held = 0;
+        for (NativeSegmentOwner? owner = _owned; owner is not null; owner = owner.NextOwned)
+        {
+            owner.InOwnedBatch = true;
+            held += owner.Capacity;
+        }
+
+        if (held != 0)
+        {
+            OwnedBatchBytes.Count(_pool, held);
+        }
     }
 
     /// <summary>
