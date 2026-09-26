@@ -508,9 +508,23 @@ internal sealed class DistinctTable
         ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(node.Values.Span).Slice(start, count);
         if (mask.AllValid)
         {
-            for (int i = 0; i < values.Length && !_abandoned; i++)
+            // A row equal to the one before takes its code without the hash or the probe, and so
+            // does the run it starts, measured a vector at a time: a sorted column or one of runs
+            // is mostly such rows. The one compare that decides it is all a column without runs
+            // pays.
+            int i = 0;
+            while (i < values.Length && !_abandoned)
             {
-                InsertFixed(ulong.CreateTruncating(values[i]));
+                T value = values[i];
+                InsertFixed(ulong.CreateTruncating(value));
+                i++;
+                if (i < values.Length && values[i] == value && !_abandoned)
+                {
+                    int run = RunLength(values[i..], value);
+                    _codes.AsSpan(_rows, run).Fill(_codes[_rows - 1]);
+                    _rows += run;
+                    i += run;
+                }
             }
 
             return;
@@ -526,6 +540,48 @@ internal sealed class DistinctTable
 
             InsertFixed(ulong.CreateTruncating(values[i]));
         }
+    }
+
+    /// <summary>How many of <paramref name="values"/>, from the first, equal <paramref name="value"/>.</summary>
+    /// <remarks>A vector of them at a time, the first that differs found by a count of trailing ones.</remarks>
+    private static int RunLength<T>(ReadOnlySpan<T> values, T value)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        ref T first = ref MemoryMarshal.GetReference(values);
+        int k = 0;
+        if (Vector256.IsHardwareAccelerated && Vector256<T>.IsSupported)
+        {
+            Vector256<T> repeated = Vector256.Create(value);
+            int lanes = Vector256<T>.Count;
+            for (; k <= values.Length - lanes; k += lanes)
+            {
+                uint same = Vector256.Equals(Vector256.LoadUnsafe(ref first, (nuint)k), repeated).ExtractMostSignificantBits();
+                if (same != (lanes == 32 ? uint.MaxValue : (1u << lanes) - 1))
+                {
+                    return k + BitOperations.TrailingZeroCount(~same);
+                }
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported)
+        {
+            Vector128<T> repeated = Vector128.Create(value);
+            int lanes = Vector128<T>.Count;
+            for (; k <= values.Length - lanes; k += lanes)
+            {
+                uint same = Vector128.Equals(Vector128.LoadUnsafe(ref first, (nuint)k), repeated).ExtractMostSignificantBits();
+                if (same != (1u << lanes) - 1)
+                {
+                    return k + BitOperations.TrailingZeroCount(~same);
+                }
+            }
+        }
+
+        while (k < values.Length && Unsafe.Add(ref first, k) == value)
+        {
+            k++;
+        }
+
+        return k;
     }
 
     /// <summary>A fixed-width value wider than a word, keyed by its bytes.</summary>
