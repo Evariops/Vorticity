@@ -2,6 +2,8 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
@@ -660,7 +662,7 @@ internal sealed class ZstdDecoder : ArrayDecoder
     /// Walking the set bits instead chains each value's row to the bit before it, which pays only
     /// for a word of few values, <see cref="SparseScatter"/> or fewer.
     /// </remarks>
-    private static void Expand<T>(
+    internal static void Expand<T>(
         ReadOnlySpan<byte> source, Span<byte> destination, in ValidityMask mask, int length)
         where T : unmanaged, IBinaryInteger<T>
     {
@@ -669,6 +671,8 @@ internal sealed class ZstdDecoder : ArrayDecoder
         ReadOnlySpan<byte> bits = mask.Bits;
         int bitOffset = mask.BitOffset;
         int next = 0;
+        bool expands = Expands<T>();
+        Compute.WordBytes spread = expands ? Compute.WordBytes.Create() : default;
         for (int row = 0; row < length; row += 64)
         {
             int span = Math.Min(64, length - row);
@@ -692,10 +696,58 @@ internal sealed class ZstdDecoder : ArrayDecoder
                 CompressedThrow.Format($"{Id} has more valid rows than decompressed values.");
             }
 
+            // A whole word whose values can be read a vector at a time is expanded in registers.
+            if (expands && span == 64 && next + 64 <= values.Length)
+            {
+                next = Expanded(values, ref MemoryMarshal.GetReference(rows[row..]), word, next, spread);
+                continue;
+            }
+
             next = count > SparseScatter
                 ? Scatter(values, ref MemoryMarshal.GetReference(rows[row..]), span, word, next)
                 : Walk(values, ref MemoryMarshal.GetReference(rows[row..]), word, next);
         }
+    }
+
+    /// <summary>Whether <typeparamref name="T"/>'s lanes expand in registers on this machine.</summary>
+    private static bool Expands<T>() =>
+        Compute.WordBytes.IsAccelerated && (Unsafe.SizeOf<T>() >= 4 ? Avx512F.IsSupported : Avx512Vbmi2.IsSupported);
+
+    /// <summary>
+    /// One mixed word's rows by <c>vpexpand</c>: for each vector of rows, the next values loaded
+    /// whole, laid on the rows whose bits are set and zero elsewhere, and the cursor moved on by
+    /// the bits' count.
+    /// </summary>
+    /// <returns>The next value after the word.</returns>
+    /// <remarks>
+    /// Eight rows a step for eight-byte values, sixteen for four, thirty-two for two, the whole word
+    /// for one: a load, an expand and a store, where the scatter writes each row. The expand runs
+    /// from a register to a register; it is its form that writes memory that is slow on Zen 4.
+    /// The caller has checked that 64 values can be read from <paramref name="next"/>, which covers
+    /// every load of the word, each at most a vector past values the word takes.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int Expanded<T>(ReadOnlySpan<T> values, ref T rows, ulong word, int next, Compute.WordBytes spread)
+        where T : unmanaged
+    {
+        ref T value = ref MemoryMarshal.GetReference(values);
+        int lanes = Vector512<T>.Count;
+        for (int group = 0; group < 64 / lanes; group++)
+        {
+            Vector512<T> dense = Vector512.LoadUnsafe(ref value, (nuint)next);
+            Vector512<T> mask = spread.Lanes<T>(word, group);
+            Vector512<T> laid = Unsafe.SizeOf<T>() switch
+            {
+                1 => Avx512Vbmi2.Expand(Vector512<byte>.Zero, mask.AsByte(), dense.AsByte()).As<byte, T>(),
+                2 => Avx512Vbmi2.Expand(Vector512<ushort>.Zero, mask.AsUInt16(), dense.AsUInt16()).As<ushort, T>(),
+                4 => Avx512F.Expand(Vector512<uint>.Zero, mask.AsUInt32(), dense.AsUInt32()).As<uint, T>(),
+                _ => Avx512F.Expand(Vector512<ulong>.Zero, mask.AsUInt64(), dense.AsUInt64()).As<ulong, T>(),
+            };
+            laid.StoreUnsafe(ref rows, (nuint)(group * lanes));
+            next += BitOperations.PopCount((word >> (group * lanes)) & (lanes == 64 ? ulong.MaxValue : (1UL << lanes) - 1));
+        }
+
+        return next;
     }
 
     /// <summary>
