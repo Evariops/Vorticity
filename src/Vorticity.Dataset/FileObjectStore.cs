@@ -260,8 +260,22 @@ public sealed class FileObjectStore : IObjectStore
     /// </summary>
     private IEnumerable<string> Keys(string prefix, string? startAfter, CancellationToken cancellationToken)
     {
+        // Only the directory the prefix names can hold its keys, so a listing of the commits, which
+        // every open and commit makes, walks the commits and not every data object. A prefix whose
+        // directory is no key's walks the root, and the filter below decides alone.
+        string walked = _root;
+        int slash = prefix.LastIndexOf('/');
+        if (slash > 0 && ObjectKey.IsValid(prefix[..slash]))
+        {
+            walked = PathOf(prefix[..slash]);
+            if (!Directory.Exists(walked))
+            {
+                yield break;
+            }
+        }
+
         List<string> keys = [];
-        foreach (string file in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
+        foreach (string file in Directory.EnumerateFiles(walked, "*", SearchOption.AllDirectories))
         {
             cancellationToken.ThrowIfCancellationRequested();
             string key = Path.GetRelativePath(_root, file).Replace(Path.DirectorySeparatorChar, '/');

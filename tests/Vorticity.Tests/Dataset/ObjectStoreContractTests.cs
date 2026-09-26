@@ -215,6 +215,38 @@ public sealed class ObjectStoreContractTests : IDisposable
         Assert.Equal(["data/b.vortex"], await store.ListAsync("data/", page[^1], 1, ct));
         Assert.Empty(await store.ListAsync("data/", "data/b.vortex", 1, ct));
         Assert.Empty(await store.ListAsync("nothing/", null, 10, ct));
+
+        // A prefix is a string, not a directory: it may end inside a name, and names no parent.
+        Assert.Equal(["data/a.vortex"], await store.ListAsync("data/a", null, 10, ct));
+        Assert.Equal(keys[..3], await store.ListAsync("comm", null, 10, ct));
+        Assert.Empty(await store.ListAsync("../", null, 10, ct));
+    }
+
+    [Fact]
+    public async Task AFileStoreListsAPrefixFromItsDirectoryAlone()
+    {
+        Assert.SkipWhen(OperatingSystem.IsWindows(), "a directory is made unreadable by its Unix mode");
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using IObjectStore store = Open("file");
+        await store.PutIfAbsentAsync("commit/99999999999999999999.vxc", Bytes("a commit"), ct);
+        await store.PutIfAbsentAsync("data/a.vortex", Bytes("an object"), ct);
+
+        // The commits are what an open lists, every time: the data objects, however many, are not
+        // walked for them. A data directory no one may read shows it.
+        string data = Path.Combine(_directories[^1], "data");
+        if (!OperatingSystem.IsWindows())
+        {
+            UnixFileMode mode = global::System.IO.File.GetUnixFileMode(data);
+            global::System.IO.File.SetUnixFileMode(data, UnixFileMode.None);
+            try
+            {
+                Assert.Equal(["commit/99999999999999999999.vxc"], await store.ListAsync("commit/", null, 10, ct));
+            }
+            finally
+            {
+                global::System.IO.File.SetUnixFileMode(data, mode);
+            }
+        }
     }
 
     [Theory]
