@@ -1543,6 +1543,17 @@ internal static class BlockStatsPass
             ref byte x = ref Unsafe.Add(ref MemoryMarshal.GetReference(heap), (nint)from + 4);
             ref byte y = ref Unsafe.Add(ref MemoryMarshal.GetReference(heap), (nint)to + 4);
             nint rest = (nint)size - 4;
+
+            // With 256-bit vectors, up to 32 bytes in one compare masked to their length, where the
+            // words' loop runs a number of times that changes with the size and is mispredicted
+            // when the sizes do; only a value within 36 bytes of the heap's end takes the loop.
+            if (Vector256.IsHardwareAccelerated && rest <= 32 && from + 36 <= heap.Length && to + 36 <= heap.Length)
+            {
+                Vector256<byte> wanted = Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(LeadingBytes), (nuint)(32 - rest));
+                found += ((Vector256.LoadUnsafe(ref x) ^ Vector256.LoadUnsafe(ref y)) & wanted) == Vector256<byte>.Zero ? 0 : 1;
+                continue;
+            }
+
             ulong differ = 0;
             for (nint k = 0; k + 8 < rest; k += 8)
             {
@@ -1557,6 +1568,18 @@ internal static class BlockStatsPass
         repeats |= repeat;
         return row;
     }
+
+    /// <summary>
+    /// Thirty-two bytes set then thirty-two clear: loaded from <c>32 - n</c>, a mask of the first
+    /// <c>n</c> bytes of a 256-bit vector.
+    /// </summary>
+    private static ReadOnlySpan<byte> LeadingBytes =>
+    [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
 
     /// <summary>The <see cref="ViewBoundaries{TMode}"/> that leaves to its caller the pairs only bytes settle.</summary>
     private readonly struct ViewsOnly;
