@@ -5,7 +5,7 @@ namespace Vorticity.IO;
 
 /// <summary>
 /// A <see cref="SegmentOwner"/> for a view into memory owned by another owner — one segment inside
-/// a whole-file memory mapping, or inside a coalesced run buffer.
+/// a whole-file memory mapping, inside a coalesced run buffer, or inside the tail an open read.
 /// </summary>
 /// <remarks>
 /// Construction <see cref="SegmentOwner.Retain"/>s the parent and the last

@@ -1392,7 +1392,7 @@ public sealed partial class VortexFile : IAsyncDisposable
         SegmentSpec spec = _metadataSegments[index];
         if (TryViewInTail(in spec, out VortexBuffer view))
         {
-            return new ValueTask<SegmentOwner>(new TailSliceSegmentOwner(_tail, view));
+            return new ValueTask<SegmentOwner>(new SliceSegmentOwner(_tail, view));
         }
 
         return _source.ReadAsync(spec, cancellationToken);
