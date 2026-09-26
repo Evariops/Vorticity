@@ -199,10 +199,26 @@ internal static class BitmapKernels
             middle = middle[counted..];
         }
 
+        // Four sums, so that no count waits on the one before: one sum chains every popcount to the
+        // last and holds the loop to a word a cycle.
         ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(middle);
-        for (int i = 0; i < words.Length; i++)
+        int w = 0;
+        int s0 = 0;
+        int s1 = 0;
+        int s2 = 0;
+        int s3 = 0;
+        for (; w + 4 <= words.Length; w += 4)
         {
-            total += BitOperations.PopCount(words[i]);
+            s0 += BitOperations.PopCount(words[w]);
+            s1 += BitOperations.PopCount(words[w + 1]);
+            s2 += BitOperations.PopCount(words[w + 2]);
+            s3 += BitOperations.PopCount(words[w + 3]);
+        }
+
+        total += (s0 + s1) + (s2 + s3);
+        for (; w < words.Length; w++)
+        {
+            total += BitOperations.PopCount(words[w]);
         }
 
         for (int i = words.Length * sizeof(ulong); i < middle.Length; i++)
@@ -313,7 +329,19 @@ internal static class BitmapKernels
             }
             else
             {
-                for (int b = 0; b < wholeBytes; b++)
+                // Eight output bytes at a time: the next eight source bytes as a word, shifted, and
+                // the byte after them for the bits the shift brings in. The last word reads the
+                // byte the last pair below would, so the reads end where the bytes' did.
+                int b = 0;
+                for (; b + 8 <= wholeBytes; b += 8)
+                {
+                    ulong word = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(sourceByte + b, 8));
+                    ulong next = source[sourceByte + b + 8];
+                    BinaryPrimitives.WriteUInt64LittleEndian(
+                        destination.Slice(destinationByte + b, 8), (word >> shift) | (next << (64 - shift)));
+                }
+
+                for (; b < wholeBytes; b++)
                 {
                     int pair = source[sourceByte + b] | (source[sourceByte + b + 1] << 8);
                     destination[destinationByte + b] = (byte)(pair >> shift);
@@ -425,7 +453,19 @@ internal static class BitmapKernels
         int length = source.Length;
         int i = 0;
 
-        if (Vector128.IsHardwareAccelerated && length >= Vector128<byte>.Count)
+        if (Vector512.IsHardwareAccelerated && length >= Vector512<byte>.Count)
+        {
+            // Sixty-four bytes to a word of bits: one compare into a mask register and one move out.
+            ref byte input = ref MemoryMarshal.GetReference(source);
+            for (; i <= length - Vector512<byte>.Count; i += Vector512<byte>.Count)
+            {
+                ulong zeros = Vector512.Equals(Vector512.LoadUnsafe(ref input, (uint)i), Vector512<byte>.Zero)
+                    .ExtractMostSignificantBits();
+                BinaryPrimitives.WriteUInt64LittleEndian(destination.Slice(i >> 3, 8), ~zeros);
+            }
+        }
+
+        if (Vector128.IsHardwareAccelerated && length - i >= Vector128<byte>.Count)
         {
             ref byte input = ref MemoryMarshal.GetReference(source);
             for (; i <= length - Vector128<byte>.Count; i += Vector128<byte>.Count)
