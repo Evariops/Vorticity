@@ -2,7 +2,10 @@ using System;
 using System.Buffers;
 using System.Numerics;
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -237,10 +240,7 @@ internal static partial class ComparisonKernels
             return;
         }
 
-        for (int i = 0; i < destination.Length; i++)
-        {
-            destination[i] = mask.IsValid(i) ? state : Trilean.Unknown;
-        }
+        ExpandBits(mask.Bits, mask.BitOffset, destination, Trilean.Unknown, state);
     }
 
     /// <summary>One byte-pattern predicate, with the operator and the validity resolved.</summary>
@@ -430,11 +430,9 @@ internal static partial class ComparisonKernels
             return;
         }
 
-        for (int i = 0; i < destination.Length; i++)
-        {
-            bool valid = mask.IsValid(i);
-            destination[i] = valid != isNull ? Trilean.True : Trilean.False;
-        }
+        ExpandBits(
+            mask.Bits, mask.BitOffset, destination,
+            whenFalse: isNull ? Trilean.True : Trilean.False, whenTrue: isNull ? Trilean.False : Trilean.True);
     }
 
     /// <summary>Compares a constant column, which is one comparison and then a fill.</summary>
@@ -519,10 +517,7 @@ internal static partial class ComparisonKernels
         }
 
         // A nullable constant: the value answers the same everywhere, and the nulls are unknown.
-        for (int i = 0; i < destination.Length; i++)
-        {
-            destination[i] = mask.IsValid(i) ? state : Trilean.Unknown;
-        }
+        ExpandBits(mask.Bits, mask.BitOffset, destination, Trilean.Unknown, state);
     }
 
     /// <summary>An extension node's storage; anything else unchanged.</summary>
@@ -566,11 +561,39 @@ internal static partial class ComparisonKernels
             return;
         }
 
-        for (int i = 0; i < destination.Length; i++)
+        ExpandBits(bits, offset, destination, whenFalse, whenTrue);
+        MarkUnknown(mask.Bits, mask.BitOffset, destination);
+    }
+
+    /// <summary>Overwrites with <see cref="Trilean.Unknown"/> the state of every row whose bit is clear.</summary>
+    /// <param name="validity">The validity bitmap.</param>
+    /// <param name="offset">The bit of row 0.</param>
+    /// <param name="destination">One state per row, those of the valid rows kept.</param>
+    private static void MarkUnknown(ReadOnlySpan<byte> validity, int offset, Span<byte> destination)
+    {
+        int i = 0;
+        if (Spreads)
         {
-            destination[i] = !mask.IsValid(i)
-                ? Trilean.Unknown
-                : CanonicalSupport.BitAt(bits, offset + i) ? whenTrue : whenFalse;
+            Vector512<byte> index = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadIndex));
+            Vector512<byte> mask = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadBit));
+            Vector512<byte> unknown = Vector512.Create(Trilean.Unknown);
+            ref byte into = ref MemoryMarshal.GetReference(destination);
+            for (; i <= destination.Length - 64; i += 64)
+            {
+                ulong word = BitWords.Load(validity, offset + i);
+                Vector512<byte> isNull = Vector512.Equals(
+                    Avx512BW.Shuffle(Vector512.Create(word).AsByte(), index) & mask, Vector512<byte>.Zero);
+                Vector512.ConditionalSelect(isNull, unknown, Vector512.LoadUnsafe(ref into, (nuint)i))
+                    .StoreUnsafe(ref into, (nuint)i);
+            }
+        }
+
+        for (; i < destination.Length; i++)
+        {
+            if (!CanonicalSupport.BitAt(validity, offset + i))
+            {
+                destination[i] = Trilean.Unknown;
+            }
         }
     }
 
@@ -580,12 +603,35 @@ internal static partial class ComparisonKernels
     /// amounts are constants the JIT folds into the selects. Only the lead-in to a byte boundary
     /// and the tail read a bit at a time, and a sliced column is the only thing that makes the
     /// lead-in non-empty.
+    /// <para>
+    /// With AVX-512, whole blocks of 64 rows go first, a word each. This is also how a validity
+    /// becomes states, the null check's and those of an answer every valid row shares.
+    /// </para>
     /// </remarks>
     private static void ExpandBits(
         ReadOnlySpan<byte> bits, int offset, Span<byte> destination, byte whenFalse, byte whenTrue)
     {
         int i = 0;
-        int bit = offset;
+
+        // Where AVX-512 is, 64 rows a step, however the bitmap is aligned: the word in every lane,
+        // shuffled to a byte per bit, and a blend of the two states by the zero bytes.
+        if (Spreads)
+        {
+            Vector512<byte> index = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadIndex));
+            Vector512<byte> mask = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadBit));
+            Vector512<byte> clear = Vector512.Create(whenFalse);
+            Vector512<byte> set = Vector512.Create(whenTrue);
+            ref byte into = ref MemoryMarshal.GetReference(destination);
+            for (; i <= destination.Length - 64; i += 64)
+            {
+                ulong word = BitWords.Load(bits, offset + i);
+                Vector512<byte> bitClear = Vector512.Equals(
+                    Avx512BW.Shuffle(Vector512.Create(word).AsByte(), index) & mask, Vector512<byte>.Zero);
+                Vector512.ConditionalSelect(bitClear, clear, set).StoreUnsafe(ref into, (nuint)i);
+            }
+        }
+
+        int bit = offset + i;
         for (; i < destination.Length && (bit & 7) != 0; i++, bit++)
         {
             destination[i] = (bits[bit >> 3] & (1 << (bit & 7))) != 0 ? whenTrue : whenFalse;
@@ -844,6 +890,11 @@ internal static partial class ComparisonKernels
     /// about vectorizing comparisons, and it would not hold if a trilean were carried as two
     /// bitmaps.
     /// </para>
+    /// <para>
+    /// Nor does it hold on x86 with AVX-512, where nothing is narrowed: a compare writes a mask
+    /// register, a mask is a word, and a word is spread back to 64 bytes by one shuffle, an and and
+    /// a min. <see cref="Lanes{T, TOp}"/> answers whole blocks of 64 rows that way.
+    /// </para>
     /// </remarks>
     private static void CompareCore<TValue, TWide, TOp>(
         ReadOnlySpan<byte> bytes, ValidityMask mask, TWide wanted, Span<byte> destination)
@@ -858,9 +909,18 @@ internal static partial class ComparisonKernels
         }
 
         ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(bytes)[..destination.Length];
+
+        // Where AVX-512 is, 64 rows a step in the column's own type, when the literal is one of its
+        // values; the rest, and a literal only the wider type holds, are the scalar loops' below.
+        int done = 0;
+        if (Spreads && Vector512<TValue>.IsSupported && InLanes(wanted, out TValue literal))
+        {
+            done = Lanes<TValue, TOp>(values, literal, mask, destination);
+        }
+
         if (mask.AllValid)
         {
-            for (int i = 0; i < destination.Length; i++)
+            for (int i = done; i < destination.Length; i++)
             {
                 destination[i] = TOp.Holds(TWide.CreateTruncating(values[i]), wanted)
                     ? Trilean.True
@@ -870,14 +930,126 @@ internal static partial class ComparisonKernels
             return;
         }
 
-        NullableCore<TValue, TWide, TOp>(values, mask, wanted, destination);
+        NullableCore<TValue, TWide, TOp>(values, mask, wanted, destination, done);
     }
+
+    /// <summary>
+    /// Whether the verdicts can be spread from 512-bit masks: a compare of a column's own lanes,
+    /// then a byte shuffle, which is AVX-512BW. ARM keeps the scalar loops, for the reason
+    /// <see cref="CompareCore{TValue, TWide, TOp}"/> gives.
+    /// </summary>
+    private static bool Spreads => Vector512.IsHardwareAccelerated && Avx512BW.IsSupported;
+
+    /// <summary>
+    /// The literal in the column's own type, when it is exactly one of that type's values: then
+    /// comparing in the column's type answers what comparing in the wider one does, since widening
+    /// is exact and keeps the order. A literal outside the range, a fraction for a float column, or
+    /// a NaN is left to the scalar loops, which compare in the wider type.
+    /// </summary>
+    private static bool InLanes<TValue, TWide>(TWide wanted, out TValue literal)
+        where TValue : INumberBase<TValue>
+        where TWide : INumberBase<TWide>, IComparisonOperators<TWide, TWide, bool>
+    {
+        literal = TValue.CreateTruncating(wanted);
+        return TWide.CreateTruncating(literal) == wanted;
+    }
+
+    /// <summary>
+    /// The verdicts of whole blocks of 64 rows: the operator over 512-bit vectors of the column's
+    /// own type, their lanes' masks gathered into a word, the word spread back to a byte a row.
+    /// </summary>
+    /// <returns>The rows answered, a multiple of 64; the rest are the caller's.</returns>
+    /// <remarks>
+    /// A null row is compared like any other and its verdict replaced by unknown: its slot holds
+    /// some value, validity governing its meaning and not its existence, and a compare of the lanes
+    /// a block holds costs the same whatever they hold.
+    /// </remarks>
+    private static int Lanes<T, TOp>(ReadOnlySpan<T> values, T literal, ValidityMask mask, Span<byte> destination)
+        where TOp : struct, IOrderOp
+    {
+        int rows = destination.Length;
+        Vector512<T> right = Vector512.Create(literal);
+        Vector512<byte> index = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadIndex));
+        Vector512<byte> bit = Vector512.LoadUnsafe(ref MemoryMarshal.GetReference(SpreadBit));
+        ref T from = ref MemoryMarshal.GetReference(values);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        int i = 0;
+        if (mask.AllValid)
+        {
+            for (; i <= rows - 64; i += 64)
+            {
+                ulong held = Verdicts<T, TOp>(ref Unsafe.Add(ref from, i), right);
+                Ones(held, index, bit).StoreUnsafe(ref into, (nuint)i);
+            }
+
+            return i;
+        }
+
+        ReadOnlySpan<byte> bits = mask.Bits;
+        int offset = mask.BitOffset;
+        for (; i <= rows - 64; i += 64)
+        {
+            ulong valid = BitWords.Load(bits, offset + i);
+            ulong held = Verdicts<T, TOp>(ref Unsafe.Add(ref from, i), right) & valid;
+            Vector512<byte> unknown = Ones(~valid, index, bit);
+            (Ones(held, index, bit) | (unknown + unknown)).StoreUnsafe(ref into, (nuint)i);
+        }
+
+        return i;
+    }
+
+    /// <summary>Sixty-four rows' verdicts from <paramref name="at"/>, bit <c>i</c> for row <c>i</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Verdicts<T, TOp>(ref T at, Vector512<T> right)
+        where TOp : struct, IOrderOp
+    {
+        int lanes = Vector512<T>.Count;
+        ulong held = 0;
+        for (int row = 0; row < 64; row += lanes)
+        {
+            held |= TOp.Lanes(Vector512.LoadUnsafe(ref at, (nuint)row), right).ExtractMostSignificantBits() << row;
+        }
+
+        return held;
+    }
+
+    /// <summary>
+    /// A byte per bit of <paramref name="word"/>, 1 where it is set and 0 where it is clear, which
+    /// is <see cref="Trilean.True"/> and <see cref="Trilean.False"/>: the word in every lane, each
+    /// byte shuffled to the word's byte holding its bit, masked to that bit, capped at one.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector512<byte> Ones(ulong word, Vector512<byte> index, Vector512<byte> bit) =>
+        Vector512.Min(Avx512BW.Shuffle(Vector512.Create(word).AsByte(), index) & bit, Vector512<byte>.One);
+
+    /// <summary>
+    /// For byte <c>j</c> of a 512-bit vector, the byte of a word broadcast to every 64-bit lane that
+    /// holds bit <c>j</c>: <c>j / 8</c>, which a shuffle confined to its own 128-bit lane still
+    /// reaches, since every such lane holds the whole word, twice.
+    /// </summary>
+    private static ReadOnlySpan<byte> SpreadIndex =>
+    [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+        2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3,
+        4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5,
+        6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7,
+    ];
+
+    /// <summary>For byte <c>j</c>, the bit of its word byte it stands for: <c>1 &lt;&lt; (j % 8)</c>.</summary>
+    private static ReadOnlySpan<byte> SpreadBit =>
+    [
+        1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128,
+        1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128,
+        1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128,
+        1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128,
+    ];
 
     /// <summary>The nullable half of <see cref="CompareOp{TValue,TWide}"/>, eight rows per byte.</summary>
     /// <param name="values">The column's values, already cast and trimmed to the row count.</param>
     /// <param name="mask">Per-row validity; the caller has ruled out all-valid and all-invalid.</param>
     /// <param name="wanted">The literal, widened once by the caller.</param>
     /// <param name="destination">One <see cref="Trilean"/> per row.</param>
+    /// <param name="start">The first row to answer: those before it the vector blocks answered.</param>
     /// <remarks>
     /// The same column, operator and literal cost several times more nullable than all-valid, and
     /// the whole of that gap is validity resolution: the all-valid loop is already a handful of
@@ -894,14 +1066,14 @@ internal static partial class ComparisonKernels
     /// </para>
     /// </remarks>
     private static void NullableCore<TValue, TWide, TOp>(
-        ReadOnlySpan<TValue> values, ValidityMask mask, TWide wanted, Span<byte> destination)
+        ReadOnlySpan<TValue> values, ValidityMask mask, TWide wanted, Span<byte> destination, int start)
         where TValue : unmanaged, INumberBase<TValue>
         where TWide : unmanaged, INumberBase<TWide>, IComparisonOperators<TWide, TWide, bool>
         where TOp : struct, IOrderOp
     {
         ReadOnlySpan<byte> bits = mask.Bits;
-        int bit = mask.BitOffset;
-        int i = 0;
+        int bit = mask.BitOffset + start;
+        int i = start;
 
         for (; i < destination.Length && (bit & 7) != 0; i++, bit++)
         {
@@ -956,42 +1128,70 @@ internal static partial class ComparisonKernels
         /// <param name="right">The literal.</param>
         static abstract bool Holds<T>(T left, T right)
             where T : IComparisonOperators<T, T, bool>;
+
+        /// <summary>
+        /// The operator over vectors, a lane of all ones where it holds: the same IEEE 754 answers
+        /// as <see cref="Holds{T}"/>, every ordering and equality against a NaN false and
+        /// inequality true.
+        /// </summary>
+        /// <typeparam name="T">The lane type, the column's own.</typeparam>
+        /// <param name="left">The column's values.</param>
+        /// <param name="right">The literal in every lane.</param>
+        static abstract Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right);
     }
 
     private readonly struct EqualOp : IOrderOp
     {
         public static bool Holds<T>(T left, T right)
             where T : IComparisonOperators<T, T, bool> => left == right;
+
+        public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
+            Vector512.Equals(left, right);
     }
 
     private readonly struct NotEqualOp : IOrderOp
     {
         public static bool Holds<T>(T left, T right)
             where T : IComparisonOperators<T, T, bool> => left != right;
+
+        public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
+            ~Vector512.Equals(left, right);
     }
 
     private readonly struct LessOp : IOrderOp
     {
         public static bool Holds<T>(T left, T right)
             where T : IComparisonOperators<T, T, bool> => left < right;
+
+        public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
+            Vector512.LessThan(left, right);
     }
 
     private readonly struct LessOrEqualOp : IOrderOp
     {
         public static bool Holds<T>(T left, T right)
             where T : IComparisonOperators<T, T, bool> => left <= right;
+
+        public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
+            Vector512.LessThanOrEqual(left, right);
     }
 
     private readonly struct GreaterOp : IOrderOp
     {
         public static bool Holds<T>(T left, T right)
             where T : IComparisonOperators<T, T, bool> => left > right;
+
+        public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
+            Vector512.GreaterThan(left, right);
     }
 
     private readonly struct GreaterOrEqualOp : IOrderOp
     {
         public static bool Holds<T>(T left, T right)
             where T : IComparisonOperators<T, T, bool> => left >= right;
+
+        public static Vector512<T> Lanes<T>(Vector512<T> left, Vector512<T> right) =>
+            Vector512.GreaterThanOrEqual(left, right);
     }
 
     /// <summary>
@@ -1182,10 +1382,13 @@ internal static partial class ComparisonKernels
             return;
         }
 
-        for (int i = 0; i < destination.Length; i++)
+        if (mask.AllInvalid)
         {
-            destination[i] = mask.IsValid(i) ? state : Trilean.Unknown;
+            Trilean.Fill(destination, Trilean.Unknown);
+            return;
         }
+
+        ExpandBits(mask.Bits, mask.BitOffset, destination, Trilean.Unknown, state);
     }
 
     /// <summary>Turns the sign of a three-way comparison into the operator's answer.</summary>
