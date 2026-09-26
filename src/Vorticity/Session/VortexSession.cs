@@ -236,7 +236,7 @@ public sealed class VortexSession : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(path);
         ThrowIfDisposed();
         VortexFile file = await VortexFile.OpenAsync(path, Effective(options), this, cancellationToken).ConfigureAwait(false);
-        Attach(file, path);
+        await AttachAsync(file, path).ConfigureAwait(false);
         return file;
     }
 
@@ -252,7 +252,7 @@ public sealed class VortexSession : IAsyncDisposable
         ThrowIfDisposed();
         ISegmentReader reader = source as ISegmentReader ?? new SourceReader(source, ownsSource: true, Options.EnginePool);
         VortexFile file = await VortexFile.OpenAsync(SessionReader.Wrap(reader, this), Effective(options), cancellationToken).ConfigureAwait(false);
-        Attach(file, source.GetType().Name);
+        await AttachAsync(file, source.GetType().Name).ConfigureAwait(false);
         return file;
     }
 
@@ -396,14 +396,19 @@ public sealed class VortexSession : IAsyncDisposable
             return ValueTask.CompletedTask;
         }
 
-        foreach ((VortexFile _, string name) in _open)
+        lock (_open)
         {
-            throw new InvalidOperationException($"The session still has '{name}' open; dispose every file before the session.");
-        }
+            foreach ((VortexFile _, string name) in _open)
+            {
+                throw new InvalidOperationException($"The session still has '{name}' open; dispose every file before the session.");
+            }
 
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
-        {
-            return ValueTask.CompletedTask;
+            if (_disposed != 0)
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            Volatile.Write(ref _disposed, 1);
         }
 
         Options.SegmentCache?.Clear();
@@ -419,13 +424,34 @@ public sealed class VortexSession : IAsyncDisposable
 
     internal void Detach(VortexFile file) => _open.TryRemove(file, out _);
 
-    private void Attach(VortexFile file, string name)
+    /// <summary>Counts <paramref name="file"/> among the files the session has open, or closes it when the session was disposed while it opened.</summary>
+    /// <param name="file">The file just opened.</param>
+    /// <param name="name">What a refused dispose calls it.</param>
+    /// <exception cref="ObjectDisposedException">The session was disposed while the file opened.</exception>
+    internal async ValueTask AttachAsync(VortexFile file, string name)
     {
         file.Session = this;
-        if (!ReferenceEquals(this, Default))
+        if (ReferenceEquals(this, Default))
         {
-            _open[file] = name;
+            return;
         }
+
+        // Under the monitor the dispose checks the open files under: a file counted first refuses
+        // the dispose, and one that comes after finds the session disposed.
+        lock (_open)
+        {
+            if (_disposed == 0)
+            {
+                _open[file] = name;
+                return;
+            }
+        }
+
+        // What the file gives back as it closes, a mapping it took over, goes with the rest.
+        await file.DisposeAsync().ConfigureAwait(false);
+        Options.SegmentCache?.Clear();
+        Mappings?.Clear();
+        ThrowIfDisposed();
     }
 
     /// <summary>The options an open runs under: the caller's, with the session's index cache budget.</summary>

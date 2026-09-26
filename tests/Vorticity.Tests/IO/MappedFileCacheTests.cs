@@ -230,6 +230,41 @@ public sealed class MappedFileCacheTests
         Assert.Equal(0, session.Mappings.Count);
     }
 
+    [Fact]
+    public async Task AnOpenThatEndsAfterItsSessionIsDisposedClosesItsFileAndKeepsNoMapping()
+    {
+        Assert.SkipUnless(FileInode.IsSupported, "the platform does not tell one file from another");
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string directory = Path.Combine(AppContext.BaseDirectory, "kept-mappings");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"late-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter(path, [("id", VortexType.Int64)]))
+        {
+            ColumnsBuilder builder = writer.Builder();
+            builder.Column<long>(0).Append([1L, 2L, 3L]);
+            await writer.WriteAsync(builder, ct);
+            await writer.CompleteAsync(ct);
+        }
+
+        VortexSession session = VortexSession.Create(options => options.MappedFileCacheCount = 4);
+        await using (VortexFile first = await session.OpenAsync(path, cancellationToken: ct))
+        {
+            await foreach (BatchView batch in first.Scan("id").WithCancellation(ct))
+            {
+                Assert.Equal(3, batch.RowCount);
+            }
+        }
+
+        // An open that passed its check before the session was disposed, and ends after: it took
+        // over the mapping the first open left, and gives it back as it closes.
+        VortexFile late = await VortexFile.OpenAsync(path, VortexOpenOptions.Default, session, ct);
+        await session.DisposeAsync();
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await session.AttachAsync(late, path));
+        Assert.Throws<ObjectDisposedException>(() => late.SegmentSpecs.Length);
+        Assert.Equal(0, session.Mappings!.Count);
+        global::System.IO.File.Delete(path);
+    }
+
     /// <summary>Opens the file through the cache, maps it, checks every byte, and returns the mapping it read.</summary>
     private static async Task<MappedFileOwner> MappedAndReadAsync(string path, MappedFileCache cache, byte[] expected)
     {
