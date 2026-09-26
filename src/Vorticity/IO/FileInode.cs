@@ -9,14 +9,19 @@ namespace Vorticity.IO;
 /// <param name="Inode">The file's number on that device.</param>
 internal readonly record struct FileInode(ulong Device, ulong Inode)
 {
-    private static readonly unsafe delegate* unmanaged<int, byte*, int> Stat = Resolve(out SizeOffset, out WideDevice);
+    private static readonly unsafe delegate* unmanaged<int, byte*, int> Stat = Resolve(out SizeOffset, out WideDevice, out VersionedStat, out StatVersion);
 
     // Where st_size sits in the platform's struct stat, and whether st_dev takes eight bytes or four.
     private static readonly int SizeOffset;
     private static readonly bool WideDevice;
 
+    // A glibc older than 2.33 exports no fstat: its headers inline a call to __fxstat, which takes
+    // the version of the struct stat layout first.
+    private static readonly unsafe delegate* unmanaged<int, int, byte*, int> VersionedStat;
+    private static readonly int StatVersion;
+
     /// <summary>Whether this platform can tell one file from another.</summary>
-    internal static unsafe bool IsSupported => Stat != null;
+    internal static unsafe bool IsSupported => Stat != null || VersionedStat != null;
 
     /// <summary>The identity of the file behind <paramref name="handle"/>.</summary>
     /// <param name="handle">An open file.</param>
@@ -30,7 +35,7 @@ internal readonly record struct FileInode(ulong Device, ulong Inode)
     internal static unsafe bool TryGet(SafeFileHandle handle, long length, out FileInode identity)
     {
         identity = default;
-        if (Stat == null)
+        if (!IsSupported)
         {
             return false;
         }
@@ -40,7 +45,8 @@ internal readonly record struct FileInode(ulong Device, ulong Inode)
         try
         {
             handle.DangerousAddRef(ref added);
-            if (Stat((int)handle.DangerousGetHandle(), status) != 0)
+            int descriptor = (int)handle.DangerousGetHandle();
+            if ((Stat != null ? Stat(descriptor, status) : VersionedStat(StatVersion, descriptor, status)) != 0)
             {
                 return false;
             }
@@ -72,10 +78,17 @@ internal readonly record struct FileInode(ulong Device, ulong Inode)
     // macOS's struct stat has a four-byte st_dev and its size at 96; Linux's, on the two 64-bit
     // architectures, an eight-byte st_dev and its size at 48; st_ino is at 8 on all three. The
     // x86-64 macOS symbol of the 64-bit-inode layout carries a suffix; arm64 has only that layout.
-    private static unsafe delegate* unmanaged<int, byte*, int> Resolve(out int sizeOffset, out bool wideDevice)
+    // The layout version __fxstat takes for that struct stat is 1 on x86-64 and 0 on arm64.
+    private static unsafe delegate* unmanaged<int, byte*, int> Resolve(
+        out int sizeOffset,
+        out bool wideDevice,
+        out delegate* unmanaged<int, int, byte*, int> versionedStat,
+        out int statVersion)
     {
         sizeOffset = 0;
         wideDevice = false;
+        versionedStat = null;
+        statVersion = 0;
         if (!Environment.Is64BitProcess)
         {
             return null;
@@ -90,29 +103,37 @@ internal readonly record struct FileInode(ulong Device, ulong Inode)
         if (OperatingSystem.IsMacOS())
         {
             sizeOffset = 96;
-            return Export(["/usr/lib/libSystem.B.dylib"], architecture == Architecture.Arm64 ? "fstat" : "fstat$INODE64");
+            return (delegate* unmanaged<int, byte*, int>)Export(["/usr/lib/libSystem.B.dylib"], architecture == Architecture.Arm64 ? "fstat" : "fstat$INODE64");
         }
 
         if (OperatingSystem.IsLinux())
         {
             sizeOffset = 48;
             wideDevice = true;
-            return Export(["libc.so.6", "libc.musl-x86_64.so.1", "libc.musl-aarch64.so.1"], "fstat");
+            delegate* unmanaged<int, byte*, int> stat =
+                (delegate* unmanaged<int, byte*, int>)Export(["libc.so.6", "libc.musl-x86_64.so.1", "libc.musl-aarch64.so.1"], "fstat");
+            if (stat == null)
+            {
+                versionedStat = (delegate* unmanaged<int, int, byte*, int>)Export(["libc.so.6"], "__fxstat");
+                statVersion = architecture == Architecture.X64 ? 1 : 0;
+            }
+
+            return stat;
         }
 
         return null;
     }
 
-    private static unsafe delegate* unmanaged<int, byte*, int> Export(string[] libraries, string symbol)
+    private static IntPtr Export(string[] libraries, string symbol)
     {
         foreach (string library in libraries)
         {
             if (NativeLibrary.TryLoad(library, out IntPtr handle) && NativeLibrary.TryGetExport(handle, symbol, out IntPtr address))
             {
-                return (delegate* unmanaged<int, byte*, int>)address;
+                return address;
             }
         }
 
-        return null;
+        return IntPtr.Zero;
     }
 }

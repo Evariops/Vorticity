@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
@@ -17,6 +18,18 @@ namespace Vorticity.Tests.IO;
 public sealed class MappedFileCacheTests
 {
     private const int FileLength = 40_000;
+
+    [Fact]
+    public void ASixtyFourBitLinuxOrMacOSTellsOneFileFromAnother()
+    {
+        // The tests below skip where the platform cannot tell; this one keeps a platform that
+        // should from losing it without a failure.
+        Assert.SkipUnless(
+            (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+                && RuntimeInformation.ProcessArchitecture is Architecture.X64 or Architecture.Arm64,
+            "only 64-bit Linux and macOS read a file's inode");
+        Assert.True(FileInode.IsSupported);
+    }
 
     [Fact]
     public void AFileHasOneInodeWhateverTheHandleAndAnotherFileAnother()
