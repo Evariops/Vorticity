@@ -1081,8 +1081,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <param name="into">Receives the selected rows; room for every row of the answer.</param>
     /// <returns>How many were selected.</returns>
     /// <remarks>
-    /// No branch on a row's answer: each row is written at the next slot and kept by its own bit,
-    /// true and valid.
+    /// A row is selected by its own bit, true and valid; the bits are read a word at a time, see
+    /// <see cref="RowIndices.FromBits"/>.
     /// </remarks>
     private static int Selected(ScanContext context, int answer, Span<int> into)
     {
@@ -1093,10 +1093,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             node = arena.GetNode(node.GetFieldIndex(0));
         }
 
-        ReadOnlySpan<byte> bits = node.Bits.Span;
-        int offset = node.BitOffset;
-        int rows = node.Length;
-        Span<int> slots = into[..rows];
         Arrays.Decoders.Canonical.ValidityMask valid =
             Arrays.Decoders.Canonical.ValidityMask.From(arena, node.Validity);
         if (valid.AllInvalid)
@@ -1104,30 +1100,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return 0;
         }
 
-        int count = 0;
-        if (valid.AllValid)
-        {
-            for (int row = 0; row < rows; row++)
-            {
-                int bit = offset + row;
-                slots[count] = row;
-                count += (bits[bit >> 3] >> (bit & 7)) & 1;
-            }
-
-            return count;
-        }
-
-        ReadOnlySpan<byte> validBits = valid.Bits;
-        int validOffset = valid.BitOffset;
-        for (int row = 0; row < rows; row++)
-        {
-            int bit = offset + row;
-            int validBit = validOffset + row;
-            slots[count] = row;
-            count += (bits[bit >> 3] >> (bit & 7)) & (validBits[validBit >> 3] >> (validBit & 7)) & 1;
-        }
-
-        return count;
+        return RowIndices.FromBits(
+            node.Bits.Span, node.BitOffset, valid.Bits, valid.BitOffset, valid.AllValid, node.Length, into);
     }
 
     /// <summary>

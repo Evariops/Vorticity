@@ -34,18 +34,8 @@ internal static class CanonicalFilter
     /// No branch on the state: a filter's verdicts follow the data, and a branch taken on a row's
     /// verdict is mispredicted as often as the data is irregular.
     /// </remarks>
-    internal static int Select(ReadOnlySpan<byte> states, Span<int> indices)
-    {
-        Span<int> slots = indices[..states.Length];
-        int count = 0;
-        for (int i = 0; i < states.Length; i++)
-        {
-            slots[count] = i;
-            count += states[i] == Trilean.True ? 1 : 0;
-        }
-
-        return count;
-    }
+    internal static int Select(ReadOnlySpan<byte> states, Span<int> indices) =>
+        RowIndices.FromStates(states, indices);
 
     /// <summary>
     /// Produces a node holding only <paramref name="indices"/> of <paramref name="nodeIndex"/>.
