@@ -11,16 +11,20 @@
 // escapes, and `_` across a multi-byte code point, which matches one character of utf8 text and one
 // byte of binary.
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
+using Vorticity.Types;
 using Xunit;
 
 namespace Vorticity.Tests.Compute;
@@ -161,6 +165,130 @@ public sealed class StringMatchTests
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// A pattern without <c>_</c>, read once into its segments, answers every generated value as the
+    /// naive matcher does, and one with a <c>_</c> is left to the backtracking matcher.
+    /// </summary>
+    [Fact]
+    public void APlannedLikeMatchesTheNaiveMatcherOnGeneratedPatterns()
+    {
+        // Four symbols deep: two segments with a wildcard between, next to an escape, is the
+        // smallest shape a plan can split wrongly.
+        string[] alphabet = ["a", "b", "%", "_", "\\", "é"];
+        List<byte[]> values = [];
+        List<byte[]> patterns = [];
+        Build(alphabet, 4, values);
+        Build(alphabet, 4, patterns);
+
+        foreach (byte[] pattern in patterns)
+        {
+            byte[] literals = new byte[pattern.Length];
+            int[] ends = new int[(pattern.Length / 2) + 1];
+            bool planned = BytePattern.TryPlan(pattern, (byte)'\\', literals, ends, out LikePlan plan);
+            Assert.Equal(!BytePattern.HasUnescapedOne(pattern, (byte)'\\'), planned);
+            if (!planned)
+            {
+                continue;
+            }
+
+            foreach (byte[] value in values)
+            {
+                bool naive = Naive(value, 0, pattern, 0, (byte)'\\');
+                if (plan.Holds(value) != naive)
+                {
+                    Assert.Fail(
+                        $"LIKE '{Show(pattern)}' over '{Show(value)}': the plan says {!naive}, " +
+                        $"the naive reference says {naive}");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The kernel answers a column as the backtracking matcher answers each row, for patterns read
+    /// onto the stack and for one long enough to be read into rented buffers.
+    /// </summary>
+    [Fact]
+    public void TheKernelAnswersAColumnAsTheMatcherAnswersEachRow()
+    {
+        Random random = new Random(26);
+        string[] values = new string[500];
+        for (int i = 0; i < values.Length; i++)
+        {
+            char[] text = new char[random.Next(0, 400)];
+            for (int c = 0; c < text.Length; c++)
+            {
+                text[c] = (char)('a' + random.Next(3));
+            }
+
+            values[i] = new string(text);
+        }
+
+        string run = new string('a', 150) + "b" + new string('c', 150);
+        values[7] = "xx" + run + "yy";
+        string[] patterns =
+        [
+            "%ab%", "a%", "%ba", "%a%b%c%", "abc", "", "%", @"%a\%b%", "%" + run + "%", run + "%",
+            "%" + run, "x%" + run + "%y", "a%_%",
+        ];
+
+        CanonicalArena arena = new CanonicalArena();
+        DTypeArena types = new DTypeArena();
+        int column = Views(arena, types.Utf8(Nullability.NonNullable), values);
+        byte[] states = new byte[values.Length];
+        foreach (string pattern in patterns)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(pattern);
+            ComparisonKernels.StringMatch(
+                arena, column, StringMatchOp.Like, FilterLiteral.From(bytes), (byte)'\\', states);
+            for (int row = 0; row < values.Length; row++)
+            {
+                bool expected = BytePattern.LikeText(Encoding.UTF8.GetBytes(values[row]), bytes, (byte)'\\');
+                Assert.True(
+                    states[row] == (expected ? Trilean.True : Trilean.False),
+                    $"LIKE '{pattern}' over row {row}: {states[row]}, the matcher says {expected}");
+            }
+        }
+
+        arena.Reset();
+    }
+
+    /// <summary>A varbinview column of <paramref name="values"/>, every row valid.</summary>
+    private static int Views(CanonicalArena arena, DType dtype, string[] values)
+    {
+        byte[][] encoded = Array.ConvertAll(values, Encoding.UTF8.GetBytes);
+        int total = 0;
+        foreach (byte[] value in encoded)
+        {
+            total += value.Length;
+        }
+
+        VortexBuffer heap = arena.Allocate(Math.Max(total, 1), 1, out Span<byte> heapBytes);
+        VortexBuffer views = arena.Allocate(values.Length * 16, 16, out Span<byte> viewBytes);
+        int offset = 0;
+        for (int row = 0; row < encoded.Length; row++)
+        {
+            byte[] value = encoded[row];
+            Span<byte> view = viewBytes.Slice(row * 16, 16);
+            view.Clear();
+            BinaryPrimitives.WriteInt32LittleEndian(view, value.Length);
+            if (value.Length <= 12)
+            {
+                value.CopyTo(view[4..]);
+            }
+            else
+            {
+                value.AsSpan(0, 4).CopyTo(view.Slice(4, 4));
+                BinaryPrimitives.WriteInt32LittleEndian(view[12..], offset);
+            }
+
+            value.CopyTo(heapBytes[offset..]);
+            offset += value.Length;
+        }
+
+        return arena.AddVarBinView(dtype, values.Length, Validity.NonNullable, views, [heap]);
     }
 
     [Fact]

@@ -206,16 +206,94 @@ internal static partial class ComparisonKernels
                 MatchCore<ContainsMatch>(node, mask, needle, escape, destination);
                 return;
             default:
-                if (text)
-                {
-                    MatchCore<LikeTextMatch>(node, mask, needle, escape, destination);
-                }
-                else
-                {
-                    MatchCore<LikeMatch>(node, mask, needle, escape, destination);
-                }
-
+                MatchLike(node, mask, needle, escape, text, destination);
                 return;
+        }
+    }
+
+    /// <summary>The bytes of a pattern whose plan is read onto the stack; a longer one rents them.</summary>
+    private const int StackPattern = 256;
+
+    /// <summary>
+    /// A <c>like</c> over a column: read once into a plan when it has no <c>_</c>, walked by the
+    /// backtracking matcher for each row otherwise.
+    /// </summary>
+    private static void MatchLike(
+        CanonicalNode node, ValidityMask mask, ReadOnlySpan<byte> pattern, byte escape, bool text,
+        Span<byte> destination)
+    {
+        if (text)
+        {
+            MatchCore<LikeTextMatch>(node, mask, pattern, escape, destination);
+            return;
+        }
+
+        byte[]? rentedLiterals = null;
+        int[]? rentedEnds = null;
+        bool small = pattern.Length <= StackPattern;
+        Span<byte> literals = small
+            ? stackalloc byte[StackPattern]
+            : (rentedLiterals = ArrayPool<byte>.Shared.Rent(pattern.Length));
+        Span<int> ends = small
+            ? stackalloc int[(StackPattern / 2) + 1]
+            : (rentedEnds = ArrayPool<int>.Shared.Rent((pattern.Length / 2) + 1));
+        try
+        {
+            if (!BytePattern.TryPlan(pattern, escape, literals, ends, out LikePlan plan))
+            {
+                MatchCore<LikeMatch>(node, mask, pattern, escape, destination);
+            }
+            else if (plan.Count != 1)
+            {
+                PlanCore(node, mask, plan, destination);
+            }
+            else
+            {
+                // One segment is one search, which the loops of the other predicates already make
+                // without reading the plan again at every row.
+                ReadOnlySpan<byte> literal = plan.Segment(0);
+                switch ((plan.AnchoredStart, plan.AnchoredEnd))
+                {
+                    case (true, true):
+                        MatchCore<EqualsMatch>(node, mask, literal, escape, destination);
+                        break;
+                    case (true, false):
+                        MatchCore<StartsWithMatch>(node, mask, literal, escape, destination);
+                        break;
+                    case (false, true):
+                        MatchCore<EndsWithMatch>(node, mask, literal, escape, destination);
+                        break;
+                    default:
+                        MatchCore<ContainsMatch>(node, mask, literal, escape, destination);
+                        break;
+                }
+            }
+        }
+        finally
+        {
+            if (rentedLiterals is not null)
+            {
+                ArrayPool<byte>.Shared.Return(rentedLiterals);
+                ArrayPool<int>.Shared.Return(rentedEnds!);
+            }
+        }
+    }
+
+    /// <summary>A planned <c>like</c> over a column, with the validity resolved.</summary>
+    private static void PlanCore(
+        CanonicalNode node, ValidityMask mask, in LikePlan plan, Span<byte> destination)
+    {
+        ViewValues values = new ViewValues(node);
+        bool allValid = mask.AllValid;
+        for (int i = 0; i < destination.Length; i++)
+        {
+            if (!allValid && !mask.IsValid(i))
+            {
+                destination[i] = Trilean.Unknown;
+                continue;
+            }
+
+            destination[i] = plan.Holds(values.At(i)) ? Trilean.True : Trilean.False;
         }
     }
 
@@ -283,6 +361,18 @@ internal static partial class ComparisonKernels
     {
         public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
             BytePattern.Contains(value, pattern);
+    }
+
+    private readonly struct EndsWithMatch : IBytesMatch
+    {
+        public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
+            value.EndsWith(pattern);
+    }
+
+    private readonly struct EqualsMatch : IBytesMatch
+    {
+        public static bool Holds(ReadOnlySpan<byte> value, ReadOnlySpan<byte> pattern, byte escape) =>
+            value.SequenceEqual(pattern);
     }
 
     private readonly struct LikeMatch : IBytesMatch
