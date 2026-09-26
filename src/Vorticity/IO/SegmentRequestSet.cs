@@ -544,7 +544,7 @@ internal sealed class SegmentRequestSet : IDisposable
     /// Mixes the whole key. Offsets in one file share their high bits and differ only in the low
     /// ones, so a plain low-bits mask would pile every segment of a chunk into one probe chain.
     /// </summary>
-    private static int HashOf(ulong offset, uint length)
+    internal static int HashOf(ulong offset, uint length)
     {
         ulong h = (offset ^ s_hashSeed) * 0x9E3779B97F4A7C15UL;
         h ^= h >> 29;

@@ -1,53 +1,18 @@
+// The segments a scan holds for its batches, each looked for by a walk over them all, kept line for
+// line as the baseline of ScanSegmentsBenchmarks: `ScanSegments` in the library is the same set with
+// its entries chained by the hash of their segment.
 using System;
 using System.Buffers;
-using System.Numerics;
 using System.Threading;
-using System.Threading.Tasks;
-using System.Threading.Tasks.Sources;
 using Vorticity.Buffers;
 using Vorticity.IO;
+using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 
-namespace Vorticity.Scanning;
+namespace Vorticity.Benchmarks.Complexity;
 
-/// <summary>
-/// The segments one scan has read, held for the batches that ask for them again, and shared by
-/// every lane of the scan.
-/// </summary>
-/// <remarks>
-/// <para>
-/// A segment spans every block of its chunk and a batch is a block or less, so consecutive batches
-/// ask for the same segments. Over a memory mapping the repetition is free, since a segment is a view;
-/// over anything that copies -- a positional read, an object store -- it is the whole cost of the
-/// scan. Lanes take consecutive batches in turn, so a set per lane would read a segment once per
-/// lane that meets it, and a scan of four lanes would reread every segment on every batch.
-/// </para>
-/// <para>
-/// Each segment is read by exactly one batch, the first to claim it. A batch that needs a segment
-/// another batch has claimed and not yet read waits for that read instead of issuing its own: a
-/// batch claims all it lacks in one step under the lock, so it can only wait on a batch that claimed
-/// before it, and the waits cannot form a cycle. Once a read fails the scan is failing, and the
-/// batches still running read what they lack themselves.
-/// </para>
-/// <para>
-/// A segment is needed by a contiguous run of the scan's batches, because it covers a contiguous
-/// run of rows and the batches are numbered in the order the scan walks its rows, forward or back.
-/// So once batch <c>n</c> is delivered, every batch before it has taken its own reference, and a
-/// segment last asked for by a batch before <c>n</c> is needed by no batch from <c>n</c> on:
-/// <see cref="Release"/> drops it. What is held is bounded by the batches in flight, whose
-/// segments were live anyway, since every batch holds its own reference until it is released.
-/// </para>
-/// <para>
-/// A batch looks for each segment it lacks by the hash of its offset and length, in chains threaded
-/// through the entries themselves, so that a batch opening G segments while the scan holds E pays
-/// G steps under the lock rather than G times E.
-/// </para>
-/// <para>
-/// The set is its own lock: a scan of one lane never contends for it, and an uncontended monitor
-/// allocates nothing.
-/// </para>
-/// </remarks>
-internal sealed class ScanSegments : IDisposable
+/// <summary>The segments one scan holds for the batches that ask for them again, looked for in order.</summary>
+internal sealed class ScanSegmentsBefore : IDisposable
 {
     private readonly SegmentWaiter?[] _parked;
     private Entry[] _entries = [];
@@ -56,7 +21,7 @@ internal sealed class ScanSegments : IDisposable
     private bool _failed;
 
     /// <param name="lanes">How many batches may be built at once; above one, a batch may wait for another's read.</param>
-    internal ScanSegments(int lanes) => _parked = lanes > 1 ? new SegmentWaiter?[lanes] : [];
+    internal ScanSegmentsBefore(int lanes) => _parked = lanes > 1 ? new SegmentWaiter?[lanes] : [];
 
     /// <summary>
     /// The next batch number, for a scan whose batches are not numbered by a split plan: a
@@ -111,10 +76,9 @@ internal sealed class ScanSegments : IDisposable
                     }
 
                     SegmentSpec spec = requests.GetSpec(slot);
-                    int hash = SegmentRequestSet.HashOf(spec.Offset, spec.Length);
-                    if (Find(spec.Offset, spec.Length, hash) < 0)
+                    if (Find(spec.Offset, spec.Length) < 0)
                     {
-                        Add(new Entry { Offset = spec.Offset, Length = spec.Length, Hash = hash, Claimant = batch, LastUse = batch });
+                        Add(new Entry { Offset = spec.Offset, Length = spec.Length, Claimant = batch, LastUse = batch });
                     }
                 }
             }
@@ -140,7 +104,7 @@ internal sealed class ScanSegments : IDisposable
             int kept = 0;
             for (int i = 0; i < _count; i++)
             {
-                ref Entry entry = ref _entries[i];
+                Entry entry = _entries[i];
                 if (entry.Owner is null && entry.Claimant == batch)
                 {
                     int slot = requests.IndexOf(entry.Offset, entry.Length);
@@ -153,7 +117,7 @@ internal sealed class ScanSegments : IDisposable
                     entry.View = requests.GetBuffer(slot);
                 }
 
-                Keep(i, ref kept);
+                _entries[kept++] = entry;
             }
 
             Truncate(kept);
@@ -171,12 +135,13 @@ internal sealed class ScanSegments : IDisposable
             int kept = 0;
             for (int i = 0; i < _count; i++)
             {
-                if (_entries[i].Owner is null && _entries[i].Claimant == batch)
+                Entry entry = _entries[i];
+                if (entry.Owner is null && entry.Claimant == batch)
                 {
                     continue;
                 }
 
-                Keep(i, ref kept);
+                _entries[kept++] = entry;
             }
 
             Truncate(kept);
@@ -198,31 +163,18 @@ internal sealed class ScanSegments : IDisposable
             int kept = 0;
             for (int i = 0; i < _count; i++)
             {
-                if (_entries[i].Owner is { } owner && _entries[i].LastUse < batch)
+                Entry entry = _entries[i];
+                if (entry.Owner is { } owner && entry.LastUse < batch)
                 {
                     owner.Release();
                     continue;
                 }
 
-                Keep(i, ref kept);
+                _entries[kept++] = entry;
             }
 
             Truncate(kept);
         }
-    }
-
-    /// <summary>
-    /// Keeps entry <paramref name="i"/>, moving it down to <paramref name="kept"/> when entries before
-    /// it were dropped; its chain is mended by <see cref="Truncate"/>, which follows every such loop.
-    /// </summary>
-    private void Keep(int i, ref int kept)
-    {
-        if (kept != i)
-        {
-            _entries[kept] = _entries[i];
-        }
-
-        kept++;
     }
 
     /// <summary>Releases everything held and gives the array back, once no batch runs.</summary>
@@ -271,21 +223,13 @@ internal sealed class ScanSegments : IDisposable
         return false;
     }
 
-    /// <summary>The entry of the segment at <paramref name="offset"/>, whose hash is <paramref name="hash"/>, or -1, by the chain of its bucket.</summary>
-    private int Find(ulong offset, uint length, int hash)
+    private int Find(ulong offset, uint length)
     {
-        Entry[] entries = _entries;
-        if (entries.Length == 0)
+        for (int i = 0; i < _count; i++)
         {
-            return -1;
-        }
-
-        int bucket = hash & (Buckets(entries) - 1);
-        for (int e = entries[bucket].Head - 1; e >= 0; e = entries[e].Next - 1)
-        {
-            if (entries[e].Offset == offset && entries[e].Length == length)
+            if (_entries[i].Offset == offset && _entries[i].Length == length)
             {
-                return e;
+                return i;
             }
         }
 
@@ -306,63 +250,15 @@ internal sealed class ScanSegments : IDisposable
             }
 
             _entries = bigger;
-            Relink();
         }
 
-        // The slot's head belongs to the bucket its index names, not to the entry stored in it.
-        ref Entry slot = ref _entries[_count];
-        entry.Head = slot.Head;
-        slot = entry;
-        Link(_count++);
+        _entries[_count++] = entry;
     }
 
-    /// <summary>
-    /// Drops the entries from <paramref name="kept"/> on, the loop before it having moved the ones it
-    /// keeps down to the front, and rechains them all when any moved.
-    /// </summary>
     private void Truncate(int kept)
     {
-        if (kept == _count)
-        {
-            return;
-        }
-
         Array.Clear(_entries, kept, _count - kept);
         _count = kept;
-        Relink();
-    }
-
-    /// <summary>
-    /// The number of hash buckets of <paramref name="entries"/>: its length, down to a power of two.
-    /// Bucket <c>b</c>'s chain starts at the <see cref="Entry.Head"/> of entry <c>b</c>, so the
-    /// buckets cost no array of their own and are never fewer than the entries.
-    /// </summary>
-    private static int Buckets(Entry[] entries) => 1 << BitOperations.Log2((uint)entries.Length);
-
-    /// <summary>Puts entry <paramref name="e"/> at the head of the chain of its segment's bucket.</summary>
-    private void Link(int e)
-    {
-        Entry[] entries = _entries;
-        ref Entry entry = ref entries[e];
-        int bucket = entry.Hash & (Buckets(entries) - 1);
-        entry.Next = entries[bucket].Head;
-        entries[bucket].Head = e + 1;
-    }
-
-    /// <summary>Chains every entry anew, once entries have moved.</summary>
-    private void Relink()
-    {
-        Entry[] entries = _entries;
-        int buckets = Buckets(entries);
-        for (int b = 0; b < buckets; b++)
-        {
-            entries[b].Head = 0;
-        }
-
-        for (int e = 0; e < _count; e++)
-        {
-            Link(e);
-        }
     }
 
     /// <summary>Wakes each parked batch no unread claim of another batch holds back any more; every one, once the scan has failed.</summary>
@@ -410,12 +306,6 @@ internal sealed class ScanSegments : IDisposable
         internal ulong Offset;
         internal uint Length;
 
-        /// <summary>The hash of the segment, <see cref="SegmentRequestSet.HashOf"/>, kept for the rechaining after a move.</summary>
-        internal int Hash;
-
-        /// <summary>The next entry of the chain of this segment's hash bucket, plus one; zero ends the chain.</summary>
-        internal int Next;
-
         /// <summary>The batch that reads the segment.</summary>
         internal long Claimant;
 
@@ -424,46 +314,5 @@ internal sealed class ScanSegments : IDisposable
 
         internal SegmentOwner? Owner;
         internal VortexBuffer View;
-
-        /// <summary>
-        /// The first entry of the chain of the hash bucket this entry's index names, plus one; zero
-        /// when the bucket is empty. It belongs to the slot, whichever entry the slot holds.
-        /// </summary>
-        internal int Head;
     }
-}
-
-/// <summary>A batch under construction that can wait for a segment another batch of its scan is reading.</summary>
-internal abstract class SegmentWaiter : IValueTaskSource
-{
-    private ManualResetValueTaskSourceCore<bool> _read = new() { RunContinuationsAsynchronously = true };
-
-    /// <summary>The set whose slots the batch waits on, while it waits.</summary>
-    internal SegmentRequestSet? Requests { get; private set; }
-
-    /// <summary>The number of the batch that waits.</summary>
-    internal long Batch { get; private set; }
-
-    /// <summary>Completes once no segment the batch needs is being read by another batch.</summary>
-    internal ValueTask ReadByOthersAsync() => new ValueTask(this, _read.Version);
-
-    internal void Park(SegmentRequestSet requests, long batch)
-    {
-        _read.Reset();
-        Requests = requests;
-        Batch = batch;
-    }
-
-    internal void Wake()
-    {
-        Requests = null;
-        _read.SetResult(true);
-    }
-
-    void IValueTaskSource.GetResult(short token) => _read.GetResult(token);
-
-    ValueTaskSourceStatus IValueTaskSource.GetStatus(short token) => _read.GetStatus(token);
-
-    void IValueTaskSource.OnCompleted(Action<object?> continuation, object? state, short token, ValueTaskSourceOnCompletedFlags flags) =>
-        _read.OnCompleted(continuation, state, token, flags);
 }
