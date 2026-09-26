@@ -20,6 +20,11 @@ namespace Vorticity.Compute;
 /// a million rows in eight-thousand-row batches would otherwise hash them a hundred and twenty
 /// times. The prepared state is keyed by the expression node it belongs to and never outlives the
 /// scan.
+///
+/// A conjunction or a disjunction evaluates its right side only over the rows its left side left
+/// open: not at all when it decided every row, and over those rows alone, gathered from the columns
+/// the right side reads, when they are few enough for the gather to cost less than the rows it
+/// spares.
 /// </remarks>
 internal sealed class FilterEvaluator
 {
@@ -261,7 +266,7 @@ internal sealed class FilterEvaluator
     /// <exception cref="NotSupportedException">A column's type is outside the 1.0 filter scope.</exception>
     internal void Evaluate(CanonicalArena arena, int rootIndex, int rows, Span<byte> destination)
     {
-        Evaluate(_filter, arena, rootIndex, rows, destination, 0);
+        Evaluate(_filter, arena, rootIndex, rows, default, destination, 0);
     }
 
     /// <summary>
@@ -278,7 +283,7 @@ internal sealed class FilterEvaluator
     /// </remarks>
     internal void EvaluateColumn(CanonicalArena arena, int column, int rows, Span<byte> destination)
     {
-        Evaluate(_filter, arena, ~column, rows, destination, 0);
+        Evaluate(_filter, arena, ~column, rows, default, destination, 0);
     }
 
     /// <summary>
@@ -322,9 +327,18 @@ internal sealed class FilterEvaluator
         return fresh.Set;
     }
 
+    /// <summary>
+    /// Evaluates <paramref name="filter"/> over the rows of <paramref name="selection"/>, or over every
+    /// row of the batch when it is empty, one state per row evaluated into
+    /// <paramref name="destination"/>.
+    /// </summary>
+    /// <remarks>
+    /// A selection comes from a logical node whose left side left few rows open: its right side is
+    /// evaluated over those rows alone, each column it reads gathered at them first.
+    /// </remarks>
     private void Evaluate(
-        VortexExpr filter, CanonicalArena arena, int rootIndex, int rows, Span<byte> destination,
-        int depth)
+        VortexExpr filter, CanonicalArena arena, int rootIndex, int rows, ReadOnlySpan<int> selection,
+        Span<byte> destination, int depth)
     {
         if (depth > MaxDepth)
         {
@@ -337,7 +351,7 @@ internal sealed class FilterEvaluator
             case ExprKind.Comparison:
             {
                 ComparisonExpr comparison = (ComparisonExpr)filter;
-                int column = Resolve(arena, rootIndex, comparison.Field, rows);
+                int column = Column(arena, rootIndex, comparison.Field, rows, selection);
                 ComparisonKernels.Compare(arena, column, comparison.Op, comparison.Value, destination);
                 return;
             }
@@ -345,8 +359,8 @@ internal sealed class FilterEvaluator
             case ExprKind.ColumnComparison:
             {
                 ColumnComparisonExpr columns = (ColumnComparisonExpr)filter;
-                int left = Resolve(arena, rootIndex, columns.Left, rows);
-                int right = Resolve(arena, rootIndex, columns.Right, rows);
+                int left = Column(arena, rootIndex, columns.Left, rows, selection);
+                int right = Column(arena, rootIndex, columns.Right, rows, selection);
                 ComparisonKernels.CompareColumns(arena, left, columns.Op, right, destination);
                 return;
             }
@@ -354,7 +368,7 @@ internal sealed class FilterEvaluator
             case ExprKind.StringMatch:
             {
                 StringMatchExpr match = (StringMatchExpr)filter;
-                int column = Resolve(arena, rootIndex, match.Field, rows);
+                int column = Column(arena, rootIndex, match.Field, rows, selection);
                 ComparisonKernels.StringMatch(
                     arena, column, match.Op, match.Pattern, match.Escape, destination);
                 return;
@@ -363,7 +377,7 @@ internal sealed class FilterEvaluator
             case ExprKind.ListContains:
             {
                 ListContainsExpr contains = (ListContainsExpr)filter;
-                int column = Resolve(arena, rootIndex, contains.Field, rows);
+                int column = Column(arena, rootIndex, contains.Field, rows, selection);
                 ListKernels.Contains(arena, column, contains.Value, destination);
                 return;
             }
@@ -371,7 +385,7 @@ internal sealed class FilterEvaluator
             case ExprKind.NullCheck:
             {
                 NullCheckExpr check = (NullCheckExpr)filter;
-                int column = Resolve(arena, rootIndex, check.Field, rows);
+                int column = Column(arena, rootIndex, check.Field, rows, selection);
                 ComparisonKernels.NullCheck(arena, column, check.IsNull, destination);
                 return;
             }
@@ -379,13 +393,13 @@ internal sealed class FilterEvaluator
             case ExprKind.In:
             {
                 InExpr membership = (InExpr)filter;
-                int column = Resolve(arena, rootIndex, membership.Field, rows);
+                int column = Column(arena, rootIndex, membership.Field, rows, selection);
                 InSet? prepared = PreparedFor(membership, arena, column);
-                byte[] scratch = ArrayPool<byte>.Shared.Rent(rows);
+                byte[] scratch = ArrayPool<byte>.Shared.Rent(destination.Length);
                 try
                 {
                     ComparisonKernels.In(
-                        arena, column, membership.Literals, destination, scratch.AsSpan(0, rows),
+                        arena, column, membership.Literals, destination, scratch.AsSpan(0, destination.Length),
                         prepared);
                 }
                 finally
@@ -397,36 +411,13 @@ internal sealed class FilterEvaluator
             }
 
             case ExprKind.Not:
-                Evaluate(((NotExpr)filter).Operand, arena, rootIndex, rows, destination, depth + 1);
+                Evaluate(((NotExpr)filter).Operand, arena, rootIndex, rows, selection, destination, depth + 1);
                 Trilean.Not(destination);
                 return;
 
             case ExprKind.Logical:
-            {
-                LogicalExpr logical = (LogicalExpr)filter;
-                Evaluate(logical.Left, arena, rootIndex, rows, destination, depth + 1);
-
-                byte[] right = ArrayPool<byte>.Shared.Rent(rows);
-                try
-                {
-                    Span<byte> other = right.AsSpan(0, rows);
-                    Evaluate(logical.Right, arena, rootIndex, rows, other, depth + 1);
-                    if (logical.IsAnd)
-                    {
-                        Trilean.And(destination, other);
-                    }
-                    else
-                    {
-                        Trilean.Or(destination, other);
-                    }
-                }
-                finally
-                {
-                    ArrayPool<byte>.Shared.Return(right);
-                }
-
+                EvaluateLogical((LogicalExpr)filter, arena, rootIndex, rows, selection, destination, depth);
                 return;
-            }
 
             default:
                 // A bare field or literal is not a predicate. The expression factories make this
@@ -435,6 +426,161 @@ internal sealed class FilterEvaluator
                 throw new ArgumentException(
                     $"A filter's root must be a predicate, not a {filter.Kind}.", nameof(filter));
         }
+    }
+
+    /// <summary>
+    /// The share of open rows under which a logical node's right side is evaluated over them alone,
+    /// as a divisor of the rows its left side was evaluated over: a pattern, a string comparison,
+    /// a list or a membership costs enough a row to gather from a fraction of the rows, a numeric
+    /// comparison or a null check only from a sliver.
+    /// </summary>
+    private const int CostlyOpenDivisor = 2;
+
+    /// <inheritdoc cref="CostlyOpenDivisor"/>
+    private const int CheapOpenDivisor = 32;
+
+    /// <summary>
+    /// <c>left AND right</c> or <c>left OR right</c>: the right side is not evaluated when the left
+    /// one decided every row, and over the rows it left open alone when they are few enough.
+    /// </summary>
+    private void EvaluateLogical(
+        LogicalExpr logical, CanonicalArena arena, int rootIndex, int rows, ReadOnlySpan<int> selection,
+        Span<byte> destination, int depth)
+    {
+        Evaluate(logical.Left, arena, rootIndex, rows, selection, destination, depth + 1);
+
+        // A left side false on a row decides a conjunction there, and one true a disjunction,
+        // whatever the right side says. The count reads the states a vector at a time, and stops
+        // once past what the right side is evaluated over alone.
+        byte decided = logical.IsAnd ? Trilean.False : Trilean.True;
+        int evaluated = destination.Length;
+        int few = evaluated / (Costly(logical.Right) ? CostlyOpenDivisor : CheapOpenDivisor);
+        int open = OpenUpTo(destination, decided, few);
+        if (open == 0)
+        {
+            return;
+        }
+
+        byte[] right = ArrayPool<byte>.Shared.Rent(evaluated);
+        try
+        {
+            Span<byte> other = right.AsSpan(0, evaluated);
+            if (open <= few)
+            {
+                EvaluateOpen(logical.Right, arena, rootIndex, rows, selection, destination, decided, open, other, depth);
+            }
+            else
+            {
+                Evaluate(logical.Right, arena, rootIndex, rows, selection, other, depth + 1);
+            }
+
+            if (logical.IsAnd)
+            {
+                Trilean.And(destination, other);
+            }
+            else
+            {
+                Trilean.Or(destination, other);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(right);
+        }
+    }
+
+    /// <summary>
+    /// Evaluates <paramref name="filter"/>, a right side, over the <paramref name="open"/> rows its
+    /// left side's <paramref name="states"/> did not decide, into <paramref name="other"/> at their
+    /// places; every other place gets the state that leaves the left side's decision as it is.
+    /// </summary>
+    private void EvaluateOpen(
+        VortexExpr filter, CanonicalArena arena, int rootIndex, int rows, ReadOnlySpan<int> selection,
+        ReadOnlySpan<byte> states, byte decided, int open, Span<byte> other, int depth)
+    {
+        int[] places = ArrayPool<int>.Shared.Rent(open);
+        int[] batchRows = ArrayPool<int>.Shared.Rent(open);
+        byte[] answers = ArrayPool<byte>.Shared.Rent(open);
+        try
+        {
+            // The open rows are few, so the search skips a vector of decided states at a time.
+            Span<int> at = places.AsSpan(0, open);
+            for (int i = 0, n = 0; n < open; n++)
+            {
+                i += states[i..].IndexOfAnyExcept(decided);
+                at[n] = i++;
+            }
+
+            // Where each open row is in the batch: its place, or the batch row the selection had
+            // there when this node already evaluates a selection.
+            Span<int> gathered = batchRows.AsSpan(0, open);
+            for (int n = 0; n < open; n++)
+            {
+                gathered[n] = selection.IsEmpty ? at[n] : selection[at[n]];
+            }
+
+            Span<byte> answered = answers.AsSpan(0, open);
+            Evaluate(filter, arena, rootIndex, rows, gathered, answered, depth + 1);
+
+            other.Fill(decided == Trilean.False ? Trilean.True : Trilean.False);
+            for (int n = 0; n < open; n++)
+            {
+                other[at[n]] = answered[n];
+            }
+        }
+        finally
+        {
+            ArrayPool<int>.Shared.Return(places);
+            ArrayPool<int>.Shared.Return(batchRows);
+            ArrayPool<byte>.Shared.Return(answers);
+        }
+    }
+
+    /// <summary>
+    /// How many of <paramref name="states"/> are not <paramref name="decided"/>: exactly when they are
+    /// <paramref name="limit"/> or fewer, and some number past it otherwise. The count stops at the
+    /// stretch of states that takes it past, or at one whose share of open states, carried over
+    /// every state, would take it twice past: a right side evaluated over every row is what the
+    /// evaluation did before, so stopping early on a share that misleads costs nothing it had.
+    /// </summary>
+    private static int OpenUpTo(ReadOnlySpan<byte> states, byte decided, int limit)
+    {
+        const int Stretch = 512;
+        int open = 0;
+        for (int start = 0; start < states.Length; start += Stretch)
+        {
+            ReadOnlySpan<byte> stretch = states.Slice(start, Math.Min(Stretch, states.Length - start));
+            open += stretch.Length - stretch.Count(decided);
+            if (open > limit || (long)open * states.Length > 2L * limit * (start + stretch.Length))
+            {
+                return Math.Max(open, limit + 1);
+            }
+        }
+
+        return open;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="filter"/> reads bytes, lists or a set of candidates, whose cost a row
+    /// is what makes evaluating it over a gathered part of the rows pay.
+    /// </summary>
+    private static bool Costly(VortexExpr filter) => filter.Kind switch
+    {
+        ExprKind.StringMatch or ExprKind.ListContains or ExprKind.In or ExprKind.ColumnComparison => true,
+        ExprKind.Comparison => ((ComparisonExpr)filter).Value.Kind == FilterLiteralKind.Bytes,
+        ExprKind.Not => Costly(((NotExpr)filter).Operand),
+        ExprKind.Logical => Costly(((LogicalExpr)filter).Left) || Costly(((LogicalExpr)filter).Right),
+        _ => false,
+    };
+
+    /// <summary>
+    /// The column <paramref name="field"/> names, over the rows of <paramref name="selection"/> when
+    /// there is one, gathered from the batch's column at them.
+    /// </summary>
+    private static int Column(CanonicalArena arena, int rootIndex, FieldExpr field, int rows, ReadOnlySpan<int> selection)
+    {
+        int column = Resolve(arena, rootIndex, field, rows);
+        return selection.IsEmpty ? column : CanonicalFilter.Apply(arena, column, selection);
     }
 
     /// <summary>
