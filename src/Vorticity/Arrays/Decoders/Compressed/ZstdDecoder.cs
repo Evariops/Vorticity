@@ -911,9 +911,11 @@ internal sealed class ZstdDecoder : ArrayDecoder
 
             // Buffer index 0 always: the values of a node fit one buffer here, so there is never a
             // second one to point at. The single call covers both the inline and the referenced
-            // shape, and writes two registers rather than clearing and copying the view per row.
+            // shape, and writes two registers rather than clearing and copying the view per row;
+            // an inline value is read as two words from the stream, where there are twelve bytes.
             Span<byte> view = writable.Slice(row * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
-            CanonicalSupport.WriteView(view, value, (int)size, bufferIndex: 0, offset: start);
+            Canonical.ViewKernels.PlaceView(
+                ref MemoryMarshal.GetReference(view), ref MemoryMarshal.GetReference(heap), start, (int)size, heap.Length);
 
             offset = start + (int)size;
             written++;

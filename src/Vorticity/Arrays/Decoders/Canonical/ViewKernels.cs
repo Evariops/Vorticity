@@ -1564,6 +1564,19 @@ internal static class ViewKernels
     }
 
     /// <summary>
+    /// The view of the value at <paramref name="offset"/> of a heap of
+    /// <paramref name="heapLength"/> bytes, in the first data buffer, for a decoder that builds its
+    /// views itself and has already checked the value lies inside the heap.
+    /// </summary>
+    /// <remarks>
+    /// An inline value with twelve bytes of heap from its start is read as two words and masked
+    /// down to its size, where gathering exactly its bytes branches on the size three ways.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void PlaceView(ref byte view, ref byte heap, int offset, int size, int heapLength) =>
+        Place(ref view, ref heap, offset, size, heapLength, requireUtf8: false);
+
+    /// <summary>
     /// Per size up to <see cref="Inline"/>, the bits of a value's first eight bytes that are the
     /// value's.
     /// </summary>
@@ -1799,7 +1812,7 @@ internal static class ViewKernels
                 ThrowInvalidRow(row);
             }
 
-            CanonicalSupport.WriteView(ref view, ref value, size, 0, start);
+            Place(ref view, ref heapRef, start, size, heapLength, requireUtf8: false);
         }
     }
 
@@ -1861,7 +1874,7 @@ internal static class ViewKernels
                 return false;
             }
 
-            CanonicalSupport.WriteView(ref view, ref value, size, 0, (int)start);
+            Place(ref view, ref heapRef, (int)start, size, heapLength, requireUtf8: false);
         }
 
         return true;
@@ -1913,7 +1926,7 @@ internal static class ViewKernels
                 ThrowInvalidRow(i);
             }
 
-            CanonicalSupport.WriteView(ref view, ref value, size, 0, start);
+            Place(ref view, ref heapRef, start, size, heapLength, requireUtf8: false);
             start = end;
         }
     }
