@@ -4,6 +4,7 @@
 // gets its own case because "start exactly on a chunk start, one before, one after" is where an
 // off-by-one hides and produces a plausible, wrong answer rather than a crash.
 using System;
+using System.Collections.Generic;
 
 using Vorticity.Layouts;
 
@@ -125,27 +126,78 @@ public sealed class ChunkSelectionTests
             selection[i] = 1_000 + (i * 7);
         }
 
-        int[] into = new int[selection.Length];
-        int count = ChunkedLayoutReader.Rebase(selection, 1_000, 500, into);
+        int taken = 0;
+        ReadOnlySpan<int> run = ChunkedLayoutReader.NextRun(selection, ref taken, 1_000, 1_500);
+        int[] into = new int[run.Length];
+        ChunkedLayoutReader.Shift(run, 1_000, into);
 
-        Assert.Equal(selection.Length, count);
-        for (int i = 0; i < count; i++)
+        Assert.Equal(selection.Length, run.Length);
+        Assert.Equal(selection.Length, taken);
+        for (int i = 0; i < into.Length; i++)
         {
             Assert.Equal(i * 7, into[i]);
         }
     }
 
     [Fact]
-    public void ASelectionAcrossChunksKeepsTheRowsOfThisOneInTheirOrder()
+    public void ASelectionAcrossChunksGivesEachChunkItsOwnRun()
     {
-        // Rows before the chunk, at both of its ends, past it, and inside it out of order: nine
-        // of them, so the vector pass meets a row outside and hands the rows to the row walk.
-        int[] selection = [5, 1_499, 999, 1_000, 1_500, 1_200, 3_000, 1_100, 1_001];
-        int[] into = new int[selection.Length];
+        // Rows before the first chunk, at both ends of each, and past the last: nine and more, so
+        // the shift takes a vector and then single rows.
+        int[] selection = [5, 999, 1_000, 1_001, 1_100, 1_200, 1_201, 1_202, 1_203, 1_499, 1_500, 2_999, 3_000];
+        int taken = 0;
 
-        int count = ChunkedLayoutReader.Rebase(selection, 1_000, 500, into);
+        ReadOnlySpan<int> first = ChunkedLayoutReader.NextRun(selection, ref taken, 1_000, 1_500);
+        int[] into = new int[first.Length];
+        ChunkedLayoutReader.Shift(first, 1_000, into);
+        Assert.Equal([0, 1, 100, 200, 201, 202, 203, 499], into);
 
-        Assert.Equal([499, 0, 200, 100, 1], into[..count]);
-        Assert.Equal(0, ChunkedLayoutReader.Rebase(selection, (long)int.MaxValue + 1, 500, into));
+        ReadOnlySpan<int> second = ChunkedLayoutReader.NextRun(selection, ref taken, 1_500, 3_000);
+        into = new int[second.Length];
+        ChunkedLayoutReader.Shift(second, 1_500, into);
+        Assert.Equal([0, 1_499], into);
+        Assert.Equal(12, taken);
+
+        // A chunk no int row reaches has no run.
+        int past = 0;
+        Assert.True(ChunkedLayoutReader.NextRun(selection, ref past, (long)int.MaxValue + 1, (long)int.MaxValue + 500).IsEmpty);
+    }
+
+    [Fact]
+    public void EveryChunkOfARangeGetsTheSelectedRowsThatFallInIt()
+    {
+        Random random = new Random(11);
+        for (int trial = 0; trial < 300; trial++)
+        {
+            // Chunks of 0 to 40 rows, empty ones included, and a selection that ascends over them.
+            long[] offsets = new long[random.Next(1, 20) + 1];
+            for (int i = 1; i < offsets.Length; i++)
+            {
+                offsets[i] = offsets[i - 1] + random.Next(0, 41);
+            }
+
+            List<int> rows = [];
+            for (int row = 0; row < offsets[^1]; row++)
+            {
+                if (random.Next(3) == 0)
+                {
+                    rows.Add(row);
+                }
+            }
+
+            int[] selection = [.. rows];
+            int taken = 0;
+            for (int chunk = 0; chunk + 1 < offsets.Length; chunk++)
+            {
+                ReadOnlySpan<int> run = ChunkedLayoutReader.NextRun(selection, ref taken, offsets[chunk], offsets[chunk + 1]);
+                int[] into = new int[run.Length];
+                ChunkedLayoutReader.Shift(run, offsets[chunk], into);
+
+                int[] expected = [.. rows.FindAll(row => row >= offsets[chunk] && row < offsets[chunk + 1]).ConvertAll(row => (int)(row - offsets[chunk]))];
+                Assert.Equal(expected, into);
+            }
+
+            Assert.Equal(selection.Length, taken);
+        }
     }
 }

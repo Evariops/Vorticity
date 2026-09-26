@@ -156,6 +156,41 @@ public sealed class LayoutExecutionTests
     }
 
     [Fact]
+    public async Task ASelectionOverSeveralChunksReadsTheRowsItNames()
+    {
+        // Three chunks of 100 rows, read as one range under a selection with rows at both ends of
+        // each chunk and in the middle of one: each chunk takes its own run of it.
+        await using VortexFile file = await LayoutExecutor.OpenAsync("containers/chunked_stream_3");
+        LayoutTree tree = LayoutTree.Parse(file);
+        using ScanContext context = new ScanContext(file);
+        int[] rows = [0, 5, 99, 100, 150, 199, 200, 299];
+
+        List<byte> expected = [];
+        foreach (int row in rows)
+        {
+            expected.AddRange(await DigestAsync(file, tree, context, new RowRange(row, row + 1)));
+        }
+
+        int[] selection = [.. rows];
+        ScanContext.SavedSelection saved = context.ExchangeSelection(selection, selection.Length);
+        byte[] actual;
+        try
+        {
+            int root = await LayoutExecutor.ReadAsync(
+                file, tree, context, new RowRange(0, file.RowCount), FieldMask.All, TestContext.Current.CancellationToken);
+            Assert.Equal(rows.Length, context.Canonical.GetNode(root).Length);
+            actual = CanonicalDigest.Of(context, root);
+        }
+        finally
+        {
+            context.RestoreSelection(in saved);
+            context.ResetBatch();
+        }
+
+        Assert.True(expected.ToArray().AsSpan().SequenceEqual(actual), "the selected rows differ from the rows read one by one.");
+    }
+
+    [Fact]
     public async Task RangeBeyondTheRootIsACallerError()
     {
         await using VortexFile file = await LayoutExecutor.OpenAsync("containers/uncompressed_canonical");
