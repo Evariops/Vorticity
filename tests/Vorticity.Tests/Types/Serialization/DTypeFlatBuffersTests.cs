@@ -671,6 +671,21 @@ public sealed class DTypeFlatBuffersTests
     }
 
     /// <summary>
+    /// The format sizes a fixed-size list in 32 unsigned bits and the public type in an int: a size
+    /// past it is a legal dtype with no public form, refused as such rather than by an overflow.
+    /// </summary>
+    [Fact]
+    public void AFixedSizeListLongerThanAnIntHasNoPublicType()
+    {
+        DTypeArena arena = new DTypeArena();
+        DType longest = arena.FixedSizeList(arena.Primitive(PType.U8, Nullability.NonNullable), uint.MaxValue, Nullability.NonNullable);
+        Assert.Throws<VortexUnsupportedException>(() => VortexTypes.FromDType(longest));
+
+        DType largest = arena.FixedSizeList(arena.Primitive(PType.U8, Nullability.NonNullable), int.MaxValue, Nullability.NonNullable);
+        Assert.Equal(int.MaxValue, VortexTypes.FromDType(largest).FixedSize);
+    }
+
+    /// <summary>
     /// The same defect through the two-child case the arithmetic is cheapest in: a
     /// <c>Map</c> whose <c>key_type</c> and <c>value_type</c> are one shared table.
     /// </summary>
@@ -968,7 +983,8 @@ public sealed class DTypeFlatBuffersTests
         // Read the extension table's own vtable rather than the model, which cannot tell the two
         // encodings apart: slot 2 must resolve to a vector, not to nothing. The root DType table is
         // a union, so its value sits in slot 1 and the tag in slot 0.
-        FlatBufferTable root = FlatBufferTable.Root(buffer);
+        int budget = VortexLimits.MaxFlatBufferTables;
+        FlatBufferTable root = FlatBufferTable.Root(buffer, ref budget);
         FlatBufferTable extension = root.GetTable(1);
         Assert.True(
             extension.HasField(2),

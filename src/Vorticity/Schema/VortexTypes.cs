@@ -79,7 +79,12 @@ internal static class VortexTypes
                 type = VortexType.List(Convert(d.ElementType, ref budget));
                 break;
             case DTypeKind.FixedSizeList:
-                type = VortexType.FixedSizeList(Convert(d.ElementType, ref budget), checked((int)d.FixedSize));
+                if (d.FixedSize > int.MaxValue)
+                {
+                    ThrowFixedSizeTooLong();
+                }
+
+                type = VortexType.FixedSizeList(Convert(d.ElementType, ref budget), (int)d.FixedSize);
                 break;
             case DTypeKind.Extension:
             {
@@ -110,6 +115,13 @@ internal static class VortexTypes
 
         return nullable ? type.Nullable : type;
     }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowFixedSizeTooLong() => throw new VortexUnsupportedException(
+        nameof(DTypeKind.FixedSizeList),
+        ComponentKind.DType,
+        "The format sizes a fixed-size list in 32 unsigned bits, and VortexType.FixedSize is an int: a list longer than int.MaxValue has no public type.");
 
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
