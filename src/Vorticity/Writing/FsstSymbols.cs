@@ -424,7 +424,15 @@ internal sealed class FsstSymbols
     /// <see cref="SampleLine"/>. Runs rather than prefixes or whole rows: prefixes would train on
     /// headers, and whole rows would let a single long row dominate.
     /// </summary>
-    private static void MakeSample(
+    /// <remarks>
+    /// A draw takes the first non-empty row from a random one. The draws walk there while all they
+    /// have walked costs less than a pass listing the non-empty rows; past that, the rows are
+    /// listed once, and every draw finds its row by a binary search of the list. A column whose
+    /// values sit together behind a long empty stretch would otherwise have every draw walk the
+    /// stretch, and one whose values are merely apart pays no pass it does not need. Either way
+    /// the row found is the same, so is the sample.
+    /// </remarks>
+    internal static void MakeSample(
         ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, Span<Line> into, out int drawn,
         out bool sampled)
     {
@@ -464,15 +472,52 @@ internal sealed class FsstSymbols
         sampled = true;
         ulong random = Hash(4637947);
         long bytes = 0;
-        while (bytes < SampleTarget)
+        int walked = 0;
+        int[]? filled = null;
+        try
         {
-            random = Hash(random);
-            int start = (int)(random % (ulong)rows);
+            while (bytes < SampleTarget)
+            {
+                random = Hash(random);
+                int start = (int)(random % (ulong)rows);
 
-            // The first non-empty row from `start`, wrapping: without the wrap a corpus whose tail
-            // is empty would draw nothing and loop forever.
-            int found = -1;
-            for (int offset = 0; offset < rows; offset++)
+                // The first non-empty row from `start`, wrapping: without the wrap a corpus whose
+                // tail is empty would draw nothing and loop forever. The row drawn is tried first,
+                // which on a column with no empty rows is the whole draw.
+                int found = lengths[start] > 0 ? start : Find(lengths, start, nonEmpty, ref walked, ref filled);
+
+                int lineLength = lengths[found];
+                int chunks = 1 + ((lineLength - 1) / SampleLine);
+                random = Hash(random);
+                int chunk = SampleLine * (int)(random % (ulong)chunks);
+                int length = Math.Min(SampleLine, lineLength - chunk);
+                into[drawn++] = new Line(starts[found] + chunk, length);
+                bytes += length;
+            }
+        }
+        finally
+        {
+            if (filled is not null)
+            {
+                ArrayPool<int>.Shared.Return(filled);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The first non-empty row after the empty <paramref name="start"/>, wrapping: walked while the
+    /// rows walked by every draw, <paramref name="walked"/>, stay under a pass over all of them,
+    /// found in the list of non-empty rows, <paramref name="filled"/>, made at the first draw past it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int Find(ReadOnlySpan<int> lengths, int start, int nonEmpty, ref int walked, ref int[]? filled)
+    {
+        if (filled is null)
+        {
+            // The walk counts its steps by offset, a loop whose only carried value is that offset.
+            int rows = lengths.Length;
+            int budget = rows - walked;
+            for (int offset = 1; offset < budget; offset++)
             {
                 int candidate = start + offset;
                 if (candidate >= rows)
@@ -482,24 +527,43 @@ internal sealed class FsstSymbols
 
                 if (lengths[candidate] > 0)
                 {
-                    found = candidate;
-                    break;
+                    walked += offset;
+                    return candidate;
                 }
             }
 
-            if (found < 0)
-            {
-                break;
-            }
-
-            int lineLength = lengths[found];
-            int chunks = 1 + ((lineLength - 1) / SampleLine);
-            random = Hash(random);
-            int chunk = SampleLine * (int)(random % (ulong)chunks);
-            int length = Math.Min(SampleLine, lineLength - chunk);
-            into[drawn++] = new Line(starts[found] + chunk, length);
-            bytes += length;
+            filled = Filled(lengths, nonEmpty);
         }
+
+        return First(filled.AsSpan(0, nonEmpty), start);
+    }
+
+    /// <summary>The first of the ascending rows <paramref name="filled"/> from <paramref name="start"/>, or the first of all past the last.</summary>
+    private static int First(ReadOnlySpan<int> filled, int start)
+    {
+        int at = filled.BinarySearch(start);
+        if (at < 0)
+        {
+            at = ~at;
+        }
+
+        return at < filled.Length ? filled[at] : filled[0];
+    }
+
+    /// <summary>The <paramref name="nonEmpty"/> non-empty rows in ascending order, in an array rented from the shared pool.</summary>
+    private static int[] Filled(ReadOnlySpan<int> lengths, int nonEmpty)
+    {
+        int[] filled = ArrayPool<int>.Shared.Rent(nonEmpty);
+        int count = 0;
+        for (int row = 0; row < lengths.Length; row++)
+        {
+            if (lengths[row] > 0)
+            {
+                filled[count++] = row;
+            }
+        }
+
+        return filled;
     }
 
     private static ulong Hash(ulong value) => (value * 2971215073UL) ^ (value >> 15);
