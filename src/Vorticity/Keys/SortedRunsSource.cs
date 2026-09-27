@@ -584,10 +584,19 @@ internal sealed partial class SortedRunsSource : KeySource
     }
 
     /// <remarks>
-    /// The entry of rank <c>i</c> lies in exactly one run. In each run in turn, the rank of its
-    /// p-th entry is <c>p</c> plus the entries of the other runs before it, strictly increasing in
-    /// <c>p</c>, so a bisection finds the p whose rank is <c>i</c> or proves the run does not hold
-    /// it, at the cost of a bisection per run over bisections in the others.
+    /// A selection over every run at once, each run keeping the positions still candidates. A
+    /// round takes a pivot among them and bounds it in every run: its rank rules out the candidates
+    /// on its wrong side. The pivot is taken two ways in turn.
+    /// <list type="bullet">
+    /// <item>Where the rank would fall in the widest run, were its candidates spread like all the
+    /// others: over runs that interleave, a few rounds close in on the entry.</item>
+    /// <item>The middle below which half the candidates lie, each run standing on its own middle
+    /// and counting for its candidates: a quarter of them at least are ruled out, whatever the
+    /// keys, so the rounds are O(log N).</item>
+    /// </list>
+    /// Each round costs a bound per run, where a bisection in each run over bounds in all the others
+    /// costs R times as many; late rounds bound in the segment each run stands in. The round that
+    /// finds the entry leaves the runs where its bounds stand.
     /// </remarks>
     internal override async ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken)
     {
@@ -597,43 +606,156 @@ internal sealed partial class SortedRunsSource : KeySource
             return false;
         }
 
-        for (int s = 0; s < _runs.Length; s++)
+        foreach (Run run in _runs)
         {
-            Run run = _runs[s];
-            long low = 0;
-            long high = run.Count;
-            while (low < high)
+            run.Low = 0;
+            run.High = run.Count;
+        }
+
+        for (int round = 0; ; round++)
+        {
+            Reset(1);
+            long ruledOut = 0;
+            long candidates = 0;
+            Run? widest = null;
+            foreach (Run run in _runs)
             {
-                long mid = low + ((high - low) >> 1);
-                (FilterLiteral key, long row) = await EntryAsync(run, mid, cancellationToken).ConfigureAwait(false);
-                long at = mid;
-                for (int t = 0; t < _runs.Length; t++)
+                long width = run.High - run.Low;
+                ruledOut += run.Low;
+                candidates += width;
+                widest = width > 0 && (widest is null || width > widest.High - widest.Low) ? run : widest;
+            }
+
+            if (widest is null)
+            {
+                // Runs that list one row twice leave a rank no entry has.
+                return false;
+            }
+
+            Run pivot = widest;
+            if ((round & 1) == 0)
+            {
+                long width = widest.High - widest.Low;
+                long offset = (long)((double)(rank - ruledOut) * width / candidates);
+                await MoveAsync(widest, widest.Low + Math.Clamp(offset, 0, width - 1), cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // The heap orders the middles, and gives them back smallest first until half the
+                // candidates are counted.
+                for (int r = 0; r < _runs.Length; r++)
                 {
-                    if (t != s)
+                    Run run = _runs[r];
+                    if (run.Low < run.High)
                     {
-                        at += await FirstAtOrAfterAsync(_runs[t], key, row, cancellationToken).ConfigureAwait(false);
+                        await PlaceAsync(r, run.Low + ((run.High - run.Low) >> 1), cancellationToken).ConfigureAwait(false);
                     }
                 }
 
-                if (at == rank)
+                long counted = 0;
+                do
                 {
-                    return await ForwardAsync(key, row, cancellationToken).ConfigureAwait(false);
+                    pivot = _runs[_heap[0]];
+                    counted += pivot.High - pivot.Low;
+                    _heap[0] = _heap[--_heapSize];
+                    SiftDown(0);
                 }
+                while (2 * counted < candidates);
+            }
 
-                if (at < rank)
+            // The pivot's bound in every run: in the segment the run stands in when its candidates
+            // all lie there, which the late rounds come to, and the long way otherwise.
+            RunSegment keySegment = pivot.Current!;
+            int keyIndex = (int)(pivot.Position - pivot.CurrentStart);
+            long row = CurrentRow(pivot);
+            long before = 0;
+            foreach (Run run in _runs)
+            {
+                if (run == pivot)
                 {
-                    low = mid + 1;
+                    run.Cut = run.Position;
+                }
+                else if (run.Low == run.High)
+                {
+                    run.Cut = run.Low;
+                }
+                else if (run.Current is { } segment && run.Low >= run.CurrentStart && run.High <= run.CurrentStart + segment.Count)
+                {
+                    run.Cut = CutInSegment(run, KeyAt(keySegment, keyIndex), row);
                 }
                 else
                 {
-                    high = mid;
+                    run.Cut = Math.Clamp(
+                        await FirstAtOrAfterAsync(run, new EntryKey(this, keySegment, keyIndex), row, cancellationToken).ConfigureAwait(false),
+                        run.Low,
+                        run.High);
                 }
+
+                before += run.Cut;
+            }
+
+            if (before == rank)
+            {
+                Reset(1);
+                for (int r = 0; r < _runs.Length; r++)
+                {
+                    if (_runs[r].Cut < _runs[r].Count)
+                    {
+                        await PlaceAsync(r, _runs[r].Cut, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+
+                return true;
+            }
+
+            foreach (Run run in _runs)
+            {
+                if (before < rank)
+                {
+                    run.Low = Math.Max(run.Low, run.Cut);
+                }
+                else
+                {
+                    run.High = Math.Min(run.High, run.Cut);
+                }
+            }
+
+            if (before < rank)
+            {
+                pivot.Low = pivot.Cut + 1;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The first position of <paramref name="run"/> at or after <c>(key, row)</c>, found among
+    /// its candidates, which all lie in the segment it stands in.
+    /// </summary>
+    private long CutInSegment(Run run, ReadOnlySpan<byte> key, long row)
+    {
+        RunSegment segment = run.Current!;
+        int first = (int)(run.Low - run.CurrentStart);
+        int last = (int)(run.High - run.CurrentStart);
+        while (first < last)
+        {
+            int mid = (first + last) >>> 1;
+            int order = _layout.Compare(KeyAt(segment, mid), key);
+            if (order == 0)
+            {
+                order = RowAt(run, segment, mid).CompareTo(row);
+            }
+
+            if (order < 0)
+            {
+                first = mid + 1;
+            }
+            else
+            {
+                last = mid;
             }
         }
 
-        // Runs that list one row twice leave a rank no entry has.
-        Invalidate();
-        return false;
+        return run.CurrentStart + first;
     }
 
     internal override async ValueTask<long> KeyCountAsync(CancellationToken cancellationToken)
@@ -855,8 +977,17 @@ internal sealed partial class SortedRunsSource : KeySource
     /// The first position of <paramref name="run"/> whose <c>(key, row)</c> is at or after the
     /// given pair; the run's count when there is none.
     /// </summary>
-    private async ValueTask<long> FirstAtOrAfterAsync(
-        Run run, FilterLiteral key, long row, CancellationToken cancellationToken)
+    private ValueTask<long> FirstAtOrAfterAsync(
+        Run run, FilterLiteral key, long row, CancellationToken cancellationToken) =>
+        FirstAtOrAfterAsync(run, new LiteralKey(this, key), row, cancellationToken);
+
+    /// <summary>
+    /// The first position of <paramref name="run"/> whose <c>(key, row)</c> is at or after the
+    /// given pair, the key however it is held; the run's count when there is none.
+    /// </summary>
+    private async ValueTask<long> FirstAtOrAfterAsync<TKey>(
+        Run run, TKey key, long row, CancellationToken cancellationToken)
+        where TKey : struct, IKeyOrder
     {
         FenceTable table = run.Table;
         if (run.Count == 0)
@@ -865,12 +996,12 @@ internal sealed partial class SortedRunsSource : KeySource
         }
 
         // The run's own range, from its options alone: most runs are excluded or included here.
-        if (CompareKey(table.LastMax, key) < 0)
+        if (key.Order(table.LastMax) < 0)
         {
             return run.Count;
         }
 
-        if (CompareKey(table.FirstMin, key) > 0)
+        if (key.Order(table.FirstMin) > 0)
         {
             return 0;
         }
@@ -878,7 +1009,7 @@ internal sealed partial class SortedRunsSource : KeySource
         // The first segment whose last key does not come before the key: a binary search over the
         // bounds in memory, or a descent through the fence pages when they are paged out.
         ISegmentReader source = _file.IndexSourceOf(run.Meta);
-        long low = await table.LowerBoundAsync(source, new MaxProbe(this, key), cancellationToken).ConfigureAwait(false);
+        long low = await table.LowerBoundAsync(source, new MaxProbe<TKey>(key), cancellationToken).ConfigureAwait(false);
         for (long s = low; s < table.SegmentCount; s++)
         {
             Fence fence = await table.GetAsync(source, s, cancellationToken).ConfigureAwait(false);
@@ -887,7 +1018,7 @@ internal sealed partial class SortedRunsSource : KeySource
                 continue;
             }
 
-            if (s > low && CompareKey(fence.Bounds.Min, key) > 0)
+            if (s > low && key.Order(fence.Bounds.Min) > 0)
             {
                 return fence.Start;
             }
@@ -898,7 +1029,7 @@ internal sealed partial class SortedRunsSource : KeySource
             while (first < last)
             {
                 int mid = (first + last) >>> 1;
-                int order = CompareKey(KeyAt(segment, mid), key);
+                int order = key.Order(KeyAt(segment, mid));
                 if (order == 0)
                 {
                     order = RowAt(run, segment, mid).CompareTo(row);
@@ -921,18 +1052,6 @@ internal sealed partial class SortedRunsSource : KeySource
         }
 
         return run.Count;
-    }
-
-    /// <summary>The key and row at a position of a run, for a selection probe.</summary>
-    private async ValueTask<(FilterLiteral Key, long Row)> EntryAsync(
-        Run run, long position, CancellationToken cancellationToken)
-    {
-        Fence fence = await run.Table.OfPositionAsync(_file.IndexSourceOf(run.Meta), position, cancellationToken).ConfigureAwait(false);
-        RunSegment segment = await SegmentAsync(run, fence, cancellationToken).ConfigureAwait(false);
-        int at = (int)(position - fence.Start);
-        ReadOnlySpan<byte> key = KeyAt(segment, at);
-        FilterLiteral literal = _layout.Shape == KeyShape.Bytes ? FilterLiteral.From(key) : Literal(key);
-        return (literal, RowAt(run, segment, at));
     }
 
     /// <summary>Makes <paramref name="position"/> the run's current entry, loading its segment.</summary>
@@ -1233,12 +1352,41 @@ internal sealed partial class SortedRunsSource : KeySource
         internal RunSegment? Probe { get; set; }
 
         internal long ProbeIndex { get; set; } = -1;
+
+        /// <summary>A selection's first candidate.</summary>
+        internal long Low { get; set; }
+
+        /// <summary>One past a selection's last candidate.</summary>
+        internal long High { get; set; }
+
+        /// <summary>A selection's bound for its pivot: the entries before it.</summary>
+        internal long Cut { get; set; }
     }
 
-    /// <summary>A descent's comparison: a fence whose last key comes before the literal.</summary>
-    private readonly struct MaxProbe(SortedRunsSource source, FilterLiteral key) : IFenceProbe
+    /// <summary>A descent's comparison: a fence whose last key comes before the key sought.</summary>
+    private readonly struct MaxProbe<TKey>(TKey key) : IFenceProbe
+        where TKey : struct, IKeyOrder
     {
-        public bool Below(ReadOnlySpan<byte> max) => source.CompareKey(max, key) < 0;
+        public bool Below(ReadOnlySpan<byte> max) => key.Order(max) < 0;
+    }
+
+    /// <summary>A key sought, ordered against the keys of a run.</summary>
+    private interface IKeyOrder
+    {
+        /// <summary>The sign of <paramref name="entry"/> less the key sought.</summary>
+        int Order(ReadOnlySpan<byte> entry);
+    }
+
+    /// <summary>A key sought as a literal of the column's domain, as a seek names it.</summary>
+    private readonly struct LiteralKey(SortedRunsSource source, FilterLiteral key) : IKeyOrder
+    {
+        public int Order(ReadOnlySpan<byte> entry) => source.CompareKey(entry, key);
+    }
+
+    /// <summary>A key sought as an entry of a decoded segment, compared where it lies.</summary>
+    private readonly struct EntryKey(SortedRunsSource source, RunSegment segment, int index) : IKeyOrder
+    {
+        public int Order(ReadOnlySpan<byte> entry) => source._layout.Compare(entry, source.KeyAt(segment, index));
     }
 
     /// <summary>A segment's fixed-width keys laid end to end, against one key's bytes.</summary>
