@@ -354,7 +354,11 @@ internal sealed class FilterEvaluator
             {
                 ComparisonExpr comparison = (ComparisonExpr)filter;
                 int column = Column(arena, rootIndex, comparison.Field, rows, selection);
-                ComparisonKernels.Compare(arena, column, comparison.Op, comparison.Value, destination);
+                if (!AnswerKept(filter, arena, column, destination, new Compared(comparison.Op, comparison.Value)))
+                {
+                    ComparisonKernels.Compare(arena, column, comparison.Op, comparison.Value, destination);
+                }
+
                 return;
             }
 
@@ -371,8 +375,12 @@ internal sealed class FilterEvaluator
             {
                 StringMatchExpr match = (StringMatchExpr)filter;
                 int column = Column(arena, rootIndex, match.Field, rows, selection);
-                ComparisonKernels.StringMatch(
-                    arena, column, match.Op, match.Pattern, match.Escape, destination);
+                if (!AnswerKept(filter, arena, column, destination, new Matched(match.Op, match.Pattern, match.Escape)))
+                {
+                    ComparisonKernels.StringMatch(
+                        arena, column, match.Op, match.Pattern, match.Escape, destination);
+                }
+
                 return;
             }
 
@@ -397,6 +405,11 @@ internal sealed class FilterEvaluator
                 InExpr membership = (InExpr)filter;
                 int column = Column(arena, rootIndex, membership.Field, rows, selection);
                 CandidateSet? prepared = PreparedFor(membership, arena, column);
+                if (AnswerKept(filter, arena, column, destination, new Member(membership.Literals, prepared)))
+                {
+                    return;
+                }
+
                 byte[] scratch = ArrayPool<byte>.Shared.Rent(destination.Length);
                 try
                 {
@@ -427,6 +440,95 @@ internal sealed class FilterEvaluator
                 // evaluated as something it is not.
                 throw new ArgumentException(
                     $"A filter's root must be a predicate, not a {filter.Kind}.", nameof(filter));
+        }
+    }
+
+    /// <summary>
+    /// Answers <paramref name="leaf"/> over a dictionary whose values are retained from the answers
+    /// its values got at an earlier batch of the lane, kept in the batch's arena, or answers the
+    /// values and keeps their answers there for the batches after.
+    /// </summary>
+    /// <returns>
+    /// False when the column is not a dictionary of retained values, the batch's arena keeps
+    /// nothing, or its values outnumber the rows answered so far: the kernel answers it then.
+    /// </returns>
+    /// <remarks>
+    /// Answers already kept are spread over any number of rows, since spreading them costs a row
+    /// each. Values fewer than the batch's rows are answered at once, as the kernel would; more
+    /// values than that are answered once the lane has answered as many rows of the chunk one by
+    /// one, so that the chunk never costs more than twice what knowing its length would have cost:
+    /// a scan that filters reads batches of a zone, fewer rows than many dictionaries hold.
+    /// </remarks>
+    private static bool AnswerKept<TAnswer>(
+        VortexExpr leaf, CanonicalArena arena, int column, Span<byte> destination, in TAnswer answer)
+        where TAnswer : struct, IValuesAnswer
+    {
+        if (arena is not RetainingArena lane)
+        {
+            return false;
+        }
+
+        int storage = ComparisonKernels.Unwrap(arena, column);
+        if (!EncodedAnswers.IsEncoded(arena, storage))
+        {
+            return false;
+        }
+
+        bool fewer = EncodedAnswers.TryValues(arena, storage, destination.Length, out int values, out int count);
+        CanonicalOrigin origin = arena.OriginOf(values);
+        if (!origin.IsKnown)
+        {
+            return false;
+        }
+
+        if (!lane.TryKept(leaf, origin, out ReadOnlySpan<byte> answers))
+        {
+            if (!fewer && lane.Spend(leaf, origin, destination.Length) < count)
+            {
+                return false;
+            }
+
+            Span<byte> into = lane.KeepFor(leaf, count);
+            answer.Answer(arena, values, into);
+            lane.Keep(leaf, origin);
+            answers = into;
+        }
+
+        EncodedAnswers.Expand(arena, storage, answers, destination);
+        return true;
+    }
+
+    /// <summary>A predicate answered over the values of a dictionary, one state per value.</summary>
+    private interface IValuesAnswer
+    {
+        void Answer(CanonicalArena arena, int values, Span<byte> answers);
+    }
+
+    private readonly struct Compared(ComparisonOp op, FilterLiteral literal) : IValuesAnswer
+    {
+        public void Answer(CanonicalArena arena, int values, Span<byte> answers) =>
+            ComparisonKernels.Compare(arena, values, op, literal, answers);
+    }
+
+    private readonly struct Matched(StringMatchOp op, FilterLiteral pattern, byte escape) : IValuesAnswer
+    {
+        public void Answer(CanonicalArena arena, int values, Span<byte> answers) =>
+            ComparisonKernels.StringMatch(arena, values, op, pattern, escape, answers);
+    }
+
+    private readonly struct Member(FilterLiteral[] literals, CandidateSet? prepared) : IValuesAnswer
+    {
+        public void Answer(CanonicalArena arena, int values, Span<byte> answers)
+        {
+            byte[] scratch = ArrayPool<byte>.Shared.Rent(Math.Max(answers.Length, 1));
+            try
+            {
+                ComparisonKernels.In(arena, values, literals, answers, scratch.AsSpan(0, answers.Length), prepared);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(scratch);
+            }
         }
     }
 

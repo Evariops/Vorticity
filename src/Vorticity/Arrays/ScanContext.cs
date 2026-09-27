@@ -1309,6 +1309,7 @@ internal sealed class ScanContext : IDisposable
     {
         ResetBatch();
         _batchCanonical.Reset();
+        (_batchCanonical as RetainingArena)?.ForgetKept();
         AbandonRetained();
         if (_ownsRetained)
         {
