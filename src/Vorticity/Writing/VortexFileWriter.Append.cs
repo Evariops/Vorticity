@@ -786,6 +786,26 @@ public sealed partial class VortexFileWriter
         internal static (List<(LayoutNode Flat, long Start)> Chunks, long ZoneLength) ColumnChunks(
             LayoutTree tree, int field, Func<string, VortexUnsupportedException>? refuse = null)
         {
+            (LayoutNode node, long zoneLength) = ColumnNode(tree, field, refuse);
+            List<(LayoutNode, long)> chunks = new List<(LayoutNode, long)>(ChunkCount(node));
+            for (int i = 0; i < ChunkCount(node); i++)
+            {
+                chunks.Add((Chunk(node, i), ChunkStart(node, i)));
+            }
+
+            return (chunks, zoneLength);
+        }
+
+        /// <summary>
+        /// The layout that holds a column's flat chunks, its chunks checked, and its zone length (0
+        /// when unzoned): a chunked layout, or the one flat layout of a column written whole.
+        /// </summary>
+        /// <param name="tree">The file's layout.</param>
+        /// <param name="field">The column.</param>
+        /// <param name="refuse">What a shape this cannot continue throws; an append's refusal when null.</param>
+        internal static (LayoutNode Node, long ZoneLength) ColumnNode(
+            LayoutTree tree, int field, Func<string, VortexUnsupportedException>? refuse = null)
+        {
             refuse ??= Refused;
             LayoutNode root = tree.Root;
             if (root.Encoding != LayoutEncodingId.Struct || field + (root.DType.IsNullable ? 1 : 0) >= root.ChildCount)
@@ -807,7 +827,7 @@ public sealed partial class VortexFileWriter
 
             if (node.Encoding == LayoutEncodingId.Flat && node.Segments.Length == 1)
             {
-                return ([(node, 0)], zoneLength);
+                return (node, zoneLength);
             }
 
             if (node.Encoding != LayoutEncodingId.Chunked)
@@ -815,8 +835,6 @@ public sealed partial class VortexFileWriter
                 throw refuse($"column {field} is a {node.EncodingIdText} layout, not chunks of flat segments");
             }
 
-            ReadOnlySpan<long> offsets = node.ChunkOffsets;
-            List<(LayoutNode, long)> chunks = new List<(LayoutNode, long)>(node.ChildCount);
             for (int i = 0; i < node.ChildCount; i++)
             {
                 LayoutNode chunk = node.GetChild(i);
@@ -824,12 +842,21 @@ public sealed partial class VortexFileWriter
                 {
                     throw refuse($"a chunk of column {field} is a {chunk.EncodingIdText} layout, not one flat segment");
                 }
-
-                chunks.Add((chunk, offsets[i]));
             }
 
-            return (chunks, zoneLength);
+            return (node, zoneLength);
         }
+
+        /// <summary>The chunks of a column's layout as <see cref="ColumnNode"/> gave it.</summary>
+        internal static int ChunkCount(LayoutNode node) => node.Encoding == LayoutEncodingId.Chunked ? node.ChildCount : 1;
+
+        /// <summary>A chunk's flat layout, from a column's layout as <see cref="ColumnNode"/> gave it.</summary>
+        internal static LayoutNode Chunk(LayoutNode node, int chunk) =>
+            node.Encoding == LayoutEncodingId.Chunked ? node.GetChild(chunk) : node;
+
+        /// <summary>A chunk's first row, from a column's layout as <see cref="ColumnNode"/> gave it.</summary>
+        internal static long ChunkStart(LayoutNode node, int chunk) =>
+            node.Encoding == LayoutEncodingId.Chunked ? node.ChunkOffsets[chunk] : 0;
 
         internal static bool SameChunks(List<(LayoutNode Flat, long Start)> a, List<(LayoutNode Flat, long Start)> b)
         {
@@ -841,6 +868,26 @@ public sealed partial class VortexFileWriter
             for (int i = 0; i < a.Count; i++)
             {
                 if (a[i].Start != b[i].Start)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>Whether two columns' layouts, as <see cref="ColumnNode"/> gave them, start their chunks at the same rows.</summary>
+        internal static bool SameChunks(LayoutNode a, LayoutNode b)
+        {
+            int count = ChunkCount(a);
+            if (count != ChunkCount(b))
+            {
+                return false;
+            }
+
+            for (int i = 0; i < count; i++)
+            {
+                if (ChunkStart(a, i) != ChunkStart(b, i))
                 {
                     return false;
                 }
