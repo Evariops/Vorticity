@@ -1119,6 +1119,9 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>Number of entries in the footer's <c>array_specs</c> dictionary.</summary>
     internal int ArrayEncodingCount => _arrayEncodings.Length;
 
+    /// <summary>The footer's <c>array_specs</c>, resolved, which an array tree's nodes index.</summary>
+    internal ReadOnlySpan<ArrayEncodingId> ResolvedArrayEncodings => _arrayEncodings;
+
     /// <summary>What scans decoded once and the file keeps for the next, made at the first of them.</summary>
     private DecodedStructures? _decoded;
 

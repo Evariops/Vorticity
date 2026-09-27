@@ -161,6 +161,55 @@ public sealed partial class VortexFile
         return new VortexLayout(encoding, rows, type, segments.MoveToImmutable(), zoneCount, zoneLength, usable, array, described.MoveToImmutable());
     }
 
+    /// <summary>The bytes read off the end of a segment for its array tree, which a tree longer than this is read whole after.</summary>
+    private const int ArrayTreeTailBytes = 1024;
+
+    /// <summary>
+    /// Loads the array tree of a flat chunk into <paramref name="arena"/>, its nodes and no buffer,
+    /// for a caller that asks what the chunk was written as: from the tree the layout inlines, or
+    /// else from the tail of the segment, which is all of it that is read.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The layout is not one flat segment, or its tree is malformed.</exception>
+    internal async ValueTask LoadArrayTreeAsync(LayoutNode flat, ArrayNodeArena arena, CancellationToken cancellationToken)
+    {
+        FlatLayoutMetadata metadata = FlatLayoutMetadata.Read(flat.Metadata);
+        if (metadata.HasArrayEncodingTree)
+        {
+            ArrayBlobReader.LoadTree(arena, metadata.ArrayEncodingTree, ResolvedArrayEncodings);
+            return;
+        }
+
+        if (flat.Segments.Length != 1)
+        {
+            throw new VortexFormatException($"A flat layout of {flat.Segments.Length} segments holds no one array tree.");
+        }
+
+        SegmentSpec spec = SegmentSpecs[(int)flat.Segments[0]];
+        long end = (long)spec.Offset + spec.Length;
+        int window = (int)Math.Min(spec.Length, ArrayTreeTailBytes);
+        int length;
+        using (SegmentOwner tail = await Segments.ReadRangeAsync(end - window, window, 1, cancellationToken).ConfigureAwait(false))
+        {
+            ReadOnlySpan<byte> bytes = tail.Buffer.Span;
+            uint declared = window < 4 ? uint.MaxValue : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[^4..]);
+            if (declared + 4L > spec.Length)
+            {
+                throw new VortexFormatException(
+                    $"An array blob of {spec.Length} bytes declares a {declared}-byte FlatBuffer before its length.");
+            }
+
+            length = (int)declared;
+            if (length + 4 <= window)
+            {
+                ArrayBlobReader.LoadTree(arena, bytes.Slice(window - 4 - length, length), ResolvedArrayEncodings);
+                return;
+            }
+        }
+
+        using SegmentOwner tree = await Segments.ReadRangeAsync(end - 4 - length, length, 1, cancellationToken).ConfigureAwait(false);
+        ArrayBlobReader.LoadTree(arena, tree.Buffer.Span, ResolvedArrayEncodings);
+    }
+
     private async ValueTask<string> ArrayEncodingOfAsync(LayoutNode node, ArrayNodeArena arena, ArrayEncodingId[] encodings, CancellationToken cancellationToken)
     {
         ReadOnlySpan<uint> segments = node.Segments;

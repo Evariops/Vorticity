@@ -698,42 +698,33 @@ public sealed partial class VortexFileWriter
             CancellationToken cancellationToken)
         {
             PlanSeed?[] seeds = new PlanSeed?[chunks.Length];
+            ArrayNodeArena tree = new ArrayNodeArena();
             for (int field = 0; field < chunks.Length; field++)
             {
                 if (chunks[field].Count > 0)
                 {
                     seeds[field] = await SeedAsync(
-                        file, chunks[field][^1].Flat, schema.GetField(field), cancellationToken).ConfigureAwait(false);
+                        file, chunks[field][^1].Flat, schema.GetField(field), tree, cancellationToken).ConfigureAwait(false);
                 }
             }
 
             return seeds;
         }
 
-        /// <summary>What one flat chunk of a column was written as.</summary>
+        /// <summary>
+        /// What one flat chunk of a column was written as, from its array tree alone: the tree its
+        /// layout inlines, or the tail of its segment.
+        /// </summary>
+        /// <param name="file">The file.</param>
+        /// <param name="flat">The chunk's flat layout.</param>
+        /// <param name="dtype">The column's dtype.</param>
+        /// <param name="tree">An arena the tree is loaded into, which the seed does not keep.</param>
+        /// <param name="cancellationToken">Cancels the read.</param>
         internal static async ValueTask<PlanSeed?> SeedAsync(
-            VortexFile file, LayoutNode flat, DType dtype, CancellationToken cancellationToken)
+            VortexFile file, LayoutNode flat, DType dtype, ArrayNodeArena tree, CancellationToken cancellationToken)
         {
-            using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
-            int slot = context.Segments.Add(file.SegmentSpecs[checked((int)flat.Segments[0])]);
-            await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
-            return Seed(context, flat, slot, dtype);
-        }
-
-        private static PlanSeed? Seed(ScanContext context, LayoutNode flat, int slot, DType dtype)
-        {
-            Buffers.VortexBuffer segment = context.Segments.GetBuffer(slot);
-            Arrays.Metadata.FlatLayoutMetadata metadata = Arrays.Metadata.FlatLayoutMetadata.Read(flat.Metadata);
-            if (metadata.HasArrayEncodingTree)
-            {
-                context.Decode.LoadBlob(metadata.ArrayEncodingTree, segment);
-            }
-            else
-            {
-                context.Decode.LoadBlob(segment);
-            }
-
-            return PlanSeed.Of(context.Nodes.Root, dtype);
+            await file.LoadArrayTreeAsync(flat, tree, cancellationToken).ConfigureAwait(false);
+            return PlanSeed.Of(tree.Root, dtype);
         }
 
         /// <summary>

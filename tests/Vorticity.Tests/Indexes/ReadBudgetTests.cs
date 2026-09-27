@@ -269,6 +269,132 @@ public sealed class ReadBudgetTests
         }
     }
 
+    [Fact]
+    public async Task AnIndexerAndAnAppendReadEachChunksArrayTreeAndNotItsValues()
+    {
+        // What a chunk was written as is in its array tree, which its segment ends with: the seed
+        // an append continues a column from and the dictionary probe of an indexer read that tail
+        // and no value, so indexing a file reads its data once, for the scan.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const int chunks = 4;
+        MemoryStream stream = new MemoryStream();
+        VortexWriteOptions options = new VortexWriteOptions { RowBlockSize = 4_096, ChunkTargetBytes = 1 };
+        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream), Schema, options))
+        {
+            CanonicalArena arena = new CanonicalArena();
+            for (int from = 0; from < chunks * 16_384; from += 16_384)
+            {
+                using (RecordBatch batch = new RecordBatch(
+                    arena, arena.AddStruct(Schema, 16_384, Validity.NonNullable, [Longs(arena, from, 16_384), Strings(arena, from, 16_384)]), from))
+                {
+                    await writer.WriteAsync(batch, ct);
+                }
+
+                arena.Reset();
+            }
+
+            await writer.CompleteAsync(ct);
+        }
+
+        CountingSegmentSource source = new CountingSegmentSource(new MemorySegmentSource(stream.ToArray()));
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
+        long data = 0;
+        foreach (SegmentSpec spec in file.SegmentSpecs)
+        {
+            data += spec.Length;
+        }
+
+        source.Reset();
+        ArrayNodeArena tree = new ArrayNodeArena();
+        for (int field = 0; field < 2; field++)
+        {
+            List<(Vorticity.Layouts.LayoutNode Flat, long Start)> columnChunks = VortexFileWriter.AppendPlan.ColumnChunks(file.LayoutTree, field).Chunks;
+            Assert.Equal(chunks, columnChunks.Count);
+            Assert.NotNull(await VortexFileWriter.AppendPlan.SeedAsync(file, columnChunks[^1].Flat, Schema.GetField(field), tree, ct));
+        }
+
+        Assert.InRange(source.Bytes, 1, 2 * 1_024);
+
+        source.Reset();
+        IndexFragment fragment = await VortexFileIndexer.BuildFragmentAsync(
+            file, WritePolicy.Auto, new RowRange(0, file.RowCount), storeToken: "budget", cancellationToken: ct);
+        IndexWriteReport probe = Assert.Single(fragment.Reports, report => report.Column == "s" && report.Kind == IndexKinds.DictProbe);
+        Assert.True(probe.Outcome == IndexOutcome.Built, probe.Reason);
+        Assert.InRange(source.Bytes, 1, data + (2 * chunks * 1_024));
+    }
+
+    [Fact]
+    public async Task AnArrayTreeLongerThanTheTailReadIsReadWholeAndNoValueWithIt()
+    {
+        // A list of structs of sixty-four fields is one flat chunk whose array tree holds a node a
+        // field, past the kilobyte read off the end of its segment: the tree is then read whole,
+        // and still nothing before it.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const int rows = 1_024;
+        const int fields = 64;
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        string[] names = new string[fields];
+        DType[] children = new DType[fields];
+        for (int f = 0; f < fields; f++)
+        {
+            names[f] = $"f{f}";
+            children[f] = i64;
+        }
+
+        DType element = types.Struct(names, children, Nullability.NonNullable);
+        DType list = types.List(element, Nullability.NonNullable);
+        DType schema = types.Struct(["v"], [list], Nullability.NonNullable);
+        CanonicalArena arena = new CanonicalArena();
+        int[] columns = new int[fields];
+        for (int f = 0; f < fields; f++)
+        {
+            VortexBuffer values = arena.Allocate(2 * rows * sizeof(long), sizeof(long), out Span<byte> bytes);
+            Span<long> longs = MemoryMarshal.Cast<byte, long>(bytes);
+            for (int i = 0; i < longs.Length; i++)
+            {
+                longs[i] = K(i + f);
+            }
+
+            columns[f] = arena.AddPrimitive(i64, 2 * rows, Validity.NonNullable, PType.I64, values);
+        }
+
+        VortexBuffer offsets = arena.Allocate(rows * sizeof(long), sizeof(long), out Span<byte> offsetBytes);
+        VortexBuffer sizes = arena.Allocate(rows * sizeof(long), sizeof(long), out Span<byte> sizeBytes);
+        for (int row = 0; row < rows; row++)
+        {
+            MemoryMarshal.Cast<byte, long>(offsetBytes)[row] = 2L * row;
+            MemoryMarshal.Cast<byte, long>(sizeBytes)[row] = 2;
+        }
+
+        int structs = arena.AddStruct(element, 2 * rows, Validity.NonNullable, columns);
+        int column = arena.AddListView(list, rows, Validity.NonNullable, structs, offsets, PType.I64, sizes, PType.I64);
+        MemoryStream stream = new MemoryStream();
+        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream), schema, new VortexWriteOptions()))
+        {
+            using (RecordBatch batch = new RecordBatch(arena, arena.AddStruct(schema, rows, Validity.NonNullable, [column]), 0))
+            {
+                await writer.WriteAsync(batch, ct);
+            }
+
+            await writer.CompleteAsync(ct);
+        }
+
+        CountingSegmentSource source = new CountingSegmentSource(new MemorySegmentSource(stream.ToArray()));
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
+        Vorticity.Layouts.LayoutNode flat = Assert.Single(VortexFileWriter.AppendPlan.ColumnChunks(file.LayoutTree, 0).Chunks).Flat;
+        long segment = file.SegmentSpecs[(int)flat.Segments[0]].Length;
+
+        source.Reset();
+        PlanSeed seed = Assert.IsType<PlanSeed>(
+            await VortexFileWriter.AppendPlan.SeedAsync(file, flat, list, new ArrayNodeArena(), ct));
+        PlanSeed elements = Assert.IsType<PlanSeed>(Assert.Single(seed.Fields));
+        Assert.Equal(fields, elements.Fields.Length);
+        Assert.All(elements.Fields, Assert.NotNull);
+        Assert.Equal(2, source.Requests);
+        Assert.InRange(source.Bytes, 2 * 1_024, segment / 4);
+    }
+
     /// <summary>
     /// A sink that leaves a hole after every write of 32 KiB or more -- a data chunk, an index
     /// segment -- and none after the small writes of a file's tail, which the open reads in one piece.

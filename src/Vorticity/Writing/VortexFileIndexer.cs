@@ -481,12 +481,13 @@ public static class VortexFileIndexer
             ColumnWriter[] columns = new ColumnWriter[fields];
             List<long> chunkRows = [];
             bool[] dict = new bool[fields * chunkCount];
+            ArrayNodeArena probe = new ArrayNodeArena();
             for (int field = 0; field < fields; field++)
             {
                 for (int c = 0; c < chunkCount; c++)
                 {
                     dict[(field * chunkCount) + c] = await IsDictionaryAsync(
-                        file, VortexFileWriter.AppendPlan.Chunk(columnNodes[field], c), cancellationToken).ConfigureAwait(false);
+                        file, VortexFileWriter.AppendPlan.Chunk(columnNodes[field], c), probe, cancellationToken).ConfigureAwait(false);
                 }
             }
 
@@ -644,29 +645,15 @@ public static class VortexFileIndexer
         }
     }
 
-    /// <summary>Whether a flat chunk's root array is a dictionary, read from its segment.</summary>
-    private static async ValueTask<bool> IsDictionaryAsync(VortexFile file, LayoutNode flat, CancellationToken cancellationToken)
+    /// <summary>
+    /// Whether a flat chunk's root array is a dictionary, from its array tree alone: the tree its
+    /// layout inlines, or the tail of its segment, and never the values the scan reads after.
+    /// </summary>
+    private static async ValueTask<bool> IsDictionaryAsync(
+        VortexFile file, LayoutNode flat, ArrayNodeArena tree, CancellationToken cancellationToken)
     {
-        using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
-        int slot = context.Segments.Add(file.SegmentSpecs[(int)flat.Segments[0]]);
-        await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
-        return RootIsDictionary(context, flat, slot);
-    }
-
-    private static bool RootIsDictionary(ScanContext context, LayoutNode flat, int slot)
-    {
-        VortexBuffer segment = context.Segments.GetBuffer(slot);
-        Arrays.Metadata.FlatLayoutMetadata metadata = Arrays.Metadata.FlatLayoutMetadata.Read(flat.Metadata);
-        if (metadata.HasArrayEncodingTree)
-        {
-            context.Decode.LoadBlob(metadata.ArrayEncodingTree, segment);
-        }
-        else
-        {
-            context.Decode.LoadBlob(segment);
-        }
-
-        return context.Nodes.Root.Encoding == ArrayEncodingId.Dict;
+        await file.LoadArrayTreeAsync(flat, tree, cancellationToken).ConfigureAwait(false);
+        return tree.Root.Encoding == ArrayEncodingId.Dict;
     }
 
     /// <summary>The statistics, directory, dtype, layout, footer, postscript and EOF, after the runs.</summary>
