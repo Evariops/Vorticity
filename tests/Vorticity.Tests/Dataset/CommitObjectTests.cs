@@ -323,4 +323,42 @@ public sealed class CommitObjectTests
         Assert.True(reference.Exists);
         Assert.False(PageReference.None.Exists);
     }
+
+    [Fact]
+    public void AnEntryReadInPlaceNamesTheVersionsItsDecodedFragmentsName()
+    {
+        // A repack reads each leaf in place and decodes only the entries that name a version it
+        // moves, so the answer read in place is the decoded one, whatever the widths of the varints
+        // before the fragments.
+        Random random = new Random(36);
+        for (int round = 0; round < 500; round++)
+        {
+            PageReference[] fragments = new PageReference[random.Next(0, 6)];
+            for (int i = 0; i < fragments.Length; i++)
+            {
+                fragments[i] = new PageReference(
+                    (ulong)random.Next(1, 9), random.Next(0, 1 << 20), random.Next(1, 4_096), (UInt128)random.NextInt64());
+            }
+
+            ObjectEntry entry = new ObjectEntry(
+                new string('k', random.Next(1, 300)), (UInt128)random.NextInt64(), random.NextInt64(1L << 40),
+                random.NextInt64(1L << 40), (UInt128)random.NextInt64(), fragments);
+            HashSet<ulong> versions = [.. Enumerable.Range(0, random.Next(0, 4)).Select(_ => (ulong)random.Next(1, 9))];
+            byte[] bytes = entry.ToBytes();
+            Assert.Equal(ObjectEntry.FromBytes(bytes).NamesAny(versions), ObjectEntry.NamesAny(bytes, versions));
+            Assert.Equal(fragments.Any(fragment => versions.Contains(fragment.Version)), ObjectEntry.NamesAny(bytes, versions));
+        }
+
+        // Cut anywhere before the end of its fragments, an entry is refused rather than read short;
+        // the summaries after them are not read.
+        ObjectEntry held = new ObjectEntry("data/cut.vortex", 1, 10, 100, 2, [new PageReference(3, 0, 64, 4), new PageReference(5, 64, 32, 6)]);
+        byte[] whole = held.ToBytes();
+        HashSet<ulong> last = [5];
+        for (int length = 0; length < whole.Length - 1; length++)
+        {
+            Assert.Throws<CommitFormatException>(() => ObjectEntry.NamesAny(whole.AsSpan(0, length), last));
+        }
+
+        Assert.True(ObjectEntry.NamesAny(whole, last));
+    }
 }

@@ -138,6 +138,52 @@ internal sealed record ObjectEntry(
     private static bool SameContent(PageReference left, PageReference right) =>
         left.Length == right.Length && left.Hash == right.Hash;
 
+    /// <summary>Whether a fragment attached to this entry lies in one of <paramref name="versions"/>.</summary>
+    public bool NamesAny(HashSet<ulong> versions)
+    {
+        for (int i = 0; i < Fragments.Count; i++)
+        {
+            if (versions.Contains(Fragments[i].Version))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Whether an entry's bytes name a fragment that lies in one of <paramref name="versions"/>,
+    /// read in place: the fields before the fragments are skipped as <see cref="SummaryOf"/> skips
+    /// them, and each reference's version is its first eight bytes, so nothing is allocated.
+    /// </summary>
+    /// <exception cref="CommitFormatException">The bytes are not an entry.</exception>
+    public static bool NamesAny(ReadOnlySpan<byte> value, HashSet<ulong> versions)
+    {
+        int at = 0;
+        Skip(value, ref at, (long)Read(value, ref at));
+        Skip(value, ref at, 16);
+        Read(value, ref at);
+        Read(value, ref at);
+        Skip(value, ref at, 16);
+        ulong fragments = Read(value, ref at);
+        if (fragments > (ulong)((value.Length - at) / PageReference.Bytes))
+        {
+            throw new CommitFormatException("An object entry's fragment list is cut short.");
+        }
+
+        ReadOnlySpan<byte> references = value.Slice(at, (int)fragments * PageReference.Bytes);
+        for (int i = 0; i < references.Length; i += PageReference.Bytes)
+        {
+            if (versions.Contains(System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(references[i..])))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Whether a fragment of exactly these bytes is already attached, wherever it lies. By content,
     /// because an uncommitted fragment has no reference to compare.

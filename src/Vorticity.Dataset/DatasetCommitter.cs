@@ -500,10 +500,19 @@ internal static class DatasetCommitter
                     {
                         await foreach (TreeEntry leaf in tree.EnumerateAsync(pages, cancellationToken).ConfigureAwait(false))
                         {
-                            ObjectEntry entry = await CurrentAsync(level, leaf.Key).ConfigureAwait(false)
-                                ?? ObjectEntry.FromBytes(leaf.Value.Span);
+                            // The entry as this commit leaves it: its own change when an earlier
+                            // operation made one, else the leaf the walk holds, which is the tree's
+                            // and is read in place until it names a fragment to move.
+                            ObjectEntry? held = pending.Count > 0 && pending.TryGetValue(Named(level, leaf.Key), out ObjectEntry? change)
+                                ? change
+                                : null;
+                            if (held is null ? !ObjectEntry.NamesAny(leaf.Value.Span, repack.Versions) : !held.NamesAny(repack.Versions))
+                            {
+                                continue;
+                            }
+
+                            ObjectEntry entry = held ?? ObjectEntry.FromBytes(leaf.Value.Span);
                             PageReference[] fragments = [.. entry.Fragments];
-                            bool changed = false;
                             for (int i = 0; i < fragments.Length; i++)
                             {
                                 if (repack.Versions.Contains(fragments[i].Version))
@@ -511,15 +520,11 @@ internal static class DatasetCommitter
                                     ReadOnlyMemory<byte> bytes = await pages
                                         .ReadFragmentAsync(fragments[i], cancellationToken).ConfigureAwait(false);
                                     fragments[i] = builder.AddFragment(bytes.Span);
-                                    changed = true;
                                     repack.Moved++;
                                 }
                             }
 
-                            if (changed)
-                            {
-                                Put(level, leaf.Key, entry with { Fragments = fragments });
-                            }
+                            Put(level, leaf.Key, entry with { Fragments = fragments });
                         }
                     }
 
