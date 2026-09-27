@@ -23,6 +23,12 @@ internal sealed class DistinctTable
 {
     private const int InitialCapacity = 64;
 
+    /// <summary>The slots a table of few values gives each, up to <see cref="SparseCapacity"/>.</summary>
+    private const int SparseSpread = 64;
+
+    /// <summary>The most slots a table of few values is spread over; past it, the load alone sizes the table.</summary>
+    private const int SparseCapacity = 4096;
+
     /// <summary>
     /// Entries beyond which the chunk refuses its dictionary candidate rather than keep growing.
     /// This is a bound on memory, not a pricing rule; pricing is the chooser's.
@@ -152,8 +158,9 @@ internal sealed class DistinctTable
     /// </summary>
     private void Open(int rows)
     {
-        int capacity = Math.Max(
+        int entries = Math.Max(
             InitialCapacity, (int)BitOperations.RoundUpToPowerOf2((uint)((_lastDistinct * 2) + 1)));
+        int capacity = Math.Max(entries, Sparse(_lastDistinct));
         _slotCode = ArrayPool<int>.Shared.Rent(capacity);
         _slotKey = ArrayPool<ulong>.Shared.Rent(capacity);
         _mask = capacity - 1;
@@ -162,13 +169,13 @@ internal sealed class DistinctTable
         {
             _slotOffset = ArrayPool<int>.Shared.Rent(capacity);
             _slotLength = ArrayPool<int>.Shared.Rent(capacity);
-            _codeOffset = ArrayPool<int>.Shared.Rent(capacity);
-            _codeLength = ArrayPool<int>.Shared.Rent(capacity);
+            _codeOffset = ArrayPool<int>.Shared.Rent(entries);
+            _codeLength = ArrayPool<int>.Shared.Rent(entries);
             _heap = ArrayPool<byte>.Shared.Rent(Math.Max(1024, _lastHeap));
         }
 
-        _firstRows = ArrayPool<int>.Shared.Rent(capacity);
-        _codeKey = ArrayPool<ulong>.Shared.Rent(capacity);
+        _firstRows = ArrayPool<int>.Shared.Rent(entries);
+        _codeKey = ArrayPool<ulong>.Shared.Rent(entries);
         _codes = ArrayPool<int>.Shared.Rent(Math.Max(Math.Max(256, rows), _lastRows));
     }
 
@@ -237,6 +244,10 @@ internal sealed class DistinctTable
         if (_mask < 0)
         {
             Open(count);
+        }
+        else if (_mask + 1 < Sparse(_distinct))
+        {
+            Resize(Sparse(_distinct));
         }
 
         EnsureCodes(_rows + count);
@@ -1009,19 +1020,34 @@ internal sealed class DistinctTable
         array = larger;
     }
 
-    /// <summary>
-    /// Doubles the slots once the load passes one half, re-inserting from the stored key or hash
-    /// rather than from the bytes, which is the point of storing the hash.
-    /// </summary>
+    /// <summary>Doubles the slots once the load passes one half.</summary>
     private void GrowIfLoaded()
     {
         int capacity = _mask + 1;
-        if (_distinct * 2 <= capacity)
+        if (_distinct * 2 > capacity)
         {
-            return;
+            Resize(capacity * 2);
         }
+    }
 
-        int grown = capacity * 2;
+    /// <summary>
+    /// The fewest slots for <paramref name="distinct"/> values: spread out while they are few, so
+    /// that rows drawing them in no order rarely find another value on their slot, which makes the
+    /// compare that finds them a branch the processor cannot guess.
+    /// </summary>
+    private static int Sparse(int distinct) => distinct == 0
+        ? 0
+        : distinct >= SparseCapacity / SparseSpread
+            ? SparseCapacity
+            : (int)BitOperations.RoundUpToPowerOf2((uint)(distinct * SparseSpread));
+
+    /// <summary>
+    /// Moves the held values to <paramref name="grown"/> slots, re-inserting from the stored key or
+    /// hash rather than from the bytes, which is the point of storing the hash.
+    /// </summary>
+    private void Resize(int grown)
+    {
+        int capacity = _mask + 1;
         int[] codes = ArrayPool<int>.Shared.Rent(grown);
         Array.Clear(codes, 0, grown);
         ulong[] keys = ArrayPool<ulong>.Shared.Rent(grown);
