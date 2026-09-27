@@ -1,5 +1,7 @@
 using System;
 using System.Numerics;
+using System.Runtime.InteropServices;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.File;
 
 namespace Vorticity.Compute;
@@ -18,6 +20,11 @@ internal sealed class BlockMask
 {
     private readonly ulong[] _bits;
 
+    // The words that may hold a live bit, [from, to): all of them until KeepOnly narrows the mask,
+    // then the ones its range covered, since nothing else ever sets a bit.
+    private int _setFrom;
+    private int _setTo;
+
     /// <summary>A mask over <paramref name="rowCount"/> rows, every block live.</summary>
     /// <param name="rowCount">The file's rows, at the layout root.</param>
     /// <param name="blockRows">Rows per block; must be positive.</param>
@@ -33,6 +40,7 @@ internal sealed class BlockMask
 
         _bits = new ulong[(BlockCount + 63) / 64];
         _bits.AsSpan().Fill(ulong.MaxValue);
+        _setTo = _bits.Length;
 
         // The bits past the last block stay clear, so that `LiveCount` is a popcount and nothing
         // else, and no caller can be told a block beyond the file is live.
@@ -120,11 +128,15 @@ internal sealed class BlockMask
     /// This is not a pruner's operation -- a pruner only ever clears bits. It is a consumer's: a
     /// terminal that decodes one split of a chunk hands the readers a mask saying so, and the
     /// restricted decode materializes that split rather than the chunk, which on a single-chunk
-    /// file is the difference between one block and the whole column.
+    /// file is the difference between one block and the whole column. Only the words the previous
+    /// narrowing set are cleared, so that narrowing to one split after another costs the splits'
+    /// words and not the mask's each time.
     /// </remarks>
     internal void KeepOnly(RowRange rows)
     {
-        Array.Clear(_bits);
+        _bits.AsSpan(_setFrom, _setTo - _setFrom).Clear();
+        _setFrom = 0;
+        _setTo = 0;
         if (rows.IsEmpty || BlockCount == 0)
         {
             return;
@@ -132,10 +144,9 @@ internal sealed class BlockMask
 
         long first = Math.Min(rows.Start / BlockRows, BlockCount - 1);
         long last = Math.Min((rows.End - 1) / BlockRows, BlockCount - 1);
-        for (long block = first; block <= last; block++)
-        {
-            _bits[block >> 6] |= 1UL << (int)(block & 63);
-        }
+        BitmapKernels.FillRange(MemoryMarshal.AsBytes(_bits.AsSpan()), (int)first, (int)(last - first + 1), true);
+        _setFrom = (int)(first >> 6);
+        _setTo = (int)(last >> 6) + 1;
     }
 
     /// <summary>The rows of block <paramref name="block"/>, the last one clipped to the file.</summary>
