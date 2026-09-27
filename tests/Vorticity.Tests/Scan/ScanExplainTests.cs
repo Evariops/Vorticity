@@ -12,12 +12,16 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Columns;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.IO;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
+using Vorticity.Types;
+using Vorticity.Writing;
 using Xunit;
 
 namespace Vorticity.Tests.Scan;
@@ -94,6 +98,67 @@ public sealed class ScanExplainTests
             counting.Requested.Count == metrics.SegmentRequests,
             $"the source saw {counting.Requested.Count} specs ({counting.ReadManyCalls} ReadMany, {counting.ReadCalls} ReadAsync, " +
             $"{counting.ReadRangeCalls} ReadRange); the sink counted {metrics.SegmentRequests} over {metrics.Batches} batches");
+    }
+
+    [Fact]
+    public async Task TheZoneMapsOfAWideFileAreEachReadOnce()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+
+        // More columns than a file keeps maps for in its short list, so that the maps kept first
+        // move to the map by node, and must all be found there.
+        const int Columns = 12;
+        const int Rows = 4_096;
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        string[] names = new string[Columns];
+        DType[] fields = new DType[Columns];
+        CanonicalArena arena = new CanonicalArena();
+        int[] columns = new int[Columns];
+        for (int c = 0; c < Columns; c++)
+        {
+            names[c] = "c" + c.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            fields[c] = i64;
+            VortexBuffer buffer = arena.Allocate(Rows * sizeof(long), sizeof(long), out Span<byte> bytes);
+            Span<long> values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(bytes);
+            for (int row = 0; row < Rows; row++)
+            {
+                values[row] = ((long)c * Rows) + row;
+            }
+
+            columns[c] = arena.AddPrimitive(i64, Rows, Validity.NonNullable, PType.I64, buffer);
+        }
+
+        DType schema = types.Struct(names, fields, Nullability.NonNullable);
+        int root = arena.AddStruct(schema, Rows, Validity.NonNullable, columns);
+        System.IO.MemoryStream written = new System.IO.MemoryStream();
+        await using (VortexFileWriter writer = VortexFileWriter.Create(
+            new StreamSegmentSink(written), schema, new VortexWriteOptions { RowBlockSize = 1_024 }))
+        {
+            using (RecordBatch batch = new RecordBatch(arena, root, 0))
+            {
+                await writer.WriteAsync(batch, ct);
+            }
+
+            await writer.CompleteAsync(ct);
+        }
+
+        await using VortexFile file = await VortexFile.OpenAsync(new MemorySegmentSource(written.ToArray()), new VortexOpenOptions(), ct);
+        for (int round = 0; round < 2; round++)
+        {
+            for (int c = 0; c < Columns; c++)
+            {
+                // The first round reads each column's zone map, the second finds each one kept.
+                VortexExpr equal = Expr.Eq(Expr.Field(names[c]), Expr.Literal(FilterLiteral.From(((long)c * Rows) + 1_500)));
+                ScanExplanation plan = await file.ScanBuilder().Where(equal).ExplainAsync(ct);
+                Assert.Equal(1, plan.LiveBlocks);
+                Assert.Equal("zone map", plan.Pruning[0].Structure);
+                Assert.True(
+                    round == 0 ? plan.Pruning[0].SegmentsRead > 0 : plan.Pruning[0].SegmentsRead == 0,
+                    $"round {round}, column {c}: {plan.Pruning[0].SegmentsRead} zone map segments read");
+            }
+        }
     }
 
     [Fact]

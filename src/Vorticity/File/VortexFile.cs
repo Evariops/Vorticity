@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -1131,12 +1132,21 @@ public sealed partial class VortexFile : IAsyncDisposable
         /// <summary>The decoded index runs, made at the first index read.</summary>
         internal Indexes.IndexRunCache? Runs;
 
-        /// <summary>The zone maps decoded so far, by the index of their zoned layout node; replaced whole, never written in place.</summary>
+        /// <summary>
+        /// The first zone maps decoded, by the index of their zoned layout node, at most
+        /// <see cref="FewZones"/>; replaced whole, never written in place.
+        /// </summary>
         internal ZoneEntry[]? Zones;
+
+        /// <summary>Every zone map kept, once more than <see cref="FewZones"/> are: a wide file's, filtered on many columns.</summary>
+        internal ConcurrentDictionary<int, Compute.ZoneColumn>? ManyZones;
     }
 
     /// <summary>One decoded zone map: the zoned node it belongs to, and its bounds.</summary>
     private readonly record struct ZoneEntry(int Node, Compute.ZoneColumn Column);
+
+    /// <summary>The zone maps a file keeps in a list, walked, before it keeps them by node in a map.</summary>
+    private const int FewZones = 8;
 
     private DecodedStructures Decoded
     {
@@ -1157,12 +1167,23 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <param name="node">The zoned layout node's index.</param>
     /// <remarks>
     /// A zone map is a property of the file, so it is read and decoded once for every scan that
-    /// filters on the column: the next one reads nothing. A walk rather than a lookup, since a
-    /// file is filtered on a handful of columns.
+    /// filters on the column: the next one reads nothing. A file filtered on a handful of columns
+    /// walks a short list; a wide one filtered on many finds each map by its node.
     /// </remarks>
     internal Compute.ZoneColumn? DecodedZones(int node)
     {
-        ZoneEntry[]? entries = Volatile.Read(ref _decoded)?.Zones;
+        DecodedStructures? decoded = Volatile.Read(ref _decoded);
+        if (decoded is null)
+        {
+            return null;
+        }
+
+        if (Volatile.Read(ref decoded.ManyZones) is { } many)
+        {
+            return many.TryGetValue(node, out Compute.ZoneColumn? found) ? found : null;
+        }
+
+        ZoneEntry[]? entries = Volatile.Read(ref decoded.Zones);
         if (entries is not null)
         {
             for (int i = 0; i < entries.Length; i++)
@@ -1180,12 +1201,24 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>Keeps the zone map a scan decoded for zoned node <paramref name="node"/>, for the scans after it.</summary>
     /// <param name="node">The zoned layout node's index.</param>
     /// <param name="column">Its bounds.</param>
-    /// <remarks>Two scans that decode the same map at once keep the first: both are the same.</remarks>
+    /// <remarks>
+    /// Two scans that decode the same map at once keep the first: both are the same. The first
+    /// <see cref="FewZones"/> maps go to a list copied at every one, the rest to a map by node,
+    /// which the list moves into whole: the list never grows past them, so nothing it holds is
+    /// missed. The map is keyed by node rather than laid out by it, since a file of many chunks
+    /// has many more nodes than zoned columns.
+    /// </remarks>
     internal void KeepZones(int node, Compute.ZoneColumn column)
     {
         DecodedStructures decoded = Decoded;
         while (true)
         {
+            if (Volatile.Read(ref decoded.ManyZones) is { } many)
+            {
+                many.TryAdd(node, column);
+                return;
+            }
+
             ZoneEntry[]? seen = Volatile.Read(ref decoded.Zones);
             int count = seen?.Length ?? 0;
             for (int i = 0; i < count; i++)
@@ -1196,13 +1229,27 @@ public sealed partial class VortexFile : IAsyncDisposable
                 }
             }
 
-            ZoneEntry[] grown = new ZoneEntry[count + 1];
-            seen?.CopyTo(grown, 0);
-            grown[count] = new ZoneEntry(node, column);
-            if (Interlocked.CompareExchange(ref decoded.Zones, grown, seen) == seen)
+            if (count < FewZones)
             {
-                return;
+                ZoneEntry[] grown = new ZoneEntry[count + 1];
+                seen?.CopyTo(grown, 0);
+                grown[count] = new ZoneEntry(node, column);
+                if (Interlocked.CompareExchange(ref decoded.Zones, grown, seen) == seen)
+                {
+                    return;
+                }
+
+                continue;
             }
+
+            ConcurrentDictionary<int, Compute.ZoneColumn> moved = new ConcurrentDictionary<int, Compute.ZoneColumn>(
+                concurrencyLevel: 1, capacity: 4 * FewZones);
+            foreach (ZoneEntry entry in seen!)
+            {
+                moved.TryAdd(entry.Node, entry.Column);
+            }
+
+            Interlocked.CompareExchange(ref decoded.ManyZones, moved, null);
         }
     }
 
