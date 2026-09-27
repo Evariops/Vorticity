@@ -143,6 +143,40 @@ public sealed class CommitObjectTests
     }
 
     [Fact]
+    public void APageTheBuilderWroteIsFoundByItsReferenceAndNoOtherIs()
+    {
+        // A walk over the tree a commit is writing reads its pages back from the builder. Each is
+        // found by its own reference among pages of every size, empty ones sharing an offset with
+        // the page after them and fragments in between; a reference that differs in any field finds
+        // nothing.
+        Random random = new Random(38);
+        CommitObjectBuilder builder = new CommitObjectBuilder(7);
+        List<(PageReference Reference, byte[] Bytes)> written = [];
+        for (int i = 0; i < 400; i++)
+        {
+            if (random.Next(4) == 0)
+            {
+                builder.AddFragment(Page((byte)i, random.Next(0, 50)));
+            }
+
+            byte[] page = Page((byte)i, random.Next(4) == 0 ? 0 : random.Next(1, 300));
+            written.Add((builder.AddPage(page), page));
+        }
+
+        foreach ((PageReference reference, byte[] bytes) in written)
+        {
+            Assert.True(builder.TryGetPage(reference, out ReadOnlyMemory<byte> found));
+            Assert.Equal(bytes, found.ToArray());
+            Assert.False(builder.TryGetPage(reference with { Version = 6 }, out _));
+            Assert.False(builder.TryGetPage(reference with { Offset = reference.Offset + 1 }, out _));
+            Assert.False(builder.TryGetPage(reference with { Length = reference.Length + 1 }, out _));
+            Assert.False(builder.TryGetPage(reference with { Hash = reference.Hash + 1 }, out _));
+        }
+
+        Assert.Contains(written, page => page.Bytes.Length == 0);
+    }
+
+    [Fact]
     public void AnObjectTruncatedAtEveryByteIsRefusedWithAReason()
     {
         (byte[] bytes, _, _, _, _, _) = Build();
