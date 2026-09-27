@@ -51,6 +51,15 @@ internal struct ProtoWriter : IDisposable
     /// <summary>Number of <see cref="MessageScope"/> instances currently open, for LIFO checking.</summary>
     private int _openScopes;
 
+    /// <summary>
+    /// The messages closed inside the outermost open one whose length takes more than the byte
+    /// reserved for it, in the order they closed: they wait for the outermost message's close,
+    /// which places them all in one pass.
+    /// </summary>
+    private Widened[]? _widened;
+
+    private int _widenedCount;
+
     /// <summary>Creates a writer with an initial pooled capacity.</summary>
     /// <param name="initialCapacity">
     /// Capacity hint in bytes. Zero defers the rental to the first write.
@@ -78,18 +87,27 @@ internal struct ProtoWriter : IDisposable
     {
         _position = 0;
         _openScopes = 0;
+        _widenedCount = 0;
     }
 
-    /// <summary>Returns the pooled array. Safe to call more than once.</summary>
+    /// <summary>Returns the pooled arrays. Safe to call more than once.</summary>
     public void Dispose()
     {
         byte[]? buffer = _buffer;
+        Widened[]? widened = _widened;
         _buffer = null;
+        _widened = null;
         _position = 0;
         _openScopes = 0;
+        _widenedCount = 0;
         if (buffer is not null)
         {
             ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        if (widened is not null)
+        {
+            ArrayPool<Widened>.Shared.Return(widened);
         }
     }
 
@@ -411,10 +429,13 @@ internal struct ProtoWriter : IDisposable
     /// last-opened-first-closed order.
     /// </summary>
     /// <remarks>
-    /// One byte is reserved for the length varint before the body is written; when the finished
-    /// body needs a longer prefix the body is shifted right by the extra bytes. That keeps the
-    /// writer single-pass, and the shift is confined to the innermost body, so an enclosing
-    /// scope's reserved slot never moves.
+    /// One byte is reserved for the length varint before the body is written. A message whose
+    /// length fits it writes it at its close. A longer one only notes its length, which counts the
+    /// bytes the longer lengths inside it take past their reserved one, and the outermost
+    /// message's close then puts every such length in its slot and every body after it, moving
+    /// each byte once, from the end: a body is not shifted again at each enclosing close, which
+    /// made a deep message cost its bytes times its depth. A message that holds a longer one is
+    /// longer itself, so a length written at a close never moves apart from its body.
     /// </remarks>
     [UnscopedRef]
     public MessageScope BeginMessage(int fieldNumber)
@@ -435,37 +456,125 @@ internal struct ProtoWriter : IDisposable
             ThrowScopeOutOfOrder(depth, _openScopes);
         }
 
-        int bodyStart = lengthPosition + 1;
-        int bodyLength = _position - bodyStart;
+        int bodyLength = _position - (lengthPosition + 1);
+        _openScopes = depth - 1;
+
+        // A body under 128 bytes holds no longer length: the innermost message with one has a
+        // body of 128 bytes at least, and every message around it holds that body whole.
+        if ((uint)bodyLength < 0x80)
+        {
+            _buffer![lengthPosition] = (byte)bodyLength;
+            return;
+        }
+
+        Widen(lengthPosition, bodyLength);
+    }
+
+    /// <summary>Notes a closed message whose length takes more than its reserved byte, and places them all when it is the outermost.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Widen(int lengthPosition, int bodyLength)
+    {
         if (bodyLength < 0)
         {
             ThrowScopeCorrupted();
         }
 
-        int prefixSize = ProtoWire.VarintSize((ulong)bodyLength);
-        if (prefixSize > 1)
+        // The longer lengths it holds are the ones noted since it opened, whose slots are past its
+        // own: they closed inside it, last. Each record counts its own subtree, so only the
+        // outermost of them are visited, from the last.
+        int inside = 0;
+        int count = 1;
+        for (int i = _widenedCount - 1; i >= 0 && _widened![i].Slot > lengthPosition; i -= _widened[i].Count)
         {
-            int extra = prefixSize - 1;
-            EnsureCapacity(extra);
-
-            // Span.CopyTo is a memmove, so the overlapping shift is well defined.
-            byte[] grown = _buffer!;
-            new Span<byte>(grown, bodyStart, bodyLength).CopyTo(new Span<byte>(grown, bodyStart + extra, bodyLength));
-            _position += extra;
+            inside += _widened[i].Below;
+            count += _widened[i].Count;
         }
 
-        byte[] buffer = _buffer!;
-        ulong remaining = (ulong)bodyLength;
-        int pos = lengthPosition;
-        while (remaining >= 0x80)
+        // The body as it will be once placed: what it holds, and the bytes the longer lengths
+        // inside it take past their reserved one.
+        long length = (long)bodyLength + inside;
+        if (length > Array.MaxLength)
         {
-            buffer[pos++] = (byte)(remaining | 0x80);
-            remaining >>= 7;
+            ThrowTooLarge(length);
         }
 
-        buffer[pos] = (byte)remaining;
-        _openScopes = depth - 1;
+        int extra = ProtoWire.VarintSize((ulong)length) - 1;
+        if (_widened is null || _widened.Length == _widenedCount)
+        {
+            GrowWidened();
+        }
+
+        _widened![_widenedCount++] = new Widened(lengthPosition, (int)length, extra, inside + extra, count);
+        if (_openScopes == 0)
+        {
+            Place(inside + extra);
+        }
     }
+
+    /// <summary>
+    /// Puts every longer length in its slot and every byte after a slot past the extra bytes of
+    /// the longer lengths before it, from the end: each byte moves once.
+    /// </summary>
+    private void Place(int extraBytes)
+    {
+        Span<Widened> widened = _widened.AsSpan(0, _widenedCount);
+        _widenedCount = 0;
+
+        // The pass wants them from the last slot. They closed innermost first, which is that
+        // order already for messages nested one in the other; siblings are sorted.
+        for (int i = 1; i < widened.Length; i++)
+        {
+            if (widened[i].Slot > widened[i - 1].Slot)
+            {
+                widened.Sort(static (a, b) => b.Slot.CompareTo(a.Slot));
+                break;
+            }
+        }
+
+        EnsureCapacity(extraBytes);
+        byte[] buffer = _buffer!;
+        int end = _position;
+        int shift = extraBytes;
+        foreach (Widened record in widened)
+        {
+            (int slot, int length, int extra, _, _) = record;
+
+            // Span.CopyTo is a memmove, so the overlapping move is well defined.
+            new Span<byte>(buffer, slot + 1, end - slot - 1).CopyTo(new Span<byte>(buffer, slot + 1 + shift, end - slot - 1));
+            shift -= extra;
+            ulong remaining = (uint)length;
+            int pos = slot + shift;
+            while (remaining >= 0x80)
+            {
+                buffer[pos++] = (byte)(remaining | 0x80);
+                remaining >>= 7;
+            }
+
+            buffer[pos] = (byte)remaining;
+            end = slot;
+        }
+
+        _position += extraBytes;
+    }
+
+    private void GrowWidened()
+    {
+        Widened[] next = ArrayPool<Widened>.Shared.Rent(Math.Max(_widenedCount * 2, 16));
+        if (_widened is not null)
+        {
+            _widened.AsSpan(0, _widenedCount).CopyTo(next);
+            ArrayPool<Widened>.Shared.Return(_widened);
+        }
+
+        _widened = next;
+    }
+
+    /// <summary>
+    /// A closed message whose length takes more than its reserved byte: its slot, its length, the
+    /// bytes past the reserved one, the same bytes with those of every longer length inside it,
+    /// and the records of its subtree, itself included, which lie just before it.
+    /// </summary>
+    private readonly record struct Widened(int Slot, int Length, int Extra, int Below, int Count);
 
     /// <summary>
     /// The open-nested-message token returned by <see cref="BeginMessage"/>. Holds a
@@ -485,8 +594,8 @@ internal struct ProtoWriter : IDisposable
         }
 
         /// <summary>
-        /// Closes the nested message and backpatches its length varint. Idempotent; a
-        /// <c>default(MessageScope)</c> does nothing.
+        /// Closes the nested message; its length varint is in place once the outermost open
+        /// message is closed too. Idempotent; a <c>default(MessageScope)</c> does nothing.
         /// </summary>
         /// <exception cref="InvalidOperationException">
         /// Scopes were closed out of order (an enclosing scope closed before one it contains).
