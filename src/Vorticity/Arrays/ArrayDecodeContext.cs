@@ -344,7 +344,7 @@ internal sealed class ArrayDecodeContext
                 }
             }
 
-            return Layouts.CanonicalSlice.SliceAcross(lent, Canonical, lentNode, 0, childLength);
+            return Layouts.CanonicalSlice.LendAcross(lent, Canonical, lentNode, 0, childLength);
         }
 
         if (!_scan.TryGetRetained(key, out CanonicalArena held, out int retained))
@@ -361,7 +361,7 @@ internal sealed class ArrayDecodeContext
             }
         }
 
-        return Layouts.CanonicalSlice.SliceAcross(held, Canonical, retained, 0, childLength);
+        return Layouts.CanonicalSlice.LendAcross(held, Canonical, retained, 0, childLength);
     }
 
     /// <summary>

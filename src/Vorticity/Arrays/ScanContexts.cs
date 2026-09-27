@@ -77,7 +77,7 @@ internal sealed class ScanContexts : ISweptAfterCollections
 
         if (context is null)
         {
-            return new ScanContext(file) { KeepsBlobs = true };
+            return ScanContext.Pooled(file);
         }
 
         context.Rebind(file);

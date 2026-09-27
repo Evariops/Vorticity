@@ -277,7 +277,7 @@ internal sealed class RetainedChunksBefore : IDisposable
                 for (int i = 0; i < retained; i++)
                 {
                     RetainedChunk spare = RetainedChunkPool.Shared.Rent();
-                    spare.Arena ??= new CanonicalArena();
+                    spare.Arena ??= new RetainingArena();
                     Recycle(spare);
                 }
             }

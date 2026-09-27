@@ -515,7 +515,7 @@ internal readonly ref struct CanonicalNode
 /// reset per batch keeping its blocks for the next (<see cref="ResetKeepingBlocks"/>), and
 /// <see cref="Reset"/> once its scan is done.
 /// </summary>
-internal sealed partial class CanonicalArena
+internal partial class CanonicalArena
 {
     private CanonicalRecord[] _records;
     private int _recordCount;
@@ -814,6 +814,7 @@ internal sealed partial class CanonicalArena
             Array.Clear(_words, 0, Math.Min(_recordCount, _words.Length));
         }
 
+        Forget(_recordCount);
         _recordCount = 0;
         _childCount = 0;
         _dataBufferCount = 0;
@@ -1466,6 +1467,26 @@ internal sealed partial class CanonicalArena
         _words[index] = words;
     }
 
+    /// <summary>The retained node that node <paramref name="index"/> views, or none: see <see cref="RetainingArena"/>.</summary>
+    /// <param name="index">The node's index.</param>
+    internal virtual CanonicalOrigin OriginOf(int index) => default;
+
+    /// <summary>
+    /// Records that node <paramref name="index"/> views <paramref name="origin"/>, until the arena is
+    /// reset, when the arena takes part in retention: see <see cref="RetainingArena"/>.
+    /// </summary>
+    /// <param name="index">The node's index, below <see cref="NodeCount"/>.</param>
+    /// <param name="origin">What <see cref="OriginOf"/> said of the node it was made from.</param>
+    internal virtual void NoteOrigin(int index, CanonicalOrigin origin)
+    {
+    }
+
+    /// <summary>Drops what the arena kept of its first <paramref name="records"/> nodes beside the records, as it is reset.</summary>
+    /// <param name="records">The nodes the arena held.</param>
+    private protected virtual void Forget(int records)
+    {
+    }
+
     internal int ChildAt(int slot)
     {
         if ((uint)slot >= (uint)_childCount)
@@ -1686,6 +1707,21 @@ internal sealed partial class CanonicalArena
         }
 
         return bytes;
+    }
+
+    /// <summary>
+    /// <see cref="ReferenceFrom"/> for a node lent to the arenas that read it, a dictionary's values:
+    /// the reference keeps the node's origin, so that what a consumer learned of a retained node it
+    /// knows again in every arena the node is lent to.
+    /// </summary>
+    /// <param name="source">The arena holding the node, whose memory the result borrows.</param>
+    /// <param name="sourceIndex">The node to reference.</param>
+    /// <returns>The reference's index in this arena.</returns>
+    internal int LendFrom(CanonicalArena source, int sourceIndex)
+    {
+        int index = ReferenceFrom(source, sourceIndex);
+        NoteOrigin(index, source.OriginOf(sourceIndex));
+        return index;
     }
 
     /// <summary>
@@ -2054,6 +2090,19 @@ internal sealed partial class CanonicalArena
         _recordCount = index + 1;
         return index;
     }
+}
+
+/// <summary>
+/// A node of a published retained chunk, which the nodes lent from it view whatever arenas and
+/// batches they pass through: two nodes of the same origin hold the same values.
+/// </summary>
+/// <param name="Generation">The publication, from <see cref="RetainingArena.Seal"/>.</param>
+/// <param name="Node">The node's index in the arena published.</param>
+/// <remarks>The default names no node, so it never shows two nodes to be the same.</remarks>
+internal readonly record struct CanonicalOrigin(long Generation, int Node)
+{
+    /// <summary>Whether this names a node.</summary>
+    internal bool IsKnown => Generation != 0;
 }
 
 /// <summary>One decoded node, flattened. Never public: <see cref="CanonicalNode"/> is the view.</summary>

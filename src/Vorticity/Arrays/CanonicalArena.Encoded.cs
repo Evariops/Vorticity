@@ -10,7 +10,7 @@ using Vorticity.Types.Numerics;
 
 namespace Vorticity.Arrays;
 
-internal sealed partial class CanonicalArena
+internal partial class CanonicalArena
 {
     /// <summary>Adds a dictionary node: a code per row into a child of distinct values.</summary>
     /// <param name="dtype">The dtype this node produces.</param>

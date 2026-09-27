@@ -54,6 +54,8 @@ internal abstract class GroupKeys
 {
     private long _dictionaryBlocks;
     private long _otherBlocks;
+    private int[] _codeGroups = [];
+    private CanonicalOrigin _codeOrigin;
 
     internal int Count { get; private protected set; }
 
@@ -97,6 +99,27 @@ internal abstract class GroupKeys
         target._otherBlocks += _otherBlocks;
     }
 
+    /// <summary>
+    /// The group of each code of a dictionary whose values are node <paramref name="values"/>, -1 for
+    /// a code not met yet: the table of the batch before when both view the same retained values,
+    /// since a key keeps its group, and a cleared one otherwise.
+    /// </summary>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="values">The dictionary's values node.</param>
+    /// <param name="entries">How many values the dictionary has.</param>
+    private protected Span<int> CodeGroups(CanonicalArena arena, int values, int entries)
+    {
+        CanonicalOrigin origin = arena.OriginOf(values);
+        if (!origin.IsKnown || origin != _codeOrigin)
+        {
+            Scratch.Grow(ref _codeGroups, entries);
+            _codeGroups.AsSpan(0, entries).Fill(-1);
+            _codeOrigin = origin;
+        }
+
+        return _codeGroups.AsSpan(0, entries);
+    }
+
     private protected static int[] Identity(int count)
     {
         int[] order = new int[count];
@@ -119,7 +142,6 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private TValue[] _keys = new TValue[16];
     private int _null = -1;
     private TValue[] _values = [];
-    private int[] _codeGroups = [];
 
     internal FixedKeys(ColumnShape shape, bool sorted)
     {
@@ -176,9 +198,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 ReadOnlySpan<TValue> dictionary = FixedReader.Values(arena, entries, kind, ref _values, out ReadOnlySpan<ulong> valid);
                 ReadOnlySpan<ulong> present = ArenaWords.Validity(arena, node);
-                Scratch.Grow(ref _codeGroups, dictionary.Length);
-                Span<int> codeGroups = _codeGroups.AsSpan(0, dictionary.Length);
-                codeGroups.Fill(-1);
+                Span<int> codeGroups = CodeGroups(arena, entries, dictionary.Length);
                 RowCursor cursor = new RowCursor(selection, 0, rows);
                 while (cursor.Next(out int row))
                 {
@@ -361,7 +381,6 @@ internal sealed class BytesKeys : GroupKeys
     private int[] _groupOfEntry = new int[16];
     private int[] _entryOfGroup = new int[16];
     private int _null = -1;
-    private int[] _codeGroups = [];
 
     internal BytesKeys(ColumnShape shape, bool sorted)
     {
@@ -417,9 +436,7 @@ internal sealed class BytesKeys : GroupKeys
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 BytesBlock dictionary = BytesBlock.Canonical(arena, entries, out ReadOnlySpan<ulong> valid);
                 ReadOnlySpan<ulong> present = ArenaWords.Validity(arena, node);
-                Scratch.Grow(ref _codeGroups, dictionary.Length);
-                Span<int> codeGroups = _codeGroups.AsSpan(0, dictionary.Length);
-                codeGroups.Fill(-1);
+                Span<int> codeGroups = CodeGroups(arena, entries, dictionary.Length);
                 RowCursor cursor = new RowCursor(selection, 0, rows);
                 while (cursor.Next(out int row))
                 {

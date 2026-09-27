@@ -118,7 +118,7 @@ internal sealed class DictLayoutReader : LayoutReader
 
             // Records only: the batch's node points at the retained arena's buffers rather than
             // owning a copy of them, which is the same borrow `CanonicalSlice.SliceAcross` makes.
-            valuesIndex = context.Canonical.ReferenceFrom(held, retainedValues);
+            valuesIndex = context.Canonical.LendFrom(held, retainedValues);
         }
 
         FieldMask all = FieldMask.All;

@@ -259,6 +259,7 @@ internal sealed class RetainedChunks : IDisposable
     {
         lock (this)
         {
+            claim.Arena?.Seal();
             claim.NodeIndex = nodeIndex;
             claim.Claimant = null;
             if (claim.LastTouched < batch)
@@ -319,7 +320,7 @@ internal sealed class RetainedChunks : IDisposable
                 for (int i = 0; i < retained; i++)
                 {
                     RetainedChunk spare = RetainedChunkPool.Shared.Rent();
-                    spare.Arena ??= new CanonicalArena();
+                    spare.Arena ??= new RetainingArena();
                     Recycle(spare);
                 }
             }
@@ -681,7 +682,7 @@ internal sealed class RetainedChunks : IDisposable
 internal sealed class RetainedChunk
 {
     /// <summary>The arena the chunk is decoded into, made when its first decode begins; an entry claimed and given back has none.</summary>
-    internal CanonicalArena? Arena;
+    internal RetainingArena? Arena;
 
     internal long Key;
 

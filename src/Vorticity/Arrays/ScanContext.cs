@@ -61,10 +61,19 @@ internal sealed class ScanContext : IDisposable
     {
     }
 
+    /// <summary>
+    /// A context that a pool keeps from one scan to the next, whose batches keep the names of the
+    /// retained nodes lent to them: see <see cref="RetainingArena"/>.
+    /// </summary>
+    /// <param name="file">The file the first scan reads.</param>
+    internal static ScanContext Pooled(VortexFile file) =>
+        new ScanContext(file, ScanCapacity, retaining: true) { KeepsBlobs = true };
+
     /// <summary>Creates a scan context whose arenas start at <paramref name="capacity"/>.</summary>
     /// <param name="file">The file being scanned.</param>
     /// <param name="capacity">Initial node capacity; see <see cref="MetadataCapacity"/>.</param>
-    internal ScanContext(VortexFile file, int capacity)
+    /// <param name="retaining">Whether the batch's arena is a <see cref="RetainingArena"/>.</param>
+    internal ScanContext(VortexFile file, int capacity, bool retaining = false)
     {
         ArgumentNullException.ThrowIfNull(file);
         _file = file;
@@ -95,7 +104,7 @@ internal sealed class ScanContext : IDisposable
         // takes the hint nor gives one.
         _notesTrees = capacity >= ScanCapacity;
         _scratchNodes = new ArrayNodeArena(capacity, _notesTrees ? file.LargestArrayTree : 0);
-        _batchCanonical = new CanonicalArena(capacity);
+        _batchCanonical = retaining ? new RetainingArena(capacity) : new CanonicalArena(capacity);
 
         // Deliberately not sized from the arena capacity. A batch registers one segment per leaf it
         // reads, which the set's own default already covers, so widening it to the arena capacity
@@ -1036,7 +1045,7 @@ internal sealed class ScanContext : IDisposable
             "No child is claimed on this scan context: a child's decode follows a miss of TryGetRetainedChild.");
         _childClaim = null;
         _child = claim;
-        CanonicalArena arena = claim.Arena ??= new CanonicalArena();
+        CanonicalArena arena = claim.Arena ??= new RetainingArena();
         claim.Depend(Segments.OwnerHolding(Nodes.FirstBlobBuffer()));
         return arena;
     }
@@ -1170,7 +1179,7 @@ internal sealed class ScanContext : IDisposable
 
         // The arena is made for the first decode the entry holds, not for the claim: a claim given
         // back without a decode, an answer an encoding declined, never needs one.
-        CanonicalArena arena = claim.Arena ??= new CanonicalArena();
+        CanonicalArena arena = claim.Arena ??= new RetainingArena();
 
         // What the decode views is the blob in the node arena, which a flat reader loads just
         // before it begins; a child decoded inside the redirect notes its own segment as it loads.
