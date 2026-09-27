@@ -15,7 +15,19 @@ internal static class RowBytes
     /// and a length that is a multiple of 32 ends on a marker of 32 rather than an empty block.
     /// </summary>
     /// <returns>The number of bytes written.</returns>
-    internal static int WriteVarBody(ReadOnlySpan<byte> value, Span<byte> destination, bool descending)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int WriteVarBody(ReadOnlySpan<byte> value, Span<byte> destination, bool descending) =>
+        descending
+            ? WriteVarBody<Inverted>(value, destination)
+            : WriteVarBody<Plain>(value, destination);
+
+    /// <remarks>
+    /// One body a direction, each laid out by its own calls: in a single body, a profile taken
+    /// while one direction ran leaves the other's copy loop out of line.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int WriteVarBody<TDirection>(ReadOnlySpan<byte> value, Span<byte> destination)
+        where TDirection : struct, IDirection
     {
         int length = value.Length;
         int fullBlocks = length / RowWidths.VarBlockData;
@@ -34,38 +46,57 @@ internal static class RowBytes
             finalLength = partial;
         }
 
-        byte continuation = descending ? (byte)0x00 : (byte)0xFF;
-        byte marker = descending ? (byte)(finalLength ^ 0xFF) : (byte)finalLength;
-        byte pad = descending ? (byte)0xFF : (byte)0x00;
-
         int read = 0;
         int written = 0;
         for (int block = 0; block < continuationBlocks; block++)
         {
             Span<byte> data = destination.Slice(written, RowWidths.VarBlockData);
-            CopyMaybeInverted(value.Slice(read, RowWidths.VarBlockData), data, descending);
-            destination[written + RowWidths.VarBlockData] = continuation;
+            TDirection.Copy(value.Slice(read, RowWidths.VarBlockData), data);
+            destination[written + RowWidths.VarBlockData] = TDirection.Continuation;
             read += RowWidths.VarBlockData;
             written += RowWidths.VarBlockTotal;
         }
 
-        CopyMaybeInverted(value.Slice(read, finalLength), destination.Slice(written, finalLength), descending);
-        destination.Slice(written + finalLength, RowWidths.VarBlockData - finalLength).Fill(pad);
-        destination[written + RowWidths.VarBlockData] = marker;
+        TDirection.Copy(value.Slice(read, finalLength), destination.Slice(written, finalLength));
+        destination.Slice(written + finalLength, RowWidths.VarBlockData - finalLength).Fill(TDirection.Pad);
+        destination[written + RowWidths.VarBlockData] = TDirection.Marker(finalLength);
         return written + RowWidths.VarBlockTotal;
     }
 
-    /// <summary>Copies <paramref name="source"/>, complementing every byte when descending.</summary>
-    internal static void CopyMaybeInverted(
-        ReadOnlySpan<byte> source, Span<byte> destination, bool descending)
+    /// <summary>How a sort direction writes a value's bytes and its blocks' framing.</summary>
+    private interface IDirection
     {
-        if (!descending)
-        {
-            source.CopyTo(destination);
-            return;
-        }
+        static abstract byte Continuation { get; }
 
-        Invert(source, destination);
+        static abstract byte Pad { get; }
+
+        static abstract byte Marker(int finalLength);
+
+        static abstract void Copy(ReadOnlySpan<byte> source, Span<byte> destination);
+    }
+
+    /// <summary>Ascending: the bytes as they are.</summary>
+    private readonly struct Plain : IDirection
+    {
+        public static byte Continuation => 0xFF;
+
+        public static byte Pad => 0x00;
+
+        public static byte Marker(int finalLength) => (byte)finalLength;
+
+        public static void Copy(ReadOnlySpan<byte> source, Span<byte> destination) => source.CopyTo(destination);
+    }
+
+    /// <summary>Descending: every byte complemented, the framing's too.</summary>
+    private readonly struct Inverted : IDirection
+    {
+        public static byte Continuation => 0x00;
+
+        public static byte Pad => 0xFF;
+
+        public static byte Marker(int finalLength) => (byte)(finalLength ^ 0xFF);
+
+        public static void Copy(ReadOnlySpan<byte> source, Span<byte> destination) => Invert(source, destination);
     }
 
     /// <summary>
