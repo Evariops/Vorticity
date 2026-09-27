@@ -1,6 +1,9 @@
 using System;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Aggregating;
 
@@ -139,7 +142,11 @@ internal static class SumKernels
     {
         long total = 0;
         int i = 0;
-        if (Vector.IsHardwareAccelerated)
+        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
+        {
+            i = PairSums(values, 0, out total);
+        }
+        else if (Vector.IsHardwareAccelerated)
         {
             int step = Vector<short>.Count;
             int vectorEnd = values.Length - (values.Length % step);
@@ -170,7 +177,14 @@ internal static class SumKernels
     {
         long total = 0;
         int i = 0;
-        if (Vector.IsHardwareAccelerated)
+        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
+        {
+            // Each byte biased by 128 is the unsigned byte `vpsadbw` sums; the bias comes off at
+            // the end, 128 a value.
+            i = ByteSums(MemoryMarshal.AsBytes(values), 0x80, out ulong biased);
+            total = (long)biased - (128L * i);
+        }
+        else if (Vector.IsHardwareAccelerated)
         {
             int step = Vector<sbyte>.Count;
             int vectorEnd = values.Length - (values.Length % step);
@@ -198,11 +212,97 @@ internal static class SumKernels
         return total;
     }
 
+    /// <summary>
+    /// The sum of whole 64-byte blocks of <paramref name="values"/>, each byte xor-ed with
+    /// <paramref name="bias"/> first, and how many bytes that was.
+    /// </summary>
+    /// <remarks>
+    /// <c>vpsadbw</c> against zero sums a block's eight bytes of each 64-bit lane into it, 64 bytes
+    /// an instruction, into lanes wide enough never to overflow; the ladder of widens it replaces
+    /// took four and had to be cut into blocks before a narrow lane could.
+    /// </remarks>
+    private static int ByteSums(ReadOnlySpan<byte> values, byte bias, out ulong sum)
+    {
+        ref byte first = ref MemoryMarshal.GetReference(values);
+        Vector512<byte> flip = Vector512.Create(bias);
+        Vector512<ulong> a = Vector512<ulong>.Zero;
+        Vector512<ulong> b = Vector512<ulong>.Zero;
+        int i = 0;
+        for (; i <= values.Length - 128; i += 128)
+        {
+            a += Avx512BW.SumAbsoluteDifferences(Vector512.LoadUnsafe(ref first, (nuint)i) ^ flip, Vector512<byte>.Zero).AsUInt64();
+            b += Avx512BW.SumAbsoluteDifferences(Vector512.LoadUnsafe(ref first, (nuint)(i + 64)) ^ flip, Vector512<byte>.Zero).AsUInt64();
+        }
+
+        for (; i <= values.Length - 64; i += 64)
+        {
+            a += Avx512BW.SumAbsoluteDifferences(Vector512.LoadUnsafe(ref first, (nuint)i) ^ flip, Vector512<byte>.Zero).AsUInt64();
+        }
+
+        sum = Vector512.Sum(a + b);
+        return i;
+    }
+
+    /// <summary>
+    /// The sum of whole 32-value blocks of <paramref name="values"/>, each xor-ed with
+    /// <paramref name="bias"/> first, and how many values that was.
+    /// </summary>
+    /// <remarks>
+    /// <c>vpmaddwd</c> against ones adds each pair of words into a doubleword, 32 values an
+    /// instruction; a doubleword gains at most 65 536 a step, so the lanes are widened and summed
+    /// every <see cref="NarrowBlock"/> steps, before one could overflow.
+    /// </remarks>
+    private static int PairSums(ReadOnlySpan<short> values, ushort bias, out long sum)
+    {
+        ref short first = ref MemoryMarshal.GetReference(values);
+        Vector512<short> flip = Vector512.Create((short)bias);
+        Vector512<short> ones = Vector512.Create((short)1);
+        long total = 0;
+        int i = 0;
+        int whole = values.Length & ~31;
+        while (i < whole)
+        {
+            int stop = Math.Min(whole, i + (32 * NarrowBlock));
+            Vector512<int> acc = Vector512<int>.Zero;
+            for (; i < stop; i += 32)
+            {
+                acc += Avx512BW.MultiplyAddAdjacent(Vector512.LoadUnsafe(ref first, (nuint)i) ^ flip, ones);
+            }
+
+            (Vector512<long> low, Vector512<long> high) = Vector512.Widen(acc);
+            total += Vector512.Sum(low + high);
+        }
+
+        sum = total;
+        return i;
+    }
+
     private static Int128 Int64(ReadOnlySpan<long> values)
     {
         Int128 total = 0;
         int i = 0;
-        if (Vector.IsHardwareAccelerated && values.Length >= Vector<long>.Count)
+        if (Vector512.IsHardwareAccelerated && values.Length >= 16)
+        {
+            // Each value as its high half, signed, and its low half, unsigned: a lane of 64 bits
+            // takes 2^31 halves before it can overflow, which no span holds, so the sum is exact in
+            // one pass whatever the values, where a sum of whole values had to be taken again in
+            // 128 bits, a value at a time, once a lane left 64 bits.
+            ref long first = ref MemoryMarshal.GetReference(values);
+            Vector512<long> mask = Vector512.Create(0xFFFF_FFFFL);
+            Vector512<long> high = Vector512<long>.Zero;
+            Vector512<long> low = Vector512<long>.Zero;
+            for (; i <= values.Length - 16; i += 16)
+            {
+                Vector512<long> a = Vector512.LoadUnsafe(ref first, (nuint)i);
+                Vector512<long> b = Vector512.LoadUnsafe(ref first, (nuint)(i + 8));
+                high += Vector512.ShiftRightArithmetic(a, 32) + Vector512.ShiftRightArithmetic(b, 32);
+                low += (a & mask) + (b & mask);
+            }
+
+            // Summed across, the high halves stay within 2^62 either way and the low ones under 2^63.
+            total = ((Int128)Vector512.Sum(high) << 32) + (ulong)Vector512.Sum(low);
+        }
+        else if (Vector.IsHardwareAccelerated && values.Length >= Vector<long>.Count)
         {
             Vector<long> acc = Vector<long>.Zero;
             Vector<long> overflow = Vector<long>.Zero;
@@ -273,7 +373,14 @@ internal static class SumKernels
     {
         ulong total = 0;
         int i = 0;
-        if (Vector.IsHardwareAccelerated)
+        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
+        {
+            // Each value less 32 768 is the signed word `vpmaddwd` adds in pairs; the bias comes
+            // back at the end, 32 768 a value.
+            i = PairSums(MemoryMarshal.Cast<ushort, short>(values), 0x8000, out long biased);
+            total = (ulong)(biased + (32768L * i));
+        }
+        else if (Vector.IsHardwareAccelerated)
         {
             int step = Vector<ushort>.Count;
             int vectorEnd = values.Length - (values.Length % step);
@@ -304,7 +411,11 @@ internal static class SumKernels
     {
         ulong total = 0;
         int i = 0;
-        if (Vector.IsHardwareAccelerated)
+        if (Vector512.IsHardwareAccelerated && Avx512BW.IsSupported)
+        {
+            i = ByteSums(values, 0, out total);
+        }
+        else if (Vector.IsHardwareAccelerated)
         {
             int step = Vector<byte>.Count;
             int vectorEnd = values.Length - (values.Length % step);
@@ -336,7 +447,24 @@ internal static class SumKernels
     {
         UInt128 total = 0;
         int i = 0;
-        if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
+        if (Vector512.IsHardwareAccelerated && values.Length >= 16)
+        {
+            // Each value as its two halves, exact in one pass whatever the values, as the signed sum.
+            ref ulong first = ref MemoryMarshal.GetReference(values);
+            Vector512<ulong> mask = Vector512.Create(0xFFFF_FFFFUL);
+            Vector512<ulong> high = Vector512<ulong>.Zero;
+            Vector512<ulong> low = Vector512<ulong>.Zero;
+            for (; i <= values.Length - 16; i += 16)
+            {
+                Vector512<ulong> a = Vector512.LoadUnsafe(ref first, (nuint)i);
+                Vector512<ulong> b = Vector512.LoadUnsafe(ref first, (nuint)(i + 8));
+                high += Vector512.ShiftRightLogical(a, 32) + Vector512.ShiftRightLogical(b, 32);
+                low += (a & mask) + (b & mask);
+            }
+
+            total = ((UInt128)Vector512.Sum(high) << 32) + Vector512.Sum(low);
+        }
+        else if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
         {
             Vector<ulong> acc = Vector<ulong>.Zero;
             Vector<ulong> overflow = Vector<ulong>.Zero;
@@ -374,12 +502,62 @@ internal static class SumKernels
         return total;
     }
 
+    /// <summary>A vector's numbers, a NaN lane zero and counted in <paramref name="nan"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector512<double> Numbers(Vector512<double> v, ref Vector512<long> nan)
+    {
+        Vector512<double> number = Vector512.Equals(v, v);
+        nan += Vector512<long>.One + number.AsInt64();
+        return v & number;
+    }
+
     private static double Double(ReadOnlySpan<double> values, out long counted)
     {
         double total = 0;
         long skipped = 0;
         int i = 0;
-        if (Vector.IsHardwareAccelerated && values.Length >= Vector<double>.Count)
+        if (Vector512.IsHardwareAccelerated && values.Length >= 32)
+        {
+            // Four sums, so that no addition waits on the one before: one sum is held to the
+            // latency of a floating add a vector. The order of the additions is this loop's, as it
+            // was the narrower vectors' before, and a total's last bits follow it.
+            //
+            // A NaN among the values makes the sum NaN, so the sum is taken first as if there were
+            // none, and again with each NaN lane zeroed and counted only when it came out NaN --
+            // where an infinity met its opposite as well, whose second sum is NaN again. Zeroed
+            // lanes add nothing, so the two sums agree to the bit where both are taken.
+            ref double first = ref MemoryMarshal.GetReference(values);
+            int whole = values.Length & ~31;
+            Vector512<double> a = Vector512<double>.Zero;
+            Vector512<double> b = Vector512<double>.Zero;
+            Vector512<double> c = Vector512<double>.Zero;
+            Vector512<double> d = Vector512<double>.Zero;
+            for (; i < whole; i += 32)
+            {
+                a += Vector512.LoadUnsafe(ref first, (nuint)i);
+                b += Vector512.LoadUnsafe(ref first, (nuint)(i + 8));
+                c += Vector512.LoadUnsafe(ref first, (nuint)(i + 16));
+                d += Vector512.LoadUnsafe(ref first, (nuint)(i + 24));
+            }
+
+            total = Vector512.Sum((a + b) + (c + d));
+            if (double.IsNaN(total))
+            {
+                a = b = c = d = Vector512<double>.Zero;
+                Vector512<long> nan = Vector512<long>.Zero;
+                for (i = 0; i < whole; i += 32)
+                {
+                    a += Numbers(Vector512.LoadUnsafe(ref first, (nuint)i), ref nan);
+                    b += Numbers(Vector512.LoadUnsafe(ref first, (nuint)(i + 8)), ref nan);
+                    c += Numbers(Vector512.LoadUnsafe(ref first, (nuint)(i + 16)), ref nan);
+                    d += Numbers(Vector512.LoadUnsafe(ref first, (nuint)(i + 24)), ref nan);
+                }
+
+                total = Vector512.Sum((a + b) + (c + d));
+                skipped = Vector512.Sum(nan);
+            }
+        }
+        else if (Vector.IsHardwareAccelerated && values.Length >= Vector<double>.Count)
         {
             Vector<double> acc = Vector<double>.Zero;
             Vector<long> nan = Vector<long>.Zero;
@@ -417,7 +595,43 @@ internal static class SumKernels
         double total = 0;
         long skipped = 0;
         int i = 0;
-        if (Vector.IsHardwareAccelerated && values.Length >= Vector<float>.Count)
+        if (Vector512.IsHardwareAccelerated && Avx512F.IsSupported && values.Length >= 32)
+        {
+            // Four loads of eight singles a step, each converted to eight doubles in one
+            // instruction, into four sums, NaN or not first, as the doubles' loop: widening a
+            // 512-bit load would take its upper half out first.
+            ref float first = ref MemoryMarshal.GetReference(values);
+            int whole = values.Length & ~31;
+            Vector512<double> a = Vector512<double>.Zero;
+            Vector512<double> b = Vector512<double>.Zero;
+            Vector512<double> c = Vector512<double>.Zero;
+            Vector512<double> d = Vector512<double>.Zero;
+            for (; i < whole; i += 32)
+            {
+                a += Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)i));
+                b += Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 8)));
+                c += Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 16)));
+                d += Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 24)));
+            }
+
+            total = Vector512.Sum((a + b) + (c + d));
+            if (double.IsNaN(total))
+            {
+                a = b = c = d = Vector512<double>.Zero;
+                Vector512<long> nan = Vector512<long>.Zero;
+                for (i = 0; i < whole; i += 32)
+                {
+                    a += Numbers(Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)i)), ref nan);
+                    b += Numbers(Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 8))), ref nan);
+                    c += Numbers(Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 16))), ref nan);
+                    d += Numbers(Avx512F.ConvertToVector512Double(Vector256.LoadUnsafe(ref first, (nuint)(i + 24))), ref nan);
+                }
+
+                total = Vector512.Sum((a + b) + (c + d));
+                skipped = Vector512.Sum(nan);
+            }
+        }
+        else if (Vector.IsHardwareAccelerated && values.Length >= Vector<float>.Count)
         {
             Vector<double> acc = Vector<double>.Zero;
             Vector<long> nan = Vector<long>.Zero;
