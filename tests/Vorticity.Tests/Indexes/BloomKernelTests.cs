@@ -97,7 +97,7 @@ public sealed class BloomKernelTests
 
                 using HashSet64 batched = new HashSet64();
                 using HashSet64 single = new HashSet64();
-                BloomBuilder.HashRows(values, width, start, stop, batched);
+                BloomBuilder.HashRows(values, width, start, stop, batched, new ulong[stop - start]);
                 for (int row = start; row < stop; row++)
                 {
                     single.Add(XxHash3.HashToUInt64(values.AsSpan(row * width, width)));

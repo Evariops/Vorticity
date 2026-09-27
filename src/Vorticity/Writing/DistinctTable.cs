@@ -511,20 +511,27 @@ internal sealed class DistinctTable
             // A row equal to the one before takes its code without the hash or the probe, and so
             // does the run it starts, measured a vector at a time: a sorted column or one of runs
             // is mostly such rows. The one compare that decides it is all a column without runs
-            // pays.
+            // pays. Every other row's hash is taken before the row ahead of it is inserted: a probe
+            // whose branch was guessed wrong throws away what came after it, never the hash waiting
+            // for it.
             int i = 0;
+            ulong hash = values.IsEmpty ? 0 : KeyHash.Mix(ulong.CreateTruncating(values[0]));
             while (i < values.Length && !_abandoned)
             {
                 T value = values[i];
-                InsertFixed(ulong.CreateTruncating(value));
                 i++;
+                ulong nextHash = i < values.Length ? KeyHash.Mix(ulong.CreateTruncating(values[i])) : 0;
+                InsertFixed(ulong.CreateTruncating(value), hash);
                 if (i < values.Length && values[i] == value && !_abandoned)
                 {
                     int run = RunLength(values[i..], value);
                     _codes.AsSpan(_rows, run).Fill(_codes[_rows - 1]);
                     _rows += run;
                     i += run;
+                    nextHash = i < values.Length ? KeyHash.Mix(ulong.CreateTruncating(values[i])) : 0;
                 }
+
+                hash = nextHash;
             }
 
             return;
@@ -600,8 +607,11 @@ internal sealed class DistinctTable
         }
     }
 
-    /// <summary>Recent inline views a probe remembers, with their codes; a power of two.</summary>
-    private const int RecentViews = 16;
+    /// <summary>The bits of a recent view's slot.</summary>
+    private const int RecentBits = 4;
+
+    /// <summary>Recent inline views a probe remembers, with their codes.</summary>
+    private const int RecentViews = 1 << RecentBits;
 
     /// <remarks>
     /// <para>
@@ -715,9 +725,14 @@ internal sealed class DistinctTable
     }
 
     /// <summary>Where a view sits among the recent ones.</summary>
+    /// <remarks>
+    /// A collision here costs a miss and nothing more, so the slot takes no seed: the top bits of
+    /// one multiply of the view's two words folded, which a row pays in <see cref="Recall"/>
+    /// before anything else.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int RecentSlot(ulong low, ulong high) =>
-        (int)KeyHash.Mix(low ^ (high * 0x9E3779B97F4A7C15UL)) & (RecentViews - 1);
+        (int)(((low ^ (high * 0x9E3779B97F4A7C15UL)) * 0x9E3779B97F4A7C15UL) >> (64 - RecentBits));
 
     /// <summary>
     /// The null is a value like any other, with a code of its own, so a nullable dictionary has at
@@ -744,9 +759,13 @@ internal sealed class DistinctTable
         _codes[_rows++] = _nullCode;
     }
 
-    private void InsertFixed(ulong key)
+    private void InsertFixed(ulong key) => InsertFixed(key, KeyHash.Mix(key));
+
+    /// <param name="key">The value's bits.</param>
+    /// <param name="hash">The key's <see cref="KeyHash.Mix"/>, which a loop takes a row ahead.</param>
+    private void InsertFixed(ulong key, ulong hash)
     {
-        int slot = (int)KeyHash.Mix(key) & _mask;
+        int slot = (int)hash & _mask;
         while (true)
         {
             int occupant = _slotCode[slot];
@@ -836,7 +855,7 @@ internal sealed class DistinctTable
         ulong tailMask = size <= 8 ? 0 : (1UL << (8 * (size - 8))) - 1;
         ulong head = ((low >> 32) | (high << 32)) & headMask;
         ulong tail = (high >> 32) & tailMask;
-        ulong hash = KeyHash.Mix(head ^ (tail * 0x9E3779B97F4A7C15UL) ^ ((ulong)size << 56));
+        ulong hash = KeyHash.Pair(head, tail, size);
 
         int[] offsets = _slotOffset!;
         int[] lengths = _slotLength!;
