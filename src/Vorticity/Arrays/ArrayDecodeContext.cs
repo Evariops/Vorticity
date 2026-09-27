@@ -457,6 +457,34 @@ internal sealed class ArrayDecodeContext
     }
 
     /// <summary>
+    /// The rows set in <paramref name="bits"/> before row <paramref name="start"/>: for a node read
+    /// a range at a time, where a range's first value sits among the valid ones alone.
+    /// </summary>
+    /// <param name="node">The node whose validity <paramref name="bits"/> is, whole.</param>
+    /// <param name="bits">The validity bitmap.</param>
+    /// <param name="bitOffset">Its first row's bit.</param>
+    /// <param name="start">The range's first row.</param>
+    /// <remarks>
+    /// Inside a reader-opened scope, the count starts from the one this context made for the
+    /// range before of the same node, which a context reads in ascending order: a chunk's ranges
+    /// then count its bitmap once between them, not once each from its first row.
+    /// </remarks>
+    internal int ValidBefore(in ArrayNode node, ReadOnlySpan<byte> bits, int bitOffset, int start)
+    {
+        if (_scan.NodeCheckScope is not uint segment ||
+            ScanContext.NodeCheckKey(segment, node.Index) is not long key)
+        {
+            return Decoders.Canonical.BitmapKernels.CountSet(bits, bitOffset, start);
+        }
+
+        int count = _scan.TryValidBefore(key, out int from, out int counted) && from <= start
+            ? counted + Decoders.Canonical.BitmapKernels.CountSet(bits, bitOffset + from, start - from)
+            : Decoders.Canonical.BitmapKernels.CountSet(bits, bitOffset, start);
+        _scan.RememberValidBefore(key, start, count);
+        return count;
+    }
+
+    /// <summary>
     /// The shared validity rule: resolve a node's optional validity child into a
     /// <see cref="Validity"/>, collapsing a constant bitmap.
     /// </summary>

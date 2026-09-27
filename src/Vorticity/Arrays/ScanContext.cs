@@ -906,6 +906,44 @@ internal sealed class ScanContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// The valid rows before <paramref name="start"/> this context last counted in the node named by
+    /// <paramref name="key"/>, when it counted any there.
+    /// </summary>
+    /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
+    /// <param name="start">The row the count stops at.</param>
+    /// <param name="count">The valid rows before it.</param>
+    internal bool TryValidBefore(long key, out int start, out int count)
+    {
+        if (_memory is { } memory && memory.RankKey == key + 1)
+        {
+            start = memory.RankStart;
+            count = memory.RankCount;
+            return true;
+        }
+
+        start = 0;
+        count = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// Records that <paramref name="count"/> rows before <paramref name="start"/> are valid in the
+    /// node named by <paramref name="key"/>, for the next range of it this context reads.
+    /// </summary>
+    /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
+    /// <param name="start">The row the count stops at.</param>
+    /// <param name="count">The valid rows before it.</param>
+    internal void RememberValidBefore(long key, int start, int count)
+    {
+        if (_memory is { } memory)
+        {
+            memory.RankKey = key + 1;
+            memory.RankStart = start;
+            memory.RankCount = count;
+        }
+    }
+
     /// <summary>See <see cref="_memory"/>.</summary>
     private sealed class BatchMemory
     {
@@ -917,6 +955,17 @@ internal sealed class ScanContext : IDisposable
 
         /// <summary>The blobs kept parsed, made at the first one a context of the scans' pool keeps.</summary>
         internal KeptBlobs? Blobs;
+
+        /// <summary>
+        /// The node whose valid rows were last counted, stored as its key plus one, the row the count
+        /// stops at and the count: a context reads the ranges of a node in ascending order, and the
+        /// next count starts from this one rather than from the node's first row.
+        /// </summary>
+        internal long RankKey;
+
+        internal int RankStart;
+
+        internal int RankCount;
     }
 
     [InlineArray(CheckedNodeSlots + 1)]
@@ -1324,6 +1373,7 @@ internal sealed class ScanContext : IDisposable
         {
             memory.Checks = default;
             memory.Blobs?.Forget();
+            memory.RankKey = 0;
         }
 
         if (_pushed is { } pushed)
