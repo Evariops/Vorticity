@@ -7,13 +7,14 @@ using System.Runtime.InteropServices;
 namespace Vorticity.Writing;
 
 /// <summary>
-/// Bucket hashes for the write path's tables. Not checksums: collisions are compared away, so which
-/// hash is used picks a bucket and cannot change a byte of the written file.
+/// Bucket hashes for the write path's tables and the aggregates' sets. Not checksums: collisions are
+/// compared away, so which hash is used picks a bucket and cannot change a byte of the written file
+/// or a count.
 /// </summary>
 /// <remarks>
 /// Every hash goes through seeds drawn once a process, so that which values share a bucket cannot be
-/// worked out ahead: values built to collide under fixed constants would make every table of a
-/// chunk quadratic in its distinct values. No hash is written, so the file does not change.
+/// worked out ahead: values built to collide under fixed constants would make every table
+/// quadratic in its distinct values. No hash is written, so neither a file nor a result changes.
 /// </remarks>
 internal static class KeyHash
 {
@@ -27,6 +28,11 @@ internal static class KeyHash
 
     /// <summary>The seed of <see cref="Fold"/>'s second operand, and odd, the multiplier after it.</summary>
     private static readonly ulong Right = DrawSeed() | 1;
+
+    /// <summary><see cref="Chained"/>'s multipliers, odd.</summary>
+    private static readonly ulong ChainLow = DrawSeed() | 1;
+
+    private static readonly ulong ChainHigh = DrawSeed() | 1;
 
     /// <summary>
     /// Mixes a whole fixed-width value, zero-extended. The final fold is what makes the low bits
@@ -42,22 +48,40 @@ internal static class KeyHash
     internal static ulong Mix(ulong value) => Finish((value * Golden) + Seed);
 
     /// <summary>
-    /// A value of up to sixteen bytes given as its first and last eight, which overlap below
-    /// sixteen, or as a view's two words, with its length.
+    /// A value of up to sixteen bytes given as two words -- a string's first and last eight, which
+    /// overlap below sixteen, or a view's two words -- with a tag that tells apart values of the
+    /// same words: its length.
     /// </summary>
     /// <remarks>
     /// The fold has already spread both words over the whole product under two seeds, so a
     /// multiply-add by one of them and a shift finish it, where a single word takes all of
-    /// <see cref="Mix"/>, and a call builds no constant but the seeds. The length is the add,
-    /// beside the fold rather than after it, so it costs the hash no step; it is what tells
-    /// "abcdefgh" from itself twice, whose words are the same.
+    /// <see cref="Mix"/>, and a call builds no constant but the seeds. The tag is the add, beside
+    /// the fold rather than after it, so it costs the hash no step; it is what tells "abcdefgh"
+    /// from itself twice, whose words are the same.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static ulong Pair(ulong low, ulong high, int length)
+    internal static ulong Pair(ulong low, ulong high, int tag)
     {
-        ulong hash = (Fold(low, high) * Right) + (ulong)length;
+        ulong hash = (Fold(low, high) * Right) + (ulong)tag;
         return hash ^ (hash >> 32);
     }
+
+    /// <summary>
+    /// A value's bits as two words and a tag that tells apart equal values -- the group it was seen
+    /// in -- for a table that chains its buckets: the high half of the sum of the words' products by
+    /// multipliers of the process, the tag added to that half.
+    /// </summary>
+    /// <remarks>
+    /// Multiply-shift is universal: whatever values a column holds, two of them share a hash about as
+    /// rarely as two random ones, which keeps every chain short on average, at one multiply for a
+    /// value of up to eight bytes. Under two tags, two values' high halves differ by as much as a
+    /// product of their difference does, which no column can aim either. It is not enough for a
+    /// table that probes linearly, where runs of neighbouring hashes merge: such a table takes
+    /// <see cref="Pair"/>.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int Chained(ulong low, ulong high, int tag) =>
+        (int)(((low * ChainLow) + (high * ChainHigh) + ((ulong)(uint)tag << 32)) >> 32);
 
     /// <summary>
     /// A byte string's hash: one word mixed below eight bytes, words folded then mixed up to 64,

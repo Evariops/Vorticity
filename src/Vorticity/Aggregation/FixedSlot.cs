@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
+using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
 
@@ -460,5 +461,53 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 }
 
 /// <summary>A value seen by one group.</summary>
+/// <remarks>
+/// Hashed under multipliers drawn once a process (<see cref="KeyHash.Chained"/>): the default hash
+/// of a 64-bit value folds its halves together, and a prime bucket count takes an integer's
+/// multiples to one bucket, so values could be built to share one chain of the set and make every
+/// insert a walk of the values before it. Equal values hash alike: every NaN and both zeros of a
+/// float are equal, so they are given one pattern of bits first.
+/// </remarks>
 internal readonly record struct DistinctEntry<TValue>(int Group, TValue Value)
-    where TValue : unmanaged, IEquatable<TValue>;
+    where TValue : unmanaged, IEquatable<TValue>
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public override int GetHashCode()
+    {
+        (ulong low, ulong high) = Words(Value);
+        return KeyHash.Chained(low, high, Group);
+    }
+
+    /// <summary>A value's bits as two words, zero-extended, a float's made one pattern per value.</summary>
+    /// <remarks>Cast rather than read through a reference, which would take the value through memory before the multiply.</remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static (ulong Low, ulong High) Words(TValue value)
+    {
+        if (typeof(TValue) == typeof(double))
+        {
+            double d = Unsafe.BitCast<TValue, double>(value);
+            return (double.IsNaN(d) ? 0x7FF8_0000_0000_0000UL : d == 0 ? 0 : BitConverter.DoubleToUInt64Bits(d), 0);
+        }
+
+        if (typeof(TValue) == typeof(float))
+        {
+            float f = Unsafe.BitCast<TValue, float>(value);
+            return (float.IsNaN(f) ? 0x7FC0_0000U : f == 0 ? 0 : BitConverter.SingleToUInt32Bits(f), 0);
+        }
+
+        if (typeof(TValue) == typeof(Half))
+        {
+            Half h = Unsafe.BitCast<TValue, Half>(value);
+            return (Half.IsNaN(h) ? (ushort)0x7E00 : h == Half.Zero ? (ushort)0 : BitConverter.HalfToUInt16Bits(h), 0);
+        }
+
+        return Unsafe.SizeOf<TValue>() switch
+        {
+            1 => (Unsafe.BitCast<TValue, byte>(value), 0),
+            2 => (Unsafe.BitCast<TValue, ushort>(value), 0),
+            4 => (Unsafe.BitCast<TValue, uint>(value), 0),
+            8 => (Unsafe.BitCast<TValue, ulong>(value), 0),
+            _ => ((ulong)Unsafe.BitCast<TValue, UInt128>(value), (ulong)(Unsafe.BitCast<TValue, UInt128>(value) >> 64)),
+        };
+    }
+}
