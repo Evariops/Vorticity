@@ -277,26 +277,7 @@ public sealed class ReadBudgetTests
         // and no value, so indexing a file reads its data once, for the scan.
         CancellationToken ct = TestContext.Current.CancellationToken;
         const int chunks = 4;
-        MemoryStream stream = new MemoryStream();
-        VortexWriteOptions options = new VortexWriteOptions { RowBlockSize = 4_096, ChunkTargetBytes = 1 };
-        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream), Schema, options))
-        {
-            CanonicalArena arena = new CanonicalArena();
-            for (int from = 0; from < chunks * 16_384; from += 16_384)
-            {
-                using (RecordBatch batch = new RecordBatch(
-                    arena, arena.AddStruct(Schema, 16_384, Validity.NonNullable, [Longs(arena, from, 16_384), Strings(arena, from, 16_384)]), from))
-                {
-                    await writer.WriteAsync(batch, ct);
-                }
-
-                arena.Reset();
-            }
-
-            await writer.CompleteAsync(ct);
-        }
-
-        CountingSegmentSource source = new CountingSegmentSource(new MemorySegmentSource(stream.ToArray()));
+        CountingSegmentSource source = new CountingSegmentSource(new MemorySegmentSource(await ChunkedAsync(chunks, ct)));
         await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
         long data = 0;
         foreach (SegmentSpec spec in file.SegmentSpecs)
@@ -321,6 +302,65 @@ public sealed class ReadBudgetTests
         IndexWriteReport probe = Assert.Single(fragment.Reports, report => report.Column == "s" && report.Kind == IndexKinds.DictProbe);
         Assert.True(probe.Outcome == IndexOutcome.Built, probe.Reason);
         Assert.InRange(source.Bytes, 1, data + (2 * chunks * 1_024));
+    }
+
+    [Fact]
+    public async Task ALayoutIsDescribedFromItsArrayTreesAndNoValue()
+    {
+        // Naming each flat node's encodings, the chunks of both columns and their zone maps, takes
+        // its array tree, and a description of the whole layout reads a kilobyte a node at most,
+        // whatever the chunks hold.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const int chunks = 4;
+        CountingSegmentSource source = new CountingSegmentSource(new MemorySegmentSource(await ChunkedAsync(chunks, ct)));
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
+
+        source.Reset();
+        VortexLayout layout = await file.GetLayoutAsync(ct);
+        List<string> named = [];
+        Collect(layout, named);
+        Assert.InRange(named.Count, 2 * chunks, (2 * chunks) + 2);
+        Assert.Contains(named, encoding => encoding.StartsWith("vortex.dict", StringComparison.Ordinal));
+        Assert.DoesNotContain(named, encoding => encoding.StartsWith('('));
+        Assert.InRange(source.Bytes, 1, named.Count * 1_024);
+
+        static void Collect(VortexLayout node, List<string> named)
+        {
+            if (node.ArrayEncoding is { } encoding)
+            {
+                named.Add(encoding);
+            }
+
+            foreach (VortexLayout child in node.Children)
+            {
+                Collect(child, named);
+            }
+        }
+    }
+
+    /// <summary>A file of this schema in chunks of 16 384 rows, one batch a chunk, in memory.</summary>
+    private static async Task<byte[]> ChunkedAsync(int chunks, CancellationToken ct)
+    {
+        MemoryStream stream = new MemoryStream();
+        VortexWriteOptions options = new VortexWriteOptions { RowBlockSize = 4_096, ChunkTargetBytes = 1 };
+        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream), Schema, options))
+        {
+            CanonicalArena arena = new CanonicalArena();
+            for (int from = 0; from < chunks * 16_384; from += 16_384)
+            {
+                using (RecordBatch batch = new RecordBatch(
+                    arena, arena.AddStruct(Schema, 16_384, Validity.NonNullable, [Longs(arena, from, 16_384), Strings(arena, from, 16_384)]), from))
+                {
+                    await writer.WriteAsync(batch, ct);
+                }
+
+                arena.Reset();
+            }
+
+            await writer.CompleteAsync(ct);
+        }
+
+        return stream.ToArray();
     }
 
     [Fact]

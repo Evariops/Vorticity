@@ -99,25 +99,19 @@ public sealed partial class VortexFile
     }
 
     /// <summary>
-    /// The layout tree, with each flat node's array encodings. It reads each flat node's segment to
-    /// name its encodings, decompressing nothing; a node that cannot be read says why in its place.
+    /// The layout tree, with each flat node's array encodings. It reads each flat node's array
+    /// tree, from the layout or the tail of its segment, to name its encodings, and none of its
+    /// values; a node whose tree cannot be read says why in its place.
     /// </summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The root node.</returns>
     public async ValueTask<VortexLayout> GetLayoutAsync(CancellationToken cancellationToken = default)
     {
-        LayoutTree tree = LayoutTree;
-        ArrayEncodingId[] encodings = new ArrayEncodingId[ArrayEncodingCount];
-        for (int i = 0; i < encodings.Length; i++)
-        {
-            encodings[i] = GetArrayEncoding(i);
-        }
-
         ArrayNodeArena arena = new ArrayNodeArena();
-        return await DescribeAsync(tree.Root, arena, encodings, cancellationToken).ConfigureAwait(false);
+        return await DescribeAsync(LayoutTree.Root, arena, cancellationToken).ConfigureAwait(false);
     }
 
-    private async ValueTask<VortexLayout> DescribeAsync(LayoutNode node, ArrayNodeArena arena, ArrayEncodingId[] encodings, CancellationToken cancellationToken)
+    private async ValueTask<VortexLayout> DescribeAsync(LayoutNode node, ArrayNodeArena arena, CancellationToken cancellationToken)
     {
         ReadOnlySpan<uint> segmentIndices = node.Segments;
         ImmutableArray<int>.Builder segments = ImmutableArray.CreateBuilder<int>(segmentIndices.Length);
@@ -142,7 +136,7 @@ public sealed partial class VortexFile
         string? array = null;
         if (node.Encoding == LayoutEncodingId.Flat)
         {
-            array = await ArrayEncodingOfAsync(node, arena, encodings, cancellationToken).ConfigureAwait(false);
+            array = await ArrayEncodingOfAsync(node, arena, cancellationToken).ConfigureAwait(false);
         }
 
         int childCount = node.ChildCount;
@@ -155,7 +149,7 @@ public sealed partial class VortexFile
         ImmutableArray<VortexLayout>.Builder described = ImmutableArray.CreateBuilder<VortexLayout>(childCount);
         foreach (LayoutNode child in children)
         {
-            described.Add(await DescribeAsync(child, arena, encodings, cancellationToken).ConfigureAwait(false));
+            described.Add(await DescribeAsync(child, arena, cancellationToken).ConfigureAwait(false));
         }
 
         return new VortexLayout(encoding, rows, type, segments.MoveToImmutable(), zoneCount, zoneLength, usable, array, described.MoveToImmutable());
@@ -210,7 +204,7 @@ public sealed partial class VortexFile
         ArrayBlobReader.LoadTree(arena, tree.Buffer.Span, ResolvedArrayEncodings);
     }
 
-    private async ValueTask<string> ArrayEncodingOfAsync(LayoutNode node, ArrayNodeArena arena, ArrayEncodingId[] encodings, CancellationToken cancellationToken)
+    private async ValueTask<string> ArrayEncodingOfAsync(LayoutNode node, ArrayNodeArena arena, CancellationToken cancellationToken)
     {
         ReadOnlySpan<uint> segments = node.Segments;
         if (segments.Length != 1)
@@ -224,29 +218,9 @@ public sealed partial class VortexFile
             return $"(segment {index} is out of range)";
         }
 
-        SegmentSpec spec = SegmentSpecs[(int)index];
-
-        // Copied before the await: a flat node may inline its array tree in its metadata, and the
-        // metadata is a span over the layout buffer.
-        byte[]? inlined = null;
-        FlatLayoutMetadata metadata = FlatLayoutMetadata.Read(node.Metadata);
-        if (metadata.HasArrayEncodingTree)
-        {
-            inlined = metadata.ArrayEncodingTree.ToArray();
-        }
-
         try
         {
-            using SegmentOwner owner = await Segments.ReadAsync(spec, cancellationToken).ConfigureAwait(false);
-            if (inlined is null)
-            {
-                ArrayBlobReader.Load(arena, owner.Buffer, encodings);
-            }
-            else
-            {
-                ArrayBlobReader.Load(arena, inlined, owner.Buffer, encodings);
-            }
-
+            await LoadArrayTreeAsync(node, arena, cancellationToken).ConfigureAwait(false);
             StringBuilder tree = new StringBuilder();
             AppendArray(tree, arena.Root);
             return tree.ToString();
