@@ -604,10 +604,87 @@ internal static class Expr
         return new StringMatchExpr(field, op, pattern, escape);
     }
 
+    /// <summary><c>left AND right</c>, or <c>OR</c>.</summary>
+    /// <remarks>
+    /// Both are associative, so a run of one operator is joined by the heights of its sides, as an
+    /// AVL tree joins: a chain of n operands built one at a time is O(log n) high whichever way it
+    /// leans, where it was n high and refused past the evaluator's depth. The operands keep their
+    /// order, which evaluation follows.
+    /// </remarks>
     internal static LogicalExpr Logical(bool isAnd, VortexExpr left, VortexExpr right)
     {
         ArgumentNullException.ThrowIfNull(left);
         ArgumentNullException.ThrowIfNull(right);
+        return Join(isAnd, left, right);
+    }
+
+    /// <summary>
+    /// <paramref name="operands"/>, at least one, in order, joined by one operator as a balanced
+    /// tree of one node between two operands: a run known whole, as a parser reads one.
+    /// </summary>
+    internal static VortexExpr Chain(bool isAnd, ReadOnlySpan<VortexExpr> operands)
+    {
+        if (operands.Length == 1)
+        {
+            return operands[0];
+        }
+
+        int middle = operands.Length / 2;
+        return new LogicalExpr(isAnd, Chain(isAnd, operands[..middle]), Chain(isAnd, operands[middle..]));
+    }
+
+    /// <summary>The height <see cref="Chain(bool, ReadOnlySpan{VortexExpr})"/> gives <paramref name="operands"/>, without building it.</summary>
+    internal static int ChainHeight(ReadOnlySpan<VortexExpr> operands)
+    {
+        if (operands.Length == 1)
+        {
+            return operands[0].Height;
+        }
+
+        int middle = operands.Length / 2;
+        return Math.Max(ChainHeight(operands[..middle]), ChainHeight(operands[middle..])) + 1;
+    }
+
+    /// <summary>
+    /// A node over two balanced sides: beside the side it is not more than one level from, down the
+    /// other's spine of the same operator, and rotated back on the way up.
+    /// </summary>
+    private static LogicalExpr Join(bool isAnd, VortexExpr left, VortexExpr right)
+    {
+        if (left.Height > right.Height + 1 && left is LogicalExpr high && high.IsAnd == isAnd)
+        {
+            return Rotated(isAnd, high.Left, Join(isAnd, high.Right, right));
+        }
+
+        if (right.Height > left.Height + 1 && right is LogicalExpr tall && tall.IsAnd == isAnd)
+        {
+            return Rotated(isAnd, Join(isAnd, left, tall.Left), tall.Right);
+        }
+
+        return new LogicalExpr(isAnd, left, right);
+    }
+
+    /// <summary>
+    /// A node over two sides whose heights differ by two at most, rotated once or twice to within
+    /// one where the taller side is of the same operator. An operand of another kind is whole, and
+    /// a node over it keeps its height.
+    /// </summary>
+    private static LogicalExpr Rotated(bool isAnd, VortexExpr left, VortexExpr right)
+    {
+        if (right.Height > left.Height + 1 && right is LogicalExpr r && r.IsAnd == isAnd)
+        {
+            return r.Left.Height > r.Right.Height && r.Left is LogicalExpr inner && inner.IsAnd == isAnd
+                ? new LogicalExpr(isAnd, new LogicalExpr(isAnd, left, inner.Left), new LogicalExpr(isAnd, inner.Right, r.Right))
+                : new LogicalExpr(isAnd, new LogicalExpr(isAnd, left, r.Left), r.Right);
+        }
+
+        if (left.Height > right.Height + 1 && left is LogicalExpr l && l.IsAnd == isAnd)
+        {
+            return l.Right.Height > l.Left.Height && l.Right is LogicalExpr inner && inner.IsAnd == isAnd
+                ? new LogicalExpr(isAnd, new LogicalExpr(isAnd, l.Left, inner.Left), new LogicalExpr(isAnd, inner.Right, right))
+                : new LogicalExpr(isAnd, l.Left, new LogicalExpr(isAnd, l.Right, right));
+        }
+
         return new LogicalExpr(isAnd, left, right);
     }
 
