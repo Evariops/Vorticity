@@ -1,5 +1,9 @@
 using System;
+using System.Diagnostics;
 using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace Vorticity.Aggregating;
 
@@ -23,6 +27,13 @@ internal interface IValueOp<TValue, TState>
     static abstract void AddSpan(ref TState state, ReadOnlySpan<TValue> values);
 
     static abstract void Merge(ref TState into, in TState other);
+
+    /// <summary>
+    /// Folds the rows of <paramref name="block"/> that <paramref name="words"/> set, 64 rows a word
+    /// and at most <see cref="WordFold.Run"/> words, none of them empty: row <c>i</c> when bit
+    /// <c>i % 64</c> of word <c>i / 64</c> is set.
+    /// </summary>
+    static abstract void AddWords(ref TState state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words);
 }
 
 /// <summary>A running sum at the widened type, and how many values it holds.</summary>
@@ -72,6 +83,16 @@ internal readonly struct SignedSum<TValue> : IValueOp<TValue, SumState<Int128>>
         into.Sum += other.Sum;
         into.Count += other.Count;
     }
+
+    [SkipLocalsInit]
+    public static void AddWords(ref SumState<Int128> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state.Sum += SumKernels.Signed(selected);
+        state.Count += WordFold.Count(words);
+    }
 }
 
 /// <summary>A sum of unsigned integers in 128 bits, exact whatever the order, as <see cref="SignedSum{TValue}"/> is.</summary>
@@ -102,6 +123,16 @@ internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128
     {
         into.Sum += other.Sum;
         into.Count += other.Count;
+    }
+
+    [SkipLocalsInit]
+    public static void AddWords(ref SumState<UInt128> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state.Sum += SumKernels.Unsigned(selected);
+        state.Count += WordFold.Count(words);
     }
 }
 
@@ -142,6 +173,21 @@ internal readonly struct FloatSum<TValue> : IValueOp<TValue, SumState<double>>
         into.Sum += other.Sum;
         into.Count += other.Count;
     }
+
+    /// <remarks>
+    /// The rows left out read as zero, which adds nothing, and the NaN the kernel skips among the
+    /// run are all rows kept: zero is not NaN. A NaN would do as well for the sum, but a sum with a
+    /// NaN in it is the kernel's slow path.
+    /// </remarks>
+    [SkipLocalsInit]
+    public static void AddWords(ref SumState<double> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, TValue.Zero, selected);
+        state.Sum += SumKernels.Float<TValue>(selected, out long counted);
+        state.Count += WordFold.Count(words) - (selected.Length - counted);
+    }
 }
 
 /// <summary>A sum of unscaled decimals in 128 bits, checked.</summary>
@@ -178,6 +224,9 @@ internal readonly struct DecimalSum : IValueOp<Int128, SumState<Int128>>
         into.Sum = checked(into.Sum + other.Sum);
         into.Count += other.Count;
     }
+
+    public static void AddWords(ref SumState<Int128> state, ReadOnlySpan<Int128> block, ReadOnlySpan<ulong> words) =>
+        WordFold.Each<Int128, SumState<Int128>, DecimalSum>(ref state, block, words);
 }
 
 /// <summary>The smallest value, NaN skipped.</summary>
@@ -217,6 +266,16 @@ internal readonly struct MinOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
             Add(ref into, other.Value);
         }
     }
+
+    /// <remarks>The rows left out read as the first row kept, which cannot move an extreme.</remarks>
+    [SkipLocalsInit]
+    public static void AddWords(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, block[BitOperations.TrailingZeroCount(words[0])], selected);
+        AddSpan(ref state, selected);
+    }
 }
 
 /// <summary>The largest value, NaN skipped.</summary>
@@ -254,6 +313,98 @@ internal readonly struct MaxOp<TValue> : IValueOp<TValue, ExtremeState<TValue>>
         if (other.Has)
         {
             Add(ref into, other.Value);
+        }
+    }
+
+    /// <remarks>The rows left out read as the first row kept, which cannot move an extreme.</remarks>
+    [SkipLocalsInit]
+    public static void AddWords(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+    {
+        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
+        selected = selected[..block.Length];
+        WordFold.Select(block, words, block[BitOperations.TrailingZeroCount(words[0])], selected);
+        AddSpan(ref state, selected);
+    }
+}
+
+/// <summary>The rows of a run of mask words, for <see cref="IValueOp{TValue, TState}.AddWords"/>.</summary>
+internal static class WordFold
+{
+    /// <summary>
+    /// A word holding fewer rows than this is folded a row at a time: a count of trailing zeros
+    /// and an add a row cost less than selecting the word's 64 rows and folding them.
+    /// </summary>
+    internal const int Dense = 16;
+
+    /// <summary>
+    /// The most words selected before a fold: the dense kernel's fixed cost, a reduction across
+    /// its lanes and a call, is paid once a run, not once a word.
+    /// </summary>
+    internal const int Run = 16;
+
+    /// <summary>The rows <paramref name="words"/> hold, one at a time.</summary>
+    internal static void Each<TValue, TState, TOp>(ref TState state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
+        where TValue : unmanaged
+        where TOp : IValueOp<TValue, TState>
+    {
+        for (int w = 0; w < words.Length; w++)
+        {
+            ulong word = words[w];
+            while (word != 0)
+            {
+                TOp.Add(ref state, block[(w << 6) + BitOperations.TrailingZeroCount(word)]);
+                word &= word - 1;
+            }
+        }
+    }
+
+    /// <summary>How many rows <paramref name="words"/> hold.</summary>
+    internal static long Count(ReadOnlySpan<ulong> words)
+    {
+        long count = 0;
+        foreach (ulong word in words)
+        {
+            count += BitOperations.PopCount(word);
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// The whole of <paramref name="block"/> into <paramref name="into"/>, each row
+    /// <paramref name="words"/> leave out read as <paramref name="fill"/>.
+    /// </summary>
+    /// <remarks>
+    /// Where there are 512-bit vectors, a select a vector under lanes taken from the word, which a
+    /// dense span's kernel then folds without a test a row; elsewhere a select a row.
+    /// </remarks>
+    internal static void Select<T>(ReadOnlySpan<T> block, ReadOnlySpan<ulong> words, T fill, Span<T> into)
+        where T : unmanaged
+    {
+        Debug.Assert(block.Length == words.Length * 64 && into.Length == block.Length);
+        if (Compute.WordBytes.IsAccelerated && Vector512<T>.IsSupported)
+        {
+            Compute.WordBytes spread = Compute.WordBytes.Create();
+            Vector512<T> filler = Vector512.Create(fill);
+            int lanes = Vector512<T>.Count;
+            ref T from = ref MemoryMarshal.GetReference(block);
+            ref T to = ref MemoryMarshal.GetReference(into);
+            for (int w = 0; w < words.Length; w++)
+            {
+                ulong word = words[w];
+                for (int group = 0; group < 64 / lanes; group++)
+                {
+                    nuint at = (nuint)((w << 6) + (group * lanes));
+                    Vector512.ConditionalSelect(spread.Lanes<T>(word, group), Vector512.LoadUnsafe(ref from, at), filler).StoreUnsafe(ref to, at);
+                }
+            }
+
+            return;
+        }
+
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = ((words[i >> 6] >> (i & 63)) & 1) != 0 ? block[i] : fill;
         }
     }
 }
