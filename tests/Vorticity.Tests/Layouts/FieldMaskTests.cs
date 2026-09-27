@@ -1,5 +1,6 @@
 // FieldMask, the tree the scan builds and the layouts consume.
 using System;
+using System.Collections.Generic;
 
 using Vorticity.Layouts;
 
@@ -189,6 +190,44 @@ public sealed class FieldMaskTests
             }
 
             Assert.Equal(position, selected);
+        }
+    }
+
+    [Fact]
+    public void PathsIncludedInAnyOrderBuildTheMaskTheyBuildInOrder()
+    {
+        // Few field values and short paths, so that fields repeat and arrive out of order at every
+        // level, some wanted whole before or after a path below them.
+        Random random = new Random(30);
+        for (int trial = 0; trial < 500; trial++)
+        {
+            List<int[]> paths = [];
+            int count = random.Next(1, 40);
+            for (int i = 0; i < count; i++)
+            {
+                int[] path = new int[random.Next(1, 4)];
+                for (int level = 0; level < path.Length; level++)
+                {
+                    path[level] = random.Next(8);
+                }
+
+                paths.Add(path);
+            }
+
+            FieldMaskBuilder shuffled = new FieldMaskBuilder();
+            foreach (int[] path in paths)
+            {
+                shuffled.Include(path);
+            }
+
+            paths.Sort((left, right) => left.AsSpan().SequenceCompareTo(right));
+            FieldMaskBuilder ordered = new FieldMaskBuilder();
+            foreach (int[] path in paths)
+            {
+                ordered.Include(path);
+            }
+
+            Assert.Equal(Describe(ordered.Build()), Describe(shuffled.Build()));
         }
     }
 

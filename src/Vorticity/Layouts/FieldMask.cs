@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Vorticity.Layouts;
 
@@ -361,38 +362,51 @@ internal sealed class FieldMaskBuilder
 
     private sealed class Level
     {
-        private readonly List<int> _fields = new List<int>();
-        private readonly List<Level> _children = new List<Level>();
+        // The fields and their children, made with the first child: a field wanted whole, which
+        // most are, holds no list.
+        private List<int>? _fields;
+        private List<Level>? _children;
+
+        // Whether the fields are increasing, without a repeat. A field that arrives out of order
+        // is appended as it comes, and so is every one after it; Build sorts them and merges the
+        // children of a field that came twice.
+        private bool _ordered = true;
 
         internal bool All { get; private set; }
 
         internal void SelectAll()
         {
             All = true;
-            _fields.Clear();
-            _children.Clear();
+            _ordered = true;
+            _fields?.Clear();
+            _children?.Clear();
         }
 
+        /// <summary>The child of <paramref name="field"/>, made on first use.</summary>
+        /// <remarks>
+        /// A field past the last one, the order a schema and a built mask give, is appended at once;
+        /// one already there is found by bisection while the fields stay ordered. A level costs
+        /// O(F log F) whatever the order the fields come in.
+        /// </remarks>
         internal Level Child(int field)
         {
-            // Linear scan, and the list stays sorted so Build needs no sort of its own. It costs
-            // the square of the field count, which stays negligible against the read it prepares
-            // even for a projection of a thousand fields; a map would remove it and add a field to
-            // every level.
-            int i = 0;
-            while (i < _fields.Count && _fields[i] < field)
+            List<int> fields = _fields ??= [];
+            List<Level> children = _children ??= [];
+            int count = fields.Count;
+            if (_ordered && count > 0 && fields[count - 1] >= field)
             {
-                i++;
-            }
+                int at = CollectionsMarshal.AsSpan(fields).BinarySearch(field);
+                if (at >= 0)
+                {
+                    return children[at];
+                }
 
-            if (i < _fields.Count && _fields[i] == field)
-            {
-                return _children[i];
+                _ordered = false;
             }
 
             Level child = new Level();
-            _fields.Insert(i, field);
-            _children.Insert(i, child);
+            fields.Add(field);
+            children.Add(child);
             return child;
         }
 
@@ -403,37 +417,98 @@ internal sealed class FieldMaskBuilder
                 return FieldMask.All;
             }
 
-            int count = _fields.Count;
-            if (count == 0)
+            if (_fields is not { Count: > 0 } named || _children is not { } children)
             {
                 return FieldMask.Empty;
             }
+
+            if (!_ordered)
+            {
+                Order(named, children);
+            }
+
+            int count = named.Count;
 
             // The common masks hold no more than they say: one whole field is the mask alone, and
             // fields all wanted whole need no mask of their own each.
             bool wholes = true;
             for (int i = 0; i < count; i++)
             {
-                wholes &= _children[i].All;
+                wholes &= children[i].All;
             }
 
             if (wholes && count == 1)
             {
-                return FieldMask.Single(_fields[0]);
+                return FieldMask.Single(named[0]);
             }
 
             int[] fields = new int[count];
             FieldMask[]? masks = wholes ? null : new FieldMask[count];
             for (int i = 0; i < count; i++)
             {
-                fields[i] = _fields[i];
+                fields[i] = named[i];
                 if (masks is not null)
                 {
-                    masks[i] = _children[i].Build();
+                    masks[i] = children[i].Build();
                 }
             }
 
             return FieldMask.Subset(new FieldMaskNode(fields, masks));
+        }
+
+        /// <summary>Sorts the fields with their children, and merges into its first child the others of a field that came twice.</summary>
+        private void Order(List<int> named, List<Level> children)
+        {
+            Span<int> fields = CollectionsMarshal.AsSpan(named);
+            Span<Level> levels = CollectionsMarshal.AsSpan(children);
+            fields.Sort(levels);
+            int kept = 0;
+            for (int i = 0; i < fields.Length; i++)
+            {
+                if (kept > 0 && fields[kept - 1] == fields[i])
+                {
+                    levels[kept - 1].Absorb(levels[i]);
+                    continue;
+                }
+
+                fields[kept] = fields[i];
+                levels[kept] = levels[i];
+                kept++;
+            }
+
+            named.RemoveRange(kept, fields.Length - kept);
+            children.RemoveRange(kept, levels.Length - kept);
+            _ordered = true;
+        }
+
+        /// <summary>Takes in what another child of the same field selected: all of it, or its fields.</summary>
+        private void Absorb(Level other)
+        {
+            if (All)
+            {
+                return;
+            }
+
+            if (other.All)
+            {
+                SelectAll();
+                return;
+            }
+
+            if (other._fields is not { Count: > 0 } fields)
+            {
+                return;
+            }
+
+            List<int> named = _fields ??= [];
+            List<Level> children = _children ??= [];
+            for (int i = 0; i < fields.Count; i++)
+            {
+                named.Add(fields[i]);
+                children.Add(other._children![i]);
+            }
+
+            _ordered = false;
         }
     }
 }
