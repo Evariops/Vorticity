@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Buffers.Binary;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
@@ -276,9 +277,14 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         }
 
         ref TCode code = ref MemoryMarshal.GetReference(codes);
+
+        // The dictionary holds MaxDictionarySize entries at most, and every code is in range by now:
+        // the whole table is one AVX-512 register, and one permute looks up a vector of rows, eight
+        // doubles or sixteen singles, where the loop below looks up one. The tables are sized to the
+        // register; the entries past the dictionary are never selected.
         if (isSingle)
         {
-            Span<uint> shifted = stackalloc uint[dictionary.Length];
+            Span<uint> shifted = stackalloc uint[2 * MaxDictionarySize];
             for (int i = 0; i < dictionary.Length; i++)
             {
                 shifted[i] = unchecked(dictionary[i] << rightBitWidth);
@@ -287,16 +293,27 @@ internal sealed class AlpRdDecoder : ArrayDecoder
             ref uint table = ref MemoryMarshal.GetReference(shifted);
             ref uint low = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, uint>(right)[..length]);
             ref uint target = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, uint>(destination)[..length]);
-            for (int i = 0; i < length; i++)
+            int row = 0;
+            if (Avx512F.IsSupported && typeof(TCode) != typeof(ulong))
             {
-                Unsafe.Add(ref target, i) = unchecked(
-                    Unsafe.Add(ref table, (nint)Widen(Unsafe.Add(ref code, i))) | Unsafe.Add(ref low, i));
+                Vector512<uint> lookup = Vector512.LoadUnsafe(ref table);
+                for (; row <= length - 16; row += 16)
+                {
+                    (Avx512F.PermuteVar16x32(lookup, Codes16(ref Unsafe.Add(ref code, row))) | Vector512.LoadUnsafe(ref low, (nuint)row))
+                        .StoreUnsafe(ref target, (nuint)row);
+                }
+            }
+
+            for (; row < length; row++)
+            {
+                Unsafe.Add(ref target, row) = unchecked(
+                    Unsafe.Add(ref table, (nint)Widen(Unsafe.Add(ref code, row))) | Unsafe.Add(ref low, row));
             }
 
             return;
         }
 
-        Span<ulong> wideShifted = stackalloc ulong[dictionary.Length];
+        Span<ulong> wideShifted = stackalloc ulong[MaxDictionarySize];
         for (int i = 0; i < dictionary.Length; i++)
         {
             wideShifted[i] = unchecked((ulong)dictionary[i] << rightBitWidth);
@@ -305,11 +322,65 @@ internal sealed class AlpRdDecoder : ArrayDecoder
         ref ulong wideTable = ref MemoryMarshal.GetReference(wideShifted);
         ref ulong wide = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, ulong>(right)[..length]);
         ref ulong output = ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, ulong>(destination)[..length]);
-        for (int i = 0; i < length; i++)
+        int at = 0;
+        if (Avx512F.IsSupported)
         {
-            Unsafe.Add(ref output, i) = unchecked(
-                Unsafe.Add(ref wideTable, (nint)Widen(Unsafe.Add(ref code, i))) | Unsafe.Add(ref wide, i));
+            Vector512<ulong> lookup = Vector512.LoadUnsafe(ref wideTable);
+            for (; at <= length - 8; at += 8)
+            {
+                (Avx512F.PermuteVar8x64(lookup, Codes8(ref Unsafe.Add(ref code, at))) | Vector512.LoadUnsafe(ref wide, (nuint)at))
+                    .StoreUnsafe(ref output, (nuint)at);
+            }
         }
+
+        for (; at < length; at++)
+        {
+            Unsafe.Add(ref output, at) = unchecked(
+                Unsafe.Add(ref wideTable, (nint)Widen(Unsafe.Add(ref code, at))) | Unsafe.Add(ref wide, at));
+        }
+    }
+
+    /// <summary>Eight codes at <paramref name="code"/>, zero-extended to the lanes of a 64-bit permute.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector512<ulong> Codes8<TCode>(ref TCode code)
+        where TCode : unmanaged
+    {
+        if (typeof(TCode) == typeof(ulong))
+        {
+            return Vector512.LoadUnsafe(ref Unsafe.As<TCode, ulong>(ref code));
+        }
+
+        if (typeof(TCode) == typeof(uint))
+        {
+            return Avx512F.ConvertToVector512UInt64(Vector256.LoadUnsafe(ref Unsafe.As<TCode, uint>(ref code)));
+        }
+
+        if (typeof(TCode) == typeof(ushort))
+        {
+            return Avx512F.ConvertToVector512UInt64(Vector128.LoadUnsafe(ref Unsafe.As<TCode, ushort>(ref code)));
+        }
+
+        // Eight bytes and no more: a sixteen-byte load could reach past the last row.
+        return Avx512F.ConvertToVector512UInt64(
+            Vector128.CreateScalarUnsafe(Unsafe.ReadUnaligned<ulong>(ref Unsafe.As<TCode, byte>(ref code))).AsByte());
+    }
+
+    /// <summary>Sixteen codes at <paramref name="code"/>, zero-extended to the lanes of a 32-bit permute; never a 64-bit code.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector512<uint> Codes16<TCode>(ref TCode code)
+        where TCode : unmanaged
+    {
+        if (typeof(TCode) == typeof(uint))
+        {
+            return Vector512.LoadUnsafe(ref Unsafe.As<TCode, uint>(ref code));
+        }
+
+        if (typeof(TCode) == typeof(ushort))
+        {
+            return Avx512F.ConvertToVector512UInt32(Vector256.LoadUnsafe(ref Unsafe.As<TCode, ushort>(ref code)));
+        }
+
+        return Avx512F.ConvertToVector512UInt32(Vector128.LoadUnsafe(ref Unsafe.As<TCode, byte>(ref code)));
     }
 
     /// <summary>

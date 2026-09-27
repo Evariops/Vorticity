@@ -4,9 +4,11 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
+using Vorticity.Compute;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -184,8 +186,11 @@ internal readonly struct AlpPlan
         try
         {
         long? fill = null;
-        int done = !mask.AllInvalid && Vector128.IsHardwareAccelerated
-            ? LanesDouble(values, encoded, e, f, LaneValidity(in mask, rows), mask.BitOffset, indices, patches, ref patchCount, ref fill)
+        int done = mask.AllInvalid ? 0
+            : Vector512.IsHardwareAccelerated
+                ? LanesDouble512(values, encoded, e, f, LaneValidity(in mask, rows), mask.BitOffset, indices, patches, ref patchCount, ref fill)
+            : Vector128.IsHardwareAccelerated
+                ? LanesDouble(values, encoded, e, f, LaneValidity(in mask, rows), mask.BitOffset, indices, patches, ref patchCount, ref fill)
             : 0;
 
         for (int i = done; i < rows; i++)
@@ -266,8 +271,11 @@ internal readonly struct AlpPlan
         try
         {
         int? fill = null;
-        int done = !mask.AllInvalid && Vector128.IsHardwareAccelerated
-            ? LanesSingle(values, encoded, e, f, LaneValidity(in mask, rows), mask.BitOffset, indices, patches, ref patchCount, ref fill)
+        int done = mask.AllInvalid ? 0
+            : Vector512.IsHardwareAccelerated
+                ? LanesSingle512(values, encoded, e, f, LaneValidity(in mask, rows), mask.BitOffset, indices, patches, ref patchCount, ref fill)
+            : Vector128.IsHardwareAccelerated
+                ? LanesSingle(values, encoded, e, f, LaneValidity(in mask, rows), mask.BitOffset, indices, patches, ref patchCount, ref fill)
             : 0;
 
         for (int i = done; i < rows; i++)
@@ -455,6 +463,113 @@ internal readonly struct AlpPlan
         return length;
     }
 
+    /// <summary>
+    /// <see cref="LanesDouble"/> eight doubles per step, where the machine has 512-bit vectors: the
+    /// same arithmetic in the same order per lane, and the two conversions AVX-512DQ carries
+    /// (`vcvtqq2pd`, and the truncating conversion the saturating one is built on).
+    /// </summary>
+    /// <returns>The rows handled: the largest multiple of eight.</returns>
+    private static int LanesDouble512(
+        ReadOnlySpan<double> values, Span<long> encoded, int e, int f, ReadOnlySpan<byte> bits, int bitOffset,
+        int[] indices, double[] patches, ref int patchCount, ref long? fill)
+    {
+        int length = values.Length & ~7;
+        Vector512<double> scale = Vector512.Create(AlpTables.F10Double[e]);
+        Vector512<double> inverse = Vector512.Create(AlpTables.If10Double[f]);
+        Vector512<double> back = Vector512.Create(AlpTables.F10Double[f]);
+        Vector512<double> backInverse = Vector512.Create(AlpTables.If10Double[e]);
+        Vector512<double> sweet = Vector512.Create((double)((1UL << 52) + (1UL << 51)));
+        ref double source = ref MemoryMarshal.GetReference(values);
+        ref long destination = ref MemoryMarshal.GetReference(encoded);
+        bool masked = !bits.IsEmpty;
+        int patched = patchCount;
+        ref int patchIndex = ref MemoryMarshal.GetArrayDataReference(indices);
+        ref double patchValue = ref MemoryMarshal.GetArrayDataReference(patches);
+        for (int i = 0; i < length; i += 8)
+        {
+            Vector512<double> value = Vector512.LoadUnsafe(ref source, (nuint)i);
+            Vector512<long> integer = Vector512.ConvertToInt64((((value * scale) * inverse) + sweet) - sweet);
+            Vector512<double> decoded = (Vector512.ConvertToDouble(integer) * back) * backInverse;
+            integer.StoreUnsafe(ref destination, (nuint)i);
+            uint same = (uint)Vector512.Equals(decoded.AsInt64(), value.AsInt64()).ExtractMostSignificantBits();
+            uint valid = masked ? (uint)(BitWords.Load(bits, bitOffset + i) & 0xFF) : 0xFFu;
+            uint patch = valid & ~same;
+            if (!fill.HasValue && (valid & same) != 0)
+            {
+                fill = integer.GetElement(BitOperations.TrailingZeroCount(valid & same));
+            }
+
+            if (patch == 0)
+            {
+                continue;
+            }
+
+            // The patched lanes' values and rows compressed to the front of a register and stored
+            // whole at the next free slot, which has room: fewer patches than rows precede it.
+            Vector512<long> lanes = Vector512.Equals(Vector512.Create((long)patch) & LaneBits64, LaneBits64);
+            Avx512F.Compress(Vector512<double>.Zero, lanes.AsDouble(), value).StoreUnsafe(ref patchValue, (nuint)patched);
+            Avx512F.ConvertToVector256Int32(Avx512F.Compress(Vector512<long>.Zero, lanes, Vector512.CreateSequence((long)i, 1)))
+                .StoreUnsafe(ref patchIndex, (nuint)patched);
+            patched += BitOperations.PopCount(patch);
+        }
+
+        patchCount = patched;
+        return length;
+    }
+
+    /// <summary>Lane <c>k</c> holding bit <c>k</c>, to spread eight bits of a mask over eight 64-bit lanes.</summary>
+    private static Vector512<long> LaneBits64 => Vector512.Create(1L, 2, 4, 8, 16, 32, 64, 128);
+
+    /// <summary>Lane <c>k</c> holding bit <c>k</c>, to spread sixteen bits of a mask over sixteen 32-bit lanes.</summary>
+    private static Vector512<int> LaneBits32 => Vector512.Create(1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768);
+
+    /// <summary><see cref="LanesSingle"/> sixteen floats per step, as <see cref="LanesDouble512"/>.</summary>
+    /// <returns>The rows handled: the largest multiple of sixteen.</returns>
+    private static int LanesSingle512(
+        ReadOnlySpan<float> values, Span<int> encoded, int e, int f, ReadOnlySpan<byte> bits, int bitOffset,
+        int[] indices, float[] patches, ref int patchCount, ref int? fill)
+    {
+        int length = values.Length & ~15;
+        Vector512<float> scale = Vector512.Create(AlpTables.F10Single[e]);
+        Vector512<float> inverse = Vector512.Create(AlpTables.If10Single[f]);
+        Vector512<float> back = Vector512.Create(AlpTables.F10Single[f]);
+        Vector512<float> backInverse = Vector512.Create(AlpTables.If10Single[e]);
+        Vector512<float> sweet = Vector512.Create((float)((1 << 23) + (1 << 22)));
+        ref float source = ref MemoryMarshal.GetReference(values);
+        ref int destination = ref MemoryMarshal.GetReference(encoded);
+        bool masked = !bits.IsEmpty;
+        int patched = patchCount;
+        ref int patchIndex = ref MemoryMarshal.GetArrayDataReference(indices);
+        ref float patchValue = ref MemoryMarshal.GetArrayDataReference(patches);
+        for (int i = 0; i < length; i += 16)
+        {
+            Vector512<float> value = Vector512.LoadUnsafe(ref source, (nuint)i);
+            Vector512<int> integer = Vector512.ConvertToInt32((((value * scale) * inverse) + sweet) - sweet);
+            Vector512<float> decoded = (Vector512.ConvertToSingle(integer) * back) * backInverse;
+            integer.StoreUnsafe(ref destination, (nuint)i);
+            uint same = (uint)Vector512.Equals(decoded.AsInt32(), value.AsInt32()).ExtractMostSignificantBits();
+            uint valid = masked ? (uint)(BitWords.Load(bits, bitOffset + i) & 0xFFFF) : 0xFFFFu;
+            uint patch = valid & ~same;
+            if (!fill.HasValue && (valid & same) != 0)
+            {
+                fill = integer.GetElement(BitOperations.TrailingZeroCount(valid & same));
+            }
+
+            if (patch == 0)
+            {
+                continue;
+            }
+
+            Vector512<int> lanes = Vector512.Equals(Vector512.Create((int)patch) & LaneBits32, LaneBits32);
+            Avx512F.Compress(Vector512<float>.Zero, lanes.AsSingle(), value).StoreUnsafe(ref patchValue, (nuint)patched);
+            Avx512F.Compress(Vector512<int>.Zero, lanes, Vector512.CreateSequence(i, 1)).StoreUnsafe(ref patchIndex, (nuint)patched);
+            patched += BitOperations.PopCount(patch);
+        }
+
+        patchCount = patched;
+        return length;
+    }
+
     /// <summary>Branchless round-to-nearest: add the sweet spot and take it away.</summary>
     /// <remarks>
     /// Adding 1.5 * 2^52 forces every fractional bit out of the mantissa under the hardware's own
@@ -535,7 +650,33 @@ internal readonly struct AlpPlan
 
         ref byte bits = ref MemoryMarshal.GetReference(mask.Bits[..((mask.BitOffset + rows + 7) >> 3)]);
         ref T slot = ref MemoryMarshal.GetReference(encoded[..rows]);
-        for (nint i = 0; i < rows; i++)
+        nint first = 0;
+
+        // With AVX-512, 64 rows a validity word, a word of no null untouched and a mixed one a
+        // blend per vector of its rows' lanes.
+        if (WordBytes.IsAccelerated && Vector512<T>.IsSupported)
+        {
+            WordBytes spread = WordBytes.Create();
+            Vector512<T> fillers = Vector512.Create(filler);
+            int lanes = Vector512<T>.Count;
+            for (; first + 64 <= rows; first += 64)
+            {
+                ulong word = BitWords.Load(mask.Bits, mask.BitOffset + (int)first);
+                if (word == ulong.MaxValue)
+                {
+                    continue;
+                }
+
+                for (int group = 0; group * lanes < 64; group++)
+                {
+                    nuint at = (nuint)(first + (group * lanes));
+                    Vector512.ConditionalSelect(spread.Lanes<T>(word, group), Vector512.LoadUnsafe(ref slot, at), fillers)
+                        .StoreUnsafe(ref slot, at);
+                }
+            }
+        }
+
+        for (nint i = first; i < rows; i++)
         {
             nint at = mask.BitOffset + i;
             bool valid = ((Unsafe.Add(ref bits, at >> 3) >> (int)(at & 7)) & 1) != 0;
@@ -710,7 +851,40 @@ internal readonly struct AlpPlan
         long min = long.MaxValue;
         long max = long.MinValue;
         int patches = 0;
-        foreach (double value in sample)
+        int i = 0;
+
+        // The search runs this for every pair of exponents, 171 of them, over the whole sample:
+        // with 512-bit vectors the sample is eight doubles a step, the same arithmetic per lane as
+        // the scalar row, the extremes kept under the lanes that come back and the others counted.
+        if (Vector512.IsHardwareAccelerated)
+        {
+            Vector512<double> scaleV = Vector512.Create(scale);
+            Vector512<double> inverseV = Vector512.Create(inverse);
+            Vector512<double> backV = Vector512.Create(back);
+            Vector512<double> backInverseV = Vector512.Create(backInverse);
+            Vector512<double> sweet = Vector512.Create((double)((1UL << 52) + (1UL << 51)));
+            Vector512<long> lows = Vector512.Create(long.MaxValue);
+            Vector512<long> highs = Vector512.Create(long.MinValue);
+            ref double from = ref MemoryMarshal.GetReference(sample);
+            for (; i <= sample.Length - 8; i += 8)
+            {
+                Vector512<double> value = Vector512.LoadUnsafe(ref from, (nuint)i);
+                Vector512<long> integer = Vector512.ConvertToInt64((((value * scaleV) * inverseV) + sweet) - sweet);
+                Vector512<double> decoded = (Vector512.ConvertToDouble(integer) * backV) * backInverseV;
+                Vector512<long> same = Vector512.Equals(decoded.AsInt64(), value.AsInt64());
+                patches += 8 - BitOperations.PopCount(same.ExtractMostSignificantBits());
+                lows = Vector512.Min(lows, Vector512.ConditionalSelect(same, integer, Vector512.Create(long.MaxValue)));
+                highs = Vector512.Max(highs, Vector512.ConditionalSelect(same, integer, Vector512.Create(long.MinValue)));
+            }
+
+            for (int lane = 0; lane < 8; lane++)
+            {
+                min = Math.Min(min, lows.GetElement(lane));
+                max = Math.Max(max, highs.GetElement(lane));
+            }
+        }
+
+        foreach (double value in sample[i..])
         {
             long integer = ToInt64(FastRound(value * scale * inverse));
             if (BitConverter.DoubleToInt64Bits(integer * back * backInverse)
@@ -742,7 +916,36 @@ internal readonly struct AlpPlan
         long min = long.MaxValue;
         long max = long.MinValue;
         int patches = 0;
-        foreach (float value in sample)
+        int i = 0;
+        if (Vector512.IsHardwareAccelerated)
+        {
+            Vector512<float> scaleV = Vector512.Create(scale);
+            Vector512<float> inverseV = Vector512.Create(inverse);
+            Vector512<float> backV = Vector512.Create(back);
+            Vector512<float> backInverseV = Vector512.Create(backInverse);
+            Vector512<float> sweet = Vector512.Create((float)((1 << 23) + (1 << 22)));
+            Vector512<int> lows = Vector512.Create(int.MaxValue);
+            Vector512<int> highs = Vector512.Create(int.MinValue);
+            ref float from = ref MemoryMarshal.GetReference(sample);
+            for (; i <= sample.Length - 16; i += 16)
+            {
+                Vector512<float> value = Vector512.LoadUnsafe(ref from, (nuint)i);
+                Vector512<int> integer = Vector512.ConvertToInt32((((value * scaleV) * inverseV) + sweet) - sweet);
+                Vector512<float> decoded = (Vector512.ConvertToSingle(integer) * backV) * backInverseV;
+                Vector512<int> same = Vector512.Equals(decoded.AsInt32(), value.AsInt32());
+                patches += 16 - BitOperations.PopCount(same.ExtractMostSignificantBits());
+                lows = Vector512.Min(lows, Vector512.ConditionalSelect(same, integer, Vector512.Create(int.MaxValue)));
+                highs = Vector512.Max(highs, Vector512.ConditionalSelect(same, integer, Vector512.Create(int.MinValue)));
+            }
+
+            for (int lane = 0; lane < 16; lane++)
+            {
+                min = Math.Min(min, lows.GetElement(lane));
+                max = Math.Max(max, highs.GetElement(lane));
+            }
+        }
+
+        foreach (float value in sample[i..])
         {
             int integer = ToInt32(FastRound(value * scale * inverse));
             if (BitConverter.SingleToInt32Bits(integer * back * backInverse)

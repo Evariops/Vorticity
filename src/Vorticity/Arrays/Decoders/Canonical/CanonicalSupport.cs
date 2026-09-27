@@ -233,6 +233,64 @@ internal static class CanonicalSupport
     }
 
     /// <summary>
+    /// The first <c>into.Length</c> elements of an integer buffer, each read as
+    /// <see cref="ReadInteger"/> reads one and <paramref name="add"/> added, into
+    /// <paramref name="into"/>: the physical type resolved once for the run rather than once an
+    /// element.
+    /// </summary>
+    /// <param name="bytes">The buffer.</param>
+    /// <param name="ptype">Its physical type; must be an integer.</param>
+    /// <param name="add">Added to every element, wrapping.</param>
+    /// <param name="into">One slot per element read.</param>
+    internal static void ReadIntegers(ReadOnlySpan<byte> bytes, PType ptype, long add, Span<long> into)
+    {
+        switch (ptype)
+        {
+            case PType.U8:
+                Integers<byte>(bytes, add, into);
+                break;
+            case PType.U16:
+                Integers<ushort>(bytes, add, into);
+                break;
+            case PType.U32:
+                Integers<uint>(bytes, add, into);
+                break;
+            case PType.U64:
+                Integers<ulong>(bytes, add, into);
+                break;
+            case PType.I8:
+                Integers<sbyte>(bytes, add, into);
+                break;
+            case PType.I16:
+                Integers<short>(bytes, add, into);
+                break;
+            case PType.I32:
+                Integers<int>(bytes, add, into);
+                break;
+            case PType.I64:
+                Integers<long>(bytes, add, into);
+                break;
+            default:
+                ThrowNotInteger<long>("offset", ptype);
+                break;
+        }
+    }
+
+    private static void Integers<T>(ReadOnlySpan<byte> bytes, long add, Span<long> into)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes)[..into.Length];
+        for (int i = 0; i < into.Length; i++)
+        {
+            T value = values[i];
+            long wide = typeof(T) == typeof(ulong)
+                ? Saturate(Unsafe.As<T, ulong>(ref value))
+                : long.CreateTruncating(value);
+            into[i] = unchecked(wide + add);
+        }
+    }
+
+    /// <summary>
     /// Reads element <paramref name="index"/> of an integer buffer as a <see cref="long"/>,
     /// saturating rather than throwing: a <c>u64</c> above <see cref="long.MaxValue"/> saturates
     /// and is then rejected by the range check every caller applies afterwards.

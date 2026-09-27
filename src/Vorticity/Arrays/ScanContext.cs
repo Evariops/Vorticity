@@ -558,6 +558,9 @@ internal sealed class ScanContext : IDisposable
         internal byte[]? Field;
         internal Expressions.ComparisonOp Op;
         internal Expressions.FilterLiteral Literal;
+
+        /// <summary>Whether the predicate is <c>StartsWith(Literal)</c> rather than <c>Op</c>.</summary>
+        internal bool Prefix;
         internal Layouts.FieldMask Fields;
         internal bool FieldsHonoured;
     }
@@ -581,6 +584,12 @@ internal sealed class ScanContext : IDisposable
 
     /// <summary>The right-hand side of <see cref="PushedField"/>'s comparison.</summary>
     internal Expressions.FilterLiteral PushedLiteral => _pushed!.Literal;
+
+    /// <summary>
+    /// Whether the pushed predicate is a prefix match, <c>StartsWith(PushedLiteral)</c>, in which
+    /// case <see cref="PushedOp"/> means nothing.
+    /// </summary>
+    internal bool PushedPrefix => _pushed!.Prefix;
 
     /// <summary>
     /// Whether the reader running right now is inside the column <see cref="PushedField"/> names.
@@ -641,17 +650,19 @@ internal sealed class ScanContext : IDisposable
     /// <param name="field">The field's name, UTF-8, or <see langword="null"/> to clear it.</param>
     /// <param name="op">The comparison.</param>
     /// <param name="literal">Its right-hand side.</param>
-    /// <returns>The previous triple.</returns>
-    internal (byte[]? Field, Expressions.ComparisonOp Op, Expressions.FilterLiteral Literal)
+    /// <param name="prefix">Whether the predicate is a prefix match on <paramref name="literal"/> instead.</param>
+    /// <returns>The previous predicate.</returns>
+    internal (byte[]? Field, Expressions.ComparisonOp Op, Expressions.FilterLiteral Literal, bool Prefix)
         ExchangePushedPredicate(
-            byte[]? field, Expressions.ComparisonOp op, Expressions.FilterLiteral literal)
+            byte[]? field, Expressions.ComparisonOp op, Expressions.FilterLiteral literal, bool prefix)
     {
         Pushed held = _pushed ??= new Pushed();
-        (byte[]? Field, Expressions.ComparisonOp Op, Expressions.FilterLiteral Literal) previous =
-            (held.Field, held.Op, held.Literal);
+        (byte[]? Field, Expressions.ComparisonOp Op, Expressions.FilterLiteral Literal, bool Prefix) previous =
+            (held.Field, held.Op, held.Literal, held.Prefix);
         held.Field = field;
         held.Op = op;
         held.Literal = literal;
+        held.Prefix = prefix;
         return previous;
     }
 

@@ -80,7 +80,11 @@ public sealed class LocalFileSourceTests
     public async Task AnOpenMapsNothingAndAScanMapsTheFile()
     {
         Decoders.EnsureRegistered();
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path("distributions/high_cardinality_i64_r8193"), CancellationToken.None);
+
+        // A session of its own: the default one may keep this file mapped from another test, and
+        // where the platform reads a file's identity from its name an open takes that over.
+        await using VortexSession session = VortexSession.Create(_ => { });
+        await using VortexFile file = await session.OpenAsync(Corpus.Path("distributions/high_cardinality_i64_r8193"), cancellationToken: CancellationToken.None);
         LocalFileSource source = Assert.IsType<LocalFileSource>(file.Segments);
 
         // What the tail and the statistics answer reads nothing more.
@@ -101,7 +105,10 @@ public sealed class LocalFileSourceTests
     public async Task AScanItsZoneMapsRuleOutMapsNothing()
     {
         Decoders.EnsureRegistered();
-        await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"), CancellationToken.None);
+
+        // A session of its own, for the reason the test above gives.
+        await using VortexSession session = VortexSession.Create(_ => { });
+        await using VortexFile file = await session.OpenAsync(Corpus.Path("containers/zoned_many_zones_nulls"), cancellationToken: CancellationToken.None);
         LocalFileSource source = Assert.IsType<LocalFileSource>(file.Segments);
 
         VortexExpr none = Expr.Lt(Expr.Field("monotone"), Expr.Literal(FilterLiteral.From(long.MinValue)));

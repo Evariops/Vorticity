@@ -3,6 +3,8 @@ using System.IO.Hashing;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Indexes;
 
@@ -85,6 +87,13 @@ internal static class SplitBlockBloom
         int block = BlockIndex(hash, words.Length / WordsPerBlock);
         Span<uint> lanes = words.Slice(block * WordsPerBlock, WordsPerBlock);
         uint key = unchecked((uint)hash);
+        if (Avx2.IsSupported)
+        {
+            ref uint first = ref MemoryMarshal.GetReference(lanes);
+            (Vector256.LoadUnsafe(ref first) | Bits(key)).StoreUnsafe(ref first);
+            return;
+        }
+
         ReadOnlySpan<uint> salts = Salts;
         for (int i = 0; i < WordsPerBlock; i++)
         {
@@ -102,6 +111,11 @@ internal static class SplitBlockBloom
         int block = BlockIndex(hash, words.Length / WordsPerBlock);
         ReadOnlySpan<uint> lanes = words.Slice(block * WordsPerBlock, WordsPerBlock);
         uint key = unchecked((uint)hash);
+        if (Avx2.IsSupported)
+        {
+            return (Bits(key) & ~Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(lanes))) == Vector256<uint>.Zero;
+        }
+
         ReadOnlySpan<uint> salts = Salts;
         uint missing = 0;
         for (int i = 0; i < WordsPerBlock; i++)
@@ -120,6 +134,16 @@ internal static class SplitBlockBloom
     /// <returns>The words.</returns>
     internal static ReadOnlySpan<uint> Words(ReadOnlySpan<byte> bytes) =>
         MemoryMarshal.Cast<byte, uint>(bytes[..(bytes.Length / BytesPerBlock * BytesPerBlock)]);
+
+    /// <summary>
+    /// The bit <paramref name="key"/> sets in each word of a block, all eight at once: the key times
+    /// each word's salt, whose top five bits index the bit, shifted in by a lane each.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<uint> Bits(uint key) =>
+        Avx2.ShiftLeftLogicalVariable(
+            Vector256<uint>.One,
+            (Vector256.Create(key) * Vector256.Create(0x47b6137bu, 0x44974d91, 0x8824ad5b, 0xa2b7289d, 0x705495c7, 0x2df1424b, 0x9efc4947, 0x5c6bfb31)) >> 27);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int BlockIndex(ulong hash, int blocks) =>

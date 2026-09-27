@@ -1,4 +1,6 @@
 using System;
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
@@ -34,105 +36,38 @@ internal static class Trilean
     /// nullness into the answer.
     /// </remarks>
     /// <param name="left">The accumulator, overwritten.</param>
-    /// <param name="right">The other operand; same length.</param>
-    internal static void And(Span<byte> left, ReadOnlySpan<byte> right)
-    {
-        int i = 0;
-        if (Vector128.IsHardwareAccelerated && left.Length >= Vector128<byte>.Count)
-        {
-            ref byte a0 = ref MemoryMarshal.GetReference(left);
-            ref byte b0 = ref MemoryMarshal.GetReference(right);
-            Vector128<byte> ones = Vector128.Create(True);
-            Vector128<byte> unknowns = Vector128.Create(Unknown);
-            Vector128<byte> zeros = Vector128<byte>.Zero;
-            int last = left.Length - Vector128<byte>.Count;
-            for (; i <= last; i += Vector128<byte>.Count)
-            {
-                Vector128<byte> a = Vector128.LoadUnsafe(ref a0, (nuint)i);
-                Vector128<byte> b = Vector128.LoadUnsafe(ref b0, (nuint)i);
-
-                // The mirror of Or: False wins outright, and between the other two it is True only
-                // when both sides are.
-                Vector128<byte> anyFalse = Vector128.Equals(a, zeros) | Vector128.Equals(b, zeros);
-                Vector128<byte> bothTrue = Vector128.Equals(a, ones) & Vector128.Equals(b, ones);
-                Vector128<byte> decided =
-                    (bothTrue & ones) | Vector128.AndNot(unknowns, bothTrue);
-                Vector128.AndNot(decided, anyFalse).StoreUnsafe(ref a0, (nuint)i);
-            }
-        }
-
-        for (; i < left.Length; i++)
-        {
-            byte a = left[i];
-            byte b = right[i];
-            left[i] = a == False || b == False
-                ? False
-                : a == Unknown || b == Unknown ? Unknown : True;
-        }
-    }
+    /// <param name="right">The other operand; at least as long.</param>
+    internal static void And(Span<byte> left, ReadOnlySpan<byte> right) => Combine(left, right, AndTable);
 
     /// <summary>
     /// <c>left OR right</c>, in place over <paramref name="left"/>.
     /// </summary>
     /// <remarks><c>unknown OR true = true</c>, the mirror of the AND rule.</remarks>
     /// <param name="left">The accumulator, overwritten.</param>
-    /// <param name="right">The other operand; same length.</param>
-    internal static void Or(Span<byte> left, ReadOnlySpan<byte> right)
-    {
-        int i = 0;
-        if (Vector128.IsHardwareAccelerated && left.Length >= Vector128<byte>.Count)
-        {
-            ref byte a0 = ref MemoryMarshal.GetReference(left);
-            ref byte b0 = ref MemoryMarshal.GetReference(right);
-            Vector128<byte> ones = Vector128.Create(True);
-            Vector128<byte> unknowns = Vector128.Create(Unknown);
-            int last = left.Length - Vector128<byte>.Count;
-            for (; i <= last; i += Vector128<byte>.Count)
-            {
-                Vector128<byte> a = Vector128.LoadUnsafe(ref a0, (nuint)i);
-                Vector128<byte> b = Vector128.LoadUnsafe(ref b0, (nuint)i);
-
-                // True wins outright; otherwise an Unknown on either side survives. Both tests are
-                // masks, so the choice between them is an AndNot rather than a branch.
-                Vector128<byte> anyTrue = Vector128.Equals(a, ones) | Vector128.Equals(b, ones);
-                Vector128<byte> anyUnknown =
-                    Vector128.Equals(a, unknowns) | Vector128.Equals(b, unknowns);
-                Vector128<byte> result =
-                    (anyTrue & ones) | Vector128.AndNot(anyUnknown & unknowns, anyTrue);
-                result.StoreUnsafe(ref a0, (nuint)i);
-            }
-        }
-
-        for (; i < left.Length; i++)
-        {
-            byte a = left[i];
-            byte b = right[i];
-            left[i] = a == True || b == True
-                ? True
-                : a == Unknown || b == Unknown ? Unknown : False;
-        }
-    }
+    /// <param name="right">The other operand; at least as long.</param>
+    internal static void Or(Span<byte> left, ReadOnlySpan<byte> right) => Combine(left, right, OrTable);
 
     /// <summary><c>NOT values</c>, in place. <c>NOT unknown = unknown</c>.</summary>
     /// <param name="values">The operand, overwritten.</param>
+    /// <remarks>One lookup of each state in <see cref="NotTable"/>, a vector of states at a time.</remarks>
     internal static void Not(Span<byte> values)
     {
+        ref byte a0 = ref MemoryMarshal.GetReference(values);
         int i = 0;
-        if (Vector128.IsHardwareAccelerated && values.Length >= Vector128<byte>.Count)
+        if (Vector512.IsHardwareAccelerated)
         {
-            ref byte a0 = ref MemoryMarshal.GetReference(values);
-            Vector128<byte> ones = Vector128.Create(True);
-            Vector128<byte> unknowns = Vector128.Create(Unknown);
-            int last = values.Length - Vector128<byte>.Count;
-            for (; i <= last; i += Vector128<byte>.Count)
+            Vector512<byte> table = Vector512.Create(NotTable);
+            for (; i <= values.Length - Vector512<byte>.Count; i += Vector512<byte>.Count)
             {
-                Vector128<byte> a = Vector128.LoadUnsafe(ref a0, (nuint)i);
+                Vector512.ShuffleNative(table, Vector512.LoadUnsafe(ref a0, (nuint)i)).StoreUnsafe(ref a0, (nuint)i);
+            }
+        }
 
-                // False and True are 0 and 1, so flipping them is one XOR; Unknown keeps itself.
-                Vector128<byte> isUnknown = Vector128.Equals(a, unknowns);
-                Vector128<byte> result =
-                    (isUnknown & unknowns) | Vector128.AndNot(a ^ ones, isUnknown);
-                result.StoreUnsafe(ref a0, (nuint)i);
+        if (Vector128.IsHardwareAccelerated)
+        {
+            for (; i <= values.Length - Vector128<byte>.Count; i += Vector128<byte>.Count)
+            {
+                Vector128.ShuffleNative(NotTable, Vector128.LoadUnsafe(ref a0, (nuint)i)).StoreUnsafe(ref a0, (nuint)i);
             }
         }
 
@@ -140,6 +75,80 @@ internal static class Trilean
         {
             byte value = values[i];
             values[i] = value == Unknown ? Unknown : value == True ? False : True;
+        }
+    }
+
+    /// <summary>
+    /// <c>AND</c> of two states, at index <c>4 * left + right</c>: False wins outright, and between
+    /// the other two it is True only when both sides are.
+    /// </summary>
+    private static Vector128<byte> AndTable => Vector128.Create(
+        False, False, False, 0,
+        False, True, Unknown, 0,
+        False, Unknown, Unknown, 0,
+        0, 0, 0, 0);
+
+    /// <summary>
+    /// <c>OR</c> of two states, at index <c>4 * left + right</c>: True wins outright, and otherwise
+    /// an Unknown on either side survives.
+    /// </summary>
+    private static Vector128<byte> OrTable => Vector128.Create(
+        False, True, Unknown, 0,
+        True, True, True, 0,
+        Unknown, True, Unknown, 0,
+        0, 0, 0, 0);
+
+    /// <summary><c>NOT</c> of a state, at its index: False and True swap, Unknown stays.</summary>
+    private static Vector128<byte> NotTable => Vector128.Create(
+        True, False, Unknown, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0);
+
+    /// <summary>
+    /// A connective as a lookup: the two states make one index, <c>4 * left + right</c>, into a
+    /// table of the sixteen answers, which one shuffle of the table answers for a vector of rows.
+    /// </summary>
+    /// <remarks>
+    /// Three operations and a shuffle a vector, where testing each side for each state and masking
+    /// the answers together took ten. The index stays below 16 for every pair of states, so the
+    /// table, repeated in each 16-byte lane of a wider vector, answers whether the platform
+    /// shuffles within a lane or across the vector.
+    /// </remarks>
+    private static void Combine(Span<byte> left, ReadOnlySpan<byte> right, Vector128<byte> table)
+    {
+        if (right.Length < left.Length)
+        {
+            throw new ArgumentException("The operands differ in length.", nameof(right));
+        }
+
+        ref byte a0 = ref MemoryMarshal.GetReference(left);
+        ref byte b0 = ref MemoryMarshal.GetReference(right);
+        int i = 0;
+        if (Vector512.IsHardwareAccelerated)
+        {
+            Vector512<byte> wide = Vector512.Create(table);
+            for (; i <= left.Length - Vector512<byte>.Count; i += Vector512<byte>.Count)
+            {
+                Vector512<byte> a = Vector512.LoadUnsafe(ref a0, (nuint)i);
+                Vector512<byte> b = Vector512.LoadUnsafe(ref b0, (nuint)i);
+                Vector512.ShuffleNative(wide, (a << 2) | b).StoreUnsafe(ref a0, (nuint)i);
+            }
+        }
+
+        if (Vector128.IsHardwareAccelerated)
+        {
+            for (; i <= left.Length - Vector128<byte>.Count; i += Vector128<byte>.Count)
+            {
+                Vector128<byte> a = Vector128.LoadUnsafe(ref a0, (nuint)i);
+                Vector128<byte> b = Vector128.LoadUnsafe(ref b0, (nuint)i);
+                Vector128.ShuffleNative(table, (a << 2) | b).StoreUnsafe(ref a0, (nuint)i);
+            }
+        }
+
+        for (; i < left.Length; i++)
+        {
+            left[i] = table.GetElement(((left[i] << 2) | right[i]) & 15);
         }
     }
 
@@ -160,4 +169,82 @@ internal static class Trilean
     /// <param name="values">The evaluated predicate.</param>
     /// <remarks>The library's count, which compares a vector of states at a time.</remarks>
     internal static int CountTrue(ReadOnlySpan<byte> values) => values.Count(True);
+
+    /// <summary>
+    /// The rows whose state is <paramref name="state"/>, or is not when <paramref name="equal"/>
+    /// is false, as a bitmap of 64-bit words: bit <c>i % 64</c> of word <c>i / 64</c> for row
+    /// <c>i</c>.
+    /// </summary>
+    /// <param name="values">One state per row.</param>
+    /// <param name="state">The state asked about.</param>
+    /// <param name="equal">Whether a row's bit says it holds the state, or that it does not.</param>
+    /// <param name="words">
+    /// At least <c>ceil(rows / 64)</c> words, of which exactly those are written: the last one's bits
+    /// past the rows are clear whichever way the question is asked.
+    /// </param>
+    /// <returns>How many bits were set.</returns>
+    /// <remarks>
+    /// A compare of 64 states is one mask of 64 bits where there are 512-bit vectors (`vpcmpeqb`
+    /// into a mask register, one `kmovq` out) and four 16-bit ones where there are 128-bit vectors,
+    /// against a test and a branch per row. The count is the words' popcount, which the caller
+    /// would otherwise take with a second pass over the states.
+    /// </remarks>
+    internal static int ToWords(ReadOnlySpan<byte> values, byte state, bool equal, Span<ulong> words)
+    {
+        int rows = values.Length;
+        int full = rows >> 6;
+        if (words.Length < (rows + 63) >> 6)
+        {
+            throw new ArgumentException("The words cannot hold a bit per row.", nameof(words));
+        }
+
+        ref byte from = ref MemoryMarshal.GetReference(values);
+        ref ulong into = ref MemoryMarshal.GetReference(words);
+        ulong flip = equal ? 0 : ulong.MaxValue;
+        int count = 0;
+        int w = 0;
+        if (Vector512.IsHardwareAccelerated)
+        {
+            Vector512<byte> wanted = Vector512.Create(state);
+            for (; w < full; w++)
+            {
+                ulong word = Vector512.Equals(Vector512.LoadUnsafe(ref from, (nuint)w << 6), wanted)
+                    .ExtractMostSignificantBits() ^ flip;
+                Unsafe.Add(ref into, w) = word;
+                count += BitOperations.PopCount(word);
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated)
+        {
+            Vector128<byte> wanted = Vector128.Create(state);
+            for (; w < full; w++)
+            {
+                ref byte at = ref Unsafe.Add(ref from, (nint)w << 6);
+                ulong word = Vector128.Equals(Vector128.LoadUnsafe(ref at), wanted).ExtractMostSignificantBits()
+                    | ((ulong)Vector128.Equals(Vector128.LoadUnsafe(ref at, 16), wanted).ExtractMostSignificantBits() << 16)
+                    | ((ulong)Vector128.Equals(Vector128.LoadUnsafe(ref at, 32), wanted).ExtractMostSignificantBits() << 32)
+                    | ((ulong)Vector128.Equals(Vector128.LoadUnsafe(ref at, 48), wanted).ExtractMostSignificantBits() << 48);
+                word ^= flip;
+                Unsafe.Add(ref into, w) = word;
+                count += BitOperations.PopCount(word);
+            }
+        }
+
+        // What the vectors left, a word at a time: every word where there are none, and the last,
+        // partial one, whose bits past the rows are never set.
+        for (int row = w << 6; row < rows; row += 64)
+        {
+            int take = Math.Min(64, rows - row);
+            ulong word = 0;
+            for (int k = 0; k < take; k++)
+            {
+                word |= (ulong)((Unsafe.Add(ref from, row + k) == state) == equal ? 1 : 0) << k;
+            }
+
+            Unsafe.Add(ref into, row >> 6) = word;
+            count += BitOperations.PopCount(word);
+        }
+
+        return count;
+    }
 }

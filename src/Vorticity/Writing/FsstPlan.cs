@@ -117,19 +117,14 @@ internal sealed class FsstPlan
             return null;
         }
 
+        // The sizes are read from the views, a null row's as zero: its bytes are unspecified, so it
+        // contributes nothing to the corpus and nothing to the stream, but still occupies a row slot.
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
-        ViewValues values = new ViewValues(node);
-        long plain = 0;
-        for (int i = 0; i < rows; i++)
+        int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        long plain = ViewHeap.Lengths(node, valid, lengths.AsSpan(0, rows));
+        if (plain > int.MaxValue - ViewHeap.Slack)
         {
-            if (valid.IsValid(i))
-            {
-                plain += values.At(i).Length;
-            }
-        }
-
-        if (plain > int.MaxValue)
-        {
+            ArrayPool<int>.Shared.Return(lengths);
             return null;
         }
 
@@ -137,33 +132,20 @@ internal sealed class FsstPlan
         // trained on, and the heap, row tables and code stream are all garbage the moment this
         // column is priced against zstd and loses. A plan that wins keeps the row tables and the
         // code stream, and hands them back once the writer has them.
+        // The gather writes past each value, so the heap has its slack; the compressor then reads
+        // every position as one eight-byte word however near the end of its value, so eight bytes
+        // past the values are cleared.
         int heapBytes = Math.Max((int)plain, 1);
-        byte[] heap = ArrayPool<byte>.Shared.Rent(heapBytes);
+        byte[] heap = ArrayPool<byte>.Shared.Rent(heapBytes + ViewHeap.Slack);
         int[] starts = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
-        int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
         byte[]? codes = null;
         int[]? offsets = null;
         FsstSymbols? table = null;
         bool kept = false;
         try
         {
-            int at = 0;
-            for (int i = 0; i < rows; i++)
-            {
-                // A null row's bytes are unspecified, so it contributes nothing to the corpus and
-                // nothing to the stream, but it still occupies a row slot of length zero.
-                starts[i] = at;
-                if (!valid.IsValid(i))
-                {
-                    lengths[i] = 0;
-                    continue;
-                }
-
-                ReadOnlySpan<byte> value = values.At(i);
-                value.CopyTo(heap.AsSpan(at));
-                lengths[i] = value.Length;
-                at += value.Length;
-            }
+            int at = (int)plain;
+            ViewHeap.Gather(node, lengths.AsSpan(0, rows), heap, starts.AsSpan(0, rows));
 
             table = FsstSymbols.Train(
                 heap.AsSpan(0, heapBytes), starts.AsSpan(0, rows), lengths.AsSpan(0, rows));
@@ -173,23 +155,17 @@ internal sealed class FsstPlan
             }
 
             // An escape costs two bytes, so the worst case is twice the input.
-            codes = ArrayPool<byte>.Shared.Rent((int)Math.Max(plain * 2, 1));
+            int codeRoom = (int)Math.Max(plain * 2, 1);
+            codes = ArrayPool<byte>.Shared.Rent(codeRoom);
             offsets = ArrayPool<int>.Shared.Rent(rows + 1);
-            int written = 0;
-
-            for (int i = 0; i < rows; i++)
+            heap.AsSpan(at, FsstSymbols.MaxSymbolLength).Clear();
+            int written = table.CompressAll(
+                heap.AsSpan(0, at + FsstSymbols.MaxSymbolLength), starts.AsSpan(0, rows), lengths.AsSpan(0, rows),
+                codes.AsSpan(0, codeRoom), offsets.AsSpan(0, rows + 1), sizeCeiling);
+            if (written < 0)
             {
-                offsets[i] = written;
-                written += table.Compress(
-                    heap.AsSpan(starts[i], lengths[i]), codes.AsSpan(written));
-
-                if (written > sizeCeiling)
-                {
-                    return null;
-                }
+                return null;
             }
-
-            offsets[rows] = written;
 
             long encoded = ((long)table.Count * (FsstSymbols.MaxSymbolLength + 1)) + written
                 + ((long)rows * Width(MaxOf(lengths.AsSpan(0, rows))))

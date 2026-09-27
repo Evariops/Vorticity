@@ -215,4 +215,32 @@ internal abstract class ArrayDecoder
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
         Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination) =>
         false;
+
+    /// <summary>
+    /// Answers <c>StartsWith(<paramref name="prefix"/>)</c> over this node's rows without decoding
+    /// it, writing one <see cref="Compute.Trilean"/> state per row, as
+    /// <see cref="TryCompare"/> answers a comparison.
+    /// </summary>
+    /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
+    /// <param name="node">The serialized node.</param>
+    /// <param name="dtype">The DType this node would produce.</param>
+    /// <param name="length">The row count this node would produce.</param>
+    /// <param name="prefix">The bytes a row must start with, a bytes literal.</param>
+    /// <param name="destination">Receives <paramref name="length"/> states.</param>
+    /// <returns><see langword="false"/> when this encoding will not answer, as for <see cref="TryCompare"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// An encoding that stores its distinct values once -- a dictionary -- matches those and spreads
+    /// the answers over its codes, which costs a fraction of building the column to match it.
+    /// </para>
+    /// <para>
+    /// FSST answers on its codes: those every row starting with the prefix shares are compared as
+    /// bytes, and the few bytes past them decoded. Decompressing each row only as far as the prefix
+    /// is long, a symbol at a time, measured as costly as decoding the column in blocks.
+    /// </para>
+    /// </remarks>
+    public virtual bool TryStartsWith(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        Expressions.FilterLiteral prefix, Span<byte> destination) =>
+        false;
 }

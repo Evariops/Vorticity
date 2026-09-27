@@ -1530,6 +1530,25 @@ internal sealed partial class CanonicalArena
                 bytes = (long)Vector128.Sum(first + second);
             }
         }
+        else if (Vector512.IsHardwareAccelerated)
+        {
+            // Four views a load as they lie: their lengths are lanes 0, 4, 8 and 12, kept where they
+            // pass the inline limit and zeroed elsewhere, so the register read as eight 64-bit
+            // lanes holds each out-of-line length in the low half of a lane and adds without
+            // widening.
+            ref uint from = ref Unsafe.As<byte, uint>(ref MemoryMarshal.GetReference(used));
+            Vector512<uint> inline = Vector512.Create(MaxInline);
+            Vector512<uint> lengths = Vector512.Create(
+                uint.MaxValue, 0, 0, 0, uint.MaxValue, 0, 0, 0, uint.MaxValue, 0, 0, 0, uint.MaxValue, 0, 0, 0);
+            Vector512<ulong> sum = Vector512<ulong>.Zero;
+            for (; row <= rows - 4; row += 4)
+            {
+                Vector512<uint> views4 = Vector512.LoadUnsafe(ref from, (nuint)(row * 4));
+                sum += (views4 & Vector512.GreaterThan(views4, inline) & lengths).AsUInt64();
+            }
+
+            bytes = (long)Vector512.Sum(sum);
+        }
 
         ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(used);
         for (int word = row * (ViewSize / sizeof(uint)); word < words.Length; word += ViewSize / sizeof(uint))
@@ -1718,6 +1737,9 @@ internal sealed partial class CanonicalArena
         return index;
     }
 
+    /// <summary>Bytes past the values <see cref="CompactVarBinView"/> may write over: one block of its gather.</summary>
+    private const int GatherSlack = 32;
+
     /// <summary>
     /// The <see cref="CanonicalKind.VarBinView"/> arm of <see cref="CopyFrom"/>: the views travel,
     /// and of the data buffers only the bytes those views actually name.
@@ -1750,19 +1772,10 @@ internal sealed partial class CanonicalArena
 
         int rows = src.Length;
         int viewBytes = rows * ViewSize;
-        ReadOnlySpan<uint> incoming = MemoryMarshal.Cast<byte, uint>(src.BufferA.Span[..viewBytes]);
 
         // Sized before anything is written: one pass to learn how many bytes the rows name, so the
         // gather below writes into a buffer it never has to grow.
-        long referenced = 0;
-        for (int j = 0; j < rows; j++)
-        {
-            uint size = incoming[j * 4];
-            if (size > MaxInline)
-            {
-                referenced += size;
-            }
-        }
+        long referenced = ViewedBytes(src.BufferA.Span, rows);
 
         VortexBuffer views = VortexBuffer.Empty;
         Span<byte> writable = default;
@@ -1772,10 +1785,13 @@ internal sealed partial class CanonicalArena
             src.BufferA.Span[..viewBytes].CopyTo(writable);
         }
 
+        // The gather copies whole blocks and writes past a value into the room the next one takes,
+        // so the buffer has a block of slack past the bytes it keeps.
         Span<byte> into = default;
         VortexBuffer data = referenced == 0
             ? VortexBuffer.Empty
-            : AllocateUninitialized(checked((int)referenced), 1, out into);
+            : AllocateUninitialized(checked((int)referenced + GatherSlack), 1, out into).Slice(0, (int)referenced);
+        bool wide = Vector256.IsHardwareAccelerated;
 
         // The gather ends with the last buffered row, once the bytes counted above are all in:
         // every view past it is inline, and a column of short strings has no buffered row at all.
@@ -1805,7 +1821,32 @@ internal sealed partial class CanonicalArena
                     $"Row {j} names bytes {offset}..{offset + size} of a {from.Length}-byte buffer.");
             }
 
-            from.Slice((int)offset, (int)size).CopyTo(into[at..]);
+            // A value a block of its buffer's bytes can be read past is copied in whole blocks, no
+            // call; one near its buffer's end takes the exact copy.
+            if ((ulong)offset + size + GatherSlack <= (ulong)from.Length)
+            {
+                ref byte source0 = ref Unsafe.Add(ref MemoryMarshal.GetReference(from), (nint)offset);
+                ref byte target0 = ref Unsafe.Add(ref MemoryMarshal.GetReference(into), at);
+                if (wide)
+                {
+                    for (int k = 0; k < (int)size; k += 32)
+                    {
+                        Vector256.LoadUnsafe(ref source0, (nuint)k).StoreUnsafe(ref target0, (nuint)k);
+                    }
+                }
+                else
+                {
+                    for (int k = 0; k < (int)size; k += 16)
+                    {
+                        Vector128.LoadUnsafe(ref source0, (nuint)k).StoreUnsafe(ref target0, (nuint)k);
+                    }
+                }
+            }
+            else
+            {
+                from.Slice((int)offset, (int)size).CopyTo(into[at..]);
+            }
+
             words[w + 2] = 0;
             words[w + 3] = (uint)at;
             at += (int)size;

@@ -72,7 +72,7 @@ public sealed partial class PerRowDispatchTests
     /// </remarks>
     private static readonly (string File, int Calls, int PerRow, string Point)[] Sites =
     [
-        ("Arrays/Decoders/Canonical/CanonicalConcat.cs", 4, 4, "R7"),
+        ("Arrays/Decoders/Canonical/CanonicalConcat.cs", 0, 0, "R7 done: a list view's offsets and sizes are read with their types resolved once a chunk"),
         ("Arrays/Decoders/Canonical/ConstantCanonicalizer.cs", 1, 0, "legitimate: one write, then Tile"),
         ("Arrays/Decoders/Canonical/ListDecoder.cs", 2, 0, "legitimate: bounds"),
         ("Arrays/Decoders/Canonical/VarBinDecoder.cs", 2, 0, "legitimate: bounds"),
@@ -83,7 +83,7 @@ public sealed partial class PerRowDispatchTests
         ("Arrays/Decoders/Compressed/EncodedNodes.cs", 3, 0, "per run, not per row: the binary search for a slice's run bounds and the rebased ends; one error message"),
         ("Arrays/Decoders/Compressed/FastLanesRleDecoder.cs", 5, 0, "per run, not per row"),
         ("Arrays/Decoders/Compressed/FsstDecoder.cs", 5, 3, "R11"),
-        ("Arrays/Decoders/Compressed/OnPairDecoder.cs", 9, 3, "R2"),
+        ("Arrays/Decoders/Compressed/OnPairDecoder.cs", 6, 3, "R2; the dictionary's two walks are typed, and the one call left there refuses a type that is not an integer"),
         ("Arrays/Decoders/Compressed/Patches.cs", 3, 1, "R4 (GetPosition); the other two are per run"),
         ("Arrays/Decoders/Compressed/RunEndDecoder.cs", 4, 0, "per run, not per row"),
         ("Columns/ExtensionColumn.cs", 1, 0, "legitimate: the column API is per row by design"),
@@ -102,7 +102,7 @@ public sealed partial class PerRowDispatchTests
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
-    private const int TotalCalls = 54;
+    private const int TotalCalls = 47;
 
     /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -110,7 +110,7 @@ public sealed partial class PerRowDispatchTests
     /// left in the file is an error path: that change of COMPOSITION is what this column exists
     /// to record.
     /// </remarks>
-    private const int TotalPerRow = 11;
+    private const int TotalPerRow = 7;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()

@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
+using System.Runtime.Intrinsics.X86;
 using System.Text.Unicode;
 
 using Vorticity.Types;
@@ -949,7 +950,12 @@ internal static class ViewKernels
         // The rows that start too near the heap's end to be read as words, only ever the last few
         // of the block holding its last row, are cut byte-exact, and the rows before them as the
         // others are.
-        bool vector = AdvSimd.IsSupported;
+        //
+        // x86 takes the vector loop for inline rows alone. The mixed one makes each row's upper
+        // half from two scalars moved into vectors, which the words loop never leaves general
+        // registers for: measured on Zen 4, the vector mixed loop is 1.6x slower than the words
+        // one, where the vector inline loop is 1.4x faster.
+        bool vector = AdvSimd.IsSupported || (Ssse3.IsSupported && longest <= Inline);
         nint reach = heapLength - (vector ? Vector128<byte>.Count : Inline);
         if (lastStart > reach)
         {
@@ -1035,6 +1041,10 @@ internal static class ViewKernels
     /// <remarks>
     /// Whether a row starts off a character is gathered in a vector from the first byte of each,
     /// masked to the size so that an empty row starts nothing, and tested once the loop is done.
+    /// <para>
+    /// The positions are compared signed: both sides are below 16, where the two orders agree, and
+    /// x86 has a signed byte compare but no unsigned one.
+    /// </para>
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static bool CutInlineVector<T, TSizes, TStarts>(ref T rows, nint start, int count, ref byte heap, ref byte views)
@@ -1042,7 +1052,7 @@ internal static class ViewKernels
         where TSizes : struct, IRowSizes
         where TStarts : struct, IStartCheck
     {
-        Vector128<byte> positions = Vector128.Create((byte)0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        Vector128<sbyte> positions = Vector128.Create((sbyte)0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
         Vector128<byte> firstHigh = Vector128.Create((byte)0xC0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         Vector128<byte> firstFollower = Vector128.Create((byte)0x80, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF);
         Vector128<byte> offChar = Vector128<byte>.Zero;
@@ -1050,19 +1060,32 @@ internal static class ViewKernels
         {
             nint size = TSizes.SizeAt(ref rows, i, start);
             Vector128<byte> value = Vector128.LoadUnsafe(ref Unsafe.Add(ref heap, start)) &
-                Vector128.LessThan(positions, Vector128.Create((byte)size));
+                Vector128.LessThan(positions, Vector128.Create((sbyte)size)).AsByte();
             if (TStarts.Checked)
             {
                 offChar |= Vector128.Equals(value & firstHigh, firstFollower);
             }
 
-            Vector128<byte> view = AdvSimd.ExtractVector128(Vector128.Create((uint)size).AsByte(), value, 12);
+            Vector128<byte> view = BehindLength(Vector128.Create((uint)size).AsByte(), value);
             view.StoreUnsafe(ref Unsafe.Add(ref views, i * ViewSize));
             start += size;
         }
 
         return offChar == Vector128<byte>.Zero;
     }
+
+    /// <summary>
+    /// A view from its length and its value: the length's last four bytes, then the value's first
+    /// twelve. One instruction on either machine, `ext` on ARM and `palignr` on x86, which read the
+    /// same pair of registers in the opposite order.
+    /// </summary>
+    /// <param name="length">The length, broadcast to every word.</param>
+    /// <param name="value">The value, masked to its size.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<byte> BehindLength(Vector128<byte> length, Vector128<byte> value) =>
+        AdvSimd.IsSupported
+            ? AdvSimd.ExtractVector128(length, value, 12)
+            : Ssse3.AlignRight(value, length, 12);
 
     /// <summary>
     /// Cuts <paramref name="count"/> rows of twelve bytes or fewer, each with twelve bytes of heap
@@ -1541,6 +1564,19 @@ internal static class ViewKernels
     }
 
     /// <summary>
+    /// The view of the value at <paramref name="offset"/> of a heap of
+    /// <paramref name="heapLength"/> bytes, in the first data buffer, for a decoder that builds its
+    /// views itself and has already checked the value lies inside the heap.
+    /// </summary>
+    /// <remarks>
+    /// An inline value with twelve bytes of heap from its start is read as two words and masked
+    /// down to its size, where gathering exactly its bytes branches on the size three ways.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void PlaceView(ref byte view, ref byte heap, int offset, int size, int heapLength) =>
+        Place(ref view, ref heap, offset, size, heapLength, requireUtf8: false);
+
+    /// <summary>
     /// Per size up to <see cref="Inline"/>, the bits of a value's first eight bytes that are the
     /// value's.
     /// </summary>
@@ -1776,7 +1812,7 @@ internal static class ViewKernels
                 ThrowInvalidRow(row);
             }
 
-            CanonicalSupport.WriteView(ref view, ref value, size, 0, start);
+            Place(ref view, ref heapRef, start, size, heapLength, requireUtf8: false);
         }
     }
 
@@ -1838,7 +1874,7 @@ internal static class ViewKernels
                 return false;
             }
 
-            CanonicalSupport.WriteView(ref view, ref value, size, 0, (int)start);
+            Place(ref view, ref heapRef, (int)start, size, heapLength, requireUtf8: false);
         }
 
         return true;
@@ -1890,7 +1926,7 @@ internal static class ViewKernels
                 ThrowInvalidRow(i);
             }
 
-            CanonicalSupport.WriteView(ref view, ref value, size, 0, start);
+            Place(ref view, ref heapRef, start, size, heapLength, requireUtf8: false);
             start = end;
         }
     }

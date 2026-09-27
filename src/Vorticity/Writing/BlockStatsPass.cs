@@ -4,9 +4,11 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
+using Vorticity.Compute;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 
@@ -968,7 +970,33 @@ internal static class BlockStatsPass
         long boundaries = 0;
         int i = 1;
         int lanes = Vector128<T>.IsSupported ? Vector128<T>.Count : 0;
-        if (Vector128.IsHardwareAccelerated && lanes > 0 && values.Length > lanes)
+        int wide = Vector512<T>.IsSupported ? Vector512<T>.Count : 0;
+        if (Vector512.IsHardwareAccelerated && wide > 0 && values.Length > wide)
+        {
+            // The same count four times as wide, where the machine has 512-bit vectors.
+            ref T head = ref MemoryMarshal.GetReference(values);
+            int last = values.Length - wide;
+            while (i <= last)
+            {
+                Vector512<T> equal = Vector512<T>.Zero;
+                int steps = Math.Min(255, ((last - i) / wide) + 1);
+                for (int step = 0; step < steps; step++, i += wide)
+                {
+                    Vector512<T> here = Vector512.LoadUnsafe(ref head, (nuint)i);
+                    Vector512<T> before = Vector512.LoadUnsafe(ref head, (nuint)(i - 1));
+                    equal -= Vector512.Equals(here, before);
+                }
+
+                long matches = 0;
+                for (int lane = 0; lane < wide; lane++)
+                {
+                    matches += long.CreateTruncating(equal.GetElement(lane));
+                }
+
+                boundaries += ((long)steps * wide) - matches;
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated && lanes > 0 && values.Length > lanes)
         {
             ref T head = ref MemoryMarshal.GetReference(values);
             int last = values.Length - lanes;
@@ -1055,8 +1083,24 @@ internal static class BlockStatsPass
         ref byte bit = ref MemoryMarshal.GetReference(bits);
         ref T value = ref MemoryMarshal.GetReference(values[..count]);
         nint boundaries = 0;
-        nint previous = BitAt(ref bit, firstBit);
-        for (nint i = 1; i < count; i++)
+        nint start1 = 1;
+
+        // With 512-bit vectors, 64 rows a word: the rows' validity, their predecessors', and which
+        // differ from their predecessor, the three combined as the scalar row combines them and
+        // counted by one popcount.
+        if (Vector512.IsHardwareAccelerated && Vector512<T>.IsSupported && count > 64)
+        {
+            for (; start1 + 64 <= count; start1 += 64)
+            {
+                ulong valid = BitWords.Load(bits, firstBit + (int)start1);
+                ulong before = BitWords.Load(bits, firstBit + (int)start1 - 1);
+                ulong differs = ~Equalities(ref Unsafe.Add(ref value, start1));
+                boundaries += BitOperations.PopCount((valid ^ before) | (valid & before & differs));
+            }
+        }
+
+        nint previous = BitAt(ref bit, firstBit + start1 - 1);
+        for (nint i = start1; i < count; i++)
         {
             nint valid = BitAt(ref bit, firstBit + i);
             nint differs = Unsafe.Add(ref value, i).Equals(Unsafe.Add(ref value, i - 1)) ? 0 : 1;
@@ -1065,6 +1109,25 @@ internal static class BlockStatsPass
         }
 
         return boundaries;
+    }
+
+    /// <summary>
+    /// Which of the 64 rows from <paramref name="at"/> equal the row before each, bit <c>i</c> for
+    /// row <c>i</c>: a vector of them against the vector one row behind, by a second load.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong Equalities<T>(ref T at)
+    {
+        int lanes = Vector512<T>.Count;
+        ulong equal = 0;
+        for (int row = 0; row < 64; row += lanes)
+        {
+            Vector512<T> here = Vector512.LoadUnsafe(ref at, (nuint)row);
+            Vector512<T> before = Vector512.LoadUnsafe(ref Unsafe.Subtract(ref at, 1), (nuint)row);
+            equal |= Vector512.Equals(here, before).ExtractMostSignificantBits() << row;
+        }
+
+        return equal;
     }
 
     /// <summary>Rows from which <see cref="CountWidths{T}"/> spreads a range over four pairs of histograms.</summary>
@@ -1480,6 +1543,17 @@ internal static class BlockStatsPass
             ref byte x = ref Unsafe.Add(ref MemoryMarshal.GetReference(heap), (nint)from + 4);
             ref byte y = ref Unsafe.Add(ref MemoryMarshal.GetReference(heap), (nint)to + 4);
             nint rest = (nint)size - 4;
+
+            // With 256-bit vectors, up to 32 bytes in one compare masked to their length, where the
+            // words' loop runs a number of times that changes with the size and is mispredicted
+            // when the sizes do; only a value within 36 bytes of the heap's end takes the loop.
+            if (Vector256.IsHardwareAccelerated && rest <= 32 && from + 36 <= heap.Length && to + 36 <= heap.Length)
+            {
+                Vector256<byte> wanted = Vector256.LoadUnsafe(ref MemoryMarshal.GetReference(LeadingBytes), (nuint)(32 - rest));
+                found += ((Vector256.LoadUnsafe(ref x) ^ Vector256.LoadUnsafe(ref y)) & wanted) == Vector256<byte>.Zero ? 0 : 1;
+                continue;
+            }
+
             ulong differ = 0;
             for (nint k = 0; k + 8 < rest; k += 8)
             {
@@ -1494,6 +1568,18 @@ internal static class BlockStatsPass
         repeats |= repeat;
         return row;
     }
+
+    /// <summary>
+    /// Thirty-two bytes set then thirty-two clear: loaded from <c>32 - n</c>, a mask of the first
+    /// <c>n</c> bytes of a 256-bit vector.
+    /// </summary>
+    private static ReadOnlySpan<byte> LeadingBytes =>
+    [
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
 
     /// <summary>The <see cref="ViewBoundaries{TMode}"/> that leaves to its caller the pairs only bytes settle.</summary>
     private readonly struct ViewsOnly;
@@ -2076,7 +2162,13 @@ internal static class BlockStatsPass
         }
 
         int i = 1;
-        if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported && Vector128<T>.Count >= 4
+        if (Vector512.IsHardwareAccelerated && Vector512<T>.IsSupported)
+        {
+            // Eight lanes or more at every width, 64-bit values included.
+            i = OrderLanes512(values, ref repeats);
+            last = values[i - 1];
+        }
+        else if (Vector128.IsHardwareAccelerated && Vector128<T>.IsSupported && Vector128<T>.Count >= 4
 )
         {
             // The lanes clear every window in which nothing happens; the scalar loop takes over at
@@ -2150,6 +2242,30 @@ internal static class BlockStatsPass
         return i;
     }
 
+    /// <summary><see cref="OrderLanes{T}"/> on 512-bit vectors, which hold eight 64-bit lanes.</summary>
+    private static int OrderLanes512<T>(ReadOnlySpan<T> values, ref bool repeats)
+        where T : unmanaged, INumber<T>
+    {
+        int lanes = Vector512<T>.Count;
+        ref T head = ref MemoryMarshal.GetReference(values);
+        Vector512<T> equal = Vector512<T>.Zero;
+        int i = 1;
+        for (; i + lanes <= values.Length; i += lanes)
+        {
+            Vector512<T> current = Vector512.LoadUnsafe(ref head, (nuint)i);
+            Vector512<T> previous = Vector512.LoadUnsafe(ref head, (nuint)(i - 1));
+            if (Vector512.LessThanAny(current, previous) || !Vector512.EqualsAll(current, current))
+            {
+                break;
+            }
+
+            equal |= Vector512.Equals(current, previous);
+        }
+
+        repeats |= equal != Vector512<T>.Zero;
+        return i;
+    }
+
     /// <summary>
     /// The extremes of a range, four to sixteen lanes at a time.
     /// </summary>
@@ -2176,7 +2292,47 @@ internal static class BlockStatsPass
         max = T.MinValue;
         int i = 0;
         int lanes = Vector128<T>.IsSupported ? Vector128<T>.Count : 0;
-        if (Vector128.IsHardwareAccelerated && lanes > 0 && values.Length >= lanes * 2)
+        int wide = Vector512<T>.IsSupported ? Vector512<T>.Count : 0;
+        if (Vector512.IsHardwareAccelerated && wide > 0 && values.Length >= wide * 2)
+        {
+            // The same two pairs of accumulators four times as wide, with a 64-bit minimum and
+            // maximum of the machine's own (vpminsq, vpminuq) where NEON emulates them.
+            ref T head = ref MemoryMarshal.GetReference(values);
+            Vector512<T> lowA = Vector512.LoadUnsafe(ref head);
+            Vector512<T> lowB = Vector512.LoadUnsafe(ref head, (nuint)wide);
+            Vector512<T> highA = lowA;
+            Vector512<T> highB = lowB;
+
+            int step = wide * 2;
+            int last = values.Length - step;
+            for (i = step; i <= last; i += step)
+            {
+                Vector512<T> a = Vector512.LoadUnsafe(ref head, (nuint)i);
+                Vector512<T> b = Vector512.LoadUnsafe(ref head, (nuint)(i + wide));
+                lowA = Vector512.Min(lowA, a);
+                lowB = Vector512.Min(lowB, b);
+                highA = Vector512.Max(highA, a);
+                highB = Vector512.Max(highB, b);
+            }
+
+            Vector512<T> low = Vector512.Min(lowA, lowB);
+            Vector512<T> high = Vector512.Max(highA, highB);
+            for (int lane = 0; lane < wide; lane++)
+            {
+                T small = low.GetElement(lane);
+                T large = high.GetElement(lane);
+                if (small < min)
+                {
+                    min = small;
+                }
+
+                if (large > max)
+                {
+                    max = large;
+                }
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated && lanes > 0 && values.Length >= lanes * 2)
         {
             ref T head = ref MemoryMarshal.GetReference(values);
             Vector128<T> lowA = Vector128.LoadUnsafe(ref head);
@@ -2290,6 +2446,44 @@ internal static class BlockStatsPass
         T otherHigh = T.MinValue;
         nint any = 0;
         nint i = 0;
+
+        // With AVX-512, 64 rows a validity word: each vector of them under its lanes' mask, a null
+        // lane standing for the far end of either bound through a select, as the scalar rows do.
+        if (Vector512.IsHardwareAccelerated && Vector512<T>.IsSupported && WordBytes.IsAccelerated && count >= 64)
+        {
+            WordBytes spread = WordBytes.Create();
+            int lanes = Vector512<T>.Count;
+            Vector512<T> ceiling = Vector512.Create(T.MaxValue);
+            Vector512<T> floor = Vector512.Create(T.MinValue);
+            Vector512<T> lows = ceiling;
+            Vector512<T> highs = floor;
+            ulong seen = 0;
+            int whole = count & ~63;
+            for (int row = 0; row < whole; row += 64)
+            {
+                ulong word = BitWords.Load(mask.Bits, firstBit + row);
+                seen |= word;
+                for (int group = 0; group * lanes < 64; group++)
+                {
+                    Vector512<T> v = Vector512.LoadUnsafe(ref value, (nuint)(row + (group * lanes)));
+                    Vector512<T> held = spread.Lanes<T>(word, group);
+                    lows = Vector512.Min(lows, Vector512.ConditionalSelect(held, v, ceiling));
+                    highs = Vector512.Max(highs, Vector512.ConditionalSelect(held, v, floor));
+                }
+            }
+
+            for (int lane = 0; lane < lanes; lane++)
+            {
+                T small = lows.GetElement(lane);
+                T large = highs.GetElement(lane);
+                low = small < low ? small : low;
+                high = large > high ? large : high;
+            }
+
+            any = seen != 0 ? 1 : 0;
+            i = whole;
+        }
+
         for (; i + 1 < count; i += 2)
         {
             nint first = BitAt(ref bit, firstBit + i);
@@ -2416,6 +2610,12 @@ internal static class BlockStatsPass
         int count = values.Length;
         int firstBit = mask.BitOffset + start;
         bool masked = !mask.AllValid;
+        if (LanesCountWidths && count >= 64)
+        {
+            CountLaneWidths(values, masked ? mask.Bits : default, firstBit, masked, zigzag, widths);
+            return;
+        }
+
         ReadOnlySpan<byte> bits = masked ? mask.Bits[..((firstBit + count + 7) >> 3)] : Everything;
         ref byte bit = ref MemoryMarshal.GetReference(bits);
         nint rowMask = masked ? -1 : 0;
@@ -2468,6 +2668,250 @@ internal static class BlockStatsPass
         for (; i < count; i++)
         {
             Count(ref first, Unsafe.Add(ref value, i), (int)BitAt(ref bits, (firstBit + i) & rowMask), elementBits, top, zigzag);
+        }
+    }
+
+    /// <summary>
+    /// Whether the widths are counted by <see cref="CountLaneWidths{T}"/>: a leading-zero count of
+    /// 512-bit vectors (AVX-512CD), and byte compares and sums of them (AVX-512BW).
+    /// </summary>
+    internal static bool LanesCountWidths =>
+        Vector512.IsHardwareAccelerated && Avx512CD.IsSupported && Avx512BW.IsSupported;
+
+    /// <summary>
+    /// The width histograms of a range, counted from vectors: each row's width as a byte, then the
+    /// bytes of each width the range holds counted a vector at a compare.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The scalar count is a leading-zero count and an increment per row and per histogram, and the
+    /// increments, not the counts, are its cost: consecutive rows mostly share a width, so they
+    /// wait on each other's stores. Here a row's width is a lane of one `vplzcnt`, sixteen or eight
+    /// to an instruction, narrowed to a byte; a block's widths almost always lie in a narrow band
+    /// -- the band a bit width is chosen from -- whose ends are the bytes' least and greatest, and
+    /// each width in it is counted by a compare of 64 bytes subtracted into byte counters, which a
+    /// sum of absolute differences totals at the end of the block. A band too wide for that to pay
+    /// is counted a byte at a time.
+    /// </para>
+    /// <para>
+    /// A null row's width is the byte 0xFF, which no band reaches: its zero is counted by the
+    /// caller, as on the scalar path.
+    /// </para>
+    /// <para>
+    /// The plain widths are of each value less <paramref name="reference"/>, zero for the ingest's
+    /// histograms and a column's least value for a frame of reference's; the zigzag ones are of the
+    /// value itself.
+    /// </para>
+    /// </remarks>
+    internal static void CountLaneWidths<T>(
+        ReadOnlySpan<T> values, ReadOnlySpan<byte> bits, int firstBit, bool masked, bool zigzag, Span<int> widths,
+        ulong reference = 0)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        const int Chunk = 1024;
+        Span<byte> raw = stackalloc byte[Chunk];
+        Span<byte> folded = stackalloc byte[zigzag ? Chunk : 0];
+        WordBytes spread = WordBytes.Create();
+        for (int at = 0; at < values.Length; at += Chunk)
+        {
+            int rows = Math.Min(Chunk, values.Length - at);
+            LaneWidthBytes(values.Slice(at, rows), raw, folded, zigzag, reference);
+            if (masked)
+            {
+                NullWidths(raw[..rows], zigzag ? folded[..rows] : default, bits, firstBit + at, in spread);
+            }
+
+            Tally(raw[..rows], widths);
+            if (zigzag)
+            {
+                Tally(folded[..rows], widths[BitPackWidths.ZigZagOffset..]);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Each row's width as a byte, of its value less <paramref name="reference"/> wrapping at the
+    /// element width, and its zigzag width, of the value itself, when asked.
+    /// </summary>
+    private static void LaneWidthBytes<T>(ReadOnlySpan<T> values, Span<byte> raw, Span<byte> folded, bool zigzag, ulong reference)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        int rows = values.Length;
+        int elementBits = Unsafe.SizeOf<T>() * 8;
+        ref byte into = ref MemoryMarshal.GetReference(raw);
+        ref byte fold = ref MemoryMarshal.GetReference(folded);
+        int i = 0;
+        if (elementBits == 64)
+        {
+            ref ulong from = ref Unsafe.As<T, ulong>(ref MemoryMarshal.GetReference(values));
+            Vector512<ulong> full = Vector512.Create(64UL);
+            Vector512<ulong> frame = Vector512.Create(reference);
+            for (; i <= rows - 8; i += 8)
+            {
+                Vector512<ulong> value = Vector512.LoadUnsafe(ref from, (nuint)i);
+                Unsafe.WriteUnaligned(
+                    ref Unsafe.Add(ref into, i),
+                    Avx512F.ConvertToVector128Byte(full - Avx512CD.LeadingZeroCount(value - frame)).AsUInt64().ToScalar());
+                if (zigzag)
+                {
+                    Vector512<ulong> zig = (value << 1) ^ (Vector512<ulong>.Zero - (value >>> 63));
+                    Unsafe.WriteUnaligned(
+                        ref Unsafe.Add(ref fold, i),
+                        Avx512F.ConvertToVector128Byte(full - Avx512CD.LeadingZeroCount(zig)).AsUInt64().ToScalar());
+                }
+            }
+        }
+        else
+        {
+            // Narrower elements zero-extended into 32-bit lanes: a leading-zero count of the lane
+            // less its width is the element's, and the zigzag is folded inside the element's bits.
+            ref byte from = ref Unsafe.As<T, byte>(ref MemoryMarshal.GetReference(values));
+            Vector512<uint> full = Vector512.Create(32u);
+            Vector512<uint> top = Vector512.Create((uint)BitWords.Mask(elementBits));
+            Vector512<uint> frame = Vector512.Create((uint)reference);
+            int sign = elementBits - 1;
+            for (; i <= rows - 16; i += 16)
+            {
+                Vector512<uint> value = elementBits switch
+                {
+                    32 => Vector512.LoadUnsafe(ref Unsafe.As<byte, uint>(ref from), (nuint)i),
+                    16 => Avx512F.ConvertToVector512UInt32(Vector256.LoadUnsafe(ref Unsafe.As<byte, ushort>(ref from), (nuint)i)),
+                    _ => Avx512F.ConvertToVector512UInt32(Vector128.LoadUnsafe(ref from, (nuint)i)),
+                };
+                Avx512F.ConvertToVector128Byte(full - Avx512CD.LeadingZeroCount((value - frame) & top)).StoreUnsafe(ref into, (nuint)i);
+                if (zigzag)
+                {
+                    Vector512<uint> zig = ((value << 1) ^ (Vector512<uint>.Zero - (value >>> sign))) & top;
+                    Avx512F.ConvertToVector128Byte(full - Avx512CD.LeadingZeroCount(zig)).StoreUnsafe(ref fold, (nuint)i);
+                }
+            }
+        }
+
+        ulong mask = BitWords.Mask(elementBits);
+        for (; i < rows; i++)
+        {
+            ulong bits = ulong.CreateTruncating(values[i]) & mask;
+            Unsafe.Add(ref into, i) = (byte)(64 - BitOperations.LeadingZeroCount((bits - reference) & mask));
+            if (zigzag)
+            {
+                ulong zig = ((bits << 1) ^ (0UL - ((bits >> (elementBits - 1)) & 1))) & mask;
+                Unsafe.Add(ref fold, i) = (byte)(64 - BitOperations.LeadingZeroCount(zig));
+            }
+        }
+    }
+
+    /// <summary>The width bytes of the null rows set to 0xFF, which no histogram counts.</summary>
+    private static void NullWidths(
+        Span<byte> raw, Span<byte> folded, ReadOnlySpan<byte> bits, int firstBit, in WordBytes spread)
+    {
+        ref byte into = ref MemoryMarshal.GetReference(raw);
+        ref byte fold = ref MemoryMarshal.GetReference(folded);
+        int i = 0;
+        for (; i <= raw.Length - 64; i += 64)
+        {
+            ulong word = BitWords.Load(bits, firstBit + i);
+            if (word == ulong.MaxValue)
+            {
+                continue;
+            }
+
+            Vector512<byte> isNull = spread.Clear(word);
+            (Vector512.LoadUnsafe(ref into, (nuint)i) | isNull).StoreUnsafe(ref into, (nuint)i);
+            if (!folded.IsEmpty)
+            {
+                (Vector512.LoadUnsafe(ref fold, (nuint)i) | isNull).StoreUnsafe(ref fold, (nuint)i);
+            }
+        }
+
+        for (; i < raw.Length; i++)
+        {
+            int at = firstBit + i;
+            if (((bits[at >> 3] >> (at & 7)) & 1) == 0)
+            {
+                raw[i] = 0xFF;
+                if (!folded.IsEmpty)
+                {
+                    folded[i] = 0xFF;
+                }
+            }
+        }
+    }
+
+    /// <summary>Widest band of widths counted by compares; a wider one is counted a byte at a time.</summary>
+    private const int BandLimit = 24;
+
+    /// <summary>Adds to <paramref name="histogram"/> how many of <paramref name="widths"/> hold each width, 0xFF counted nowhere.</summary>
+    private static void Tally(ReadOnlySpan<byte> widths, Span<int> histogram)
+    {
+        ref byte first = ref MemoryMarshal.GetReference(widths);
+        int whole = widths.Length & ~63;
+
+        // The band: the least width, and the greatest short of a null's 0xFF.
+        Vector512<byte> low = Vector512<byte>.AllBitsSet;
+        Vector512<byte> high = Vector512<byte>.Zero;
+        Vector512<byte> none = Vector512<byte>.AllBitsSet;
+        for (int i = 0; i < whole; i += 64)
+        {
+            Vector512<byte> v = Vector512.LoadUnsafe(ref first, (nuint)i);
+            low = Vector512.Min(low, v);
+            high = Vector512.Max(high, Vector512.AndNot(v, Vector512.Equals(v, none)));
+        }
+
+        int least = 255;
+        int greatest = 0;
+        for (int i = whole; i < widths.Length; i++)
+        {
+            byte w = widths[i];
+            least = Math.Min(least, w);
+            greatest = w == 0xFF ? greatest : Math.Max(greatest, w);
+        }
+
+        if (whole > 0)
+        {
+            for (int lane = 0; lane < 64; lane++)
+            {
+                least = Math.Min(least, low.GetElement(lane));
+                greatest = Math.Max(greatest, high.GetElement(lane));
+            }
+        }
+
+        if (least == 0xFF)
+        {
+            return;
+        }
+
+        if (greatest - least >= BandLimit)
+        {
+            for (int i = 0; i < widths.Length; i++)
+            {
+                byte w = widths[i];
+                if (w != 0xFF)
+                {
+                    histogram[w]++;
+                }
+            }
+
+            return;
+        }
+
+        // Each width of the band: a compare per 64 bytes subtracted into byte counters (at most
+        // sixteen vectors to a chunk, so a counter cannot wrap), summed by absolute differences.
+        for (int w = least; w <= greatest; w++)
+        {
+            Vector512<byte> wanted = Vector512.Create((byte)w);
+            Vector512<byte> counters = Vector512<byte>.Zero;
+            for (int i = 0; i < whole; i += 64)
+            {
+                counters -= Vector512.Equals(Vector512.LoadUnsafe(ref first, (nuint)i), wanted);
+            }
+
+            int total = (int)Vector512.Sum(Avx512BW.SumAbsoluteDifferences(counters, Vector512<byte>.Zero).AsUInt64());
+            for (int i = whole; i < widths.Length; i++)
+            {
+                total += widths[i] == w ? 1 : 0;
+            }
+
+            histogram[w] += total;
         }
     }
 

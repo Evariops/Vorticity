@@ -793,7 +793,9 @@ internal static class CanonicalConcat
     /// prefixes, buffer indices and offsets, a referencing view is one whose length is past the
     /// inline limit, its index is moved by a mask of that, an index past the chunk's buffers is
     /// gathered by or, and the four go back together into place. A chunk with a bad index is
-    /// walked again view by view to name it. Elsewhere the views are copied and then rebased.
+    /// walked again view by view to name it. Where there are 512-bit vectors, four views are one
+    /// register as they lie, the same tests by lane masks. Elsewhere the views are copied and then
+    /// rebased.
     /// </remarks>
     internal static unsafe void RebaseInto(
         ReadOnlySpan<byte> source, Span<byte> block, int rows, int bufferBase, int dataBufferCount, int chunkIndex)
@@ -823,6 +825,35 @@ internal static class CanonicalConcat
                 {
                     j = 0;
                 }
+            }
+        }
+        else if (Vector512.IsHardwareAccelerated)
+        {
+            // A view is a 128-bit lane, so four views are one register as they lie, nothing to take
+            // apart: each view's size is spread over its lane by a shuffle, a referencing view's
+            // index word is picked by a mask of that and of the index position, and the four go
+            // back in one store.
+            ref uint from = ref Unsafe.As<byte, uint>(ref MemoryMarshal.GetReference(source));
+            ref uint into = ref Unsafe.As<byte, uint>(ref MemoryMarshal.GetReference(block));
+            Vector512<uint> inline = Vector512.Create((uint)CanonicalSupport.MaxInlineViewLength);
+            Vector512<uint> limit = Vector512.Create((uint)dataBufferCount);
+            Vector512<uint> shift = Vector512.Create((uint)bufferBase);
+            Vector512<uint> sizes = Vector512.Create(0u, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12);
+            Vector512<uint> indexWords = Vector512.Create(
+                0u, 0, uint.MaxValue, 0, 0, 0, uint.MaxValue, 0, 0, 0, uint.MaxValue, 0, 0, 0, uint.MaxValue, 0);
+            Vector512<uint> bad = Vector512<uint>.Zero;
+            for (; j <= rows - 4; j += 4)
+            {
+                nuint at = (nuint)(j * 4);
+                Vector512<uint> views = Vector512.LoadUnsafe(ref from, at);
+                Vector512<uint> referencing = Vector512.GreaterThan(Vector512.Shuffle(views, sizes), inline) & indexWords;
+                bad |= referencing & Vector512.GreaterThanOrEqual(views, limit);
+                (views + (shift & referencing)).StoreUnsafe(ref into, at);
+            }
+
+            if (bad != Vector512<uint>.Zero)
+            {
+                j = 0;
             }
         }
 
@@ -949,24 +980,20 @@ internal static class CanonicalConcat
             VortexBuffer sizes = CanonicalSupport.Allocate(
                 context, offsetBytes, Align, out Span<byte> sizeSpan);
 
+            // A chunk's offsets and sizes are read with their types resolved once for the chunk,
+            // not once a row, and written as the 64-bit words they become.
+            Span<long> offsetWords = MemoryMarshal.Cast<byte, long>(offsetSpan);
+            Span<long> sizeWords = MemoryMarshal.Cast<byte, long>(sizeSpan);
             long elementsBase = 0;
             int row = 0;
             for (int i = 0; i < chunks.Length; i++)
             {
                 CanonicalNode chunk = arena.GetNode(chunks[i]);
-                ReadOnlySpan<byte> chunkOffsets = chunk.Offsets.Span;
-                ReadOnlySpan<byte> chunkSizes = chunk.Sizes.Span;
-                PType offsetPType = chunk.OffsetPType;
-                PType sizePType = chunk.SizePType;
-
-                for (int j = 0; j < chunk.Length; j++, row++)
-                {
-                    long offset = CanonicalSupport.ReadInteger(chunkOffsets, offsetPType, j);
-                    long size = CanonicalSupport.ReadInteger(chunkSizes, sizePType, j);
-                    CanonicalSupport.WriteInteger(offsetSpan, PType.U64, row, offset + elementsBase);
-                    CanonicalSupport.WriteInteger(sizeSpan, PType.U64, row, size);
-                }
-
+                CanonicalSupport.ReadIntegers(
+                    chunk.Offsets.Span, chunk.OffsetPType, elementsBase, offsetWords.Slice(row, chunk.Length));
+                CanonicalSupport.ReadIntegers(
+                    chunk.Sizes.Span, chunk.SizePType, 0, sizeWords.Slice(row, chunk.Length));
+                row += chunk.Length;
                 elementsBase += arena.GetNode(chunk.ElementsIndex).Length;
             }
 

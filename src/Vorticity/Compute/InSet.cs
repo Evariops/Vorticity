@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Expressions;
 using Vorticity.Types;
@@ -30,18 +31,29 @@ internal sealed class InSet
     /// </summary>
     private const int Emptiness = 8;
 
+    /// <summary>
+    /// Up to this many distinct keys, and where there are 512-bit vectors, a vector of rows is
+    /// compared with each key in turn rather than each row hashed: a compare answers eight to
+    /// sixty-four rows, where a probe is a multiply, a load and a branch for one.
+    /// </summary>
+    private const int FewKeys = 16;
+
     private readonly ulong[] _slots;
     private readonly int _mask;
     private readonly bool _hasZero;
     private readonly byte _miss;
 
-    private InSet(ulong[] slots, int mask, bool hasZero, byte miss, bool signed)
+    /// <summary>The distinct keys, zero included, when there are at most <see cref="FewKeys"/>; else null.</summary>
+    private readonly ulong[]? _keys;
+
+    private InSet(ulong[] slots, int mask, bool hasZero, byte miss, bool signed, ulong[]? keys)
     {
         _slots = slots;
         _mask = mask;
         _hasZero = hasZero;
         _miss = miss;
         Signed = signed;
+        _keys = keys;
     }
 
     /// <summary>Whether this set was built for a signed column.</summary>
@@ -147,9 +159,34 @@ internal sealed class InSet
             table[at] = key;
         }
 
+        ulong[]? keys = null;
+        int distinct = hasZero ? 1 : 0;
+        foreach (ulong slot in table)
+        {
+            distinct += slot != 0 ? 1 : 0;
+        }
+
+        if (distinct <= FewKeys)
+        {
+            keys = new ulong[distinct];
+            int k = 0;
+            foreach (ulong slot in table)
+            {
+                if (slot != 0)
+                {
+                    keys[k++] = slot;
+                }
+            }
+
+            if (hasZero)
+            {
+                keys[k] = 0;
+            }
+        }
+
         // A null candidate cannot be put in a set -- nothing equals it -- but its whole effect is
         // to turn the no-match answer from false into unknown.
-        return new InSet(table, mask, hasZero, hasNull ? Trilean.Unknown : Trilean.False, signed);
+        return new InSet(table, mask, hasZero, hasNull ? Trilean.Unknown : Trilean.False, signed, keys);
     }
 
     /// <summary>Writes one state per row of <paramref name="destination"/>.</summary>
@@ -160,6 +197,39 @@ internal sealed class InSet
     internal void Apply(
         PType ptype, ReadOnlySpan<byte> values, ValidityMask mask, Span<byte> destination)
     {
+        if (_keys is not null && WordBytes.IsAccelerated)
+        {
+            switch (ptype)
+            {
+                case PType.I8:
+                    Few<sbyte>(values, mask, destination);
+                    break;
+                case PType.I16:
+                    Few<short>(values, mask, destination);
+                    break;
+                case PType.I32:
+                    Few<int>(values, mask, destination);
+                    break;
+                case PType.I64:
+                    Few<long>(values, mask, destination);
+                    break;
+                case PType.U8:
+                    Few<byte>(values, mask, destination);
+                    break;
+                case PType.U16:
+                    Few<ushort>(values, mask, destination);
+                    break;
+                case PType.U32:
+                    Few<uint>(values, mask, destination);
+                    break;
+                default:
+                    Few<ulong>(values, mask, destination);
+                    break;
+            }
+
+            return;
+        }
+
         switch (ptype)
         {
             case PType.I8:
@@ -279,5 +349,103 @@ internal sealed class InSet
             ulong key = ulong.CreateTruncating(Unsafe.Add(ref value, i));
             destination[i] = Holds(ref table, key) ? Trilean.True : miss;
         }
+    }
+
+    /// <summary>
+    /// The membership of a set of few keys where there are 512-bit vectors: whole blocks of 64 rows
+    /// compared with each key, the rest probed.
+    /// </summary>
+    /// <remarks>
+    /// Its own method, reached from <see cref="Apply"/> rather than from <see cref="Core"/>: a
+    /// branch to it inside the probing loop's method changes how the jit compiles that loop, and
+    /// the probe of a set of many keys ran a fifth to a third slower for it.
+    /// </remarks>
+    private void Few<TValue>(ReadOnlySpan<byte> bytes, ValidityMask mask, Span<byte> destination)
+        where TValue : unmanaged, IBinaryInteger<TValue>
+    {
+        if (mask.AllInvalid)
+        {
+            Trilean.Fill(destination, Trilean.Unknown);
+            return;
+        }
+
+        ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(bytes)[..destination.Length];
+        Rest(values, mask, destination, Lanes(values, mask, destination));
+    }
+
+    /// <summary>The rows past the last whole block of <see cref="Lanes"/>, fewer than 64, probed one at a time.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void Rest<TValue>(ReadOnlySpan<TValue> values, ValidityMask mask, Span<byte> destination, int from)
+        where TValue : unmanaged, IBinaryInteger<TValue>
+    {
+        ref ulong table = ref MemoryMarshal.GetArrayDataReference(_slots);
+        for (int i = from; i < destination.Length; i++)
+        {
+            destination[i] = !mask.IsValid(i) ? Trilean.Unknown
+                : Holds(ref table, ulong.CreateTruncating(values[i])) ? Trilean.True
+                : _miss;
+        }
+    }
+
+    /// <summary>
+    /// The states of whole blocks of 64 rows, each 512-bit vector of rows compared with each key:
+    /// the matches' masks gathered into a word, the word spread back to a byte a row.
+    /// </summary>
+    /// <returns>The rows answered, a multiple of 64; the rest are the caller's.</returns>
+    /// <remarks>
+    /// The keys are compared in the column's type, so a key the type cannot hold is dropped: its
+    /// truncation would match a row the key does not equal, and no row equals the key itself. A
+    /// null row is compared like any other and its state replaced by unknown, which the no-match
+    /// state may be too when a candidate was null.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int Lanes<TValue>(ReadOnlySpan<TValue> values, ValidityMask mask, Span<byte> destination)
+        where TValue : unmanaged, IBinaryInteger<TValue>
+    {
+        Span<TValue> keys = stackalloc TValue[FewKeys];
+        int count = 0;
+        foreach (ulong key in _keys!)
+        {
+            TValue narrow = TValue.CreateTruncating(key);
+            if (ulong.CreateTruncating(narrow) == key)
+            {
+                keys[count++] = narrow;
+            }
+        }
+
+        int rows = destination.Length;
+        int lanes = Vector512<TValue>.Count;
+        WordBytes spread = WordBytes.Create();
+        ref TValue from = ref MemoryMarshal.GetReference(values);
+        ref TValue key0 = ref MemoryMarshal.GetReference(keys);
+        ref byte into = ref MemoryMarshal.GetReference(destination);
+        ulong missUnknown = _miss == Trilean.Unknown ? ulong.MaxValue : 0;
+        ReadOnlySpan<byte> bits = mask.Bits;
+        int offset = mask.BitOffset;
+        bool allValid = mask.AllValid;
+        int i = 0;
+        for (; i <= rows - 64; i += 64)
+        {
+            ulong hits = 0;
+            for (int row = 0; row < 64; row += lanes)
+            {
+                Vector512<TValue> block = Vector512.LoadUnsafe(ref from, (nuint)(i + row));
+                Vector512<TValue> any = Vector512<TValue>.Zero;
+                for (int k = 0; k < count; k++)
+                {
+                    any |= Vector512.Equals(block, Vector512.Create(Unsafe.Add(ref key0, k)));
+                }
+
+                hits |= any.ExtractMostSignificantBits() << row;
+            }
+
+            // A match is true and a valid miss the no-match state; a null row is unknown whatever
+            // it held. Unknown is 2, so its ones are doubled.
+            ulong valid = allValid ? ulong.MaxValue : BitWords.Load(bits, offset + i);
+            Vector512<byte> unknown = spread.Ones(~valid | (~hits & missUnknown));
+            (spread.Ones(hits & valid) | (unknown + unknown)).StoreUnsafe(ref into, (nuint)i);
+        }
+
+        return i;
     }
 }

@@ -218,21 +218,7 @@ internal static class ColumnData
     {
         ReadOnlySpan<T> values = Values<T>(arena, node);
         Span<T?> into = Destination(destination, values.Length);
-        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
-        if (valid.IsEmpty)
-        {
-            for (int i = 0; i < into.Length; i++)
-            {
-                into[i] = values[i];
-            }
-
-            return;
-        }
-
-        for (int i = 0; i < into.Length; i++)
-        {
-            into[i] = IsValid(valid, i) ? values[i] : null;
-        }
+        ColumnKernels.Nullables(values, ArenaWords.Validity(arena, node), into);
     }
 
     /// <summary>Copies the values of a bool node.</summary>
@@ -240,11 +226,7 @@ internal static class ColumnData
     {
         int length = arena.GetNode(valuesNode).Length;
         ReadOnlySpan<ulong> bits = ArenaWords.Bits(arena, valuesNode);
-        Span<bool> into = Destination(destination, length);
-        for (int i = 0; i < into.Length; i++)
-        {
-            into[i] = ((bits[i >> 6] >> (i & 63)) & 1UL) != 0;
-        }
+        ColumnKernels.Bools(bits, Destination(destination, length));
     }
 
     /// <summary>Copies the values of a nullable bool node, a null for a null row.</summary>
@@ -253,11 +235,7 @@ internal static class ColumnData
         int length = arena.GetNode(valuesNode).Length;
         ReadOnlySpan<ulong> bits = ArenaWords.Bits(arena, valuesNode);
         ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
-        Span<bool?> into = Destination(destination, length);
-        for (int i = 0; i < into.Length; i++)
-        {
-            into[i] = IsValid(valid, i) ? ((bits[i >> 6] >> (i & 63)) & 1UL) != 0 : null;
-        }
+        ColumnKernels.NullableBools(valid, bits, Destination(destination, length));
     }
 
     /// <summary>Copies the rows of a decimal node of at most 28 digits.</summary>

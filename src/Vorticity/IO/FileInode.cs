@@ -5,11 +5,73 @@ using Microsoft.Win32.SafeHandles;
 namespace Vorticity.IO;
 
 /// <summary>A file's device and inode: what stays the same while its name changes, and changes when another file takes its name.</summary>
-/// <param name="Device">The device the file lives on.</param>
-/// <param name="Inode">The file's number on that device.</param>
-internal readonly record struct FileInode(ulong Device, ulong Inode)
+/// <param name="Device">The device the file lives on; on Windows, the volume's serial number.</param>
+/// <param name="Inode">The file's number on that device; on Windows, the low half of its 128-bit file id.</param>
+/// <param name="InodeHigh">The high half of a Windows file id, which ReFS uses; zero elsewhere.</param>
+internal readonly record struct FileInode(ulong Device, ulong Inode, ulong InodeHigh = 0)
 {
     private static readonly unsafe delegate* unmanaged<int, byte*, int> Stat = Resolve(out SizeOffset, out WideDevice, out VersionedStat, out StatVersion);
+
+    // Windows has no fstat: GetFileInformationByHandleEx answers the same two questions, the file's
+    // id on its volume (FileIdInfo) and its length (FileStandardInfo).
+    private static readonly unsafe delegate* unmanaged<IntPtr, int, byte*, uint, int> FileInformation =
+        OperatingSystem.IsWindows() ? (delegate* unmanaged<IntPtr, int, byte*, uint, int>)Export(["kernel32.dll"], "GetFileInformationByHandleEx") : null;
+
+    private const int FileStandardInfo = 1;
+    private const int FileIdInfo = 18;
+
+    // Windows 11 24H2 answers the same questions from a path, without opening the file: an open
+    // costs a hundred microseconds where antivirus and endpoint filters inspect every one, this
+    // call a fifth of that. Earlier Windows does not export it.
+    private static readonly unsafe delegate* unmanaged<char*, int, byte*, uint, int> FileInformationByName =
+        OperatingSystem.IsWindows()
+            ? (delegate* unmanaged<char*, int, byte*, uint, int>)Export(["kernel32.dll", "kernelbase.dll"], "GetFileInformationByName")
+            : null;
+
+    private const int FileStatBasicByNameInfo = 3;
+
+    /// <summary>
+    /// The identity and length of the file at <paramref name="path"/>, read without opening it;
+    /// false where the platform cannot, or when the path is a link or a junction.
+    /// </summary>
+    /// <param name="path">The path.</param>
+    /// <param name="identity">The file's identity, when this returns true.</param>
+    /// <param name="length">The file's length, when this returns true.</param>
+    /// <remarks>
+    /// FILE_STAT_BASIC_INFORMATION: the length (EndOfFile) at 48, the reparse tag at 60, the
+    /// volume's serial number at 80 and the 128-bit file id at 88, the same two numbers
+    /// <see cref="TryGet"/> reads from a handle. A reparse point is described as itself rather
+    /// than as what it points to, so it is declined: its identity would not be its target's.
+    /// </remarks>
+    internal static unsafe bool TryGetByName(string path, out FileInode identity, out long length)
+    {
+        identity = default;
+        length = 0;
+        if (FileInformationByName == null)
+        {
+            return false;
+        }
+
+        byte* status = stackalloc byte[104];
+        fixed (char* name = path)
+        {
+            if (FileInformationByName(name, FileStatBasicByNameInfo, status, 104) == 0)
+            {
+                return false;
+            }
+        }
+
+        ulong low = *(ulong*)(status + 88);
+        ulong high = *(ulong*)(status + 96);
+        if (*(uint*)(status + 60) != 0 || (low == 0 && high == 0))
+        {
+            return false;
+        }
+
+        identity = new FileInode(*(ulong*)(status + 80), low, high);
+        length = *(long*)(status + 48);
+        return true;
+    }
 
     // Where st_size sits in the platform's struct stat, and whether st_dev takes eight bytes or four.
     private static readonly int SizeOffset;
@@ -21,7 +83,7 @@ internal readonly record struct FileInode(ulong Device, ulong Inode)
     private static readonly int StatVersion;
 
     /// <summary>Whether this platform can tell one file from another.</summary>
-    internal static unsafe bool IsSupported => Stat != null || VersionedStat != null;
+    internal static unsafe bool IsSupported => Stat != null || VersionedStat != null || FileInformation != null;
 
     /// <summary>The identity of the file behind <paramref name="handle"/>.</summary>
     /// <param name="handle">An open file.</param>
@@ -38,6 +100,11 @@ internal readonly record struct FileInode(ulong Device, ulong Inode)
         if (!IsSupported)
         {
             return false;
+        }
+
+        if (FileInformation != null)
+        {
+            return TryGetOnWindows(handle, length, out identity);
         }
 
         byte* status = stackalloc byte[256];
@@ -72,6 +139,47 @@ internal readonly record struct FileInode(ulong Device, ulong Inode)
         }
 
         identity = new FileInode(device, inode);
+        return true;
+    }
+
+    // FILE_STANDARD_INFO has the length (EndOfFile) at 8; FILE_ID_INFO is the volume's 64-bit serial
+    // number and then the file's 128-bit id, which NTFS fills in its low half only and ReFS in both.
+    private static unsafe bool TryGetOnWindows(SafeFileHandle handle, long length, out FileInode identity)
+    {
+        identity = default;
+        byte* standard = stackalloc byte[24];
+        byte* id = stackalloc byte[24];
+        bool added = false;
+        try
+        {
+            handle.DangerousAddRef(ref added);
+            IntPtr raw = handle.DangerousGetHandle();
+            if (FileInformation(raw, FileStandardInfo, standard, 24) == 0 || FileInformation(raw, FileIdInfo, id, 24) == 0)
+            {
+                return false;
+            }
+        }
+        finally
+        {
+            if (added)
+            {
+                handle.DangerousRelease();
+            }
+        }
+
+        if (*(long*)(standard + 8) != length)
+        {
+            return false;
+        }
+
+        ulong low = *(ulong*)(id + 8);
+        ulong high = *(ulong*)(id + 16);
+        if (low == 0 && high == 0)
+        {
+            return false;
+        }
+
+        identity = new FileInode(*(ulong*)id, low, high);
         return true;
     }
 

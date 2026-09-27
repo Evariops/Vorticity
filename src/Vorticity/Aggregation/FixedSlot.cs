@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
@@ -197,8 +198,13 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
     internal override TResult Result(int group) => _finish(_states[group]);
 
-    /// <summary>Folds the rows of [start, end) the mask holds: a dense span where the mask is full, a value at a time where it is not.</summary>
-    private static void Accumulate(ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> rows, int start, int end)
+    /// <summary>
+    /// Folds the rows of [start, end) the mask holds: a run of words of <see cref="WordFold.Dense"/>
+    /// rows or more at once, as a dense span where the run is full and selected where it is not; a
+    /// value at a time elsewhere.
+    /// </summary>
+    [SkipLocalsInit]
+    internal static void Accumulate(ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> rows, int start, int end)
     {
         if (end <= start)
         {
@@ -213,6 +219,9 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
         int first = start >> 6;
         int last = (end - 1) >> 6;
+        Span<ulong> run = stackalloc ulong[WordFold.Run];
+        int count = 0;
+        bool full = true;
         for (int w = first; w <= last; w++)
         {
             ulong word = rows[w];
@@ -227,10 +236,25 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                 word &= (1UL << (end - baseRow)) - 1;
             }
 
-            if (word == ulong.MaxValue)
+            if (values.Length - baseRow >= 64 && BitOperations.PopCount(word) >= WordFold.Dense)
             {
-                TOp.AddSpan(ref state, values.Slice(baseRow, 64));
+                run[count++] = word;
+                full &= word == ulong.MaxValue;
+                if (count == WordFold.Run)
+                {
+                    Fold(ref state, values, run, w + 1 - count, full);
+                    count = 0;
+                    full = true;
+                }
+
                 continue;
+            }
+
+            if (count > 0)
+            {
+                Fold(ref state, values, run[..count], w - count, full);
+                count = 0;
+                full = true;
             }
 
             while (word != 0)
@@ -238,6 +262,25 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                 TOp.Add(ref state, values[baseRow + BitOperations.TrailingZeroCount(word)]);
                 word &= word - 1;
             }
+        }
+
+        if (count > 0)
+        {
+            Fold(ref state, values, run[..count], last + 1 - count, full);
+        }
+    }
+
+    /// <summary>The rows a run of words from word <paramref name="from"/> holds.</summary>
+    private static void Fold(ref TState state, ReadOnlySpan<TValue> values, ReadOnlySpan<ulong> run, int from, bool full)
+    {
+        ReadOnlySpan<TValue> block = values.Slice(from << 6, run.Length << 6);
+        if (full)
+        {
+            TOp.AddSpan(ref state, block);
+        }
+        else
+        {
+            TOp.AddWords(ref state, block, run);
         }
     }
 }

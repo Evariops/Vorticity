@@ -793,6 +793,7 @@ public sealed partial class VortexFileWriter
 
         using Microsoft.Win32.SafeHandles.SafeFileHandle handle = System.IO.File.OpenHandle(
             _appendedPath, FileMode.Open, FileAccess.Write, FileShare.None);
+        Vorticity.IO.MappedFileCache.ReleaseEverywhere(handle);
         RandomAccess.SetLength(handle, _appendOrigin);
     }
 }

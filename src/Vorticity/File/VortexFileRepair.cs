@@ -65,6 +65,8 @@ public static class VortexFileRepair
 
         using (SafeFileHandle handle = System.IO.File.OpenHandle(path, FileMode.Open, FileAccess.Write, FileShare.None))
         {
+            // Reading it for its valid end may have left it mapped, which on Windows forbids the cut.
+            Vorticity.IO.MappedFileCache.ReleaseEverywhere(handle);
             RandomAccess.SetLength(handle, end);
         }
 

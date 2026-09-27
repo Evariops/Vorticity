@@ -1,6 +1,8 @@
 using System;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
@@ -105,14 +107,8 @@ internal sealed class FsstSymbols
     /// <summary>The longest run of one line the sampler takes.</summary>
     private const int SampleLine = 512;
 
-    /// <summary>Slots in the symbol table; a power of two, four times <see cref="MaxSymbols"/>.</summary>
-    private const int SlotCount = 1024;
-
     /// <summary>Slots in the reference's matcher, which decides which symbols it can hold.</summary>
     private const int ReferenceSlotCount = 2048;
-
-    /// <summary>The multiplier of the multiply-shift hash; the reference's own constant.</summary>
-    private const ulong HashPrime = 2971215073UL;
 
     private readonly ulong[] _bits = new ulong[MaxSymbols];
     private readonly byte[] _lengths = new byte[MaxSymbols];
@@ -120,12 +116,12 @@ internal sealed class FsstSymbols
     private readonly short[] _twoByte = new short[65536];
 
     /// <summary>
-    /// The symbols of length 3..8, indexed by their first three bytes, which a symbol always shares
-    /// with any input it matches. The chain holds every collision rather than dropping one, so
-    /// which symbols the table ends up with does not depend on the hash.
+    /// The symbol of three bytes or more in each slot of the reference's matcher, or -1: at most
+    /// one, because <see cref="Optimize"/> skips a candidate whose slot is taken. A symbol and the
+    /// input it matches share their first three bytes, and so their slot, so one probe finds the
+    /// only symbol of three bytes or more that can match.
     /// </summary>
-    private readonly short[] _prefixHeads = new short[SlotCount];
-    private readonly short[] _prefixChain = new short[MaxSymbols];
+    private readonly short[] _slots = new short[ReferenceSlotCount];
 
     private int _count;
 
@@ -304,6 +300,123 @@ internal sealed class FsstSymbols
         }
 
         return written;
+    }
+
+    /// <summary>
+    /// Compresses every row, back to back, as <see cref="Compress"/> compresses one: each row's
+    /// codes start where the one before ended, and <paramref name="offsets"/> records each start
+    /// and the total.
+    /// </summary>
+    /// <param name="heap">
+    /// The rows' bytes, followed by at least eight readable bytes of slack: every position is read
+    /// as the next eight bytes in one load, however near the end of its row, and the bytes past the
+    /// row never decide a symbol, whose width is capped at what the row has left.
+    /// </param>
+    /// <param name="starts">Each row's first byte in <paramref name="heap"/>.</param>
+    /// <param name="lengths">Each row's length.</param>
+    /// <param name="codes">Room for the worst case, two code bytes per input byte.</param>
+    /// <param name="offsets">Room for a start per row and the total.</param>
+    /// <param name="ceiling">Past this many code bytes the compression gives up.</param>
+    /// <returns>The code bytes written, or -1 when they passed <paramref name="ceiling"/>.</returns>
+    /// <remarks>
+    /// One call for the column rather than one a row, with <see cref="FindLongest"/>'s probe written
+    /// into the loop and every table read through a reference, so the width it finds stays in a
+    /// register and the loop's code does not hang on whether the JIT inlines a call. The reads need
+    /// no bounds: a slot is a hash masked to the slot count, a code is below
+    /// <see cref="MaxSymbols"/>, the pair and byte tables are indexed by a pair and a byte, and the
+    /// worst case sizes <paramref name="codes"/>, as it does for <see cref="Compress"/>.
+    /// </remarks>
+    internal int CompressAll(
+        ReadOnlySpan<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, Span<byte> codes,
+        Span<int> offsets, long ceiling)
+    {
+        int rows = starts.Length;
+        if (offsets.Length <= rows || lengths.Length < rows)
+        {
+            throw new ArgumentException("The offsets cannot hold a start per row and the total.", nameof(offsets));
+        }
+
+        long input = 0;
+        for (int i = 0; i < rows; i++)
+        {
+            input += lengths[i];
+            if ((uint)starts[i] > (uint)heap.Length || (long)starts[i] + lengths[i] + MaxSymbolLength > heap.Length)
+            {
+                throw new ArgumentException("A row with its eight bytes of slack lies outside the heap.", nameof(heap));
+            }
+        }
+
+        if (codes.Length < 2 * input)
+        {
+            throw new ArgumentException("The codes cannot hold the worst case.", nameof(codes));
+        }
+
+        ref byte bytes = ref MemoryMarshal.GetReference(heap);
+        ref byte into = ref MemoryMarshal.GetReference(codes);
+        ref short slots = ref MemoryMarshal.GetArrayDataReference(_slots);
+        ref byte widths = ref MemoryMarshal.GetArrayDataReference(_lengths);
+        ref ulong symbols = ref MemoryMarshal.GetArrayDataReference(_bits);
+        ref short pairs = ref MemoryMarshal.GetArrayDataReference(_twoByte);
+        ref short singles = ref MemoryMarshal.GetArrayDataReference(_oneByte);
+        nint written = 0;
+        for (int row = 0; row < starts.Length; row++)
+        {
+            offsets[row] = (int)written;
+            nint read = starts[row];
+            nint end = read + lengths[row];
+            while (read < end)
+            {
+                ulong word = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bytes, read));
+                nint left = end - read;
+                if (left >= 3)
+                {
+                    int code = Unsafe.Add(ref slots, ReferenceSlot(word));
+                    if (code >= 0)
+                    {
+                        // A symbol of three bytes or more: its mask keeps its 3..8 low bytes.
+                        int width = Unsafe.Add(ref widths, code);
+                        if (width <= left && (word & (ulong.MaxValue >> (64 - (width * 8)))) == Unsafe.Add(ref symbols, code))
+                        {
+                            Unsafe.Add(ref into, written++) = (byte)code;
+                            read += width;
+                            continue;
+                        }
+                    }
+                }
+
+                if (left >= 2)
+                {
+                    int two = Unsafe.Add(ref pairs, (nint)(ushort)word);
+                    if (two >= 0)
+                    {
+                        Unsafe.Add(ref into, written++) = (byte)two;
+                        read += 2;
+                        continue;
+                    }
+                }
+
+                int one = Unsafe.Add(ref singles, (nint)(byte)word);
+                if (one >= 0)
+                {
+                    Unsafe.Add(ref into, written++) = (byte)one;
+                }
+                else
+                {
+                    Unsafe.Add(ref into, written++) = EscapeCode;
+                    Unsafe.Add(ref into, written++) = (byte)word;
+                }
+
+                read++;
+            }
+
+            if (written > ceiling)
+            {
+                return -1;
+            }
+        }
+
+        offsets[rows] = (int)written;
+        return (int)written;
     }
 
     /// <summary>
@@ -595,27 +708,15 @@ internal sealed class FsstSymbols
         int limit = Math.Min(MaxSymbolLength, remaining);
         if (limit >= 3)
         {
-            int best = -1;
-            int bestLength = 2;
-            for (int code = _prefixHeads[Bucket(word)]; code >= 0; code = _prefixChain[code])
+            int code = _slots[ReferenceSlot(word)];
+            if (code >= 0)
             {
                 int width = _lengths[code];
-                if (width > limit || width <= bestLength)
+                if (width <= limit && (word & Mask(width)) == _bits[code])
                 {
-                    continue;
+                    length = width;
+                    return CodeBase + code;
                 }
-
-                if ((word & Mask(width)) == _bits[code])
-                {
-                    best = code;
-                    bestLength = width;
-                }
-            }
-
-            if (best >= 0)
-            {
-                length = bestLength;
-                return CodeBase + best;
             }
         }
 
@@ -716,9 +817,8 @@ internal sealed class FsstSymbols
     /// <summary>
     /// The slot a one-symbol-per-slot matcher gives a symbol of three bytes or more, so that a
     /// symbol such a matcher could not hold is never chosen: a reader pushing a predicate down has
-    /// to rebuild the table as a matcher, and a symbol it cannot place stops it dead. The mixing is
-    /// deliberately not <see cref="Bucket"/>'s, which hashes the product rather than the value and
-    /// would predict a different slot.
+    /// to rebuild the table as a matcher, and a symbol it cannot place stops it dead. This table is
+    /// that matcher too: <see cref="CompressAll"/> and <see cref="FindLongest"/> probe the one slot.
     /// </summary>
     private static int ReferenceSlot(ulong bits) =>
         (int)(Hash(bits & 0xFFFFFFUL) & (ReferenceSlotCount - 1));
@@ -736,9 +836,9 @@ internal sealed class FsstSymbols
         }
         else
         {
-            int bucket = Bucket(bits);
-            _prefixChain[code] = _prefixHeads[bucket];
-            _prefixHeads[bucket] = (short)code;
+            int slot = ReferenceSlot(bits);
+            Debug.Assert(_slots[slot] < 0, "Optimize admits one symbol of three bytes or more a slot.");
+            _slots[slot] = (short)code;
         }
 
         _bits[code] = bits;
@@ -751,18 +851,7 @@ internal sealed class FsstSymbols
         _count = 0;
         Array.Fill(_oneByte, (short)-1);
         Array.Fill(_twoByte, (short)-1);
-        Array.Fill(_prefixHeads, (short)-1);
-    }
-
-    /// <summary>
-    /// The bucket a symbol's first three bytes fall in: three because that is the shortest symbol
-    /// this table indexes, so a symbol and the input it matches always agree on them.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int Bucket(ulong bits)
-    {
-        ulong mixed = (bits & 0xFFFFFFUL) * HashPrime;
-        return (int)((mixed ^ (mixed >> 15)) & (SlotCount - 1));
+        Array.Fill(_slots, (short)-1);
     }
 
     /// <summary>A symbol proposed for the table: its bytes and its length.</summary>

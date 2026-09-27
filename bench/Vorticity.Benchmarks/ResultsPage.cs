@@ -65,6 +65,16 @@ internal static class ResultsPage
                 return Ask("sysctl", ["-n", "machdep.cpu.brand_string"]);
             }
 
+            if (OperatingSystem.IsWindows())
+            {
+                using Microsoft.Win32.RegistryKey? cpu = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                    @"HARDWARE\DESCRIPTION\System\CentralProcessor\0");
+                if (cpu?.GetValue("ProcessorNameString") is string name && name.Trim().Length > 0)
+                {
+                    return name.Trim();
+                }
+            }
+
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux) && System.IO.File.Exists("/proc/cpuinfo"))
             {
                 foreach (string line in System.IO.File.ReadLines("/proc/cpuinfo"))

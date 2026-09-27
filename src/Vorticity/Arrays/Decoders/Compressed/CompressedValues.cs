@@ -442,7 +442,15 @@ internal ref struct ValueWriter
     {
         ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(source.Bytes);
         Span<TValue> destination = MemoryMarshal.Cast<byte, TValue>(_bytes)[..length];
+        ref TValue into = ref MemoryMarshal.GetReference(destination);
         ulong unsignedLength = (ulong)(uint)length;
+
+        // A run is stores of the value in every lane, a vector at a time, the last written past the
+        // run's end into rows the next runs write again: a run holds few rows, and the call a fill
+        // makes outweighs them. The runs whose last vector would pass the rows are filled.
+        int lanes = Vector256.IsHardwareAccelerated && Vector256<TValue>.IsSupported ? Vector256<TValue>.Count
+            : Vector128.IsHardwareAccelerated && Vector128<TValue>.IsSupported ? Vector128<TValue>.Count
+            : 0;
         int position = 0;
         for (int run = firstRun; run < ends.Length && position < length; run++)
         {
@@ -458,7 +466,30 @@ internal ref struct ValueWriter
                 continue;
             }
 
-            destination[position..endRow].Fill(values[run]);
+            int rows = endRow - position;
+            if (lanes != 0 && position + rows + lanes - 1 <= length)
+            {
+                if (lanes == Vector256<TValue>.Count && Vector256.IsHardwareAccelerated)
+                {
+                    Vector256<TValue> repeated = Vector256.Create(values[run]);
+                    for (int k = 0; k < rows; k += lanes)
+                    {
+                        repeated.StoreUnsafe(ref into, (nuint)(position + k));
+                    }
+                }
+                else
+                {
+                    Vector128<TValue> repeated = Vector128.Create(values[run]);
+                    for (int k = 0; k < rows; k += lanes)
+                    {
+                        repeated.StoreUnsafe(ref into, (nuint)(position + k));
+                    }
+                }
+            }
+            else
+            {
+                destination[position..endRow].Fill(values[run]);
+            }
             if (tracked && sourceValidity.IsValid(run))
             {
                 validity.SetValidRange(position, endRow - position);

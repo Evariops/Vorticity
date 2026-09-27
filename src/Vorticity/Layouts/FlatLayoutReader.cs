@@ -849,9 +849,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         try
         {
             Span<byte> states = rented.AsSpan(0, total);
-            if (!decoder.TryCompare(
-                    context.Decode, in root, node.DType, total,
-                    context.PushedOp, context.PushedLiteral, states))
+            if (!Asked(decoder, in root, node.DType, total, context, states))
             {
                 return false;
             }
@@ -885,6 +883,13 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
     }
 
+    /// <summary>Asks the encoding the pushed predicate: the comparison, or the prefix match.</summary>
+    private static bool Asked(
+        ArrayDecoder decoder, in ArrayNode root, Types.DType dtype, int total, ScanContext context, Span<byte> states) =>
+        context.PushedPrefix
+            ? decoder.TryStartsWith(context.Decode, in root, dtype, total, context.PushedLiteral, states)
+            : decoder.TryCompare(context.Decode, in root, dtype, total, context.PushedOp, context.PushedLiteral, states);
+
     /// <summary>
     /// Offers the pushed comparison to this node's encoding, and turns an answer into the column.
     /// </summary>
@@ -914,9 +919,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         try
         {
             Span<byte> states = rented.AsSpan(0, total);
-            if (!decoder.TryCompare(
-                    context.Decode, in root, node.DType, total,
-                    context.PushedOp, context.PushedLiteral, states))
+            if (!Asked(decoder, in root, node.DType, total, context, states))
             {
                 return -1;
             }
@@ -943,36 +946,24 @@ internal sealed class FlatLayoutReader : LayoutReader
     private static int Answer(ScanContext context, ReadOnlySpan<byte> states, int total)
     {
         Arrays.CanonicalArena arena = context.Canonical;
-        int bytes = Math.Max((total + 7) / 8, 1);
+        states = states[..total];
 
-        VortexBuffer truth = arena.Allocate(bytes, 1, out Span<byte> bits);
-        bits.Clear();
-        bool unknown = false;
-        for (int row = 0; row < total; row++)
-        {
-            byte state = states[row];
-            if (state == Compute.Trilean.True)
-            {
-                bits[row >> 3] |= (byte)(1 << (row & 7));
-            }
-            else if (state == Compute.Trilean.Unknown)
-            {
-                unknown = true;
-            }
-        }
+        // Whole words, every one written: the first here in case there is no row, the rest by the
+        // kernel, which leaves the bits past the rows clear.
+        int bytes = Math.Max((total + 63) >> 6, 1) * sizeof(ulong);
+        VortexBuffer truth = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> bits);
+        Span<ulong> truthWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bits);
+        truthWords[0] = 0;
+        Compute.Trilean.ToWords(states, Compute.Trilean.True, equal: true, truthWords);
+        bool unknown = states.Contains(Compute.Trilean.Unknown);
 
         Validity validity = Validity.NonNullable;
         if (unknown)
         {
-            VortexBuffer known = arena.Allocate(bytes, 1, out Span<byte> valid);
-            valid.Clear();
-            for (int row = 0; row < total; row++)
-            {
-                if (states[row] != Compute.Trilean.Unknown)
-                {
-                    valid[row >> 3] |= (byte)(1 << (row & 7));
-                }
-            }
+            VortexBuffer known = arena.AllocateUninitialized(bytes, sizeof(ulong), out Span<byte> valid);
+            Span<ulong> knownWords = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(valid);
+            knownWords[0] = 0;
+            Compute.Trilean.ToWords(states, Compute.Trilean.Unknown, equal: false, knownWords);
 
             validity = Validity.Bitmap(arena.AddBool(
                 context.Types.Bool(Types.Nullability.NonNullable), total, Validity.NonNullable,

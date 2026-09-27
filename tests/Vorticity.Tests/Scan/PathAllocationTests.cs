@@ -131,6 +131,15 @@ public sealed class PathAllocationTests
     /// <summary>Runs measured, of which the minimum is the answer.</summary>
     private const int Runs = 10;
 
+    /// <summary>
+    /// What the runtime's own file handle weighs on Windows beyond the platform the ceilings were
+    /// measured on: every axis opens one file, and every axis, the footer-only one included, reads
+    /// 24 bytes more there. The handle is the one allocation of an open that differs by platform:
+    /// Windows' <c>SafeFileHandle</c> carries its file type, its cached length and its thread-pool
+    /// binding, 80 bytes. The library allocates the same bytes on both.
+    /// </summary>
+    private static readonly long HandleAllowance = OperatingSystem.IsWindows() ? 24 : 0;
+
     /// <summary>Samples taken at each end of the retention check, of which the minimum counts.</summary>
     private const int Samples = 3;
 
@@ -337,8 +346,9 @@ public sealed class PathAllocationTests
             .Append(" warm-ups\n");
 
         List<string> over = [];
-        foreach ((string axis, string file, long ceiling, Func<string, ValueTask<long>> path) in Axes)
+        foreach ((string axis, string file, long measured, Func<string, ValueTask<long>> path) in Axes)
         {
+            long ceiling = measured + HandleAllowance;
             long floor = Floor(path, Corpus.Path(file));
             long headroom = ceiling - floor;
             report.Append("    ")

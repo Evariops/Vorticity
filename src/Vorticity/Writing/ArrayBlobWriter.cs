@@ -552,16 +552,12 @@ internal static class ArrayBlobWriter
         // chooser counted them from its histogram, which sizes the spans; the loop fills them; a
         // count that disagrees is an exception rather than a short array padded with row 0 in
         // silence.
-        int exceptions = patchIndices.Length;
-        int found = 0;
-
-        int bitWidth = plan.BitWidth;
-        int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
-
+        //
         // Width zero still walks: a column packed at zero bits is a constant with exceptions, and
-        // the exceptions are exactly what the loop below has to find. Only an empty column has
-        // nothing to look at. The packed bytes are empty either way -- `BlockByteLength(0)` is 0 --
-        // and the pack itself is skipped block by block below.
+        // the exceptions are exactly what the loop has to find. Only an empty column has nothing to
+        // look at. The packed bytes are empty either way -- `BlockByteLength(0)` is 0 -- and the
+        // pack itself is skipped block by block.
+        int exceptions = patchIndices.Length;
         if (length == 0)
         {
             return;
@@ -569,59 +565,13 @@ internal static class ArrayBlobWriter
 
         ReadOnlySpan<byte> values = node.Values.Span;
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
-        int blockBytes = FastLanes.BlockByteLength(bitWidth);
-        int elementBits = ptype.ByteWidth() * 8;
-
-        // Both scratch buffers are rented once and live for the whole column rather than for one
-        // block, and the narrow one is sized in bytes so a single rental serves whichever element
-        // width the column turns out to be.
-        // An exception is a transformed value at or above 2^width; at the element's own width
-        // nothing can be one, and the chooser then counted none.
-        ulong limit = bitWidth >= 64 ? ulong.MaxValue : 1UL << bitWidth;
-        bool patching = exceptions > 0;
-
-        ulong[] block = ArrayPool<ulong>.Shared.Rent(FastLanes.BlockSize);
-        byte[] narrow = ArrayPool<byte>.Shared.Rent(FastLanes.BlockSize * sizeof(uint));
-        try
+        int found = ptype.ByteWidth() switch
         {
-            Span<ulong> wide = block.AsSpan(0, FastLanes.BlockSize);
-            for (int b = 0; b < blocks; b++)
-            {
-                int start = b * FastLanes.BlockSize;
-                int count = Math.Min(FastLanes.BlockSize, length - start);
-
-                // Only the tail of the last block needs clearing: the loop below writes every slot
-                // of a full block, which is every block but the last, so clearing the whole block
-                // each time would zero bytes that are about to be overwritten.
-                if (count < FastLanes.BlockSize)
-                {
-                    wide[count..].Clear();
-                }
-
-                TransformBlock(values, in mask, ptype, start, count, plan, elementBits, wide);
-
-                // The patches are gathered from `wide` in a loop of their own, and not from the
-                // transform loop above with a branch per row: a per-row test there costs the pack
-                // several times over, even when the branch is never taken. The block's transformed
-                // values are still in cache, a second walk over them costs their compares and
-                // nothing else, and it runs only when the chooser counted an exception at all. A
-                // null row is zero, zero always fits, so a null is never a patch.
-                if (patching)
-                {
-                    found = FindPatches(wide[..count], limit, start, patchIndices, patchValues, found);
-                }
-
-                if (blockBytes > 0)
-                {
-                    PackInto(wide, narrow, bitWidth, ptype, destination.Slice(b * blockBytes, blockBytes));
-                }
-            }
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(narrow);
-            ArrayPool<ulong>.Shared.Return(block);
-        }
+            1 => Pack<byte>(values, in mask, in plan, length, destination, patchIndices, patchValues),
+            2 => Pack<ushort>(values, in mask, in plan, length, destination, patchIndices, patchValues),
+            4 => Pack<uint>(values, in mask, in plan, length, destination, patchIndices, patchValues),
+            _ => Pack<ulong>(values, in mask, in plan, length, destination, patchIndices, patchValues),
+        };
 
         if (found != exceptions)
         {
@@ -629,133 +579,250 @@ internal static class ArrayBlobWriter
             // same rows under the same map, so they agree or one of the two is wrong -- and a
             // short array of patches would otherwise put row 0 back into the file in silence.
             throw new InvalidOperationException(
-                $"The width histogram counted {exceptions} values above {bitWidth} bits and the " +
+                $"The width histogram counted {exceptions} values above {plan.BitWidth} bits and the " +
                 $"pack found {found}.");
         }
     }
 
-    /// <summary>One block's transformed values, a null row as zero.</summary>
-    /// <param name="values">The column's values, from its first row.</param>
-    /// <param name="mask">The column's validity.</param>
-    /// <param name="ptype">The column's element type.</param>
-    /// <param name="start">The block's first row.</param>
-    /// <param name="count">The block's rows.</param>
-    /// <param name="plan">The transform and its reference.</param>
-    /// <param name="elementBits">The element width.</param>
-    /// <param name="wide">The block's transformed values.</param>
-    private static void TransformBlock(
-        ReadOnlySpan<byte> values, in ValidityMask mask, PType ptype, int start, int count,
-        in BitPackPlan plan, int elementBits, Span<ulong> wide)
-    {
-        // Two methods, neither inlined: with both loops in one body the masked path's code crowds
-        // the lanes' and slows the blocks that take them, for identical bytes.
-        if (mask.AllValid)
-        {
-            TransformValid(values, ptype, start, count, plan, elementBits, wide);
-        }
-        else
-        {
-            TransformMasked(values, in mask, ptype, start, count, plan, elementBits, wide);
-        }
-    }
-
     /// <summary>
-    /// The transform of an all-valid block applied on the load: two 64-bit values or four 32-bit
-    /// ones per step, widened into <paramref name="wide"/>.
+    /// The pack at the element's own width: each block transformed into the buffer
+    /// <c>PackBlock</c> reads, its nulls cleared, its patches found, and packed.
     /// </summary>
     /// <remarks>
-    /// The element width's own arithmetic is the mask. <see cref="BitPackPlan.Encode"/> computes
-    /// in 64 bits and masks to the element width; a 32-bit lane wraps at 32 bits and its arithmetic
-    /// shift by 31 is the sign word, so its result, zero-extended, is the same number. Only the
-    /// low word of the reference takes part, which is all the mask kept of it. The narrower widths
-    /// and the tail are left to the scalar loop.
+    /// <para>
+    /// In the element's own type throughout, which is the whole point. The transforms are the same
+    /// numbers there: <see cref="BitPackPlan.Encode"/> computes in 64 bits and masks to the element
+    /// width, and an element's own subtraction wraps at that width, its zigzag's shifts drop the
+    /// same bits. So there is no block of 64-bit words to widen into, compare in and narrow back
+    /// out of one value at a time: a u8 column's transform is 64 values a 512-bit vector, not one a
+    /// row, and its patches are found 64 at a compare.
+    /// </para>
+    /// <para>
+    /// A null row packs as zero, which always fits, so a null is never a patch: its value is not
+    /// read back, and a stable zero compresses better than whatever the slot held.
+    /// </para>
     /// </remarks>
-    /// <param name="values">The column's values, from its first row.</param>
-    /// <param name="ptype">The column's element type.</param>
-    /// <param name="start">The block's first row.</param>
-    /// <param name="count">The block's rows.</param>
-    /// <param name="plan">The transform and its reference.</param>
-    /// <param name="elementBits">The element width, for the scalar tail.</param>
-    /// <param name="wide">The block's transformed values.</param>
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void TransformValid(
-        ReadOnlySpan<byte> values, PType ptype, int start, int count, in BitPackPlan plan,
-        int elementBits, Span<ulong> wide)
-    {
-        int done = TransformLanes(values, ptype.ByteWidth(), start, count, plan.Transform, plan.Reference, wide);
-        switch (ptype.ByteWidth())
-        {
-            case 1: TransformRows<byte>(values, done, start, count, plan, elementBits, wide); return;
-            case 2: TransformRows<ushort>(values, done, start, count, plan, elementBits, wide); return;
-            case 4: TransformRows<uint>(values, done, start, count, plan, elementBits, wide); return;
-            default: TransformRows<ulong>(values, done, start, count, plan, elementBits, wide); return;
-        }
-    }
-
-    /// <summary>
-    /// Rows <c>[done, count)</c> of the block, the width resolved once: the lanes' tail, or the
-    /// whole block for the widths the lanes do not serve.
-    /// </summary>
-    private static void TransformRows<T>(
-        ReadOnlySpan<byte> values, int done, int start, int count, in BitPackPlan plan,
-        int elementBits, Span<ulong> wide)
+    /// <returns>The patches found.</returns>
+    private static int Pack<T>(
+        ReadOnlySpan<byte> bytes, in ValidityMask mask, in BitPackPlan plan, int length,
+        Span<byte> destination, Span<int> patchIndices, Span<ulong> patchValues)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
-        ReadOnlySpan<T> block = MemoryMarshal.Cast<byte, T>(values).Slice(start, count);
-        for (int i = done; i < block.Length; i++)
+        ReadOnlySpan<T> values = MemoryMarshal.Cast<byte, T>(bytes)[..length];
+        int bitWidth = plan.BitWidth;
+        int blockBytes = FastLanes.BlockByteLength(bitWidth);
+        int blocks = (length + FastLanes.BlockSize - 1) / FastLanes.BlockSize;
+        bool frame = plan.Transform == BitPackTransform.Frame;
+        T reference = T.CreateTruncating(plan.Reference);
+
+        // An exception is a transformed value above the largest the width holds; at the element's
+        // own width nothing can be one, and the chooser then counted none.
+        bool patching = patchIndices.Length > 0;
+        T largest = patching ? T.CreateTruncating((1UL << bitWidth) - 1) : T.AllBitsSet;
+
+        // One block of the element's own type, rented once for the column.
+        T[] rented = ArrayPool<T>.Shared.Rent(FastLanes.BlockSize);
+        int found = 0;
+        try
         {
-            wide[i] = BitPackPlan.Encode(
-                ulong.CreateTruncating(block[i]), plan.Transform, plan.Reference, elementBits);
+            Span<T> block = rented.AsSpan(0, FastLanes.BlockSize);
+            for (int b = 0; b < blocks; b++)
+            {
+                int start = b * FastLanes.BlockSize;
+                int count = Math.Min(FastLanes.BlockSize, length - start);
+
+                // Only the tail of the last block needs clearing: every other block is written
+                // whole by the transform.
+                if (count < FastLanes.BlockSize)
+                {
+                    block[count..].Clear();
+                }
+
+                if (mask.AllInvalid)
+                {
+                    block[..count].Clear();
+                }
+                else
+                {
+                    Transform(values.Slice(start, count), frame, reference, block);
+                    if (!mask.AllValid)
+                    {
+                        ClearNulls(block[..count], in mask, start);
+                    }
+                }
+
+                if (patching)
+                {
+                    found = FindPatches<T>(block[..count], largest, start, patchIndices, patchValues, found);
+                }
+
+                if (blockBytes > 0)
+                {
+                    FastLanes.PackBlock<T>(
+                        block, bitWidth, MemoryMarshal.Cast<byte, T>(destination.Slice(b * blockBytes, blockBytes)));
+                }
+            }
         }
+        finally
+        {
+            ArrayPool<T>.Shared.Return(rented);
+        }
+
+        return found;
     }
 
     /// <summary>
-    /// The exceptions of one transformed block, found eight values at a time: an unsigned
-    /// <c>v ≥ 2^width</c> mask over two loads, and a scalar walk only of the eight that hold one.
+    /// One block's rows under the transform, in the element's own arithmetic: a vector of the
+    /// widest width the machine accelerates at a time, then the tail.
     /// </summary>
-    /// <remarks>
-    /// Exceptions are rare by construction — the chooser priced every one — so the common step is
-    /// two compares, an OR and a test. A found array that would overflow is left to the caller's
-    /// count check, which names both counts.
-    /// </remarks>
-    /// <returns>The patches found so far, this block's included.</returns>
-    private static int FindPatches(
-        ReadOnlySpan<ulong> block, ulong limit, int start, Span<int> indices, Span<ulong> values, int found)
+    private static void Transform<T>(ReadOnlySpan<T> source, bool frame, T reference, Span<T> destination)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
-        const int Step = 8;
-        if (!Vector128.IsHardwareAccelerated)
+        int count = source.Length;
+        int shift = (Unsafe.SizeOf<T>() * 8) - 1;
+        ref T from = ref MemoryMarshal.GetReference(source);
+        ref T into = ref MemoryMarshal.GetReference(destination);
+        int i = 0;
+        if (Vector512.IsHardwareAccelerated)
         {
-            return CollectPatches(block, limit, start, indices, values, found);
+            int lanes = Vector512<T>.Count;
+            Vector512<T> origin = Vector512.Create(reference);
+            for (; i <= count - lanes; i += lanes)
+            {
+                Vector512<T> value = Vector512.LoadUnsafe(ref from, (nuint)i);
+                (frame ? value - origin : (value << 1) ^ (Vector512<T>.Zero - (value >>> shift)))
+                    .StoreUnsafe(ref into, (nuint)i);
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated)
+        {
+            int lanes = Vector128<T>.Count;
+            Vector128<T> origin = Vector128.Create(reference);
+            for (; i <= count - lanes; i += lanes)
+            {
+                Vector128<T> value = Vector128.LoadUnsafe(ref from, (nuint)i);
+                (frame ? value - origin : (value << 1) ^ (Vector128<T>.Zero - (value >>> shift)))
+                    .StoreUnsafe(ref into, (nuint)i);
+            }
         }
 
-        Vector128<ulong> bound = Vector128.Create(limit - 1);
-        ref ulong first = ref MemoryMarshal.GetReference(block);
-        int i = 0;
-        for (; i + Step <= block.Length; i += Step)
+        for (; i < count; i++)
         {
-            Vector128<ulong> any =
-                Vector128.GreaterThan(Vector128.LoadUnsafe(ref first, (nuint)i), bound)
-                | Vector128.GreaterThan(Vector128.LoadUnsafe(ref first, (nuint)(i + 2)), bound)
-                | Vector128.GreaterThan(Vector128.LoadUnsafe(ref first, (nuint)(i + 4)), bound)
-                | Vector128.GreaterThan(Vector128.LoadUnsafe(ref first, (nuint)(i + 6)), bound);
-            if (any == Vector128<ulong>.Zero)
+            T value = Unsafe.Add(ref from, i);
+            Unsafe.Add(ref into, i) = frame
+                ? unchecked(value - reference)
+                : unchecked((value << 1) ^ (T.Zero - (value >> shift)));
+        }
+    }
+
+    /// <summary>Zeroes the transformed value of every null row of a block, a validity word at a time.</summary>
+    /// <remarks>
+    /// Transforming the garbage and clearing it costs less than a test per row in front of the
+    /// transform. A word of no null, which is most of them, costs a test; a word of nothing but
+    /// nulls a clear; a mixed one, with 512-bit vectors, an and per vector of its rows with a mask
+    /// of their bits, and without them an and per row.
+    /// </remarks>
+    private static void ClearNulls<T>(Span<T> block, in ValidityMask mask, int start)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        ReadOnlySpan<byte> bits = mask.Bits;
+        int offset = mask.BitOffset + start;
+        ref T value = ref MemoryMarshal.GetReference(block);
+        bool wide = WordBytes.IsAccelerated;
+        WordBytes spread = wide ? WordBytes.Create() : default;
+        for (int i = 0; i < block.Length; i += 64)
+        {
+            int take = Math.Min(64, block.Length - i);
+            ulong word = BitWords.Load(bits, offset + i) | ~BitWords.Mask(take);
+            if (word == ulong.MaxValue)
             {
                 continue;
             }
 
-            found = CollectPatches(block.Slice(i, Step), limit, start + i, indices, values, found);
-        }
+            if ((word & BitWords.Mask(take)) == 0)
+            {
+                block.Slice(i, take).Clear();
+                continue;
+            }
 
-        return CollectPatches(block[i..], limit, start + i, indices, values, found);
+            if (wide && take == 64)
+            {
+                ClearLanes(ref Unsafe.Add(ref value, i), word, in spread);
+                continue;
+            }
+
+            for (int k = 0; k < take; k++)
+            {
+                Unsafe.Add(ref value, i + k) &= T.CreateTruncating(0UL - ((word >> k) & 1));
+            }
+        }
     }
 
-    /// <summary>The scalar walk: every value at or above the limit, in order.</summary>
-    private static int CollectPatches(
-        ReadOnlySpan<ulong> block, ulong limit, int start, Span<int> indices, Span<ulong> values, int found)
+    /// <summary>Sixty-four rows anded with a mask of their validity bits, a 512-bit vector at a time.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ClearLanes<T>(ref T rows, ulong word, in WordBytes spread)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        int lanes = Vector512<T>.Count;
+        for (int group = 0; group * lanes < 64; group++)
+        {
+            nuint at = (nuint)(group * lanes);
+            (Vector512.LoadUnsafe(ref rows, at) & spread.Lanes<T>(word, group)).StoreUnsafe(ref rows, at);
+        }
+    }
+
+    /// <summary>
+    /// The exceptions of one transformed block, found a vector at a time: a compare against the
+    /// largest value the width holds, and a scalar walk only of the vectors that hold one.
+    /// </summary>
+    /// <remarks>
+    /// Exceptions are rare by construction -- the chooser priced every one -- so the common step is
+    /// one compare and a test. A found array that would overflow is left to the caller's count
+    /// check, which names both counts.
+    /// </remarks>
+    /// <returns>The patches found so far, this block's included.</returns>
+    private static int FindPatches<T>(
+        ReadOnlySpan<T> block, T largest, int start, Span<int> indices, Span<ulong> values, int found)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
+    {
+        ref T first = ref MemoryMarshal.GetReference(block);
+        int i = 0;
+        if (Vector512.IsHardwareAccelerated)
+        {
+            int lanes = Vector512<T>.Count;
+            Vector512<T> bound = Vector512.Create(largest);
+            for (; i <= block.Length - lanes; i += lanes)
+            {
+                if (Vector512.GreaterThanAny(Vector512.LoadUnsafe(ref first, (nuint)i), bound))
+                {
+                    found = CollectPatches(block.Slice(i, lanes), largest, start + i, indices, values, found);
+                }
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated)
+        {
+            int lanes = Vector128<T>.Count;
+            Vector128<T> bound = Vector128.Create(largest);
+            for (; i <= block.Length - lanes; i += lanes)
+            {
+                if (Vector128.GreaterThanAny(Vector128.LoadUnsafe(ref first, (nuint)i), bound))
+                {
+                    found = CollectPatches(block.Slice(i, lanes), largest, start + i, indices, values, found);
+                }
+            }
+        }
+
+        return CollectPatches(block[i..], largest, start + i, indices, values, found);
+    }
+
+    /// <summary>The scalar walk: every value above the largest the width holds, in order.</summary>
+    private static int CollectPatches<T>(
+        ReadOnlySpan<T> block, T largest, int start, Span<int> indices, Span<ulong> values, int found)
+        where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         for (int i = 0; i < block.Length; i++)
         {
-            if (block[i] < limit)
+            if (block[i] <= largest)
             {
                 continue;
             }
@@ -763,192 +830,13 @@ internal static class ArrayBlobWriter
             if (found < indices.Length)
             {
                 indices[found] = start + i;
-                values[found] = block[i];
+                values[found] = ulong.CreateTruncating(block[i]);
             }
 
             found++;
         }
 
         return found;
-    }
-
-    /// <summary>
-    /// The transform of a block that may hold nulls: <see cref="TransformValid"/> over every row,
-    /// then each row anded with its validity bit spread over the word.
-    /// </summary>
-    /// <remarks>
-    /// A null row encodes as zero under either transform: its value is never read back and a
-    /// stable zero compresses better than whatever the buffer held. Transforming the garbage and
-    /// clearing it costs less than a test per row in front of the transform.
-    /// </remarks>
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void TransformMasked(
-        ReadOnlySpan<byte> values, in ValidityMask mask, PType ptype, int start, int count,
-        in BitPackPlan plan, int elementBits, Span<ulong> wide)
-    {
-        if (mask.AllInvalid)
-        {
-            wide[..count].Clear();
-            return;
-        }
-
-        TransformValid(values, ptype, start, count, plan, elementBits, wide);
-        int firstBit = mask.BitOffset + start;
-        ref byte bits = ref MemoryMarshal.GetReference(mask.Bits[..((firstBit + count + 7) >> 3)]);
-        ref ulong value = ref MemoryMarshal.GetReference(wide[..count]);
-        for (nint i = 0; i < count; i++)
-        {
-            nint at = firstBit + i;
-            Unsafe.Add(ref value, i) &= 0UL - (ulong)((Unsafe.Add(ref bits, at >> 3) >> (int)(at & 7)) & 1);
-        }
-    }
-
-    /// <summary>The lanes of <see cref="TransformValid"/>, for 32- and 64-bit elements.</summary>
-    /// <returns>The rows written: a prefix of the block.</returns>
-    private static int TransformLanes(
-        ReadOnlySpan<byte> values, int byteWidth, int start, int count,
-        BitPackTransform transform, ulong reference, Span<ulong> wide)
-    {
-        if (!Vector128.IsHardwareAccelerated)
-        {
-            return 0;
-        }
-
-        bool frame = transform == BitPackTransform.Frame;
-        ref ulong destination = ref MemoryMarshal.GetReference(wide);
-        if (byteWidth == sizeof(ulong))
-        {
-            ref ulong source = ref Unsafe.Add(
-                ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, ulong>(values)), start);
-            return frame
-                ? FrameLanes(ref source, ref destination, count, reference)
-                : ZigZagLanes(ref source, ref destination, count);
-        }
-
-        if (byteWidth == sizeof(uint))
-        {
-            ref uint source = ref Unsafe.Add(
-                ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, uint>(values)), start);
-            return frame
-                ? FrameLanes(ref source, ref destination, count, unchecked((uint)reference))
-                : ZigZagLanes(ref source, ref destination, count);
-        }
-
-        return 0;
-    }
-
-    // The lanes' loops, one per transform and width, two registers a step: a loop this small moves
-    // by half its time with where it lands in the code, and one unrolled holds its speed.
-
-    private static int FrameLanes(ref ulong source, ref ulong destination, int count, ulong reference)
-    {
-        Vector128<ulong> origin = Vector128.Create(reference);
-        int i = 0;
-        for (; i + 4 <= count; i += 4)
-        {
-            (Vector128.LoadUnsafe(ref source, (nuint)i) - origin).StoreUnsafe(ref destination, (nuint)i);
-            (Vector128.LoadUnsafe(ref source, (nuint)(i + 2)) - origin).StoreUnsafe(ref destination, (nuint)(i + 2));
-        }
-
-        return i;
-    }
-
-    private static int ZigZagLanes(ref ulong source, ref ulong destination, int count)
-    {
-        int i = 0;
-        for (; i + 4 <= count; i += 4)
-        {
-            Vector128<ulong> low = Vector128.LoadUnsafe(ref source, (nuint)i);
-            Vector128<ulong> high = Vector128.LoadUnsafe(ref source, (nuint)(i + 2));
-            ((low << 1) ^ Vector128.ShiftRightArithmetic(low.AsInt64(), 63).AsUInt64()).StoreUnsafe(ref destination, (nuint)i);
-            ((high << 1) ^ Vector128.ShiftRightArithmetic(high.AsInt64(), 63).AsUInt64()).StoreUnsafe(ref destination, (nuint)(i + 2));
-        }
-
-        return i;
-    }
-
-    private static int FrameLanes(ref uint source, ref ulong destination, int count, uint reference)
-    {
-        Vector128<uint> origin = Vector128.Create(reference);
-        int i = 0;
-        for (; i + 8 <= count; i += 8)
-        {
-            Vector128<uint> low = Vector128.LoadUnsafe(ref source, (nuint)i) - origin;
-            Vector128<uint> high = Vector128.LoadUnsafe(ref source, (nuint)(i + 4)) - origin;
-            Vector128.WidenLower(low).StoreUnsafe(ref destination, (nuint)i);
-            Vector128.WidenUpper(low).StoreUnsafe(ref destination, (nuint)(i + 2));
-            Vector128.WidenLower(high).StoreUnsafe(ref destination, (nuint)(i + 4));
-            Vector128.WidenUpper(high).StoreUnsafe(ref destination, (nuint)(i + 6));
-        }
-
-        return i;
-    }
-
-    private static int ZigZagLanes(ref uint source, ref ulong destination, int count)
-    {
-        int i = 0;
-        for (; i + 8 <= count; i += 8)
-        {
-            Vector128<uint> low = Vector128.LoadUnsafe(ref source, (nuint)i);
-            Vector128<uint> high = Vector128.LoadUnsafe(ref source, (nuint)(i + 4));
-            low = (low << 1) ^ Vector128.ShiftRightArithmetic(low.AsInt32(), 31).AsUInt32();
-            high = (high << 1) ^ Vector128.ShiftRightArithmetic(high.AsInt32(), 31).AsUInt32();
-            Vector128.WidenLower(low).StoreUnsafe(ref destination, (nuint)i);
-            Vector128.WidenUpper(low).StoreUnsafe(ref destination, (nuint)(i + 2));
-            Vector128.WidenLower(high).StoreUnsafe(ref destination, (nuint)(i + 4));
-            Vector128.WidenUpper(high).StoreUnsafe(ref destination, (nuint)(i + 6));
-        }
-
-        return i;
-    }
-
-    private static void PackInto(
-        ReadOnlySpan<ulong> block, byte[] scratch, int bitWidth, PType ptype, Span<byte> destination)
-    {
-        switch (ptype.ByteWidth())
-        {
-            case 1:
-            {
-                Span<byte> narrow = scratch.AsSpan(0, FastLanes.BlockSize);
-                for (int i = 0; i < narrow.Length; i++)
-                {
-                    narrow[i] = (byte)block[i];
-                }
-
-                FastLanes.PackBlock<byte>(narrow, bitWidth, destination);
-                return;
-            }
-
-            case 2:
-            {
-                Span<ushort> narrow = MemoryMarshal.Cast<byte, ushort>(
-                    scratch.AsSpan(0, FastLanes.BlockSize * sizeof(ushort)));
-                for (int i = 0; i < narrow.Length; i++)
-                {
-                    narrow[i] = (ushort)block[i];
-                }
-
-                FastLanes.PackBlock<ushort>(narrow, bitWidth, MemoryMarshal.Cast<byte, ushort>(destination));
-                return;
-            }
-
-            case 4:
-            {
-                Span<uint> narrow = MemoryMarshal.Cast<byte, uint>(
-                    scratch.AsSpan(0, FastLanes.BlockSize * sizeof(uint)));
-                for (int i = 0; i < narrow.Length; i++)
-                {
-                    narrow[i] = (uint)block[i];
-                }
-
-                FastLanes.PackBlock<uint>(narrow, bitWidth, MemoryMarshal.Cast<byte, uint>(destination));
-                return;
-            }
-
-            default:
-                FastLanes.PackBlock<ulong>(block, bitWidth, MemoryMarshal.Cast<byte, ulong>(destination));
-                return;
-        }
     }
 
     private static ReadOnlySpan<byte> BitPackedBytes(
@@ -1541,26 +1429,51 @@ internal static class ArrayBlobWriter
     /// a per-entry one here.
     /// </para>
     /// </remarks>
+    /// <remarks>
+    /// The width is resolved once, not once an index: a varbin's offsets are one a row, where the
+    /// other index arrays are one a patch or a dictionary entry. The host is little-endian, which
+    /// the writer checks once at start-up, so the indices are written as the typed words they are.
+    /// </remarks>
     private static void WriteIndices(ReadOnlySpan<int> values, int width, Span<byte> destination)
     {
-        for (int i = 0; i < values.Length; i++)
+        switch (width)
         {
-            Span<byte> at = destination.Slice(i * width, width);
-            switch (width)
+            case 1:
             {
-                case 1:
-                    at[0] = (byte)values[i];
-                    break;
-                case 2:
-                    BinaryPrimitives.WriteUInt16LittleEndian(at, (ushort)values[i]);
-                    break;
-                case 8:
-                    BinaryPrimitives.WriteUInt64LittleEndian(at, (ulong)(uint)values[i]);
-                    break;
-                default:
-                    BinaryPrimitives.WriteUInt32LittleEndian(at, (uint)values[i]);
-                    break;
+                Span<byte> into = destination[..values.Length];
+                for (int i = 0; i < into.Length; i++)
+                {
+                    into[i] = (byte)values[i];
+                }
+
+                break;
             }
+
+            case 2:
+            {
+                Span<ushort> into = MemoryMarshal.Cast<byte, ushort>(destination)[..values.Length];
+                for (int i = 0; i < into.Length; i++)
+                {
+                    into[i] = (ushort)values[i];
+                }
+
+                break;
+            }
+
+            case 8:
+            {
+                Span<ulong> into = MemoryMarshal.Cast<byte, ulong>(destination)[..values.Length];
+                for (int i = 0; i < into.Length; i++)
+                {
+                    into[i] = (uint)values[i];
+                }
+
+                break;
+            }
+
+            default:
+                MemoryMarshal.AsBytes(values).CopyTo(destination);
+                break;
         }
     }
 
@@ -1809,64 +1722,53 @@ internal static class ArrayBlobWriter
         result = 0;
         int rows = node.Length;
         ValidityReader mask = ValidityReader.Of(arena, node.Validity);
-        ViewValues values = new ViewValues(node);
 
-        long heapBytes = 0;
-        for (int i = 0; i < rows; i++)
-        {
-            if (mask.IsValid(i))
-            {
-                heapBytes += values.At(i).Length;
-            }
-        }
-
-        if (heapBytes > int.MaxValue)
-        {
-            return false;
-        }
-
-        PType offsetsPType = FsstPlan.IndexPType(heapBytes);
-        long varbinForm = (((long)rows + 1) * offsetsPType.ByteWidth()) + heapBytes;
-        if (varbinForm >= viewForm)
-        {
-            return false;
-        }
-
-        // Rented, and written once without being cleared first. `heapBytes` is the sum of the valid
-        // values' lengths, so the loop below fills exactly that many bytes of the heap, which goes
-        // into the blob as a rental queued before the loop so that the blob's `finally` hands it
-        // back. The offsets are copied into the arena at their own width and go back at once.
-        int heapLength = (int)heapBytes;
-        byte[] heap = ArrayPool<byte>.Shared.Rent(heapLength);
-        int heapBuffer = Add(blob, new PendingBuffer(heap, heapLength, 0, rented: true));
-        int width = offsetsPType.ByteWidth();
-        VortexBuffer offsetBuffer = arena.AllocateUninitialized(
-            (rows + 1) * width, width, out Span<byte> offsetBytes);
-        int[] offsets = ArrayPool<int>.Shared.Rent(rows + 1);
+        // The sizes are read from the views, a null row's as zero: a null row is zero-length, so
+        // offsets stay monotone and the reader never looks at the bytes, because validity already
+        // told it not to. The values are then gathered by `ViewHeap`, each view's start in the
+        // heap being the row's offset.
+        int[] lengths = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        int[]? offsets = null;
+        VortexBuffer offsetBuffer;
+        PType offsetsPType;
+        int heapBuffer;
         try
         {
-            int written = 0;
-            for (int i = 0; i < rows; i++)
+            long heapBytes = ViewHeap.Lengths(node, mask, lengths.AsSpan(0, rows));
+            if (heapBytes > int.MaxValue - ViewHeap.Slack)
             {
-                offsets[i] = written;
-                if (!mask.IsValid(i))
-                {
-                    // A null row is zero-length: offsets stay monotone and the reader never looks
-                    // at the bytes, because validity already told it not to.
-                    continue;
-                }
-
-                ReadOnlySpan<byte> value = values.At(i);
-                value.CopyTo(heap.AsSpan(written));
-                written += value.Length;
+                return false;
             }
 
-            offsets[rows] = written;
+            offsetsPType = FsstPlan.IndexPType(heapBytes);
+            long varbinForm = (((long)rows + 1) * offsetsPType.ByteWidth()) + heapBytes;
+            if (varbinForm >= viewForm)
+            {
+                return false;
+            }
+
+            // Rented, and written once without being cleared first, with the slack the gather
+            // writes past its last value. `heapBytes` is the sum of the valid values' lengths, so
+            // the gather fills exactly that many bytes of the heap, which goes into the blob as a
+            // rental queued before the gather so that the blob's `finally` hands it back. The
+            // offsets are copied into the arena at their own width and go back at once.
+            int heapLength = (int)heapBytes;
+            byte[] heap = ArrayPool<byte>.Shared.Rent(heapLength + ViewHeap.Slack);
+            heapBuffer = Add(blob, new PendingBuffer(heap, heapLength, 0, rented: true));
+            int width = offsetsPType.ByteWidth();
+            offsetBuffer = arena.AllocateUninitialized((rows + 1) * width, width, out Span<byte> offsetBytes);
+            offsets = ArrayPool<int>.Shared.Rent(rows + 1);
+            ViewHeap.Gather(node, lengths.AsSpan(0, rows), heap, offsets.AsSpan(0, rows));
+            offsets[rows] = heapLength;
             WriteIndices(offsets.AsSpan(0, rows + 1), width, offsetBytes);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(offsets);
+            ArrayPool<int>.Shared.Return(lengths);
+            if (offsets is not null)
+            {
+                ArrayPool<int>.Shared.Return(offsets);
+            }
         }
 
         Span<int> children = stackalloc int[2];

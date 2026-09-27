@@ -77,6 +77,75 @@ public sealed class AlpRdDecoderTests
         }
     }
 
+    [Theory]
+    [InlineData(PType.U8, false)]
+    [InlineData(PType.U16, false)]
+    [InlineData(PType.U32, false)]
+    [InlineData(PType.U64, false)]
+    [InlineData(PType.U8, true)]
+    [InlineData(PType.U16, true)]
+    [InlineData(PType.U32, true)]
+    [InlineData(PType.U64, true)]
+    internal void EveryCodeWidthCombinesAsTheScalarLineDoes(PType codeType, bool single)
+    {
+        // Thirty-seven rows over a full dictionary: whole vector steps where a machine has them, a
+        // tail after them, and every entry looked up, each row checked by its bits.
+        const int rows = 37;
+        int rightBitWidth = single ? 20 : 48;
+        int width = single ? sizeof(uint) : sizeof(ulong);
+        Random random = new Random(20260926 + (int)codeType);
+        uint[] dictionary = new uint[8];
+        for (int i = 0; i < dictionary.Length; i++)
+        {
+            dictionary[i] = (uint)random.Next(1 << (single ? 12 : 16));
+        }
+
+        int[] code = new int[rows];
+        ulong[] low = new ulong[rows];
+        byte[] codes = new byte[rows * codeType.ByteWidth()];
+        byte[] right = new byte[rows * width];
+        for (int i = 0; i < rows; i++)
+        {
+            code[i] = random.Next(dictionary.Length);
+            low[i] =(ulong)random.NextInt64() & ((1UL << rightBitWidth) - 1);
+            if (single)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(right.AsSpan(i * 4), (uint)low[i]);
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(right.AsSpan(i * 8), low[i]);
+            }
+
+            Span<byte> at = codes.AsSpan(i * codeType.ByteWidth());
+            switch (codeType)
+            {
+                case PType.U8: at[0] = (byte)code[i]; break;
+                case PType.U16: BinaryPrimitives.WriteUInt16LittleEndian(at, (ushort)code[i]); break;
+                case PType.U32: BinaryPrimitives.WriteUInt32LittleEndian(at, (uint)code[i]); break;
+                default: BinaryPrimitives.WriteUInt64LittleEndian(at, (ulong)code[i]); break;
+            }
+        }
+
+        TestNode root = new TestNode("vortex.alprd")
+            .WithMetadata(TestMetadata.AlpRd((uint)rightBitWidth, codeType, dictionary))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(0))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(1));
+
+        using DecodeHarness harness = DecodeHarness.Load(root, codes, right);
+        DType type = harness.Types.Primitive(single ? PType.F32 : PType.F64, Nullability.NonNullable);
+        CanonicalNode node = harness.Node(harness.DecodeRoot(type, rows));
+
+        for (int i = 0; i < rows; i++)
+        {
+            ulong expected = ((ulong)dictionary[code[i]] << rightBitWidth) | low[i];
+            ulong actual = single
+                ? BinaryPrimitives.ReadUInt32LittleEndian(node.Values.Span.Slice(i * 4, 4))
+                : BinaryPrimitives.ReadUInt64LittleEndian(node.Values.Span.Slice(i * 8, 8));
+            Assert.Equal(expected, actual);
+        }
+    }
+
     [Fact]
     public void SharedHighBitsCollapseIntoOneDictionaryEntry()
     {

@@ -355,6 +355,37 @@ internal readonly struct BitPackPlan
         int elementBits = Unsafe.SizeOf<T>() * 8;
         int shift = elementBits - 1;
 
+        // Where 512-bit vectors count leading zeros, the ingest pass's counter takes the framed
+        // widths as it takes its own, a vector of rows to an instruction and a band of widths
+        // counted by compares, where the loops below increment a counter a row. A null row, which
+        // it leaves out, is counted at width zero here, as the loops count it.
+        if (BlockStatsPass.LanesCountWidths && length >= 64 && !mask.AllInvalid)
+        {
+            Span<int> widths = stackalloc int[BitPackWidths.Length];
+            widths.Clear();
+            bool masked = !mask.AllValid;
+            BlockStatsPass.CountLaneWidths(
+                values, masked ? mask.Bits : default, mask.BitOffset, masked, signed, widths, minimum);
+            int nulls = masked ? length - BitmapKernels.CountSet(mask.Bits, mask.BitOffset, length) : 0;
+            for (int w = 0; w < BitPackWidths.Domain; w++)
+            {
+                frames[w] += widths[w];
+            }
+
+            frames[0] += nulls;
+            if (signed)
+            {
+                for (int w = 0; w < BitPackWidths.Domain; w++)
+                {
+                    zigzags[w] += widths[BitPackWidths.ZigZagOffset + w];
+                }
+
+                zigzags[0] += nulls;
+            }
+
+            return;
+        }
+
         if (mask.AllValid && !signed)
         {
             FramedWidths(values, reference, elementBits, frames);

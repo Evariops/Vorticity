@@ -281,6 +281,60 @@ public sealed class NestedDecoderTests
         Assert.Equal(CanonicalKind.ListView, h.Node(index).Kind);
     }
 
+    // Rows enough for the validation's vectors, eight or sixteen rows at a time, with one bad row
+    // at either end of a vector and past the last whole one: every place it can hide.
+    [Theory]
+    [InlineData(false, -1, 0)]
+    [InlineData(true, -1, 0)]
+    [InlineData(false, 0, 1)]
+    [InlineData(false, 15, 1)]
+    [InlineData(false, 16, 2)]
+    [InlineData(false, 39, 2)]
+    [InlineData(true, 0, 1)]
+    [InlineData(true, 7, 2)]
+    [InlineData(true, 8, 3)]
+    [InlineData(true, 16, 1)]
+    [InlineData(true, 39, 3)]
+    public void ListViewChecksEveryRowOfALongColumn(bool wide, int badRow, int badKind)
+    {
+        const int Rows = 40;
+        const int Elements = 100;
+        Random random = new Random((badRow * 7) + badKind + (wide ? 100 : 0));
+        long[] offsets = new long[Rows];
+        long[] sizes = new long[Rows];
+        for (int i = 0; i < Rows; i++)
+        {
+            offsets[i] = random.Next(Elements + 1);
+            sizes[i] = random.Next((int)(Elements - offsets[i]) + 1);
+        }
+
+        if (badRow >= 0)
+        {
+            (offsets[badRow], sizes[badRow]) = badKind switch
+            {
+                1 => (-1L, 1L),
+                2 => (Elements - 2L, 3L),
+                _ => (long.MaxValue, 1L),
+            };
+        }
+
+        using DecodeHarness h = new DecodeHarness();
+        BlobBuilder b = new BlobBuilder();
+        byte[] elements = I32(new int[Elements]);
+        BlobNode node = wide
+            ? ListView64(b, elements, I64(offsets), I64(sizes), Elements)
+            : ListView(b, elements, I32(Array.ConvertAll(offsets, v => (int)v)), I32(Array.ConvertAll(sizes, v => (int)v)), Elements);
+        DType dtype = h.Types.List(h.Types.Primitive(PType.I32, Nullability.NonNullable), Nullability.NonNullable);
+        if (badRow < 0)
+        {
+            Assert.Equal(CanonicalKind.ListView, h.Node(h.Decode(b, node, dtype, Rows)).Kind);
+        }
+        else
+        {
+            Assert.Throws<VortexFormatException>(() => h.Decode(b, node, dtype, Rows));
+        }
+    }
+
     private static BlobNode ListView64(
         BlobBuilder b, byte[] elements, byte[] offsets, byte[] sizes, ulong elementsLength)
     {

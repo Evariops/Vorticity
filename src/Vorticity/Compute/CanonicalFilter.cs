@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -34,18 +35,8 @@ internal static class CanonicalFilter
     /// No branch on the state: a filter's verdicts follow the data, and a branch taken on a row's
     /// verdict is mispredicted as often as the data is irregular.
     /// </remarks>
-    internal static int Select(ReadOnlySpan<byte> states, Span<int> indices)
-    {
-        Span<int> slots = indices[..states.Length];
-        int count = 0;
-        for (int i = 0; i < states.Length; i++)
-        {
-            slots[count] = i;
-            count += states[i] == Trilean.True ? 1 : 0;
-        }
-
-        return count;
-    }
+    internal static int Select(ReadOnlySpan<byte> states, Span<int> indices) =>
+        RowIndices.FromStates(states, indices);
 
     /// <summary>
     /// Produces a node holding only <paramref name="indices"/> of <paramref name="nodeIndex"/>.
@@ -64,47 +55,70 @@ internal static class CanonicalFilter
     /// without its own arm fails the build instead of being gathered through a child it does not
     /// have.
     /// </remarks>
-    internal static int Apply(CanonicalArena arena, int nodeIndex, ReadOnlySpan<int> indices)
+    internal static int Apply(CanonicalArena arena, int nodeIndex, ReadOnlySpan<int> indices) =>
+        Apply(arena, nodeIndex, indices, default);
+
+    /// <summary>
+    /// Produces a node holding the rows of <paramref name="nodeIndex"/> that
+    /// <paramref name="mask"/> keeps, which <paramref name="indices"/> lists too, ascending.
+    /// </summary>
+    /// <param name="arena">The arena, which receives the new nodes and buffers.</param>
+    /// <param name="nodeIndex">The node to filter.</param>
+    /// <param name="indices">The kept rows, ascending: what a form the mask cannot take is gathered by.</param>
+    /// <param name="mask">
+    /// A bit a row of the node, set for the rows <paramref name="indices"/> lists; empty to gather
+    /// by the indices alone.
+    /// </param>
+    /// <returns>The new node's index.</returns>
+    /// <remarks>
+    /// For a selection that keeps most rows: values of up to eight bytes, views and 128-bit
+    /// decimals, a list's offsets and sizes and a dictionary's codes are packed by
+    /// <see cref="MaskFilter"/> a register at a time, bits and validities 64 at a time, where a
+    /// gather reads a row per index. Where the mask keeps few rows the gather reads less; the
+    /// caller decides, and passes no mask then.
+    /// </remarks>
+    internal static int Apply(CanonicalArena arena, int nodeIndex, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> mask)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
+        Debug.Assert(mask.IsEmpty || mask.Length == (node.Length + 63) >> 6);
         int count = indices.Length;
 
         return node.Kind switch
         {
             CanonicalKind.Null => arena.AddNull(node.DType, count),
-            CanonicalKind.Bool => FilterBool(arena, node, indices),
-            CanonicalKind.Primitive => FilterPrimitive(arena, node, indices),
-            CanonicalKind.Decimal => FilterDecimal(arena, node, indices),
-            CanonicalKind.VarBinView => FilterVarBinView(arena, node, indices),
-            CanonicalKind.ListView => FilterListView(arena, node, indices),
+            CanonicalKind.Bool => FilterBool(arena, node, indices, mask),
+            CanonicalKind.Primitive => FilterPrimitive(arena, node, indices, mask),
+            CanonicalKind.Decimal => FilterDecimal(arena, node, indices, mask),
+            CanonicalKind.VarBinView => FilterVarBinView(arena, node, indices, mask),
+            CanonicalKind.ListView => FilterListView(arena, node, indices, mask),
             CanonicalKind.FixedSizeList => FilterFixedSizeList(arena, node, indices),
-            CanonicalKind.Struct => FilterStruct(arena, node, indices),
-            CanonicalKind.Extension => FilterExtension(arena, node, indices),
+            CanonicalKind.Struct => FilterStruct(arena, node, indices, mask),
+            CanonicalKind.Extension => FilterExtension(arena, node, indices, mask),
             // Filtering a constant yields a constant: only the length and the validity change, the
             // element is the same one, and a gather over rows that all hold it would gather
             // nothing.
             CanonicalKind.Constant => arena.AddConstant(
                 node.DType,
                 count,
-                FilterValidity(arena, node.Validity, indices),
+                FilterValidity(arena, node.Validity, indices, mask),
                 node.ConstantElement),
 
             // The codes are one per row and are what the selection picks; the distinct values are
             // shared by every row, so they travel untouched.
-            CanonicalKind.Dictionary => FilterDictionary(arena, node, indices),
+            CanonicalKind.Dictionary => FilterDictionary(arena, node, indices, mask),
 
             // A selection breaks runs apart, and a gather through the ends would cost a search per
             // row for a form the consumer may never read: the runs are expanded once and gathered.
-            CanonicalKind.RunEnd => Apply(arena, arena.MaterializeEncoded(nodeIndex), indices),
+            CanonicalKind.RunEnd => Apply(arena, arena.MaterializeEncoded(nodeIndex), indices, mask),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
     }
 
     private static int FilterDictionary(
-        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
+        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> mask)
     {
         int count = indices.Length;
-        Validity validity = FilterValidity(arena, node.Validity, indices);
+        Validity validity = FilterValidity(arena, node.Validity, indices, mask);
         VortexBuffer codes = VortexBuffer.Empty;
         if (count > 0)
         {
@@ -113,24 +127,37 @@ internal static class CanonicalFilter
                 ArrayDecodeContext.CheckedMultiply(count, sizeof(uint), "filtered dictionary codes"), sizeof(uint), out Span<byte> raw);
             ReadOnlySpan<uint> source = MemoryMarshal.Cast<byte, uint>(node.Codes.Span);
             Span<uint> target = MemoryMarshal.Cast<byte, uint>(raw)[..count];
-            for (int i = 0; i < target.Length; i++)
+            if (!mask.IsEmpty)
             {
-                target[i] = source[indices[i]];
+                MaskFilter.Compress(source[..node.Length], mask, target);
+            }
+            else
+            {
+                for (int i = 0; i < target.Length; i++)
+                {
+                    target[i] = source[indices[i]];
+                }
             }
         }
 
         return arena.AddDictionary(node.DType, count, validity, codes, node.EncodedValuesIndex);
     }
 
-    private static int FilterBool(CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
+    private static int FilterBool(CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> mask)
     {
         int count = indices.Length;
-        Validity validity = FilterValidity(arena, node.Validity, indices);
+        Validity validity = FilterValidity(arena, node.Validity, indices, mask);
         int bytes = CanonicalSupport.BitmapByteCount(count);
         VortexBuffer bits = arena.Allocate(Math.Max(bytes, 1), 1, out Span<byte> destination);
 
         ReadOnlySpan<byte> source = node.Bits.Span;
         int offset = node.BitOffset;
+        if (!mask.IsEmpty)
+        {
+            MaskFilter.Bits(source, offset, node.Length, mask, destination);
+            return arena.AddBool(node.DType, count, validity, bits, 0);
+        }
+
         for (int i = 0; i < count; i++)
         {
             if (CanonicalSupport.BitAt(source, offset + indices[i]))
@@ -143,34 +170,34 @@ internal static class CanonicalFilter
     }
 
     private static int FilterPrimitive(
-        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
+        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> mask)
     {
         int count = indices.Length;
-        Validity validity = FilterValidity(arena, node.Validity, indices);
+        Validity validity = FilterValidity(arena, node.Validity, indices, mask);
         int width = node.PType.ByteWidth();
-        VortexBuffer values = Gather(arena, node.Values.Span, indices, width);
+        VortexBuffer values = Gather(arena, node.Values.Span, indices, width, mask);
         return arena.AddPrimitive(node.DType, count, validity, node.PType, values);
     }
 
     private static int FilterDecimal(
-        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
+        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> mask)
     {
         int count = indices.Length;
-        Validity validity = FilterValidity(arena, node.Validity, indices);
+        Validity validity = FilterValidity(arena, node.Validity, indices, mask);
         int width = Types.Numerics.DecimalStorage.ByteWidth(node.Storage);
-        VortexBuffer values = Gather(arena, node.Values.Span, indices, width);
+        VortexBuffer values = Gather(arena, node.Values.Span, indices, width, mask);
         return arena.AddDecimal(
             node.DType, count, validity, node.Storage, node.Precision, node.Scale, values);
     }
 
     private static int FilterVarBinView(
-        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
+        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> mask)
     {
         int count = indices.Length;
-        Validity validity = FilterValidity(arena, node.Validity, indices);
+        Validity validity = FilterValidity(arena, node.Validity, indices, mask);
 
         // The views are gathered; the heap they point into is shared as it is.
-        VortexBuffer views = Gather(arena, node.Views.Span, indices, ViewSize);
+        VortexBuffer views = Gather(arena, node.Views.Span, indices, ViewSize, mask);
 
         int buffers = node.DataBufferCount;
         if (buffers == 0)
@@ -196,13 +223,13 @@ internal static class CanonicalFilter
     }
 
     private static int FilterListView(
-        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
+        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> mask)
     {
         int count = indices.Length;
-        Validity validity = FilterValidity(arena, node.Validity, indices);
+        Validity validity = FilterValidity(arena, node.Validity, indices, mask);
         VortexBuffer offsets = Gather(
-            arena, node.Offsets.Span, indices, node.OffsetPType.ByteWidth());
-        VortexBuffer sizes = Gather(arena, node.Sizes.Span, indices, node.SizePType.ByteWidth());
+            arena, node.Offsets.Span, indices, node.OffsetPType.ByteWidth(), mask);
+        VortexBuffer sizes = Gather(arena, node.Sizes.Span, indices, node.SizePType.ByteWidth(), mask);
 
         return arena.AddListView(
             node.DType, count, validity, node.ElementsIndex, offsets, node.OffsetPType, sizes,
@@ -213,7 +240,7 @@ internal static class CanonicalFilter
         CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
     {
         int count = indices.Length;
-        Validity validity = FilterValidity(arena, node.Validity, indices);
+        Validity validity = FilterValidity(arena, node.Validity, indices, default);
         int size = checked((int)node.FixedSize);
 
         if (size == 0)
@@ -245,10 +272,10 @@ internal static class CanonicalFilter
     }
 
     private static int FilterStruct(
-        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
+        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> mask)
     {
         int count = indices.Length;
-        Validity validity = FilterValidity(arena, node.Validity, indices);
+        Validity validity = FilterValidity(arena, node.Validity, indices, mask);
         int fields = node.FieldCount;
 
         if (fields == 0)
@@ -263,7 +290,7 @@ internal static class CanonicalFilter
             {
                 // Re-read the node each time: Apply adds nodes, and the arena may have moved its
                 // record array out from under a stale CanonicalNode.
-                children[i] = Apply(arena, arena.GetNode(node.GetFieldIndex(i)), indices);
+                children[i] = Apply(arena, arena.GetNode(node.GetFieldIndex(i)), indices, mask);
             }
 
             return arena.AddStruct(node.DType, count, validity, children.AsSpan(0, fields));
@@ -275,14 +302,14 @@ internal static class CanonicalFilter
     }
 
     private static int FilterExtension(
-        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices)
+        CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> mask)
     {
         if (node.Kind != CanonicalKind.Extension)
         {
             throw new NotSupportedException($"A filter cannot gather a {node.Kind} column.");
         }
 
-        int storage = Apply(arena, node.StorageIndex, indices);
+        int storage = Apply(arena, node.StorageIndex, indices, mask);
         return arena.AddExtension(node.DType, indices.Length, storage);
     }
 
@@ -294,7 +321,7 @@ internal static class CanonicalFilter
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">An index lies past the source's rows.</exception>
     private static VortexBuffer Gather(
-        CanonicalArena arena, ReadOnlySpan<byte> source, ReadOnlySpan<int> indices, int width)
+        CanonicalArena arena, ReadOnlySpan<byte> source, ReadOnlySpan<int> indices, int width, ReadOnlySpan<ulong> mask)
     {
         int count = indices.Length;
         if (count == 0 || width == 0)
@@ -304,6 +331,34 @@ internal static class CanonicalFilter
 
         VortexBuffer buffer = arena.AllocateUninitialized(
             ArrayDecodeContext.CheckedMultiply(count, width, "gathered values"), width, out Span<byte> destination);
+        if (!mask.IsEmpty && width is 1 or 2 or 4 or 8 or 16)
+        {
+            // The rows the mask covers: a source past them holds rows no bit keeps.
+            int rows = Math.Min(source.Length / width, mask.Length << 6);
+            ReadOnlySpan<byte> covered = source[..(rows * width)];
+            ReadOnlySpan<ulong> words = mask[..((rows + 63) >> 6)];
+            switch (width)
+            {
+                case 1:
+                    MaskFilter.Compress(covered, words, destination);
+                    break;
+                case 2:
+                    MaskFilter.Compress(MemoryMarshal.Cast<byte, ushort>(covered), words, MemoryMarshal.Cast<byte, ushort>(destination));
+                    break;
+                case 4:
+                    MaskFilter.Compress(MemoryMarshal.Cast<byte, uint>(covered), words, MemoryMarshal.Cast<byte, uint>(destination));
+                    break;
+                case 8:
+                    MaskFilter.Compress(MemoryMarshal.Cast<byte, ulong>(covered), words, MemoryMarshal.Cast<byte, ulong>(destination));
+                    break;
+                default:
+                    MaskFilter.CompressPairs(MemoryMarshal.Cast<byte, ulong>(covered), words, MemoryMarshal.Cast<byte, ulong>(destination));
+                    break;
+            }
+
+            return buffer;
+        }
+
         int outside = RowKernels.Gather(
             MemoryMarshal.AsBytes(indices), PType.I32, source, width, source.Length / width, destination, count);
         if (outside >= 0)
@@ -328,11 +383,46 @@ internal static class CanonicalFilter
     /// <param name="indices">The selected rows.</param>
     /// <remarks>Internal so a specialized selective decoder can reuse it rather than copy it.</remarks>
     internal static Validity FilterValidity(
-        CanonicalArena arena, Validity validity, ReadOnlySpan<int> indices)
+        CanonicalArena arena, Validity validity, ReadOnlySpan<int> indices) =>
+        FilterValidity(arena, validity, indices, default);
+
+    /// <summary>
+    /// <see cref="FilterValidity(CanonicalArena, Validity, ReadOnlySpan{int})"/> by a selection's
+    /// mask where it has one: the valid rows kept counted a word at a time, and the bitmap, where
+    /// it survives the collapse, packed 64 rows an instruction.
+    /// </summary>
+    private static Validity FilterValidity(
+        CanonicalArena arena, Validity validity, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> selection)
     {
         if (validity.Kind != ValidityKind.Bitmap)
         {
             return validity;
+        }
+
+        if (!selection.IsEmpty)
+        {
+            CanonicalNode bitmap = arena.GetNode(validity.CanonicalNodeIndex);
+            ReadOnlySpan<byte> source = bitmap.Bits.Span;
+            int offset = bitmap.BitOffset;
+            int kept = 0;
+            for (int w = 0; w < selection.Length; w++)
+            {
+                kept += BitOperations.PopCount(BitWords.Load(source, offset + (w << 6)) & selection[w]);
+            }
+
+            if (kept == indices.Length)
+            {
+                return Validity.AllValid;
+            }
+
+            if (kept == 0)
+            {
+                return Validity.AllInvalid;
+            }
+
+            VortexBuffer packed = arena.Allocate(Math.Max(CanonicalSupport.BitmapByteCount(indices.Length), 1), 1, out Span<byte> into);
+            MaskFilter.Bits(source, offset, bitmap.Length, selection, into);
+            return Validity.Bitmap(arena.AddBool(bitmap.DType, indices.Length, Validity.NonNullable, packed, 0));
         }
 
         ValidityMask mask = ValidityMask.From(arena, validity);
@@ -372,6 +462,6 @@ internal static class CanonicalFilter
         return Validity.Bitmap(node);
     }
 
-    private static int Apply(CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices) =>
-        Apply(arena, node.Index, indices);
+    private static int Apply(CanonicalArena arena, CanonicalNode node, ReadOnlySpan<int> indices, ReadOnlySpan<ulong> mask) =>
+        Apply(arena, node.Index, indices, mask);
 }

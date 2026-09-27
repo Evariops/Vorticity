@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -359,7 +360,11 @@ internal sealed class AlpRdPlan
         uint live = (1u << dictionaryLength) - 1;
         bool allValid = mask.AllValid;
         int exceptions = 0;
-        for (int row = 0; row < values.Length; row++)
+        int done = Compute.WordBytes.IsAccelerated && (typeof(TBits) == typeof(ulong) || typeof(TBits) == typeof(uint))
+            ? SplitLanes(values, mask, rightBitWidth, in dictionary, dictionaryLength, codes, right,
+                ref exceptionRows, ref exceptionPatterns, ref exceptions)
+            : 0;
+        for (int row = done; row < values.Length; row++)
         {
             if (!allValid && !mask.IsValid(row))
             {
@@ -391,6 +396,90 @@ internal sealed class AlpRdPlan
         }
 
         return exceptions;
+    }
+
+    /// <summary>
+    /// <see cref="Split"/> of whole blocks of 64 rows where there are 512-bit vectors, a vector of
+    /// rows at a time rather than a row: eight doubles' bits or sixteen singles' to a register.
+    /// </summary>
+    /// <returns>The rows split, a multiple of 64; the rest are the caller's.</returns>
+    /// <remarks>
+    /// The right parts are one and, the patterns one shift; each of the dictionary's few patterns
+    /// is compared with the whole register, and a lane that matches takes that pattern's index as
+    /// its code. The patterns are distinct, so at most one matches a lane, the one the scalar
+    /// search's trailing-zero count finds. The codes are narrowed to sixteen bits by one move. A
+    /// null row is a lane the validity word clears, its code and right part zero; a valid lane no
+    /// pattern matched is an exception, taken lane by lane in row order, which is rare, since the
+    /// dictionary was chosen to cover the column.
+    /// </remarks>
+    private static int SplitLanes<TBits>(
+        ReadOnlySpan<TBits> values, ValidityMask mask, int rightBitWidth,
+        in DictionaryPatterns dictionary, int dictionaryLength, Span<ushort> codes, Span<TBits> right,
+        ref int[] exceptionRows, ref ushort[] exceptionPatterns, ref int exceptions)
+        where TBits : unmanaged, IBinaryInteger<TBits>, IUnsignedNumber<TBits>
+    {
+        int lanes = Vector512<TBits>.Count;
+        Vector512<TBits> rightMask = Vector512.Create((TBits.One << rightBitWidth) - TBits.One);
+        Span<Vector512<TBits>> keys = stackalloc Vector512<TBits>[MaxDictionarySize];
+        for (int k = 0; k < dictionaryLength; k++)
+        {
+            keys[k] = Vector512.Create(TBits.CreateTruncating(dictionary[k]));
+        }
+
+        Compute.WordBytes spread = Compute.WordBytes.Create();
+        bool allValid = mask.AllValid;
+        ref TBits from = ref MemoryMarshal.GetReference(values);
+        ref TBits into = ref MemoryMarshal.GetReference(right);
+        ref ushort coded = ref MemoryMarshal.GetReference(codes);
+        int row = 0;
+        for (; row <= values.Length - 64; row += 64)
+        {
+            ulong valid = allValid ? ulong.MaxValue : BitWords.Load(mask.Bits, mask.BitOffset + row);
+            for (int group = 0; group < 64 / lanes; group++)
+            {
+                int at = row + (group * lanes);
+                Vector512<TBits> value = Vector512.LoadUnsafe(ref from, (nuint)at);
+                Vector512<TBits> kept = allValid ? Vector512<TBits>.AllBitsSet : spread.Lanes<TBits>(valid, group);
+                Vector512<TBits> pattern = value >>> rightBitWidth;
+                Vector512<TBits> code = Vector512<TBits>.Zero;
+                Vector512<TBits> matched = Vector512<TBits>.Zero;
+                for (int k = 0; k < dictionaryLength; k++)
+                {
+                    Vector512<TBits> hit = Vector512.Equals(pattern, keys[k]);
+                    code |= hit & Vector512.Create(TBits.CreateTruncating(k));
+                    matched |= hit;
+                }
+
+                (value & rightMask & kept).StoreUnsafe(ref into, (nuint)at);
+                code &= kept;
+                if (typeof(TBits) == typeof(ulong))
+                {
+                    Avx512F.ConvertToVector128UInt16(code.AsUInt64()).StoreUnsafe(ref coded, (nuint)at);
+                }
+                else
+                {
+                    Avx512F.ConvertToVector256UInt16(code.AsUInt32()).StoreUnsafe(ref coded, (nuint)at);
+                }
+
+                ulong missing = Vector512.AndNot(kept, matched).ExtractMostSignificantBits();
+                while (missing != 0)
+                {
+                    int lane = BitOperations.TrailingZeroCount(missing);
+                    missing &= missing - 1;
+                    if (exceptions == exceptionRows.Length || exceptions == exceptionPatterns.Length)
+                    {
+                        Grow(ref exceptionRows, exceptions);
+                        Grow(ref exceptionPatterns, exceptions);
+                    }
+
+                    exceptionRows[exceptions] = at + lane;
+                    exceptionPatterns[exceptions] = ushort.CreateTruncating(values[at + lane] >> rightBitWidth);
+                    exceptions++;
+                }
+            }
+        }
+
+        return row;
     }
 
     /// <summary>Doubles a rental, keeping its first <paramref name="used"/> entries.</summary>

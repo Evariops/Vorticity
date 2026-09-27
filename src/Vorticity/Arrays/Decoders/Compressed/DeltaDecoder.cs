@@ -249,6 +249,16 @@ internal sealed class DeltaDecoder : ArrayDecoder
                     continue;
                 }
 
+                if (typeof(T) == typeof(uint) && Vector128.IsHardwareAccelerated && lanes == 32
+                    && wholeStart >= offset && wholeStart + BlockSize <= offset + length)
+                {
+                    AccumulateUntransposed(
+                        MemoryMarshal.Cast<T, uint>(baseValues.Slice(b * lanes, lanes)),
+                        MemoryMarshal.Cast<T, uint>(deltaBlock),
+                        MemoryMarshal.Cast<T, uint>(output.Slice(wholeStart - offset, BlockSize)));
+                    continue;
+                }
+
                 if (Vector128.IsHardwareAccelerated && lanes == 8 * Vector128<T>.Count)
                 {
                     AccumulateInRegisters(baseValues.Slice(b * lanes, lanes), deltaBlock, block, rowsPerLane);
@@ -409,6 +419,69 @@ internal sealed class DeltaDecoder : ArrayDecoder
             High(a, r7).StoreUnsafe(ref into, at + 960);
         }
     }
+
+    /// <summary>
+    /// A whole block of 32-bit values, its prefix sums written where they belong in the output:
+    /// lane <c>l</c>'s sum at row <c>r</c> is output value <c>64 * (l % 16) + 32 * (l / 16) + r</c>,
+    /// so each lane's thirty-two sums are contiguous, as a 64-bit lane's sixty-four are.
+    /// </summary>
+    /// <remarks>
+    /// Rows go four at a time. A register holds four lanes' sums; the four registers of four
+    /// consecutive rows, transposed as a four-by-four tile, give each of the four lanes its four
+    /// consecutive sums, one store each. The transposition is eight interleaves for sixteen values,
+    /// where the general path stores the block and then walks the permutation, a table load, a
+    /// load and a store a value.
+    /// </remarks>
+    private static void AccumulateUntransposed(ReadOnlySpan<uint> bases, ReadOnlySpan<uint> deltaBlock, Span<uint> output)
+    {
+        ref uint start = ref MemoryMarshal.GetReference(bases);
+        ref uint delta = ref MemoryMarshal.GetReference(deltaBlock);
+        ref uint into = ref MemoryMarshal.GetReference(output);
+        ref byte order = ref MemoryMarshal.GetReference(FastLanes.Order);
+
+        // One register of four lanes at a time, all 32 rows: its running sums stay in a register,
+        // and the eight registers' work is independent.
+        for (int k = 0; k < 8; k++)
+        {
+            Vector128<uint> running = Vector128.LoadUnsafe(ref start, (nuint)(4 * k));
+            int lane = 4 * k;
+            nuint home = (nuint)((64 * (lane & 15)) + (32 * (lane >> 4)));
+            for (int row = 0; row < 32; row += 4)
+            {
+                // The four rows share a group of eight, so their order entry, and differ in the
+                // row within it.
+                nuint at = (nuint)((Unsafe.Add(ref order, row >> 3) * 16) + ((row & 7) * 128) + lane);
+                Vector128<uint> a = running + Vector128.LoadUnsafe(ref delta, at);
+                Vector128<uint> b = a + Vector128.LoadUnsafe(ref delta, at + 128);
+                Vector128<uint> c = b + Vector128.LoadUnsafe(ref delta, at + 256);
+                running = c + Vector128.LoadUnsafe(ref delta, at + 384);
+
+                Vector128<uint> ab0 = Low(a, b);
+                Vector128<uint> ab1 = High(a, b);
+                Vector128<uint> cd0 = Low(c, running);
+                Vector128<uint> cd1 = High(c, running);
+                nuint to = home + (nuint)row;
+                Low(ab0.AsUInt64(), cd0.AsUInt64()).AsUInt32().StoreUnsafe(ref into, to);
+                High(ab0.AsUInt64(), cd0.AsUInt64()).AsUInt32().StoreUnsafe(ref into, to + 64);
+                Low(ab1.AsUInt64(), cd1.AsUInt64()).AsUInt32().StoreUnsafe(ref into, to + 128);
+                High(ab1.AsUInt64(), cd1.AsUInt64()).AsUInt32().StoreUnsafe(ref into, to + 192);
+            }
+        }
+    }
+
+    /// <summary>The first two lanes of two registers interleaved.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<uint> Low(Vector128<uint> a, Vector128<uint> b) =>
+        AdvSimd.Arm64.IsSupported ? AdvSimd.Arm64.ZipLow(a, b)
+        : Sse2.IsSupported ? Sse2.UnpackLow(a, b)
+        : Vector128.Create(a.GetElement(0), b.GetElement(0), a.GetElement(1), b.GetElement(1));
+
+    /// <summary>The last two lanes of two registers interleaved.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector128<uint> High(Vector128<uint> a, Vector128<uint> b) =>
+        AdvSimd.Arm64.IsSupported ? AdvSimd.Arm64.ZipHigh(a, b)
+        : Sse2.IsSupported ? Sse2.UnpackHigh(a, b)
+        : Vector128.Create(a.GetElement(2), b.GetElement(2), a.GetElement(3), b.GetElement(3));
 
     /// <summary>The first lanes of two registers side by side.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

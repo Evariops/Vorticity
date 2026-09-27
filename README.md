@@ -108,6 +108,7 @@ analyzer reference:
 |---|---|
 | [docs/guide/](docs/guide/README.md) | **Using the library**: pages named by what you are trying to do, each one a program the samples project compiles and runs |
 | [docs/guide/benchmarks.md](docs/guide/benchmarks.md) | Every figure the bench publishes: what this costs against the Rust implementation, and each kernel against the loop it replaced |
+| [docs/guide/benchmarks-x64.md](docs/guide/benchmarks-x64.md) | The same figures from an x64 machine, a Zen 4 processor under Windows |
 | [docs/design/](docs/design/README.md) | **Why it is shaped this way**: the design documents, from the scope to the byte layout to the public API |
 | [CHANGELOG.md](CHANGELOG.md) | What the first release will contain, and what changed on the way |
 
@@ -148,7 +149,8 @@ Vorticity is measured against Vortex's Rust implementation on the same files and
 machine, built with Native AOT, on one core and on all of them: a table read and written, every
 encoding decoded, taken from and written, and each hot loop against the one it replaced. A scan
 allocates nothing per batch. Every figure is on one page, [the benchmark page](docs/guide/benchmarks.md),
-each section with the machine and the commit it was measured on;
+each section with the machine and the commit it was measured on, and again from an x64 machine on
+[its twin](docs/guide/benchmarks-x64.md);
 [docs/design/05-benchmarks.md](docs/design/05-benchmarks.md) says what is compared and how, and
 [bench/README.md](bench/README.md) how to run each instrument: `bench/gate.sh` runs everything that
 gates a commit.

@@ -1,5 +1,7 @@
 using System;
 using System.Buffers;
+using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -386,17 +388,72 @@ internal sealed class OnPairDecoder : ArrayDecoder
     internal static void BuildTokenTable(
         ReadOnlySpan<byte> dictOffsets, PType offsetsPType, int tokenCount, Span<long> tokens, int dictionaryLength)
     {
+        // The offsets' type is resolved once for the table, not once an offset.
+        switch (offsetsPType)
+        {
+            case PType.U8:
+                Tokens<byte>(dictOffsets, tokenCount, tokens, dictionaryLength);
+                break;
+            case PType.U16:
+                Tokens<ushort>(dictOffsets, tokenCount, tokens, dictionaryLength);
+                break;
+            case PType.U32:
+                Tokens<uint>(dictOffsets, tokenCount, tokens, dictionaryLength);
+                break;
+            case PType.U64:
+                Tokens<ulong>(dictOffsets, tokenCount, tokens, dictionaryLength);
+                break;
+            case PType.I8:
+                Tokens<sbyte>(dictOffsets, tokenCount, tokens, dictionaryLength);
+                break;
+            case PType.I16:
+                Tokens<short>(dictOffsets, tokenCount, tokens, dictionaryLength);
+                break;
+            case PType.I32:
+                Tokens<int>(dictOffsets, tokenCount, tokens, dictionaryLength);
+                break;
+            case PType.I64:
+                Tokens<long>(dictOffsets, tokenCount, tokens, dictionaryLength);
+                break;
+            default:
+                NotIntegers(offsetsPType);
+                break;
+        }
+    }
+
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void NotIntegers(PType ptype) =>
+        CompressedThrow.Format($"{Id}'s dictionary offsets must be an integer physical type; the file says {(byte)ptype}.");
+
+    private static void Tokens<T>(ReadOnlySpan<byte> bytes, int tokenCount, Span<long> tokens, int dictionaryLength)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> offsets = MemoryMarshal.Cast<byte, T>(bytes)[..(tokenCount + 1)];
+        tokens = tokens[..tokenCount];
+
         // A token whose sixteen bytes from its start would run past the blob carries NearEnd, so
         // the concatenation finds such a token among many with one or rather than a compare each.
         int wideStart = dictionaryLength - MaxTokenSize;
-        int previous = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, 0);
-        for (int t = 0; t < tokenCount; t++)
+        int previous = (int)Offset(offsets[0]);
+        for (int t = 0; t < tokens.Length; t++)
         {
-            int next = (int)CanonicalSupport.ReadInteger(dictOffsets, offsetsPType, t + 1);
+            int next = (int)Offset(offsets[t + 1]);
             tokens[t] = (uint)previous | (previous > wideStart ? NearEnd : 0) | ((long)(next - previous) << 32);
             previous = next;
         }
     }
+
+    /// <summary>
+    /// An offset as <see cref="CanonicalSupport.ReadInteger"/> reads one: a 64-bit unsigned one
+    /// saturated to <see cref="long.MaxValue"/>, the others extended as their sign says.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long Offset<T>(T value)
+        where T : unmanaged, IBinaryInteger<T> =>
+        typeof(T) == typeof(ulong)
+            ? (long)Math.Min(Unsafe.As<T, ulong>(ref value), (ulong)long.MaxValue)
+            : long.CreateTruncating(value);
 
     /// <summary>The concatenation itself, with the code width resolved once.</summary>
     /// <remarks>
@@ -824,6 +881,52 @@ internal sealed class OnPairDecoder : ArrayDecoder
     }
 
     /// <summary>
+    /// The offsets' walk of <see cref="ValidateDictionary"/>, with their type resolved once: each
+    /// token's size, one unsigned compare for both of its bounds.
+    /// </summary>
+    /// <returns>The last offset.</returns>
+    private static long LastOffset<T>(ReadOnlySpan<byte> bytes, int tokenCount)
+        where T : unmanaged, IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> offsets = MemoryMarshal.Cast<byte, T>(bytes)[..(tokenCount + 1)];
+        long previous = Offset(offsets[0]);
+        if (previous != 0)
+        {
+            CompressedThrow.Format($"{Id}'s dictionary offsets start at {previous}, not 0.");
+        }
+
+        for (int i = 1; i < offsets.Length; i++)
+        {
+            long current = Offset(offsets[i]);
+            if ((ulong)(current - previous - 1) >= MaxTokenSize)
+            {
+                BadToken(i - 1, previous, current);
+            }
+
+            previous = current;
+        }
+
+        return previous;
+    }
+
+    /// <summary>Reports a token that is empty, runs backwards, or is longer than a token can be.</summary>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void BadToken(int token, long start, long end)
+    {
+        long size = end - start;
+        if (size <= 0)
+        {
+            CompressedThrow.Format(
+                $"{Id} dictionary token {token} spans [{start}, {end}); tokens are " +
+                "non-empty and their offsets increase.");
+        }
+
+        CompressedThrow.Format(
+            $"{Id} dictionary token {token} is {size} bytes; the maximum is {MaxTokenSize}.");
+    }
+
+    /// <summary>
     /// <c>validate_safety</c>: the offsets must start at zero, be strictly increasing (no empty
     /// token), describe tokens of at most <see cref="MaxTokenSize"/> bytes, and end inside the blob.
     /// </summary>
@@ -838,31 +941,18 @@ internal sealed class OnPairDecoder : ArrayDecoder
         CanonicalNode dictOffsets, PType ptype, int tokenCount, VortexBuffer dictionary)
     {
         ReadOnlySpan<byte> offsets = dictOffsets.Values.Span;
-        long previous = CanonicalSupport.ReadInteger(offsets, ptype, 0);
-        if (previous != 0)
+        long previous = ptype switch
         {
-            CompressedThrow.Format($"{Id}'s dictionary offsets start at {previous}, not 0.");
-        }
-
-        for (int i = 1; i <= tokenCount; i++)
-        {
-            long current = CanonicalSupport.ReadInteger(offsets, ptype, i);
-            long size = current - previous;
-            if (size <= 0)
-            {
-                CompressedThrow.Format(
-                    $"{Id} dictionary token {i - 1} spans [{previous}, {current}); tokens are " +
-                    "non-empty and their offsets increase.");
-            }
-
-            if (size > MaxTokenSize)
-            {
-                CompressedThrow.Format(
-                    $"{Id} dictionary token {i - 1} is {size} bytes; the maximum is {MaxTokenSize}.");
-            }
-
-            previous = current;
-        }
+            PType.U8 => LastOffset<byte>(offsets, tokenCount),
+            PType.U16 => LastOffset<ushort>(offsets, tokenCount),
+            PType.U32 => LastOffset<uint>(offsets, tokenCount),
+            PType.U64 => LastOffset<ulong>(offsets, tokenCount),
+            PType.I8 => LastOffset<sbyte>(offsets, tokenCount),
+            PType.I16 => LastOffset<short>(offsets, tokenCount),
+            PType.I32 => LastOffset<int>(offsets, tokenCount),
+            PType.I64 => LastOffset<long>(offsets, tokenCount),
+            _ => CanonicalSupport.ReadInteger(offsets, ptype, 0),
+        };
 
         // The logical end, not the reference implementation's read-padded one. That decoder copies
         // a fixed sixteen bytes per token and so needs padding past the last token's start; this

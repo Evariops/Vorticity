@@ -888,7 +888,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
 
             int count = CanonicalFilter.Select(window, kept);
-            return ExecuteKept(lane, split, kept, count, rows);
+            return ExecuteKept(lane, split, kept, count, rows, window);
         }
         finally
         {
@@ -907,8 +907,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <param name="kept">The kept rows, in the split's space; moved into the file's when pushed down.</param>
     /// <param name="count">How many rows were kept.</param>
     /// <param name="rows">The split's rows.</param>
+    /// <param name="window">The filter's state a row, where the filter was evaluated here: what a mask of the kept rows is taken from.</param>
     /// <returns>The batch's root.</returns>
-    private int ExecuteKept(Lane lane, RowRange split, int[] kept, int count, int rows)
+    private int ExecuteKept(Lane lane, RowRange split, int[] kept, int count, int rows, ReadOnlySpan<byte> window = default)
     {
         ScanContext context = lane.Context;
         CanonicalArena arena = context.Canonical;
@@ -931,7 +932,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             // A column read over most of its rows costs more than read whole and gathered, which
             // touches each row once in a kernel's stride.
             root = SplitExecution.Execute(context, _tree, in _keep, split, null);
-            root = CanonicalFilter.Apply(arena, root, kept.AsSpan(0, count));
+            root = Keep(arena, root, kept.AsSpan(0, count), window);
         }
         else
         {
@@ -982,12 +983,34 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// purpose. A conjunction is not pushed because answering one arm does not select the rows, a
     /// take is not pushed because its own selection already owns the row space, and a dotted path
     /// is not pushed because only the struct reader resolves one and it resolves a name.
+    /// <para>
+    /// A prefix match is offered too, as the one string match an encoding answers from a part of
+    /// each value: a compressed string has to be decompressed only as far as the prefix is long.
+    /// </para>
     /// </remarks>
-    private ComparisonExpr? Pushable() =>
-        _take is null && !_filterProven && _evaluator?.Filter is ComparisonExpr comparison &&
-        comparison.Field.SegmentsUtf8.Length == 1
-            ? comparison
-            : null;
+    private PushedPredicate? Pushable()
+    {
+        if (_take is not null || _filterProven)
+        {
+            return null;
+        }
+
+        return _evaluator?.Filter switch
+        {
+            ComparisonExpr comparison when comparison.Field.SegmentsUtf8.Length == 1 =>
+                new PushedPredicate(comparison.Field, comparison.Op, comparison.Value, Prefix: false),
+            StringMatchExpr { Op: StringMatchOp.StartsWith } match
+                when match.Field.SegmentsUtf8.Length == 1 && match.Pattern.Kind == FilterLiteralKind.Bytes =>
+                new PushedPredicate(match.Field, ComparisonOp.Equal, match.Pattern, Prefix: true),
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// A predicate an encoding may answer: a comparison of a top-level field, or when
+    /// <paramref name="Prefix"/> a prefix match of it on <paramref name="Literal"/>.
+    /// </summary>
+    private readonly record struct PushedPredicate(FieldExpr Field, ComparisonOp Op, FilterLiteral Literal, bool Prefix);
 
     /// <summary>
     /// Offers the comparison to the predicate's column and, when its encoding answers, reads the
@@ -1000,7 +1023,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// do. When it declines, the first pass has decoded that one column for nothing, once, and no
     /// split of this scan asks again.
     /// </remarks>
-    private int ExecutePushed(Lane lane, RowRange split, ComparisonExpr pushable)
+    private int ExecutePushed(Lane lane, RowRange split, PushedPredicate pushable)
     {
         ScanContext context = lane.Context;
 
@@ -1018,8 +1041,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         FieldMask only = FieldMask.Single(field);
-        (byte[]? Field, ComparisonOp Op, FilterLiteral Literal) saved =
-            context.ExchangePushedPredicate(name, pushable.Op, pushable.Value);
+        (byte[]? Field, ComparisonOp Op, FilterLiteral Literal, bool Prefix) saved =
+            context.ExchangePushedPredicate(name, pushable.Op, pushable.Literal, pushable.Prefix);
         int answer;
         FilterWindow(context, split);
         try
@@ -1028,7 +1051,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         finally
         {
-            context.ExchangePushedPredicate(saved.Field, saved.Op, saved.Literal);
+            context.ExchangePushedPredicate(saved.Field, saved.Op, saved.Literal, saved.Prefix);
             ProjectionWindow(context, split);
         }
 
@@ -1059,8 +1082,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <param name="into">Receives the selected rows; room for every row of the answer.</param>
     /// <returns>How many were selected.</returns>
     /// <remarks>
-    /// No branch on a row's answer: each row is written at the next slot and kept by its own bit,
-    /// true and valid.
+    /// A row is selected by its own bit, true and valid; the bits are read a word at a time, see
+    /// <see cref="RowIndices.FromBits"/>.
     /// </remarks>
     private static int Selected(ScanContext context, int answer, Span<int> into)
     {
@@ -1071,10 +1094,6 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             node = arena.GetNode(node.GetFieldIndex(0));
         }
 
-        ReadOnlySpan<byte> bits = node.Bits.Span;
-        int offset = node.BitOffset;
-        int rows = node.Length;
-        Span<int> slots = into[..rows];
         Arrays.Decoders.Canonical.ValidityMask valid =
             Arrays.Decoders.Canonical.ValidityMask.From(arena, node.Validity);
         if (valid.AllInvalid)
@@ -1082,30 +1101,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return 0;
         }
 
-        int count = 0;
-        if (valid.AllValid)
-        {
-            for (int row = 0; row < rows; row++)
-            {
-                int bit = offset + row;
-                slots[count] = row;
-                count += (bits[bit >> 3] >> (bit & 7)) & 1;
-            }
-
-            return count;
-        }
-
-        ReadOnlySpan<byte> validBits = valid.Bits;
-        int validOffset = valid.BitOffset;
-        for (int row = 0; row < rows; row++)
-        {
-            int bit = offset + row;
-            int validBit = validOffset + row;
-            slots[count] = row;
-            count += (bits[bit >> 3] >> (bit & 7)) & (validBits[validBit >> 3] >> (validBit & 7)) & 1;
-        }
-
-        return count;
+        return RowIndices.FromBits(
+            node.Bits.Span, node.BitOffset, valid.Bits, valid.BitOffset, valid.AllValid, node.Length, into);
     }
 
     /// <summary>
@@ -1166,7 +1163,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             if (count != rows && !_compact)
             {
                 // The block is delivered whole and the rows that passed are marked, not copied.
-                lane.Selection = SelectionWords(context.Canonical, window, rows);
+                lane.Selection = SelectionWords(context.Canonical, window, rows, out _);
                 lane.Selected = count;
             }
             else if (count != rows)
@@ -1174,7 +1171,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 // Room for every row: the selection writes a slot per row before deciding.
                 selected = ArrayPool<int>.Shared.Rent(rows);
                 CanonicalFilter.Select(window, selected);
-                root = CanonicalFilter.Apply(context.Canonical, root, selected.AsSpan(0, count));
+                root = Keep(context.Canonical, root, selected.AsSpan(0, count), window);
             }
         }
         finally
@@ -1250,8 +1247,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 }
             }
 
-            lane.Selected = Trilean.CountTrue(window);
-            lane.Selection = SelectionWords(context.Canonical, window, rows);
+            lane.Selection = SelectionWords(context.Canonical, window, rows, out int selected);
+            lane.Selected = selected;
         }
         finally
         {
@@ -1265,21 +1262,48 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
     }
 
-    /// <summary>The true states of a filter window as 64-bit words, in the batch's arena.</summary>
-    private static Buffers.VortexBuffer SelectionWords(CanonicalArena arena, ReadOnlySpan<byte> window, int rows)
+    /// <summary>
+    /// The rows of <paramref name="root"/> a filter kept: by their mask, taken from the filter's
+    /// states, where the filter keeps a row in eight or more and the mask is packed a register at a
+    /// time; by their indices alone otherwise.
+    /// </summary>
+    /// <remarks>
+    /// A gather by indices reads a row an index; the mask reads every row once in a kernel's stride,
+    /// which a row kept in eight already pays for, measured.
+    /// </remarks>
+    private static int Keep(CanonicalArena arena, int root, ReadOnlySpan<int> kept, ReadOnlySpan<byte> window)
     {
-        int words = Math.Max((rows + 63) >> 6, 1);
-        Buffers.VortexBuffer buffer = arena.Allocate(words * 8, 64, out Span<byte> raw);
-        Span<ulong> bits = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(raw);
-        bits.Clear();
-        for (int row = 0; row < rows; row++)
+        if (window.IsEmpty || !MaskFilter.IsAccelerated || kept.Length * 8L < window.Length)
         {
-            if (window[row] == Trilean.True)
-            {
-                bits[row >> 6] |= 1UL << (row & 63);
-            }
+            return CanonicalFilter.Apply(arena, root, kept);
         }
 
+        int words = (window.Length + 63) >> 6;
+        ulong[] mask = ArrayPool<ulong>.Shared.Rent(words);
+        try
+        {
+            Trilean.ToWords(window, Trilean.True, equal: true, mask.AsSpan(0, words));
+            return CanonicalFilter.Apply(arena, root, kept, mask.AsSpan(0, words));
+        }
+        finally
+        {
+            ArrayPool<ulong>.Shared.Return(mask);
+        }
+    }
+
+    /// <summary>The true states of a filter window as 64-bit words, in the batch's arena.</summary>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="window">One state per row.</param>
+    /// <param name="rows">The rows of the window.</param>
+    /// <param name="selected">How many rows are selected: the words' popcount, for no second pass.</param>
+    private static Buffers.VortexBuffer SelectionWords(CanonicalArena arena, ReadOnlySpan<byte> window, int rows, out int selected)
+    {
+        // Uninitialized: every word is written, the first one here in case there is no row.
+        int words = Math.Max((rows + 63) >> 6, 1);
+        Buffers.VortexBuffer buffer = arena.AllocateUninitialized(words * 8, 64, out Span<byte> raw);
+        Span<ulong> bits = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(raw);
+        bits[0] = 0;
+        selected = Trilean.ToWords(window[..rows], Trilean.True, equal: true, bits);
         return buffer;
     }
 

@@ -1,5 +1,8 @@
 using System;
 using System.Numerics;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 
@@ -198,7 +201,7 @@ internal static class PcoPageDecoder
                         Ramp(values, (primaryFirst * modeBase) + added, primaryStep * modeBase);
                         break;
                     default:
-                        for (int i = 0; i < values.Length; i++)
+                        for (int i = Multiplied(values, default, modeBase, added); i < values.Length; i++)
                         {
                             values[i] = (values[i] * modeBase) + added;
                         }
@@ -221,7 +224,7 @@ internal static class PcoPageDecoder
                     Add(values, secondary);
                     break;
                 default:
-                    for (int i = 0; i < values.Length; i++)
+                    for (int i = Multiplied(values, secondary, modeBase, shift); i < values.Length; i++)
                     {
                         values[i] = (values[i] * modeBase) + secondary[i] + shift;
                     }
@@ -229,6 +232,42 @@ internal static class PcoPageDecoder
                     break;
             }
         }
+    }
+
+    /// <summary>
+    /// <c>values[i] * modeBase + secondary[i] + added</c>, eight values a step, where 512-bit vectors
+    /// multiply 64-bit lanes in one instruction; <paramref name="secondary"/> empty adds nothing.
+    /// </summary>
+    /// <returns>The values done, a multiple of eight; the rest are the caller's.</returns>
+    /// <remarks>
+    /// AVX-512DQ's <c>vpmullq</c> is the multiply the loop needs, and wraps as the scalar one does.
+    /// NEON has no 64-bit vector multiply, which is why the loop was scalar, and it stays so there.
+    /// </remarks>
+    private static int Multiplied(Span<ulong> values, ReadOnlySpan<ulong> secondary, ulong modeBase, ulong added)
+    {
+        if (!Vector512.IsHardwareAccelerated || !Avx512DQ.IsSupported)
+        {
+            return 0;
+        }
+
+        ref ulong at = ref MemoryMarshal.GetReference(values);
+        ref ulong other = ref MemoryMarshal.GetReference(secondary);
+        bool paired = !secondary.IsEmpty;
+        Vector512<ulong> factor = Vector512.Create(modeBase);
+        Vector512<ulong> plus = Vector512.Create(added);
+        int i = 0;
+        for (; i <= values.Length - 8; i += 8)
+        {
+            Vector512<ulong> joined = (Vector512.LoadUnsafe(ref at, (nuint)i) * factor) + plus;
+            if (paired)
+            {
+                joined += Vector512.LoadUnsafe(ref other, (nuint)i);
+            }
+
+            joined.StoreUnsafe(ref at, (nuint)i);
+        }
+
+        return i;
     }
 
     /// <summary>Writes <paramref name="start"/> plus i <paramref name="step"/>s into slot i, wrapping.</summary>

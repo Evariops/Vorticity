@@ -4,6 +4,9 @@ using System.Buffers.Binary;
 using System.Collections;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -345,8 +348,41 @@ internal sealed class StringBounds
         // ranked in full before it is let go, against the bounds' ranks Fold keeps.
         int keep = _limit + 1;
         bool exact = keep <= ExactBytes;
+
+        // Where there are 512-bit vectors, four views are one register, and a row of four bytes or
+        // more whose first four, big-endian, lie strictly between the bounds' is settled from its
+        // view: its key does too. Four rows so settled, or null, pass together; otherwise the four
+        // go through the loop below one at a time, and a group that did not pass holds the vectors
+        // back for twice as many rows as the one before, up to 64: a column whose rows mostly tie a
+        // bound's prefix pays a compare a stretch, not one every four rows. Bounds whose prefixes
+        // have none between them -- a column of rows opening alike, which is common -- settle no
+        // row this way, and the vectors are not tried at all. And they wait for sixteen rows the
+        // loop settled one at a time: a column whose every row moves a bound, as an ascending one
+        // does, comes back here a row at a time, and would pay for a group it never passes.
+        uint low = (uint)(minKey >> 32);
+        uint high = (uint)(maxKey >> 32);
+        bool lanes = Vector512.IsHardwareAccelerated && Avx512BW.IsSupported && high > low && high - low > 1;
+        int scalarUntil = row + 16;
+        int backoff = 4;
         for (; row < end; row++)
         {
+            if (lanes && row >= scalarUntil)
+            {
+                int settled = SettledGroups(views, bits, bitOffset, row, end, low, high);
+                if (settled != row)
+                {
+                    backoff = 4;
+                    row = settled;
+                    if (row == end)
+                    {
+                        break;
+                    }
+                }
+
+                scalarUntil = row + backoff;
+                backoff = Math.Min(backoff * 2, 64);
+            }
+
             if (!bits.IsEmpty && !CanonicalSupport.BitAt(bits, bitOffset + row))
             {
                 continue;
@@ -384,6 +420,58 @@ internal sealed class StringBounds
 
         return end;
     }
+
+    /// <summary>
+    /// The rows from <paramref name="row"/> that pass four at a time, each null or of four bytes or
+    /// more whose first four, big-endian, lie strictly between <paramref name="low"/> and
+    /// <paramref name="high"/>; returns the first row of the first four that do not all pass.
+    /// </summary>
+    /// <remarks>
+    /// A method of its own so that the row loop, which calls it once a stretch, holds none of its
+    /// vectors: sharing a body with them pushed that loop's state to the stack.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int SettledGroups(
+        ReadOnlySpan<byte> views, ReadOnlySpan<byte> bits, int bitOffset, int row, int end, uint low, uint high)
+    {
+        ref uint words = ref Unsafe.As<byte, uint>(ref MemoryMarshal.GetReference(views));
+        Vector512<uint> lowPrefix = Vector512.Create(low);
+        Vector512<uint> highPrefix = Vector512.Create(high);
+        Vector512<byte> prefixBytes = Vector512.Create(PrefixBytes);
+        for (; row <= end - 4; row += 4)
+        {
+            Vector512<uint> four = Vector512.LoadUnsafe(ref words, (nuint)(row * 4));
+            // Both shuffles stay inside each view's 128-bit lane: `vpshufb` and `vpshufd`, named, since
+            // a general shuffle the JIT did not see as constant was emulated, at a quarter the speed.
+            Vector512<uint> prefix = Avx512BW.Shuffle(four.AsByte(), prefixBytes).AsUInt32();
+            Vector512<uint> lengths = Avx512F.Shuffle(four, 0);
+            uint inside = (uint)(Vector512.GreaterThanOrEqual(lengths, Vector512.Create(4u))
+                & Vector512.GreaterThan(prefix, lowPrefix) & Vector512.LessThan(prefix, highPrefix))
+                .ExtractMostSignificantBits();
+
+            // The prefix lanes are 1, 5, 9 and 13; a null row passes at 0, 4, 8 or 12 once its
+            // validity bit is moved there.
+            uint passed = inside >> 1;
+            if (!bits.IsEmpty)
+            {
+                uint valid = (uint)BitWords.Load(bits, bitOffset + row) & 0xF;
+                passed |= ~((valid & 1) | ((valid & 2) << 3) | ((valid & 4) << 6) | ((valid & 8) << 9));
+            }
+
+            if ((passed & 0x1111) != 0x1111)
+            {
+                break;
+            }
+        }
+
+        return row;
+    }
+
+    /// <summary>
+    /// For a view in a 128-bit lane, its prefix word, bytes 4 to 7, reversed in place so that it
+    /// reads big-endian; the other bytes are don't-cares.
+    /// </summary>
+    private static Vector128<byte> PrefixBytes => Vector128.Create((byte)0, 0, 0, 0, 7, 6, 5, 4, 0, 0, 0, 0, 0, 0, 0, 0);
 
     /// <summary>Per rank, the bits of a key that belong to the value: its first bytes, up to eight.</summary>
     private static ReadOnlySpan<ulong> KeyMasks =>

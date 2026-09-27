@@ -19,6 +19,9 @@ so under 1.00 the measured side took less.
 their own sections of it, dated and signed with the machine and the commit, and leave the others;
 a run narrowed to some axes, files or columns writes nothing, and a BenchmarkDotNet run writes the
 classes it ran. The page's head lists the command behind each section.
+On an x64 machine the same runs take `--out docs/guide/benchmarks-x64.md`, which holds the same
+sections measured there; publish the Native AOT runner first, since the report times the one it
+finds.
 
 ## The loop: what you changed, what you run
 

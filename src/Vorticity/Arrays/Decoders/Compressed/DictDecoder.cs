@@ -66,7 +66,23 @@ internal sealed class DictDecoder : ArrayDecoder
     /// </remarks>
     public override bool TryCompare(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination)
+        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, Span<byte> destination) =>
+        TryAnswer(context, in node, dtype, length, op, literal, prefix: false, destination);
+
+    /// <summary>
+    /// Answers a prefix match as a comparison is answered: the distinct values matched once, the
+    /// answers spread over the rows by their codes.
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool TryStartsWith(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        Expressions.FilterLiteral literal, Span<byte> destination) =>
+        literal.Kind == Expressions.FilterLiteralKind.Bytes && dtype.Kind is DTypeKind.Utf8 or DTypeKind.Binary &&
+        TryAnswer(context, in node, dtype, length, Expressions.ComparisonOp.Equal, literal, prefix: true, destination);
+
+    private static bool TryAnswer(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        Expressions.ComparisonOp op, Expressions.FilterLiteral literal, bool prefix, Span<byte> destination)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
@@ -103,7 +119,15 @@ internal sealed class DictDecoder : ArrayDecoder
         try
         {
             Span<byte> answers = rented.AsSpan(0, valuesLength);
-            Compute.ComparisonKernels.Compare(context.Canonical, valuesIndex, op, literal, answers);
+            if (prefix)
+            {
+                Compute.ComparisonKernels.StringMatch(
+                    context.Canonical, valuesIndex, Expressions.StringMatchOp.StartsWith, literal, escape: 0, answers);
+            }
+            else
+            {
+                Compute.ComparisonKernels.Compare(context.Canonical, valuesIndex, op, literal, answers);
+            }
 
             DType codesType = context.Types.Primitive(metadata.CodesPType, codesNullability);
             int codesIndex = context.DecodeChild(in node, 0, codesType, length);
@@ -121,21 +145,20 @@ internal sealed class DictDecoder : ArrayDecoder
             ReadOnlySpan<byte> codes = codesNode.Values.Span;
             PType codesPType = metadata.CodesPType;
             ValidityReader codesValidity = ValidityReader.Of(context.Canonical, codesNode.Validity);
-            for (int row = 0; row < length; row++)
+            if (codesValidity.IsAllInvalid)
             {
-                if (!codesValidity.IsValid(row))
-                {
-                    destination[row] = Compute.Trilean.Unknown;
-                    continue;
-                }
+                Compute.Trilean.Fill(destination[..length], Compute.Trilean.Unknown);
+                return true;
+            }
 
-                uint code = RowKernels.CodeAt(codes, codesPType, row);
-                if (code >= (uint)valuesLength)
-                {
-                    ThrowCode(codes, codesPType, row, valuesLength);
-                }
-
-                destination[row] = answers[(int)code];
+            // The codes' type and the validity's mode resolved once, and on AVX-512 VBMI 64 rows a
+            // permute of the answers: see CodeAnswers.
+            int bad = Compute.CodeAnswers.Expand(
+                answers, codes, codesPType, codesValidity.Bits, codesValidity.BitOffset,
+                codesValidity.IsAllValid, destination[..length]);
+            if (bad >= 0)
+            {
+                ThrowCode(codes, codesPType, bad, valuesLength);
             }
 
             return true;
