@@ -31,6 +31,9 @@ namespace Vorticity.Keys;
 /// </remarks>
 internal sealed partial class SortedRunsSource : KeySource
 {
+    /// <summary>What <see cref="Gallop"/> answers when the key's entries run on past the decoded segment.</summary>
+    private const long Unknown = long.MinValue;
+
     private readonly VortexFile _file;
     private readonly KeyLayout _layout;
     private readonly DType _storage;
@@ -445,10 +448,123 @@ internal sealed partial class SortedRunsSource : KeySource
         _direction < 0 ? StepAsync(cancellationToken) : FlipAsync(forward: false, cancellationToken);
 
     internal override ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken) =>
-        ForwardAsync(Key, long.MaxValue, cancellationToken);
+        _direction > 0 ? PastKeyAsync(forward: true, cancellationToken) : ForwardAsync(Key, long.MaxValue, cancellationToken);
 
     internal override ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken) =>
-        BackwardAsync(Key, long.MinValue, cancellationToken);
+        _direction < 0 ? PastKeyAsync(forward: false, cancellationToken) : BackwardAsync(Key, long.MinValue, cancellationToken);
+
+    /// <summary>
+    /// Moves every run past the current key in the heap's direction, the top first: a run that
+    /// holds the key gallops over its entries of it in the segment it has decoded, and is sought
+    /// past them the long way only when they run on into another segment.
+    /// </summary>
+    /// <remarks>
+    /// A key held by k entries of a run costs O(log k) comparisons there, and a run that does not
+    /// hold it is not touched, where seeking every run costs a bisection in each whatever k is.
+    /// The key is read from the segment it was found in, held here: a segment owns its arrays, so
+    /// moving the run off it leaves the key's bytes whole.
+    /// </remarks>
+    private async ValueTask<bool> PastKeyAsync(bool forward, CancellationToken cancellationToken)
+    {
+        Run top = _runs[_heap[0]];
+        RunSegment keySegment = top.Current!;
+        int keyIndex = (int)(top.Position - top.CurrentStart);
+        while (PastKeyInSegments(keySegment, keyIndex, forward) is { } run)
+        {
+            // The entries reach the segment's edge: the run goes on to the next segment, which it
+            // would load anyway, and gallops there; a key that fills that one too is sought the
+            // long way, which is the only step that copies it.
+            long edge = forward ? run.CurrentStart + run.Current!.Count : run.CurrentStart - 1;
+            long past = edge;
+            if (edge >= 0 && edge < run.Count)
+            {
+                await MoveAsync(run, edge, cancellationToken).ConfigureAwait(false);
+                past = CurrentKey(run).SequenceEqual(KeyAt(keySegment, keyIndex))
+                    ? Gallop(run, KeyAt(keySegment, keyIndex), forward)
+                    : edge;
+            }
+
+            if (past == Unknown)
+            {
+                FilterLiteral key = LiteralAt(keySegment, keyIndex);
+                past = forward
+                    ? await FirstAtOrAfterAsync(run, key, long.MaxValue, cancellationToken).ConfigureAwait(false)
+                    : await FirstAtOrAfterAsync(run, key, long.MinValue, cancellationToken).ConfigureAwait(false) - 1;
+            }
+
+            if (past < 0 || past >= run.Count)
+            {
+                _heap[0] = _heap[--_heapSize];
+            }
+            else
+            {
+                await MoveAsync(run, past, cancellationToken).ConfigureAwait(false);
+            }
+
+            SiftDown(0);
+        }
+
+        return _heapSize > 0;
+    }
+
+    /// <summary>
+    /// Moves the heap's runs past the key of entry <paramref name="keyIndex"/> of
+    /// <paramref name="keySegment"/> while their entries of it end in the segment each has decoded.
+    /// </summary>
+    /// <returns>
+    /// The top run when its entries of the key reach its segment's edge, which takes a read; null
+    /// once the top is past the key or no run is left.
+    /// </returns>
+    /// <remarks>
+    /// Two keys are one when their bytes are: the total order is one-to-one on them, which is what
+    /// lets the comparison be an equality.
+    /// </remarks>
+    private Run? PastKeyInSegments(RunSegment keySegment, int keyIndex, bool forward)
+    {
+        ReadOnlySpan<byte> key = KeyAt(keySegment, keyIndex);
+        while (_heapSize > 0)
+        {
+            Run run = _runs[_heap[0]];
+            if (!CurrentKey(run).SequenceEqual(key))
+            {
+                return null;
+            }
+
+            long past = Gallop(run, key, forward);
+            if (past == Unknown)
+            {
+                return run;
+            }
+
+            // A gallop lands within the decoded segment, so the move is the position alone.
+            run.Position = past;
+            SiftDown(0);
+        }
+
+        return null;
+    }
+
+    private FilterLiteral LiteralAt(RunSegment segment, int index)
+    {
+        ReadOnlySpan<byte> key = KeyAt(segment, index);
+        return _layout.Shape == KeyShape.Bytes ? FilterLiteral.From(key) : Literal(key);
+    }
+
+    /// <summary>
+    /// The first position of <paramref name="run"/> past its entries of <paramref name="key"/>,
+    /// going forward or back, from those of its decoded segment; <see cref="Unknown"/> when they
+    /// reach that segment's end in the direction gone.
+    /// </summary>
+    private long Gallop(Run run, ReadOnlySpan<byte> key, bool forward)
+    {
+        RunSegment segment = run.Current!;
+        int at = (int)(run.Position - run.CurrentStart);
+        int edge = forward ? segment.Count - 1 : 0;
+        int past = segment.Offsets is { } offsets
+            ? KeyGallop.Past(new ByteKeys(segment.Keys, offsets, key), at, edge, forward)
+            : KeyGallop.Past(new FixedKeys(segment.Keys, _layout.Width, key), at, edge, forward);
+        return past < 0 ? Unknown : run.CurrentStart + past;
+    }
 
     internal override ValueTask<long> RankAsync(FilterLiteral key, CancellationToken cancellationToken) =>
         SumAsync(key, long.MinValue, cancellationToken);
@@ -1123,5 +1239,39 @@ internal sealed partial class SortedRunsSource : KeySource
     private readonly struct MaxProbe(SortedRunsSource source, FilterLiteral key) : IFenceProbe
     {
         public bool Below(ReadOnlySpan<byte> max) => source.CompareKey(max, key) < 0;
+    }
+
+    /// <summary>A segment's fixed-width keys laid end to end, against one key's bytes.</summary>
+    private readonly ref struct FixedKeys : KeyGallop.IKeyed
+    {
+        private readonly ReadOnlySpan<byte> _keys;
+        private readonly ReadOnlySpan<byte> _key;
+        private readonly int _width;
+
+        internal FixedKeys(ReadOnlySpan<byte> keys, int width, ReadOnlySpan<byte> key)
+        {
+            _keys = keys;
+            _width = width;
+            _key = key;
+        }
+
+        public bool Holds(int index) => _keys.Slice(index * _width, _width).SequenceEqual(_key);
+    }
+
+    /// <summary>A segment's byte keys, delimited by their offsets, against one key's bytes.</summary>
+    private readonly ref struct ByteKeys : KeyGallop.IKeyed
+    {
+        private readonly ReadOnlySpan<byte> _keys;
+        private readonly ReadOnlySpan<int> _offsets;
+        private readonly ReadOnlySpan<byte> _key;
+
+        internal ByteKeys(ReadOnlySpan<byte> keys, ReadOnlySpan<int> offsets, ReadOnlySpan<byte> key)
+        {
+            _keys = keys;
+            _offsets = offsets;
+            _key = key;
+        }
+
+        public bool Holds(int index) => _keys[_offsets[index].._offsets[index + 1]].SequenceEqual(_key);
     }
 }

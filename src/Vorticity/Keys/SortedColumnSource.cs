@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -231,6 +233,63 @@ internal sealed class SortedColumnSource : IAsyncDisposable
             ? LiteralReader.ViewAt(node, (int)(row - _loadedStart))
             : default;
     }
+
+    /// <summary>
+    /// The entry just past <paramref name="entry"/>'s key, going forward or back -- the first after
+    /// its entries, or the last before them -- found in the loaded zone, which stays loaded for it;
+    /// -1 when the key reaches the zone's edge that way, where the zone cannot tell.
+    /// </summary>
+    /// <param name="entry">An entry whose zone is loaded, as every positioning call leaves it.</param>
+    /// <param name="forward">Whether to go past the key's last entry rather than before its first.</param>
+    /// <remarks>
+    /// O(log k) comparisons for a key held by k entries, against the two bisections of a bound, each
+    /// made where the keys lie: a primitive's values as they are, a string's bytes in place.
+    /// </remarks>
+    internal long PastKeyInZone(long entry, bool forward)
+    {
+        CanonicalArena arena = _context!.Canonical;
+        CanonicalNode node = arena.GetNode(ComparisonKernels.Unwrap(arena, _column));
+        int at = (int)(RowOf(entry) - _loadedStart);
+        int edge = (int)((forward ? Math.Min(_loadedEnd, _rowCount) - 1 : Math.Max(_loadedStart, _firstRow)) - _loadedStart);
+        int past = node.Kind switch
+        {
+            CanonicalKind.Primitive => node.PType switch
+            {
+                PType.F16 => PastValue<Half>(node.Values.Span, at, edge, forward),
+                PType.F32 => PastValue<float>(node.Values.Span, at, edge, forward),
+                PType.F64 => PastValue<double>(node.Values.Span, at, edge, forward),
+                _ => node.PType.ByteWidth() switch
+                {
+                    1 => PastValue<byte>(node.Values.Span, at, edge, forward),
+                    2 => PastValue<ushort>(node.Values.Span, at, edge, forward),
+                    4 => PastValue<uint>(node.Values.Span, at, edge, forward),
+                    _ => PastValue<ulong>(node.Values.Span, at, edge, forward),
+                },
+            },
+            CanonicalKind.VarBinView => PastView(node, at, edge, forward),
+
+            // Any other form is left to the bound: a constant, whose one key fills the zone, or one
+            // this source does not read in place.
+            _ => -1,
+        };
+
+        return past < 0 ? -1 : _loadedStart + past - _firstRow;
+    }
+
+    /// <summary>A primitive zone's gallop, one per width.</summary>
+    /// <remarks>
+    /// Out of line so that the dispatch stays small: each gallop inlined into it gets stack slots of
+    /// its own, which every call then clears, whichever width it takes.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int PastValue<T>(ReadOnlySpan<byte> values, int at, int edge, bool forward)
+        where T : unmanaged, IEquatable<T> =>
+        KeyGallop.Past(new Values<T>(values, at), at, edge, forward);
+
+    /// <summary>A string zone's gallop.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int PastView(CanonicalNode node, int at, int edge, bool forward) =>
+        KeyGallop.Past(new Views(node, at), at, edge, forward);
 
     /// <summary>
     /// The number of entries whose key is below <paramref name="key"/>, which is also the index of
@@ -579,5 +638,40 @@ internal sealed class SortedColumnSource : IAsyncDisposable
                 kind = FilterLiteralKind.Null;
                 return false;
         }
+    }
+
+    /// <summary>
+    /// A primitive zone's values as they lie, against the key of one row: an integer's bits, a
+    /// float's IEEE value, which holds <c>-0.0</c> and <c>+0.0</c> as one key the way
+    /// <see cref="Compare"/> does.
+    /// </summary>
+    private readonly ref struct Values<T> : KeyGallop.IKeyed
+        where T : unmanaged, IEquatable<T>
+    {
+        private readonly ReadOnlySpan<T> _values;
+        private readonly T _key;
+
+        internal Values(ReadOnlySpan<byte> bytes, int row)
+        {
+            _values = MemoryMarshal.Cast<byte, T>(bytes);
+            _key = _values[row];
+        }
+
+        public bool Holds(int index) => _values[index].Equals(_key);
+    }
+
+    /// <summary>A string zone's views against the key of one row, their bytes compared in place.</summary>
+    private readonly ref struct Views : KeyGallop.IKeyed
+    {
+        private readonly CanonicalNode _node;
+        private readonly ReadOnlySpan<byte> _key;
+
+        internal Views(CanonicalNode node, int row)
+        {
+            _node = node;
+            _key = LiteralReader.ViewAt(node, row);
+        }
+
+        public bool Holds(int index) => LiteralReader.ViewAt(_node, index).SequenceEqual(_key);
     }
 }
