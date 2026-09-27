@@ -94,6 +94,12 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
     /// Applies a batch of changes, sorted by key and unique, reusing every page it does not have to
     /// rewrite. The rule must be the one the tree was built under.
     /// </summary>
+    /// <remarks>
+    /// Only the pages on the paths of the changes are read, and past them only as far as the pages
+    /// cut anew run on before a cut falls where an old page began: O(c × D) pages for c changes,
+    /// whatever the tree holds. A subtree the walk leaves unread is reused whole at every level,
+    /// since nothing under it changed and the cutting reaches it between pages.
+    /// </remarks>
     public async ValueTask<DatasetTree> CommitAsync(
         IReadOnlyList<TreeChange> changes,
         IBoundaryRule rule,
@@ -135,29 +141,33 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
             return Build(fresh, rule, fold, sink);
         }
 
-        // A level's pages are described by the entries of the level above, so this read is what
-        // tells the merge below which leaf pages exist at all.
-        List<List<InternalEntry>> descriptors = await DescribeAsync(source, cancellationToken).ConfigureAwait(false);
-
         // Level 0: the leaves. An old page began at a boundary and the rule resets at every
-        // boundary, so an untouched page can be reused by reference exactly when the emitter sits
-        // between pages; that condition is what makes re-chunking converge back onto old cuts.
-        PageEmitter emitter = new PageEmitter(rule.Fresh(), fold, sink, leaf: true);
-        List<InternalEntry> pages = descriptors[0];
+        // boundary, so an untouched page, or an untouched subtree, can be reused by reference
+        // exactly when the emitter sits between pages; that condition is what makes re-chunking
+        // converge back onto old cuts.
+        Rechunk tree = new Rechunk(this, source, cancellationToken);
+        PageEmitter emitter = new PageEmitter(rule.Fresh(), fold, sink, leaf: true, reusing: true);
         long added = 0;
         int change = 0;
-        for (int i = 0; i < pages.Count; i++)
+        tree.Restart();
+        while (tree.TryNext(out Node node))
         {
-            ReadOnlyMemory<byte> upper = i + 1 < pages.Count ? pages[i + 1].MinKey : default;
-            bool last = i + 1 == pages.Count;
+            bool last = !tree.TryUpper(out ReadOnlyMemory<byte> upper);
             if (!Touches(changes, change, upper, last) && emitter.IsEmpty)
             {
-                emitter.Reuse(pages[i]);
+                emitter.Reuse(node);
                 continue;
             }
 
+            if (node.Height > 1)
+            {
+                await tree.EnterAsync(node).ConfigureAwait(false);
+                continue;
+            }
+
+            tree.Rewritten(node);
             IReadOnlyList<TreeEntry> page = TreePage.ReadLeaf(
-                await source.ReadPageAsync(pages[i].Child, cancellationToken).ConfigureAwait(false));
+                await source.ReadPageAsync(node.Descriptor.Child, cancellationToken).ConfigureAwait(false));
             added += Merge(page, changes, ref change, upper, last, emitter);
         }
 
@@ -174,21 +184,24 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         }
 
         emitter.Flush();
-        List<InternalEntry> level = emitter.Emitted;
-        if (level.Count == 0)
+        if (emitter.Items!.Count == 0)
         {
             return Empty;
         }
 
-        // An old page whose children are exactly the same references is reused, which is what keeps
-        // a commit's writes near `depth`.
+        // An old page none of whose children changed, reached between pages, is reused, which is
+        // what keeps a commit's writes near `depth`. A level built at the old root's height is all
+        // new pages, since the root holds a rewritten page.
         int depth = 1;
-        for (int above = 1; above < descriptors.Count && level.Count > 1; above++)
+        InternalEntry? single = await tree.SinglePageAsync(emitter, depth).ConfigureAwait(false);
+        while (single is null && depth < Depth)
         {
-            level = Rewrite(descriptors[above], descriptors[above - 1], level, rule, fold, sink);
             depth++;
+            emitter = await tree.RewriteAsync(emitter, depth, rule, fold, sink).ConfigureAwait(false);
+            single = await tree.SinglePageAsync(emitter, depth).ConfigureAwait(false);
         }
 
+        List<InternalEntry> level = single is { } top ? [top] : emitter.Emitted;
         while (level.Count > 1)
         {
             level = Chunk(level, rule, fold, sink);
@@ -445,33 +458,6 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         return hash.GetCurrentHashAsUInt128();
     }
 
-    /// <summary>
-    /// The descriptors of every level's pages: index 0 is the leaves, index <c>Depth − 1</c> the
-    /// root. Reads every internal page and no leaf. The root, having no level above it, gets a
-    /// descriptor of its own whose key range is never consulted.
-    /// </summary>
-    private async ValueTask<List<List<InternalEntry>>> DescribeAsync(
-        IPageSource source, CancellationToken cancellationToken)
-    {
-        List<List<InternalEntry>>? descriptors = new List<List<InternalEntry>>(Depth);
-        for (int i = 0; i < Depth; i++)
-        {
-            descriptors.Add([]);
-        }
-
-        descriptors[Depth - 1].Add(new InternalEntry(default, default, Rows, Root));
-        for (int level = Depth - 1; level > 0; level--)
-        {
-            foreach (InternalEntry entry in descriptors[level])
-            {
-                descriptors[level - 1].AddRange(TreePage.ReadInternal(
-                    await source.ReadPageAsync(entry.Child, cancellationToken).ConfigureAwait(false)));
-            }
-        }
-
-        return descriptors;
-    }
-
     /// <summary>Whether any change from <c>from</c> on falls below <c>upper</c>, the next page's first key.</summary>
     private static bool Touches(
         IReadOnlyList<TreeChange> changes, int from, ReadOnlyMemory<byte> upper, bool last) =>
@@ -549,79 +535,6 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         return added;
     }
 
-    /// <summary>
-    /// Rewrites one level above the leaves: an old page whose children are exactly the same
-    /// references is reused; everything else goes through the chunker.
-    /// </summary>
-    private static List<InternalEntry> Rewrite(
-        List<InternalEntry> oldPages,
-        List<InternalEntry> oldChildren,
-        List<InternalEntry> children,
-        IBoundaryRule rule,
-        ISummaryFold fold,
-        IPageSink sink)
-    {
-        PageEmitter emitter = new PageEmitter(rule.Fresh(), fold, sink, leaf: false);
-        int cursor = 0;
-        int oldCursor = 0;
-        for (int i = 0; i < oldPages.Count; i++)
-        {
-            int count = CountChildren(oldChildren, oldCursor, oldPages, i);
-            bool same = emitter.IsEmpty && cursor + count <= children.Count;
-            for (int k = 0; same && k < count; k++)
-            {
-                same = children[cursor + k].Child == oldChildren[oldCursor + k].Child;
-            }
-
-            if (same && count > 0)
-            {
-                emitter.Reuse(oldPages[i]);
-                cursor += count;
-                oldCursor += count;
-                continue;
-            }
-
-            // Not reusable: feed every new child whose key belongs to this old page's range.
-            ReadOnlyMemory<byte> upper = i + 1 < oldPages.Count ? oldPages[i + 1].MinKey : default;
-            bool last = i + 1 == oldPages.Count;
-            while (cursor < children.Count
-                && (last || TreePage.Compare(children[cursor].MinKey.Span, upper.Span) < 0))
-            {
-                emitter.Add(children[cursor++]);
-            }
-
-            oldCursor += count;
-        }
-
-        while (cursor < children.Count)
-        {
-            emitter.Add(children[cursor++]);
-        }
-
-        emitter.Flush();
-        return emitter.Emitted;
-    }
-
-    /// <summary>How many of the level below's old pages belong to the old page at this index.</summary>
-    private static int CountChildren(
-        List<InternalEntry> oldChildren, int from, List<InternalEntry> oldPages, int index)
-    {
-        if (index + 1 == oldPages.Count)
-        {
-            return oldChildren.Count - from;
-        }
-
-        ReadOnlyMemory<byte> upper = oldPages[index + 1].MinKey;
-        int count = 0;
-        while (from + count < oldChildren.Count
-            && TreePage.Compare(oldChildren[from + count].MinKey.Span, upper.Span) < 0)
-        {
-            count++;
-        }
-
-        return count;
-    }
-
     /// <summary>Chunks a level's entries into pages.</summary>
     private static List<InternalEntry> Chunk(
         List<InternalEntry> entries, IBoundaryRule rule, ISummaryFold fold, IPageSink sink)
@@ -688,16 +601,24 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         private readonly List<InternalEntry> _internals = [];
         private readonly List<ReadOnlyMemory<byte>> _summaries = [];
 
-        internal PageEmitter(IBoundaryRule rule, ISummaryFold fold, IPageSink sink, bool leaf)
+        internal PageEmitter(IBoundaryRule rule, ISummaryFold fold, IPageSink sink, bool leaf, bool reusing = false)
         {
             _rule = rule;
             _fold = fold;
             _sink = sink;
             _leaf = leaf;
+            Items = reusing ? [] : null;
             _rule.Reset();
         }
 
+        /// <summary>The pages it cut, in order.</summary>
         internal List<InternalEntry> Emitted { get; } = [];
+
+        /// <summary>
+        /// For an emitter that reuses old pages, the whole level in order: the pages it cut, by
+        /// their place in <see cref="Emitted"/>, and the old pages and subtrees it reused.
+        /// </summary>
+        internal List<Item>? Items { get; }
 
         /// <summary>Whether nothing is accumulated: the emitter sits on a boundary.</summary>
         internal bool IsEmpty => _leaves.Count == 0 && _internals.Count == 0;
@@ -722,15 +643,18 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
             }
         }
 
-        /// <summary>Emits an old page unchanged, by reference. Only legal on a boundary.</summary>
-        internal void Reuse(InternalEntry descriptor)
+        /// <summary>
+        /// Emits an old page, or every page of an old subtree, unchanged, by reference. Only legal
+        /// on a boundary.
+        /// </summary>
+        internal void Reuse(Node node)
         {
             if (!IsEmpty)
             {
                 throw new InvalidOperationException("A page is reused only between pages.");
             }
 
-            Emitted.Add(descriptor);
+            Items!.Add(new Item(node.Page, node.Index));
         }
 
         internal void Flush()
@@ -770,8 +694,327 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
                 _internals.Clear();
             }
 
+            Items?.Add(new Item(null, Emitted.Count - 1));
             _summaries.Clear();
             _rule.Reset();
+        }
+    }
+
+    /// <summary>An old internal page a commit read: the entries it holds, and whether it holds a rewritten page.</summary>
+    private sealed class Opened
+    {
+        internal Opened(int height, Opened? parent, IReadOnlyList<InternalEntry> entries)
+        {
+            Height = height;
+            Parent = parent;
+            Entries = entries;
+        }
+
+        /// <summary>Its height: 2 for a page whose entries are leaves.</summary>
+        internal int Height { get; }
+
+        /// <summary>The page above it, or null for the page that holds the root alone.</summary>
+        internal Opened? Parent { get; }
+
+        internal IReadOnlyList<InternalEntry> Entries { get; }
+
+        /// <summary>Whether a page under it was rewritten, which forbids reusing it.</summary>
+        internal bool Dirty { get; set; }
+    }
+
+    /// <summary>An old page, by its place among the entries of the page above it.</summary>
+    private readonly record struct Node(Opened Page, int Index)
+    {
+        internal InternalEntry Descriptor => Page.Entries[Index];
+
+        /// <summary>Its height: 1 for a leaf page.</summary>
+        internal int Height => Page.Height - 1;
+    }
+
+    /// <summary>
+    /// A page of a level a commit builds: a new one, by its place among the pages its emitter cut,
+    /// when <paramref name="Page"/> is null; else an old page or subtree reused whole, by its place
+    /// in the page above it.
+    /// </summary>
+    private readonly record struct Item(Opened? Page, int Index);
+
+    /// <summary>A page being walked, and the next of its entries.</summary>
+    private struct Frame(Opened page, int next)
+    {
+        internal readonly Opened Page = page;
+        internal int Next = next;
+    }
+
+    /// <summary>
+    /// The old tree as a commit reads it, one level at a time: a walk in key order that opens a page
+    /// only when it must, the pages opened so far, and which of them hold a rewritten page.
+    /// </summary>
+    private sealed class Rechunk
+    {
+        private readonly IPageSource _source;
+        private readonly CancellationToken _cancellationToken;
+        private readonly Opened _top;
+        private readonly Dictionary<Node, Opened> _opened = [];
+        private readonly Frame[] _walk;
+        private readonly Frame[] _below;
+        private int _walking;
+        private int _belowOpen;
+        private PageEmitter? _level;
+        private int _next;
+
+        internal Rechunk(DatasetTree tree, IPageSource source, CancellationToken cancellationToken)
+        {
+            _source = source;
+            _cancellationToken = cancellationToken;
+
+            // The root, as the one entry of a page above it, so that every old page is a node.
+            _top = new Opened(tree.Depth + 1, null, [new InternalEntry(default, default, tree.Rows, tree.Root)]);
+            _walk = new Frame[tree.Depth + 1];
+            _below = new Frame[tree.Depth + 1];
+        }
+
+        /// <summary>Starts a walk from the root.</summary>
+        internal void Restart()
+        {
+            _walk[0] = new Frame(_top, 0);
+            _walking = 1;
+        }
+
+        /// <summary>The next page or subtree of the walk, in key order.</summary>
+        internal bool TryNext(out Node node)
+        {
+            while (_walking > 0)
+            {
+                ref Frame frame = ref _walk[_walking - 1];
+                if (frame.Next < frame.Page.Entries.Count)
+                {
+                    node = new Node(frame.Page, frame.Next++);
+                    return true;
+                }
+
+                _walking--;
+            }
+
+            node = default;
+            return false;
+        }
+
+        /// <summary>The first key of what the walk reaches next, or false when it has reached the end.</summary>
+        internal bool TryUpper(out ReadOnlyMemory<byte> upper)
+        {
+            for (int i = _walking - 1; i >= 0; i--)
+            {
+                Frame frame = _walk[i];
+                if (frame.Next < frame.Page.Entries.Count)
+                {
+                    upper = frame.Page.Entries[frame.Next].MinKey;
+                    return true;
+                }
+            }
+
+            upper = default;
+            return false;
+        }
+
+        /// <summary>Opens the node the walk just reached, which it then walks into.</summary>
+        internal async ValueTask EnterAsync(Node node)
+        {
+            Opened page = await OpenAsync(node).ConfigureAwait(false);
+            _walk[_walking++] = new Frame(page, 0);
+        }
+
+        /// <summary>Marks every page above a rewritten one, none of which can be reused.</summary>
+        internal void Rewritten(Node node)
+        {
+            for (Opened? page = node.Page; page is { Dirty: false }; page = page.Parent)
+            {
+                page.Dirty = true;
+            }
+        }
+
+        /// <summary>
+        /// Builds the pages of <paramref name="height"/> over the level <paramref name="below"/>
+        /// built. An old page is reused when the emitter sits between pages and no page under it was
+        /// rewritten: its children are then the old ones, in the same places. Any other page of the
+        /// level is cut anew from what the level below holds in its range.
+        /// </summary>
+        internal async ValueTask<PageEmitter> RewriteAsync(
+            PageEmitter below, int height, IBoundaryRule rule, ISummaryFold fold, IPageSink sink)
+        {
+            PageEmitter emitter = new PageEmitter(rule.Fresh(), fold, sink, leaf: false, reusing: true);
+            _level = below;
+            _next = 0;
+            _belowOpen = 0;
+            Restart();
+            while (TryNext(out Node node))
+            {
+                if (emitter.IsEmpty && !IsDirty(node))
+                {
+                    TakeWhole(node);
+                    emitter.Reuse(node);
+                    continue;
+                }
+
+                if (node.Height > height)
+                {
+                    bool whole = !IsDirty(node);
+                    Opened page = await OpenAsync(node).ConfigureAwait(false);
+                    if (whole)
+                    {
+                        // The level below reused it whole: what follows there is what it holds.
+                        TakeWhole(node);
+                        _below[_belowOpen++] = new Frame(page, 0);
+                    }
+
+                    _walk[_walking++] = new Frame(page, 0);
+                    continue;
+                }
+
+                Rewritten(node);
+                bool last = !TryUpper(out ReadOnlyMemory<byte> upper);
+                while (await TakeBelowAsync(height, upper, last).ConfigureAwait(false) is { } child)
+                {
+                    emitter.Add(child);
+                }
+            }
+
+            while (await TakeBelowAsync(height, default, last: true).ConfigureAwait(false) is { } rest)
+            {
+                emitter.Add(rest);
+            }
+
+            emitter.Flush();
+            return emitter;
+        }
+
+        /// <summary>
+        /// The one page of <paramref name="height"/> a level holds, or null when it holds more. A
+        /// subtree reused whole is one page only when each page down to that height holds one entry.
+        /// </summary>
+        internal async ValueTask<InternalEntry?> SinglePageAsync(PageEmitter level, int height)
+        {
+            if (level.Items!.Count != 1)
+            {
+                return null;
+            }
+
+            Item item = level.Items[0];
+            if (item.Page is null)
+            {
+                return level.Emitted[item.Index];
+            }
+
+            Node node = new Node(item.Page, item.Index);
+            while (node.Height > height)
+            {
+                Opened page = await OpenAsync(node).ConfigureAwait(false);
+                if (page.Entries.Count != 1)
+                {
+                    return null;
+                }
+
+                node = new Node(page, 0);
+            }
+
+            return node.Descriptor;
+        }
+
+        private bool IsDirty(Node node) => _opened.TryGetValue(node, out Opened? page) && page.Dirty;
+
+        private async ValueTask<Opened> OpenAsync(Node node)
+        {
+            if (!_opened.TryGetValue(node, out Opened? page))
+            {
+                page = new Opened(node.Height, node.Page, TreePage.ReadInternal(
+                    await _source.ReadPageAsync(node.Descriptor.Child, _cancellationToken).ConfigureAwait(false)));
+                _opened.Add(node, page);
+            }
+
+            return page;
+        }
+
+        /// <summary>
+        /// The next entry of the level below whose first key is under <paramref name="upper"/>, or
+        /// null. A subtree that level reused whole is opened into the entries it holds at that level.
+        /// </summary>
+        private async ValueTask<InternalEntry?> TakeBelowAsync(int height, ReadOnlyMemory<byte> upper, bool last)
+        {
+            while (TryPeek(out InternalEntry descriptor, out Opened? page, out int index))
+            {
+                if (!last && TreePage.Compare(descriptor.MinKey.Span, upper.Span) >= 0)
+                {
+                    return null;
+                }
+
+                Take();
+                if (page is not null && page.Height - 1 >= height)
+                {
+                    _below[_belowOpen++] = new Frame(await OpenAsync(new Node(page, index)).ConfigureAwait(false), 0);
+                    continue;
+                }
+
+                return descriptor;
+            }
+
+            return null;
+        }
+
+        /// <summary>Takes the next entry of the level below, which is the old node reused whole.</summary>
+        private void TakeWhole(Node node)
+        {
+            if (!IsNext(node))
+            {
+                throw new InvalidOperationException("The level below does not hold a page reused whole where the walk reached it.");
+            }
+
+            Take();
+        }
+
+        private bool IsNext(Node node) =>
+            TryPeek(out _, out Opened? page, out int index) && ReferenceEquals(page, node.Page) && index == node.Index;
+
+        private bool TryPeek(out InternalEntry descriptor, out Opened? page, out int index)
+        {
+            while (_belowOpen > 0)
+            {
+                Frame frame = _below[_belowOpen - 1];
+                if (frame.Next < frame.Page.Entries.Count)
+                {
+                    page = frame.Page;
+                    index = frame.Next;
+                    descriptor = page.Entries[index];
+                    return true;
+                }
+
+                _belowOpen--;
+            }
+
+            if (_next < _level!.Items!.Count)
+            {
+                Item item = _level.Items[_next];
+                page = item.Page;
+                index = item.Index;
+                descriptor = page is null ? _level.Emitted[index] : page.Entries[index];
+                return true;
+            }
+
+            descriptor = default;
+            page = null;
+            index = 0;
+            return false;
+        }
+
+        /// <summary>Moves past the entry <see cref="TryPeek"/> returned.</summary>
+        private void Take()
+        {
+            if (_belowOpen > 0)
+            {
+                _below[_belowOpen - 1].Next++;
+            }
+            else
+            {
+                _next++;
+            }
         }
     }
 }
