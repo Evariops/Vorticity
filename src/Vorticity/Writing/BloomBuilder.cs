@@ -50,6 +50,9 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>Values hashed together before their hashes go to the set: a quarter of <see cref="CheckStride"/>.</summary>
     private const int HashBatch = 64;
 
+    /// <summary>The recent hashes a string column's rows are checked against, a power of two.</summary>
+    private const int RecentHashes = 1024;
+
     /// <summary>The blocks `Auto` watches for a column that repeats one set.</summary>
     private const int RepeatBlocks = 4;
 
@@ -407,6 +410,7 @@ internal sealed class BloomBuilder : IndexBuilder
             {
                 Span<byte> trigram = stackalloc byte[Trigrams.Length];
                 Span<ulong> hashes = stackalloc ulong[CheckStride];
+                Span<ulong> recent = stackalloc ulong[RecentHashes];
                 int gathered = 0;
                 bool fold = _policy.CaseInsensitive;
                 _rawBytes += 16L * count;
@@ -419,8 +423,7 @@ internal sealed class BloomBuilder : IndexBuilder
                         for (int i = 0; i + Trigrams.Length <= value.Length; i++)
                         {
                             Trigrams.Copy(value.Slice(i, Trigrams.Length), fold, trigram);
-                            hashes[gathered++] = SplitBlockBloom.Hash(trigram, hash);
-                            if (gathered == hashes.Length)
+                            if (Fresh(recent, SplitBlockBloom.Hash(trigram, hash), hashes, ref gathered))
                             {
                                 block.AddRange(hashes);
                                 gathered = 0;
@@ -436,6 +439,7 @@ internal sealed class BloomBuilder : IndexBuilder
             case CanonicalKind.VarBinView:
             {
                 Span<ulong> hashes = stackalloc ulong[CheckStride];
+                Span<ulong> recent = stackalloc ulong[RecentHashes];
                 int gathered = 0;
                 _rawBytes += 16L * count;
                 for (int row = start; row < start + count; row++)
@@ -444,8 +448,7 @@ internal sealed class BloomBuilder : IndexBuilder
                     {
                         ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
                         _rawBytes += value.Length;
-                        hashes[gathered++] = SplitBlockBloom.Hash(value, hash);
-                        if (gathered == hashes.Length)
+                        if (Fresh(recent, SplitBlockBloom.Hash(value, hash), hashes, ref gathered))
                         {
                             block.AddRange(hashes);
                             gathered = 0;
@@ -506,6 +509,29 @@ internal sealed class BloomBuilder : IndexBuilder
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// Gathers <paramref name="value"/> unless it is a recent hash, which the set holds already or
+    /// will once the gathered ones are added; returns whether the gathered hashes fill their span.
+    /// </summary>
+    /// <remarks>
+    /// A column of few strings hashes the same few values row after row, each of which would pay
+    /// the set's mix and probe again. The recent hashes are a direct-mapped table on the stack for
+    /// one call, picked by the hash's own low bits: a collision there only costs the probe it would
+    /// have saved, so it takes no seed. Zero is the empty slot, and a zero hash always goes on.
+    /// </remarks>
+    private static bool Fresh(Span<ulong> recent, ulong value, Span<ulong> hashes, ref int gathered)
+    {
+        ref ulong seen = ref recent[(int)value & (RecentHashes - 1)];
+        if (seen == value && value != 0)
+        {
+            return false;
+        }
+
+        seen = value;
+        hashes[gathered++] = value;
+        return gathered == hashes.Length;
     }
 
     /// <summary>
