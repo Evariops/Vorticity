@@ -31,6 +31,8 @@
 // 5 % on a kernel, or any number recorded as a baseline, is confirmed with `--full` on the
 // one class concerned.
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 using BenchmarkDotNet.Columns;
@@ -74,6 +76,17 @@ public sealed class BenchmarkConfig : ManualConfig
     /// hatch for the case where the generated host is the problem rather than the answer.
     /// </remarks>
     internal static bool InProcess { get; set; }
+
+    /// <summary>
+    /// Set the same way: each <c>--case Name=Value[,Name=Value]</c> on the command line, the cases
+    /// of a class to run, a case running when every parameter it names has that value. None means
+    /// every case.
+    /// </summary>
+    /// <remarks>
+    /// A curve of a dozen cases answers one question at the end; the iterations before it ask about
+    /// one or two of them, and running the others is waiting for nothing.
+    /// </remarks>
+    internal static List<Dictionary<string, string>> Cases { get; } = [];
 
     /// <summary>The category name for a curve: excluded unless <c>--explore</c> asks for it.</summary>
     public const string Explore = "explore";
@@ -142,6 +155,16 @@ public sealed class BenchmarkConfig : ManualConfig
         {
             AddFilter(new SimpleFilter(benchmark => !benchmark.Descriptor.Categories.Contains(
                 Explore, StringComparer.OrdinalIgnoreCase)));
+        }
+
+        if (Cases.Count > 0)
+        {
+            AddFilter(new SimpleFilter(benchmark => Cases.Any(wanted => wanted.All(pair =>
+                benchmark.Parameters.Items.Any(parameter =>
+                    string.Equals(parameter.Name, pair.Key, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(
+                        Convert.ToString(parameter.Value, CultureInfo.InvariantCulture), pair.Value,
+                        StringComparison.OrdinalIgnoreCase))))));
         }
 
     }

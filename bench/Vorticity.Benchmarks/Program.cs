@@ -5,7 +5,9 @@
 // narrows it to one class, which is what a kernel change wants, and `-- fsst` is the same thing
 // without the quoting -- a bare word becomes `--filter '*word*'`; `-- --full` selects the reference
 // profile, for the one class whose number is about to be written down; `-- --explore` adds back the
-// CURVES, which are exploration rather than guards and are out of the default run. Selection by
+// CURVES, which are exploration rather than guards and are out of the default run; and
+// `-- --case Rows=65536,Values=Sparse` keeps the cases whose parameters have those values, once per
+// case wanted, for the iterations that ask about one corner of a curve. Selection by
 // category -- `-- --anyCategories kernel` -- is BenchmarkDotNet's own, and works because every class
 // is labelled `kernel`, `path` or `explore`; this file refuses to run if one is not.
 //
@@ -295,13 +297,24 @@ internal static class Program
         BenchmarkConfig.Exploring = Array.IndexOf(args, "--explore") >= 0;
         BenchmarkConfig.InProcess = Array.IndexOf(args, "--inprocess") >= 0;
 
+        // `--case Name=Value[,Name=Value]` is ours as well, as many times as there are cases to run.
+        for (int i = 0; i + 1 < args.Length; i++)
+        {
+            if (args[i] == "--case")
+            {
+                BenchmarkConfig.Cases.Add(args[i + 1].Split(',')
+                    .Select(pair => pair.Split('=', 2))
+                    .ToDictionary(pair => pair[0].Trim(), pair => pair.Length > 1 ? pair[1].Trim() : "", StringComparer.OrdinalIgnoreCase));
+            }
+        }
+
         // `--out <page>` is ours too: each class run goes to the benchmark page as a section of its
         // own, so a run of one class refreshes that class and leaves the others.
         int pageFlag = Array.IndexOf(args, "--out");
         string? page = pageFlag >= 0 && pageFlag + 1 < args.Length ? args[pageFlag + 1] : null;
         string[] forwarded =
-            [.. args.Where((a, i) => a is not ("--full" or "--explore" or "--inprocess" or "--out") &&
-                (pageFlag < 0 || i != pageFlag + 1))];
+            [.. args.Where((a, i) => a is not ("--full" or "--explore" or "--inprocess" or "--out" or "--case") &&
+                (pageFlag < 0 || i != pageFlag + 1) && (i == 0 || args[i - 1] != "--case"))];
 
         if (UncategorizedClasses() is { Length: > 0 } uncategorized)
         {
