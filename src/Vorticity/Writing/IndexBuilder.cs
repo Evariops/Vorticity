@@ -20,6 +20,12 @@ internal abstract class IndexBuilder : IDisposable
 
     internal Queue<PendingPayload> Pending { get; } = new Queue<PendingPayload>();
 
+    /// <summary>The writer's record of the builders that hold queued payloads; null outside a writer.</summary>
+    internal PendingLedger? Ledger { get; set; }
+
+    /// <summary>The builder's rank among its writer's, the order their payloads go out in.</summary>
+    internal int Order { get; set; }
+
     /// <summary>Why the whole index was dropped; <see langword="null"/> while it lives.</summary>
     internal string? Abandoned { get; private set; }
 
@@ -95,6 +101,7 @@ internal abstract class IndexBuilder : IDisposable
     internal virtual void Abandon(string reason)
     {
         Abandoned ??= reason;
+        Ledger?.Dropped(Pending.Count);
         Pending.Clear();
         _pending = 0;
     }
@@ -105,6 +112,7 @@ internal abstract class IndexBuilder : IDisposable
         payload.Owner = this;
         _pending += payload.Estimate;
         Pending.Enqueue(payload);
+        Ledger?.Queued(this);
     }
 
     /// <summary>A payload of this builder landed: its estimate becomes its real length.</summary>

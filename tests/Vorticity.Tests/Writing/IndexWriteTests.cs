@@ -157,6 +157,47 @@ public sealed class IndexWriteTests
     }
 
     [Fact]
+    public async Task TheIndexPayloadsOfOneFlushGoOutColumnAfterColumn()
+    {
+        // Too little data for the budget to judge before the end, so every payload waits for the
+        // one flush of the completion, which takes a column's payloads before the next column's.
+        Decoders.EnsureRegistered();
+        WritePolicy policy = WritePolicy.None
+            .For("id", IndexSpec.Bloom())
+            .For("label", IndexSpec.Bloom());
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            RowBlockSize = Block,
+            DataBlockTargetBytes = null,
+            WritePolicy = policy,
+            IndexBudgetPerMille = 1_000_000,
+        };
+        (byte[] bytes, WriteReport report) = await WriteAsync(options);
+        Assert.All(report.Indexes, index => Assert.Equal(IndexOutcome.Built, index.Outcome));
+
+        await using VortexFile file = await OpenAsync(bytes);
+        IndexDirectory directory = (await file.ReadIndexDirectoryAsync(TestContext.Current.CancellationToken))!;
+        long previous = -1;
+        foreach (uint field in (uint[])[0, 2])
+        {
+            IndexEntry entry = Assert.Single(directory.Entries, e => e.ColumnPath.Count == 1 && e.ColumnPath[0] == field);
+            long first = long.MaxValue;
+            long last = 0;
+            foreach (IndexRun run in entry.Runs)
+            {
+                foreach (IndexSegment region in run.Payload)
+                {
+                    first = Math.Min(first, (long)region.Offset);
+                    last = Math.Max(last, (long)region.Offset);
+                }
+            }
+
+            Assert.True(first > previous, $"column {field}'s payloads start at {first}, before the previous column's end at {previous}");
+            previous = last;
+        }
+    }
+
+    [Fact]
     public async Task TheReportAccountsForEveryByteOfTheFile()
     {
         Decoders.EnsureRegistered();

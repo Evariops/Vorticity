@@ -64,6 +64,14 @@ internal sealed class IndexWriter : IDisposable
     private DTypeArena? _payloadTypes;
     private long _payloadBytes;
 
+    /// <summary>The builders holding queued payloads, and how many.</summary>
+    private readonly PendingLedger _ledger = new PendingLedger();
+
+    // The living bytes while a flush places payloads, or -1 when unknown: summed at the flush's
+    // first verdict, then moved by each payload placed, since no builder takes in data while a
+    // flush writes. Forgotten when the flush ends and whenever a builder may be given up.
+    private long _living = -1;
+
     /// <summary>
     /// The budget is a share per mille of the data bytes. Rows per block is 0 when the caller's
     /// batches are the blocks, and a row span past <c>wideRowsAbove</c> writes rows at 64 bits.
@@ -160,11 +168,15 @@ internal sealed class IndexWriter : IDisposable
             _refusals[field] = reason;
         }
 
-        // The locating builders share one scratch, made only when there is one such builder.
+        // The locating builders share one scratch, made only when there is one such builder. Every
+        // builder reports its queued payloads to the ledger, ranked in the order they go out.
+        int order = 0;
         foreach (List<IndexBuilder> builders in _builders)
         {
             foreach (IndexBuilder builder in builders)
             {
+                builder.Ledger = _ledger;
+                builder.Order = order++;
                 if (builder is KeyIndexBuilder locating)
                 {
                     _scratch ??= new RunScratch(scratchMemoryBytes, scratchDirectory);
@@ -877,6 +889,7 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     internal void Judge()
     {
+        _living = -1;
         for (int field = 0; field < _builders.Length; field++)
         {
             ColumnFacts facts = new ColumnFacts(_columnBytes[field]);
@@ -900,6 +913,7 @@ internal sealed class IndexWriter : IDisposable
     /// </remarks>
     internal void SettleBudget(long dataBytes)
     {
+        _living = -1;
         if (LivingBytes > 0 && OverBudget(dataBytes))
         {
             AbandonForBudget(dataBytes);
@@ -924,6 +938,8 @@ internal sealed class IndexWriter : IDisposable
                         $"{_budgetPerMille}‰; raise it with IndexPolicy.WithBudgetPerMille");
                 }
             }
+
+            _living = -1;
         }
     }
 
@@ -962,24 +978,7 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    internal bool HasPending
-    {
-        get
-        {
-            foreach (List<IndexBuilder> builders in _builders)
-            {
-                foreach (IndexBuilder builder in builders)
-                {
-                    if (builder.Pending.Count > 0)
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
-        }
-    }
+    internal bool HasPending => _ledger.Payloads > 0;
 
     /// <summary>
     /// Whether the payloads queued so far may be written now, the budget having been asked first.
@@ -1003,6 +1002,7 @@ internal sealed class IndexWriter : IDisposable
     /// </remarks>
     internal bool TryOpenFlush(long position)
     {
+        _living = -1;
         long dataBytes = position - FileBytes;
         if (dataBytes < BudgetFloor)
         {
@@ -1030,32 +1030,25 @@ internal sealed class IndexWriter : IDisposable
         ArrayBlobWriter.Workspace blobs, EncodingDictionary encodings, out ArrayBlobWriter.BlobLease blob,
         out PendingPayload? payload)
     {
-        foreach (List<IndexBuilder> builders in _builders)
+        if (!_ledger.TryTake(out payload))
         {
-            foreach (IndexBuilder builder in builders)
-            {
-                if (!builder.Pending.TryDequeue(out payload))
-                {
-                    continue;
-                }
-
-                if (_payloads is null)
-                {
-                    _payloads = new ScanContext([]);
-                    _payloadTypes = new DTypeArena();
-                }
-
-                CanonicalArena arena = _payloads.Canonical;
-                int node = payload.Build(arena, _payloadTypes!);
-                payload.DType = DTypeFlatBuffers.Serialize(arena.GetNode(node).DType);
-                blob = ArrayBlobWriter.Write(blobs, arena, node, encodings, payload.Compress);
-                return true;
-            }
+            // The flush is over: the builders may take in data again.
+            _living = -1;
+            blob = default;
+            return false;
         }
 
-        blob = default;
-        payload = null;
-        return false;
+        if (_payloads is null)
+        {
+            _payloads = new ScanContext([]);
+            _payloadTypes = new DTypeArena();
+        }
+
+        CanonicalArena arena = _payloads.Canonical;
+        int node = payload!.Build(arena, _payloadTypes!);
+        payload.DType = DTypeFlatBuffers.Serialize(arena.GetNode(node).DType);
+        blob = ArrayBlobWriter.Write(blobs, arena, node, encodings, payload.Compress);
+        return true;
     }
 
     /// <summary>Every byte the payloads took in the file, their alignment padding included.</summary>
@@ -1068,7 +1061,16 @@ internal sealed class IndexWriter : IDisposable
     internal void Placed(PendingPayload payload, IndexSegment segment, long fileBytes, long position)
     {
         payload.Segment = segment;
-        payload.Owner?.Placed(payload, segment.Length);
+        if (payload.Owner is { } owner)
+        {
+            long before = owner.Bytes;
+            owner.Placed(payload, segment.Length);
+            if (_living >= 0 && owner.Abandoned is null)
+            {
+                _living += owner.Bytes - before;
+            }
+        }
+
         _payloadBytes += segment.Length;
         FileBytes += fileBytes;
         _payloads!.Canonical.Reset();
@@ -1090,12 +1092,18 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>
     /// The bytes of the indexes still alive. What an abandoned builder already wrote is dead weight
-    /// the file carries either way, and must not condemn the builders that survived it.
+    /// the file carries either way, and must not condemn the builders that survived it. Summed over
+    /// the builders once per flush; see <see cref="_living"/>.
     /// </summary>
     private long LivingBytes
     {
         get
         {
+            if (_living >= 0)
+            {
+                return _living;
+            }
+
             long bytes = 0;
             foreach (List<IndexBuilder> builders in _builders)
             {
@@ -1105,6 +1113,7 @@ internal sealed class IndexWriter : IDisposable
                 }
             }
 
+            _living = bytes;
             return bytes;
         }
     }
@@ -1138,6 +1147,8 @@ internal sealed class IndexWriter : IDisposable
                     $"over the budget of {_budgetPerMille}‰ (IndexPolicy.WithBudgetPerMille)");
             }
         }
+
+        _living = -1;
     }
 
     /// <summary>
@@ -1147,6 +1158,7 @@ internal sealed class IndexWriter : IDisposable
     internal void Close(
         IReadOnlyList<ColumnWriter> columns, IReadOnlyList<long> chunkRows, int blockRows, long dataBytes = 0)
     {
+        _living = -1;
         if (_payloadBytes > 0 && OverBudget(dataBytes))
         {
             AbandonForBudget(dataBytes);
