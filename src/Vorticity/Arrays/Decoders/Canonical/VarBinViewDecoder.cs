@@ -155,9 +155,23 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
     private const int MaxSweptBuffers = 64;
 
     /// <summary>
-    /// Every view of a column without nulls, bounds checked as it goes; true when every prefix
-    /// matched and, for Utf8, every inline value and every referenced span is ASCII.
+    /// The bytes a data buffer's views leave unnamed between the values they name, per view, up to
+    /// which one sweep of the span they reach costs less than a check of each value: measured at
+    /// about 150 on 24-byte values, where a check costs a view's pass and a call, and a swept byte a
+    /// hundredth of a nanosecond.
     /// </summary>
+    private const int SweptGapPerView = 160;
+
+    /// <summary>
+    /// Every view of a column without nulls, bounds checked as it goes; true when every prefix
+    /// matched and, for Utf8, every inline value and every referenced value is ASCII.
+    /// </summary>
+    /// <remarks>
+    /// The values a buffer's views name are checked by one sweep of the span they reach, which is
+    /// as long as the values when a writer laid them in row order. Views scattered over a buffer
+    /// much longer than what they name, a window of a chunk whose values are shared or reordered,
+    /// would have every batch sweep most of the buffer: their values are checked one by one.
+    /// </remarks>
     private static bool Swept(ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> dataBuffers, int length, bool requireUtf8)
     {
         Span<uint> lowest = stackalloc uint[MaxSweptBuffers];
@@ -275,10 +289,86 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
             return false;
         }
 
+        ulong scattered = 0;
         for (int b = 0; b < dataBuffers.Length; b++)
         {
-            if (highest[b] > lowest[b] &&
-                !System.Text.Ascii.IsValid(dataBuffers[b].Span[(int)lowest[b]..(int)highest[b]]))
+            if (highest[b] <= lowest[b])
+            {
+                continue;
+            }
+
+            // A span longer than the gap allowed to every view of the batch may be views scattered
+            // over the buffer, or long values in row order: a sample of the views tells which.
+            if ((ulong)(highest[b] - lowest[b]) > (ulong)length * SweptGapPerView && Scattered(views, length, b))
+            {
+                scattered |= 1UL << b;
+            }
+            else if (!System.Text.Ascii.IsValid(dataBuffers[b].Span[(int)lowest[b]..(int)highest[b]]))
+            {
+                return false;
+            }
+        }
+
+        return scattered == 0 || ScatteredAscii(views, dataBuffers, length, scattered);
+    }
+
+    /// <summary>Views read to tell a buffer's values scattered from long ones in row order.</summary>
+    private const int SampledViews = 64;
+
+    /// <summary>
+    /// Whether the first <see cref="SampledViews"/> views that name <paramref name="buffer"/> leave
+    /// more bytes unnamed between their values than a check of each value costs: what a sweep would
+    /// pay for nothing. Only which way the values are checked rides on it.
+    /// </summary>
+    private static bool Scattered(ReadOnlySpan<byte> views, int length, int buffer)
+    {
+        uint low = uint.MaxValue;
+        uint high = 0;
+        ulong bytes = 0;
+        int count = 0;
+        for (int i = 0; i < length && count < SampledViews; i++)
+        {
+            ReadOnlySpan<byte> view = views.Slice(i * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
+            uint size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view);
+            if (size <= CanonicalSupport.MaxInlineViewLength
+                || System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]) != (uint)buffer)
+            {
+                continue;
+            }
+
+            uint offset = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
+            low = Math.Min(low, offset);
+            high = Math.Max(high, offset + size);
+            bytes += size;
+            count++;
+        }
+
+        return count > 0 && high - low > bytes + ((ulong)count * SweptGapPerView);
+    }
+
+    /// <summary>
+    /// Whether every value the views name in the buffers of <paramref name="scattered"/> is ASCII,
+    /// checked value by value: the views were bounds checked by the sweep.
+    /// </summary>
+    private static bool ScatteredAscii(ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> dataBuffers, int length, ulong scattered)
+    {
+        for (int i = 0; i < length; i++)
+        {
+            ReadOnlySpan<byte> view = views.Slice(i * CanonicalSupport.ViewSize, CanonicalSupport.ViewSize);
+            uint size = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view);
+            if (size <= CanonicalSupport.MaxInlineViewLength)
+            {
+                continue;
+            }
+
+            int bufferIndex = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[8..12]);
+            if ((scattered & (1UL << bufferIndex)) == 0)
+            {
+                continue;
+            }
+
+            int offset = (int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(view[12..16]);
+            if (!System.Text.Ascii.IsValid(dataBuffers[bufferIndex].Span.Slice(offset, (int)size)))
             {
                 return false;
             }
