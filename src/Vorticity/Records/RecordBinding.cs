@@ -130,15 +130,8 @@ internal sealed class RecordBinding
     /// <summary>The index of the member named <paramref name="name"/> in the record.</summary>
     internal int MemberIndex(string name)
     {
-        for (int i = 0; i < Record.Count; i++)
-        {
-            if (Record[i].Name == name)
-            {
-                return i;
-            }
-        }
-
-        throw new VortexSchemaException($"{RecordType.Name} has no member '{name}'.");
+        int index = Record.IndexOfName(name);
+        return index >= 0 ? index : throw new VortexSchemaException($"{RecordType.Name} has no member '{name}'.");
     }
 
     private static RecordBinding Bind(
@@ -150,10 +143,11 @@ internal sealed class RecordBinding
         string[][] paths = new string[count][];
         int[][] indexPaths = new int[count][];
         FieldMaskBuilder mask = new FieldMaskBuilder();
+        ColumnNames names = new ColumnNames(fileFields);
         for (int i = 0; i < count; i++)
         {
             VortexField member = record[i];
-            int found = Match(recordType, member.Name, fileFields);
+            int found = Match(recordType, member.Name, fileFields, names);
             fileIndex[i] = found;
             VortexField column = fileFields[found];
             paths[i] = [.. prefix, column.Name];
@@ -233,29 +227,19 @@ internal sealed class RecordBinding
         }
     }
 
-    private static int Match(Type recordType, string name, VortexField[] fields)
+    private static int Match(Type recordType, string name, VortexField[] fields, ColumnNames names)
     {
-        for (int i = 0; i < fields.Length; i++)
+        int exact = names.Exact(name);
+        if (exact >= 0)
         {
-            if (string.Equals(fields[i].Name, name, StringComparison.Ordinal))
-            {
-                return i;
-            }
+            return exact;
         }
 
-        int found = -1;
-        for (int i = 0; i < fields.Length; i++)
+        (int found, int second) = names.Loose(name);
+        if (second >= 0)
         {
-            if (string.Equals(fields[i].Name, name, StringComparison.OrdinalIgnoreCase))
-            {
-                if (found >= 0)
-                {
-                    throw new VortexSchemaException(
-                        $"Member '{name}' of {recordType.Name} matches both '{fields[found].Name}' and '{fields[i].Name}' when case is ignored; name the column with [VortexColumn].");
-                }
-
-                found = i;
-            }
+            throw new VortexSchemaException(
+                $"Member '{name}' of {recordType.Name} matches both '{fields[found].Name}' and '{fields[second].Name}' when case is ignored; name the column with [VortexColumn].");
         }
 
         if (found < 0)

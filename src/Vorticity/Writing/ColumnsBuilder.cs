@@ -98,15 +98,8 @@ public class ColumnsBuilder
     private int IndexOf(string name)
     {
         ArgumentNullException.ThrowIfNull(name);
-        for (int i = 0; i < Schema.Count; i++)
-        {
-            if (string.Equals(Schema[i].Name, name, StringComparison.Ordinal))
-            {
-                return i;
-            }
-        }
-
-        throw new VortexSchemaException($"The builder has no column '{name}'; its schema is {Schema}.");
+        int index = Schema.IndexOfName(name);
+        return index >= 0 ? index : throw new VortexSchemaException($"The builder has no column '{name}'; its schema is {Schema}.");
     }
 
     /// <summary>The builder of <paramref name="column"/> as <typeparamref name="T"/>, once the type is found to fit it.</summary>
@@ -180,7 +173,7 @@ public sealed class ColumnsBuilder<TRecord> : ColumnsBuilder
             return typed;
         }
 
-        typed = new ColumnsBuilder<TNested>(nested, WriteBinding.Map(typeof(TNested), TNested.Schema, nested.Type.Fields), null);
+        typed = new ColumnsBuilder<TNested>(nested, WriteBinding.Map(typeof(TNested), TNested.Schema, nested.Type.FieldArray), null);
         nested.TypedFacade = typed;
         return typed;
     }
@@ -670,42 +663,33 @@ public static class ExtensionColumnBuilderExtensions
 internal static class WriteBinding
 {
     /// <summary>Per member of <paramref name="record"/>, its column among <paramref name="fields"/>; null when they are the same, in order.</summary>
-    internal static int[]? Map(Type recordType, VortexSchema record, ReadOnlySpan<VortexField> fields)
+    internal static int[]? Map(Type recordType, VortexSchema record, VortexField[] fields)
     {
         int[] map = new int[record.Count];
         bool identity = record.Count == fields.Length;
+        ColumnNames names = new ColumnNames(fields);
         for (int i = 0; i < record.Count; i++)
         {
-            map[i] = Match(recordType, record[i].Name, fields);
+            map[i] = Match(recordType, record[i].Name, fields, names);
             identity &= map[i] == i;
         }
 
         return identity ? null : map;
     }
 
-    private static int Match(Type recordType, string name, ReadOnlySpan<VortexField> fields)
+    private static int Match(Type recordType, string name, VortexField[] fields, ColumnNames names)
     {
-        for (int i = 0; i < fields.Length; i++)
+        int exact = names.Exact(name);
+        if (exact >= 0)
         {
-            if (string.Equals(fields[i].Name, name, StringComparison.Ordinal))
-            {
-                return i;
-            }
+            return exact;
         }
 
-        int found = -1;
-        for (int i = 0; i < fields.Length; i++)
+        (int found, int second) = names.Loose(name);
+        if (second >= 0)
         {
-            if (string.Equals(fields[i].Name, name, StringComparison.OrdinalIgnoreCase))
-            {
-                if (found >= 0)
-                {
-                    throw new VortexSchemaException(
-                        $"Member '{name}' of {recordType.Name} matches both '{fields[found].Name}' and '{fields[i].Name}' when case is ignored; name the column with [VortexColumn].");
-                }
-
-                found = i;
-            }
+            throw new VortexSchemaException(
+                $"Member '{name}' of {recordType.Name} matches both '{fields[found].Name}' and '{fields[second].Name}' when case is ignored; name the column with [VortexColumn].");
         }
 
         return found >= 0

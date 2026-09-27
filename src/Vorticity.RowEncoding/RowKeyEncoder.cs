@@ -72,7 +72,7 @@ public static partial class RowEncoder
         CanonicalArena arena = new CanonicalArena(8, options.EnginePool);
         try
         {
-            ColumnsBuilder<TKey> builder = new ColumnsBuilder<TKey>(store, WriteBinding.Map(typeof(TKey), TKey.Schema, store.Type.Fields), null);
+            ColumnsBuilder<TKey> builder = new ColumnsBuilder<TKey>(store, WriteBinding.Map(typeof(TKey), TKey.Schema, store.Type.FieldArray), null);
             TKey.WriteRows(builder, new ReadOnlySpan<TKey>(in key));
             CanonicalNode root = arena.GetNode(store.Build(arena, 1));
             int count = root.FieldCount;

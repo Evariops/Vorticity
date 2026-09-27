@@ -18,33 +18,18 @@ internal static class ToolPaths
     internal static int[] Resolve(VortexSchema schema, string path)
     {
         ArgumentNullException.ThrowIfNull(path);
-        for (int i = 0; i < schema.Count; i++)
-        {
-            if (schema[i].Name == path)
-            {
-                return [i];
-            }
-        }
-
-        return Resolve(schema, path.Split('.'), path);
+        int top = schema.IndexOfName(path);
+        return top >= 0 ? [top] : Resolve(schema, path.Split('.'), path);
     }
 
     internal static int[] Resolve(VortexSchema schema, string[] segments, string display)
     {
         int[] indices = new int[segments.Length];
         ReadOnlySpan<VortexField> fields = schema.FieldArray;
+        VortexType? parent = null;
         for (int s = 0; s < segments.Length; s++)
         {
-            int found = -1;
-            for (int i = 0; i < fields.Length; i++)
-            {
-                if (fields[i].Name == segments[s])
-                {
-                    found = i;
-                    break;
-                }
-            }
-
+            int found = parent is null ? schema.IndexOfName(segments[s]) : parent.IndexOfField(segments[s]);
             if (found < 0)
             {
                 throw new VortexSchemaException($"The file has no column '{display}'; its schema is {schema}.");
@@ -59,6 +44,7 @@ internal static class ToolPaths
                     throw new VortexSchemaException($"'{display}' goes through '{segments[s]}', a column of {fields[found].Type}, which has no fields.");
                 }
 
+                parent = type;
                 fields = type.Fields;
             }
         }

@@ -3,7 +3,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
-using System.Text;
 using System.Text.Unicode;
 
 namespace Vorticity;
@@ -21,6 +20,7 @@ public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<Vortex
     private readonly int _hash;
     private string? _text;
     private VortexType? _root;
+    private Dictionary<string, int>? _names;
 
     private VortexSchema(VortexField[] fields, bool rootIsStruct)
     {
@@ -79,9 +79,7 @@ public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<Vortex
     public int IndexOf(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
-        Span<byte> buffer = path.Length <= 128 ? stackalloc byte[512] : new byte[Encoding.UTF8.GetMaxByteCount(path.Length)];
-        int written = Encoding.UTF8.GetBytes(path, buffer);
-        return TryGetField(buffer[..written], out int index) ? index : -1;
+        return Find(path);
     }
 
     /// <summary>The UTF-8 form of <see cref="IndexOf"/>, without allocating.</summary>
@@ -90,32 +88,46 @@ public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<Vortex
     /// <returns>Whether a field matches.</returns>
     public bool TryGetField(ReadOnlySpan<byte> pathUtf8, out int index)
     {
-        index = IndexOfName(_fields, pathUtf8);
-        if (index >= 0)
+        Span<char> chars = pathUtf8.Length <= 256 ? stackalloc char[256] : new char[pathUtf8.Length];
+        if (Utf8.ToUtf16(pathUtf8, chars, out _, out int written) != System.Buffers.OperationStatus.Done)
         {
-            return true;
+            index = -1;
+            return false;
         }
 
+        index = Find(chars[..written]);
+        return index >= 0;
+    }
+
+    /// <summary>The index of the first top-level field named exactly <paramref name="name"/>, or -1.</summary>
+    internal int IndexOfName(ReadOnlySpan<char> name) => FieldNames.IndexOf(_fields, ref _names, name);
+
+    /// <summary>
+    /// The index of the field <paramref name="path"/> names within its own struct, or -1: a
+    /// top-level name first, then a path.
+    /// </summary>
+    private int Find(ReadOnlySpan<char> path)
+    {
         ReadOnlySpan<VortexField> fields = _fields;
-        ReadOnlySpan<byte> rest = pathUtf8;
+        int index = IndexOfName(path);
+        if (index >= 0 || !path.Contains('.'))
+        {
+            return index;
+        }
+
+        VortexType? type = null;
+        ReadOnlySpan<char> rest = path;
         while (true)
         {
-            int dot = rest.IndexOf((byte)'.');
-            ReadOnlySpan<byte> segment = dot < 0 ? rest : rest[..dot];
-            int found = IndexOfName(fields, segment);
-            if (found < 0)
+            int dot = rest.IndexOf('.');
+            ReadOnlySpan<char> segment = dot < 0 ? rest : rest[..dot];
+            int found = type is null ? IndexOfName(segment) : type.IndexOfField(segment);
+            if (found < 0 || dot < 0)
             {
-                index = -1;
-                return false;
+                return found;
             }
 
-            if (dot < 0)
-            {
-                index = found;
-                return true;
-            }
-
-            VortexType type = fields[found].Type;
+            type = fields[found].Type;
             while (type.Kind == VortexTypeKind.Extension)
             {
                 type = type.StorageType!;
@@ -123,74 +135,12 @@ public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<Vortex
 
             if (type.Kind != VortexTypeKind.Struct)
             {
-                index = -1;
-                return false;
+                return -1;
             }
 
             fields = type.Fields;
             rest = rest[(dot + 1)..];
         }
-    }
-
-    /// <summary>The field a <c>.</c>-separated path names, or null.</summary>
-    internal VortexField? Resolve(string path)
-    {
-        int top = IndexOfName(_fields, Encoding.UTF8.GetBytes(path));
-        if (top >= 0)
-        {
-            return _fields[top];
-        }
-
-        ReadOnlySpan<VortexField> fields = _fields;
-        VortexField? current = null;
-        foreach (string segment in path.Split('.'))
-        {
-            if (current is { } parent)
-            {
-                VortexType type = parent.Type;
-                while (type.Kind == VortexTypeKind.Extension)
-                {
-                    type = type.StorageType!;
-                }
-
-                if (type.Kind != VortexTypeKind.Struct)
-                {
-                    return null;
-                }
-
-                fields = type.Fields;
-            }
-
-            int found = IndexOfName(fields, Encoding.UTF8.GetBytes(segment));
-            if (found < 0)
-            {
-                return null;
-            }
-
-            current = fields[found];
-        }
-
-        return current;
-    }
-
-    private static int IndexOfName(ReadOnlySpan<VortexField> fields, ReadOnlySpan<byte> nameUtf8)
-    {
-        Span<char> chars = nameUtf8.Length <= 256 ? stackalloc char[256] : new char[nameUtf8.Length];
-        if (Utf8.ToUtf16(nameUtf8, chars, out _, out int written) != System.Buffers.OperationStatus.Done)
-        {
-            return -1;
-        }
-
-        ReadOnlySpan<char> name = chars[..written];
-        for (int i = 0; i < fields.Length; i++)
-        {
-            if (name.SequenceEqual(fields[i].Name))
-            {
-                return i;
-            }
-        }
-
-        return -1;
     }
 
     /// <inheritdoc/>
