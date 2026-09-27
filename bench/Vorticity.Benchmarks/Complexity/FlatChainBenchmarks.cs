@@ -32,7 +32,7 @@ public class FlatChainBenchmarks
     private const int Rows = 65_536;
 
     /// <summary>Comparisons joined by AND.</summary>
-    [Params(16, 64, 1_024)]
+    [Params(2, 4, 16, 64, 1_024)]
     public int Terms { get; set; }
 
     private string _text = null!;

@@ -93,16 +93,24 @@ public sealed class FilterDepthTests
         Assert.Equal(backward.ToString(), reversed.ToString());
         Assert.Equal(forward.ToString(), VortexExpr.Parse(forward.ToString()).ToString());
 
-        // Neighbouring runs of every size joined in a random order, which takes every rotation:
-        // the operands keep their order, and the run stays within an AVL tree's height.
+        // Neighbouring runs past the depth, of every size, joined in a random order, which takes
+        // every rotation: the operands keep their order, and the run stays within an AVL tree's
+        // height.
+        const int Past = Deepest + 2;
         Random random = new Random(45);
         for (int round = 0; round < 50; round++)
         {
-            int count = random.Next(2, 600);
+            int count = random.Next(2, 60);
             List<VortexExpr> runs = [];
-            for (int i = 0; i < count; i++)
+            for (int k = 0; k < count; k++)
             {
-                runs.Add(Term(i));
+                VortexExpr run = Term(k * Past);
+                for (int i = 1; i < Past; i++)
+                {
+                    run &= Term((k * Past) + i);
+                }
+
+                runs.Add(run);
             }
 
             while (runs.Count > 1)
@@ -112,11 +120,44 @@ public sealed class FilterDepthTests
                 runs.RemoveAt(at + 1);
             }
 
-            Assert.Equal(string.Join(" and ", Enumerable.Range(0, count).Select(i => $"x = {i}")), runs[0].ToString());
-            Assert.InRange(runs[0].Height, 1, (int)((1.45 * Math.Log2(count + 2)) + 1));
+            Assert.Equal(string.Join(" and ", Enumerable.Range(0, count * Past).Select(i => $"x = {i}")), runs[0].ToString());
+            Assert.InRange(runs[0].Height, 1, (int)((1.45 * Math.Log2((count * Past) + 2)) + 1));
         }
 
         static VortexExpr Term(int value) => Expr.Eq(Expr.Field("x"), Expr.Literal(FilterLiteral.From((long)value)));
+    }
+
+    [Fact]
+    public void AChainWithinTheEvaluatorsDepthLeansAsItIsBuiltAndRead()
+    {
+        // Within the depth, a chain built one operand at a time leans, a node an operand, from
+        // either side, and so does one read from text.
+        VortexExpr leaf = Expr.Eq(Expr.Field("x"), Expr.Literal(FilterLiteral.From(1L)));
+        VortexExpr appended = leaf;
+        VortexExpr prepended = leaf;
+        for (int i = 0; i < Deepest; i++)
+        {
+            appended &= leaf;
+            prepended = leaf | prepended;
+        }
+
+        Assert.Equal(Deepest, appended.Height);
+        Assert.Equal(Deepest, prepended.Height);
+        Assert.Equal(Deepest, VortexExpr.Parse("x = 1" + Repeat(" and x = 1", Deepest)).Height);
+        for (VortexExpr node = appended; node is LogicalExpr link; node = link.Left)
+        {
+            Assert.Equal(0, link.Right.Height);
+        }
+
+        for (VortexExpr node = prepended; node is LogicalExpr link; node = link.Right)
+        {
+            Assert.Equal(0, link.Left.Height);
+        }
+
+        // One operand past it, the run is rebuilt balanced, whether built or read.
+        Assert.InRange((appended & leaf).Height, 1, 8);
+        Assert.InRange((leaf | prepended).Height, 1, 8);
+        Assert.InRange(VortexExpr.Parse("x = 1" + Repeat(" and x = 1", Deepest + 1)).Height, 1, 8);
     }
 
     [Fact]
