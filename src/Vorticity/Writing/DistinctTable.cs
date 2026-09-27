@@ -609,9 +609,8 @@ internal sealed class DistinctTable
 
     /// <summary>The bits of a recent view's slot.</summary>
     /// <remarks>
-    /// Two views in one slot take each other's place row after row, which sixteen slots do to two
-    /// of five labels half the time; 256 keep a few dozen apart, and more cost a column of strings
-    /// that do not come back more than they spare.
+    /// Two views in one slot take each other's place row after row, so there are enough slots to
+    /// keep a few dozen labels apart, and no more, as each costs the rows whose views never come back.
     /// </remarks>
     private const int RecentBits = 8;
 
