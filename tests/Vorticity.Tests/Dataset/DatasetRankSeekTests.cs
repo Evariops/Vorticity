@@ -118,50 +118,7 @@ public sealed class DatasetRankSeekTests
         Assert.False(await cursor.SeekRankAsync(-1, ct));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task ASelectionOnAWarmCursorAllocatesNothing(bool sortedColumn)
-    {
-        CancellationToken ct = TestContext.Current.CancellationToken;
-        Decoders.EnsureRegistered();
-        DTypeArena types = new DTypeArena();
-        DType schema = types.Struct(
-            ["key", "measure"],
-            [types.Utf8(Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
-            Nullability.NonNullable);
-
-        await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await BuildAsync(store, types, schema, Shape.Shared, text: true, sortedColumn, ct);
-        await using DatasetKeyCursor cursor = await OpenAsync(dataset, sortedColumn, ct);
-
-        // A first pass opens the objects and reads what the selections read; the second allocates
-        // nothing, text keys included, which are compared where a cursor lends them.
-        const int Ranks = 64;
-        for (int rank = 0; rank < Ranks; rank++)
-        {
-            Assert.True(await cursor.SelectAsync(rank * 31, ct));
-        }
-
-        int synchronous = 0;
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int rank = 0; rank < Ranks; rank++)
-        {
-            ValueTask<bool> select = cursor.SelectAsync(rank * 31, ct);
-            if (select.IsCompletedSuccessfully)
-            {
-                synchronous++;
-            }
-
-            Assert.True(await select);
-        }
-
-        long delta = GC.GetAllocatedBytesForCurrentThread() - before;
-        Assert.Equal(Ranks, synchronous);
-        Assert.True(delta == 0, $"{Ranks} selections allocated {delta} bytes");
-    }
-
-    private static ValueTask<DatasetKeyCursor> OpenAsync(VortexDataset dataset, bool sortedColumn, CancellationToken ct) =>
+    internal static ValueTask<DatasetKeyCursor> OpenAsync(VortexDataset dataset, bool sortedColumn, CancellationToken ct) =>
         DatasetKeyCursor.OpenAsync(dataset, dataset.Snapshot, "key", distinct: false, indexes: !sortedColumn, ct);
 
     private static void AssertAt(DatasetKeyCursor cursor, List<(FilterLiteral Key, long Row, string Object)> walked, int rank)
@@ -171,7 +128,7 @@ public sealed class DatasetRankSeekTests
         Assert.Equal(walked[rank].Object, cursor.Object.Key);
     }
 
-    private static async Task<VortexDataset> BuildAsync(
+    internal static async Task<VortexDataset> BuildAsync(
         MemoryObjectStore store, DTypeArena types, DType schema, Shape shape, bool text, bool sortedColumn, CancellationToken ct)
     {
         DatasetOptions options = new DatasetOptions
