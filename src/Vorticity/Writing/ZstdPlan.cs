@@ -489,7 +489,7 @@ internal readonly struct ZstdPlan
     /// left, and every row elsewhere, are written whether valid or not and the count moves by the
     /// row's bit, a store and an add where a copy a row was a call.
     /// </remarks>
-    internal static int Compact<T>(
+    private static int Compact<T>(
         ReadOnlySpan<byte> source, in ValidityReader valid, int from, int to, Span<byte> stream, int count)
         where T : unmanaged
     {

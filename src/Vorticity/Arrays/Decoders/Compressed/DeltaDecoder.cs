@@ -208,7 +208,7 @@ internal sealed class DeltaDecoder : ArrayDecoder
     /// nodes does not put one array on the heap per node.
     /// </para>
     /// </remarks>
-    internal static void Undelta<T>(
+    private static void Undelta<T>(
         ReadOnlySpan<byte> bases,
         ReadOnlySpan<byte> deltas,
         Span<byte> destination,
