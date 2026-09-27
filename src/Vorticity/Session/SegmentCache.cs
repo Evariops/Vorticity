@@ -18,8 +18,13 @@ namespace Vorticity;
 public sealed class SegmentCache
 {
     private readonly Lock _gate = new Lock();
-    private readonly Dictionary<Key, LinkedListNode<Entry>> _entries = [];
-    private readonly LinkedList<Entry> _order = new LinkedList<Entry>();
+    private readonly Dictionary<Key, Entry> _entries = [];
+
+    // Each source's most recently kept entry, the head of its chain: a file that closes drops the
+    // entries it chains, and walks none of the others.
+    private readonly Dictionary<object, Entry> _sources = new Dictionary<object, Entry>(ReferenceEqualityComparer.Instance);
+    private Entry? _newest;
+    private Entry? _oldest;
     private long _size;
     private long _hits;
     private long _misses;
@@ -50,14 +55,16 @@ public sealed class SegmentCache
         List<SegmentOwner> released;
         lock (_gate)
         {
-            released = new List<SegmentOwner>(_order.Count);
-            foreach (Entry entry in _order)
+            released = new List<SegmentOwner>(_entries.Count);
+            for (Entry? entry = _newest; entry is not null; entry = entry.Older)
             {
                 released.Add(entry.Owner);
             }
 
-            _order.Clear();
+            _newest = null;
+            _oldest = null;
             _entries.Clear();
+            _sources.Clear();
             Interlocked.Exchange(ref _size, 0);
         }
 
@@ -72,12 +79,12 @@ public sealed class SegmentCache
     {
         lock (_gate)
         {
-            if (_entries.TryGetValue(new Key(source, offset, length), out LinkedListNode<Entry>? node))
+            if (_entries.TryGetValue(new Key(source, offset, length), out Entry? entry))
             {
-                _order.Remove(node);
-                _order.AddFirst(node);
-                owner = node.Value.Owner.Retain();
-                buffer = node.Value.Buffer;
+                Unlink(entry);
+                LinkNewest(entry);
+                owner = entry.Owner.Retain();
+                buffer = entry.Buffer;
                 Interlocked.Increment(ref _hits);
                 VortexTelemetry.CacheHit();
                 return true;
@@ -112,17 +119,26 @@ public sealed class SegmentCache
             Key key = new Key(source, offset, length);
             if (!_entries.ContainsKey(key))
             {
-                while (_size + length > Capacity && _order.Last is { } last)
+                while (_size + length > Capacity && _oldest is { } last)
                 {
-                    _order.RemoveLast();
-                    _entries.Remove(last.Value.Key);
-                    _size -= last.Value.Buffer.Length;
-                    (evicted ??= []).Add(last.Value.Owner);
+                    Unlink(last);
+                    UnlinkFromSource(last);
+                    _entries.Remove(last.Key);
+                    _size -= last.Buffer.Length;
+                    (evicted ??= []).Add(last.Owner);
                 }
 
                 Entry entry = copy is null ? new Entry(key, owner.Retain(), buffer) : new Entry(key, copy, copy.Buffer);
                 copy = null;
-                _entries[key] = _order.AddFirst(entry);
+                _entries[key] = entry;
+                LinkNewest(entry);
+                if (_sources.TryGetValue(source, out Entry? head))
+                {
+                    entry.NextOfSource = head;
+                    head.PreviousOfSource = entry;
+                }
+
+                _sources[source] = entry;
                 _size += length;
             }
         }
@@ -144,19 +160,15 @@ public sealed class SegmentCache
         List<SegmentOwner>? released = null;
         lock (_gate)
         {
-            LinkedListNode<Entry>? node = _order.First;
-            while (node is not null)
+            if (_sources.Remove(source, out Entry? entry))
             {
-                LinkedListNode<Entry>? next = node.Next;
-                if (ReferenceEquals(node.Value.Key.Source, source))
+                for (; entry is not null; entry = entry.NextOfSource)
                 {
-                    _order.Remove(node);
-                    _entries.Remove(node.Value.Key);
-                    _size -= node.Value.Buffer.Length;
-                    (released ??= []).Add(node.Value.Owner);
+                    Unlink(entry);
+                    _entries.Remove(entry.Key);
+                    _size -= entry.Buffer.Length;
+                    (released ??= []).Add(entry.Owner);
                 }
-
-                node = next;
             }
         }
 
@@ -177,7 +189,90 @@ public sealed class SegmentCache
         return copy;
     }
 
+    /// <summary>Puts <paramref name="entry"/>, out of the order of use, at its head: the most recently used.</summary>
+    private void LinkNewest(Entry entry)
+    {
+        entry.Older = _newest;
+        entry.Newer = null;
+        if (_newest is not null)
+        {
+            _newest.Newer = entry;
+        }
+
+        _newest = entry;
+        _oldest ??= entry;
+    }
+
+    /// <summary>Takes <paramref name="entry"/> out of the order of use.</summary>
+    private void Unlink(Entry entry)
+    {
+        if (entry.Newer is null)
+        {
+            _newest = entry.Older;
+        }
+        else
+        {
+            entry.Newer.Older = entry.Older;
+        }
+
+        if (entry.Older is null)
+        {
+            _oldest = entry.Newer;
+        }
+        else
+        {
+            entry.Older.Newer = entry.Newer;
+        }
+
+        entry.Newer = null;
+        entry.Older = null;
+    }
+
+    /// <summary>Takes <paramref name="entry"/> out of its source's chain.</summary>
+    private void UnlinkFromSource(Entry entry)
+    {
+        if (entry.PreviousOfSource is null)
+        {
+            if (entry.NextOfSource is null)
+            {
+                _sources.Remove(entry.Key.Source);
+            }
+            else
+            {
+                _sources[entry.Key.Source] = entry.NextOfSource;
+            }
+        }
+        else
+        {
+            entry.PreviousOfSource.NextOfSource = entry.NextOfSource;
+        }
+
+        if (entry.NextOfSource is not null)
+        {
+            entry.NextOfSource.PreviousOfSource = entry.PreviousOfSource;
+        }
+
+        entry.PreviousOfSource = null;
+        entry.NextOfSource = null;
+    }
+
     private readonly record struct Key(object Source, long Offset, int Length);
 
-    private readonly record struct Entry(Key Key, SegmentOwner Owner, VortexBuffer Buffer);
+    /// <summary>A segment kept, in the order of use and in its source's chain.</summary>
+    private sealed class Entry(Key key, SegmentOwner owner, VortexBuffer buffer)
+    {
+        internal Key Key { get; } = key;
+
+        internal SegmentOwner Owner { get; } = owner;
+
+        internal VortexBuffer Buffer { get; } = buffer;
+
+        internal Entry? Newer { get; set; }
+
+        internal Entry? Older { get; set; }
+
+        internal Entry? NextOfSource { get; set; }
+
+        internal Entry? PreviousOfSource { get; set; }
+    }
 }

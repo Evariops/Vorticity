@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
@@ -115,5 +116,71 @@ public sealed class SegmentCacheTests
         {
             await reader.DisposeAsync();
         }
+    }
+
+    [Fact]
+    public void KeptSegmentsLeaveInTheirOrderOfUseAndWithTheirFile()
+    {
+        // Keeps, lookups and file closes drawn at random, against a model of what the cache must
+        // hold: past the budget the least recently used leaves first, a lookup makes a segment the
+        // most recently used and keeping it again does not, and a file that closes takes its
+        // segments and no other.
+        Random random = new Random(42);
+        object[] files = [new object(), new object(), new object(), new object(), new object(), new object()];
+        const long capacity = 64 * 40;
+        SegmentCache cache = new SegmentCache(capacity);
+        List<(object File, long Offset)> model = [];
+        for (int step = 0; step < 5_000; step++)
+        {
+            object file = files[random.Next(files.Length)];
+            long offset = random.Next(30) * 64L;
+            int what = random.Next(10);
+            if (what < 5)
+            {
+                NativeSegmentOwner owner = AlignedBufferPool.Shared.Rent(64, 64);
+                cache.Add(file, offset, owner, owner.Buffer);
+                owner.Release();
+                if (!model.Contains((file, offset)))
+                {
+                    while ((model.Count + 1) * 64L > capacity)
+                    {
+                        model.RemoveAt(model.Count - 1);
+                    }
+
+                    model.Insert(0, (file, offset));
+                }
+            }
+            else if (what < 9)
+            {
+                bool found = cache.TryGet(file, offset, 64, out SegmentOwner kept, out _);
+                Assert.Equal(model.Contains((file, offset)), found);
+                if (found)
+                {
+                    kept.Release();
+                    model.Remove((file, offset));
+                    model.Insert(0, (file, offset));
+                }
+            }
+            else
+            {
+                cache.Evict(file);
+                model.RemoveAll(entry => ReferenceEquals(entry.File, file));
+            }
+
+            Assert.Equal(model.Count * 64L, cache.Size);
+        }
+
+        // Each segment the model holds is there; looked up from the oldest, they leave again in
+        // the order the model says once the budget is spent.
+        Assert.NotEmpty(model);
+        foreach ((object file, long offset) in model)
+        {
+            Assert.True(cache.TryGet(file, offset, 64, out SegmentOwner kept, out _));
+            kept.Release();
+        }
+
+        cache.Clear();
+        Assert.Equal(0, cache.Size);
+        Assert.False(cache.TryGet(model[0].File, model[0].Offset, 64, out _, out _));
     }
 }
