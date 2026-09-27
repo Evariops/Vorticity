@@ -164,7 +164,7 @@ public sealed class VortexDataset : IAsyncDisposable
     public async ValueTask<ulong> RefreshAsync(CancellationToken cancellationToken = default)
     {
         (ulong version, CommitObject? commit) = await DatasetCommitter
-            .LatestAsync(_store, cancellationToken).ConfigureAwait(false);
+            .LatestAsync(_store, Version, cancellationToken).ConfigureAwait(false);
         if (commit is null)
         {
             return Version;
@@ -549,7 +549,8 @@ public sealed class VortexDataset : IAsyncDisposable
         IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken)
     {
         CommitResult result = await DatasetCommitter
-            .CommitAsync(_store, operations, Commit(_options, Snapshot.Header), cancellationToken).ConfigureAwait(false);
+            .CommitAsync(_store, operations, Commit(_options, Snapshot.Header) with { Known = Version }, cancellationToken)
+            .ConfigureAwait(false);
         await RefreshAsync(cancellationToken).ConfigureAwait(false);
         return result;
     }

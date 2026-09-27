@@ -95,6 +95,39 @@ public sealed class DatasetVacuumTests
     }
 
     [Fact]
+    public async Task AHandleWhoseVersionWasSweptRefreshesToTheLatestAndCommitsOnIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        await dataset.AppendAsync(Of(types, schema, 0, PerObject), ct);
+        await using VortexDataset stale = await VortexDataset.OpenAsync(store, cancellationToken: ct);
+        ulong staleVersion = stale.Version;
+        for (int i = 1; i < Objects; i++)
+        {
+            await dataset.AppendAsync(Of(types, schema, i * PerObject, PerObject), ct);
+        }
+
+        // Two hours on, the sweep takes every commit but the latest, the stale handle's with them,
+        // and the versions right after it: nothing is left above it to be asked for.
+        clock.Advance(TimeSpan.FromHours(2));
+        VacuumResult swept = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
+        Assert.Contains(CommitKey.For(staleVersion), swept.Deleted);
+        Assert.Contains(CommitKey.For(staleVersion + 1), swept.Deleted);
+
+        Assert.Equal(dataset.Version, await stale.RefreshAsync(ct));
+        await stale.AppendAsync(Of(types, schema, Objects * PerObject, PerObject), ct);
+        Assert.Equal(dataset.Version + 1, stale.Version);
+        Assert.Equal(
+            Enumerable.Range(0, (Objects + 1) * PerObject).Select(i => (long)i),
+            (await KeysAsync(stale.ScanBuilder())).Order());
+    }
+
+    [Fact]
     public async Task AnOrphanYoungerThanTheWindowIsKeptAndAnOlderOneDeleted()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
