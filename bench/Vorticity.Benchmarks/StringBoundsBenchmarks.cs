@@ -4,7 +4,9 @@
 // 65 536 values of 4 to 40 bytes from a wide alphabet, so their first bytes are diverse; the
 // bounds settle in the first rows and every row after lies between them. And the two shapes of the
 // corpus's text: `value-{i}`, every row opening with the same four bytes, and `s{i}`, short rows
-// whose first four bytes mostly lie between the bounds'. Each invocation starts a fresh block.
+// whose first four bytes mostly lie between the bounds'; and `s{i}` of seven digits, ascending, each
+// row a new greatest value, which calls the bounds back a row at a time. Each invocation starts a
+// fresh block.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
@@ -25,8 +27,8 @@ public class StringBoundsBenchmarks
 {
     private const int Rows = 1 << 16;
 
-    /// <summary>The values: diverse, `value-{i}` or `s{i}`.</summary>
-    [Params("diverse", "value-i", "s-i")]
+    /// <summary>The values: diverse, `value-{i}`, `s{i}`, or `s{i}` of seven digits, each row a new greatest.</summary>
+    [Params("diverse", "value-i", "s-i", "ascending")]
     public string Shape { get; set; } = "diverse";
 
     private readonly CanonicalArena _arena = new CanonicalArena();
@@ -41,7 +43,7 @@ public class StringBoundsBenchmarks
     {
         if (Shape != "diverse")
         {
-            SetupFormatted(Shape == "value-i" ? "value-" : "s");
+            SetupFormatted(Shape == "value-i" ? "value-" : "s", Shape == "ascending" ? "D7" : "");
             return;
         }
 
@@ -86,13 +88,13 @@ public class StringBoundsBenchmarks
     }
 
     /// <summary>`{prefix}{i}` for each row, as the corpus writes its text columns.</summary>
-    private void SetupFormatted(string prefix)
+    private void SetupFormatted(string prefix, string format)
     {
         byte[][] values = new byte[Rows][];
         int heapBytes = 0;
         for (int i = 0; i < Rows; i++)
         {
-            values[i] = System.Text.Encoding.ASCII.GetBytes(prefix + i.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            values[i] = System.Text.Encoding.ASCII.GetBytes(prefix + i.ToString(format, System.Globalization.CultureInfo.InvariantCulture));
             heapBytes += values[i].Length > 12 ? values[i].Length : 0;
         }
 

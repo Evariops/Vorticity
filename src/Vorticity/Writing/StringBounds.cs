@@ -356,11 +356,13 @@ internal sealed class StringBounds
         // back for twice as many rows as the one before, up to 64: a column whose rows mostly tie a
         // bound's prefix pays a compare a stretch, not one every four rows. Bounds whose prefixes
         // have none between them -- a column of rows opening alike, which is common -- settle no
-        // row this way, and the vectors are not tried at all.
+        // row this way, and the vectors are not tried at all. And they wait for sixteen rows the
+        // loop settled one at a time: a column whose every row moves a bound, as an ascending one
+        // does, comes back here a row at a time, and would pay for a group it never passes.
         uint low = (uint)(minKey >> 32);
         uint high = (uint)(maxKey >> 32);
         bool lanes = Vector512.IsHardwareAccelerated && Avx512BW.IsSupported && high > low && high - low > 1;
-        int scalarUntil = row;
+        int scalarUntil = row + 16;
         int backoff = 4;
         for (; row < end; row++)
         {
