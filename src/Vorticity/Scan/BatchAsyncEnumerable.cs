@@ -888,7 +888,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
 
             int count = CanonicalFilter.Select(window, kept);
-            return ExecuteKept(lane, split, kept, count, rows);
+            return ExecuteKept(lane, split, kept, count, rows, window);
         }
         finally
         {
@@ -907,8 +907,9 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <param name="kept">The kept rows, in the split's space; moved into the file's when pushed down.</param>
     /// <param name="count">How many rows were kept.</param>
     /// <param name="rows">The split's rows.</param>
+    /// <param name="window">The filter's state a row, where the filter was evaluated here: what a mask of the kept rows is taken from.</param>
     /// <returns>The batch's root.</returns>
-    private int ExecuteKept(Lane lane, RowRange split, int[] kept, int count, int rows)
+    private int ExecuteKept(Lane lane, RowRange split, int[] kept, int count, int rows, ReadOnlySpan<byte> window = default)
     {
         ScanContext context = lane.Context;
         CanonicalArena arena = context.Canonical;
@@ -931,7 +932,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             // A column read over most of its rows costs more than read whole and gathered, which
             // touches each row once in a kernel's stride.
             root = SplitExecution.Execute(context, _tree, in _keep, split, null);
-            root = CanonicalFilter.Apply(arena, root, kept.AsSpan(0, count));
+            root = Keep(arena, root, kept.AsSpan(0, count), window);
         }
         else
         {
@@ -1170,7 +1171,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 // Room for every row: the selection writes a slot per row before deciding.
                 selected = ArrayPool<int>.Shared.Rent(rows);
                 CanonicalFilter.Select(window, selected);
-                root = CanonicalFilter.Apply(context.Canonical, root, selected.AsSpan(0, count));
+                root = Keep(context.Canonical, root, selected.AsSpan(0, count), window);
             }
         }
         finally
@@ -1259,6 +1260,35 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
+    }
+
+    /// <summary>
+    /// The rows of <paramref name="root"/> a filter kept: by their mask, taken from the filter's
+    /// states, where the filter keeps a row in eight or more and the mask is packed a register at a
+    /// time; by their indices alone otherwise.
+    /// </summary>
+    /// <remarks>
+    /// A gather by indices reads a row an index; the mask reads every row once in a kernel's stride,
+    /// which a row kept in eight already pays for, measured.
+    /// </remarks>
+    private static int Keep(CanonicalArena arena, int root, ReadOnlySpan<int> kept, ReadOnlySpan<byte> window)
+    {
+        if (window.IsEmpty || !MaskFilter.IsAccelerated || kept.Length * 8L < window.Length)
+        {
+            return CanonicalFilter.Apply(arena, root, kept);
+        }
+
+        int words = (window.Length + 63) >> 6;
+        ulong[] mask = ArrayPool<ulong>.Shared.Rent(words);
+        try
+        {
+            Trilean.ToWords(window, Trilean.True, equal: true, mask.AsSpan(0, words));
+            return CanonicalFilter.Apply(arena, root, kept, mask.AsSpan(0, words));
+        }
+        finally
+        {
+            ArrayPool<ulong>.Shared.Return(mask);
+        }
     }
 
     /// <summary>The true states of a filter window as 64-bit words, in the batch's arena.</summary>
