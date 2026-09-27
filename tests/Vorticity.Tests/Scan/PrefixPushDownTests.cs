@@ -1,11 +1,11 @@
 // A prefix match over a text column with nulls, offered to its encoding: a dictionary answers it,
-// matching its distinct values and spreading the answers over its codes; FSST declines, and the
-// column is decoded and matched as it always was.
+// matching its distinct values and spreading the answers over its codes; FSST answers it on its
+// codes, comparing those every row starting with the prefix shares and decoding the few bytes past.
 //
 // Correctness is asserted against the same scan without a predicate, filtered in memory with an
 // ordinal StartsWith, for prefixes that end inside a multi-byte character, are longer than every
 // value, are empty, or match nothing: the answer has to agree row for row whichever path gave it,
-// and a null row is never selected. The quantity that shows the dictionary answered is the scan's
+// and a null row is never selected. The quantity that shows the encoding answered is the scan's
 // `ScanMetrics.ValuesDecoded`, as in FilterPushDownTests.
 using System;
 using System.Buffers.Binary;
@@ -31,7 +31,7 @@ public sealed class PrefixPushDownTests
     private const string Field = "strs";
     private const int Rows = 24_576;
 
-    public static TheoryData<string> Encodings => ["dictionary", "fsst"];
+    public static TheoryData<string> Encodings => ["dictionary", "fsst", "fsst words"];
 
     [Theory]
     [MemberData(nameof(Encodings))]
@@ -89,10 +89,62 @@ public sealed class PrefixPushDownTests
                     "https://example.invalid/vortex/conformancé/000012345/longer",
                     "https://example.invalid/vortex/conformancÃ", "https://example.invalid/vortex/conformance", "ftp://",
                 ],
+                "https://example.invalid/vortex/conformancé/0000123"),
+
+            // Words of a small vocabulary, some accented and some with bytes no symbol covers, so
+            // that rows compress to codes that part at every position and escape; the prefixes are
+            // rows cut at every length up to past their end, and cut and changed in their last byte.
+            "fsst words" => (
+                EncodingHint.Fsst,
+                Word,
+                WordPrefixes(),
                 null),
 
             _ => throw new ArgumentOutOfRangeException(nameof(encoding), encoding, "no such fixture"),
         };
+
+    private static readonly string[] Vocabulary =
+    [
+        "alpha", "beta", "gamma", "délta", "epsilon", "zêta", "eta", "theta", "iota", "kappa", "lambda", "mu",
+        "~\u007F", "q", "xyzzy", "ÿþ", "snowman☃", "aaaaaaaaaaaaaaaaaaa", "a", "ab",
+    ];
+
+    private static string? Word(int row)
+    {
+        if (row % 13 == 6)
+        {
+            return null;
+        }
+
+        uint state = (uint)row * 2_654_435_761u;
+        int words = 1 + (int)(state % 5);
+        System.Text.StringBuilder text = new System.Text.StringBuilder();
+        for (int w = 0; w < words; w++)
+        {
+            state = (state * 1_103_515_245u) + 12_345u;
+            text.Append(Vocabulary[(state >> 16) % Vocabulary.Length]);
+            text.Append(w % 2 == 0 ? '/' : ' ');
+        }
+
+        return text.ToString();
+    }
+
+    private static string[] WordPrefixes()
+    {
+        List<string> prefixes = [];
+        foreach (int row in new[] { 1, 17, 200, 4_099 })
+        {
+            string value = Word(row)!;
+            for (int cut = 1; cut <= value.Length + 1; cut++)
+            {
+                string prefix = value[..Math.Min(cut, value.Length)] + (cut > value.Length ? "!" : "");
+                prefixes.Add(prefix);
+                prefixes.Add(prefix[..^1] + (char)(prefix[^1] + 1));
+            }
+        }
+
+        return [.. prefixes];
+    }
 
     private static async Task<(List<string?> Values, long Decoded)> ReadAsync(string path, VortexExpr? filter)
     {

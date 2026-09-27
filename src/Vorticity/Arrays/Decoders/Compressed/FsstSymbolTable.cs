@@ -121,6 +121,10 @@ internal readonly ref struct FsstSymbolTable
         return new FsstDecodeTable(symbolScratch, widthScratch, _lengths.Length);
     }
 
+    /// <summary>The bytes symbol <paramref name="code"/> stands for.</summary>
+    /// <param name="code">A code below <see cref="Count"/>.</param>
+    internal int Width(int code) => _lengths[code];
+
     /// <summary>The <c>u64</c> of symbol <paramref name="code"/>, for diagnostics and tests.</summary>
     /// <param name="code">A code below <see cref="Count"/>.</param>
     internal ulong SymbolBits(int code) =>

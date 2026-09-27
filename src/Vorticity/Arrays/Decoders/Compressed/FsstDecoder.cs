@@ -1,4 +1,6 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
@@ -94,22 +96,8 @@ internal sealed class FsstDecoder : ArrayDecoder
             }
 
             ReadOnlySpan<byte> wanted = rented.AsSpan(0, needleLength);
-
             PType offsetsPType = metadata.CodesOffsetsPType;
-            CanonicalSupport.RequireIntegerPType(offsetsPType, Id + " codes_offsets");
-            int offsetCount = ArrayDecodeContext.CheckedLength(
-                (ulong)length + 1, Id + " codes_offsets");
-            DType offsetsType = context.Types.Primitive(offsetsPType, Nullability.NonNullable);
-            int offsetsIndex = context.DecodeChild(in node, 1, offsetsType, offsetCount);
-            CanonicalNode codesOffsets = CanonicalSupport.RequirePrimitiveChild(
-                context, offsetsIndex, offsetsPType, offsetCount, Id + " codes_offsets");
-
-            VortexBuffer codes = node.GetBuffer(2);
-            ReadOnlySpan<byte> stream = CodeStream(codesOffsets, offsetsPType, length, codes);
-            ReadOnlySpan<byte> raw = codesOffsets.Values.Span;
-
-            Validity validity = context.DecodeValidity(in node, 2, dtype.Nullability, length);
-            ValidityReader rows = ValidityReader.Of(context.Canonical, validity);
+            RowCodes(context, in node, dtype, length, offsetsPType, out ReadOnlySpan<byte> raw, out ReadOnlySpan<byte> stream, out ValidityReader rows);
 
             byte match = op == Expressions.ComparisonOp.Equal
                 ? Compute.Trilean.True
@@ -131,6 +119,75 @@ internal sealed class FsstDecoder : ArrayDecoder
                 case PType.I16: Match<short>(raw, stream, wanted, in rows, length, match, miss, destination); break;
                 case PType.I32: Match<int>(raw, stream, wanted, in rows, length, match, miss, destination); break;
                 case PType.I64: Match<long>(raw, stream, wanted, in rows, length, match, miss, destination); break;
+                default: return false;
+            }
+
+            return true;
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    /// <summary>
+    /// Answers a prefix on the codes: the codes every row that starts with the prefix shares are
+    /// compared as bytes, and only the few bytes past them are decoded.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It rests on the rule <see cref="TryCompare"/> rests on, that compression takes the longest
+    /// symbol matching at each position; <see cref="FsstPrefix"/> says why that fixes the codes a
+    /// row starting with the prefix opens with.
+    /// </para>
+    /// <para>
+    /// A row whose codes do not start that way is rejected without a byte decoded, and a row that
+    /// passes decodes a code or a few. The block decode of the column, which measured as costly as
+    /// decoding each row only as far as the prefix, and the views over it, are not built at all.
+    /// </para>
+    /// </remarks>
+    /// <inheritdoc/>
+    public override bool TryStartsWith(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
+        Expressions.FilterLiteral literal, Span<byte> destination)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (literal.Kind != Expressions.FilterLiteralKind.Bytes ||
+            dtype.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary) ||
+            node.BufferCount != 3)
+        {
+            return false;
+        }
+
+        CanonicalSupport.RequireBinaryLike(dtype, Id);
+        ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, 3, Id);
+
+        FsstMetadata metadata = FsstMetadata.Read(node.Metadata);
+        FsstSymbolTable table = FsstSymbolTable.Create(
+            node.GetBuffer(0).Span, node.GetBuffer(1).Span, Id);
+
+        ReadOnlySpan<byte> prefix = literal.BytesValue;
+        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(
+            FsstSymbolTable.MaxCompressedLength(prefix.Length) + 1);
+        try
+        {
+            if (!FsstPrefix.TryCreate(table, prefix, rented, out FsstPrefix starts))
+            {
+                return false;
+            }
+
+            PType offsetsPType = metadata.CodesOffsetsPType;
+            RowCodes(context, in node, dtype, length, offsetsPType, out ReadOnlySpan<byte> raw, out ReadOnlySpan<byte> stream, out ValidityReader rows);
+            switch (offsetsPType)
+            {
+                case PType.U8: Prefix<byte>(raw, stream, in starts, in rows, length, destination); break;
+                case PType.U16: Prefix<ushort>(raw, stream, in starts, in rows, length, destination); break;
+                case PType.U32: Prefix<uint>(raw, stream, in starts, in rows, length, destination); break;
+                case PType.U64: Prefix<ulong>(raw, stream, in starts, in rows, length, destination); break;
+                case PType.I8: Prefix<sbyte>(raw, stream, in starts, in rows, length, destination); break;
+                case PType.I16: Prefix<short>(raw, stream, in starts, in rows, length, destination); break;
+                case PType.I32: Prefix<int>(raw, stream, in starts, in rows, length, destination); break;
+                case PType.I64: Prefix<long>(raw, stream, in starts, in rows, length, destination); break;
                 default: return false;
             }
 
@@ -390,6 +447,69 @@ internal sealed class FsstDecoder : ArrayDecoder
         return codes.Span.Slice((int)start, (int)(end - start));
     }
 
+    /// <summary>The offsets child's bytes, the code stream they bound, and the column's validity.</summary>
+    private static void RowCodes(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, PType offsetsPType,
+        out ReadOnlySpan<byte> raw, out ReadOnlySpan<byte> stream, out ValidityReader rows)
+    {
+        CanonicalSupport.RequireIntegerPType(offsetsPType, Id + " codes_offsets");
+        int offsetCount = ArrayDecodeContext.CheckedLength(
+            (ulong)length + 1, Id + " codes_offsets");
+        DType offsetsType = context.Types.Primitive(offsetsPType, Nullability.NonNullable);
+        int offsetsIndex = context.DecodeChild(in node, 1, offsetsType, offsetCount);
+        CanonicalNode codesOffsets = CanonicalSupport.RequirePrimitiveChild(
+            context, offsetsIndex, offsetsPType, offsetCount, Id + " codes_offsets");
+
+        stream = CodeStream(codesOffsets, offsetsPType, length, node.GetBuffer(2));
+        raw = codesOffsets.Values.Span;
+
+        Validity validity = context.DecodeValidity(in node, 2, dtype.Nullability, length);
+        rows = ValidityReader.Of(context.Canonical, validity);
+    }
+
+    /// <summary>Marks the rows that start with a prefix, with the offsets typed once, as <see cref="Match{T}"/>.</summary>
+    private static void Prefix<T>(
+        ReadOnlySpan<byte> raw, ReadOnlySpan<byte> stream, in FsstPrefix starts,
+        in ValidityReader rows, int length, Span<byte> destination)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> offsets = System.Runtime.InteropServices.MemoryMarshal
+            .Cast<byte, T>(raw)[..(length + 1)];
+        long origin = long.CreateChecked(offsets[0]);
+        long previous = origin;
+        for (int row = 0; row < length; row++)
+        {
+            long next = long.CreateChecked(offsets[row + 1]);
+            if (next < previous || next - origin > stream.Length)
+            {
+                BadSpan(row, previous, next, stream.Length);
+            }
+
+            int start = (int)(previous - origin);
+            int size = (int)(next - previous);
+            previous = next;
+
+            if (!rows.IsValid(row))
+            {
+                destination[row] = Compute.Trilean.Unknown;
+                continue;
+            }
+
+            destination[row] = starts.Match(stream.Slice(start, size))
+                ? Compute.Trilean.True
+                : Compute.Trilean.False;
+        }
+    }
+
+    /// <summary>
+    /// Refuses a row whose codes run backwards or past the stream: out of the loops that read the
+    /// offsets, whose state a message built inline would push to the stack.
+    /// </summary>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void BadSpan(int row, long previous, long next, int stream) =>
+        CompressedThrow.Format($"{Id} row {row} spans codes [{previous}, {next}) of a {stream}-byte stream.");
+
     /// <summary>Marks the rows whose code slice is the needle's, with the offsets typed once.</summary>
     /// <typeparam name="T">The physical type of <c>codes_offsets</c>.</typeparam>
     /// <param name="raw">The offsets child's bytes.</param>
@@ -415,9 +535,7 @@ internal sealed class FsstDecoder : ArrayDecoder
             long next = long.CreateChecked(offsets[row + 1]);
             if (next < previous || next - origin > stream.Length)
             {
-                CompressedThrow.Format(
-                    $"{Id} row {row} spans codes [{previous}, {next}) of a " +
-                    $"{stream.Length}-byte stream.");
+                BadSpan(row, previous, next, stream.Length);
             }
 
             int start = (int)(previous - origin);

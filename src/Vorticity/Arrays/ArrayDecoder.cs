@@ -234,9 +234,9 @@ internal abstract class ArrayDecoder
     /// the answers over its codes, which costs a fraction of building the column to match it.
     /// </para>
     /// <para>
-    /// FSST does not answer, measured: decompressing each row only as far as the prefix is long,
-    /// a symbol at a time, cost as much as decompressing the column in blocks and matching the
-    /// views, and a scan that keeps many rows then decodes the column a second time to project it.
+    /// FSST answers on its codes: those every row starting with the prefix shares are compared as
+    /// bytes, and the few bytes past them decoded. Decompressing each row only as far as the prefix
+    /// is long, a symbol at a time, measured as costly as decoding the column in blocks.
     /// </para>
     /// </remarks>
     public virtual bool TryStartsWith(
