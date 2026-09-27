@@ -3,8 +3,9 @@
 // A file of 262,144 rows written in four parts, a write and three appends, whose key columns hold
 // each key on `Dups` rows. The sorted columns run in key order across the parts, the source a
 // sorted column serves; the mixed columns spread every part over the whole key range and carry a
-// sorted-runs index, one run per part, so that four runs overlap. A walk visits every key once,
-// from the first. Run in a checkout of the original and in the tree.
+// sorted-runs index, which the last append folds into one run, as an append does once the runs
+// it would leave pass the most an entry keeps. A walk visits every key once, from the first. Run
+// in a checkout of the original and in the tree.
 using System;
 using System.Buffers.Binary;
 using System.IO;
@@ -107,10 +108,11 @@ public class DistinctWalkBenchmarks
             Walked.RunsInt64 => ("mixed_i64", KeySourceKind.SortedRuns),
             _ => ("mixed_utf8", KeySourceKind.SortedRuns),
         };
+        KeyPlan plan = await _file.Keys(column).Distinct().WithSource(source).ExplainAsync(CancellationToken.None);
         _cursor = await _file.Keys(column).Distinct().WithSource(source).OpenAsync(CancellationToken.None);
-        if (await Walk() != Rows / Dups)
+        if (plan.Runs != 1 || await Walk() != Rows / Dups)
         {
-            throw new InvalidOperationException("The walk did not visit every key once.");
+            throw new InvalidOperationException("The source is not one run, or the walk did not visit every key once.");
         }
     }
 
