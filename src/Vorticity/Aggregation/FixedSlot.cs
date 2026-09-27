@@ -19,7 +19,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
     private readonly Func<TState, TResult> _finish;
     private TState[] _states = [];
     private int _groups;
-    private TValue[] _values = [];
+    private ValuesCache<TValue> _values;
     private MaskCache _rows;
     private int[] _counts = [];
 
@@ -65,7 +65,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             case ColumnEncoding.RunEnd:
             {
                 int runs = EncodedForms.RunEnd(arena, node, out ReadOnlySpan<uint> ends);
-                ReadOnlySpan<TValue> values = FixedReader.Values(arena, runs, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, runs, _kind, out ReadOnlySpan<ulong> valid);
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
                 int r = Runs.FirstEndingAfter(ends, start);
                 int runStart = r == 0 ? 0 : (int)ends[r - 1];
@@ -90,7 +90,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             case ColumnEncoding.Dictionary:
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
-                ReadOnlySpan<TValue> dictionary = FixedReader.Values(arena, entries, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
                 if (end - start < dictionary.Length)
                 {
@@ -130,7 +130,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
             default:
             {
-                ReadOnlySpan<TValue> values = FixedReader.Values(arena, node, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
                 Accumulate(ref state, values, _rows.And(input, input.Selection, valid), start, end);
                 return;
             }
@@ -159,7 +159,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             case ColumnEncoding.Dictionary:
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
-                ReadOnlySpan<TValue> dictionary = FixedReader.Values(arena, entries, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
                 while (rows.Next(out int row))
                 {
@@ -175,7 +175,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
             default:
             {
-                ReadOnlySpan<TValue> values = FixedReader.Values(arena, node, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), 0, input.Rows);
                 while (rows.Next(out int row))
                 {
@@ -293,7 +293,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
     private readonly HashSet<DistinctEntry<TValue>> _seen = [];
     private long[] _counts = [];
     private int _groups;
-    private TValue[] _values = [];
+    private ValuesCache<TValue> _values;
     private MaskCache _rows;
     private bool[] _present = [];
 
@@ -326,7 +326,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
             case ColumnEncoding.RunEnd:
             {
                 int runs = EncodedForms.RunEnd(arena, node, out ReadOnlySpan<uint> ends);
-                ReadOnlySpan<TValue> values = FixedReader.Values(arena, runs, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, runs, _kind, out ReadOnlySpan<ulong> valid);
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
                 int r = Runs.FirstEndingAfter(ends, start);
                 int runStart = r == 0 ? 0 : (int)ends[r - 1];
@@ -347,7 +347,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
             case ColumnEncoding.Dictionary:
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
-                ReadOnlySpan<TValue> dictionary = FixedReader.Values(arena, entries, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
                 Scratch.Grow(ref _present, dictionary.Length);
                 Span<bool> present = _present.AsSpan(0, dictionary.Length);
                 present.Clear();
@@ -370,7 +370,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 
             default:
             {
-                ReadOnlySpan<TValue> values = FixedReader.Values(arena, node, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), start, end);
                 while (rows.Next(out int row))
                 {
@@ -389,7 +389,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
         if (FixedReader.EncodingOf(arena, node, _kind) == ColumnEncoding.Dictionary)
         {
             int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
-            ReadOnlySpan<TValue> dictionary = FixedReader.Values(arena, entries, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+            ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
             RowCursor coded = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
             while (coded.Next(out int row))
             {
@@ -403,7 +403,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
             return;
         }
 
-        ReadOnlySpan<TValue> values = FixedReader.Values(arena, node, _kind, ref _values, out ReadOnlySpan<ulong> validity);
+        ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> validity);
         RowCursor rows = new RowCursor(_rows.And(input, input.Selection, validity), 0, input.Rows);
         while (rows.Next(out int row))
         {

@@ -142,6 +142,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private TValue[] _keys = new TValue[16];
     private int _null = -1;
     private TValue[] _values = [];
+    private ValuesCache<TValue> _entries;
 
     internal FixedKeys(ColumnShape shape, bool sorted)
     {
@@ -196,7 +197,7 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             case ColumnEncoding.Dictionary:
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
-                ReadOnlySpan<TValue> dictionary = FixedReader.Values(arena, entries, kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> dictionary = _entries.Of(arena, 0, entries, kind, out ReadOnlySpan<ulong> valid);
                 ReadOnlySpan<ulong> present = ArenaWords.Validity(arena, node);
                 Span<int> codeGroups = CodeGroups(arena, entries, dictionary.Length);
                 RowCursor cursor = new RowCursor(selection, 0, rows);
