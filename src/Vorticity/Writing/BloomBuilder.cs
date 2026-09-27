@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -45,6 +46,9 @@ internal sealed class BloomBuilder : IndexBuilder
 
     /// <summary>Rows between two of `Auto`'s checks inside a block.</summary>
     private const int CheckStride = 256;
+
+    /// <summary>Values hashed together before their hashes go to the set: a quarter of <see cref="CheckStride"/>.</summary>
+    private const int HashBatch = 64;
 
     /// <summary>The blocks `Auto` watches for a column that repeats one set.</summary>
     private const int RepeatBlocks = 4;
@@ -484,14 +488,34 @@ internal sealed class BloomBuilder : IndexBuilder
     /// Rows <c>[start, stop)</c> of an all-valid fixed-width column, hashed by XxHash3's own short
     /// path for the width, resolved once for the whole range instead of per row.
     /// </summary>
-    private static void HashRows(ReadOnlySpan<byte> values, int width, int start, int stop, HashSet64 block)
+    /// <remarks>
+    /// Four- and eight-byte values are hashed <see cref="HashBatch"/> at a time where
+    /// <see cref="XxHash3Fixed.IsVectorized"/>, eight an instruction, and the batch then added to
+    /// the set, whose probe is the one part left a value at a time.
+    /// </remarks>
+    [SkipLocalsInit]
+    internal static void HashRows(ReadOnlySpan<byte> values, int width, int start, int stop, HashSet64 block)
     {
+        Span<ulong> hashes = stackalloc ulong[HashBatch];
         switch (width)
         {
             case 4:
             {
                 ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(values)[start..stop];
-                foreach (uint word in words)
+                int i = 0;
+                if (XxHash3Fixed.IsVectorized)
+                {
+                    for (; i <= words.Length - HashBatch; i += HashBatch)
+                    {
+                        XxHash3Fixed.Hash4(words.Slice(i, HashBatch), hashes);
+                        foreach (ulong hash in hashes)
+                        {
+                            block.Add(hash);
+                        }
+                    }
+                }
+
+                foreach (uint word in words[i..])
                 {
                     block.Add(XxHash3Fixed.Hash4(word));
                 }
@@ -502,7 +526,20 @@ internal sealed class BloomBuilder : IndexBuilder
             case 8:
             {
                 ReadOnlySpan<ulong> words = MemoryMarshal.Cast<byte, ulong>(values)[start..stop];
-                foreach (ulong word in words)
+                int i = 0;
+                if (XxHash3Fixed.IsVectorized)
+                {
+                    for (; i <= words.Length - HashBatch; i += HashBatch)
+                    {
+                        XxHash3Fixed.Hash8(words.Slice(i, HashBatch), hashes);
+                        foreach (ulong hash in hashes)
+                        {
+                            block.Add(hash);
+                        }
+                    }
+                }
+
+                foreach (ulong word in words[i..])
                 {
                     block.Add(XxHash3Fixed.Hash8(word));
                 }

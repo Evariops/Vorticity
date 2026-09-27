@@ -2,6 +2,9 @@ using System;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace Vorticity.Indexes;
 
@@ -77,6 +80,48 @@ internal static class XxHash3Fixed
         ulong product = Math.BigMul(low, high, out ulong lower);
         ulong acc = (ulong)length + BinaryPrimitives.ReverseEndianness(low) + high + (product ^ lower);
         return Avalanche3(acc);
+    }
+
+    /// <summary>Whether <see cref="Hash4(ReadOnlySpan{uint}, Span{ulong})"/> and its eight-byte twin hash eight values an instruction: 512-bit vectors with 64-bit multiplies.</summary>
+    internal static bool IsVectorized => Vector512.IsHardwareAccelerated && Avx512DQ.IsSupported;
+
+    /// <summary>
+    /// <see cref="Hash4(uint)"/> of each of <paramref name="values"/> into <paramref name="hashes"/>,
+    /// eight a step: a count a multiple of eight, and only where <see cref="IsVectorized"/>.
+    /// </summary>
+    internal static void Hash4(ReadOnlySpan<uint> values, Span<ulong> hashes)
+    {
+        ref uint from = ref MemoryMarshal.GetReference(values);
+        ref ulong to = ref MemoryMarshal.GetReference(hashes[..values.Length]);
+        Vector512<ulong> secret = Vector512.Create(Secret8 ^ Secret16);
+        for (int i = 0; i < values.Length; i += 8)
+        {
+            Vector512<ulong> value = Avx512F.ConvertToVector512UInt64(Vector256.LoadUnsafe(ref from, (nuint)i));
+            Rrmxmx((value | (value << 32)) ^ secret, 4).StoreUnsafe(ref to, (nuint)i);
+        }
+    }
+
+    /// <summary><see cref="Hash8(ulong)"/> of each of <paramref name="values"/>, as <see cref="Hash4(ReadOnlySpan{uint}, Span{ulong})"/>.</summary>
+    internal static void Hash8(ReadOnlySpan<ulong> values, Span<ulong> hashes)
+    {
+        ref ulong from = ref MemoryMarshal.GetReference(values);
+        ref ulong to = ref MemoryMarshal.GetReference(hashes[..values.Length]);
+        Vector512<ulong> secret = Vector512.Create(Secret8 ^ Secret16);
+        for (int i = 0; i < values.Length; i += 8)
+        {
+            // The halves swapped is the high word plus the low one moved up.
+            Rrmxmx(Avx512F.RotateLeft(Vector512.LoadUnsafe(ref from, (nuint)i), 32) ^ secret, 8).StoreUnsafe(ref to, (nuint)i);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector512<ulong> Rrmxmx(Vector512<ulong> h, ulong length)
+    {
+        h ^= Avx512F.RotateLeft(h, 49) ^ Avx512F.RotateLeft(h, 24);
+        h *= Vector512.Create(PrimeMx2);
+        h ^= (h >> 35) + Vector512.Create(length);
+        h *= Vector512.Create(PrimeMx2);
+        return h ^ (h >> 28);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
