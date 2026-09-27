@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
 
 namespace Vorticity.Aggregating;
@@ -13,7 +14,7 @@ internal interface IBytesSink
 /// <summary>The values of a text or binary block handed to a sink in the form the block arrives in: once per constant, per run, per distinct code, or per row.</summary>
 internal static class BytesWalk
 {
-    internal static void Range<TSink>(ref TSink sink, in BatchInput input, int start, int end, int group, ref MaskCache mask, ref bool[] present)
+    internal static void Range<TSink>(ref TSink sink, in BatchInput input, int start, int end, int group, ref MaskCache mask, ref CodeSet distinct)
         where TSink : struct, IBytesSink
     {
         CanonicalArena arena = input.Arena;
@@ -53,21 +54,14 @@ internal static class BytesWalk
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 BytesBlock dictionary = BytesBlock.Canonical(arena, entries, out ReadOnlySpan<ulong> valid);
-                Scratch.Grow(ref present, dictionary.Length);
-                Span<bool> seen = present.AsSpan(0, dictionary.Length);
-                seen.Clear();
-                RowCursor rows = new RowCursor(mask.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
-                while (rows.Next(out int row))
+                ReadOnlySpan<ulong> rows = mask.And(input, input.Selection, ArenaWords.Validity(arena, node));
+                if (end - start < dictionary.Length)
                 {
-                    seen[(int)codes[row]] = true;
+                    FewCodes(ref sink, ref distinct, codes, rows, start, end, group, dictionary, valid);
                 }
-
-                for (int code = 0; code < seen.Length; code++)
+                else
                 {
-                    if (seen[code] && StorageValues.IsValid(valid, code))
-                    {
-                        sink.Take(group, dictionary[code]);
-                    }
+                    ManyCodes(ref sink, ref distinct, codes, rows, start, end, group, dictionary, valid);
                 }
 
                 return;
@@ -83,6 +77,46 @@ internal static class BytesWalk
                 }
 
                 return;
+            }
+        }
+    }
+
+    /// <summary>The values of a range of fewer rows than its dictionary has codes, each once.</summary>
+    /// <remarks>Each walk of a dictionary range is a method of its own, so that neither loop takes its shape from the other.</remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void FewCodes<TSink>(
+        ref TSink sink, ref CodeSet distinct, ReadOnlySpan<uint> codes, ReadOnlySpan<ulong> rows, int start, int end,
+        int group, BytesBlock dictionary, ReadOnlySpan<ulong> valid)
+        where TSink : struct, IBytesSink
+    {
+        foreach (int code in distinct.Few(codes, rows, start, end, dictionary.Length))
+        {
+            if (StorageValues.IsValid(valid, code))
+            {
+                sink.Take(group, dictionary[code]);
+            }
+        }
+    }
+
+    /// <summary>The values of a range as long as its dictionary or longer, each once, in code order.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ManyCodes<TSink>(
+        ref TSink sink, ref CodeSet distinct, ReadOnlySpan<uint> codes, ReadOnlySpan<ulong> rows, int start, int end,
+        int group, BytesBlock dictionary, ReadOnlySpan<ulong> valid)
+        where TSink : struct, IBytesSink
+    {
+        Span<byte> seen = distinct.Table(dictionary.Length);
+        RowCursor all = new RowCursor(rows, start, end);
+        while (all.Next(out int row))
+        {
+            seen[(int)codes[row]] = 1;
+        }
+
+        for (int code = 0; code < seen.Length; code++)
+        {
+            if (seen[code] != 0 && StorageValues.IsValid(valid, code))
+            {
+                sink.Take(group, dictionary[code]);
             }
         }
     }
@@ -147,7 +181,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
     private int[] _lengths = [];
     private int _groups;
     private MaskCache _rows;
-    private bool[] _present = [];
+    private CodeSet _distinct;
 
     internal BytesExtremeSlot(ColumnShape shape, bool max)
     {
@@ -176,7 +210,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         Sink sink = new Sink(this);
-        BytesWalk.Range(ref sink, input, start, end, group, ref _rows, ref _present);
+        BytesWalk.Range(ref sink, input, start, end, group, ref _rows, ref _distinct);
     }
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
@@ -240,7 +274,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
     private int _groups;
     private byte[] _key = new byte[64];
     private MaskCache _rows;
-    private bool[] _present = [];
+    private CodeSet _distinct;
 
     internal override void EnsureGroups(int groups)
     {
@@ -255,7 +289,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
     internal override void StepRange(in BatchInput input, int start, int end, int group)
     {
         Sink sink = new Sink(this);
-        BytesWalk.Range(ref sink, input, start, end, group, ref _rows, ref _present);
+        BytesWalk.Range(ref sink, input, start, end, group, ref _rows, ref _distinct);
     }
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)

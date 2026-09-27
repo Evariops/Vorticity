@@ -167,6 +167,89 @@ internal struct MaskCache
     }
 }
 
+/// <summary>
+/// The distinct codes the rows of a range of a dictionary block name, for an aggregate that takes
+/// each value once, marked in a table of the dictionary's size. A range of fewer rows than the
+/// dictionary has codes lists its codes as it meets them and unmarks them from the list, so that it
+/// pays for its rows and not for the dictionary; a longer one clears the table, marks it and sweeps
+/// it, which costs the dictionary once and its rows no more than a store each.
+/// </summary>
+internal struct CodeSet
+{
+    private byte[]? _marked;
+    private int[]? _met;
+
+    // Whether the table may hold marks: left so by a long range, or by a short one that did not
+    // finish unmarking.
+    private bool _dirty;
+
+    /// <summary>
+    /// The codes of the rows of <paramref name="rows"/> in [<paramref name="start"/>,
+    /// <paramref name="end"/>), each once, in the order they are met: for a range of fewer rows
+    /// than <paramref name="entries"/>.
+    /// </summary>
+    /// <param name="codes">The block's codes, one per row.</param>
+    /// <param name="rows">The rows to read, every row when empty.</param>
+    /// <param name="start">The range's first row.</param>
+    /// <param name="end">The row past the range.</param>
+    /// <param name="entries">The dictionary's size, above every code.</param>
+    internal ReadOnlySpan<int> Few(ReadOnlySpan<uint> codes, ReadOnlySpan<ulong> rows, int start, int end, int entries)
+    {
+        Span<byte> marked = Marks(entries);
+        if (_dirty)
+        {
+            // Past the dictionary too: a longer one read before may have left marks there.
+            _marked.AsSpan().Clear();
+        }
+
+        int[] met = _met ??= [];
+        Scratch.Grow(ref met, Math.Min(entries, Math.Max(end - start, 0)) + 1);
+        _met = met;
+        _dirty = true;
+        int count = 0;
+        RowCursor cursor = new RowCursor(rows, start, end);
+        while (cursor.Next(out int row))
+        {
+            // Every row writes its code at the end of the list and moves the end past it only the
+            // first time: no branch on whether the code was met, which random codes would
+            // mispredict at nearly every new one.
+            int code = (int)codes[row];
+            met[count] = code;
+            count += 1 - marked[code];
+            marked[code] = 1;
+        }
+
+        for (int i = 0; i < count; i++)
+        {
+            marked[met[i]] = 0;
+        }
+
+        _dirty = false;
+        return met.AsSpan(0, count);
+    }
+
+    /// <summary>
+    /// The table cleared, for a range as long as the dictionary or longer to mark with its codes and
+    /// sweep: nonzero at a code the range names.
+    /// </summary>
+    /// <param name="entries">The dictionary's size.</param>
+    internal Span<byte> Table(int entries)
+    {
+        Span<byte> marked = Marks(entries);
+        marked.Clear();
+        _dirty = true;
+        return marked;
+    }
+
+    private Span<byte> Marks(int entries)
+    {
+        byte[] marked = _marked ??= [];
+        Scratch.Grow(ref marked, entries);
+        _marked = marked;
+        return marked.AsSpan(0, entries);
+    }
+}
+
 /// <summary>Run lookups over the exclusive run ends of a run-end block.</summary>
 internal static class Runs
 {

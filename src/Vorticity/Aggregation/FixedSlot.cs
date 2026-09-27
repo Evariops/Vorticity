@@ -295,7 +295,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
     private int _groups;
     private ValuesCache<TValue> _values;
     private MaskCache _rows;
-    private bool[] _present = [];
+    private CodeSet _distinct;
 
     internal FixedDistinctSlot(StorageKind kind) => _kind = kind;
 
@@ -348,21 +348,14 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
-                Scratch.Grow(ref _present, dictionary.Length);
-                Span<bool> present = _present.AsSpan(0, dictionary.Length);
-                present.Clear();
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
-                while (rows.Next(out int row))
+                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
+                if (end - start < dictionary.Length)
                 {
-                    present[(int)codes[row]] = true;
+                    FewCodes(codes, rows, start, end, group, dictionary, valid);
                 }
-
-                for (int code = 0; code < present.Length; code++)
+                else
                 {
-                    if (present[code] && StorageValues.IsValid(valid, code))
-                    {
-                        Add(group, dictionary[code]);
-                    }
+                    ManyCodes(codes, rows, start, end, group, dictionary, valid);
                 }
 
                 return;
@@ -420,6 +413,42 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
     }
 
     internal override long Result(int group) => _counts[group];
+
+    /// <summary>The values of a range of fewer rows than its dictionary has codes, each once.</summary>
+    /// <remarks>Each walk of a dictionary range is a method of its own, so that neither loop takes its shape from the other.</remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void FewCodes(
+        ReadOnlySpan<uint> codes, ReadOnlySpan<ulong> rows, int start, int end, int group, ReadOnlySpan<TValue> dictionary, ReadOnlySpan<ulong> valid)
+    {
+        foreach (int code in _distinct.Few(codes, rows, start, end, dictionary.Length))
+        {
+            if (StorageValues.IsValid(valid, code))
+            {
+                Add(group, dictionary[code]);
+            }
+        }
+    }
+
+    /// <summary>The values of a range as long as its dictionary or longer, each once, in code order.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ManyCodes(
+        ReadOnlySpan<uint> codes, ReadOnlySpan<ulong> rows, int start, int end, int group, ReadOnlySpan<TValue> dictionary, ReadOnlySpan<ulong> valid)
+    {
+        Span<byte> present = _distinct.Table(dictionary.Length);
+        RowCursor all = new RowCursor(rows, start, end);
+        while (all.Next(out int row))
+        {
+            present[(int)codes[row]] = 1;
+        }
+
+        for (int code = 0; code < present.Length; code++)
+        {
+            if (present[code] != 0 && StorageValues.IsValid(valid, code))
+            {
+                Add(group, dictionary[code]);
+            }
+        }
+    }
 
     private void Add(int group, TValue value)
     {
