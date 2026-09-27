@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Types.Numerics;
@@ -39,6 +40,13 @@ internal sealed class ZonePruner : IBlockPruner
     /// walk.
     /// </summary>
     private volatile Ordered[]? _ordered;
+
+    /// <summary>
+    /// The ordered candidates of every <c>IN</c> a filter still in use holds, made once for the
+    /// expression rather than once per pruner: a dataset plans one filter over each of its
+    /// objects, and each would sort the same list again. They go with the expression.
+    /// </summary>
+    private static readonly ConditionalWeakTable<InExpr, Ordered> Sorted = new ConditionalWeakTable<InExpr, Ordered>();
 
     internal ZonePruner(VortexExpr filter, ZoneColumn[] columns)
     {
@@ -1597,10 +1605,10 @@ internal sealed class ZonePruner : IBlockPruner
             }
         }
 
-        OrderedCandidates? built = OrderedCandidates.TryBuild(membership.Literals);
+        Ordered sorted = Sorted.GetValue(membership, static node => new Ordered(node, OrderedCandidates.TryBuild(node.Literals)));
 
-        // Two lanes reaching the same unseen node build the same thing twice and one array wins.
-        // Both are equal and neither is mutated after publication, so the loser is only work.
+        // Two lanes reaching the same unseen node publish it twice and one array wins. Both are
+        // equal and neither is mutated after publication, so the loser is only work.
         int length = known?.Length ?? 0;
         Ordered[] grown = new Ordered[length + 1];
         for (int i = 0; i < length; i++)
@@ -1608,9 +1616,9 @@ internal sealed class ZonePruner : IBlockPruner
             grown[i] = known![i];
         }
 
-        grown[length] = new Ordered(membership, built);
+        grown[length] = sorted;
         _ordered = grown;
-        return built;
+        return sorted.Candidates;
     }
 
     /// <summary>What one <c>IN</c> node of the filter was prepared into.</summary>
@@ -1625,10 +1633,12 @@ internal sealed class ZonePruner : IBlockPruner
     /// above <c>max</c>, none is inside. So the walk over candidates becomes one binary search, and
     /// the cost per zone falls from the candidate count to its logarithm.
     ///
-    /// Only kinds whose order is exact are taken. Widening an integer to a double is lossy above
-    /// 2^53, which would let the sort and the per-zone comparison disagree about two candidates
-    /// that differ; a float candidate, a boolean, a null, or a mix of bytes and numbers therefore
-    /// leaves the caller on the walk it already had.
+    /// Only candidates of one order are taken, compared with bounds of that order: bytes, integers
+    /// of either sign, or floats. Widening an integer to a double is lossy above 2^53, which would
+    /// let the sort and the per-zone comparison disagree about two candidates that differ, so
+    /// integers and floats are never mixed. Floats compare as IEEE does, the two zeros one value,
+    /// as the proof of an equality compares them; a NaN, which that proof leaves open on every
+    /// zone, keeps the caller on the walk, and so do a boolean and a null.
     /// </remarks>
     private sealed class OrderedCandidates
     {
@@ -1640,12 +1650,14 @@ internal sealed class ZonePruner : IBlockPruner
         private const int LeastCandidates = 32;
 
         private readonly FilterLiteral[] _sorted;
-        private readonly bool _bytes;
 
-        private OrderedCandidates(FilterLiteral[] sorted, bool bytes)
+        /// <summary>The candidates' order, as <see cref="OrderOf"/> names it.</summary>
+        private readonly FilterLiteralKind _order;
+
+        private OrderedCandidates(FilterLiteral[] sorted, FilterLiteralKind order)
         {
             _sorted = sorted;
-            _bytes = bytes;
+            _order = order;
         }
 
         /// <summary>
@@ -1660,23 +1672,42 @@ internal sealed class ZonePruner : IBlockPruner
                 return null;
             }
 
-            bool bytes = literals[0].Kind == FilterLiteralKind.Bytes;
+            FilterLiteralKind order = OrderOf(literals[0].Kind);
+            if (order == FilterLiteralKind.Null)
+            {
+                return null;
+            }
+
             for (int i = 0; i < literals.Length; i++)
             {
-                FilterLiteralKind kind = literals[i].Kind;
-                bool ordered = bytes
-                    ? kind == FilterLiteralKind.Bytes
-                    : kind is FilterLiteralKind.Signed or FilterLiteralKind.Unsigned;
-                if (!ordered)
+                if (OrderOf(literals[i].Kind) != order
+                    || (order == FilterLiteralKind.Float && double.IsNaN(literals[i].FloatValue)))
                 {
                     return null;
                 }
             }
 
             FilterLiteral[] sorted = (FilterLiteral[])literals.Clone();
-            Array.Sort(sorted, bytes ? CompareBytes : CompareIntegers);
-            return new OrderedCandidates(sorted, bytes);
+            Array.Sort(sorted, order switch
+            {
+                FilterLiteralKind.Bytes => CompareBytes,
+                FilterLiteralKind.Float => CompareFloats,
+                _ => CompareIntegers,
+            });
+            return new OrderedCandidates(sorted, order);
         }
+
+        /// <summary>
+        /// The order a value of <paramref name="kind"/> sorts in: bytes, integers of either sign
+        /// on one line, or floats; <see cref="FilterLiteralKind.Null"/> for any other.
+        /// </summary>
+        private static FilterLiteralKind OrderOf(FilterLiteralKind kind) => kind switch
+        {
+            FilterLiteralKind.Bytes => FilterLiteralKind.Bytes,
+            FilterLiteralKind.Signed or FilterLiteralKind.Unsigned => FilterLiteralKind.Signed,
+            FilterLiteralKind.Float => FilterLiteralKind.Float,
+            _ => FilterLiteralKind.Null,
+        };
 
         /// <summary>
         /// What the bounds of one zone prove of the membership, when they compare at all.
@@ -1698,10 +1729,9 @@ internal sealed class ZonePruner : IBlockPruner
                 return true;
             }
 
-            bool comparable = _bytes
-                ? kind == FilterLiteralKind.Bytes
-                : kind is FilterLiteralKind.Signed or FilterLiteralKind.Unsigned;
-            if (!comparable)
+            // A bound's own NaN is not screened here: the comparisons below refuse it, and the
+            // zone then stays live, as the walk leaves it.
+            if (OrderOf(kind) != _order)
             {
                 return false;
             }
@@ -1752,6 +1782,10 @@ internal sealed class ZonePruner : IBlockPruner
 
         private static int CompareBytes(FilterLiteral left, FilterLiteral right) =>
             left.BytesValue.SequenceCompareTo(right.BytesValue);
+
+        /// <summary>Two floats, neither a NaN, as IEEE orders them: the two zeros are one value.</summary>
+        private static int CompareFloats(FilterLiteral left, FilterLiteral right) =>
+            left.FloatValue.CompareTo(right.FloatValue);
 
         /// <summary>
         /// The signed and unsigned candidates on one line, which is what
