@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -44,6 +45,10 @@ internal sealed class DatasetKeyCursor : IKeyWalker
 
     // The smallest open key, row-encoded, which a single column's bounds are compared with.
     private byte[] _smallest = [];
+
+    // Per object, its part in a selection, rented by the first selection and returned when the walk
+    // is disposed: a walk that never selects holds none. It may be longer than the objects.
+    private Window[]? _windows;
 
     private FilterLiteral _target;
     private SeekOp _op;
@@ -289,15 +294,25 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     }
 
     /// <summary>
-    /// Positions on the entry of rank <paramref name="rank"/> in key order, by walking to it from
-    /// the first: the ranks of a merge are known only by counting its entries.
+    /// Positions on the entry of rank <paramref name="rank"/> in key order: a near one by walking
+    /// to it from the first, a far one by a selection over the objects' cursors.
     /// </summary>
+    /// <remarks>
+    /// A walk costs a step per entry before the rank; the selection, which opens the objects a walk
+    /// would open, a few rounds of a bound in each of them. Below one entry per object the walk is
+    /// the cheaper, whether the objects interleave or not.
+    /// </remarks>
     public async ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken = default)
     {
         if (rank < 0)
         {
             _current = -1;
             return false;
+        }
+
+        if (rank >= _slots.Length)
+        {
+            return await SelectAsync(rank, cancellationToken).ConfigureAwait(false);
         }
 
         if (!await SeekFirstAsync(cancellationToken).ConfigureAwait(false))
@@ -314,6 +329,235 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         }
 
         return true;
+    }
+
+    /// <summary>
+    /// The entry of rank <paramref name="rank"/>, selected over the objects' cursors, each keeping
+    /// the window of its own ranks still candidates.
+    /// </summary>
+    /// <remarks>
+    /// On the clustering key the objects take part in the order of their bounds, until they hold
+    /// more entries than the rank; the ones left waiting hold only keys at or above their bounds.
+    /// Once the entry is found, the waiting objects whose bounds are at or below its key take part
+    /// and the selection runs again, which can only find a smaller key, so none is left that could
+    /// come before it. An object whose keys all come after the entry is not opened, as a walk
+    /// would not open it. On any other column every object takes part.
+    /// </remarks>
+    internal async ValueTask<bool> SelectAsync(long rank, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _windows ??= ArrayPool<Window>.Shared.Rent(_slots.Length);
+        Restart();
+        Array.Clear(_next);
+        long held = 0;
+        for (int next = FirstWaiting(out int level); next >= 0 && (held <= rank || !_bounded); next = FirstWaiting(out level))
+        {
+            held += await JoinAsync(next, level, cancellationToken).ConfigureAwait(false);
+        }
+
+        while (await RoundsAsync(rank, cancellationToken).ConfigureAwait(false))
+        {
+            await PlaceAsync(cancellationToken).ConfigureAwait(false);
+            bool joined = false;
+            for (int next = FirstWaiting(out int level); next >= 0 && MayHoldSmallest(next); next = FirstWaiting(out level))
+            {
+                await JoinAsync(next, level, cancellationToken).ConfigureAwait(false);
+                joined = true;
+            }
+
+            if (!joined)
+            {
+                return Choose();
+            }
+        }
+
+        Restart();
+        return false;
+    }
+
+    /// <summary>An object takes part in a selection: past its place in its level, opened, and counted.</summary>
+    private async ValueTask<long> JoinAsync(int slot, int level, CancellationToken cancellationToken)
+    {
+        _next[level]++;
+        Slot joined = _slots[slot];
+        joined.Walked = true;
+        KeyCursor cursor = await CursorOfAsync(joined, cancellationToken).ConfigureAwait(false);
+        long count = cursor.EntryCount ?? 0;
+        _windows![slot].Count = count;
+        return count;
+    }
+
+    /// <summary>
+    /// The rounds of a selection over the objects taking part, which leave each one's bound for the
+    /// entry of rank <paramref name="rank"/> in its <see cref="Window.Cut"/>.
+    /// </summary>
+    /// <remarks>
+    /// A round takes a pivot among the candidates and bounds it in every object, in the merge's
+    /// order: an earlier object counts the pivot's key's entries as before it, a later one as after
+    /// it. Its rank rules out the candidates on its wrong side. The pivot is taken three ways in
+    /// turn.
+    /// <list type="bullet">
+    /// <item>Where the rank would fall in the widest window, were its candidates spread like the
+    /// others': over objects whose keys interleave, a few rounds close in on the entry.</item>
+    /// <item>Where it would fall were the windows laid end to end in the order of their first keys:
+    /// over objects that do not overlap, as a compacted level's, that is the entry itself.</item>
+    /// <item>The middle below which half the candidates lie, each object standing on its own middle
+    /// and counting for its window: a quarter of them at least are ruled out, whatever the keys,
+    /// so the rounds are O(log N).</item>
+    /// </list>
+    /// </remarks>
+    private async ValueTask<bool> RoundsAsync(long rank, CancellationToken cancellationToken)
+    {
+        Window[] windows = _windows!;
+        for (int s = 0; s < _slots.Length; s++)
+        {
+            windows[s].Low = 0;
+            windows[s].High = _slots[s].Walked ? windows[s].Count : 0;
+            windows[s].Cut = 0;
+        }
+
+        for (int round = 0; ; round++)
+        {
+            _live = 0;
+            long ruledOut = 0;
+            long candidates = 0;
+            int widest = -1;
+            for (int s = 0; s < _slots.Length; s++)
+            {
+                long width = windows[s].Width;
+                ruledOut += windows[s].Low;
+                candidates += width;
+                widest = width > 0 && (widest < 0 || width > windows[widest].Width) ? s : widest;
+            }
+
+            if (widest < 0 || rank < ruledOut || rank >= ruledOut + candidates)
+            {
+                return false;
+            }
+
+            int pivot = widest;
+            if (round % 3 == 0)
+            {
+                long width = windows[widest].Width;
+                long offset = Math.Clamp((long)((double)(rank - ruledOut) * width / candidates), 0, width - 1);
+                windows[widest].Cut = windows[widest].Low + offset;
+                await _slots[widest].Cursor!.SeekRankAsync(windows[widest].Cut, cancellationToken).ConfigureAwait(false);
+            }
+            else if (round % 3 == 1)
+            {
+                // The merge's heap orders the windows by their first keys, and gives them back until
+                // their widths pass the rank.
+                for (int s = 0; s < _slots.Length; s++)
+                {
+                    if (windows[s].Width > 0
+                        && await _slots[s].Cursor!.SeekRankAsync(windows[s].Low, cancellationToken).ConfigureAwait(false))
+                    {
+                        Push(s);
+                    }
+                }
+
+                long counted = 0;
+                while (_live > 0)
+                {
+                    pivot = PopTop();
+                    if (counted + windows[pivot].Width > rank - ruledOut)
+                    {
+                        break;
+                    }
+
+                    counted += windows[pivot].Width;
+                }
+
+                windows[pivot].Cut = windows[pivot].Low + Math.Clamp(rank - ruledOut - counted, 0, windows[pivot].Width - 1);
+                await _slots[pivot].Cursor!.SeekRankAsync(windows[pivot].Cut, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                // The merge's heap orders the middles, and gives them back smallest first until half
+                // the candidates are counted.
+                for (int s = 0; s < _slots.Length; s++)
+                {
+                    if (windows[s].Width > 0)
+                    {
+                        windows[s].Cut = windows[s].Low + (windows[s].Width >> 1);
+                        if (await _slots[s].Cursor!.SeekRankAsync(windows[s].Cut, cancellationToken).ConfigureAwait(false))
+                        {
+                            Push(s);
+                        }
+                    }
+                }
+
+                long counted = 0;
+                while (_live > 0 && 2 * counted < candidates)
+                {
+                    pivot = PopTop();
+                    counted += windows[pivot].Width;
+                }
+            }
+
+            KeyCursor lender = _slots[pivot].Cursor!;
+            long before = 0;
+            for (int s = 0; s < _slots.Length; s++)
+            {
+                if (s != pivot)
+                {
+                    long cut = windows[s].Low;
+                    if (windows[s].Width > 0)
+                    {
+                        long ranked = await _slots[s].Cursor!.RankOfAsync(lender, upper: s < pivot, cancellationToken).ConfigureAwait(false);
+                        cut = Math.Clamp(ranked, windows[s].Low, windows[s].High);
+                    }
+
+                    windows[s].Cut = cut;
+                }
+
+                before += windows[s].Cut;
+            }
+
+            if (before == rank)
+            {
+                return true;
+            }
+
+            for (int s = 0; s < _slots.Length; s++)
+            {
+                if (before < rank)
+                {
+                    windows[s].Low = Math.Max(windows[s].Low, windows[s].Cut);
+                }
+                else
+                {
+                    windows[s].High = Math.Min(windows[s].High, windows[s].Cut);
+                }
+            }
+
+            if (before < rank)
+            {
+                windows[pivot].Low = windows[pivot].Cut + 1;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Every object taking part on its bound, in the heap, and the merge resumed from there: a
+    /// waiting object opens on its first entry once the walk reaches its bound.
+    /// </summary>
+    private async ValueTask PlaceAsync(CancellationToken cancellationToken)
+    {
+        Window[] windows = _windows!;
+        _live = 0;
+        _first = true;
+        for (int s = 0; s < _slots.Length; s++)
+        {
+            Slot slot = _slots[s];
+            slot.Live = slot.Walked
+                && windows[s].Cut < windows[s].Count
+                && await slot.Cursor!.SeekRankAsync(windows[s].Cut, cancellationToken).ConfigureAwait(false);
+            if (slot.Live)
+            {
+                Push(s);
+            }
+        }
     }
 
     /// <summary>Moves to the next entry in key order; on a distinct walk, to the next key.</summary>
@@ -433,6 +677,12 @@ internal sealed class DatasetKeyCursor : IKeyWalker
 
         _disposed = true;
         _current = -1;
+        if (_windows is not null)
+        {
+            ArrayPool<Window>.Shared.Return(_windows);
+            _windows = null;
+        }
+
         foreach (Slot slot in _slots)
         {
             if (slot.Cursor is not null)
@@ -512,20 +762,7 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     {
         while (true)
         {
-            // The objects of a level wait in the order of their bounds: the first waiting one of
-            // each level is the only one of it that can be next.
-            int next = -1;
-            int nextLevel = -1;
-            for (int level = 0; level < _levels.Length; level++)
-            {
-                List<int> ordered = _levels[level];
-                if (_next[level] < ordered.Count && (next < 0 || Before(ordered[_next[level]], next)))
-                {
-                    next = ordered[_next[level]];
-                    nextLevel = level;
-                }
-            }
-
+            int next = FirstWaiting(out int nextLevel);
             if (next < 0 || (_bounded && _live > 0 && !MayHoldSmallest(next)))
             {
                 return;
@@ -543,6 +780,28 @@ internal sealed class DatasetKeyCursor : IKeyWalker
                 Push(next);
             }
         }
+    }
+
+    /// <summary>
+    /// The first waiting object of every level, by bound then as the version lists them, and its
+    /// level; -1 when none waits. The objects of a level wait in the order of their bounds, so the
+    /// first waiting one of each level is the only one of it that can be next.
+    /// </summary>
+    private int FirstWaiting(out int level)
+    {
+        int next = -1;
+        level = -1;
+        for (int l = 0; l < _levels.Length; l++)
+        {
+            List<int> ordered = _levels[l];
+            if (_next[l] < ordered.Count && (next < 0 || Before(ordered[_next[l]], next)))
+            {
+                next = ordered[_next[l]];
+                level = l;
+            }
+        }
+
+        return next;
     }
 
     /// <summary>
@@ -746,5 +1005,24 @@ internal sealed class DatasetKeyCursor : IKeyWalker
 
         /// <summary>It was positioned by the current walk, rather than only opened to rank a key.</summary>
         internal bool Walked { get; set; }
+    }
+
+    /// <summary>An object's part in a selection: the window of its ranks still candidates.</summary>
+    private struct Window
+    {
+        /// <summary>The object's entries, once it takes part.</summary>
+        internal long Count;
+
+        /// <summary>Its first candidate rank.</summary>
+        internal long Low;
+
+        /// <summary>One past its last candidate rank.</summary>
+        internal long High;
+
+        /// <summary>Its bound for the round's pivot: its entries before it.</summary>
+        internal long Cut;
+
+        /// <summary>Its candidates.</summary>
+        internal readonly long Width => High - Low;
     }
 }

@@ -298,13 +298,23 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// <param name="key">The sought key.</param>
     /// <param name="cancellationToken">Cancels the decodes this makes.</param>
     internal ValueTask<long> LowerBoundAsync(FilterLiteral key, CancellationToken cancellationToken) =>
-        BoundAsync(key, strict: false, cancellationToken);
+        BoundAsync(new LiteralKey(this, key), strict: false, cancellationToken);
 
     /// <summary>The index of the first entry whose key is strictly after <paramref name="key"/>.</summary>
     /// <param name="key">The sought key.</param>
     /// <param name="cancellationToken">Cancels the decodes this makes.</param>
     internal ValueTask<long> UpperBoundAsync(FilterLiteral key, CancellationToken cancellationToken) =>
-        BoundAsync(key, strict: true, cancellationToken);
+        BoundAsync(new LiteralKey(this, key), strict: true, cancellationToken);
+
+    /// <summary>
+    /// <see cref="LowerBoundAsync"/>, or <see cref="UpperBoundAsync"/> when <paramref name="strict"/>,
+    /// of the byte key <paramref name="lender"/> is on, compared where it lends it.
+    /// </summary>
+    /// <param name="lender">A source on an entry, whose keys are bytes.</param>
+    /// <param name="strict">Whether the bound is past the key's entries.</param>
+    /// <param name="cancellationToken">Cancels the decodes this makes.</param>
+    internal ValueTask<long> BoundOfAsync(KeySource lender, bool strict, CancellationToken cancellationToken) =>
+        BoundAsync(new LentKey(this, lender), strict, cancellationToken);
 
     public ValueTask DisposeAsync()
     {
@@ -333,8 +343,8 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// values yields nothing and the search moves to the next one, which is the only case that
     /// decodes twice.
     /// </remarks>
-    private async ValueTask<long> BoundAsync(
-        FilterLiteral key, bool strict, CancellationToken cancellationToken)
+    private async ValueTask<long> BoundAsync<TKey>(TKey key, bool strict, CancellationToken cancellationToken)
+        where TKey : struct, ISoughtKey
     {
         long entries = EntryCount;
         if (entries <= 0)
@@ -359,7 +369,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
             while (low < high)
             {
                 long mid = low + ((high - low) >> 1);
-                int order = CompareLoaded(mid, key);
+                int order = key.OrderLoaded(mid);
                 bool before = strict ? order <= 0 : order < 0;
                 if (before)
                 {
@@ -384,7 +394,8 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// The first zone that may hold an entry at or after <paramref name="key"/>, from the bounds
     /// alone.
     /// </summary>
-    private int FirstZoneThatMayHold(FilterLiteral key, bool strict, int first, int last)
+    private int FirstZoneThatMayHold<TKey>(TKey key, bool strict, int first, int last)
+        where TKey : struct, ISoughtKey
     {
         int low = first;
         int high = last;
@@ -412,7 +423,8 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     }
 
     /// <summary>Whether zone <paramref name="zone"/>'s every value is below the sought key.</summary>
-    private bool Below(int zone, FilterLiteral key, bool strict)
+    private bool Below<TKey>(int zone, TKey key, bool strict)
+        where TKey : struct, ISoughtKey
     {
         ZoneBounds bounds = _zones.Bounds(zone);
         if (!bounds.HasMax || bounds.Max.Kind != key.Kind)
@@ -420,7 +432,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
             return false;
         }
 
-        int order = Compare(bounds.Max, key);
+        int order = key.Order(bounds.Max);
         return strict ? order <= 0 : order < 0;
     }
 
@@ -449,6 +461,16 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         }
 
         return Compare(Literal(row), key);
+    }
+
+    /// <summary>Orders the loaded zone's row against a byte key.</summary>
+    private int CompareLoaded(long row, ReadOnlySpan<byte> key)
+    {
+        CanonicalNode node = _context!.Canonical.GetNode(_column);
+        ReadOnlySpan<byte> value = node.Kind == CanonicalKind.VarBinView
+            ? LiteralReader.ViewAt(node, (int)(row - _loadedStart))
+            : Literal(row).BytesValue;
+        return Math.Sign(value.SequenceCompareTo(key));
     }
 
     private FilterLiteral Literal(long row) =>
@@ -673,5 +695,38 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         }
 
         public bool Holds(int index) => LiteralReader.ViewAt(_node, index).SequenceEqual(_key);
+    }
+
+    /// <summary>A key a bound is sought for, ordered against the zones' bounds and the loaded rows.</summary>
+    private interface ISoughtKey
+    {
+        /// <summary>The key's domain, which a bound must share to say anything.</summary>
+        FilterLiteralKind Kind { get; }
+
+        /// <summary>The sign of a zone's bound less the key.</summary>
+        int Order(FilterLiteral bound);
+
+        /// <summary>The sign of the loaded zone's row less the key.</summary>
+        int OrderLoaded(long row);
+    }
+
+    /// <summary>A key sought as a literal, as a seek names it.</summary>
+    private readonly struct LiteralKey(SortedColumnSource source, FilterLiteral key) : ISoughtKey
+    {
+        public FilterLiteralKind Kind => key.Kind;
+
+        public int Order(FilterLiteral bound) => Compare(bound, key);
+
+        public int OrderLoaded(long row) => source.CompareLoaded(row, key);
+    }
+
+    /// <summary>A byte key sought where another source lends it, on its current entry.</summary>
+    private readonly struct LentKey(SortedColumnSource source, KeySource lender) : ISoughtKey
+    {
+        public FilterLiteralKind Kind => FilterLiteralKind.Bytes;
+
+        public int Order(FilterLiteral bound) => Math.Sign(bound.BytesValue.SequenceCompareTo(lender.KeyBytes));
+
+        public int OrderLoaded(long row) => source.CompareLoaded(row, lender.KeyBytes);
     }
 }

@@ -125,11 +125,19 @@ internal sealed class SortedColumnWalker : KeySource
     internal override ValueTask<long> UpperRankAsync(FilterLiteral key, CancellationToken cancellationToken) =>
         BoundAsync(key, upper: true, cancellationToken);
 
-    private async ValueTask<long> BoundAsync(FilterLiteral key, bool upper, CancellationToken cancellationToken)
+    internal override ValueTask<long> RankOfAsync(KeySource other, bool upper, CancellationToken cancellationToken) =>
+        KeyKind == FilterLiteralKind.Bytes
+            ? KeepingPositionAsync(_source.BoundOfAsync(other, upper, cancellationToken), cancellationToken)
+            : BoundAsync(other.Key, upper, cancellationToken);
+
+    private ValueTask<long> BoundAsync(FilterLiteral key, bool upper, CancellationToken cancellationToken) =>
+        KeepingPositionAsync(
+            upper ? _source.UpperBoundAsync(key, cancellationToken) : _source.LowerBoundAsync(key, cancellationToken),
+            cancellationToken);
+
+    private async ValueTask<long> KeepingPositionAsync(ValueTask<long> bound, CancellationToken cancellationToken)
     {
-        long rank = upper
-            ? await _source.UpperBoundAsync(key, cancellationToken).ConfigureAwait(false)
-            : await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false);
+        long rank = await bound.ConfigureAwait(false);
 
         // The bisection may have decoded another zone; the position is put back.
         if (IsValid)

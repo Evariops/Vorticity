@@ -567,12 +567,21 @@ internal sealed partial class SortedRunsSource : KeySource
     }
 
     internal override ValueTask<long> RankAsync(FilterLiteral key, CancellationToken cancellationToken) =>
-        SumAsync(key, long.MinValue, cancellationToken);
+        SumAsync(new LiteralKey(this, key), long.MinValue, cancellationToken);
 
     internal override ValueTask<long> UpperRankAsync(FilterLiteral key, CancellationToken cancellationToken) =>
-        SumAsync(key, long.MaxValue, cancellationToken);
+        SumAsync(new LiteralKey(this, key), long.MaxValue, cancellationToken);
 
-    private async ValueTask<long> SumAsync(FilterLiteral key, long row, CancellationToken cancellationToken)
+    internal override ValueTask<long> RankOfAsync(KeySource other, bool upper, CancellationToken cancellationToken)
+    {
+        long row = upper ? long.MaxValue : long.MinValue;
+        return _layout.Shape == KeyShape.Bytes
+            ? SumAsync(new LentKey(other), row, cancellationToken)
+            : SumAsync(new LiteralKey(this, other.Key), row, cancellationToken);
+    }
+
+    private async ValueTask<long> SumAsync<TKey>(TKey key, long row, CancellationToken cancellationToken)
+        where TKey : struct, IKeyOrder
     {
         long rank = 0;
         for (int r = 0; r < _runs.Length; r++)
@@ -1387,6 +1396,12 @@ internal sealed partial class SortedRunsSource : KeySource
     private readonly struct EntryKey(SortedRunsSource source, RunSegment segment, int index) : IKeyOrder
     {
         public int Order(ReadOnlySpan<byte> entry) => source._layout.Compare(entry, source.KeyAt(segment, index));
+    }
+
+    /// <summary>A byte key sought where another source lends it, on its current entry.</summary>
+    private readonly struct LentKey(KeySource lender) : IKeyOrder
+    {
+        public int Order(ReadOnlySpan<byte> entry) => Math.Sign(entry.SequenceCompareTo(lender.KeyBytes));
     }
 
     /// <summary>A segment's fixed-width keys laid end to end, against one key's bytes.</summary>
