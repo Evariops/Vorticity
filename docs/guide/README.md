@@ -109,3 +109,4 @@ VX0002 for the row encoding, which a project acknowledges before it builds.
 | [native-aot.md](native-aot.md) | publish an application that uses this library ahead of time |
 | [how-it-works.md](how-it-works.md) | the shape of the library in two pages, and where to read further |
 | [benchmarks.md](benchmarks.md) | every figure the bench publishes: what this costs against the Rust implementation, and each kernel against the loop it replaced |
+| [benchmarks-x64.md](benchmarks-x64.md) | the same figures from an x64 machine, a Zen 4 processor under Windows |

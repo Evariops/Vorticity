@@ -4,7 +4,8 @@ Every figure the bench publishes, on one page: Vorticity against Vortex's Rust i
 the same files, and Vorticity's kernels against the code they replaced. Each section is written by
 the instrument that measures it and ends with the machine, the build, the commit and the date it was
 measured on. [05-benchmarks.md](../design/05-benchmarks.md) says what is compared and how each
-instrument measures; [bench/README.md](../../bench/README.md) how to run them.
+instrument measures; [bench/README.md](../../bench/README.md) how to run them. [Benchmarks on
+x64](benchmarks-x64.md) is the same page from an x64 machine.
 
 Vortex™ is a trademark of LF Projects, LLC. Vorticity is an independent implementation,
 not affiliated with or endorsed by the Vortex project or LF Projects, LLC.
@@ -35,6 +36,31 @@ and the arguments below, which rewrite that section of this page and leave the o
 | [Taking rows](#taking-rows-per-encoding), [writing](#writing-per-encoding), per encoding | `--throughput --take --out docs/guide/benchmarks.md`, and `--write` |
 | [Encodings, column by column](#encodings-column-by-column), [what the advice picks](#what-the-advice-picks) | `--tradeoffs --out docs/guide/benchmarks.md`, and `--advise`, under `DOTNET_TieredCompilation=0` |
 | [Kernels](#kernels-against-what-they-replaced) | `--out docs/guide/benchmarks.md`, or a class name before it |
+
+## On x64
+
+[Benchmarks on x64](benchmarks-x64.md) is this page measured again, section for section, on an AMD
+Ryzen 9 7950X (Zen 4, AVX-512) under Windows 11, against the same Rust built for that machine. Its
+figures are from commit b5104f2, this page's from 7d8f1790: between the two, Vorticity's kernels
+were reworked for AVX-512, some of it portable, so a gap between the columns below is that work's as
+much as the machine's. Each column is a ratio to Rust on its own machine.
+
+| scenario, 1,048,576 rows, Vorticity's file | arm64, one core | x64, one core | arm64, all cores | x64, all cores |
+|---|---:|---:|---:|---:|
+| `open` | 0.26x | 0.51x | 0.25x | 0.21x |
+| `scan` | 0.85x | 0.49x | 0.51x | 0.68x |
+| `project` | 0.36x | 0.48x | 0.40x | 0.43x |
+| `filter-narrow` | 0.81x | 0.79x | 0.33x | 0.40x |
+| `filter-wide` | 0.79x | 0.49x | 0.47x | 0.63x |
+| `take` | 1.05x | 0.93x | 0.70x | 0.84x |
+| `write` | 0.53x | 0.46x | 0.70x | 0.60x |
+
+| section | arm64 | x64 |
+|---|---|---|
+| decoding, per encoding: files Vorticity reads faster, median ratio | 57 of 57, 0.35x | 57 of 57, 0.19x |
+| taking rows, per encoding | 57 of 57, 0.24x | 57 of 57, 0.11x |
+| writing, per encoding | 56 of 56, 0.22x | 56 of 56, 0.15x |
+| in one process: axes where Vorticity takes longer | 4 of 19: key order over an uncorrelated column, a string prefix on FSST, a string equality and a string prefix on a dictionary | none; the string prefix on FSST is the closest, at 0.97x |
 
 <!-- results: scenarios -->
 ## Reading and writing a table, process against process
@@ -912,8 +938,9 @@ Benchmarks with issues:
   flush it before each query.
 * **Pinned cores.** macOS pins no process, and an Apple M-series processor has cores of two kinds;
   both sides see all of them. Upstream measures on 94 pinned cores of one kind.
-* **x64.** Every figure is from one arm64 machine: CI builds and tests on x64 and arm64 and runs no
-  benchmark.
+* **x64 on this page.** Every figure here is from one arm64 machine; [Benchmarks on
+  x64](benchmarks-x64.md) has the same sections from one x64 machine. CI builds and tests on x64 and
+  arm64 and runs no benchmark.
 * **Your data and your machine.** A handful of tables and one machine: a column the compressor likes
   less, or a filter the zone maps cannot prune, moves these numbers more than either implementation
   does.
