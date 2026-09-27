@@ -141,80 +141,24 @@ internal static class IntegerKernels
     }
 
     /// <summary>
-    /// <c>destination[i] = (long)source[i] * scale</c>, wrapping, widening from any integer
-    /// physical type.
-    /// </summary>
-    /// <param name="source">The values, little-endian, at least <c>destination.Length</c> of them.</param>
-    /// <param name="ptype">The element's physical type; must be an integer.</param>
-    /// <param name="destination">The i64 accumulator.</param>
-    /// <param name="scale">The multiplier applied to every widened value.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="ptype"/> is not an integer.</exception>
-    public static void WidenScaled(
-        ReadOnlySpan<byte> source, PType ptype, Span<long> destination, long scale)
-    {
-        switch (ptype)
-        {
-            case PType.U8: WidenScaled<byte>(source, destination, scale); break;
-            case PType.U16: WidenScaled<ushort>(source, destination, scale); break;
-            case PType.U32: WidenScaled<uint>(source, destination, scale); break;
-            case PType.U64: WidenScaled<ulong>(source, destination, scale); break;
-            case PType.I8: WidenScaled<sbyte>(source, destination, scale); break;
-            case PType.I16: WidenScaled<short>(source, destination, scale); break;
-            case PType.I32: WidenScaled<int>(source, destination, scale); break;
-            case PType.I64: WidenScaled<long>(source, destination, scale); break;
-            default:
-                throw new ArgumentOutOfRangeException(
-                    nameof(ptype), ptype, "Widening needs an integer physical type.");
-        }
-    }
-
-    /// <summary>
-    /// <c>destination[i] += (long)source[i] * scale</c>, wrapping, widening from any integer
-    /// physical type.
-    /// </summary>
-    /// <param name="source">The values, little-endian, at least <c>destination.Length</c> of them.</param>
-    /// <param name="ptype">The element's physical type; must be an integer.</param>
-    /// <param name="destination">The i64 accumulator.</param>
-    /// <param name="scale">The multiplier applied to every widened value.</param>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="ptype"/> is not an integer.</exception>
-    public static void AddWidenScaled(
-        ReadOnlySpan<byte> source, PType ptype, Span<long> destination, long scale)
-    {
-        switch (ptype)
-        {
-            case PType.U8: AddWidenScaled<byte>(source, destination, scale); break;
-            case PType.U16: AddWidenScaled<ushort>(source, destination, scale); break;
-            case PType.U32: AddWidenScaled<uint>(source, destination, scale); break;
-            case PType.U64: AddWidenScaled<ulong>(source, destination, scale); break;
-            case PType.I8: AddWidenScaled<sbyte>(source, destination, scale); break;
-            case PType.I16: AddWidenScaled<short>(source, destination, scale); break;
-            case PType.I32: AddWidenScaled<int>(source, destination, scale); break;
-            case PType.I64: AddWidenScaled<long>(source, destination, scale); break;
-            default:
-                throw new ArgumentOutOfRangeException(
-                    nameof(ptype), ptype, "Widening needs an integer physical type.");
-        }
-    }
-
-    /// <summary>
     /// <c>destination[i] = a[i] * scaleA + b[i] * scaleB + c[i]</c>, wrapping, in one pass.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The same arithmetic as <see cref="WidenScaled(ReadOnlySpan{byte}, PType, Span{long},
-    /// long)"/> followed by two <see cref="AddWidenScaled(ReadOnlySpan{byte}, PType, Span{long},
-    /// long)"/>, with the read-modify-write passes over the destination gone: three reads and one
-    /// write per element. Splitting it back into three passes makes the destination traffic
-    /// dominate a date-time-parts scan, so it stays fused.
+    /// The arithmetic of a widen and scale followed by two scaled adds, with the read-modify-write
+    /// passes over the destination gone: three reads and one write per element. Splitting it back
+    /// into three passes makes the destination traffic dominate a date-time-parts scan, so it stays
+    /// fused.
     /// </para>
     /// <para>
     /// The three types are resolved before the loop, nested the way <c>RowKernels.Gather</c>
     /// resolves its codes, so only the shapes a file actually uses are ever instantiated.
     /// </para>
     /// <para>
-    /// The wrapping is the three kernels' wrapping, unchanged: <c>CreateTruncating</c> and
-    /// <c>unchecked</c>, because the reference multiplies i64 in release mode and a hostile file
-    /// must produce a wrong timestamp rather than an exception we would not share with it.
+    /// Wrapping: <c>CreateTruncating</c>, never checked nor saturating, since the reference widens
+    /// with Rust's <c>as</c>, which keeps a u64's low 64 bits; and <c>unchecked</c>, because the
+    /// reference multiplies i64 in release mode and a hostile file must produce a wrong timestamp
+    /// rather than an exception we would not share with it.
     /// </para>
     /// </remarks>
     /// <param name="a">The first part's values, little-endian.</param>
@@ -398,30 +342,6 @@ internal static class IntegerKernels
         return typeof(T) == typeof(sbyte)
             ? Avx512F.ConvertToVector512Int64(eight.AsSByte())
             : Avx512F.ConvertToVector512Int64(eight.AsByte());
-    }
-
-    // CreateTruncating, never CreateChecked or CreateSaturating: the reference widens with Rust's
-    // `as` cast (num_traits AsPrimitive), which keeps the low 64 bits of a u64 rather than clamping
-    // it to i64::MAX. CompressedValues.ReadInteger saturates instead, and is right to - its callers
-    // compare against a non-negative bound - but a value-producing path must not.
-    private static void WidenScaled<T>(ReadOnlySpan<byte> source, Span<long> destination, long scale)
-        where T : unmanaged, IBinaryInteger<T>
-    {
-        ReadOnlySpan<T> src = MemoryMarshal.Cast<byte, T>(source);
-        for (int i = 0; i < destination.Length; i++)
-        {
-            destination[i] = unchecked(long.CreateTruncating(src[i]) * scale);
-        }
-    }
-
-    private static void AddWidenScaled<T>(ReadOnlySpan<byte> source, Span<long> destination, long scale)
-        where T : unmanaged, IBinaryInteger<T>
-    {
-        ReadOnlySpan<T> src = MemoryMarshal.Cast<byte, T>(source);
-        for (int i = 0; i < destination.Length; i++)
-        {
-            destination[i] = unchecked(destination[i] + (long.CreateTruncating(src[i]) * scale));
-        }
     }
 
     /// <summary>
