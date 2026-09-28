@@ -31,11 +31,11 @@ namespace Vorticity.Benchmarks.Complexity;
 public class SparsePatchBenchmarks
 {
     /// <summary>The patches of the node.</summary>
-    [Params(1_024, 16_384, 65_536)]
+    [Params(1_024, 4_096, 16_384, 65_536)]
     public int Patches { get; set; }
 
-    /// <summary>The rows of a batch, down from the reader's window.</summary>
-    [Params(8_192, 32_768, 131_072)]
+    /// <summary>The rows of a batch: the reader's window and below, or the whole node, read once.</summary>
+    [Params(8_192, 32_768, 131_072, 262_144)]
     public int BatchRows { get; set; }
 
     /// <summary>The rows of the node, a chunk as the reference writer cuts one.</summary>

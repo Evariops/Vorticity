@@ -25,6 +25,12 @@ internal readonly ref struct Patches
     /// </summary>
     public const int ChunkSize = PatchesMetadata.ChunkSize;
 
+    /// <summary>
+    /// The fewest patches a selective read decodes once for every read of its node: a smaller set
+    /// costs less to decode again at each read than to retain.
+    /// </summary>
+    public const int RetainedFrom = 4_096;
+
     private readonly ReadOnlySpan<byte> _indices;
     private readonly PType _indicesPType;
     private readonly int _count;

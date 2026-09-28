@@ -401,20 +401,26 @@ internal sealed class BitPackedDecoder : ArrayDecoder
             patchesMetadata.Length, $"{Id} patch count");
 
         // Every selective read of the node reads the whole patch set: decoded once for all of them,
-        // as a range's is.
+        // as a range's is, when there are enough patches for that to pay.
+        bool whole = patchCount >= Patches.RetainedFrom;
         DType indicesType = context.Types.Primitive(
             patchesMetadata.IndicesPType, Nullability.NonNullable);
-        int indicesIndex = context.DecodeWholeChild(in node, 0, indicesType, patchCount);
-        int valuesIndex = context.DecodeWholeChild(in node, 1, dtype, patchCount);
+        int indicesIndex = whole
+            ? context.DecodeWholeChild(in node, 0, indicesType, patchCount)
+            : context.DecodeChild(in node, 0, indicesType, patchCount);
+        int valuesIndex = whole
+            ? context.DecodeWholeChild(in node, 1, dtype, patchCount)
+            : context.DecodeChild(in node, 1, dtype, patchCount);
 
         if (patchesMetadata.HasChunkOffsets)
         {
             int chunkOffsetsLength = ArrayDecodeContext.CheckedLength(
                 patchesMetadata.ChunkOffsetsLength, $"{Id} patch chunk_offsets_len");
-            int chunkOffsets = context.DecodeWholeChild(
-                in node, 2,
-                context.Types.Primitive(patchesMetadata.ChunkOffsetsPType, Nullability.NonNullable),
-                chunkOffsetsLength);
+            DType chunkOffsetsType = context.Types.Primitive(
+                patchesMetadata.ChunkOffsetsPType, Nullability.NonNullable);
+            int chunkOffsets = whole
+                ? context.DecodeWholeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength)
+                : context.DecodeChild(in node, 2, chunkOffsetsType, chunkOffsetsLength);
             CompressedValues.RequireIndexChild(
                 context, chunkOffsets, patchesMetadata.ChunkOffsetsPType, chunkOffsetsLength, Id,
                 "patch_chunk_offsets");
