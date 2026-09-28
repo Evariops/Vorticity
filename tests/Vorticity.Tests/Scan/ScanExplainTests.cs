@@ -15,6 +15,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Columns;
+using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.IO;
@@ -157,6 +158,57 @@ public sealed class ScanExplainTests
                 Assert.True(
                     round == 0 ? plan.Pruning[0].SegmentsRead > 0 : plan.Pruning[0].SegmentsRead == 0,
                     $"round {round}, column {c}: {plan.Pruning[0].SegmentsRead} zone map segments read");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Scans keeping zone maps at once, across the short list's move to the map by node, lose
+    /// none: each node is kept by one thread alone, so a keep lost to a race is a node missing,
+    /// and every node is found afterwards with its thread's map.
+    /// </summary>
+    [Fact]
+    public async Task ZoneMapsKeptAtOnceAcrossTheMoveToTheMapAreAllFound()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        const int Nodes = 64;
+        const int Keepers = 8;
+        for (int round = 0; round < 200; round++)
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), ct);
+            ZoneColumn[] columns = new ZoneColumn[Keepers];
+            for (int k = 0; k < Keepers; k++)
+            {
+                columns[k] = new ZoneColumn(Expr.Field("monotone"), 1_024, 1_024, []);
+            }
+
+            // Threads of their own rather than the pool's, so that all of them wait at the start
+            // together however few pool threads there are.
+            using Barrier start = new Barrier(Keepers);
+            Thread[] keepers = new Thread[Keepers];
+            for (int k = 0; k < Keepers; k++)
+            {
+                int keeper = k;
+                keepers[k] = new Thread(() =>
+                {
+                    start.SignalAndWait(ct);
+                    for (int node = keeper; node < Nodes; node += Keepers)
+                    {
+                        file.KeepZones(node, columns[keeper]);
+                    }
+                });
+                keepers[k].Start();
+            }
+
+            foreach (Thread keeper in keepers)
+            {
+                keeper.Join();
+            }
+
+            for (int node = 0; node < Nodes; node++)
+            {
+                Assert.Same(columns[node % Keepers], file.DecodedZones(node));
             }
         }
     }
