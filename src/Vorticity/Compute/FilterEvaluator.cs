@@ -647,15 +647,22 @@ internal sealed class FilterEvaluator
     /// every state, would take it twice past: a right side evaluated over every row is what the
     /// evaluation did before, so stopping early on a share that misleads costs nothing it had.
     /// </summary>
+    /// <remarks>
+    /// The stretches start short and double, so that a batch the left side left mostly open, which
+    /// the right side is evaluated over whole, pays for a few vectors of states rather than a stretch.
+    /// </remarks>
     private static int OpenUpTo(ReadOnlySpan<byte> states, byte decided, int limit)
     {
+        const int FirstStretch = 64;
         const int Stretch = 512;
         int open = 0;
-        for (int start = 0; start < states.Length; start += Stretch)
+        int start = 0;
+        for (int length = FirstStretch; start < states.Length; length = Math.Min(2 * length, Stretch))
         {
-            ReadOnlySpan<byte> stretch = states.Slice(start, Math.Min(Stretch, states.Length - start));
+            ReadOnlySpan<byte> stretch = states.Slice(start, Math.Min(length, states.Length - start));
             open += stretch.Length - stretch.Count(decided);
-            if (open > limit || (long)open * states.Length > 2L * limit * (start + stretch.Length))
+            start += stretch.Length;
+            if (open > limit || (long)open * states.Length > 2L * limit * start)
             {
                 return Math.Max(open, limit + 1);
             }
