@@ -20,6 +20,10 @@ internal sealed class BlockMask
 {
     private readonly ulong[] _bits;
 
+    // Four bytes, as a zone length is, so that the range of words below fits in the object without
+    // growing it.
+    private readonly uint _blockRows;
+
     // The words that may hold a live bit, [from, to): all of them until KeepOnly narrows the mask,
     // then the ones its range covered, since nothing else ever sets a bit.
     private int _setFrom;
@@ -27,14 +31,15 @@ internal sealed class BlockMask
 
     /// <summary>A mask over <paramref name="rowCount"/> rows, every block live.</summary>
     /// <param name="rowCount">The file's rows, at the layout root.</param>
-    /// <param name="blockRows">Rows per block; must be positive.</param>
+    /// <param name="blockRows">Rows per block; must be positive and fit a zone length's 32 bits.</param>
     internal BlockMask(long rowCount, long blockRows)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(rowCount);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(blockRows);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(blockRows, uint.MaxValue);
 
         RowCount = rowCount;
-        BlockRows = blockRows;
+        _blockRows = (uint)blockRows;
         long blocks = (rowCount + blockRows - 1) / blockRows;
         BlockCount = checked((int)blocks);
 
@@ -55,7 +60,7 @@ internal sealed class BlockMask
     internal long RowCount { get; }
 
     /// <summary>Rows per block, the last block excepted.</summary>
-    internal long BlockRows { get; }
+    internal long BlockRows => _blockRows;
 
     /// <summary>How many blocks the rows make, the last one short unless the count divides.</summary>
     internal int BlockCount { get; }

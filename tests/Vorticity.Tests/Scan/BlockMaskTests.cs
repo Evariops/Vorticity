@@ -77,6 +77,22 @@ public sealed class BlockMaskTests
         }
     }
 
+    /// <summary>
+    /// A block holds as many rows as a zone length's 32 bits count and no more: the largest is a
+    /// mask of whole-file blocks, one past it is refused rather than wrapped.
+    /// </summary>
+    [Fact]
+    public void ABlockHoldsAsManyRowsAsAZoneLengthCounts()
+    {
+        long rows = 3L * uint.MaxValue;
+        BlockMask widest = new BlockMask(rows, uint.MaxValue);
+
+        Assert.Equal(uint.MaxValue, widest.BlockRows);
+        Assert.Equal(3, widest.BlockCount);
+        Assert.Equal(new RowRange(2L * uint.MaxValue, rows), widest.BlockRange(2));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new BlockMask(rows, (long)uint.MaxValue + 1));
+    }
+
     [Fact]
     public void TheLastBlockIsClippedToTheFile()
     {
