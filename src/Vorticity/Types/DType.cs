@@ -180,7 +180,12 @@ internal readonly struct DType : IEquatable<DType>
     /// the arena interns names, so this resolves the bytes to a handle once and then searches the
     /// struct's handles for it, several at a time.
     /// </summary>
+    /// <remarks>
+    /// Kept out of line: the methods that resolve a path are optimized fully at their first call,
+    /// and the vector search this inlines would lengthen that compile for one lookup a field.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">The kind is neither Struct nor Union.</exception>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public int IndexOfField(ReadOnlySpan<byte> nameUtf8)
     {
         ref readonly DTypeNode n = ref NodeRef();

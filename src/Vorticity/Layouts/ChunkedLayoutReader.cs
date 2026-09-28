@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
@@ -81,7 +82,6 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         {
             Span<int> chunks = scratch.Span;
             int count = 0;
-            ReadOnlySpan<int> selection = context.HasSelection ? context.Selection : default;
             int taken = 0;
             for (int i = first; i < last; i++)
             {
@@ -94,8 +94,7 @@ internal sealed class ChunkedLayoutReader : LayoutReader
                 LayoutNode chunk = node.GetChild(i);
                 if (context.HasSelection)
                 {
-                    ReadOnlySpan<int> run = NextRun(selection, ref taken, offsets[i], offsets[i + 1]);
-                    chunks[count++] = ExecuteChunkSelected(in chunk, local, in fields, context, run, offsets[i]);
+                    chunks[count++] = ExecuteChunkSelected(in chunk, local, in fields, context, ref taken, offsets[i], offsets[i + 1]);
                 }
                 else if (live is not null
                     && local.Length < chunk.RowCount
@@ -187,18 +186,23 @@ internal sealed class ChunkedLayoutReader : LayoutReader
     }
 
     /// <summary>
-    /// Executes one chunk with its run of the selection re-based into that chunk's own row space.
+    /// Executes the chunk <c>[start, end)</c> with its run of the selection, the one after
+    /// <paramref name="taken"/>, re-based into that chunk's own row space.
     /// </summary>
     /// <remarks>
     /// The only reader that has to do this, and the reason the selection is defined to live in its
     /// sibling `rows` argument's coordinate space: struct, zoned and stats pass `rows` through
     /// untouched and therefore pass the selection through by doing nothing, while this one
     /// re-partitions and so has to re-partition both. A chunk that ends up wanting no rows still
-    /// runs - it produces an empty node, which concatenates to nothing.
+    /// runs - it produces an empty node, which concatenates to nothing. Kept out of
+    /// <see cref="Execute"/>, which the JIT optimizes fully at its first call, so that a scan with
+    /// no selection does not wait for the search of a run to compile.
     /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static int ExecuteChunkSelected(
-        in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context, ReadOnlySpan<int> run, long start)
+        in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context, ref int taken, long start, long end)
     {
+        ReadOnlySpan<int> run = NextRun(context.Selection, ref taken, start, end);
         int[] rebased = ArrayPool<int>.Shared.Rent(Math.Max(run.Length, 1));
         try
         {
