@@ -99,41 +99,41 @@ much as the machine's. Each column is a ratio to Rust on its own machine.
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | ratio | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.6 (0.6-0.8) | 0.26x | — | — | 5.3 KiB | 9 / 11 MiB |
-| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.5 (0.5-0.8) | 0.30x | — | — | 4.9 KiB | 9 / 11 MiB |
-| `scan` | Vorticity's | 7.1 (6.8-7.2) | 8.3 (8.2-8.7) | 0.85x | 3.8 | 3.2 | 14.6 KiB | 15 / 18 MiB |
-| `scan` | Vortex Rust's | 1.9 (1.8-2.0) | 3.0 (2.9-3.2) | 0.64x | 13.8 | 8.8 | 11.0 KiB | 23 / 23 MiB |
-| `project` | Vorticity's | 0.4 (0.4-0.4) | 1.1 (1.0-1.1) | 0.36x | 21.2 | 7.7 | 16.9 KiB | 11 / 15 MiB |
-| `project` | Vortex Rust's | 0.4 (0.4-0.4) | 0.9 (0.8-0.9) | 0.44x | 21.8 | 9.6 | 13.2 KiB | 11 / 13 MiB |
-| `filter-narrow` | Vorticity's | 1.0 (0.9-1.2) | 1.3 (1.2-1.4) | 0.81x | 0.3 | 0.2 | 41.4 KiB | 13 / 15 MiB |
-| `filter-narrow` | Vortex Rust's | 0.7 (0.7-0.8) | 1.2 (1.2-1.3) | 0.59x | 0.4 | 0.2 | 21.2 KiB | 15 / 16 MiB |
-| `filter-wide` | Vorticity's | 3.9 (3.7-4.1) | 5.0 (4.8-5.2) | 0.79x | 3.4 | 2.7 | 23.9 KiB | 14 / 17 MiB |
-| `filter-wide` | Vortex Rust's | 1.3 (1.2-1.4) | 2.4 (2.3-2.6) | 0.57x | 10.0 | 5.7 | 21.2 KiB | 20 / 20 MiB |
-| `take` | Vorticity's | 6.7 (6.5-6.8) | 6.4 (6.2-7.0) | 1.05x | — | — | 38.3 KiB | 13 / 17 MiB |
-| `take` | Vortex Rust's | 0.7 (0.7-0.7) | 2.0 (1.9-2.2) | 0.34x | — | — | 34.7 KiB | 18 / 21 MiB |
-| `write` | Vorticity's | 30.0 (29.9-30.6) | 56.2 (55.0-57.4) | 0.53x | 0.9 | 0.5 | 30.7 KiB | 20 / 77 MiB |
-| `write` | Vortex Rust's | 24.8 (24.6-25.1) | 52.2 (50.4-55.3) | 0.48x | 1.1 | 0.5 | 27.1 KiB | 28 / 74 MiB |
-| `append` | Vorticity's | 10.1 (9.9-13.3) | not asked | n/a | — | — | 219.5 KiB | 18 / — MiB |
+| `open` | Vorticity's | 0.2 (0.1-0.2) | 0.6 (0.5-0.7) | 0.27x | — | — | 5.3 KiB | 10 / 11 MiB |
+| `open` | Vortex Rust's | 0.2 (0.2-0.3) | 0.6 (0.6-0.6) | 0.31x | — | — | 4.9 KiB | 10 / 11 MiB |
+| `scan` | Vorticity's | 7.0 (6.8-7.8) | 8.4 (8.2-8.8) | 0.84x | 3.8 | 3.2 | 14.6 KiB | 15 / 18 MiB |
+| `scan` | Vortex Rust's | 2.1 (1.9-2.2) | 3.3 (3.1-3.9) | 0.62x | 12.9 | 8.1 | 11.0 KiB | 23 / 23 MiB |
+| `project` | Vorticity's | 0.4 (0.4-0.4) | 1.1 (1.0-1.2) | 0.38x | 20.5 | 7.7 | 16.8 KiB | 11 / 15 MiB |
+| `project` | Vortex Rust's | 0.4 (0.4-0.5) | 0.9 (0.8-1.0) | 0.44x | 20.9 | 9.2 | 13.1 KiB | 11 / 13 MiB |
+| `filter-narrow` | Vorticity's | 1.1 (1.0-1.1) | 1.3 (1.2-1.4) | 0.83x | 0.3 | 0.2 | 41.3 KiB | 14 / 15 MiB |
+| `filter-narrow` | Vortex Rust's | 0.8 (0.7-0.9) | 1.3 (1.3-1.5) | 0.62x | 0.3 | 0.2 | 21.1 KiB | 16 / 16 MiB |
+| `filter-wide` | Vorticity's | 4.1 (3.9-4.3) | 5.3 (5.0-5.5) | 0.78x | 3.2 | 2.5 | 23.7 KiB | 14 / 17 MiB |
+| `filter-wide` | Vortex Rust's | 1.5 (1.4-1.5) | 2.6 (2.4-2.7) | 0.57x | 9.1 | 5.2 | 21.1 KiB | 20 / 20 MiB |
+| `take` | Vorticity's | 7.1 (6.5-7.4) | 6.8 (6.2-7.0) | 1.05x | — | — | 38.3 KiB | 14 / 17 MiB |
+| `take` | Vortex Rust's | 0.7 (0.7-0.9) | 2.2 (2.1-2.3) | 0.34x | — | — | 34.7 KiB | 18 / 21 MiB |
+| `write` | Vorticity's | 30.4 (28.6-30.8) | 56.7 (55.1-59.1) | 0.54x | 0.9 | 0.5 | 30.7 KiB | 20 / 77 MiB |
+| `write` | Vortex Rust's | 25.0 (24.2-25.4) | 50.0 (48.8-52.2) | 0.50x | 1.1 | 0.5 | 27.1 KiB | 28 / 76 MiB |
+| `append` | Vorticity's | 10.4 (10.2-10.5) | not asked | n/a | — | — | 209.1 KiB | 18 / — MiB |
 
 #### All 14 cores
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | ratio | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.7 (0.7-0.8) | 0.25x | — | — | 5.3 KiB | 9 / 12 MiB |
-| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.7 (0.6-0.8) | 0.23x | — | — | 4.9 KiB | 9 / 12 MiB |
-| `scan` | Vorticity's | 1.9 (1.8-2.4) | 3.8 (3.7-3.9) | 0.51x | 13.7 | 7.0 | 38.0 KiB | 43 / 50 MiB |
-| `scan` | Vortex Rust's | 1.6 (1.5-1.7) | 3.7 (3.2-3.8) | 0.43x | 16.6 | 7.1 | 24.3 KiB | 62 / 54 MiB |
-| `project` | Vorticity's | 0.7 (0.6-1.0) | 1.7 (1.7-1.9) | 0.40x | 12.1 | 4.8 | 31.2 KiB | 18 / 24 MiB |
-| `project` | Vortex Rust's | 0.6 (0.6-0.7) | 1.3 (1.2-1.7) | 0.46x | 14.1 | 6.4 | 21.5 KiB | 19 / 19 MiB |
-| `filter-narrow` | Vorticity's | 0.6 (0.6-1.1) | 1.9 (1.7-2.0) | 0.33x | 0.4 | 0.1 | 57.7 KiB | 12 / 20 MiB |
-| `filter-narrow` | Vortex Rust's | 0.5 (0.5-0.5) | 2.0 (2.0-2.2) | 0.25x | 0.5 | 0.1 | 23.9 KiB | 12 / 22 MiB |
-| `filter-wide` | Vorticity's | 1.3 (1.2-1.6) | 2.9 (2.7-2.9) | 0.47x | 9.9 | 4.7 | 35.8 KiB | 29 / 38 MiB |
-| `filter-wide` | Vortex Rust's | 1.1 (1.0-1.5) | 3.0 (2.7-3.2) | 0.37x | 12.1 | 4.4 | 27.2 KiB | 37 / 41 MiB |
-| `take` | Vorticity's | 1.6 (1.5-1.9) | 2.3 (2.3-2.3) | 0.70x | — | — | 87.5 KiB | 23 / 28 MiB |
-| `take` | Vortex Rust's | 0.9 (0.8-1.2) | 1.8 (1.6-2.3) | 0.54x | — | — | 71.4 KiB | 20 / 25 MiB |
-| `write` | Vorticity's | 11.3 (11.3-13.4) | 16.1 (15.6-16.9) | 0.70x | 2.4 | 1.7 | 1.5 MiB | 53 / 120 MiB |
-| `write` | Vortex Rust's | 11.6 (11.4-12.0) | 15.6 (15.6-16.0) | 0.74x | 2.3 | 1.7 | 2.4 MiB | 72 / 124 MiB |
-| `append` | Vorticity's | 10.1 (9.7-10.5) | not asked | n/a | — | — | 220.7 KiB | 19 / — MiB |
+| `open` | Vorticity's | 0.2 (0.2-0.3) | 0.9 (0.7-0.9) | 0.24x | — | — | 5.3 KiB | 10 / 12 MiB |
+| `open` | Vortex Rust's | 0.2 (0.2-0.3) | 0.7 (0.6-0.8) | 0.25x | — | — | 4.9 KiB | 10 / 12 MiB |
+| `scan` | Vorticity's | 1.9 (1.8-2.0) | 4.0 (3.5-4.3) | 0.48x | 13.9 | 6.7 | 34.9 KiB | 43 / 49 MiB |
+| `scan` | Vortex Rust's | 1.6 (1.6-1.8) | 3.9 (3.7-4.5) | 0.42x | 16.3 | 6.9 | 25.3 KiB | 63 / 55 MiB |
+| `project` | Vorticity's | 0.7 (0.6-0.9) | 1.7 (1.5-1.8) | 0.40x | 12.5 | 5.1 | 30.2 KiB | 18 / 23 MiB |
+| `project` | Vortex Rust's | 0.7 (0.6-0.7) | 1.3 (1.2-1.6) | 0.49x | 12.7 | 6.2 | 21.4 KiB | 19 / 20 MiB |
+| `filter-narrow` | Vorticity's | 0.6 (0.6-0.7) | 2.0 (1.8-2.2) | 0.29x | 0.5 | 0.1 | 43.1 KiB | 12 / 20 MiB |
+| `filter-narrow` | Vortex Rust's | 0.5 (0.4-0.5) | 1.9 (1.9-2.1) | 0.26x | 0.5 | 0.1 | 24.5 KiB | 12 / 20 MiB |
+| `filter-wide` | Vorticity's | 1.5 (1.4-1.8) | 3.0 (3.0-3.2) | 0.49x | 9.0 | 4.4 | 38.1 KiB | 30 / 38 MiB |
+| `filter-wide` | Vortex Rust's | 1.2 (1.0-1.2) | 3.2 (3.1-3.3) | 0.36x | 11.6 | 4.2 | 28.0 KiB | 37 / 41 MiB |
+| `take` | Vorticity's | 1.8 (1.7-2.4) | 2.5 (2.3-2.5) | 0.74x | — | — | 85.2 KiB | 24 / 28 MiB |
+| `take` | Vortex Rust's | 0.9 (0.8-1.0) | 1.8 (1.7-1.9) | 0.49x | — | — | 76.7 KiB | 20 / 25 MiB |
+| `write` | Vorticity's | 11.6 (11.4-11.6) | 16.1 (15.6-16.6) | 0.72x | 2.3 | 1.7 | 2.5 MiB | 53 / 121 MiB |
+| `write` | Vortex Rust's | 11.6 (11.6-12.1) | 15.7 (15.6-16.9) | 0.74x | 2.3 | 1.7 | 2.3 MiB | 73 / 124 MiB |
+| `append` | Vorticity's | 10.1 (9.9-10.2) | not asked | n/a | — | — | 210.2 KiB | 19 / — MiB |
 
 ### 10,485,760 rows
 
@@ -148,41 +148,41 @@ much as the machine's. Each column is a ratio to Rust on its own machine.
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | ratio | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.6 (0.6-0.7) | 0.27x | — | — | 21.1 KiB | 9 / 12 MiB |
-| `open` | Vortex Rust's | 0.2 (0.2-0.3) | 0.6 (0.5-0.7) | 0.28x | — | — | 9.5 KiB | 9 / 11 MiB |
-| `scan` | Vorticity's | 67.3 (67.0-68.1) | 77.0 (75.8-78.0) | 0.87x | 4.0 | 3.5 | 74.2 KiB | 36 / 29 MiB |
-| `scan` | Vortex Rust's | 14.2 (14.1-14.6) | 21.2 (20.9-23.1) | 0.67x | 18.7 | 12.6 | 28.3 KiB | 89 / 57 MiB |
-| `project` | Vorticity's | 1.4 (1.3-1.4) | 3.5 (3.3-3.6) | 0.39x | 61.2 | 24.0 | 76.5 KiB | 13 / 21 MiB |
-| `project` | Vortex Rust's | 1.2 (1.1-4.5) | 1.9 (1.8-2.0) | 0.64x | 71.3 | 45.3 | 30.5 KiB | 11 / 14 MiB |
-| `filter-narrow` | Vorticity's | 1.4 (1.3-1.7) | 3.1 (2.9-3.7) | 0.47x | 1.9 | 0.9 | 107.1 KiB | 15 / 23 MiB |
-| `filter-narrow` | Vortex Rust's | 1.1 (1.0-1.2) | 3.1 (3.0-3.3) | 0.35x | 2.5 | 0.9 | 62.2 KiB | 17 / 28 MiB |
-| `filter-wide` | Vorticity's | 34.2 (33.7-35.3) | 41.7 (41.5-42.8) | 0.82x | 3.9 | 3.2 | 107.1 KiB | 25 / 33 MiB |
-| `filter-wide` | Vortex Rust's | 7.8 (7.7-7.9) | 14.2 (14.0-15.2) | 0.55x | 17.1 | 9.4 | 62.2 KiB | 53 / 53 MiB |
-| `take` | Vorticity's | 51.1 (50.5-51.5) | 56.4 (55.8-59.3) | 0.91x | — | — | 97.9 KiB | 34 / 29 MiB |
-| `take` | Vortex Rust's | 2.2 (2.2-3.1) | 10.7 (10.2-11.4) | 0.21x | — | — | 52.0 KiB | 37 / 52 MiB |
-| `write` | Vorticity's | 283.3 (282.5-301.7) | 551.8 (546.7-565.2) | 0.51x | 0.9 | 0.5 | 95.4 KiB | 42 / 428 MiB |
-| `write` | Vortex Rust's | 231.9 (230.7-235.1) | 493.4 (484.9-516.2) | 0.47x | 1.2 | 0.5 | 49.5 KiB | 97 / 376 MiB |
-| `append` | Vorticity's | 80.8 (79.6-81.7) | not asked | n/a | — | — | 1.4 MiB | 23 / — MiB |
+| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.6 (0.6-0.6) | 0.28x | — | — | 21.1 KiB | 10 / 12 MiB |
+| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.6 (0.6-1.8) | 0.29x | — | — | 9.5 KiB | 10 / 11 MiB |
+| `scan` | Vorticity's | 66.1 (65.9-67.0) | 76.2 (75.2-79.6) | 0.87x | 4.0 | 3.5 | 74.2 KiB | 36 / 29 MiB |
+| `scan` | Vortex Rust's | 14.7 (14.0-15.8) | 22.1 (20.9-22.4) | 0.66x | 18.2 | 12.1 | 28.3 KiB | 89 / 57 MiB |
+| `project` | Vorticity's | 1.5 (1.4-1.9) | 3.8 (3.7-3.9) | 0.40x | 55.5 | 22.1 | 76.5 KiB | 14 / 21 MiB |
+| `project` | Vortex Rust's | 1.2 (1.1-1.9) | 2.1 (1.9-2.9) | 0.56x | 71.2 | 40.1 | 30.5 KiB | 11 / 13 MiB |
+| `filter-narrow` | Vorticity's | 1.5 (1.4-1.6) | 3.2 (3.0-3.6) | 0.48x | 1.7 | 0.8 | 107.0 KiB | 15 / 23 MiB |
+| `filter-narrow` | Vortex Rust's | 1.3 (1.1-2.1) | 3.0 (2.9-3.3) | 0.43x | 2.0 | 0.9 | 62.1 KiB | 17 / 28 MiB |
+| `filter-wide` | Vorticity's | 34.3 (33.4-34.4) | 41.6 (40.9-44.3) | 0.83x | 3.9 | 3.2 | 107.0 KiB | 25 / 34 MiB |
+| `filter-wide` | Vortex Rust's | 7.9 (7.6-8.6) | 15.0 (14.0-18.0) | 0.53x | 17.0 | 8.9 | 62.1 KiB | 53 / 53 MiB |
+| `take` | Vorticity's | 50.4 (50.2-51.6) | 56.9 (55.5-63.3) | 0.89x | — | — | 97.9 KiB | 35 / 29 MiB |
+| `take` | Vortex Rust's | 2.3 (2.2-2.4) | 10.9 (10.3-11.1) | 0.21x | — | — | 52.0 KiB | 37 / 52 MiB |
+| `write` | Vorticity's | 282.5 (276.4-290.3) | 548.2 (533.6-559.3) | 0.52x | 0.9 | 0.5 | 95.4 KiB | 42 / 429 MiB |
+| `write` | Vortex Rust's | 226.3 (224.9-239.0) | 491.1 (478.9-499.8) | 0.46x | 1.2 | 0.5 | 49.5 KiB | 97 / 377 MiB |
+| `append` | Vorticity's | 82.7 (81.2-83.2) | not asked | n/a | — | — | 1.4 MiB | 23 / — MiB |
 
 #### All 14 cores
 
 | scenario | file | Vorticity, ms | Vortex Rust, ms | ratio | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |
 |---|---|---:|---:|---:|---:|---:|---:|---:|
-| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.8 (0.7-0.8) | 0.22x | — | — | 21.1 KiB | 9 / 12 MiB |
-| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.7 (0.7-0.9) | 0.24x | — | — | 9.5 KiB | 9 / 12 MiB |
-| `scan` | Vorticity's | 8.0 (7.7-8.1) | 11.6 (11.1-12.0) | 0.69x | 33.5 | 23.1 | 106.8 KiB | 64 / 76 MiB |
-| `scan` | Vortex Rust's | 5.3 (5.1-5.8) | 8.8 (8.0-9.4) | 0.60x | 50.5 | 30.3 | 54.6 KiB | 161 / 93 MiB |
-| `project` | Vorticity's | 1.0 (1.0-1.1) | 3.9 (3.6-4.0) | 0.27x | 81.5 | 21.8 | 94.7 KiB | 21 / 45 MiB |
-| `project` | Vortex Rust's | 1.1 (1.0-1.5) | 2.1 (2.0-2.2) | 0.50x | 78.6 | 39.7 | 46.7 KiB | 25 / 24 MiB |
-| `filter-narrow` | Vorticity's | 1.1 (1.0-1.1) | 3.6 (3.2-3.8) | 0.30x | 2.5 | 0.7 | 109.2 KiB | 15 / 28 MiB |
-| `filter-narrow` | Vortex Rust's | 1.1 (0.9-1.3) | 3.3 (3.2-3.7) | 0.33x | 2.4 | 0.8 | 64.8 KiB | 17 / 34 MiB |
-| `filter-wide` | Vorticity's | 4.6 (4.5-4.9) | 8.7 (8.1-9.1) | 0.53x | 28.9 | 15.3 | 144.4 KiB | 53 / 70 MiB |
-| `filter-wide` | Vortex Rust's | 4.2 (4.1-8.7) | 8.1 (7.6-10.8) | 0.52x | 31.9 | 16.5 | 96.6 KiB | 126 / 92 MiB |
-| `take` | Vorticity's | 5.7 (5.6-6.1) | 8.2 (8.0-8.5) | 0.69x | — | — | 167.4 KiB | 47 / 57 MiB |
-| `take` | Vortex Rust's | 1.6 (1.6-1.7) | 6.4 (6.3-6.9) | 0.25x | — | — | 139.8 KiB | 40 / 78 MiB |
-| `write` | Vorticity's | 88.6 (84.3-94.7) | 96.3 (94.9-105.6) | 0.92x | 3.0 | 2.8 | 2.6 MiB | 75 / 515 MiB |
-| `write` | Vortex Rust's | 111.7 (103.8-134.1) | 109.8 (103.9-121.3) | 1.02x | 2.4 | 2.4 | 327.2 KiB | 175 / 540 MiB |
-| `append` | Vorticity's | 75.7 (74.2-77.2) | not asked | n/a | — | — | 3.2 MiB | 52 / — MiB |
+| `open` | Vorticity's | 0.2 (0.2-0.2) | 0.8 (0.8-0.9) | 0.24x | — | — | 21.1 KiB | 10 / 12 MiB |
+| `open` | Vortex Rust's | 0.2 (0.2-0.2) | 0.8 (0.7-0.9) | 0.23x | — | — | 9.5 KiB | 10 / 12 MiB |
+| `scan` | Vorticity's | 8.0 (7.9-8.1) | 11.5 (11.2-12.2) | 0.69x | 33.3 | 23.1 | 114.4 KiB | 64 / 76 MiB |
+| `scan` | Vortex Rust's | 5.2 (5.0-5.7) | 9.0 (8.7-9.9) | 0.58x | 51.0 | 29.6 | 54.5 KiB | 162 / 94 MiB |
+| `project` | Vorticity's | 1.1 (1.1-1.2) | 4.0 (3.9-4.4) | 0.28x | 75.2 | 21.0 | 95.2 KiB | 21 / 46 MiB |
+| `project` | Vortex Rust's | 1.1 (1.0-2.6) | 2.1 (2.0-2.2) | 0.51x | 79.5 | 40.2 | 45.5 KiB | 25 / 23 MiB |
+| `filter-narrow` | Vorticity's | 1.1 (1.0-1.2) | 3.7 (3.6-4.1) | 0.30x | 2.4 | 0.7 | 109.1 KiB | 16 / 28 MiB |
+| `filter-narrow` | Vortex Rust's | 1.1 (1.0-1.3) | 3.4 (3.4-3.6) | 0.32x | 2.4 | 0.8 | 64.7 KiB | 17 / 34 MiB |
+| `filter-wide` | Vorticity's | 5.1 (4.6-5.3) | 8.4 (8.1-8.7) | 0.61x | 26.2 | 15.9 | 144.2 KiB | 53 / 67 MiB |
+| `filter-wide` | Vortex Rust's | 4.3 (3.9-7.0) | 8.4 (8.2-9.6) | 0.51x | 31.1 | 16.0 | 94.2 KiB | 126 / 96 MiB |
+| `take` | Vorticity's | 6.1 (5.6-6.6) | 8.4 (8.1-8.8) | 0.72x | — | — | 166.2 KiB | 47 / 57 MiB |
+| `take` | Vortex Rust's | 1.6 (1.6-2.8) | 6.3 (6.0-7.4) | 0.26x | — | — | 126.6 KiB | 40 / 78 MiB |
+| `write` | Vorticity's | 83.4 (82.5-83.6) | 97.7 (95.0-100.5) | 0.85x | 3.2 | 2.7 | 2.7 MiB | 75 / 512 MiB |
+| `write` | Vortex Rust's | 85.1 (83.3-87.0) | 97.3 (96.8-100.2) | 0.87x | 3.1 | 2.7 | 2.5 MiB | 176 / 525 MiB |
+| `append` | Vorticity's | 77.8 (76.6-78.6) | not asked | n/a | — | — | 3.1 MiB | 52 / — MiB |
 
 `open`: open the file and read no rows. `scan`: read every column of every row. `project`: read one column of four. `filter-narrow`: read the rows of a band holding about one in a hundred. `filter-wide`: read the rows of a band holding about half. `take`: take a thousand rows spread across the file. `write`: read the file and encode it back out. `append`: append a tenth of the rows to a copy of the file.
 
@@ -190,12 +190,12 @@ much as the machine's. Each column is a ratio to Rust on its own machine.
 The lowest ratio is `take` at 10,485,760 rows on Vortex Rust's file (0.21x), the highest
 `take` at 1,048,576 rows on Vorticity's file (1.05x).
 
-**On all 14 cores.** Vorticity took less time than Rust on 27 of 28 compared rows.
-The lowest ratio is `open` at 10,485,760 rows on Vorticity's file (0.22x), the highest
-`write` at 10,485,760 rows on Vortex Rust's file (1.02x).
+**On all 14 cores.** Vorticity took less time than Rust on 28 of 28 compared rows.
+The lowest ratio is `open` at 10,485,760 rows on Vortex Rust's file (0.23x), the highest
+`write` at 10,485,760 rows on Vortex Rust's file (0.87x).
 
-**The process start** is not in the figures: 17 ms for Vorticity's native binary and 16 ms for Rust's,
-most of it the operating system starting a binary, and 40 ms for the managed runtime on the JIT.
+**The process start** is not in the figures: 17 ms for Vorticity's native binary and 15 ms for Rust's,
+most of it the operating system starting a binary, and 42 ms for the managed runtime on the JIT.
 
 **Not asked of Rust**: `append`, which its harness has no entry point for; those figures
 are Vorticity's alone.
@@ -208,16 +208,16 @@ Milliseconds, the median of the same runs.
 
 | scenario | 1,048,576 rows, Vorticity's file | 1,048,576 rows, Vortex Rust's file | 10,485,760 rows, Vorticity's file | 10,485,760 rows, Vortex Rust's file |
 |---|---:|---:|---:|---:|
-| `open` | 12.8 | 11.8 | 12.6 | 12.2 |
-| `scan` | 62.2 | 64.6 | 126.1 | 119.2 |
-| `project` | 43.4 | 42.8 | 44.6 | 47.3 |
-| `filter-narrow` | 83.1 | 82.7 | 83.7 | 90.2 |
-| `filter-wide` | 73.3 | 78.9 | 108.9 | 110.2 |
-| `take` | 69.3 | 61.5 | 125.6 | 65.8 |
-| `write` | 176.5 | 184.6 | 595.1 | 587.5 |
-| `append` | 180.6 | — | 287.6 | — |
+| `open` | 12.3 | 12.4 | 12.6 | 12.7 |
+| `scan` | 59.4 | 64.8 | 122.6 | 114.9 |
+| `project` | 43.3 | 43.0 | 49.1 | 46.7 |
+| `filter-narrow` | 82.6 | 80.3 | 86.8 | 90.7 |
+| `filter-wide` | 71.8 | 76.0 | 109.5 | 108.2 |
+| `take` | 68.3 | 59.6 | 122.1 | 67.0 |
+| `write` | 173.4 | 177.1 | 529.7 | 516.0 |
+| `append` | 174.5 | — | 282.1 | — |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew); commit 7d8f1790, 2026-09-25 11:03 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew); commit fc7c7f36 with uncommitted changes, 2026-09-28 06:42 UTC.*
 <!-- /results: scenarios -->
 
 <!-- results: decoding -->
@@ -233,67 +233,67 @@ copied, and measures the walk of the layout.
 
 | encoding | rows | Vorticity, ns/row | Vortex Rust, ns/row | ratio | Vorticity, GB/s | Vortex Rust, GB/s |
 |---|---:|---:|---:|---:|---:|---:|
-| `alp` | 1,000,000 | 0.35 | 0.92 | 0.38x | 22.9 | 8.7 |
-| `alp_no_patches` | 1,000,000 | 0.18 | 0.64 | 0.28x | 45.2 | 12.5 |
-| `alp_patched_no_chunk_offsets` | 1,000,000 | 0.19 | 0.55 | 0.35x | 41.6 | 14.6 |
-| `alprd` | 1,000,000 | 0.61 | 0.80 | 0.76x | 13.2 | 10.1 |
-| `bool` | 1,000,000 | 0.04 | 0.06 | 0.67x | 3.2 | 2.2 |
-| `bool_bit_offset3` | 1,000,000 | 0.04 | 0.06 | 0.56x | 3.5 | 2.0 |
-| `bool_bit_offset7` | 1,000,000 | 0.04 | 0.05 | 0.70x | 3.3 | 2.3 |
-| `bool_bit_offset_straddle` | 1,000,000 | 0.04 | 0.06 | 0.65x | 3.5 | 2.3 |
-| `bytebool` | 1,000,000 | 0.08 | 0.10 | 0.81x | 1.6 | 1.3 |
-| `chunked` | 1,000,000 | 0.04 | 0.31 | 0.13x | 200.0 | 25.6 |
-| `chunked_bool` | 1,000,000 | 0.04 | 0.08 | 0.51x | 3.0 | 1.5 |
-| `chunked_decimal` | 1,000,000 | 0.04 | 0.33 | 0.11x | 228.6 | 24.1 |
-| `chunked_empty_chunks` | 1,000,000 | 0.04 | 0.32 | 0.13x | 192.8 | 25.2 |
-| `chunked_mixed_validity` | 1,000,000 | 0.17 | 0.34 | 0.50x | 47.7 | 23.9 |
-| `chunked_one_chunk` | 1,000,000 | 0.04 | 0.33 | 0.11x | 222.2 | 24.5 |
-| `chunked_varbinview` | 1,000,000 | 1.36 | 60.8 | 0.02x | 9.9 | 0.2 |
-| `constant` | 1,000,000 | 0.06 | 0.13 | 0.44x | 142.9 | 63.2 |
-| `datetimeparts` | 1,000,000 | 0.37 | 1.49 | 0.25x | 21.7 | 5.4 |
-| `decimal` | 1,000,000 | 0.04 | 0.36 | 0.11x | 202.5 | 22.0 |
-| `decimal_byte_parts` | 1,000,000 | 0.04 | 0.34 | 0.12x | 195.1 | 23.8 |
-| `dict` | 1,000,000 | 0.36 | 0.47 | 0.77x | 16.7 | 12.9 |
-| `dict_nullable_codes` | 1,000,000 | 0.56 | 2.06 | 0.27x | 10.0 | 2.7 |
-| `dict_nullable_values_nonnull_codes` | 1,000,000 | 0.45 | 0.69 | 0.65x | 12.8 | 8.3 |
-| `dict_u64_codes` | 1,000,000 | 0.38 | 0.57 | 0.67x | 15.6 | 10.5 |
-| `dict_u8_codes` | 1,000,000 | 0.35 | 0.39 | 0.90x | 23.1 | 20.8 |
-| `ext` | 1,000,000 | 0.04 | 0.28 | 0.14x | 207.8 | 28.4 |
-| `fastlanes_bitpacked` | 1,000,000 | 0.10 | 0.16 | 0.64x | 39.2 | 25.2 |
-| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,000,000 | 0.11 | 0.18 | 0.59x | 37.7 | 22.3 |
-| `fastlanes_delta` | 1,000,000 | 0.30 | 1.12 | 0.27x | 26.4 | 7.1 |
-| `fastlanes_for` | 1,000,000 | 0.18 | 0.44 | 0.40x | 45.2 | 18.3 |
-| `fastlanes_rle` | 1,000,000 | 0.26 | 0.50 | 0.52x | 15.3 | 7.9 |
-| `fixed_size_list` | 1,000,000 | 0.04 | 0.51 | 0.07x | 338.0 | 23.7 |
-| `fsst` | 1,000,000 | 3.37 | 5.17 | 0.65x | 16.6 | 10.8 |
-| `list` | 1,000,000 | 0.19 | 1.30 | 0.15x | 52.1 | 7.7 |
-| `listview` | 1,000,000 | 0.20 | 6.70 | 0.03x | 50.1 | 1.5 |
-| `map` | 1,000,000 | 0.41 | 42.7 | 0.01x | 48.3 | 0.5 |
-| `masked` | 1,000,000 | 0.04 | 0.18 | 0.22x | 104.4 | 23.4 |
-| `masked_all_invalid` | 1,000,000 | 0.05 | 0.19 | 0.28x | 76.2 | 21.3 |
-| `masked_all_valid` | 1,000,000 | 0.04 | 0.17 | 0.24x | 98.8 | 24.1 |
-| `null` | 1,000,000 | 0.03 | 0.04 | 0.67x | — | — |
-| `onpair` | 1,000,000 | 1.74 | 2.16 | 0.80x | 12.5 | 10.0 |
-| `parquet_variant` | 1,000,000 | 1.54 | 4.36 | 0.35x | 7.8 | 2.8 |
-| `pco` | 1,000,000 | 0.40 | 1.58 | 0.25x | 20.2 | 5.0 |
-| `primitive` | 1,000,000 | 0.04 | 0.30 | 0.12x | 210.5 | 26.3 |
-| `runend` | 1,000,000 | 0.14 | 0.15 | 0.92x | 28.5 | 26.1 |
-| `sequence` | 1,000,000 | 0.10 | 0.13 | 0.84x | 76.2 | 63.7 |
-| `sparse` | 1,000,000 | 0.09 | 0.15 | 0.59x | 44.9 | 26.7 |
-| `struct` | 1,000,000 | 0.22 | 43.8 | 0.00x | 68.8 | 0.3 |
-| `table_mixed` | 1,000,000 | 2.20 | 101.8 | 0.02x | 31.8 | 0.7 |
-| `table_wide` | 50,000 | 0.95 | 18.3 | 0.05x | 421.1 | 21.9 |
-| `varbin` | 1,000,000 | 1.01 | 66.7 | 0.02x | 15.8 | 0.2 |
-| `varbinview` | 1,000,000 | 0.85 | 60.8 | 0.01x | 15.8 | 0.2 |
-| `variant` | 1,000,000 | 0.04 | 0.06 | 0.62x | 421.1 | 260.2 |
-| `zigzag` | 1,000,000 | 0.12 | 0.30 | 0.39x | 33.9 | 13.2 |
-| `zstd` | 1,000,000 | 3.91 | 6.79 | 0.58x | 8.1 | 4.7 |
-| `zstd_buffers` | 1,000,000 | 0.34 | 2.64 | 0.13x | 23.9 | 3.0 |
-| `zstd_nullable` | 1,000,000 | 2.20 | 3.48 | 0.63x | 3.7 | 2.3 |
+| `alp` | 1,000,000 | 0.34 | 0.87 | 0.39x | 23.5 | 9.2 |
+| `alp_no_patches` | 1,000,000 | 0.20 | 0.54 | 0.36x | 40.8 | 14.7 |
+| `alp_patched_no_chunk_offsets` | 1,000,000 | 0.18 | 0.54 | 0.34x | 43.8 | 14.8 |
+| `alprd` | 1,000,000 | 0.60 | 0.79 | 0.77x | 13.2 | 10.2 |
+| `bool` | 1,000,000 | 0.03 | 0.06 | 0.54x | 4.2 | 2.2 |
+| `bool_bit_offset3` | 1,000,000 | 0.03 | 0.06 | 0.60x | 3.8 | 2.3 |
+| `bool_bit_offset7` | 1,000,000 | 0.03 | 0.06 | 0.55x | 3.9 | 2.1 |
+| `bool_bit_offset_straddle` | 1,000,000 | 0.03 | 0.05 | 0.57x | 4.0 | 2.3 |
+| `bytebool` | 1,000,000 | 0.07 | 0.10 | 0.70x | 1.9 | 1.3 |
+| `chunked` | 1,000,000 | 0.03 | 0.39 | 0.09x | 238.8 | 20.8 |
+| `chunked_bool` | 1,000,000 | 0.04 | 0.08 | 0.48x | 3.3 | 1.6 |
+| `chunked_decimal` | 1,000,000 | 0.03 | 0.34 | 0.10x | 238.8 | 23.7 |
+| `chunked_empty_chunks` | 1,000,000 | 0.04 | 0.34 | 0.11x | 216.2 | 23.7 |
+| `chunked_mixed_validity` | 1,000,000 | 0.17 | 0.33 | 0.50x | 48.8 | 24.4 |
+| `chunked_one_chunk` | 1,000,000 | 0.03 | 0.28 | 0.12x | 235.3 | 29.0 |
+| `chunked_varbinview` | 1,000,000 | 1.34 | 59.5 | 0.02x | 10.1 | 0.2 |
+| `constant` | 1,000,000 | 0.04 | 0.14 | 0.29x | 202.5 | 58.6 |
+| `datetimeparts` | 1,000,000 | 0.35 | 1.27 | 0.27x | 23.2 | 6.3 |
+| `decimal` | 1,000,000 | 0.03 | 0.27 | 0.12x | 250.0 | 29.6 |
+| `decimal_byte_parts` | 1,000,000 | 0.03 | 0.28 | 0.12x | 242.4 | 28.5 |
+| `dict` | 1,000,000 | 0.31 | 0.44 | 0.71x | 19.1 | 13.6 |
+| `dict_nullable_codes` | 1,000,000 | 0.55 | 1.99 | 0.28x | 10.0 | 2.8 |
+| `dict_nullable_values_nonnull_codes` | 1,000,000 | 0.44 | 0.67 | 0.66x | 13.0 | 8.5 |
+| `dict_u64_codes` | 1,000,000 | 0.38 | 0.55 | 0.69x | 15.7 | 10.8 |
+| `dict_u8_codes` | 1,000,000 | 0.34 | 0.40 | 0.85x | 23.9 | 20.2 |
+| `ext` | 1,000,000 | 0.03 | 0.27 | 0.13x | 235.3 | 29.9 |
+| `fastlanes_bitpacked` | 1,000,000 | 0.09 | 0.16 | 0.60x | 43.0 | 25.7 |
+| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,000,000 | 0.11 | 0.17 | 0.65x | 36.0 | 23.5 |
+| `fastlanes_delta` | 1,000,000 | 0.28 | 1.01 | 0.28x | 28.5 | 7.9 |
+| `fastlanes_for` | 1,000,000 | 0.16 | 0.41 | 0.40x | 48.6 | 19.3 |
+| `fastlanes_rle` | 1,000,000 | 0.25 | 0.44 | 0.58x | 15.8 | 9.1 |
+| `fixed_size_list` | 1,000,000 | 0.04 | 0.49 | 0.08x | 324.3 | 24.4 |
+| `fsst` | 1,000,000 | 3.33 | 5.39 | 0.62x | 16.8 | 10.4 |
+| `list` | 1,000,000 | 0.18 | 1.10 | 0.17x | 54.9 | 9.1 |
+| `listview` | 1,000,000 | 0.21 | 6.26 | 0.03x | 48.2 | 1.6 |
+| `map` | 1,000,000 | 0.41 | 43.2 | 0.01x | 49.0 | 0.5 |
+| `masked` | 1,000,000 | 0.04 | 0.20 | 0.19x | 107.1 | 20.5 |
+| `masked_all_invalid` | 1,000,000 | 0.04 | 0.18 | 0.24x | 93.0 | 22.2 |
+| `masked_all_valid` | 1,000,000 | 0.04 | 0.17 | 0.25x | 95.2 | 23.7 |
+| `null` | 1,000,000 | 0.04 | 0.05 | 0.71x | — | — |
+| `onpair` | 1,000,000 | 1.70 | 2.10 | 0.81x | 12.8 | 10.3 |
+| `parquet_variant` | 1,000,000 | 1.42 | 4.20 | 0.34x | 8.4 | 2.9 |
+| `pco` | 1,000,000 | 0.42 | 1.55 | 0.27x | 19.2 | 5.2 |
+| `primitive` | 1,000,000 | 0.04 | 0.30 | 0.13x | 207.8 | 26.5 |
+| `runend` | 1,000,000 | 0.14 | 0.15 | 0.91x | 29.5 | 26.8 |
+| `sequence` | 1,000,000 | 0.10 | 0.11 | 0.87x | 82.5 | 71.4 |
+| `sparse` | 1,000,000 | 0.09 | 0.14 | 0.64x | 46.0 | 29.3 |
+| `struct` | 1,000,000 | 0.24 | 43.5 | 0.01x | 62.3 | 0.3 |
+| `table_mixed` | 1,000,000 | 2.15 | 102.1 | 0.02x | 32.6 | 0.7 |
+| `table_wide` | 50,000 | 0.98 | 20.5 | 0.05x | 408.2 | 19.5 |
+| `varbin` | 1,000,000 | 1.05 | 64.5 | 0.02x | 15.1 | 0.2 |
+| `varbinview` | 1,000,000 | 0.95 | 59.4 | 0.02x | 14.3 | 0.2 |
+| `variant` | 1,000,000 | 0.04 | 0.07 | 0.61x | 390.2 | 237.0 |
+| `zigzag` | 1,000,000 | 0.11 | 0.28 | 0.39x | 35.7 | 14.1 |
+| `zstd` | 1,000,000 | 3.81 | 6.73 | 0.57x | 8.4 | 4.7 |
+| `zstd_buffers` | 1,000,000 | 0.31 | 2.37 | 0.13x | 25.7 | 3.4 |
+| `zstd_nullable` | 1,000,000 | 1.87 | 3.42 | 0.55x | 4.3 | 2.4 |
 
-Vorticity decoded 57 of 57 files in less time than Rust; the median ratio is 0.35x.
+Vorticity decoded 57 of 57 files in less time than Rust; the median ratio is 0.34x.
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew); commit 7d8f1790, 2026-09-25 11:03 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1, rustc 1.98.1 (48a229cea 2026-09-01) (Homebrew); commit fc7c7f36 with uncommitted changes, 2026-09-28 06:42 UTC.*
 <!-- /results: decoding -->
 
 <!-- results: in-process -->
@@ -307,29 +307,29 @@ holds to a ceiling; what each one reads and asks is in
 
 | axis | Vorticity, µs | Vortex Rust, µs | ratio | 95 % interval |
 |---|---:|---:|---:|---|
-| full scan | 503.9 | 1,807.2 | 0.28x | 0.271 to 0.283 |
-| projected scan, 1 of 5 columns | 116.2 | 273.8 | 0.41x | 0.398 to 0.422 |
-| open to first batch | 84.1 | 1,210.1 | 0.07x | 0.068 to 0.075 |
-| open, footer only | 33.1 | 54.2 | 0.61x | 0.602 to 0.626 |
-| read and write back | 5,468.6 | 14,701.4 | 0.37x | 0.368 to 0.381 |
-| filtered scan, 1% band | 87.3 | 404.3 | 0.21x | 0.213 to 0.219 |
-| filtered scan, half the rows | 158.6 | 678.7 | 0.23x | 0.228 to 0.238 |
-| scattered take, 64 of 64 splits | 349.4 | 1,681.6 | 0.21x | 0.204 to 0.210 |
-| key order, sorted column, 1% band | 76.5 | 110.1 | 0.69x | 0.684 to 0.709 |
-| key order, uncorrelated, 64 rows | 197.7 | 161.5 | 1.12x | 1.045 to 1.156 |
-| count, exact cover, 1% band | 126.3 | 235.5 | 0.53x | 0.503 to 0.554 |
-| filtered scan, string equality, fsst | 230.4 | 322.7 | 0.72x | 0.707 to 0.725 |
-| filtered scan, string prefix, fsst | 907.1 | 716.8 | 1.27x | 1.223 to 1.299 |
-| filtered scan, string equality, dict | 300.0 | 235.9 | 1.26x | 1.220 to 1.331 |
-| filtered scan, string prefix, dict | 176.6 | 138.2 | 1.28x | 1.258 to 1.304 |
-| filtered scan, band, runend | 79.6 | 84.3 | 0.95x | 0.896 to 0.986 |
-| filtered scan, band, bitpacked | 77.5 | 84.3 | 0.93x | 0.882 to 0.952 |
-| full scan, 1M table | 1,421.2 | 99,391.5 | 0.01x | 0.014 to 0.015 |
-| projected scan, 1 of 50 columns | 73.8 | 913.4 | 0.08x | 0.075 to 0.082 |
+| full scan | 529.8 | 1,884.2 | 0.27x | 0.265 to 0.291 |
+| projected scan, 1 of 5 columns | 106.8 | 266.6 | 0.40x | 0.394 to 0.407 |
+| open to first batch | 90.1 | 1,147.3 | 0.08x | 0.072 to 0.080 |
+| open, footer only | 30.8 | 50.7 | 0.61x | 0.604 to 0.617 |
+| read and write back | 4,768.3 | 14,697.7 | 0.32x | 0.313 to 0.329 |
+| filtered scan, 1% band | 84.0 | 418.1 | 0.20x | 0.188 to 0.207 |
+| filtered scan, half the rows | 167.7 | 683.9 | 0.25x | 0.240 to 0.250 |
+| scattered take, 64 of 64 splits | 338.1 | 1,671.1 | 0.19x | 0.187 to 0.200 |
+| key order, sorted column, 1% band | 87.2 | 129.4 | 0.67x | 0.641 to 0.706 |
+| key order, uncorrelated, 64 rows | 250.7 | 215.8 | 1.10x | 1.060 to 1.184 |
+| count, exact cover, 1% band | 187.8 | 288.0 | 0.63x | 0.613 to 0.673 |
+| filtered scan, string equality, fsst | 194.9 | 283.2 | 0.69x | 0.670 to 0.734 |
+| filtered scan, string prefix, fsst | 889.1 | 692.8 | 1.28x | 1.272 to 1.313 |
+| filtered scan, string equality, dict | 180.3 | 104.7 | 1.77x | 1.693 to 1.834 |
+| filtered scan, string prefix, dict | 204.2 | 176.7 | 1.13x | 1.091 to 1.194 |
+| filtered scan, band, runend | 93.6 | 97.1 | 0.93x | 0.910 to 0.996 |
+| filtered scan, band, bitpacked | 76.4 | 83.1 | 0.92x | 0.899 to 0.949 |
+| full scan, 1M table | 1,418.4 | 97,175.2 | 0.01x | 0.014 to 0.015 |
+| projected scan, 1 of 50 columns | 66.3 | 1,084.3 | 0.06x | 0.057 to 0.063 |
 
-Vorticity took less time on 15 of 19 axes. At 1.00x or above: filtered scan, string prefix, dict (1.28x), filtered scan, string prefix, fsst (1.27x), filtered scan, string equality, dict (1.26x), key order, uncorrelated, 64 rows (1.12x).
+Vorticity took less time on 15 of 19 axes. At 1.00x or above: filtered scan, string equality, dict (1.77x), filtered scan, string prefix, fsst (1.28x), filtered scan, string prefix, dict (1.13x), key order, uncorrelated, 64 rows (1.10x).
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:04 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit fc7c7f36 with uncommitted changes, 2026-09-28 06:44 UTC.*
 <!-- /results: in-process -->
 
 <!-- results: take -->
@@ -342,67 +342,67 @@ at least 9 rounds after a 1-second warm-up per file, our side on the JIT, warmed
 
 | encoding | Vorticity, µs | Vortex Rust, µs | ratio |
 |---|---:|---:|---:|
-| `alp` | 142 | 648 | 0.21x |
-| `alp_no_patches` | 68 | 316 | 0.22x |
+| `alp` | 139 | 632 | 0.22x |
+| `alp_no_patches` | 66 | 309 | 0.22x |
 | `alp_patched_no_chunk_offsets` | 79 | 336 | 0.24x |
-| `alprd` | 55 | 250 | 0.22x |
-| `bool` | 38 | 59 | 0.64x |
-| `bool_bit_offset3` | 39 | 63 | 0.63x |
-| `bool_bit_offset7` | 39 | 59 | 0.66x |
-| `bool_bit_offset_straddle` | 40 | 61 | 0.66x |
-| `bytebool` | 76 | 114 | 0.67x |
-| `chunked` | 66 | 335 | 0.20x |
-| `chunked_bool` | 44 | 98 | 0.44x |
-| `chunked_decimal` | 69 | 352 | 0.19x |
-| `chunked_empty_chunks` | 47 | 317 | 0.15x |
-| `chunked_mixed_validity` | 206 | 397 | 0.52x |
-| `chunked_one_chunk` | 65 | 316 | 0.21x |
-| `chunked_varbinview` | 1,028 | 56,316 | 0.02x |
-| `constant` | 41 | 53 | 0.77x |
-| `datetimeparts` | 92 | 682 | 0.14x |
-| `decimal` | 64 | 300 | 0.21x |
-| `decimal_byte_parts` | 66 | 324 | 0.21x |
-| `dict` | 52 | 156 | 0.33x |
-| `dict_nullable_codes` | 61 | 170 | 0.36x |
-| `dict_nullable_values_nonnull_codes` | 61 | 126 | 0.46x |
-| `dict_u64_codes` | 77 | 336 | 0.24x |
-| `dict_u8_codes` | 51 | 100 | 0.51x |
-| `ext` | 68 | 334 | 0.20x |
-| `fastlanes_bitpacked` | 42 | 88 | 0.47x |
-| `fastlanes_bitpacked_patched_no_chunk_offsets` | 52 | 107 | 0.49x |
-| `fastlanes_delta` | 109 | 1,001 | 0.11x |
-| `fastlanes_for` | 70 | 322 | 0.21x |
-| `fastlanes_rle` | 306 | 501 | 0.60x |
-| `fixed_size_list` | 45 | 429 | 0.10x |
-| `fsst` | 119 | 874 | 0.14x |
-| `list` | 195 | 497 | 0.40x |
-| `listview` | 278 | 6,390 | 0.04x |
-| `map` | 545 | 52,528 | 0.01x |
-| `masked` | 43 | 176 | 0.25x |
-| `masked_all_invalid` | 47 | 176 | 0.26x |
-| `masked_all_valid` | 45 | 170 | 0.26x |
-| `null` | 36 | 47 | 0.76x |
-| `onpair` | 149 | 521 | 0.28x |
-| `parquet_variant` | 86 | 480 | 0.19x |
-| `pco` | 421 | 1,615 | 0.26x |
-| `primitive` | 61 | 306 | 0.20x |
-| `runend` | 71 | 90 | 0.79x |
-| `sequence` | 44 | 54 | 0.82x |
-| `sparse` | 56 | 88 | 0.63x |
-| `struct` | 348 | 41,978 | 0.01x |
-| `table_mixed` | 1,477 | 100,835 | 0.01x |
-| `table_wide` | 94 | 997 | 0.09x |
-| `varbin` | 185 | 64,864 | 0.00x |
-| `varbinview` | 622 | 56,287 | 0.01x |
-| `variant` | 51 | 65 | 0.80x |
-| `zigzag` | 45 | 163 | 0.28x |
-| `zstd` | 848 | 6,746 | 0.13x |
-| `zstd_buffers` | 370 | 2,548 | 0.14x |
-| `zstd_nullable` | 1,172 | 3,362 | 0.35x |
+| `alprd` | 73 | 276 | 0.26x |
+| `bool` | 38 | 57 | 0.67x |
+| `bool_bit_offset3` | 39 | 58 | 0.66x |
+| `bool_bit_offset7` | 40 | 59 | 0.66x |
+| `bool_bit_offset_straddle` | 39 | 58 | 0.67x |
+| `bytebool` | 74 | 109 | 0.68x |
+| `chunked` | 64 | 329 | 0.20x |
+| `chunked_bool` | 44 | 95 | 0.47x |
+| `chunked_decimal` | 67 | 338 | 0.20x |
+| `chunked_empty_chunks` | 64 | 336 | 0.19x |
+| `chunked_mixed_validity` | 208 | 401 | 0.51x |
+| `chunked_one_chunk` | 64 | 315 | 0.20x |
+| `chunked_varbinview` | 1,025 | 56,214 | 0.02x |
+| `constant` | 39 | 50 | 0.79x |
+| `datetimeparts` | 94 | 763 | 0.12x |
+| `decimal` | 62 | 297 | 0.21x |
+| `decimal_byte_parts` | 63 | 308 | 0.20x |
+| `dict` | 50 | 152 | 0.33x |
+| `dict_nullable_codes` | 58 | 162 | 0.35x |
+| `dict_nullable_values_nonnull_codes` | 54 | 120 | 0.46x |
+| `dict_u64_codes` | 53 | 257 | 0.21x |
+| `dict_u8_codes` | 49 | 94 | 0.52x |
+| `ext` | 65 | 312 | 0.20x |
+| `fastlanes_bitpacked` | 42 | 85 | 0.50x |
+| `fastlanes_bitpacked_patched_no_chunk_offsets` | 51 | 101 | 0.51x |
+| `fastlanes_delta` | 103 | 966 | 0.10x |
+| `fastlanes_for` | 69 | 322 | 0.22x |
+| `fastlanes_rle` | 298 | 480 | 0.62x |
+| `fixed_size_list` | 75 | 512 | 0.15x |
+| `fsst` | 117 | 953 | 0.12x |
+| `list` | 205 | 505 | 0.41x |
+| `listview` | 280 | 6,535 | 0.04x |
+| `map` | 539 | 40,989 | 0.01x |
+| `masked` | 42 | 172 | 0.24x |
+| `masked_all_invalid` | 45 | 170 | 0.26x |
+| `masked_all_valid` | 44 | 167 | 0.27x |
+| `null` | 36 | 47 | 0.78x |
+| `onpair` | 91 | 548 | 0.17x |
+| `parquet_variant` | 100 | 543 | 0.18x |
+| `pco` | 412 | 1,599 | 0.26x |
+| `primitive` | 60 | 303 | 0.20x |
+| `runend` | 71 | 88 | 0.80x |
+| `sequence` | 44 | 51 | 0.86x |
+| `sparse` | 56 | 85 | 0.66x |
+| `struct` | 371 | 41,424 | 0.01x |
+| `table_mixed` | 1,472 | 100,537 | 0.01x |
+| `table_wide` | 86 | 1,087 | 0.08x |
+| `varbin` | 185 | 63,000 | 0.00x |
+| `varbinview` | 603 | 55,042 | 0.01x |
+| `variant` | 49 | 61 | 0.82x |
+| `zigzag` | 45 | 157 | 0.29x |
+| `zstd` | 837 | 6,621 | 0.13x |
+| `zstd_buffers` | 326 | 2,420 | 0.13x |
+| `zstd_nullable` | 1,139 | 3,249 | 0.35x |
 
 Vorticity took less time on 57 of 57 files; the median ratio is 0.24x.
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:05 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit 7a0e7e28 with uncommitted changes, 2026-09-27 22:49 UTC.*
 <!-- /results: take -->
 
 <!-- results: write -->
@@ -415,67 +415,67 @@ at least 9 rounds after a 1-second warm-up per file, our side on the JIT, warmed
 
 | encoding | Vorticity, µs | Vortex Rust, µs | ratio |
 |---|---:|---:|---:|
-| `alp` | 4,998 | 23,396 | 0.21x |
-| `alp_no_patches` | 5,354 | 16,518 | 0.32x |
-| `alp_patched_no_chunk_offsets` | 6,239 | 22,311 | 0.28x |
-| `alprd` | 7,725 | 20,539 | 0.38x |
-| `bool` | 139 | 502 | 0.27x |
-| `bool_bit_offset3` | 232 | 632 | 0.37x |
-| `bool_bit_offset7` | 216 | 625 | 0.35x |
-| `bool_bit_offset_straddle` | 215 | 618 | 0.35x |
-| `bytebool` | 183 | 545 | 0.33x |
-| `chunked` | 1,156 | 11,237 | 0.10x |
-| `chunked_bool` | 122 | 508 | 0.24x |
-| `chunked_decimal` | 1,281 | 13,944 | 0.09x |
-| `chunked_empty_chunks` | 774 | 10,677 | 0.07x |
-| `chunked_mixed_validity` | 3,393 | 10,627 | 0.32x |
-| `chunked_one_chunk` | 578 | 10,121 | 0.06x |
-| `chunked_varbinview` | 17,792 | 78,216 | 0.23x |
-| `constant` | 98 | 3,368 | 0.03x |
-| `datetimeparts` | 2,788 | 24,810 | 0.11x |
-| `decimal` | 1,212 | 12,967 | 0.09x |
-| `decimal_byte_parts` | 1,191 | 12,557 | 0.10x |
-| `dict` | 7,326 | 18,785 | 0.39x |
-| `dict_nullable_codes` | 10,637 | 18,333 | 0.58x |
-| `dict_nullable_values_nonnull_codes` | 10,216 | 17,020 | 0.60x |
-| `dict_u64_codes` | 7,254 | 19,586 | 0.37x |
-| `dict_u8_codes` | 13,950 | 18,312 | 0.76x |
-| `ext` | 615 | 19,870 | 0.03x |
-| `fastlanes_bitpacked` | 1,813 | 4,952 | 0.37x |
-| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,578 | 5,692 | 0.27x |
-| `fastlanes_delta` | 890 | 11,871 | 0.07x |
-| `fastlanes_for` | 2,065 | 5,777 | 0.36x |
-| `fastlanes_rle` | 1,179 | 5,053 | 0.23x |
-| `fixed_size_list` | 743 | 22,663 | 0.03x |
-| `fsst` | 31,883 | 258,448 | 0.12x |
-| `list` | 7,544 | 21,410 | 0.36x |
-| `listview` | 7,600 | 37,196 | 0.20x |
-| `map` | 18,318 | 92,796 | 0.20x |
-| `masked` | 3,959 | 13,100 | 0.30x |
-| `masked_all_invalid` | 222 | 871 | 0.25x |
-| `masked_all_valid` | 400 | 8,963 | 0.04x |
-| `null` | 61 | 309 | 0.20x |
-| `onpair` | 19,687 | 25,628 | 0.77x |
-| `pco` | 909 | 12,102 | 0.08x |
-| `primitive` | 572 | 9,896 | 0.06x |
-| `runend` | 840 | 5,790 | 0.14x |
-| `sequence` | 623 | 9,954 | 0.06x |
-| `sparse` | 772 | 2,820 | 0.28x |
-| `struct` | 27,675 | 129,101 | 0.21x |
-| `table_mixed` | 52,589 | 381,981 | 0.14x |
-| `table_wide` | 5,036 | 32,244 | 0.16x |
-| `varbin` | 32,594 | 245,670 | 0.13x |
-| `varbinview` | 17,034 | 78,470 | 0.22x |
-| `variant` | 100 | 1,543 | 0.06x |
-| `zigzag` | 1,814 | 10,352 | 0.18x |
-| `zstd` | 25,751 | 29,888 | 0.86x |
-| `zstd_buffers` | 2,392 | 7,501 | 0.32x |
-| `zstd_nullable` | 5,585 | 10,675 | 0.52x |
+| `alp` | 4,893 | 22,970 | 0.21x |
+| `alp_no_patches` | 4,522 | 16,416 | 0.27x |
+| `alp_patched_no_chunk_offsets` | 4,100 | 17,592 | 0.23x |
+| `alprd` | 6,593 | 17,688 | 0.37x |
+| `bool` | 133 | 470 | 0.28x |
+| `bool_bit_offset3` | 216 | 617 | 0.35x |
+| `bool_bit_offset7` | 215 | 613 | 0.35x |
+| `bool_bit_offset_straddle` | 215 | 615 | 0.35x |
+| `bytebool` | 178 | 538 | 0.33x |
+| `chunked` | 1,124 | 11,090 | 0.10x |
+| `chunked_bool` | 146 | 524 | 0.28x |
+| `chunked_decimal` | 1,187 | 13,234 | 0.09x |
+| `chunked_empty_chunks` | 755 | 10,314 | 0.07x |
+| `chunked_mixed_validity` | 3,368 | 10,455 | 0.33x |
+| `chunked_one_chunk` | 570 | 9,906 | 0.06x |
+| `chunked_varbinview` | 13,774 | 75,879 | 0.18x |
+| `constant` | 96 | 3,286 | 0.03x |
+| `datetimeparts` | 2,775 | 24,223 | 0.11x |
+| `decimal` | 1,129 | 12,250 | 0.09x |
+| `decimal_byte_parts` | 1,148 | 12,446 | 0.09x |
+| `dict` | 6,852 | 18,289 | 0.38x |
+| `dict_nullable_codes` | 10,283 | 17,573 | 0.58x |
+| `dict_nullable_values_nonnull_codes` | 9,762 | 16,321 | 0.60x |
+| `dict_u64_codes` | 6,971 | 18,339 | 0.38x |
+| `dict_u8_codes` | 9,720 | 17,919 | 0.54x |
+| `ext` | 576 | 19,178 | 0.03x |
+| `fastlanes_bitpacked` | 1,841 | 5,029 | 0.37x |
+| `fastlanes_bitpacked_patched_no_chunk_offsets` | 1,572 | 5,459 | 0.28x |
+| `fastlanes_delta` | 840 | 10,908 | 0.08x |
+| `fastlanes_for` | 2,034 | 5,586 | 0.36x |
+| `fastlanes_rle` | 1,202 | 5,032 | 0.24x |
+| `fixed_size_list` | 720 | 22,262 | 0.03x |
+| `fsst` | 31,819 | 249,541 | 0.13x |
+| `list` | 7,359 | 20,901 | 0.35x |
+| `listview` | 7,392 | 36,855 | 0.20x |
+| `map` | 13,860 | 91,489 | 0.15x |
+| `masked` | 3,988 | 12,934 | 0.31x |
+| `masked_all_invalid` | 215 | 830 | 0.26x |
+| `masked_all_valid` | 364 | 8,491 | 0.04x |
+| `null` | 61 | 304 | 0.20x |
+| `onpair` | 17,757 | 25,236 | 0.70x |
+| `pco` | 868 | 11,629 | 0.07x |
+| `primitive` | 563 | 9,769 | 0.06x |
+| `runend` | 818 | 5,685 | 0.14x |
+| `sequence` | 611 | 9,826 | 0.06x |
+| `sparse` | 751 | 2,786 | 0.27x |
+| `struct` | 27,284 | 126,222 | 0.22x |
+| `table_mixed` | 47,472 | 368,679 | 0.13x |
+| `table_wide` | 4,831 | 31,266 | 0.15x |
+| `varbin` | 31,925 | 237,218 | 0.13x |
+| `varbinview` | 13,272 | 75,825 | 0.17x |
+| `variant` | 100 | 1,530 | 0.06x |
+| `zigzag` | 1,812 | 10,229 | 0.18x |
+| `zstd` | 23,427 | 29,181 | 0.81x |
+| `zstd_buffers` | 2,328 | 7,081 | 0.33x |
+| `zstd_nullable` | 5,456 | 10,631 | 0.51x |
 
-Vorticity took less time on 56 of 56 files; the median ratio is 0.22x.
+Vorticity took less time on 56 of 56 files; the median ratio is 0.21x.
 Rust's writer declines `parquet_variant`, which is left out.
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:07 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary 5ee2b9027373; commit 7a0e7e28 with uncommitted changes, 2026-09-27 22:50 UTC.*
 <!-- /results: write -->
 
 <!-- results: tradeoffs -->
@@ -500,26 +500,26 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
 | a sequence | Sequence x77 | 0.00 | 5 | 3.3 | 0.36 |  |
-| sorted runs of 1 000 | RunEnd x77 | 0.01 | 15 | 3.7 | 0.49 |  |
-| timestamps (ms, increasing, jittered) | BitPacked x77 | 3.38 | 28 | 5.5 | 0.40 | Smallest: Zstd x77, 2.07 B/value, scan 58.8 ms, take 47.07 ms; reads faster below 246 MB/s |
-| random in 0..999 | BitPacked x77 | 1.25 | 24 | 3.9 | 0.34 |  |
-| 16 distinct, random order | Dictionary x77 | 0.51 | 67 | 5.3 | 0.43 |  |
-| 100 003 distinct, repeating | BitPacked x77 | 4.63 | 32 | 4.3 | 0.48 | Auto, 16 MiB chunks: Dictionary x5, 2.36 B/value, scan 5.8 ms, take 0.46 ms; reads faster below 15,587 MB/s |
-| uniform 64-bit | Canonical x77 | 8.00 | 20 | 2.6 | 0.34 |  |
-| random in 0..999, 10 % null | BitPacked x82 | 1.38 | 51 | 5.2 | 0.43 | hint Dictionary: Dictionary x82, 1.27 B/value, scan 6.9 ms, take 0.56 ms; reads faster below 661 MB/s |
+| sorted runs of 1 000 | RunEnd x77 | 0.01 | 14 | 3.4 | 0.46 |  |
+| timestamps (ms, increasing, jittered) | BitPacked x77 | 3.38 | 27 | 5.4 | 0.40 | Smallest: Zstd x77, 2.07 B/value, scan 58.0 ms, take 45.79 ms; reads faster below 249 MB/s |
+| random in 0..999 | BitPacked x77 | 1.25 | 24 | 3.7 | 0.34 |  |
+| 16 distinct, random order | Dictionary x77 | 0.51 | 54 | 5.0 | 0.41 |  |
+| 100 003 distinct, repeating | BitPacked x77 | 4.63 | 29 | 4.0 | 0.37 | Auto, 16 MiB chunks: Dictionary x5, 2.36 B/value, scan 5.7 ms, take 0.46 ms; reads faster below 13,609 MB/s |
+| uniform 64-bit | Canonical x77 | 8.00 | 21 | 2.6 | 0.28 |  |
+| random in 0..999, 10 % null | BitPacked x82 | 1.38 | 47 | 5.2 | 0.40 | hint Dictionary: Dictionary x82, 1.27 B/value, scan 6.7 ms, take 0.56 ms; reads faster below 773 MB/s |
 
 <details><summary>a sequence: every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
 | Auto | Sequence x77 | 38,836 | 0.00 | 5 | 3.3 | 0.36 |  |
-| Fastest | Sequence x77 | 38,836 | 0.00 | 5 | 3.3 | 0.36 | same |
-| Smallest | Sequence x77 | 38,836 | 0.00 | 5 | 3.4 | 0.37 | same |
-| None | Canonical x77 | 80,043,716 | 8.00 | 20 | 2.6 | 0.36 | reads faster above 120,435 MB/s |
-| hint Dictionary | Sequence x77 | 38,836 | 0.00 | 90 | 3.5 | 0.37 | reads slower at any throughput |
-| hint BitPacked | Sequence x77 | 38,836 | 0.00 | 5 | 3.4 | 0.36 | same |
-| hint RunEnd | Sequence x77 | 38,836 | 0.00 | 5 | 3.4 | 0.38 | same |
-| hint Zstd | Sequence x77 | 38,836 | 0.00 | 5 | 3.4 | 0.36 | same |
+| Fastest | Sequence x77 | 38,836 | 0.00 | 5 | 3.2 | 0.35 | same |
+| Smallest | Sequence x77 | 38,836 | 0.00 | 5 | 3.3 | 0.36 | same |
+| None | Canonical x77 | 80,043,716 | 8.00 | 17 | 2.6 | 0.34 | reads faster above 106,009 MB/s |
+| hint Dictionary | Sequence x77 | 38,836 | 0.00 | 69 | 3.2 | 0.36 | same |
+| hint BitPacked | Sequence x77 | 38,836 | 0.00 | 5 | 3.3 | 0.36 | same |
+| hint RunEnd | Sequence x77 | 38,836 | 0.00 | 5 | 3.3 | 0.35 | same |
+| hint Zstd | Sequence x77 | 38,836 | 0.00 | 5 | 3.2 | 0.38 | same |
 
 </details>
 
@@ -527,14 +527,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | RunEnd x77 | 87,996 | 0.01 | 15 | 3.7 | 0.49 |  |
-| Fastest | RunEnd x77 | 87,996 | 0.01 | 15 | 3.6 | 0.51 | same |
-| Smallest | RunEnd x76, Zstd x1 | 87,964 | 0.01 | 28 | 3.6 | 0.49 | same |
-| None | Canonical x77 | 80,043,708 | 8.00 | 26 | 2.6 | 0.35 | reads faster above 72,568 MB/s |
-| hint Dictionary | Dictionary x77 | 1,449,884 | 0.14 | 47 | 6.8 | 2.03 | reads slower at any throughput |
-| hint BitPacked | BitPacked x77 | 10,034,452 | 1.00 | 25 | 5.1 | 0.37 | reads slower at any throughput |
-| hint RunEnd | RunEnd x77 | 87,996 | 0.01 | 15 | 3.7 | 0.47 | same |
-| hint Zstd | Zstd x77 | 136,620 | 0.01 | 15 | 20.3 | 15.53 | reads slower at any throughput |
+| Auto | RunEnd x77 | 87,996 | 0.01 | 14 | 3.4 | 0.46 |  |
+| Fastest | RunEnd x77 | 87,996 | 0.01 | 14 | 3.4 | 0.46 | same |
+| Smallest | RunEnd x76, Zstd x1 | 87,964 | 0.01 | 28 | 3.5 | 0.50 | same |
+| None | Canonical x77 | 80,043,708 | 8.00 | 23 | 2.7 | 0.35 | reads faster above 111,189 MB/s |
+| hint Dictionary | Dictionary x77 | 1,449,884 | 0.14 | 46 | 6.5 | 1.96 | reads slower at any throughput |
+| hint BitPacked | BitPacked x77 | 10,034,452 | 1.00 | 24 | 5.1 | 0.37 | reads slower at any throughput |
+| hint RunEnd | RunEnd x77 | 87,996 | 0.01 | 14 | 3.4 | 0.44 | same |
+| hint Zstd | Zstd x77 | 136,620 | 0.01 | 15 | 20.5 | 15.69 | reads slower at any throughput |
 
 </details>
 
@@ -542,14 +542,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x77 | 33,795,164 | 3.38 | 28 | 5.5 | 0.40 |  |
-| Fastest | BitPacked x77 | 33,795,164 | 3.38 | 27 | 5.3 | 0.44 | same |
-| Smallest | Zstd x77 | 20,700,788 | 2.07 | 171 | 58.8 | 47.07 | reads faster below 246 MB/s |
-| None | Canonical x77 | 80,043,716 | 8.00 | 24 | 2.6 | 0.30 | reads faster above 15,483 MB/s |
-| hint Dictionary | BitPacked x77 | 33,795,164 | 3.38 | 112 | 5.3 | 0.40 | same |
-| hint BitPacked | BitPacked x77 | 33,795,164 | 3.38 | 31 | 5.4 | 0.39 | same |
-| hint RunEnd | BitPacked x77 | 33,795,164 | 3.38 | 39 | 5.4 | 0.40 | same |
-| hint Zstd | Zstd x77 | 20,700,788 | 2.07 | 134 | 59.7 | 47.08 | reads faster below 242 MB/s |
+| Auto | BitPacked x77 | 33,795,164 | 3.38 | 27 | 5.4 | 0.40 |  |
+| Fastest | BitPacked x77 | 33,795,164 | 3.38 | 27 | 5.3 | 0.41 | same |
+| Smallest | Zstd x77 | 20,700,788 | 2.07 | 170 | 58.0 | 45.79 | reads faster below 249 MB/s |
+| None | Canonical x77 | 80,043,716 | 8.00 | 23 | 2.5 | 0.32 | reads faster above 15,938 MB/s |
+| hint Dictionary | BitPacked x77 | 33,795,164 | 3.38 | 92 | 5.2 | 0.40 | same |
+| hint BitPacked | BitPacked x77 | 33,795,164 | 3.38 | 27 | 5.3 | 0.37 | same |
+| hint RunEnd | BitPacked x77 | 33,795,164 | 3.38 | 38 | 5.3 | 0.36 | same |
+| hint Zstd | Zstd x77 | 20,700,788 | 2.07 | 132 | 58.3 | 46.06 | reads faster below 247 MB/s |
 
 </details>
 
@@ -557,14 +557,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x77 | 12,544,276 | 1.25 | 24 | 3.9 | 0.34 |  |
-| Fastest | BitPacked x77 | 12,544,276 | 1.25 | 24 | 4.0 | 0.36 | same |
-| Smallest | BitPacked x77 | 12,544,276 | 1.25 | 183 | 3.9 | 0.33 | same |
-| None | Canonical x77 | 80,043,708 | 8.00 | 20 | 2.6 | 0.34 | reads faster above 52,345 MB/s |
-| hint Dictionary | Dictionary x77 | 12,652,716 | 1.27 | 95 | 5.6 | 0.51 | reads slower at any throughput |
-| hint BitPacked | BitPacked x77 | 12,544,276 | 1.25 | 24 | 3.9 | 0.37 | same |
-| hint RunEnd | BitPacked x77 | 12,544,276 | 1.25 | 22 | 3.7 | 0.30 | same |
-| hint Zstd | Zstd x77 | 20,141,164 | 2.01 | 169 | 84.6 | 67.94 | reads slower at any throughput |
+| Auto | BitPacked x77 | 12,544,276 | 1.25 | 24 | 3.7 | 0.34 |  |
+| Fastest | BitPacked x77 | 12,544,276 | 1.25 | 24 | 3.6 | 0.35 | same |
+| Smallest | BitPacked x77 | 12,544,276 | 1.25 | 181 | 3.7 | 0.35 | same |
+| None | Canonical x77 | 80,043,708 | 8.00 | 20 | 2.5 | 0.32 | reads faster above 58,189 MB/s |
+| hint Dictionary | Dictionary x77 | 12,652,716 | 1.27 | 68 | 5.4 | 0.50 | reads slower at any throughput |
+| hint BitPacked | BitPacked x77 | 12,544,276 | 1.25 | 25 | 3.7 | 0.36 | same |
+| hint RunEnd | BitPacked x77 | 12,544,276 | 1.25 | 22 | 3.7 | 0.36 | same |
+| hint Zstd | Zstd x77 | 20,141,164 | 2.01 | 168 | 84.5 | 67.65 | reads slower at any throughput |
 
 </details>
 
@@ -572,15 +572,15 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x77 | 5,063,740 | 0.51 | 67 | 5.3 | 0.43 |  |
-| Fastest | Dictionary x77 | 5,063,740 | 0.51 | 72 | 6.2 | 0.57 | reads slower at any throughput |
-| Smallest | Dictionary x77 | 5,063,740 | 0.51 | 211 | 6.2 | 0.56 | reads slower at any throughput |
-| None | Canonical x77 | 80,043,724 | 8.00 | 26 | 3.2 | 0.43 | reads faster above 37,007 MB/s |
-| hint Dictionary | Dictionary x77 | 5,063,740 | 0.51 | 79 | 5.7 | 0.44 | reads slower at any throughput |
-| hint BitPacked | Dictionary x77 | 5,063,740 | 0.51 | 104 | 5.2 | 0.35 | same |
-| hint RunEnd | Dictionary x77 | 5,063,740 | 0.51 | 90 | 5.3 | 0.42 | same |
-| hint Zstd | Zstd x77 | 10,539,388 | 1.05 | 119 | 66.2 | 53.45 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 5,032,924 | 0.50 | 74 | 5.3 | 0.39 | same |
+| Auto | Dictionary x77 | 5,063,740 | 0.51 | 54 | 5.0 | 0.41 |  |
+| Fastest | Dictionary x77 | 5,063,740 | 0.51 | 52 | 5.1 | 0.41 | same |
+| Smallest | Dictionary x77 | 5,063,740 | 0.51 | 167 | 5.1 | 0.41 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 21 | 2.6 | 0.33 | reads faster above 30,345 MB/s |
+| hint Dictionary | Dictionary x77 | 5,063,740 | 0.51 | 51 | 5.2 | 0.42 | same |
+| hint BitPacked | Dictionary x77 | 5,063,740 | 0.51 | 100 | 5.0 | 0.41 | same |
+| hint RunEnd | Dictionary x77 | 5,063,740 | 0.51 | 92 | 5.0 | 0.40 | same |
+| hint Zstd | Zstd x77 | 10,539,388 | 1.05 | 118 | 64.6 | 51.96 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 5,032,924 | 0.50 | 62 | 5.1 | 0.40 | same |
 
 </details>
 
@@ -588,15 +588,15 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x77 | 46,295,644 | 4.63 | 32 | 4.3 | 0.48 |  |
-| Fastest | BitPacked x77 | 46,295,644 | 4.63 | 29 | 4.2 | 0.40 | same |
-| Smallest | BitPacked x77 | 46,295,644 | 4.63 | 143 | 4.1 | 0.39 | same |
-| None | Canonical x77 | 80,043,716 | 8.00 | 19 | 2.6 | 0.37 | reads faster above 19,252 MB/s |
-| hint Dictionary | BitPacked x77 | 46,295,644 | 4.63 | 111 | 4.2 | 0.39 | same |
-| hint BitPacked | BitPacked x77 | 46,295,644 | 4.63 | 29 | 4.1 | 0.41 | reads faster at any throughput |
-| hint RunEnd | BitPacked x77 | 46,295,644 | 4.63 | 49 | 4.1 | 0.39 | same |
-| hint Zstd | Zstd x77 | 51,815,860 | 5.18 | 104 | 67.7 | 53.18 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 23,603,540 | 2.36 | 92 | 5.8 | 0.46 | reads faster below 15,587 MB/s |
+| Auto | BitPacked x77 | 46,295,644 | 4.63 | 29 | 4.0 | 0.37 |  |
+| Fastest | BitPacked x77 | 46,295,644 | 4.63 | 28 | 4.0 | 0.38 | same |
+| Smallest | BitPacked x77 | 46,295,644 | 4.63 | 138 | 4.0 | 0.37 | same |
+| None | Canonical x77 | 80,043,716 | 8.00 | 18 | 2.5 | 0.38 | reads faster above 22,975 MB/s |
+| hint Dictionary | BitPacked x77 | 46,295,644 | 4.63 | 87 | 4.0 | 0.36 | same |
+| hint BitPacked | BitPacked x77 | 46,295,644 | 4.63 | 29 | 4.4 | 0.36 | reads slower at any throughput |
+| hint RunEnd | BitPacked x77 | 46,295,644 | 4.63 | 48 | 4.0 | 0.37 | same |
+| hint Zstd | Zstd x77 | 51,815,860 | 5.18 | 102 | 64.5 | 50.80 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 23,603,540 | 2.36 | 87 | 5.7 | 0.46 | reads faster below 13,609 MB/s |
 
 </details>
 
@@ -604,14 +604,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Canonical x77 | 80,043,724 | 8.00 | 20 | 2.6 | 0.34 |  |
-| Fastest | Canonical x77 | 80,043,724 | 8.00 | 23 | 2.7 | 0.36 | same |
-| Smallest | Canonical x77 | 80,043,724 | 8.00 | 77 | 2.6 | 0.34 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.6 | 0.38 | same |
-| hint Dictionary | Canonical x77 | 80,043,724 | 8.00 | 126 | 2.6 | 0.33 | same |
-| hint BitPacked | Canonical x77 | 80,043,724 | 8.00 | 84 | 2.7 | 0.36 | same |
-| hint RunEnd | Canonical x77 | 80,043,724 | 8.00 | 78 | 2.6 | 0.36 | same |
-| hint Zstd | Canonical x77 | 80,043,724 | 8.00 | 88 | 2.6 | 0.34 | same |
+| Auto | Canonical x77 | 80,043,724 | 8.00 | 21 | 2.6 | 0.28 |  |
+| Fastest | Canonical x77 | 80,043,724 | 8.00 | 21 | 2.5 | 0.26 | reads faster at any throughput |
+| Smallest | Canonical x77 | 80,043,724 | 8.00 | 78 | 2.6 | 0.33 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 20 | 2.5 | 0.36 | same |
+| hint Dictionary | Canonical x77 | 80,043,724 | 8.00 | 102 | 2.5 | 0.34 | same |
+| hint BitPacked | Canonical x77 | 80,043,724 | 8.00 | 83 | 2.5 | 0.35 | same |
+| hint RunEnd | Canonical x77 | 80,043,724 | 8.00 | 76 | 2.5 | 0.33 | same |
+| hint Zstd | Canonical x77 | 80,043,724 | 8.00 | 86 | 2.5 | 0.34 | same |
 
 </details>
 
@@ -619,14 +619,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | BitPacked x82 | 13,800,452 | 1.38 | 51 | 5.2 | 0.43 |  |
-| Fastest | BitPacked x82 | 13,800,452 | 1.38 | 50 | 5.3 | 0.42 | same |
-| Smallest | BitPacked x82 | 13,800,452 | 1.38 | 216 | 5.4 | 0.45 | same |
-| None | Canonical x82 | 81,294,660 | 8.13 | 41 | 2.7 | 0.40 | reads faster above 26,880 MB/s |
-| hint Dictionary | Dictionary x82 | 12,676,388 | 1.27 | 111 | 6.9 | 0.56 | reads faster below 661 MB/s |
-| hint BitPacked | BitPacked x82 | 13,800,452 | 1.38 | 50 | 5.2 | 0.41 | same |
-| hint RunEnd | BitPacked x82 | 13,800,452 | 1.38 | 50 | 5.3 | 0.41 | same |
-| hint Zstd | Zstd x82 | 19,283,932 | 1.93 | 199 | 81.7 | 62.20 | reads slower at any throughput |
+| Auto | BitPacked x82 | 13,800,452 | 1.38 | 47 | 5.2 | 0.40 |  |
+| Fastest | BitPacked x82 | 13,800,452 | 1.38 | 47 | 5.1 | 0.40 | same |
+| Smallest | BitPacked x82 | 13,800,452 | 1.38 | 211 | 5.1 | 0.41 | same |
+| None | Canonical x82 | 81,294,660 | 8.13 | 40 | 2.5 | 0.38 | reads faster above 25,135 MB/s |
+| hint Dictionary | Dictionary x82 | 12,676,388 | 1.27 | 97 | 6.7 | 0.56 | reads faster below 773 MB/s |
+| hint BitPacked | BitPacked x82 | 13,800,452 | 1.38 | 48 | 5.1 | 0.41 | same |
+| hint RunEnd | BitPacked x82 | 13,800,452 | 1.38 | 48 | 5.1 | 0.41 | same |
+| hint Zstd | Zstd x82 | 19,283,932 | 1.93 | 193 | 81.6 | 61.87 | reads slower at any throughput |
 
 </details>
 
@@ -634,23 +634,23 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| prices (2 decimals) | Alp x77 | 2.50 | 40 | 6.5 | 0.42 |  |
-| 16 distinct, random order | Dictionary x77 | 0.51 | 53 | 5.3 | 0.43 |  |
-| 1 000 distinct prices | Dictionary x77 | 1.28 | 96 | 5.7 | 0.55 |  |
-| 100 003 distinct, repeating | Zstd x77 | 1.69 | 136 | 60.6 | 48.22 | Auto, 16 MiB chunks: Dictionary x5, 2.21 B/value, scan 8.5 ms, take 3.25 ms; reads faster above 100 MB/s; None: Canonical x77, 8.00 B/value, scan 2.6 ms, take 0.34 ms; reads faster above 1,089 MB/s |
-| uniform in [0, 1) | AlpRd x77 | 6.91 | 53 | 8.4 | 0.61 | None: Canonical x77, 8.00 B/value, scan 2.6 ms, take 0.34 ms; reads faster above 1,915 MB/s |
+| prices (2 decimals) | Alp x77 | 2.50 | 39 | 6.8 | 0.61 | None: Canonical x77, 8.00 B/value, scan 2.5 ms, take 0.28 ms; reads faster above 12,626 MB/s |
+| 16 distinct, random order | Dictionary x77 | 0.51 | 52 | 5.5 | 0.52 |  |
+| 1 000 distinct prices | Dictionary x77 | 1.28 | 71 | 5.4 | 0.56 |  |
+| 100 003 distinct, repeating | Zstd x77 | 1.69 | 140 | 60.7 | 47.38 | Auto, 16 MiB chunks: Dictionary x5, 2.21 B/value, scan 8.4 ms, take 3.27 ms; reads faster above 100 MB/s; None: Canonical x77, 8.00 B/value, scan 2.6 ms, take 0.34 ms; reads faster above 1,085 MB/s |
+| uniform in [0, 1) | AlpRd x77 | 6.91 | 54 | 8.1 | 0.59 | None: Canonical x77, 8.00 B/value, scan 2.5 ms, take 0.37 ms; reads faster above 1,942 MB/s |
 
 <details><summary>prices (2 decimals): every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Alp x77 | 25,049,724 | 2.50 | 40 | 6.5 | 0.42 |  |
-| Fastest | Alp x77 | 25,049,724 | 2.50 | 40 | 6.5 | 0.49 | same |
-| Smallest | Alp x77 | 25,049,724 | 2.50 | 327 | 6.5 | 0.44 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.6 | 0.35 | reads faster above 13,950 MB/s |
-| hint Dictionary | Alp x77 | 25,049,724 | 2.50 | 156 | 6.5 | 0.43 | same |
-| hint Alp | Alp x77 | 25,049,724 | 2.50 | 46 | 6.6 | 0.42 | same |
-| hint Zstd | Zstd x77 | 41,240,252 | 4.12 | 250 | 82.1 | 65.78 | reads slower at any throughput |
+| Auto | Alp x77 | 25,049,724 | 2.50 | 39 | 6.8 | 0.61 |  |
+| Fastest | Alp x77 | 25,049,724 | 2.50 | 39 | 6.4 | 0.44 | reads faster at any throughput |
+| Smallest | Alp x77 | 25,049,724 | 2.50 | 321 | 6.3 | 0.42 | reads faster at any throughput |
+| None | Canonical x77 | 80,043,724 | 8.00 | 18 | 2.5 | 0.28 | reads faster above 12,626 MB/s |
+| hint Dictionary | Alp x77 | 25,049,724 | 2.50 | 129 | 6.3 | 0.41 | reads faster at any throughput |
+| hint Alp | Alp x77 | 25,049,724 | 2.50 | 38 | 6.4 | 0.42 | reads faster at any throughput |
+| hint Zstd | Zstd x77 | 41,240,252 | 4.12 | 250 | 80.8 | 64.62 | reads slower at any throughput |
 
 </details>
 
@@ -658,14 +658,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x77 | 5,063,740 | 0.51 | 53 | 5.3 | 0.43 |  |
-| Fastest | Dictionary x77 | 5,063,740 | 0.51 | 53 | 5.3 | 0.39 | same |
-| Smallest | Dictionary x77 | 5,063,740 | 0.51 | 191 | 5.2 | 0.47 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 22 | 2.6 | 0.34 | reads faster above 27,746 MB/s |
-| hint Dictionary | Dictionary x77 | 5,063,740 | 0.51 | 52 | 5.3 | 0.44 | same |
-| hint Alp | Dictionary x77 | 5,063,740 | 0.51 | 107 | 5.4 | 0.41 | same |
-| hint Zstd | Zstd x77 | 10,545,660 | 1.05 | 122 | 65.8 | 52.46 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 5,032,924 | 0.50 | 60 | 5.2 | 0.39 | same |
+| Auto | Dictionary x77 | 5,063,740 | 0.51 | 52 | 5.5 | 0.52 |  |
+| Fastest | Dictionary x77 | 5,063,740 | 0.51 | 52 | 5.1 | 0.43 | reads faster at any throughput |
+| Smallest | Dictionary x77 | 5,063,740 | 0.51 | 189 | 5.1 | 0.43 | reads faster at any throughput |
+| None | Canonical x77 | 80,043,724 | 8.00 | 20 | 2.5 | 0.33 | reads faster above 25,043 MB/s |
+| hint Dictionary | Dictionary x77 | 5,063,740 | 0.51 | 51 | 5.2 | 0.42 | reads faster at any throughput |
+| hint Alp | Dictionary x77 | 5,063,740 | 0.51 | 110 | 5.2 | 0.42 | reads faster at any throughput |
+| hint Zstd | Zstd x77 | 10,545,660 | 1.05 | 123 | 64.9 | 51.80 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 5,032,924 | 0.50 | 59 | 5.1 | 0.38 | reads faster at any throughput |
 
 </details>
 
@@ -673,14 +673,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x77 | 12,756,252 | 1.28 | 96 | 5.7 | 0.55 |  |
-| Fastest | Dictionary x77 | 12,756,252 | 1.28 | 99 | 5.6 | 0.58 | same |
-| Smallest | Dictionary x77 | 12,756,252 | 1.28 | 298 | 5.6 | 0.52 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 18 | 2.6 | 0.33 | reads faster above 21,919 MB/s |
-| hint Dictionary | Dictionary x77 | 12,756,252 | 1.28 | 96 | 5.7 | 0.55 | same |
-| hint Alp | Alp x77 | 12,756,252 | 1.28 | 109 | 7.0 | 0.56 | reads slower at any throughput |
-| hint Zstd | Zstd x77 | 26,073,404 | 2.61 | 205 | 69.7 | 55.19 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x5 | 12,545,724 | 1.25 | 92 | 5.6 | 0.50 | reads faster at any throughput |
+| Auto | Dictionary x77 | 12,756,252 | 1.28 | 71 | 5.4 | 0.56 |  |
+| Fastest | Dictionary x77 | 12,756,252 | 1.28 | 71 | 5.4 | 0.54 | same |
+| Smallest | Dictionary x77 | 12,756,252 | 1.28 | 271 | 5.5 | 0.56 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.5 | 0.34 | reads faster above 22,885 MB/s |
+| hint Dictionary | Dictionary x77 | 12,756,252 | 1.28 | 71 | 5.4 | 0.52 | same |
+| hint Alp | Alp x77 | 12,756,252 | 1.28 | 110 | 6.8 | 0.54 | reads slower at any throughput |
+| hint Zstd | Zstd x77 | 26,073,404 | 2.61 | 201 | 67.7 | 54.00 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x5 | 12,545,724 | 1.25 | 75 | 5.4 | 0.48 | reads faster at any throughput |
 
 </details>
 
@@ -688,14 +688,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Zstd x77 | 16,909,884 | 1.69 | 136 | 60.6 | 48.22 |  |
-| Fastest | Zstd x77 | 16,909,884 | 1.69 | 136 | 60.7 | 48.56 | same |
-| Smallest | Zstd x77 | 16,909,884 | 1.69 | 210 | 60.8 | 48.50 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 18 | 2.6 | 0.34 | reads faster above 1,089 MB/s |
-| hint Dictionary | Zstd x77 | 16,909,884 | 1.69 | 242 | 61.1 | 48.63 | same |
-| hint Alp | Zstd x77 | 16,909,884 | 1.69 | 212 | 60.9 | 48.28 | same |
-| hint Zstd | Zstd x77 | 16,909,884 | 1.69 | 135 | 61.0 | 48.55 | same |
-| Auto, 16 MiB chunks | Dictionary x5 | 22,129,980 | 2.21 | 105 | 8.5 | 3.25 | reads faster above 100 MB/s |
+| Auto | Zstd x77 | 16,909,884 | 1.69 | 140 | 60.7 | 47.38 |  |
+| Fastest | Zstd x77 | 16,909,884 | 1.69 | 141 | 60.1 | 47.52 | same |
+| Smallest | Zstd x77 | 16,909,884 | 1.69 | 208 | 59.7 | 47.63 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.6 | 0.34 | reads faster above 1,085 MB/s |
+| hint Dictionary | Zstd x77 | 16,909,884 | 1.69 | 218 | 60.0 | 47.78 | same |
+| hint Alp | Zstd x77 | 16,909,884 | 1.69 | 213 | 59.8 | 47.28 | same |
+| hint Zstd | Zstd x77 | 16,909,884 | 1.69 | 140 | 60.0 | 47.20 | same |
+| Auto, 16 MiB chunks | Dictionary x5 | 22,129,980 | 2.21 | 92 | 8.4 | 3.27 | reads faster above 100 MB/s |
 
 </details>
 
@@ -703,13 +703,13 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | AlpRd x77 | 69,054,372 | 6.91 | 53 | 8.4 | 0.61 |  |
-| Fastest | AlpRd x77 | 69,054,372 | 6.91 | 52 | 8.6 | 0.76 | same |
-| Smallest | AlpRd x77 | 69,054,372 | 6.91 | 170 | 8.3 | 0.64 | same |
-| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.6 | 0.34 | reads faster above 1,915 MB/s |
-| hint Dictionary | AlpRd x77 | 69,054,372 | 6.91 | 214 | 8.4 | 0.61 | same |
-| hint Alp | AlpRd x77 | 69,054,372 | 6.91 | 186 | 8.3 | 0.61 | same |
-| hint Zstd | AlpRd x77 | 69,054,372 | 6.91 | 231 | 8.4 | 0.77 | same |
+| Auto | AlpRd x77 | 69,054,372 | 6.91 | 54 | 8.1 | 0.59 |  |
+| Fastest | AlpRd x77 | 69,054,372 | 6.91 | 53 | 8.2 | 0.60 | same |
+| Smallest | AlpRd x77 | 69,054,372 | 6.91 | 167 | 8.3 | 0.60 | same |
+| None | Canonical x77 | 80,043,724 | 8.00 | 19 | 2.5 | 0.37 | reads faster above 1,942 MB/s |
+| hint Dictionary | AlpRd x77 | 69,054,372 | 6.91 | 192 | 8.3 | 0.62 | same |
+| hint Alp | AlpRd x77 | 69,054,372 | 6.91 | 180 | 8.2 | 0.62 | same |
+| hint Zstd | AlpRd x77 | 69,054,372 | 6.91 | 224 | 8.5 | 0.73 | same |
 
 </details>
 
@@ -717,23 +717,23 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| 16 cities, random order | Dictionary x175 | 0.51 | 233 | 8.6 | 0.66 |  |
-| 10 000 distinct ids | Dictionary x306 | 2.54 | 601 | 37.3 | 28.90 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 12.2 ms, take 3.34 ms; reads faster at any throughput; hint Fsst: Fsst x306, 9.06 B/value, scan 25.3 ms, take 0.92 ms; reads faster above 5,445 MB/s |
-| 10 000 distinct ids, 10 % null | Dictionary x306 | 2.45 | 607 | 39.7 | 29.24 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 13.3 ms, take 3.32 ms; reads faster at any throughput; hint Fsst: Fsst x306, 8.80 B/value, scan 36.0 ms, take 1.24 ms; reads faster above 17,320 MB/s |
-| unique UUIDs | Zstd x611 | 20.61 | 1310 | 316.4 | 311.58 | hint Fsst: Fsst x611, 24.91 B/value, scan 71.8 ms, take 1.99 ms; reads faster above 176 MB/s |
-| log lines (~100 B) | Zstd x1221 | 13.71 | 1252 | 418.1 | 338.68 | hint Fsst: Fsst x1221, 23.96 B/value, scan 90.9 ms, take 2.82 ms; reads faster above 313 MB/s |
+| 16 cities, random order | Dictionary x175 | 0.51 | 133 | 8.4 | 0.65 |  |
+| 10 000 distinct ids | Dictionary x306 | 2.54 | 567 | 36.6 | 28.11 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 11.9 ms, take 3.28 ms; reads faster at any throughput; hint Fsst: Fsst x306, 9.06 B/value, scan 24.9 ms, take 0.88 ms; reads faster above 5,563 MB/s |
+| 10 000 distinct ids, 10 % null | Dictionary x306 | 2.45 | 586 | 38.5 | 28.05 | Auto, 16 MiB chunks: Dictionary x18, 1.80 B/value, scan 13.0 ms, take 3.20 ms; reads faster at any throughput; hint Fsst: Fsst x306, 8.80 B/value, scan 33.5 ms, take 1.00 ms; reads faster above 12,713 MB/s |
+| unique UUIDs | Zstd x611 | 20.61 | 1288 | 308.9 | 303.81 | hint Fsst: Fsst x611, 24.91 B/value, scan 70.7 ms, take 1.67 ms; reads faster above 181 MB/s |
+| log lines (~100 B) | Zstd x1221 | 13.71 | 1220 | 409.1 | 334.08 | hint Fsst: Fsst x1221, 23.96 B/value, scan 89.9 ms, take 2.76 ms; reads faster above 321 MB/s |
 
 <details><summary>16 cities, random order: every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x175 | 5,117,276 | 0.51 | 233 | 8.6 | 0.66 |  |
-| Fastest | Dictionary x175 | 5,117,276 | 0.51 | 232 | 8.6 | 0.67 | same |
-| Smallest | Dictionary x175 | 5,117,276 | 0.51 | 376 | 8.6 | 0.70 | same |
-| None | Canonical x175 | 96,746,748 | 9.67 | 199 | 23.1 | 5.03 | reads slower at any throughput |
-| hint Dictionary | Dictionary x175 | 5,117,276 | 0.51 | 234 | 8.6 | 0.62 | same |
-| hint Fsst | Fsst x175 | 64,458,972 | 6.45 | 393 | 24.3 | 0.82 | reads slower at any throughput |
-| hint Zstd | Zstd x175 | 17,427,092 | 1.74 | 228 | 92.9 | 66.92 | reads slower at any throughput |
+| Auto | Dictionary x175 | 5,117,276 | 0.51 | 133 | 8.4 | 0.65 |  |
+| Fastest | Dictionary x175 | 5,117,276 | 0.51 | 135 | 8.8 | 0.60 | reads slower at any throughput |
+| Smallest | Dictionary x175 | 5,117,276 | 0.51 | 272 | 8.3 | 0.66 | same |
+| None | Canonical x175 | 96,746,748 | 9.67 | 185 | 22.7 | 4.83 | reads slower at any throughput |
+| hint Dictionary | Dictionary x175 | 5,117,276 | 0.51 | 130 | 8.2 | 0.64 | same |
+| hint Fsst | Fsst x175 | 64,458,972 | 6.45 | 381 | 23.2 | 0.65 | reads slower at any throughput |
+| hint Zstd | Zstd x175 | 17,427,092 | 1.74 | 224 | 91.8 | 65.83 | reads slower at any throughput |
 
 </details>
 
@@ -741,14 +741,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x306 | 25,433,780 | 2.54 | 601 | 37.3 | 28.90 |  |
-| Fastest | Dictionary x306 | 25,433,780 | 2.54 | 592 | 37.1 | 28.71 | same |
-| Smallest | Dictionary x305, Zstd x1 | 25,427,444 | 2.54 | 1449 | 37.0 | 28.71 | same |
-| None | Canonical x306 | 140,098,164 | 14.01 | 145 | 18.4 | 6.87 | reads faster above 6,084 MB/s |
-| hint Dictionary | Dictionary x306 | 25,433,780 | 2.54 | 593 | 37.7 | 28.88 | same |
-| hint Fsst | Fsst x306 | 90,615,708 | 9.06 | 480 | 25.3 | 0.92 | reads faster above 5,445 MB/s |
-| hint Zstd | Zstd x306 | 27,097,620 | 2.71 | 323 | 106.7 | 77.56 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x18 | 18,014,004 | 1.80 | 345 | 12.2 | 3.34 | reads faster at any throughput |
+| Auto | Dictionary x306 | 25,433,780 | 2.54 | 567 | 36.6 | 28.11 |  |
+| Fastest | Dictionary x306 | 25,433,780 | 2.54 | 568 | 36.3 | 28.09 | same |
+| Smallest | Dictionary x305, Zstd x1 | 25,427,444 | 2.54 | 1417 | 36.5 | 28.35 | same |
+| None | Canonical x306 | 140,098,164 | 14.01 | 149 | 18.0 | 6.53 | reads faster above 6,153 MB/s |
+| hint Dictionary | Dictionary x306 | 25,433,780 | 2.54 | 570 | 36.5 | 28.15 | same |
+| hint Fsst | Fsst x306 | 90,615,708 | 9.06 | 466 | 24.9 | 0.88 | reads faster above 5,563 MB/s |
+| hint Zstd | Zstd x306 | 27,097,620 | 2.71 | 320 | 91.1 | 66.11 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x18 | 18,014,004 | 1.80 | 325 | 11.9 | 3.28 | reads faster at any throughput |
 
 </details>
 
@@ -756,14 +756,14 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Dictionary x306 | 24,539,276 | 2.45 | 607 | 39.7 | 29.24 |  |
-| Fastest | Dictionary x306 | 24,539,276 | 2.45 | 629 | 39.8 | 29.04 | same |
-| Smallest | Dictionary x305, Zstd x1 | 24,533,580 | 2.45 | 1458 | 39.6 | 28.76 | same |
-| None | Canonical x306 | 151,883,724 | 15.19 | 217 | 30.3 | 6.49 | reads faster above 13,663 MB/s |
-| hint Dictionary | Dictionary x306 | 24,539,276 | 2.45 | 611 | 39.6 | 29.10 | same |
-| hint Fsst | Fsst x306 | 87,950,764 | 8.80 | 519 | 36.0 | 1.24 | reads faster above 17,320 MB/s |
-| hint Zstd | Zstd x306 | 25,595,628 | 2.56 | 334 | 104.7 | 60.05 | reads slower at any throughput |
-| Auto, 16 MiB chunks | Dictionary x18 | 17,982,596 | 1.80 | 386 | 13.3 | 3.32 | reads faster at any throughput |
+| Auto | Dictionary x306 | 24,539,276 | 2.45 | 586 | 38.5 | 28.05 |  |
+| Fastest | Dictionary x306 | 24,539,276 | 2.45 | 591 | 38.6 | 28.29 | same |
+| Smallest | Dictionary x305, Zstd x1 | 24,533,580 | 2.45 | 1416 | 38.5 | 28.27 | same |
+| None | Canonical x306 | 151,883,724 | 15.19 | 216 | 29.6 | 6.22 | reads faster above 14,424 MB/s |
+| hint Dictionary | Dictionary x306 | 24,539,276 | 2.45 | 594 | 39.0 | 28.43 | same |
+| hint Fsst | Fsst x306 | 87,950,764 | 8.80 | 509 | 33.5 | 1.00 | reads faster above 12,713 MB/s |
+| hint Zstd | Zstd x306 | 25,595,628 | 2.56 | 340 | 102.9 | 59.99 | reads slower at any throughput |
+| Auto, 16 MiB chunks | Dictionary x18 | 17,982,596 | 1.80 | 379 | 13.0 | 3.20 | reads faster at any throughput |
 
 </details>
 
@@ -771,13 +771,13 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Zstd x611 | 206,058,580 | 20.61 | 1310 | 316.4 | 311.58 |  |
-| Fastest | Zstd x611 | 206,058,580 | 20.61 | 1296 | 316.1 | 309.80 | same |
-| Smallest | Zstd x611 | 206,058,580 | 20.61 | 3144 | 315.5 | 309.86 | same |
-| None | Canonical x611 | 360,155,508 | 36.02 | 161 | 28.3 | 12.52 | reads faster above 535 MB/s |
-| hint Dictionary | Zstd x611 | 206,058,580 | 20.61 | 3118 | 374.4 | 335.24 | reads slower at any throughput |
-| hint Fsst | Fsst x611 | 249,114,908 | 24.91 | 1717 | 71.8 | 1.99 | reads faster above 176 MB/s |
-| hint Zstd | Zstd x611 | 206,058,580 | 20.61 | 1295 | 316.2 | 310.12 | same |
+| Auto | Zstd x611 | 206,058,580 | 20.61 | 1288 | 308.9 | 303.81 |  |
+| Fastest | Zstd x611 | 206,058,580 | 20.61 | 1285 | 309.5 | 303.32 | same |
+| Smallest | Zstd x611 | 206,058,580 | 20.61 | 3061 | 308.4 | 303.14 | same |
+| None | Canonical x611 | 360,155,508 | 36.02 | 145 | 27.6 | 12.06 | reads faster above 548 MB/s |
+| hint Dictionary | Zstd x611 | 206,058,580 | 20.61 | 3072 | 308.2 | 303.96 | same |
+| hint Fsst | Fsst x611 | 249,114,908 | 24.91 | 1699 | 70.7 | 1.67 | reads faster above 181 MB/s |
+| hint Zstd | Zstd x611 | 206,058,580 | 20.61 | 1286 | 309.0 | 303.03 | same |
 
 </details>
 
@@ -785,13 +785,13 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Zstd x1221 | 137,107,180 | 13.71 | 1252 | 418.1 | 338.68 |  |
-| Fastest | Zstd x1221 | 137,107,180 | 13.71 | 1244 | 416.3 | 338.01 | same |
-| Smallest | Zstd x1221 | 137,107,180 | 13.71 | 3004 | 415.0 | 342.19 | same |
-| None | Canonical x1221 | 725,468,436 | 72.55 | 493 | 49.2 | 20.44 | reads faster above 1,595 MB/s |
-| hint Dictionary | Zstd x1221 | 137,107,180 | 13.71 | 3104 | 416.7 | 337.28 | same |
-| hint Fsst | Fsst x1221 | 239,634,612 | 23.96 | 2051 | 90.9 | 2.82 | reads faster above 313 MB/s |
-| hint Zstd | Zstd x1221 | 137,107,180 | 13.71 | 1225 | 417.9 | 338.45 | same |
+| Auto | Zstd x1221 | 137,107,180 | 13.71 | 1220 | 409.1 | 334.08 |  |
+| Fastest | Zstd x1221 | 137,107,180 | 13.71 | 1232 | 410.1 | 332.91 | same |
+| Smallest | Zstd x1221 | 137,107,180 | 13.71 | 2951 | 409.5 | 333.79 | same |
+| None | Canonical x1221 | 725,468,436 | 72.55 | 408 | 45.3 | 19.16 | reads faster above 1,617 MB/s |
+| hint Dictionary | Zstd x1221 | 137,107,180 | 13.71 | 3037 | 410.1 | 334.87 | same |
+| hint Fsst | Fsst x1221 | 239,634,612 | 23.96 | 2034 | 89.9 | 2.76 | reads faster above 321 MB/s |
+| hint Zstd | Zstd x1221 | 137,107,180 | 13.71 | 1216 | 410.2 | 333.56 | same |
 
 </details>
 
@@ -799,18 +799,18 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | shape | `Auto` writes | B/value | write ms | scan ms | take ms | worth knowing |
 |---|---|---:|---:|---:|---:|---|
-| half true | Canonical x10 | 0.13 | 2 | 0.2 | 0.24 |  |
-| 1 % true | RunEnd x10 | 0.05 | 3 | 2.3 | 1.79 | None: Canonical x10, 0.13 B/value, scan 0.2 ms, take 0.27 ms; reads faster above 344 MB/s |
+| half true | Canonical x10 | 0.13 | 1 | 0.2 | 0.28 |  |
+| 1 % true | RunEnd x10 | 0.05 | 3 | 2.1 | 1.68 | None: Canonical x10, 0.13 B/value, scan 0.2 ms, take 0.25 ms; reads faster above 371 MB/s |
 
 <details><summary>half true: every configuration</summary>
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | Canonical x10 | 1,262,548 | 0.13 | 2 | 0.2 | 0.24 |  |
-| Fastest | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.27 | reads slower at any throughput |
-| Smallest | Canonical x10 | 1,262,548 | 0.13 | 2 | 0.2 | 0.25 | same |
-| None | Canonical x10 | 1,262,548 | 0.13 | 2 | 0.2 | 0.27 | reads slower at any throughput |
-| hint RunEnd | Canonical x10 | 1,262,548 | 0.13 | 3 | 0.2 | 0.29 | reads slower at any throughput |
+| Auto | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.28 |  |
+| Fastest | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.24 | reads faster at any throughput |
+| Smallest | Canonical x10 | 1,262,548 | 0.13 | 3 | 0.2 | 0.26 | reads faster at any throughput |
+| None | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.23 | reads faster at any throughput |
+| hint RunEnd | Canonical x10 | 1,262,548 | 0.13 | 2 | 0.2 | 0.27 | same |
 
 </details>
 
@@ -818,20 +818,20 @@ GB/s; and the fastest take, when it halves `Auto`'s.
 
 | configuration | written as | bytes | B/value | write ms | scan ms | take ms | against Auto |
 |---|---|---:|---:|---:|---:|---:|---|
-| Auto | RunEnd x10 | 548,084 | 0.05 | 3 | 2.3 | 1.79 |  |
-| Fastest | RunEnd x10 | 548,084 | 0.05 | 3 | 2.2 | 1.78 | same |
-| Smallest | RunEnd x10 | 548,084 | 0.05 | 4 | 2.2 | 1.78 | same |
-| None | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.27 | reads faster above 344 MB/s |
-| hint RunEnd | RunEnd x10 | 548,084 | 0.05 | 4 | 2.2 | 1.79 | same |
+| Auto | RunEnd x10 | 548,084 | 0.05 | 3 | 2.1 | 1.68 |  |
+| Fastest | RunEnd x10 | 548,084 | 0.05 | 3 | 2.2 | 1.73 | same |
+| Smallest | RunEnd x10 | 548,084 | 0.05 | 3 | 2.2 | 1.75 | same |
+| None | Canonical x10 | 1,262,548 | 0.13 | 1 | 0.2 | 0.25 | reads faster above 371 MB/s |
+| hint RunEnd | RunEnd x10 | 548,084 | 0.05 | 3 | 2.2 | 1.74 | same |
 
 </details>
 
 ### The profiles side by side
 
-`Fastest` wrote what `Auto` wrote on 20 of 20 columns. `Smallest` wrote something else on *i64, sorted runs of 1 000*, *i64, timestamps (ms, increasing, jittered)*, *utf8, 10 000 distinct ids*, *utf8, 10 000 distinct ids, 10 % null*, and took up to 8.2 times `Auto`'s write, 327 ms against 40 ms on *f64, prices (2 decimals)*, since it tries every scheme on every chunk.
+`Fastest` wrote what `Auto` wrote on 20 of 20 columns. `Smallest` wrote something else on *i64, sorted runs of 1 000*, *i64, timestamps (ms, increasing, jittered)*, *utf8, 10 000 distinct ids*, *utf8, 10 000 distinct ids, 10 % null*, and took up to 8.2 times `Auto`'s write, 321 ms against 39 ms on *f64, prices (2 decimals)*, since it tries every scheme on every chunk.
 `None`, the plain form, made the largest file on 20 of 20 columns.
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:12 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; commit 7a0e7e28 with uncommitted changes, 2026-09-27 23:03 UTC.*
 <!-- /results: tradeoffs -->
 
 <!-- results: advice -->
@@ -857,7 +857,7 @@ does not; a column it never departs on is left out.
 
 It keeps the writer's choice under every goal on the 10 other columns.
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:14 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; commit 7a0e7e28 with uncommitted changes, 2026-09-27 23:04 UTC.*
 <!-- /results: advice -->
 
 ## Kernels, against what they replaced
@@ -873,14 +873,14 @@ the reference profile on that class, the one to quote a small difference from.
 
 | Method       | BitWidth | Mean      | Error     | StdDev    | Ratio | MannWhitney(5%) | ns/row | GB/s  | Allocated | Alloc Ratio |
 |------------- |--------- |----------:|----------:|----------:|------:|---------------- |-------:|------:|----------:|------------:|
-| &#39;i64 scalar&#39; | 17       | 77.113 μs | 2.3706 μs | 0.6156 μs |  1.00 | Baseline        |   1.18 |  6.80 |         - |          NA |
-| &#39;i64 vector&#39; | 17       |  8.377 μs | 0.2198 μs | 0.0340 μs |  0.11 | Faster          |   0.13 | 62.59 |         - |          NA |
-| &#39;i32 scalar&#39; | 17       | 88.322 μs | 3.4862 μs | 0.9054 μs |  1.15 | Same            |   1.35 |  2.97 |         - |          NA |
-| &#39;i64 pack&#39;   | 17       | 22.438 μs | 0.7023 μs | 0.1824 μs |  0.29 | Faster          |   0.34 | 23.37 |         - |          NA |
-| &#39;i32 pack&#39;   | 17       | 11.295 μs | 0.1837 μs | 0.0477 μs |  0.15 | Faster          |   0.17 | 23.21 |         - |          NA |
-| &#39;i32 vector&#39; | 17       |  5.601 μs | 0.0276 μs | 0.0043 μs |  0.07 | Faster          |   0.09 | 46.80 |         - |          NA |
+| &#39;i64 scalar&#39; | 17       | 76.081 μs | 1.6955 μs | 0.4403 μs |  1.00 | Baseline        |   1.16 |  6.89 |         - |          NA |
+| &#39;i64 vector&#39; | 17       | 10.253 μs | 1.3300 μs | 0.3454 μs |  0.13 | Faster          |   0.16 | 51.14 |         - |          NA |
+| &#39;i32 scalar&#39; | 17       | 86.953 μs | 2.2467 μs | 0.5835 μs |  1.14 | Same            |   1.33 |  3.01 |         - |          NA |
+| &#39;i64 pack&#39;   | 17       | 22.247 μs | 0.3546 μs | 0.0549 μs |  0.29 | Faster          |   0.34 | 23.57 |         - |          NA |
+| &#39;i32 pack&#39;   | 17       | 12.090 μs | 0.7907 μs | 0.2053 μs |  0.16 | Faster          |   0.18 | 21.68 |         - |          NA |
+| &#39;i32 vector&#39; | 17       |  4.725 μs | 0.0637 μs | 0.0166 μs |  0.06 | Faster          |   0.07 | 55.48 |         - |          NA |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7a0e7e28 with uncommitted changes, 2026-09-27 23:08 UTC.*
 <!-- /results: kernel:FastLanesKernelBenchmarks -->
 
 <!-- results: kernel:RowEncodingBenchmarks -->
@@ -888,48 +888,48 @@ the reference profile on that class, the one to quote a small difference from.
 
 | Method                                   | Entry                | Mean       | Error      | StdDev    | ns/row | GB/s | Allocated |
 |----------------------------------------- |--------------------- |-----------:|-----------:|----------:|-------:|-----:|----------:|
-| **&#39;encode a batch to row keys&#39;**             | **conta(...)nical [33]** |  **48.643 μs** |  **1.2391 μs** | **0.3218 μs** |  **11.88** | **3.62** |      **48 B** |
-| &#39;encode a batch to row keys, descending&#39; | conta(...)nical [33] |  48.980 μs |  3.3704 μs | 0.5216 μs |  11.96 | 3.60 |      48 B |
-| &#39;encode, then sort rows by key&#39;          | conta(...)nical [33] | 365.200 μs | 18.9096 μs | 2.9263 μs |  89.16 | 0.48 |      48 B |
+| **&#39;encode a batch to row keys&#39;**             | **conta(...)nical [33]** |  **47.621 μs** |  **2.0152 μs** | **0.3119 μs** |  **11.63** | **3.70** |      **48 B** |
+| &#39;encode a batch to row keys, descending&#39; | conta(...)nical [33] |  45.538 μs |  0.8430 μs | 0.2189 μs |  11.12 | 3.87 |      48 B |
+| &#39;encode, then sort rows by key&#39;          | conta(...)nical [33] | 364.805 μs | 27.5182 μs | 7.1464 μs |  89.06 | 0.48 |      48 B |
 | **&#39;encode a batch to row keys&#39;**             | **conta(...)nulls [33]** |         **NA** |         **NA** |        **NA** |      **-** |    **-** |        **NA** |
 | &#39;encode a batch to row keys, descending&#39; | conta(...)nulls [33] |         NA |         NA |        NA |      - |    - |        NA |
 | &#39;encode, then sort rows by key&#39;          | conta(...)nulls [33] |         NA |         NA |        NA |      - |    - |        NA |
-| **&#39;encode a batch to row keys&#39;**             | **encod(...)r1025 [31]** |   **6.772 μs** |  **0.1071 μs** | **0.0278 μs** |   **6.61** | **1.36** |      **48 B** |
-| &#39;encode a batch to row keys, descending&#39; | encod(...)r1025 [31] |   6.752 μs |  0.2228 μs | 0.0579 μs |   6.59 | 1.37 |      48 B |
-| &#39;encode, then sort rows by key&#39;          | encod(...)r1025 [31] |  36.969 μs |  1.5542 μs | 0.4036 μs |  36.07 | 0.25 |      48 B |
+| **&#39;encode a batch to row keys&#39;**             | **encod(...)r1025 [31]** |   **6.469 μs** |  **0.0700 μs** | **0.0108 μs** |   **6.31** | **1.43** |      **48 B** |
+| &#39;encode a batch to row keys, descending&#39; | encod(...)r1025 [31] |   6.409 μs |  0.0348 μs | 0.0090 μs |   6.25 | 1.44 |      48 B |
+| &#39;encode, then sort rows by key&#39;          | encod(...)r1025 [31] |  36.684 μs |  1.0286 μs | 0.2671 μs |  35.79 | 0.25 |      48 B |
 
 Benchmarks with issues:
   RowEncodingBenchmarks.'encode a batch to row keys': fast(MinIterationTime=50ms, Toolchain=InProcessEmitToolchain, IterationCount=5, IterationTime=100ms, MaxWarmupIterationCount=30, MinWarmupIterationCount=4) [Entry=conta(...)nulls [33]]
   RowEncodingBenchmarks.'encode a batch to row keys, descending': fast(MinIterationTime=50ms, Toolchain=InProcessEmitToolchain, IterationCount=5, IterationTime=100ms, MaxWarmupIterationCount=30, MinWarmupIterationCount=4) [Entry=conta(...)nulls [33]]
   RowEncodingBenchmarks.'encode, then sort rows by key': fast(MinIterationTime=50ms, Toolchain=InProcessEmitToolchain, IterationCount=5, IterationTime=100ms, MaxWarmupIterationCount=30, MinWarmupIterationCount=4) [Entry=conta(...)nulls [33]]
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7a0e7e28 with uncommitted changes, 2026-09-27 23:08 UTC.*
 <!-- /results: kernel:RowEncodingBenchmarks -->
 
 <!-- results: kernel:CompressorBenchmarks -->
 ### `CompressorBenchmarks`
 
-| Method                       | Column | Mean          | Error         | StdDev      | Ratio | MannWhitney(5%) | Allocated | Alloc Ratio |
-|----------------------------- |------- |--------------:|--------------:|------------:|------:|---------------- |----------:|------------:|
-| &#39;Choose, the whole decision&#39; | i64    | 43,437.126 ns | 2,778.9539 ns | 721.6855 ns | 1.000 | Baseline        |      72 B |        1.00 |
-| &#39;candidate: sequence&#39;        | i64    |      7.412 ns |     0.1156 ns |   0.0300 ns | 0.000 | Faster          |         - |        0.00 |
-| &#39;candidate: bit packing&#39;     | i64    |  6,636.432 ns |   150.8890 ns |  39.1854 ns | 0.153 | Faster          |         - |        0.00 |
-| &#39;candidate: FSST&#39;            | i64    |      1.578 ns |     0.0165 ns |   0.0026 ns | 0.000 | Faster          |         - |        0.00 |
-| &#39;candidate: zstd&#39;            | i64    |  9,797.567 ns |   366.3004 ns |  95.1271 ns | 0.226 | Faster          |      72 B |        1.00 |
-| &#39;candidate: ALP&#39;             | i64    |      1.755 ns |     0.0525 ns |   0.0136 ns | 0.000 | Faster          |         - |        0.00 |
+| Method                       | Column | Mean          | Error       | StdDev     | Ratio | MannWhitney(5%) | Allocated | Alloc Ratio |
+|----------------------------- |------- |--------------:|------------:|-----------:|------:|---------------- |----------:|------------:|
+| &#39;Choose, the whole decision&#39; | i64    | 43,999.912 ns | 535.5218 ns | 82.8726 ns | 1.000 | Baseline        |      72 B |        1.00 |
+| &#39;candidate: sequence&#39;        | i64    |      6.896 ns |   0.2151 ns |  0.0559 ns | 0.000 | Faster          |         - |        0.00 |
+| &#39;candidate: bit packing&#39;     | i64    |  6,570.347 ns |  40.1118 ns |  6.2073 ns | 0.149 | Faster          |         - |        0.00 |
+| &#39;candidate: FSST&#39;            | i64    |      1.516 ns |   0.0288 ns |  0.0045 ns | 0.000 | Faster          |         - |        0.00 |
+| &#39;candidate: zstd&#39;            | i64    |  9,468.242 ns | 283.7353 ns | 43.9084 ns | 0.215 | Faster          |      72 B |        1.00 |
+| &#39;candidate: ALP&#39;             | i64    |      1.826 ns |   0.1459 ns |  0.0379 ns | 0.000 | Faster          |         - |        0.00 |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7a0e7e28 with uncommitted changes, 2026-09-27 23:08 UTC.*
 <!-- /results: kernel:CompressorBenchmarks -->
 
 <!-- results: kernel:LanesBenchmarks -->
 ### `LanesBenchmarks`
 
-| Method                 | Lanes | Mean       | Error    | StdDev   | Ratio | MannWhitney(5%) | RatioSD | Completed Work Items | Lock Contentions | Allocated | Alloc Ratio |
-|----------------------- |------ |-----------:|---------:|---------:|------:|---------------- |--------:|---------------------:|-----------------:|----------:|------------:|
-| &#39;ours, n lanes&#39;        | 4     |   369.3 μs |  9.55 μs |  1.48 μs |  1.00 | Baseline        |    0.00 |             103.2778 |                - |   46586 B |        1.00 |
-| &#39;reference, n workers&#39; | 4     | 1,085.7 μs | 60.16 μs | 15.62 μs |  2.94 | Slower          |    0.04 |                    - |                - |         - |        0.00 |
+| Method                 | Lanes | Mean       | Error    | StdDev  | Ratio | MannWhitney(5%) | RatioSD | Completed Work Items | Lock Contentions | Allocated | Alloc Ratio |
+|----------------------- |------ |-----------:|---------:|--------:|------:|---------------- |--------:|---------------------:|-----------------:|----------:|------------:|
+| &#39;ours, n lanes&#39;        | 4     |   347.6 μs | 19.07 μs | 4.95 μs |  1.00 | Baseline        |    0.00 |             104.2891 |                - |   46586 B |        1.00 |
+| &#39;reference, n workers&#39; | 4     | 1,004.6 μs | 49.83 μs | 7.71 μs |  2.89 | Slower          |    0.04 |                    - |                - |         - |        0.00 |
 
-*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7d8f1790 with uncommitted changes, 2026-09-25 11:42 UTC.*
+*Measured on Apple M4 Pro (Arm64), 14 processors, macOS 26.7.0; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit 7a0e7e28 with uncommitted changes, 2026-09-27 23:08 UTC.*
 <!-- /results: kernel:LanesBenchmarks -->
 
 ## What this does not measure
