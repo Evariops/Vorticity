@@ -3,7 +3,8 @@
 // `Nested` writes `Depth` messages one inside the other around a bytes field of `Bytes` bytes, as a
 // deep dtype or a commit header's inlined pages are written; `WideStruct` serializes the dtype of a
 // struct of 4,096 Int64 fields, the shape metadata usually has. Run in a checkout of the original
-// and in the tree.
+// and in the tree. `NestedBefore` nests the same messages with `ProtoWriterBefore`, the writer as it
+// kept its waiting lengths in an array of its own.
 using System;
 
 using BenchmarkDotNet.Attributes;
@@ -68,6 +69,22 @@ public class ProtoNestingBenchmarks
         }
     }
 
+    /// <summary>The nested messages written by the original writer.</summary>
+    [Benchmark]
+    public int NestedBefore()
+    {
+        ProtoWriterBefore writer = new ProtoWriterBefore(Bytes + 1_024);
+        try
+        {
+            NestBefore(ref writer, Depth);
+            return writer.Length;
+        }
+        finally
+        {
+            writer.Dispose();
+        }
+    }
+
     /// <summary>The dtype of a struct of 4,096 fields serialized.</summary>
     [Benchmark]
     public int WideStruct() => DTypeProtobuf.Serialize(_wide).Length;
@@ -82,6 +99,19 @@ public class ProtoNestingBenchmarks
 
         ProtoWriter.MessageScope scope = writer.BeginMessage(1);
         Nest(ref writer, depth - 1);
+        scope.End();
+    }
+
+    private void NestBefore(ref ProtoWriterBefore writer, int depth)
+    {
+        if (depth == 0)
+        {
+            writer.WriteBytes(1, _payload);
+            return;
+        }
+
+        ProtoWriterBefore.MessageScope scope = writer.BeginMessage(1);
+        NestBefore(ref writer, depth - 1);
         scope.End();
     }
 }

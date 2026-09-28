@@ -299,6 +299,71 @@ public sealed class ProtoMessageScopeTests
     }
 
     /// <summary>
+    /// A clear while a message is open drops the longer lengths its closed children left waiting:
+    /// what is written next is encoded as a new writer would encode it.
+    /// </summary>
+    [Fact]
+    public void A_clear_drops_the_longer_lengths_an_open_message_had_waiting()
+    {
+        Part fresh = new Part(1, null, [new Part(2, null, [new Part(3, ProtoTestHelpers.Payload(300), [])]), new Part(4, ProtoTestHelpers.Payload(150), [])]);
+        byte[] written = ProtoTestHelpers.Write(
+            (ref ProtoWriter w) =>
+            {
+                _ = w.BeginMessage(7);
+                ProtoWriter.MessageScope inner = w.BeginMessage(8);
+                w.WriteBytesAlways(1, ProtoTestHelpers.Payload(200));
+                inner.End();
+                w.Clear();
+                Write(ref w, fresh);
+            },
+            initialCapacity: 16);
+
+        List<byte> expected = [];
+        Encode(fresh, expected);
+        Assert.Equal(expected.ToArray(), written);
+    }
+
+    /// <summary>
+    /// A close that fails as the outermost one, here of a scope opened before a clear whose slot
+    /// lies past everything written since, drops the longer lengths waiting under it: a clear and
+    /// a new message then give the bytes a new writer would.
+    /// </summary>
+    [Fact]
+    public void An_outermost_close_that_fails_leaves_no_longer_length_waiting()
+    {
+        Part fresh = new Part(1, null, [new Part(2, ProtoTestHelpers.Payload(300), [])]);
+        bool threw = false;
+        byte[] written = ProtoTestHelpers.Write(
+            (ref ProtoWriter w) =>
+            {
+                w.WriteBytesAlways(9, ProtoTestHelpers.Payload(1_000));
+                ProtoWriter.MessageScope stale = w.BeginMessage(1);
+                w.Clear();
+                _ = w.BeginMessage(2);
+                ProtoWriter.MessageScope inner = w.BeginMessage(3);
+                w.WriteBytesAlways(1, ProtoTestHelpers.Payload(200));
+                inner.End();
+                try
+                {
+                    stale.End();
+                }
+                catch (InvalidOperationException)
+                {
+                    threw = true;
+                }
+
+                w.Clear();
+                Write(ref w, fresh);
+            },
+            initialCapacity: 16);
+
+        List<byte> expected = [];
+        Encode(fresh, expected);
+        Assert.True(threw);
+        Assert.Equal(expected.ToArray(), written);
+    }
+
+    /// <summary>
     /// The scope holds a <c>ref</c> to the writer, so a body that outgrows the pooled array and
     /// forces a reallocation must still backpatch into the array the writer ended up with.
     /// </summary>

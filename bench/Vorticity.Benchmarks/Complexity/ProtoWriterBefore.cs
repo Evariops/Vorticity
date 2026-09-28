@@ -1,123 +1,86 @@
+// The protobuf writer as it held the lengths waiting for the outermost message's close in an array
+// of its own, next to the count of open scopes: the original that `ProtoMessageBenchmarks` and
+// `ProtoNestingBenchmarks` measure the library against.
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
-using System.Runtime.InteropServices;
 using System.Text;
 
-namespace Vorticity.Serialization.Protobuf;
+using Vorticity.Serialization.Protobuf;
 
-/// <summary>
-/// A single-pass proto3 encoder over a pooled <see cref="byte"/> array.
-/// </summary>
-/// <remarks>
-/// <para>
-/// <b>proto3 implicit presence.</b> The plain field writers omit a field whose value equals the
-/// proto3 default (0, false, empty), because that is what every conforming encoder does and what
-/// a decoder assumes when the field is absent. The <c>...Always</c> variants emit unconditionally
-/// and exist for fields with <em>explicit</em> presence — <c>optional</c> fields, and every field
-/// inside a <c>oneof</c>, where "absent" and "present and zero" are different states. Both
-/// behaviours occur in the vendored schemas, so both are part of the contract:
-/// <c>Extension.metadata</c> is an <c>optional bytes</c> field, and every arm of
-/// <c>ScalarValue.kind</c> is a <c>oneof</c> member.
-/// </para>
-/// <para>
-/// <b>Ownership.</b> The backing array is rented from <see cref="ArrayPool{T}"/> and returned by
-/// <see cref="Dispose"/>. <see cref="WrittenSpan"/> is only valid until the next mutation or
-/// <see cref="Dispose"/>. A <c>default(ProtoWriter)</c> is usable: the array is rented lazily on
-/// first write.
-/// </para>
-/// <para>
-/// <b>This is a mutable struct, and the language cannot enforce that for us.</b> Pass it as
-/// <c>ref ProtoWriter</c>, never by value — a copy writes into the same pooled array as the
-/// original and the two <see cref="Length"/> counters then disagree. A <c>ref struct</c> would not
-/// fix it: that forbids boxing and heap capture, not copying, and it is unavailable here anyway
-/// because <see cref="MessageScope"/> holds a <c>ref ProtoWriter</c> and a ref field may not point
-/// at a ref struct. <c>using var w = new ProtoWriter();</c> mutates in place (a <c>using</c> local is
-/// read-only but is not defensively copied) and <see cref="BeginMessage"/> works on one, but C#
-/// forbids passing a <c>using</c> variable as a <c>ref</c> argument (CS1657). A codec that hands
-/// its writer to a <c>Write(ref ProtoWriter, …)</c> helper therefore needs a plain local disposed
-/// in a <c>try</c>/<c>finally</c>.
-/// </para>
-/// </remarks>
-internal struct ProtoWriter : IDisposable
+namespace Vorticity.Benchmarks.Complexity;
+
+/// <summary>A single-pass proto3 encoder over a pooled <see cref="byte"/> array.</summary>
+internal struct ProtoWriterBefore : IDisposable
 {
     private const int DefaultCapacity = 256;
     private const int MinimumCapacity = 64;
 
-    /// <summary>The bytes of the array's head, which holds where the body must stop.</summary>
-    private const int Head = sizeof(int);
-
-    /// <summary>The bytes of a <see cref="Widened"/> record.</summary>
-    private const int RecordBytes = 5 * sizeof(int);
-
-    /// <summary>
-    /// The pooled array: a head holding where the body must stop, the body from the head on, and
-    /// from where it must stop to the end, the messages closed inside the outermost open one whose
-    /// length takes more than the byte reserved for it, the last closed first.
-    /// </summary>
-    /// <remarks>
-    /// Those lengths live in the array rather than in the struct, so that a class holding a writer
-    /// pays for the array's reference and two ints and no more; the head is read at a fixed place,
-    /// as the array's length is.
-    /// </remarks>
     private byte[]? _buffer;
-
-    /// <summary>Where the next byte goes in the array, past its head; of no meaning with no array.</summary>
     private int _position;
 
     /// <summary>Number of <see cref="MessageScope"/> instances currently open, for LIFO checking.</summary>
     private int _openScopes;
+
+    /// <summary>
+    /// The messages closed inside the outermost open one whose length takes more than the byte
+    /// reserved for it, in the order they closed: they wait for the outermost message's close,
+    /// which places them all in one pass.
+    /// </summary>
+    private Widened[]? _widened;
+
+    private int _widenedCount;
 
     /// <summary>Creates a writer with an initial pooled capacity.</summary>
     /// <param name="initialCapacity">
     /// Capacity hint in bytes. Zero defers the rental to the first write.
     /// </param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is negative.</exception>
-    public ProtoWriter(int initialCapacity = DefaultCapacity)
+    public ProtoWriterBefore(int initialCapacity = DefaultCapacity)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(initialCapacity);
-        _buffer = null;
+        _buffer = initialCapacity > 0 ? ArrayPool<byte>.Shared.Rent(initialCapacity) : null;
         _position = 0;
         _openScopes = 0;
-        if (initialCapacity > 0)
-        {
-            Open(ArrayPool<byte>.Shared.Rent(initialCapacity));
-        }
     }
 
     /// <summary>
     /// The bytes written so far. Valid until the next mutation or <see cref="Dispose"/>.
     /// </summary>
     public readonly ReadOnlySpan<byte> WrittenSpan =>
-        _buffer is null ? default : new ReadOnlySpan<byte>(_buffer, Head, _position - Head);
+        _buffer is null ? default : new ReadOnlySpan<byte>(_buffer, 0, _position);
 
     /// <summary>Number of bytes written so far.</summary>
-    public readonly int Length => _buffer is null ? 0 : _position - Head;
+    public readonly int Length => _position;
 
     /// <summary>Discards everything written, keeping the rented array for reuse.</summary>
     public void Clear()
     {
-        _position = Head;
-
-        // Lengths wait only while a message is open: with none open, the body may already run to the end.
-        if (_openScopes != 0)
-        {
-            Abandon();
-        }
+        _position = 0;
+        _openScopes = 0;
+        _widenedCount = 0;
     }
 
-    /// <summary>Returns the pooled array. Safe to call more than once.</summary>
+    /// <summary>Returns the pooled arrays. Safe to call more than once.</summary>
     public void Dispose()
     {
         byte[]? buffer = _buffer;
+        Widened[]? widened = _widened;
         _buffer = null;
+        _widened = null;
         _position = 0;
         _openScopes = 0;
+        _widenedCount = 0;
         if (buffer is not null)
         {
             ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        if (widened is not null)
+        {
+            ArrayPool<Widened>.Shared.Return(widened);
         }
     }
 
@@ -484,59 +447,40 @@ internal struct ProtoWriter : IDisposable
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void Widen(int lengthPosition, int bodyLength)
     {
-        try
+        if (bodyLength < 0)
         {
-            if (bodyLength < 0)
-            {
-                ThrowScopeCorrupted();
-            }
-
-            // The longer lengths it holds are the ones noted since it opened, whose slots are past
-            // its own: they closed inside it, last, and the array holds them first. Each record
-            // counts its own subtree, so only the outermost of them are visited, from the last closed.
-            Span<Widened> waiting = Waiting();
-            int inside = 0;
-            int count = 1;
-            for (int i = 0; i < waiting.Length && waiting[i].Slot > lengthPosition; i += waiting[i].Count)
-            {
-                inside += waiting[i].Below;
-                count += waiting[i].Count;
-            }
-
-            // The body as it will be once placed: what it holds, and the bytes the longer lengths
-            // inside it take past their reserved one.
-            long length = (long)bodyLength + inside;
-            if (length > Array.MaxLength)
-            {
-                ThrowTooLarge(length);
-            }
-
-            int extra = ProtoWire.VarintSize((ulong)length) - 1;
-            byte[] buffer = _buffer!;
-            if (Limit(buffer) - _position < RecordBytes)
-            {
-                Grow(RecordBytes);
-                buffer = _buffer!;
-            }
-
-            // The body must stop a record sooner, and the record takes the room.
-            int limit = Limit(buffer) - RecordBytes;
-            Widened record = new Widened(lengthPosition, (int)length, extra, inside + extra, count);
-            MemoryMarshal.Write(buffer.AsSpan(limit, RecordBytes), in record);
-            Limit(buffer) = limit;
-            if (_openScopes == 0)
-            {
-                Place(inside + extra);
-            }
+            ThrowScopeCorrupted();
         }
-        finally
+
+        // The longer lengths it holds are the ones noted since it opened, whose slots are past its
+        // own: they closed inside it, last. Each record counts its own subtree, so only the
+        // outermost of them are visited, from the last.
+        int inside = 0;
+        int count = 1;
+        for (int i = _widenedCount - 1; i >= 0 && _widened![i].Slot > lengthPosition; i -= _widened[i].Count)
         {
-            // Once the outermost message is closed, its lengths placed or given up, none waits,
-            // which lets a clear with no message open leave the end of the array alone.
-            if (_openScopes == 0 && _buffer is { } buffer)
-            {
-                Limit(buffer) = End(buffer);
-            }
+            inside += _widened[i].Below;
+            count += _widened[i].Count;
+        }
+
+        // The body as it will be once placed: what it holds, and the bytes the longer lengths
+        // inside it take past their reserved one.
+        long length = (long)bodyLength + inside;
+        if (length > Array.MaxLength)
+        {
+            ThrowTooLarge(length);
+        }
+
+        int extra = ProtoWire.VarintSize((ulong)length) - 1;
+        if (_widened is null || _widened.Length == _widenedCount)
+        {
+            GrowWidened();
+        }
+
+        _widened![_widenedCount++] = new Widened(lengthPosition, (int)length, extra, inside + extra, count);
+        if (_openScopes == 0)
+        {
+            Place(inside + extra);
         }
     }
 
@@ -546,28 +490,27 @@ internal struct ProtoWriter : IDisposable
     /// </summary>
     private void Place(int extraBytes)
     {
-        // The body grows into the room before the records, which move with the array if it grows.
-        EnsureCapacity(extraBytes);
-        byte[] buffer = _buffer!;
-        Span<Widened> waiting = Waiting();
+        Span<Widened> widened = _widened.AsSpan(0, _widenedCount);
+        _widenedCount = 0;
 
-        // The pass wants them from the last slot, and takes them from the end of the array, which
-        // holds them the last closed first. They closed innermost first, which puts them in slot
+        // The pass wants them from the last slot. They closed innermost first, which is that
         // order already for messages nested one in the other; siblings are sorted.
-        for (int i = 1; i < waiting.Length; i++)
+        for (int i = 1; i < widened.Length; i++)
         {
-            if (waiting[i].Slot < waiting[i - 1].Slot)
+            if (widened[i].Slot > widened[i - 1].Slot)
             {
-                waiting.Sort(static (a, b) => a.Slot.CompareTo(b.Slot));
+                widened.Sort(static (a, b) => b.Slot.CompareTo(a.Slot));
                 break;
             }
         }
 
+        EnsureCapacity(extraBytes);
+        byte[] buffer = _buffer!;
         int end = _position;
         int shift = extraBytes;
-        for (int i = waiting.Length - 1; i >= 0; i--)
+        foreach (Widened record in widened)
         {
-            (int slot, int length, int extra, _, _) = waiting[i];
+            (int slot, int length, int extra, _, _) = record;
 
             // Span.CopyTo is a memmove, so the overlapping move is well defined.
             new Span<byte>(buffer, slot + 1, end - slot - 1).CopyTo(new Span<byte>(buffer, slot + 1 + shift, end - slot - 1));
@@ -587,18 +530,22 @@ internal struct ProtoWriter : IDisposable
         _position += extraBytes;
     }
 
-    /// <summary>The records waiting at the end of the array, the last closed first.</summary>
-    private readonly Span<Widened> Waiting()
+    private void GrowWidened()
     {
-        byte[] buffer = _buffer!;
-        int limit = Limit(buffer);
-        return MemoryMarshal.Cast<byte, Widened>(buffer.AsSpan(limit, End(buffer) - limit));
+        Widened[] next = ArrayPool<Widened>.Shared.Rent(Math.Max(_widenedCount * 2, 16));
+        if (_widened is not null)
+        {
+            _widened.AsSpan(0, _widenedCount).CopyTo(next);
+            ArrayPool<Widened>.Shared.Return(_widened);
+        }
+
+        _widened = next;
     }
 
     /// <summary>
     /// A closed message whose length takes more than its reserved byte: its slot, its length, the
     /// bytes past the reserved one, the same bytes with those of every longer length inside it,
-    /// and the records of its subtree, itself included, which the array holds from it on.
+    /// and the records of its subtree, itself included, which lie just before it.
     /// </summary>
     private readonly record struct Widened(int Slot, int Length, int Extra, int Below, int Count);
 
@@ -608,11 +555,11 @@ internal struct ProtoWriter : IDisposable
     /// </summary>
     public ref struct MessageScope
     {
-        private ref ProtoWriter _writer;
+        private ref ProtoWriterBefore _writer;
         private readonly int _lengthPosition;
         private int _depth;
 
-        internal MessageScope(ref ProtoWriter writer, int lengthPosition, int depth)
+        internal MessageScope(ref ProtoWriterBefore writer, int lengthPosition, int depth)
         {
             _writer = ref writer;
             _lengthPosition = lengthPosition;
@@ -651,86 +598,42 @@ internal struct ProtoWriter : IDisposable
     private void EnsureCapacity(int additional)
     {
         byte[]? buffer = _buffer;
-        if (buffer is not null)
+
+        // The uint cast makes an int overflow of `_position + additional` fold into the
+        // "too large" branch instead of wrapping to a value that passes the test.
+        if (buffer is not null && (uint)(_position + additional) <= (uint)buffer.Length)
         {
-            // Read before the position, as the array's length would be, so that the compare does
-            // not wait on it. The uint cast makes an int overflow of `_position + additional` fold
-            // into the "too large" branch instead of wrapping to a value that passes the test.
-            int limit = Limit(buffer);
-            if ((uint)(_position + additional) <= (uint)limit)
-            {
-                return;
-            }
+            return;
         }
 
         Grow(additional);
     }
 
-    /// <summary>Moves to an array with room for <paramref name="additional"/> more bytes of body, the records kept at its end.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void Grow(int additional)
     {
-        byte[]? previous = _buffer;
-        int start = previous is null ? Head : _position;
-        int records = previous is null ? 0 : End(previous) - Limit(previous);
-        long required = (long)start + additional + records;
-        if (required > (Array.MaxLength & -sizeof(int)))
+        long required = (long)_position + additional;
+        if (required > Array.MaxLength)
         {
             ThrowTooLarge(required);
         }
 
-        int size = previous is null ? DefaultCapacity : Math.Max(End(previous), MinimumCapacity);
+        int size = _buffer is null ? DefaultCapacity : Math.Max(_buffer.Length, MinimumCapacity);
         while (size < required)
         {
             size = size >= Array.MaxLength / 2 ? Array.MaxLength : size * 2;
         }
 
         byte[] next = ArrayPool<byte>.Shared.Rent(size);
-        if (previous is null)
+        byte[]? previous = _buffer;
+        if (previous is not null)
         {
-            Open(next);
-            return;
+            new ReadOnlySpan<byte>(previous, 0, _position).CopyTo(next);
+            ArrayPool<byte>.Shared.Return(previous);
         }
 
-        // The limit is set before the copies, so that it is long written when the next check reads it.
-        int limit = End(next) - records;
-        Limit(next) = limit;
-        new ReadOnlySpan<byte>(previous, Head, _position - Head).CopyTo(new Span<byte>(next, Head, _position - Head));
-        if (records != 0)
-        {
-            new ReadOnlySpan<byte>(previous, End(previous) - records, records).CopyTo(new Span<byte>(next, limit, records));
-        }
-
-        ArrayPool<byte>.Shared.Return(previous);
         _buffer = next;
     }
-
-    /// <summary>Drops the open messages a clear left, and the lengths they had waiting.</summary>
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private void Abandon()
-    {
-        _openScopes = 0;
-        if (_buffer is { } buffer)
-        {
-            Limit(buffer) = End(buffer);
-        }
-    }
-
-    /// <summary>Starts on <paramref name="buffer"/> with nothing written and no length waiting.</summary>
-    private void Open(byte[] buffer)
-    {
-        _buffer = buffer;
-        _position = Head;
-        Limit(buffer) = End(buffer);
-    }
-
-    /// <summary>Where the records of <paramref name="buffer"/> end: its length taken down to a whole int.</summary>
-    private static int End(byte[] buffer) => buffer.Length & -sizeof(int);
-
-    /// <summary>Where the body must stop in <paramref name="buffer"/>, the writer's array, which its head holds.</summary>
-    /// <remarks>Read without a bounds check: a rented array is never shorter than its head.</remarks>
-    private static ref int Limit(byte[] buffer) =>
-        ref Unsafe.As<byte, int>(ref MemoryMarshal.GetArrayDataReference(buffer));
 
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]
