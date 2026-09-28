@@ -522,26 +522,25 @@ internal sealed class DistinctTable
             // A row equal to the one before takes its code without the hash or the probe, and so
             // does the run it starts, measured a vector at a time: a sorted column or one of runs
             // is mostly such rows. The one compare that decides it is all a column without runs
-            // pays. Every other row's hash is taken before the row ahead of it is inserted: a probe
-            // whose branch was guessed wrong throws away what came after it, never the hash waiting
-            // for it.
+            // pays. The run is measured before the row that starts it is inserted, so that the hash
+            // of the row after the run is taken first: a probe whose branch was guessed wrong throws
+            // away what came after it, never the hash waiting for it.
             int i = 0;
             ulong hash = values.IsEmpty ? 0 : KeyHash.Mix(ulong.CreateTruncating(values[0]));
             while (i < values.Length && !_abandoned)
             {
                 T value = values[i];
-                i++;
-                ulong nextHash = i < values.Length ? KeyHash.Mix(ulong.CreateTruncating(values[i])) : 0;
+                int run = i + 1 < values.Length && values[i + 1] == value ? RunLength(values[(i + 1)..], value) : 0;
+                int next = i + 1 + run;
+                ulong nextHash = next < values.Length ? KeyHash.Mix(ulong.CreateTruncating(values[next])) : 0;
                 InsertFixed(ulong.CreateTruncating(value), hash);
-                if (i < values.Length && values[i] == value && !_abandoned)
+                if (run > 0 && !_abandoned)
                 {
-                    int run = RunLength(values[i..], value);
                     _codes.AsSpan(_rows, run).Fill(_codes[_rows - 1]);
                     _rows += run;
-                    i += run;
-                    nextHash = i < values.Length ? KeyHash.Mix(ulong.CreateTruncating(values[i])) : 0;
                 }
 
+                i = next;
                 hash = nextHash;
             }
 
