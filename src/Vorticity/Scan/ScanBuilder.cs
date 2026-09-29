@@ -944,7 +944,7 @@ internal sealed class ScanBuilder
     /// are honoured exactly as <see cref="ExecuteAsync"/> honours them.
     /// </remarks>
     /// <exception cref="ArgumentException"><paramref name="path"/> does not resolve against the file's schema.</exception>
-    /// <exception cref="NotSupportedException">The column's type is outside the 1.0 filter scope.</exception>
+    /// <exception cref="NotSupportedException">The column's type is not one the filter supports.</exception>
     public System.Threading.Tasks.ValueTask<FilterLiteral> MinAsync(
         string path, System.Threading.CancellationToken cancellationToken = default) =>
         Terminal(Resolved(path)).ExtremeAsync(path, wantMin: true, cancellationToken);
@@ -958,7 +958,7 @@ internal sealed class ScanBuilder
     /// <returns>The maximum.</returns>
     /// <remarks>See <see cref="MinAsync"/>.</remarks>
     /// <exception cref="ArgumentException"><paramref name="path"/> does not resolve against the file's schema.</exception>
-    /// <exception cref="NotSupportedException">The column's type is outside the 1.0 filter scope.</exception>
+    /// <exception cref="NotSupportedException">The column's type is not one the filter supports.</exception>
     public System.Threading.Tasks.ValueTask<FilterLiteral> MaxAsync(
         string path, System.Threading.CancellationToken cancellationToken = default) =>
         Terminal(Resolved(path)).ExtremeAsync(path, wantMin: false, cancellationToken);

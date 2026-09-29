@@ -1,6 +1,6 @@
 # Contributing
 
-## What a fresh clone can run, and what it cannot yet
+## What a fresh clone can run, and what it needs first
 
 A clone with nothing else installed but the SDK `global.json` asks for builds, tests and publishes.
 The conformance corpus is committed — 856 files and their sidecars — so `dotnet test` runs the

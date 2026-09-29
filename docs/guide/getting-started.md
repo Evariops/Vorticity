@@ -5,8 +5,7 @@ One file of code, a few minutes, and the only page that shows both directions.
 
 ## Reference the library
 
-Nothing is published to nuget.org yet, so there is no version to ask for. Until the first release,
-reference the projects from a project that targets .NET 11:
+The library is consumed from source: reference the projects from a project that targets .NET 11:
 
 ```xml
 <ItemGroup>

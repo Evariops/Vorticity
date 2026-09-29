@@ -194,7 +194,7 @@ message ZstdMetadata {
 `uncompressed_size` is file-supplied: validate against the decompression cap
 ([08-semantics.md](../docs/design/08-semantics.md) §6) **before** allocating.
 
-### `vortex.zstd_buffers` — `encodings/zstd/src/lib.rs` (draft `zstd2026.02.0`, deferred to 1.1)
+### `vortex.zstd_buffers` — `encodings/zstd/src/lib.rs` (draft `zstd2026.02.0`)
 ```proto
 message ZstdBuffersMetadata {
   string inner_encoding_id            = 1;
@@ -206,14 +206,14 @@ message ZstdBuffersMetadata {
 }
 ```
 
-### `vortex.pco` — `encodings/pco/src/lib.rs` (deferred to 1.1)
+### `vortex.pco` — `encodings/pco/src/lib.rs`
 ```proto
 message PcoPageInfo  { uint32 n_values = 1; }              // pco caps at 2^24 values per chunk
 message PcoChunkInfo { repeated PcoPageInfo pages = 1; }
 message PcoMetadata  { bytes header = 1; repeated PcoChunkInfo chunks = 2; }
 ```
 
-### `vortex.variant` / `vortex.parquet.variant` (deferred to 1.1)
+### `vortex.variant` / `vortex.parquet.variant`
 ```proto
 // vortex-array/src/arrays/variant/vtable/mod.rs
 message VariantMetadataProto { optional DType shredded_dtype = 1; }
@@ -330,8 +330,8 @@ wrong; they are recorded here and fixed at their source.
    from what `serialize`/`deserialize` actually do. Read those two functions, not the struct.
 
 3. **A Protobuf `ScalarValue` cannot be interpreted without its DType.** The wire form carries no
-   type tag of its own, so `from_proto_bytes` takes the DType as a parameter. This is what closes
-   Phase 0's `TODO(decimal-scalar)`: a Decimal scalar arrives as `bytes_value` holding a
+   type tag of its own, so `from_proto_bytes` takes the DType as a parameter. This is what makes a
+   Decimal scalar readable: it arrives as `bytes_value` holding a
    little-endian two's-complement integer whose **length** selects i8/i16/i32/i64/i128/i256, and
    an Extension DType resolves through its storage type.
 

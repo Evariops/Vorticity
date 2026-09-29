@@ -1,4 +1,4 @@
-//! Acceptance criterion 2 for 1.0: **any file written by Vorticity is read back correctly by
+//! Acceptance criterion 2: **any file written by Vorticity is read back correctly by
 //! Vortex Rust**.
 //!
 //! This is the direction the golden corpus cannot test. A corpus proves we read what Rust wrote; a

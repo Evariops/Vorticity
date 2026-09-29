@@ -31,7 +31,7 @@ public sealed class CorpusValueTests
     public async Task ReadsBackEveryValue(string id)
     {
         ScopeVerdict verdict = CorpusCatalog.Verdict(id);
-        Assert.True(verdict.InScope, $"{id} is not in Phase 1 scope and must not be in this theory");
+        Assert.True(verdict.InScope, $"{id} is not in scope and must not be in this theory");
 
         FileResult result = await ConformanceRunner.CompareAsync(verdict.Entry, TestContext.Current.CancellationToken);
 

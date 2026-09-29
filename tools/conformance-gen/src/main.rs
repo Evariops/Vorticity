@@ -605,7 +605,7 @@ fn report(
     println!("  skips:  {}", skips.len());
 
     println!("\n=== coverage ===");
-    // The corpus coverage gate: every 1.0-scope component must have a corpus file.
+    // The corpus coverage gate: every in-scope component must have a corpus file.
     let mut gate_failed = Vec::new();
     for (label, set) in [
         ("arrays", &coverage.arrays),
@@ -614,7 +614,7 @@ fn report(
         ("aggregates", &coverage.aggregates),
     ] {
         println!(
-            "  {label:<11} {}/{} components in 1.0 scope covered",
+            "  {label:<11} {}/{} components in scope covered",
             set.covered.len(),
             set.claimed
         );
@@ -650,7 +650,7 @@ fn report(
         }
     }
     if gate_failed.is_empty() {
-        println!("\n  COVERAGE GATE: pass — every 1.0-scope component has a corpus file.");
+        println!("\n  COVERAGE GATE: pass — every in-scope component has a corpus file.");
     } else if undocumented.is_empty() {
         println!("\n  COVERAGE GATE: pass with documented gaps");
         for (label, id, skip) in &documented {
@@ -659,7 +659,7 @@ fn report(
     } else {
         println!("\n  COVERAGE GATE: FAIL");
         for (label, id) in &undocumented {
-            println!("      {label}: {id} — claimed for 1.0, no corpus file, no SkipRecord");
+            println!("      {label}: {id} — claimed in scope, no corpus file, no SkipRecord");
         }
         println!("      Produce it, or record why 0.86.1 cannot, in emit::static_skips.");
     }

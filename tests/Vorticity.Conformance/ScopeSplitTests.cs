@@ -19,7 +19,7 @@ public sealed class ScopeSplitTests
     // decoder landing, and an unexplained move is the visible half of one being dropped.
     //
     // THE SPLIT IS 856/0, and the zero is the point: every file of the conformance corpus is
-    // readable by this build. No component is left unread, whether "deferred to Vortex 1.1" or in
+    // readable by this build. No component is left unread, whether once left out of scope or in
     // no core edition -- `fastlanes.delta` and `vortex.zstd_buffers` are both read, and both
     // variants are. What is still refused is a SHAPE rather than an id: a shredded variant, the
     // two-buffer form of fsst, the pco modes the generator cannot produce. Each of those is refused

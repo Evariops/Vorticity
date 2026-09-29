@@ -27,7 +27,7 @@ internal static class Extremes
     /// <param name="wantMin">Whether the smallest value is wanted, else the largest.</param>
     /// <param name="bestRow">The row holding it, when one does.</param>
     /// <returns>Whether any row held a value.</returns>
-    /// <exception cref="NotSupportedException">The column's type is outside the 1.0 filter scope.</exception>
+    /// <exception cref="NotSupportedException">The column's type is not one the filter supports.</exception>
     internal static bool TryFind(
         CanonicalArena arena, int nodeIndex, ReadOnlySpan<int> rows, bool listed, bool wantMin, out int bestRow)
     {

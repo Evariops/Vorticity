@@ -30,8 +30,9 @@ measures it; [bench/README.md](../../bench/README.md) says how to run each one.
   `WrittenSizeTests` holds the bytes the writer gives the whole conformance corpus under a ceiling
   below the size target.
 * **One machine per figure.** Each section of the benchmark page names the machine it was measured
-  on. So far that is arm64 and the `Vector128` paths only: CI builds and tests on x64 and arm64 but
-  runs no benchmark, and there is no x64 figure.
+  on: an Apple M4 Pro, arm64 and the `Vector128` paths, for [the benchmark page](../guide/benchmarks.md),
+  and an AMD Ryzen 9 7950X, x64 with AVX-512, for [its twin](../guide/benchmarks-x64.md). CI builds
+  and tests on x64 and arm64 but runs no benchmark.
 
 ## 2. What a caller sees
 
@@ -199,7 +200,7 @@ Not measured:
 
 * **A cold page cache.** Every run reads a warm one; upstream's benchmarks flush it.
 * **Pinned cores.** macOS pins no process, and an Apple M-series processor has cores of two kinds.
-* **x64**, and a remote store's latency: every file is local.
+* **A remote store's latency**: every file is local.
 * **Other data.** TPC-H and ClickBench are gigabytes that do not belong in a repository; what makes
   the comparison honest is both sides reading the same bytes, whatever they are.
 * **The row encoding against Rust's**: the shim cannot hand `vortex-row` a batch, so

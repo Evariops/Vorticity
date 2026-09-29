@@ -248,7 +248,7 @@ internal sealed class FilterEvaluator
     /// <param name="rows">The batch's row count.</param>
     /// <param name="destination">Receives one <see cref="Trilean"/> state per row.</param>
     /// <exception cref="ArgumentException">A field path names nothing in the batch's schema.</exception>
-    /// <exception cref="NotSupportedException">A column's type is outside the 1.0 filter scope.</exception>
+    /// <exception cref="NotSupportedException">A column's type is not one the filter supports.</exception>
     internal static void Evaluate(
         VortexExpr filter, CanonicalArena arena, int rootIndex, int rows, Span<byte> destination)
     {
@@ -263,7 +263,7 @@ internal sealed class FilterEvaluator
     /// <param name="rows">The batch's row count.</param>
     /// <param name="destination">Receives one <see cref="Trilean"/> state per row.</param>
     /// <exception cref="ArgumentException">A field path names nothing in the batch's schema.</exception>
-    /// <exception cref="NotSupportedException">A column's type is outside the 1.0 filter scope.</exception>
+    /// <exception cref="NotSupportedException">A column's type is not one the filter supports.</exception>
     internal void Evaluate(CanonicalArena arena, int rootIndex, int rows, Span<byte> destination)
     {
         Evaluate(_filter, arena, rootIndex, rows, default, destination, 0);

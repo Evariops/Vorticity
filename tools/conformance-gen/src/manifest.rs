@@ -23,9 +23,9 @@ pub const VORTEX_VERSION: &str = "0.86.1";
 /// Bumped whenever the manifest shape changes in a way a consumer must notice.
 pub const MANIFEST_FORMAT: &str = "vortex-conformance-corpus/2";
 
-/// The array encodings the registry puts **in 1.0 scope** — its three component tables
+/// The array encodings the registry puts **in scope** — its three component tables
 /// (canonical and structural, compressed integer, float/string/temporal) and its late arrivals,
-/// five encodings first deferred to 1.1 and built inside 1.0 since.
+/// five encodings first left out of scope and brought in since.
 ///
 /// This is the list the corpus coverage gate runs against: a miss here fails the build.
 pub const CLAIMED_ARRAYS: &[&str] = &[

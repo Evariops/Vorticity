@@ -24,6 +24,9 @@ in them reads back equal — that is the parity claimed and the cross-check is w
 not byte parity: the same data is encoded differently on the two sides by design, and a file from
 one is not expected to match the other byte for byte.
 
+**Status.** This project was developed with the help of LLMs. Until v1.0, it may be subject to
+breaking changes.
+
 ## A first look
 
 A record is a schema, not a row: its members are the file's columns, in order, under their names.
@@ -95,7 +98,7 @@ That SDK is all `dotnet build` and `dotnet test` need. Everything that compares 
 reference — the cross-check, the ratio axes of the bench, and the corpus generator — wants a Rust
 toolchain on top.
 
-Nothing is published yet. Until it is, reference the projects, as
+The library is consumed from source: reference the projects, as
 [the samples](samples/Vorticity.Samples/Vorticity.Samples.csproj) do; the generator is an
 analyzer reference:
 

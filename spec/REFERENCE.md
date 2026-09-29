@@ -139,7 +139,7 @@ at least 8. Combined with the `alignment_exponent <= 6` cap in
 [08-semantics.md](../docs/design/08-semantics.md) §6, a segment's own alignment is enough to make every
 inner buffer aligned once the segment start is.
 
-One writer-side note for Phase 3: *"Serializers may choose historical IDs and may provide
+One note for the writer: *"Serializers may choose historical IDs and may provide
 downgraded buffers or children that differ from the in-memory array tree."* The serialized encoding
 id is not required to equal the in-memory one — which is exactly the mechanism edition targeting
 uses to write an older id than the array it holds.

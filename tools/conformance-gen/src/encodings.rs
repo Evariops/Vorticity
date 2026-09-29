@@ -1053,9 +1053,9 @@ pub fn encoding_cases() -> Vec<EncodingCase> {
             disable_editions: false,
         },
         // --- ids that belong to no core edition -------------------------------------------
-        // Both are reachable only with `disable_editions()`. They are NOT 1.0 conformance
-        // targets — the registry puts `fastlanes.delta` in no edition at all and defers
-        // `vortex.zstd_buffers` to 1.1 — but "no core edition contains it" is not the same
+        // Both are reachable only with `disable_editions()`. They are NOT core-edition
+        // conformance targets — the registry puts `fastlanes.delta` in no edition at all and
+        // `vortex.zstd_buffers` in a draft one only — but "no core edition contains it" is not the same
         // claim as "this release cannot write one", and the corpus should not assert the
         // stronger one. They are the fixtures the forward-compatibility tests need: a structurally
         // valid file carrying an encoding a conformant reader may legitimately not know.

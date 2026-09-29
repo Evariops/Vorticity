@@ -20,7 +20,7 @@ produced a corpus is recorded in `manifest.json` and in every file record.
 
 0.86.1 is the release [docs/design/99-sources.md](../../docs/design/99-sources.md) derived the specification
 against, and the newest at the time of writing. It can target every frozen core edition through
-`core2026.08.3`, so the corpus reaches every component in the 1.0 scope. It needs rustc ≥ 1.95
+`core2026.08.3`, so the corpus reaches every component in scope. It needs rustc ≥ 1.95
 (built here with 1.98.1).
 
 ## Running
@@ -256,7 +256,7 @@ reported, because they differ:
 
 Result against [docs/design/90-registry.md](../../docs/design/90-registry.md):
 
-| kind | in 1.0 scope | covered | gap |
+| kind | in scope | covered | gap |
 |---|---|---|---|
 | array encodings | 35 | **35** | — |
 | layouts | 6 | 5 | `vortex.stats` |
@@ -264,8 +264,8 @@ Result against [docs/design/90-registry.md](../../docs/design/90-registry.md):
 | zone-map aggregates | 6 | **6** | — |
 
 The 35 include the registry's five late arrivals (`vortex.map`, `vortex.pco`, `vortex.variant`,
-`vortex.parquet.variant`, `vortex.zstd_buffers`), first deferred to 1.1 and built inside 1.0
-since: they gate like the other thirty.
+`vortex.parquet.variant`, `vortex.zstd_buffers`), first left out of scope and brought in since:
+they gate like the other thirty.
 
 Two ids appear that the registry lists nowhere: `fastlanes.delta` and `vortex.patched`. Both are
 deliberate forward-compatibility fixtures, written with edition enforcement off — see below. The

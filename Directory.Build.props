@@ -21,8 +21,7 @@
        known: this file is read before the project sets it. -->
 
   <!-- Package metadata, shared by the three libraries and the generator. Nothing here sets a
-       version: nothing has been published, so nothing carries a number, and the job that publishes
-       passes one. A local `dotnet pack` therefore produces the SDK's default 1.0.0, which is a file
+       version: the number belongs to a release, and the job that publishes passes one. A local `dotnet pack` therefore produces the SDK's default 1.0.0, which is a file
        name and not a claim. Not packable by default either, so a project has to ask: the three
        libraries and the generator do, and the benchmarks, the tools and the tests never will. -->
   <PropertyGroup>
@@ -32,10 +31,10 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>vortex;columnar;file-format;analytics</PackageTags>
     <RepositoryType>git</RepositoryType>
-    <!-- The repository has no remote, so there is no URL to write down. PublishRepositoryUrl reads
-         RepositoryUrl off the remote once there is one; PackageProjectUrl has no equivalent and is
-         left unset rather than pointed at a guess. -->
+    <!-- PublishRepositoryUrl reads RepositoryUrl off the `origin` remote; PackageProjectUrl has no
+         equivalent, so it is written down. -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageProjectUrl>https://github.com/Evariops/Vorticity</PackageProjectUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>

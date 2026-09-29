@@ -41,7 +41,7 @@ internal static partial class ComparisonKernels
     /// <param name="literal">The constant.</param>
     /// <param name="destination">One <see cref="Trilean"/> state per row.</param>
     /// <exception cref="NotSupportedException">
-    /// The column's canonical form or the literal's type is outside the 1.0 filter scope.
+    /// The column's canonical form or the literal's type is not one the filter supports.
     /// </exception>
     internal static void Compare(
         CanonicalArena arena, int nodeIndex, ComparisonOp op, FilterLiteral literal,
