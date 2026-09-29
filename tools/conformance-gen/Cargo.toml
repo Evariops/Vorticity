@@ -26,7 +26,7 @@ vortex-onpair = "=0.86.1"
 pco = "=1.0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.10"
+sha2 = "0.11"
 anyhow = "1"
 # Only for `FutureExt::catch_unwind`: several 0.86.1 writer limitations surface as panics
 # rather than errors, and one unsupported recipe must not take the whole corpus run down.
