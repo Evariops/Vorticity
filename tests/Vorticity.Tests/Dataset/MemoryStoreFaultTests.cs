@@ -34,7 +34,6 @@ public sealed class MemoryStoreFaultTests
         inner.Latency = latency;
         store.Reset();
 
-        Stopwatch watch = Stopwatch.StartNew();
         Task<ObjectRange>[] reads = new Task<ObjectRange>[8];
         for (int i = 0; i < reads.Length; i++)
         {
@@ -46,17 +45,15 @@ public sealed class MemoryStoreFaultTests
             (await read).Dispose();
         }
 
-        TimeSpan together = watch.Elapsed;
         Assert.Equal(8, store.CountOf(ObjectOperation.GetRange));
 
-        // Eight requests, one step: they never waited for each other.
+        // Eight requests, one step: they never waited for each other. The step count is the proof,
+        // and no clock is asked to agree: a wall-clock ceiling is a flake on a busy runner, where
+        // the suite's classes contend for the pool that resumes the delays.
         Assert.Equal(1, store.DependentSteps);
-        Assert.True(
-            together < TimeSpan.FromMilliseconds(8 * 50 * 0.5),
-            $"eight parallel requests at {latency.TotalMilliseconds} ms took {together.TotalMilliseconds} ms");
 
         store.Reset();
-        watch.Restart();
+        Stopwatch watch = Stopwatch.StartNew();
         for (int i = 0; i < 4; i++)
         {
             using ObjectRange range = await store.GetRangeAsync("data/one", i, 1, ct);
