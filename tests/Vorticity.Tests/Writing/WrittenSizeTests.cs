@@ -48,7 +48,7 @@ public sealed class WrittenSizeTests
     /// </para>
     /// <para>
     /// The file's identity in every postscript -- sixteen bytes of value, the entry's key and
-    /// segment in the postscript, and the padding they move: 72 to 96 bytes a file -- is growth
+    /// segment in the postscript, and the padding they move: 80 to 104 bytes a file -- is growth
     /// this ceiling accepts, because it is what lets an index or a dataset prove which bytes it
     /// describes without reading them.
     /// </para>
@@ -111,16 +111,16 @@ public sealed class WrittenSizeTests
     [
         // Written under Auto and without text bounds in the zones. Besides the columns, these sizes
         // carry: on a dictionary-encoded column, the dict.probe entry Auto writes, free at write time, with the index directory that holds it
-        // and its metadata entry in the postscript (138 B; a file where Auto keeps nothing has no
+        // and its metadata entry in the postscript (96 B; a file where Auto keeps nothing has no
         // directory); the file's identity in every postscript -- 16 bytes of value, the entry's
-        // key and segment, and the padding they move (72 or 96 B); and the index directory's
+        // key and segment, and the padding they move (80 or 104 B); and the index directory's
         // XXH3-64 trailer, on the files that carry one (8 B).
-        ("types/utf8_nonnull_r8193", 47_062),    // 17 chunks, 17 zones; including the file statistics segment (96 B), the dictionary probe (138 B), the identity (72 B) and the directory checksum (8 B)
-        ("types/utf8_nullable_r8193", 46_718),   // 17 chunks, 17 zones; including the same four
+        ("types/utf8_nonnull_r8193", 47_052),    // 17 chunks, 17 zones; including the file statistics segment (96 B), the dictionary probe (96 B), the identity (80 B) and the directory checksum (8 B)
+        ("types/utf8_nullable_r8193", 46_708),   // 17 chunks, 17 zones; including the same four
         // The copy of the carried remainder materializes only the bytes its views name, so the
         // heap written for a chunk never carries the strings of blocks already emitted.
-        ("encodings/fsst", 6_740),               // 8 chunks, 8 zones; including the file statistics segment (96 B) and the identity (96 B)
-        ("encodings/dict", 7_654),               // 8 chunks, 8 zones; including the file statistics segment (96 B), the dictionary probe (138 B), the identity (72 B) and the directory checksum (8 B)
+        ("encodings/fsst", 6_748),               // 8 chunks, 8 zones; including the file statistics segment (96 B) and the identity (104 B)
+        ("encodings/dict", 7_644),               // 8 chunks, 8 zones; including the file statistics segment (96 B), the dictionary probe (96 B), the identity (80 B) and the directory checksum (8 B)
     ];
 
     [Fact]

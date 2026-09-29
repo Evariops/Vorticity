@@ -51,9 +51,9 @@ public sealed class PlanMemoryTests
         // carried over those three would pack them too.
         (long size, List<string> disagreements) = await Write(rowBlock: Rows);
         // The framing includes the file's identity, which every postscript carries (16 bytes of
-        // value, the entry's key and segment in the postscript, and the padding they move: 96
+        // value, the entry's key and segment in the postscript, and the padding they move: 104
         // bytes here), and the file statistics segment (120 bytes).
-        Assert.Equal(19_148, size);
+        Assert.Equal(19_156, size);
         Assert.True(
             disagreements.Count == 0,
             "the chooser and the reference disagree on " + disagreements.Count + " chunk(s):\n  "
@@ -77,7 +77,7 @@ public sealed class PlanMemoryTests
     public async Task AProgressionThatStartsAChunkAfterAJumpIsStillAProgression()
     {
         (long size, List<string> disagreements) = await Write(rowBlock: 1024);
-        Assert.Equal(19_820, size);
+        Assert.Equal(19_828, size);
         Assert.True(
             disagreements.Count == 0,
             "the chooser and the reference disagree on " + disagreements.Count + " chunk(s):\n  "
@@ -159,7 +159,7 @@ public sealed class PlanMemoryTests
             // them: pinned so that a table that served a different dictionary would show here first.
             // The column is a dictionary, so under Auto the file also carries its dict.probe entry
             // and the directory that lists it; the zones carry no text bounds.
-            Assert.Equal(35_855, new FileInfo(path).Length);
+            Assert.Equal(35_845, new FileInfo(path).Length);
         }
         finally
         {
@@ -238,7 +238,7 @@ public sealed class PlanMemoryTests
             // their widths. With the tail left uncounted, the second walked too. The bytes are the
             // walk's, whichever priced the packing.
             Assert.Equal(3, fromWidths);
-            Assert.Equal(43_532, new FileInfo(path).Length);
+            Assert.Equal(43_540, new FileInfo(path).Length);
         }
         finally
         {
