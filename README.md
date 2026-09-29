@@ -5,13 +5,16 @@ file format (LF AI & Data, formerly SpiralDB).
 
 * **A typed surface.** A `[VortexRecord]` declares the columns; filters and aggregates are C#
   lambdas the scan pushes down to the file, and what cannot be pushed down does not compile.
-* Ultra-optimized core: zero allocations per batch on hot paths, SIMD (`System.Runtime.Intrinsics`),
-  zero-copy from the file to the span you read.
+* Ultra-optimized core: near-zero allocations per batch on hot paths, SIMD (`System.Runtime.Intrinsics`),
+  no copy before decoding: a mapped file is decoded where it lies, and an uncompressed column is a
+  view of its bytes.
 * **Async-only** public API: every read and every write is awaited (`ValueTask`, `await foreach`),
   whatever the source; there is no synchronous path to choose.
 * Conformant to the published spec (`VTXF` v1, `core2026.08.3` edition).
 * Validated by **cross-testing** against the Rust reference implementation.
-* Benchmarked against the Rust reference implementation, process against process.
+* **Notably faster than the Rust reference implementation**, process against process on the same
+  machine: about 1.2x to 3x on a whole table, and a median of about 3x to 5x per encoding
+  ([Performance](#performance)).
 
 No third-party package: the base class library, plus `System.IO.Hashing`, first party, for the
 hashes of the write path and the Bloom filters.
@@ -43,7 +46,7 @@ await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Readin
 ```
 
 Reading columns back. Each batch is borrowed: its columns are `ref struct`s, valid until the next
-batch, and the loop allocates nothing per batch.
+batch, and the loop allocates next to nothing per batch.
 
 ```csharp
 await using VortexFile file = await VortexFile.OpenAsync("readings.vortex");
@@ -110,45 +113,32 @@ analyzer reference:
 | [docs/guide/benchmarks.md](docs/guide/benchmarks.md) | Every figure the bench publishes: what this costs against the Rust implementation, and each kernel against the loop it replaced |
 | [docs/guide/benchmarks-x64.md](docs/guide/benchmarks-x64.md) | The same figures from an x64 machine, a Zen 4 processor under Windows |
 | [docs/design/](docs/design/README.md) | **Why it is shaped this way**: the design documents, from the scope to the byte layout to the public API |
-| [CHANGELOG.md](CHANGELOG.md) | What the first release will contain, and what changed on the way |
-
-## Status
-
-**Reading is complete for the 1.0 scope; writing produces files the Rust reference reads back.**
-
-Nothing here has been published yet, so nothing carries a version number. The first release will be
-a `0.1.0` cut by CI.
-
-| package | what it is | state |
-|---|---|---|
-| `Vorticity` | the format and its public surface: the session, files, the typed scan and its columns, aggregates, the key cursor, the tool path, the writer and its builders, the I/O seam | the 1.0 scope, complete for reading |
-| `Vorticity.Generators` | the `[VortexRecord]` source generator and the analyzers VX1001 to VX1008 | build-time only; a record can also be written by hand, since its interface is in the core |
-| `Vorticity.Dataset` | a versioned dataset over an object store: commit objects, a prolly tree, the store seam an S3 library implements | experimental, `[Experimental("VX0001")]`, and the format is this repository's own |
-| `Vorticity.RowEncoding` | the byte-sortable row encoding | experimental, `[Experimental("VX0002")]`: upstream reserves the right to change the layout between releases |
-| `vxdump` | the inspection tool: schema, layout, encodings, segments, statistics, indexes | written against the public surface only, published ahead of time |
-
-What checks it, each one a command that re-runs on a clone:
-
-| check | what it compares | command |
-|---|---|---|
-| Tests | the unit and property tests, and the conformance corpus: 856 committed files read back value for value against the Rust sidecars | `dotnet test Vorticity.slnx -c Release` |
-| **Cross-check** | the corpus written by Vorticity and **read by Vortex Rust**, compared scalar by scalar against the reference's own file | `bench/crosscheck.sh` |
-| Throughput | each encoding's decoder against the Rust reference, both in one process, on one clock | `dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput --check` |
-| Native AOT | `vxdump` publishes with no trim or AOT warning and reads the corpus | `dotnet publish tools/vxdump -c Release -r <rid>` |
-
-Implemented: the file open path, the layout tree, every array encoding of the 1.0 scope, typed
-column access through records, projection by record, filter pushdown from lambdas, zone-map
-pruning, rows by index, aggregates and group by on the encoded form, owned batches, exact block
-statistics on write, the fused single-pass writer, append and torn-tail recovery, skipping and
-locating indexes, and the key cursor. Parser fuzzing runs in CI on every pull request. See
-[docs/design/90-registry.md](docs/design/90-registry.md) for the component-by-component state.
 
 ## Performance
 
 Vorticity is measured against Vortex's Rust implementation on the same files and the same
 machine, built with Native AOT, on one core and on all of them: a table read and written, every
-encoding decoded, taken from and written, and each hot loop against the one it replaced. A scan
-allocates nothing per batch. Every figure is on one page, [the benchmark page](docs/guide/benchmarks.md),
+encoding decoded, taken from and written, and each hot loop against the one it replaced. The
+speedup is Rust's time over Vorticity's: above 1.0x, Vorticity is faster.
+
+A table of four columns and 1,048,576 rows, both sides reading the file Vorticity wrote, on an
+Apple M4 Pro:
+
+| scenario | speedup, one core | speedup, all 14 cores |
+|---|---:|---:|
+| read every column | 1.2x | 2.2x |
+| read one column of four | 2.9x | 2.7x |
+| filter, 1 % of the rows | 1.3x | 3.2x |
+| filter, half the rows | 1.4x | 2.2x |
+| take 1,000 scattered rows | 0.98x | 1.4x |
+| write the table back out | 2.1x | 1.6x |
+
+Per encoding, on one core, Vorticity decodes 56 of 57 files faster than Rust (median speedup 3.2x;
+run-end is the exception, at 0.72x), takes rows faster from 57 of 57 (median 4.6x) and writes 56 of
+56 faster (median 4.6x). Both readers warmed up in one process, Rust is faster on 2 of 19 cases: key
+order over an uncorrelated column (0.91x) and a prefix filter on FSST strings (0.94x).
+
+A scan allocates next to nothing per batch. Every figure is on one page, [the benchmark page](docs/guide/benchmarks.md),
 each section with the machine and the commit it was measured on, and again from an x64 machine on
 [its twin](docs/guide/benchmarks-x64.md);
 [docs/design/05-benchmarks.md](docs/design/05-benchmarks.md) says what is compared and how, and
