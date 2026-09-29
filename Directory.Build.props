@@ -21,7 +21,7 @@
        known: this file is read before the project sets it. -->
 
   <!-- Package metadata, shared by the three libraries and the generator. Nothing here sets a
-       version: the number belongs to a release, and CI passes the one a v1.2.3 tag names. A local
+       version: the number belongs to a release, and CI passes the one a release names. A local
        `dotnet pack` therefore produces the SDK's default 1.0.0, which is a file name and not a
        claim. Not packable by default either, so a project has to ask: the three libraries and the
        generator do, and the benchmarks, the tools and the tests never will. -->

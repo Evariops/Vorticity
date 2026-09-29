@@ -1,0 +1,96 @@
+name: Release Drafter
+
+# Keeps a draft release up to date on every push to main, and labels pull requests from their
+# titles and changed files (config: .github/release-drafter.yml). Publishing the draft fires the
+# release run of build.yml, which pushes the packages to nuget.org.
+#
+# With no previous release the drafter resolves to 1.0.0: for the first draft, run this workflow
+# by hand with an explicit version.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # `labeled` matters: a label added by hand must also go through the single-category collapse
+    # below, or a pull request labelled feature and performance shows in two sections.
+    types: [opened, reopened, synchronize, edited, labeled]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Explicit version for the draft (e.g. 0.1.0); empty resolves it from the labels'
+        required: false
+        default: ''
+
+# Least privilege by default; each job raises only what it needs.
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  draft:
+    name: Update release draft
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write # create and update the draft release
+      pull-requests: read # list the merged pull requests for the notes
+    steps:
+      - uses: release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7.7.0
+        with:
+          disable-autolabeler: true
+          # Empty on push events; the action treats '' as unset.
+          version: ${{ inputs.version }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  autolabel:
+    name: Autolabel pull request
+    # A pull request from a fork gets a read-only token, which cannot label: a maintainer labels
+    # those by hand rather than every outside contribution showing a red check.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # read .github/release-drafter.yml
+      pull-requests: write # apply labels
+    steps:
+      - uses: release-drafter/release-drafter@34d80673e067bdc0c24568d3af899c216adcfaa9 # v7.7.0
+        with:
+          disable-releaser: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # release-drafter lists a pull request under every category its labels match, with no notion
+      # of priority, so one labelled feature and documentation shows twice. Keep only the
+      # highest-priority category label, so each lands in exactly one section.
+      - name: Keep one category label, by priority
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }} # no checkout here, so gh is told the repository
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # Highest to lowest. Mirror this order in the categories of release-drafter.yml.
+          priority="breaking feature bug performance documentation ci dependencies maintenance"
+          have="$(gh pr view "$PR" --json labels --jq '.labels[].name')"
+          winner=""
+          for p in $priority; do
+            if printf '%s\n' "$have" | grep -qx "$p"; then winner="$p"; break; fi
+          done
+          if [ -z "$winner" ]; then echo "No category label; leaving it as is."; exit 0; fi
+          drop=""
+          for p in $priority; do
+            [ "$p" = "$winner" ] && continue
+            if printf '%s\n' "$have" | grep -qx "$p"; then drop="$drop --remove-label $p"; fi
+          done
+          if [ -n "$drop" ]; then
+            # shellcheck disable=SC2086
+            gh pr edit "$PR" $drop
+            echo "Kept '$winner'; removed:$drop"
+          else
+            echo "Already one category: '$winner'."
+          fi

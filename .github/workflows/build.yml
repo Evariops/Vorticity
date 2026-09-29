@@ -3,9 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
   workflow_dispatch:
+  # Publishing the draft Release Drafter keeps creates the tag and runs everything again on it,
+  # then the publish job below.
+  release:
+    types: [published]
 
 # A newer push to the same branch or pull request supersedes the run in progress.
 concurrency:
@@ -29,18 +32,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      # Nothing here pushes to git, and a release run uploads an artifact: the token is not left
+      # on disk.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
           global-json-file: global.json
 
-      # A tag v1.2.3 is a release, and everything built from it carries 1.2.3: the assemblies, and
-      # the packages the publish job pushes. Any other run leaves the version unset and packs the
-      # SDK's default, a file name and not a claim.
+      # A release v1.2.3 is built as 1.2.3: the assemblies, and the packages the publish job
+      # pushes. Any other run leaves the version unset and packs the SDK's default, a file name and
+      # not a claim.
       - name: Resolve the version
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == release ]]; then
             version="${GITHUB_REF_NAME#v}"
             if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
               echo "::error::$GITHUB_REF_NAME is not a v followed by a SemVer version"
@@ -104,13 +111,13 @@ jobs:
       # A release's packages are kept for the publish job, which pushes them only once every check
       # below has passed on the same build.
       - name: Gather the packages of a release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'release'
         run: |
           mkdir -p "$RUNNER_TEMP/packages"
           cp src/*/bin/Release/*.nupkg src/*/bin/Release/*.snupkg "$RUNNER_TEMP/packages/"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'release'
         with:
           name: packages
           path: ${{ runner.temp }}/packages
@@ -187,8 +194,11 @@ jobs:
           echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
 
       # Building the reference's crates is the longest step of the job, so their build is kept
-      # from one run to the next until the lock file or the compiler changes.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      # from one run to the next until the lock file or the compiler changes. A release run builds
+      # them from scratch: nothing restored from a cache runs in the job that makes its packages,
+      # which zizmor cannot see through the condition.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
+        if: github.event_name != 'release'
         with:
           path: |
             ~/.cargo/registry/index
@@ -227,14 +237,14 @@ jobs:
             echo "spec/ matches upstream develop"
           fi
 
-  # A release tag's packages go to nuget.org, under the Evariops account. Trusted Publishing trades
+  # A published release's packages go to nuget.org, under the Evariops account. Trusted Publishing trades
   # the job's GitHub OIDC token for an API key that lives an hour, so no key is stored here; the
   # policy nuget.org holds names this repository, this file (build.yml) and the release
   # environment: renaming either stops the push.
   publish:
     name: push the packages to nuget.org
     needs: ci
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: release
@@ -254,7 +264,9 @@ jobs:
       # Each .snupkg goes up with its .nupkg. A package already there is skipped, so a push that
       # failed halfway can be re-run.
       - name: Push
+        env:
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
         run: |
           dotnet nuget push "packages/*.nupkg" --skip-duplicate \
-            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
+            --api-key "$NUGET_API_KEY" \
             --source https://api.nuget.org/v3/index.json
