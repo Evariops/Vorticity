@@ -13,6 +13,7 @@ public sealed class RetainedTableTests
 {
     private const int Warmup = 20;
     private const int Iterations = 200;
+    private const int Rounds = 5;
 
     /// <summary>
     /// A scan that retains chunks allocates nothing for its table beyond the table object: the
@@ -171,6 +172,11 @@ public sealed class RetainedTableTests
         table.Dispose();
     }
 
+    /// <summary>
+    /// The bytes a round of <see cref="Iterations"/> calls allocated after a warm-up, floored over
+    /// <see cref="Rounds"/> rounds so that a one-off such as a tiered promotion inside one round
+    /// does not read as a cost of the table; anything allocated on every call raises every round.
+    /// </summary>
     private static long Measure(Action body)
     {
         for (int i = 0; i < Warmup; i++)
@@ -178,12 +184,18 @@ public sealed class RetainedTableTests
             body();
         }
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < Iterations; i++)
+        long floor = long.MaxValue;
+        for (int round = 0; round < Rounds; round++)
         {
-            body();
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < Iterations; i++)
+            {
+                body();
+            }
+
+            floor = Math.Min(floor, GC.GetAllocatedBytesForCurrentThread() - before);
         }
 
-        return GC.GetAllocatedBytesForCurrentThread() - before;
+        return floor;
     }
 }
