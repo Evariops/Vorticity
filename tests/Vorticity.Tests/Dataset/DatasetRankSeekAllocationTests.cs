@@ -34,28 +34,39 @@ public sealed class DatasetRankSeekAllocationTests
             store, types, schema, DatasetRankSeekTests.Shape.Shared, text: true, sortedColumn, ct);
         await using DatasetKeyCursor cursor = await DatasetRankSeekTests.OpenAsync(dataset, sortedColumn, ct);
 
-        // A first pass opens the objects and reads what the selections read; the second allocates nothing.
+        // A first pass opens the objects and reads what the selections read; the ones after it
+        // allocate nothing. Floored over several passes rather than measured on one: a one-off
+        // inside a single pass - a tiered promotion is the usual one - once read as 4 032 bytes
+        // over 64 selections. A selection that allocates raises every pass, so the floor still
+        // catches it.
         const int Ranks = 64;
+        const int Passes = 5;
         for (int rank = 0; rank < Ranks; rank++)
         {
             Assert.True(await cursor.SelectAsync(rank * 31, ct));
         }
 
-        int synchronous = 0;
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int rank = 0; rank < Ranks; rank++)
+        long floor = long.MaxValue;
+        for (int pass = 0; pass < Passes; pass++)
         {
-            ValueTask<bool> select = cursor.SelectAsync(rank * 31, ct);
-            if (select.IsCompletedSuccessfully)
+            int synchronous = 0;
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int rank = 0; rank < Ranks; rank++)
             {
-                synchronous++;
+                ValueTask<bool> select = cursor.SelectAsync(rank * 31, ct);
+                if (select.IsCompletedSuccessfully)
+                {
+                    synchronous++;
+                }
+
+                Assert.True(await select);
             }
 
-            Assert.True(await select);
+            long delta = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.Equal(Ranks, synchronous);
+            floor = Math.Min(floor, delta);
         }
 
-        long delta = GC.GetAllocatedBytesForCurrentThread() - before;
-        Assert.Equal(Ranks, synchronous);
-        Assert.True(delta == 0, $"{Ranks} selections allocated {delta} bytes");
+        Assert.True(floor == 0, $"{Ranks} selections allocated {floor} bytes on each of {Passes} passes");
     }
 }
