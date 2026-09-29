@@ -1,72 +1,73 @@
 # Release Drafter config, read by .github/workflows/release-drafter.yml.
 #
-# Every merge to main updates a draft release, its version resolved from the merged pull requests'
-# labels. Publishing the draft creates the tag and fires the release run of build.yml, which runs
-# every check again on that tag and then pushes the packages to nuget.org.
+# Every merge to main updates a draft release. Publishing the draft creates the tag and fires the
+# release run of build.yml, which runs every check again on that tag and then pushes the packages
+# to nuget.org.
 #
-# Only merged pull requests reach the notes: a commit pushed straight to main never appears. Labels
-# come from the pull request's title, in the Conventional Commits form the commits use, and from
-# the files it touches (autolabeler below); `skip-changelog` hides a pull request.
+# Only merged pull requests reach the notes: a commit pushed straight to main never appears. A pull
+# request is filed by its title, read as a Conventional Commits header like the commit messages,
+# under the first category that matches it; the `skip-changelog` label leaves it out.
 
 name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
 
-# The autolabel job collapses each pull request to one category label, by priority, so none
-# appears in two sections. Keep this list in the order of that priority list.
+# Below 1.0.0 a breaking change moves the minor version, as SemVer allows there; it moves the major
+# from 1.0 on. A category without `semver-increment` moves the patch.
 categories:
+  - type: pre-exclude
+    when:
+      label: skip-changelog
   - title: '💥 Breaking changes'
-    labels: ['breaking']
+    exclusive: true
+    semver-increment: minor
+    when:
+      - conventional:
+          breaking: true
+      - label: breaking
   - title: '🚀 Features'
-    labels: ['feature']
+    exclusive: true
+    semver-increment: minor
+    when:
+      conventional:
+        type: feat
   - title: '🐛 Bug fixes'
-    labels: ['bug']
+    exclusive: true
+    when:
+      conventional:
+        type: fix
   - title: '⚡ Performance'
-    labels: ['performance']
+    exclusive: true
+    semver-increment: minor
+    when:
+      conventional:
+        type: perf
   - title: '📚 Documentation'
-    labels: ['documentation']
-  - title: '🔧 Build, CI and tooling'
-    labels: ['ci']
+    exclusive: true
+    when:
+      conventional:
+        type: docs
   - title: '📦 Dependencies'
-    labels: ['dependencies']
+    exclusive: true
     collapse-after: 3
+    when:
+      - conventional:
+          scope: deps
+      - label: dependencies
+  - title: '🔧 Build, CI and tooling'
+    exclusive: true
+    when:
+      conventional:
+        types: [build, ci]
   - title: '🧹 Maintenance'
-    labels: ['maintenance']
+    exclusive: true
     collapse-after: 5
-
-exclude-labels: ['skip-changelog']
+    when:
+      conventional:
+        types: [refactor, test, chore, bench]
+  - title: 'Other changes'
 
 change-template: '- $TITLE (#$NUMBER)'
 change-title-escapes: '\<*_&' # markdown metacharacters in pull request titles
-
-# Below 1.0.0 a breaking change moves the minor version, as SemVer allows there; `breaking` moves
-# to `major` with 1.0.
-version-resolver:
-  minor:
-    labels: ['breaking', 'feature', 'performance']
-  patch:
-    labels: ['bug', 'documentation', 'ci', 'dependencies', 'maintenance']
-  default: patch
-
-autolabeler:
-  - label: 'breaking'
-    title: ['/^\w+(\([^)]*\))?!:/']
-    body: ['/^BREAKING CHANGE:/m']
-  - label: 'feature'
-    title: ['/^feat(\([^)]*\))?!?:/i']
-  - label: 'bug'
-    title: ['/^fix(\([^)]*\))?!?:/i']
-  - label: 'performance'
-    title: ['/^perf(\([^)]*\))?!?:/i']
-  - label: 'documentation'
-    title: ['/^docs(\([^)]*\))?!?:/i']
-    files: ['**/*.md']
-  - label: 'ci'
-    title: ['/^(ci|build)(\([^)]*\))?!?:/i']
-    files: ['.github/**']
-  - label: 'dependencies'
-    files: ['Directory.Packages.props', 'global.json', 'nuget.config', '**/Cargo.toml', '**/Cargo.lock']
-  - label: 'maintenance'
-    title: ['/^(refactor|test|chore|bench)(\([^)]*\))?!?:/i']
 
 template: |
   ## What's Changed
