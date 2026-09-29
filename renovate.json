@@ -5,5 +5,14 @@
   ],
   "prHourlyLimit": 0,
   "minimumReleaseAge": "2 days",
-  "internalChecksFilter": "strict"
+  "internalChecksFilter": "strict",
+  "packageRules": [
+    {
+      "description": "The generator and the analyzers build against the oldest compiler they load into (see Directory.Packages.props): raising it raises the floor for every consumer, so it is a decision rather than an update.",
+      "matchPackageNames": [
+        "Microsoft.CodeAnalysis.CSharp"
+      ],
+      "enabled": false
+    }
+  ]
 }
