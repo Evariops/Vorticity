@@ -256,10 +256,13 @@ jobs:
           name: packages
           path: packages
 
+      # The user is the nuget.org account that created the trusted publishing policy, not the
+      # Evariops organization that owns the packages. It is a variable of the release environment,
+      # read when the job runs, so a change of account needs no new tag: re-run the failed job.
       - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
         id: login
         with:
-          user: Evariops
+          user: ${{ vars.NUGET_USER }}
 
       # Each .snupkg goes up with its .nupkg. A package already there is skipped, so a push that
       # failed halfway can be re-run.
