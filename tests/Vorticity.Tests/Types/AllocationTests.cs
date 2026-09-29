@@ -16,8 +16,19 @@ public sealed class AllocationTests
 {
     private const int Warmup = 200;
     private const int Iterations = 500;
+    private const int Rounds = 5;
 
-    /// <summary>Runs <paramref name="body"/> after a warm-up and returns the bytes it allocated.</summary>
+    /// <summary>
+    /// Runs <paramref name="body"/> after a warm-up and returns the bytes a round of
+    /// <see cref="Iterations"/> calls allocated, floored over <see cref="Rounds"/> rounds.
+    /// </summary>
+    /// <remarks>
+    /// The floor rather than one round, for the reason PathAllocationTests gives: tiered JIT
+    /// promotes a method on its call-count threshold and the promotion allocates, so a single
+    /// window measures whichever round happened to absorb a one-off. One did: 448 bytes over 500
+    /// reads of a scalar list with intrinsics disabled, which no per-call allocation adds up to.
+    /// Anything allocated on every call still raises the floor.
+    /// </remarks>
     private static long Measure(Action body)
     {
         for (int i = 0; i < Warmup; i++)
@@ -25,13 +36,19 @@ public sealed class AllocationTests
             body();
         }
 
-        long before = GC.GetAllocatedBytesForCurrentThread();
-        for (int i = 0; i < Iterations; i++)
+        long floor = long.MaxValue;
+        for (int round = 0; round < Rounds; round++)
         {
-            body();
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int i = 0; i < Iterations; i++)
+            {
+                body();
+            }
+
+            floor = Math.Min(floor, GC.GetAllocatedBytesForCurrentThread() - before);
         }
 
-        return GC.GetAllocatedBytesForCurrentThread() - before;
+        return floor;
     }
 
     private static (DTypeArena A, DTypeArena B, DType X, DType Y) TwoArenas()
