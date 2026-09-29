@@ -23,6 +23,12 @@ internal sealed class DistinctTable
 {
     private const int InitialCapacity = 64;
 
+    /// <summary>The slots a table of few values gives each, up to <see cref="SparseCapacity"/>.</summary>
+    private const int SparseSpread = 64;
+
+    /// <summary>The most slots a table of few values is spread over; past it, the load alone sizes the table.</summary>
+    private const int SparseCapacity = 4096;
+
     /// <summary>
     /// Entries beyond which the chunk refuses its dictionary candidate rather than keep growing.
     /// This is a bound on memory, not a pricing rule; pricing is the chooser's.
@@ -152,8 +158,9 @@ internal sealed class DistinctTable
     /// </summary>
     private void Open(int rows)
     {
-        int capacity = Math.Max(
+        int entries = Math.Max(
             InitialCapacity, (int)BitOperations.RoundUpToPowerOf2((uint)((_lastDistinct * 2) + 1)));
+        int capacity = Math.Max(entries, Sparse(_lastDistinct));
         _slotCode = ArrayPool<int>.Shared.Rent(capacity);
         _slotKey = ArrayPool<ulong>.Shared.Rent(capacity);
         _mask = capacity - 1;
@@ -162,13 +169,13 @@ internal sealed class DistinctTable
         {
             _slotOffset = ArrayPool<int>.Shared.Rent(capacity);
             _slotLength = ArrayPool<int>.Shared.Rent(capacity);
-            _codeOffset = ArrayPool<int>.Shared.Rent(capacity);
-            _codeLength = ArrayPool<int>.Shared.Rent(capacity);
+            _codeOffset = ArrayPool<int>.Shared.Rent(entries);
+            _codeLength = ArrayPool<int>.Shared.Rent(entries);
             _heap = ArrayPool<byte>.Shared.Rent(Math.Max(1024, _lastHeap));
         }
 
-        _firstRows = ArrayPool<int>.Shared.Rent(capacity);
-        _codeKey = ArrayPool<ulong>.Shared.Rent(capacity);
+        _firstRows = ArrayPool<int>.Shared.Rent(entries);
+        _codeKey = ArrayPool<ulong>.Shared.Rent(entries);
         _codes = ArrayPool<int>.Shared.Rent(Math.Max(Math.Max(256, rows), _lastRows));
     }
 
@@ -237,6 +244,10 @@ internal sealed class DistinctTable
         if (_mask < 0)
         {
             Open(count);
+        }
+        else if (_mask + 1 < Sparse(_distinct))
+        {
+            Resize(Sparse(_distinct));
         }
 
         EnsureCodes(_rows + count);
@@ -511,20 +522,26 @@ internal sealed class DistinctTable
             // A row equal to the one before takes its code without the hash or the probe, and so
             // does the run it starts, measured a vector at a time: a sorted column or one of runs
             // is mostly such rows. The one compare that decides it is all a column without runs
-            // pays.
+            // pays. The run is measured before the row that starts it is inserted, so that the hash
+            // of the row after the run is taken first: a probe whose branch was guessed wrong throws
+            // away what came after it, never the hash waiting for it.
             int i = 0;
+            ulong hash = values.IsEmpty ? 0 : KeyHash.Mix(ulong.CreateTruncating(values[0]));
             while (i < values.Length && !_abandoned)
             {
                 T value = values[i];
-                InsertFixed(ulong.CreateTruncating(value));
-                i++;
-                if (i < values.Length && values[i] == value && !_abandoned)
+                int run = i + 1 < values.Length && values[i + 1] == value ? RunLength(values[(i + 1)..], value) : 0;
+                int next = i + 1 + run;
+                ulong nextHash = next < values.Length ? KeyHash.Mix(ulong.CreateTruncating(values[next])) : 0;
+                InsertFixed(ulong.CreateTruncating(value), hash);
+                if (run > 0 && !_abandoned)
                 {
-                    int run = RunLength(values[i..], value);
                     _codes.AsSpan(_rows, run).Fill(_codes[_rows - 1]);
                     _rows += run;
-                    i += run;
                 }
+
+                i = next;
+                hash = nextHash;
             }
 
             return;
@@ -600,8 +617,15 @@ internal sealed class DistinctTable
         }
     }
 
-    /// <summary>Recent inline views a probe remembers, with their codes; a power of two.</summary>
-    private const int RecentViews = 16;
+    /// <summary>The bits of a recent view's slot.</summary>
+    /// <remarks>
+    /// Two views in one slot take each other's place row after row, so there are enough slots to
+    /// keep a few dozen labels apart, and no more, as each costs the rows whose views never come back.
+    /// </remarks>
+    private const int RecentBits = 8;
+
+    /// <summary>Recent inline views a probe remembers, with their codes.</summary>
+    private const int RecentViews = 1 << RecentBits;
 
     /// <remarks>
     /// <para>
@@ -715,9 +739,14 @@ internal sealed class DistinctTable
     }
 
     /// <summary>Where a view sits among the recent ones.</summary>
+    /// <remarks>
+    /// A collision here costs a miss and nothing more, so the slot takes no seed: the top bits of
+    /// one multiply of the view's two words folded, which a row pays in <see cref="Recall"/>
+    /// before anything else.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int RecentSlot(ulong low, ulong high) =>
-        (int)KeyHash.Mix(low ^ (high * 0x9E3779B97F4A7C15UL)) & (RecentViews - 1);
+        (int)(((low ^ (high * 0x9E3779B97F4A7C15UL)) * 0x9E3779B97F4A7C15UL) >> (64 - RecentBits));
 
     /// <summary>
     /// The null is a value like any other, with a code of its own, so a nullable dictionary has at
@@ -744,9 +773,13 @@ internal sealed class DistinctTable
         _codes[_rows++] = _nullCode;
     }
 
-    private void InsertFixed(ulong key)
+    private void InsertFixed(ulong key) => InsertFixed(key, KeyHash.Mix(key));
+
+    /// <param name="key">The value's bits.</param>
+    /// <param name="hash">The key's <see cref="KeyHash.Mix"/>, which a loop takes a row ahead.</param>
+    private void InsertFixed(ulong key, ulong hash)
     {
-        int slot = (int)KeyHash.Mix(key) & _mask;
+        int slot = (int)hash & _mask;
         while (true)
         {
             int occupant = _slotCode[slot];
@@ -836,7 +869,7 @@ internal sealed class DistinctTable
         ulong tailMask = size <= 8 ? 0 : (1UL << (8 * (size - 8))) - 1;
         ulong head = ((low >> 32) | (high << 32)) & headMask;
         ulong tail = (high >> 32) & tailMask;
-        ulong hash = KeyHash.Mix(head ^ (tail * 0x9E3779B97F4A7C15UL) ^ ((ulong)size << 56));
+        ulong hash = KeyHash.Pair(head, tail, size);
 
         int[] offsets = _slotOffset!;
         int[] lengths = _slotLength!;
@@ -986,19 +1019,34 @@ internal sealed class DistinctTable
         array = larger;
     }
 
-    /// <summary>
-    /// Doubles the slots once the load passes one half, re-inserting from the stored key or hash
-    /// rather than from the bytes, which is the point of storing the hash.
-    /// </summary>
+    /// <summary>Doubles the slots once the load passes one half.</summary>
     private void GrowIfLoaded()
     {
         int capacity = _mask + 1;
-        if (_distinct * 2 <= capacity)
+        if (_distinct * 2 > capacity)
         {
-            return;
+            Resize(capacity * 2);
         }
+    }
 
-        int grown = capacity * 2;
+    /// <summary>
+    /// The fewest slots for <paramref name="distinct"/> values: spread out while they are few, so
+    /// that rows drawing them in no order rarely find another value on their slot, which makes the
+    /// compare that finds them a branch the processor cannot guess.
+    /// </summary>
+    private static int Sparse(int distinct) => distinct == 0
+        ? 0
+        : distinct >= SparseCapacity / SparseSpread
+            ? SparseCapacity
+            : (int)BitOperations.RoundUpToPowerOf2((uint)(distinct * SparseSpread));
+
+    /// <summary>
+    /// Moves the held values to <paramref name="grown"/> slots, re-inserting from the stored key or
+    /// hash rather than from the bytes, which is the point of storing the hash.
+    /// </summary>
+    private void Resize(int grown)
+    {
+        int capacity = _mask + 1;
         int[] codes = ArrayPool<int>.Shared.Rent(grown);
         Array.Clear(codes, 0, grown);
         ulong[] keys = ArrayPool<ulong>.Shared.Rent(grown);

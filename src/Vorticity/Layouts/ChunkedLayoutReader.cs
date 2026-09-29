@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
@@ -81,6 +82,7 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         {
             Span<int> chunks = scratch.Span;
             int count = 0;
+            int taken = 0;
             for (int i = first; i < last; i++)
             {
                 RowRange local = LocalRange(offsets, rows, i);
@@ -92,7 +94,7 @@ internal sealed class ChunkedLayoutReader : LayoutReader
                 LayoutNode chunk = node.GetChild(i);
                 if (context.HasSelection)
                 {
-                    chunks[count++] = ExecuteChunkSelected(in chunk, local, in fields, context, offsets[i]);
+                    chunks[count++] = ExecuteChunkSelected(in chunk, local, in fields, context, ref taken, offsets[i], offsets[i + 1]);
                 }
                 else if (live is not null
                     && local.Length < chunk.RowCount
@@ -184,30 +186,28 @@ internal sealed class ChunkedLayoutReader : LayoutReader
     }
 
     /// <summary>
-    /// Executes one chunk with the selection re-based into that chunk's own row space.
+    /// Executes the chunk <c>[start, end)</c> with its run of the selection, the one after
+    /// <paramref name="taken"/>, re-based into that chunk's own row space.
     /// </summary>
     /// <remarks>
     /// The only reader that has to do this, and the reason the selection is defined to live in its
     /// sibling `rows` argument's coordinate space: struct, zoned and stats pass `rows` through
     /// untouched and therefore pass the selection through by doing nothing, while this one
     /// re-partitions and so has to re-partition both. A chunk that ends up wanting no rows still
-    /// runs - it produces an empty node, which concatenates to nothing.
-    ///
-    /// The pass over the whole selection looks like a cost per chunk and is not one: a chunk
-    /// boundary is a split boundary, because the split walk recurses into every touched chunk and
-    /// pushes its end, so the caller's loop runs this once per split and the selection it walks is
-    /// the split's own. Replacing the pass with two binary searches would therefore save nothing.
+    /// runs - it produces an empty node, which concatenates to nothing. Kept out of
+    /// <see cref="Execute"/>, which the JIT optimizes fully at its first call, so that a scan with
+    /// no selection does not wait for the search of a run to compile.
     /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static int ExecuteChunkSelected(
-        in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context, long start)
+        in LayoutNode chunk, RowRange local, in FieldMask fields, ScanContext context, ref int taken, long start, long end)
     {
-        ReadOnlySpan<int> selection = context.Selection;
-
-        int[] rebased = ArrayPool<int>.Shared.Rent(Math.Max(selection.Length, 1));
+        ReadOnlySpan<int> run = NextRun(context.Selection, ref taken, start, end);
+        int[] rebased = ArrayPool<int>.Shared.Rent(Math.Max(run.Length, 1));
         try
         {
-            int count = Rebase(selection, start, chunk.RowCount, rebased);
-            ScanContext.SavedSelection saved = context.ExchangeSelection(rebased, count);
+            Shift(run, start, rebased);
+            ScanContext.SavedSelection saved = context.ExchangeSelection(rebased, run.Length);
             try
             {
                 return ExecuteRowChild(in chunk, local, in fields, context);
@@ -223,58 +223,87 @@ internal sealed class ChunkedLayoutReader : LayoutReader
         }
     }
 
-    /// <summary>The selected rows that fall in a chunk, in the chunk's own row space.</summary>
-    /// <param name="selection">The rows, in the chunked node's space.</param>
+    /// <summary>
+    /// The selected rows that fall in the chunk <c>[start, end)</c>: the run of the selection that
+    /// follows <paramref name="taken"/>, which is left past it.
+    /// </summary>
+    /// <param name="selection">The rows, in the chunked node's space, ascending.</param>
+    /// <param name="taken">Where the previous chunk's run ended.</param>
     /// <param name="start">The chunk's first row.</param>
-    /// <param name="rows">The chunk's row count.</param>
-    /// <param name="into">Room for every row of <paramref name="selection"/>.</param>
-    /// <returns>How many fall in the chunk.</returns>
+    /// <param name="end">The row past the chunk's last.</param>
+    /// <returns>The run, still in the chunked node's space.</returns>
     /// <remarks>
-    /// Every column of a split walks the same selection, so the walk has no branch on a row: the
-    /// rows are moved a vector at a time and checked all at once, which is the whole answer when
-    /// the split lies in one chunk, and otherwise each row is written at the next slot and kept by
-    /// its own verdict.
+    /// The selection ascends -- every producer sorts it, and its first and last rows are read as its
+    /// bounds -- and the chunks are visited in order, so a chunk's rows are the run after the last
+    /// chunk's, found by two searches rather than by a pass over the whole selection for every chunk.
+    /// A split lying in one chunk, which is what the plan makes of every chunk it walks, is one run
+    /// found at once. Rows outside the chunks, which no producer makes, fall in no run.
     /// </remarks>
-    internal static int Rebase(ReadOnlySpan<int> selection, long start, long rows, Span<int> into)
+    internal static ReadOnlySpan<int> NextRun(ReadOnlySpan<int> selection, ref int taken, long start, long end)
     {
-        if (start > int.MaxValue)
+        ReadOnlySpan<int> rest = selection[taken..];
+        int begin = Below(rest, start);
+        int stop = begin + Below(rest[begin..], end);
+        taken += stop;
+        return rest[begin..stop];
+    }
+
+    /// <summary>Writes <paramref name="rows"/> less <paramref name="start"/> into <paramref name="into"/>, a vector at a time.</summary>
+    /// <param name="rows">A chunk's run of the selection, every row at or past <paramref name="start"/>.</param>
+    /// <param name="start">The chunk's first row.</param>
+    /// <param name="into">Room for the run.</param>
+    internal static void Shift(ReadOnlySpan<int> rows, long start, Span<int> into)
+    {
+        if (rows.IsEmpty)
         {
-            return 0;
+            return;
         }
 
+        // A row is an int at or past the chunk's first, so that first is an int too.
         int origin = (int)start;
-        uint limit = (uint)Math.Min(rows, uint.MaxValue);
-        Span<int> slots = into[..selection.Length];
+        Span<int> slots = into[..rows.Length];
         int i = 0;
-        if (Vector128.IsHardwareAccelerated && selection.Length >= Vector128<int>.Count)
+        if (Vector128.IsHardwareAccelerated && rows.Length >= Vector128<int>.Count)
         {
             Vector128<int> shift = Vector128.Create(origin);
-            Vector128<uint> bound = Vector128.Create(limit);
-            Vector128<uint> outside = Vector128<uint>.Zero;
-            ref int from = ref MemoryMarshal.GetReference(selection);
+            ref int from = ref MemoryMarshal.GetReference(rows);
             ref int to = ref MemoryMarshal.GetReference(slots);
-            for (; i <= selection.Length - Vector128<int>.Count; i += Vector128<int>.Count)
+            for (; i <= rows.Length - Vector128<int>.Count; i += Vector128<int>.Count)
             {
-                Vector128<int> local = Vector128.LoadUnsafe(ref from, (nuint)i) - shift;
-                local.StoreUnsafe(ref to, (nuint)i);
-                outside |= Vector128.GreaterThanOrEqual(local.AsUInt32(), bound);
-            }
-
-            if (outside != Vector128<uint>.Zero)
-            {
-                i = 0;
+                (Vector128.LoadUnsafe(ref from, (nuint)i) - shift).StoreUnsafe(ref to, (nuint)i);
             }
         }
 
-        int count = i;
-        for (; i < selection.Length; i++)
+        for (; i < rows.Length; i++)
         {
-            int local = selection[i] - origin;
-            slots[count] = local;
-            count += (uint)local < limit ? 1 : 0;
+            slots[i] = rows[i] - origin;
+        }
+    }
+
+    /// <summary>How many rows of an ascending run lie below <paramref name="bound"/>.</summary>
+    private static int Below(ReadOnlySpan<int> rows, long bound)
+    {
+        if (rows.IsEmpty || rows[^1] < bound)
+        {
+            return rows.Length;
         }
 
-        return count;
+        int lo = 0;
+        int hi = rows.Length - 1;
+        while (lo < hi)
+        {
+            int mid = (int)(((uint)lo + (uint)hi) >> 1);
+            if (rows[mid] < bound)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        return lo;
     }
 
     /// <summary>

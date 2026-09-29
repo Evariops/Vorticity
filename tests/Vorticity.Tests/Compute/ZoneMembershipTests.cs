@@ -169,6 +169,104 @@ public class ZoneMembershipTests
         Assert.True(Pruner(literals).MayMatch(new RowRange(0, Rows)));
     }
 
+    /// <summary>
+    /// Float candidates against float bounds, zone by zone, against the definition as IEEE orders
+    /// floats: the two zeros are one value, and a NaN bound claims nothing.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Counts))]
+    public void AnswersEachFloatZoneAsTheDefinitionDoes(int candidates)
+    {
+        // Zone z holds [z - 500, z - 499.5], half of them below zero, but for two exact zones at
+        // -0.0 and +0.0 and one whose maximum is a NaN. The candidates fall in every other zone,
+        // below zero as above it, and the last is +0.0.
+        const double Offset = Zones / 2;
+        ZoneBounds[] zones = new ZoneBounds[Zones];
+        for (int zone = 0; zone < Zones; zone++)
+        {
+            (double min, double max) = zone switch
+            {
+                10 => (-0.0, -0.0),
+                11 => (0.0, 0.0),
+                12 => (zone - Offset, double.NaN),
+                _ => (zone - Offset, zone - Offset + 0.5),
+            };
+
+            zones[zone] = ZoneBounds.Create(
+                FilterLiteral.From(min), true, FilterLiteral.From(max), true,
+                exact: true, nullCount: 0, hasNullCount: true);
+        }
+
+        FilterLiteral[] literals = new FilterLiteral[candidates];
+        for (int i = 0; i < candidates - 1; i++)
+        {
+            literals[i] = FilterLiteral.From((2.0 * (i % (Zones / 2))) + 0.25 - Offset);
+        }
+
+        literals[candidates - 1] = FilterLiteral.From(0.0);
+        ZonePruner pruner = new ZonePruner(
+            Expr.In(Expr.Field(Field), literals),
+            [new ZoneColumn(Expr.Field(Field), ZoneLength, Rows, zones)]);
+
+        List<int> disagreed = [];
+        for (int zone = 0; zone < Zones; zone++)
+        {
+            // A NaN bound says nothing of its side, and the other side still rules a value out. A
+            // zone every value of which is a candidate counts whole when its NaNs are known, which
+            // these bounds do not say.
+            ZoneBounds bounds = zones[zone];
+            double min = bounds.Min.FloatValue;
+            double max = bounds.Max.FloatValue;
+            bool expected = false;
+            bool whole = false;
+            for (int i = 0; i < literals.Length; i++)
+            {
+                double value = literals[i].FloatValue;
+                expected |= (double.IsNaN(min) || value >= min) && (double.IsNaN(max) || value <= max);
+                whole |= value == min && value == max;
+            }
+
+            RowRange range = new RowRange((long)zone * ZoneLength, (long)(zone + 1) * ZoneLength);
+            bool counted = pruner.TryCount(range, out long count);
+            if (pruner.MayMatch(range) != expected
+                || (!expected && !(counted && count == 0))
+                || (whole && counted && count != ZoneLength))
+            {
+                disagreed.Add(zone);
+            }
+        }
+
+        Assert.Empty(disagreed);
+    }
+
+    /// <summary>
+    /// A NaN candidate equals no value, and the proof of an equality leaves it open on every zone:
+    /// an <c>IN</c> holding one keeps every zone, whatever the count of the others.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Counts))]
+    public void KeepsAZoneWhoseFloatCandidatesIncludeANaN(int candidates)
+    {
+        FilterLiteral[] literals = new FilterLiteral[candidates];
+        for (int i = 0; i < candidates - 1; i++)
+        {
+            literals[i] = FilterLiteral.From(-(i + 1.5));
+        }
+
+        literals[candidates - 1] = FilterLiteral.From(double.NaN);
+        ZoneBounds[] zones =
+        [
+            ZoneBounds.Create(
+                FilterLiteral.From(1.0), true, FilterLiteral.From(2.0), true,
+                exact: true, nullCount: 0, hasNullCount: true),
+        ];
+
+        ZonePruner pruner = new ZonePruner(
+            Expr.In(Expr.Field(Field), literals),
+            [new ZoneColumn(Expr.Field(Field), ZoneLength, ZoneLength, zones)]);
+        Assert.True(pruner.MayMatch(new RowRange(0, ZoneLength)));
+    }
+
     /// <summary>Candidates one per zone, so half the zones hold one and half do not.</summary>
     private static FilterLiteral[] Spread(int candidates)
     {

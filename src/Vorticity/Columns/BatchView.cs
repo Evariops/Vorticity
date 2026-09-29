@@ -98,15 +98,10 @@ public readonly ref struct BatchView
     public Column<T> Column<T>(string name)
     {
         ArgumentNullException.ThrowIfNull(name);
-        for (int i = 0; i < Schema.Count; i++)
-        {
-            if (Schema[i].Name == name)
-            {
-                return Column<T>(i);
-            }
-        }
-
-        throw new VortexSchemaException($"The batch has no column '{name}'; its schema is {Schema}.");
+        int index = Schema.IndexOfName(name);
+        return index >= 0
+            ? Column<T>(index)
+            : throw new VortexSchemaException($"The batch has no column '{name}'; its schema is {Schema}.");
     }
 
     /// <summary>Copies the batch once into buffers the caller owns.</summary>

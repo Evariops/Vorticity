@@ -73,7 +73,7 @@ public sealed class MembershipAndPairTests
                             }
 
                             int node = Primitive(arena, types, ptype, values, valid, bitOffset);
-                            InSet? set = InSet.TryBuild(literals.ToArray(), signed);
+                            InSet? set = InSet.TryBuild(literals.ToArray(), signed ? CandidateKind.Signed : CandidateKind.Unsigned);
                             Assert.NotNull(set);
                             byte[] answer = new byte[rows];
                             ComparisonKernels.In(arena, node, literals.ToArray(), answer, new byte[rows], set);

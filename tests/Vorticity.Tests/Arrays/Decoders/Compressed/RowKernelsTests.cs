@@ -18,29 +18,37 @@ public sealed class RowKernelsTests
 
     private const int Entries = 37;
 
+    /// <remarks>
+    /// The dictionary is a few dozen values, whose validity the gather expands to a byte each, or
+    /// more than a quarter of the rows, whose validity it reads in the bitmap at each code.
+    /// </remarks>
     [Theory]
-    [InlineData(PType.U16, 16, true)]
-    [InlineData(PType.U16, 16, false)]
-    [InlineData(PType.U8, 8, false)]
-    [InlineData(PType.I32, 4, true)]
-    [InlineData(PType.I16, 2, false)]
-    internal void NullableCodesGatherAsRowByRow(PType codesPType, int width, bool valuesAllValid)
+    [InlineData(PType.U16, 16, true, Entries)]
+    [InlineData(PType.U16, 16, false, Entries)]
+    [InlineData(PType.U8, 8, false, Entries)]
+    [InlineData(PType.I32, 4, true, Entries)]
+    [InlineData(PType.I16, 2, false, Entries)]
+    [InlineData(PType.U16, 16, false, 251)]
+    [InlineData(PType.U16, 8, false, 5_000)]
+    [InlineData(PType.I32, 4, false, 5_000)]
+    [InlineData(PType.I16, 2, false, 5_000)]
+    internal void NullableCodesGatherAsRowByRow(PType codesPType, int width, bool valuesAllValid, int entries)
     {
-        Random random = new Random((width * 31) + (int)codesPType + (valuesAllValid ? 1 : 0));
-        byte[] values = new byte[Entries * width];
+        Random random = new Random((width * 31) + (int)codesPType + (valuesAllValid ? 1 : 0) + entries);
+        byte[] values = new byte[entries * width];
         random.NextBytes(values);
         bool[] codeValid = new bool[Rows];
-        bool[] valueValid = new bool[Entries];
+        bool[] valueValid = new bool[entries];
         int[] codes = new int[Rows];
         for (int row = 0; row < Rows; row++)
         {
             codeValid[row] = random.Next(10) != 0;
 
             // A null row's code is whatever the file holds, past the dictionary included.
-            codes[row] = codeValid[row] ? random.Next(Entries) : Entries + random.Next(100);
+            codes[row] = codeValid[row] ? random.Next(entries) : entries + random.Next(100);
         }
 
-        for (int entry = 0; entry < Entries; entry++)
+        for (int entry = 0; entry < entries; entry++)
         {
             valueValid[entry] = random.Next(5) != 0;
         }
@@ -49,7 +57,7 @@ public sealed class RowKernelsTests
         destination.AsSpan().Fill(0xCD);
         byte[] output = new byte[(Rows + 7) / 8];
         int fault = RowKernels.GatherMasked(
-            Codes(codes, codesPType), codesPType, values, width, Entries, destination, Rows,
+            Codes(codes, codesPType), codesPType, values, width, entries, destination, Rows,
             Bits(codeValid, offset: 3), 3, valuesAllValid ? default : Bits(valueValid, offset: 5), 5,
             valuesAllValid, output);
 

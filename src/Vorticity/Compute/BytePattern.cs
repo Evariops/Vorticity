@@ -9,7 +9,8 @@ namespace Vorticity.Compute;
 /// would need a definition of "case" this layer does not have. <c>_</c> matches one byte of binary
 /// and one character of UTF8 text: <see cref="Like"/> and <see cref="LikeText"/>, which agree on
 /// any pattern without an unescaped <c>_</c>. <c>StartsWith</c> and <c>Contains</c> delegate to the
-/// runtime's vectorised span search rather than to hand-written loops. The <c>like</c> matchers
+/// runtime's vectorised span search rather than to hand-written loops, and so does a <c>like</c>
+/// pattern without <c>_</c>, read once into a <see cref="LikePlan"/>. The <c>like</c> matchers
 /// backtrack greedily on <c>%</c> and are linear on any pattern without adjacent wildcards; their
 /// quadratic case is bounded by the pattern the caller wrote, never by the file.
 /// </remarks>
@@ -17,6 +18,59 @@ internal static class BytePattern
 {
     private const byte Any = (byte)'%';
     private const byte One = (byte)'_';
+
+    /// <summary>
+    /// Reads a <c>like</c> pattern without <c>_</c> into its segments, or reports that it has one.
+    /// </summary>
+    /// <param name="pattern">The pattern.</param>
+    /// <param name="escape">The byte that quotes a wildcard or itself.</param>
+    /// <param name="literals">Receives the segments; at least as long as the pattern.</param>
+    /// <param name="ends">Receives where each segment ends; at least <c>pattern.Length / 2 + 1</c> long.</param>
+    /// <param name="plan">The plan, over <paramref name="literals"/> and <paramref name="ends"/>.</param>
+    /// <returns>False when the pattern holds a <c>_</c> no escape quotes.</returns>
+    /// <remarks>Tokens are read as <see cref="Like"/> reads them, a <c>%</c> before an escape.</remarks>
+    internal static bool TryPlan(
+        ReadOnlySpan<byte> pattern, byte escape, Span<byte> literals, Span<int> ends, out LikePlan plan)
+    {
+        int written = 0;
+        int segments = 0;
+        bool anchoredStart = pattern.IsEmpty || pattern[0] != Any;
+        bool lastIsAny = false;
+        for (int p = 0; p < pattern.Length;)
+        {
+            byte token = pattern[p];
+            if (token == Any)
+            {
+                if (written > (segments == 0 ? 0 : ends[segments - 1]))
+                {
+                    ends[segments++] = written;
+                }
+
+                lastIsAny = true;
+                p++;
+                continue;
+            }
+
+            bool escaped = token == escape && p + 1 < pattern.Length;
+            if (!escaped && token == One)
+            {
+                plan = default;
+                return false;
+            }
+
+            literals[written++] = escaped ? pattern[p + 1] : token;
+            lastIsAny = false;
+            p += escaped ? 2 : 1;
+        }
+
+        if (written > (segments == 0 ? 0 : ends[segments - 1]))
+        {
+            ends[segments++] = written;
+        }
+
+        plan = new LikePlan(literals[..written], ends[..segments], anchoredStart, !lastIsAny);
+        return true;
+    }
 
     /// <summary>Whether <paramref name="value"/> begins with <paramref name="pattern"/>.</summary>
     /// <param name="value">The row's bytes.</param>

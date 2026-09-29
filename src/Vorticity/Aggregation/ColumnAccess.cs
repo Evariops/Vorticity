@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -88,11 +89,76 @@ internal sealed class ColumnShape
     }
 }
 
+/// <summary>
+/// The values of a node as a reader's storage type, for a reader that reads the same node at every
+/// range a batch is folded in: read once a batch, the view onto the node kept, or the copy when the
+/// node has to be widened, a decimal narrower than 128 bits or a uuid, and read from there at the
+/// batch's other ranges. A copy of retained values also serves the later batches that view them.
+/// </summary>
+internal struct ValuesCache<TValue>
+    where TValue : unmanaged
+{
+    private TValue[]? _values;
+    private VortexBuffer _view;
+    private int _length;
+    private long _batch;
+    private int _node;
+    private int _canonical;
+    private CanonicalOrigin _origin;
+    private bool _widened;
+
+    /// <summary>The values of <paramref name="node"/> as <paramref name="kind"/>, and their validity.</summary>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="batch">The batch's number, from 1, or 0 for a reader that keys nothing on it.</param>
+    /// <param name="node">The node.</param>
+    /// <param name="kind">The storage type.</param>
+    /// <param name="validity">The node's validity words, empty when every value is valid.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal ReadOnlySpan<TValue> Of(CanonicalArena arena, long batch, int node, StorageKind kind, out ReadOnlySpan<ulong> validity)
+    {
+        if (batch != 0 && batch == _batch && node == _node)
+        {
+            validity = ArenaWords.Validity(arena, _canonical);
+            return _widened ? _values.AsSpan(0, _length) : MemoryMarshal.Cast<byte, TValue>(_view.Span)[.._length];
+        }
+
+        return Read(arena, batch, node, kind, out validity);
+    }
+
+    /// <summary>The first read of the node in this batch: the copy retained values had, or a read of the node.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private ReadOnlySpan<TValue> Read(CanonicalArena arena, long batch, int node, StorageKind kind, out ReadOnlySpan<ulong> validity)
+    {
+        int canonical = EncodedForms.Canonical(arena, node);
+        CanonicalOrigin origin = arena.OriginOf(node);
+        ReadOnlySpan<TValue> values;
+        if (_widened && origin.IsKnown && origin == _origin)
+        {
+            validity = ArenaWords.Validity(arena, canonical);
+            values = _values.AsSpan(0, _length);
+        }
+        else
+        {
+            _values ??= [];
+            values = FixedReader.Values(arena, node, kind, ref _values, out validity);
+            _widened = FixedReader.Widens(arena, node, kind);
+            _view = _widened ? default : arena.RecordRef(canonical).BufferA;
+            _length = values.Length;
+            _origin = origin;
+        }
+
+        _batch = batch;
+        _node = node;
+        _canonical = canonical;
+        return values;
+    }
+}
+
 /// <summary>The values of a fixed-width column as the aggregate's storage type, in whatever form a block holds them.</summary>
 internal static class FixedReader
 {
     /// <summary>The values of <paramref name="node"/> in canonical form, decoding it when it is encoded.</summary>
-    internal static ReadOnlySpan<TValue> Values<TValue>(CanonicalArena arena, int node, StorageKind kind, ref TValue[] scratch, out ReadOnlySpan<ulong> validity)
+    internal static ReadOnlySpan<TValue> Values<TValue>(CanonicalArena arena, int node, StorageKind kind, scoped ref TValue[] scratch, out ReadOnlySpan<ulong> validity)
         where TValue : unmanaged
     {
         int canonical = EncodedForms.Canonical(arena, node);
@@ -131,6 +197,11 @@ internal static class FixedReader
                 return MemoryMarshal.Cast<byte, TValue>(record.BufferA.Span)[..length];
         }
     }
+
+    /// <summary>Whether <see cref="Values{TValue}"/> copies <paramref name="node"/> into a wider type rather than viewing it.</summary>
+    internal static bool Widens(CanonicalArena arena, int node, StorageKind kind) =>
+        kind == StorageKind.Uuid
+        || (kind == StorageKind.Decimal && arena.RecordRef(EncodedForms.Canonical(arena, node)).Storage != DecimalStorageType.I128);
 
     /// <summary>The one value of a constant node.</summary>
     internal static TValue Constant<TValue>(CanonicalArena arena, int node, StorageKind kind)

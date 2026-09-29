@@ -1,8 +1,11 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -30,10 +33,15 @@ internal sealed class BloomPruner
     private readonly VortexExpr _filter;
     private readonly Dictionary<string, Column> _columns;
 
+    /// <summary>Each question of the filter a column's filters answer, by reference.</summary>
+    private readonly Dictionary<VortexExpr, Question> _questions =
+        new Dictionary<VortexExpr, Question>(ReferenceEqualityComparer.Instance);
+
     private BloomPruner(VortexExpr filter, Dictionary<string, Column> columns)
     {
         _filter = filter;
         _columns = columns;
+        Plan(filter);
     }
 
     /// <summary>What consulting the filters cost: segments and bytes read.</summary>
@@ -166,13 +174,32 @@ internal sealed class BloomPruner
                 await LoadLevelAsync(file, live, level, cancellationToken).ConfigureAwait(false);
             }
 
-            for (int block = 0; block < live.BlockCount; block++)
+            Kill(live, level);
+        }
+    }
+
+    /// <summary>
+    /// Kills the blocks the filters read at <paramref name="level"/> prove the filter false in: each
+    /// node's filter is asked once, for all the blocks it covers, a word of blocks at a time.
+    /// </summary>
+    private void Kill(BlockMask live, int level)
+    {
+        int words = live.Words.Length;
+        ulong[] rented = ArrayPool<ulong>.Shared.Rent(words);
+        try
+        {
+            Span<ulong> kept = rented.AsSpan(0, words);
+            Absent(_filter, kept, level);
+            for (int i = 0; i < kept.Length; i++)
             {
-                if (live.IsLive(block) && ProvesAbsent(_filter, block, level))
-                {
-                    live.Kill(block);
-                }
+                kept[i] = ~kept[i];
             }
+
+            live.Keep(kept);
+        }
+        finally
+        {
+            ArrayPool<ulong>.Shared.Return(rented);
         }
     }
 
@@ -249,12 +276,12 @@ internal sealed class BloomPruner
         {
             foreach (Tree tree in column.Trees)
             {
-                if (tree.Root is null || tree.Root.Level <= level)
+                if (tree.Root is null || tree.Root.Level <= level || tree.NodesAt(level + 1) is not { } parents)
                 {
                     continue;
                 }
 
-                foreach ((long index, BloomNode parent) in tree.NodesAt(level + 1))
+                foreach ((long index, BloomNode parent) in parents)
                 {
                     if (parent.Children is not { } region || tree.IsOpened(level + 1, index))
                     {
@@ -348,88 +375,77 @@ internal sealed class BloomPruner
 
     // ------------------------------------------------------------------------------ the proof
 
-    private bool ProvesAbsent(VortexExpr expr, int block, int level)
+    /// <summary>
+    /// Records, once, the questions of the filter a column's filters answer: an equality, an
+    /// <c>IN</c> or a list's element on a column that is what the question takes it for, and a text
+    /// match on a column with trigram filters.
+    /// </summary>
+    private void Plan(VortexExpr expr)
     {
         switch (expr)
         {
-            case LogicalExpr { IsAnd: true } and:
-                return ProvesAbsent(and.Left, block, level) || ProvesAbsent(and.Right, block, level);
+            case LogicalExpr logical:
+                Plan(logical.Left);
+                Plan(logical.Right);
+                break;
 
-            case LogicalExpr or:
-                return ProvesAbsent(or.Left, block, level) && ProvesAbsent(or.Right, block, level);
+            case ComparisonExpr { Op: ComparisonOp.Equal } equal
+                when _columns.TryGetValue(equal.Field.Path, out Column? column) && !column.IsList:
+                _questions[expr] = new Question(column, [equal.Value]);
+                break;
 
-            case ComparisonExpr { Op: ComparisonOp.Equal } equal:
-                return Absent(equal.Field.Path, equal.Value, block, level, elements: false);
-
-            case ListContainsExpr contains:
+            case ListContainsExpr contains
+                when _columns.TryGetValue(contains.Field.Path, out Column? column) && column.IsList:
                 // A list's filter holds its elements, each in its row's block.
-                return Absent(contains.Field.Path, contains.Value, block, level, elements: true);
+                _questions[expr] = new Question(column, [contains.Value]);
+                break;
 
-            case StringMatchExpr match:
-                return AbsentTrigrams(match, block, level);
+            case InExpr @in when _columns.TryGetValue(@in.Field.Path, out Column? column) && !column.IsList:
+                _questions[expr] = new Question(column, @in.Values);
+                break;
 
-            case InExpr @in:
-                foreach (FilterLiteral value in @in.Values)
-                {
-                    if (!Absent(@in.Field.Path, value, block, level, elements: false))
-                    {
-                        return false;
-                    }
-                }
-
-                return @in.Values.Count > 0;
+            case StringMatchExpr match when _columns.TryGetValue(TrigramKey(match.Field.Path), out Column? text):
+                _questions[expr] = new Question(text, Trigrams.Required(match, text.Fold));
+                break;
 
             default:
-                return false;
+                break;
         }
     }
 
     /// <summary>
-    /// Whether the filter over <paramref name="block"/> proves <paramref name="value"/> absent from
-    /// the column, or from its lists' elements when <paramref name="elements"/> — and only when the
-    /// column is what the question takes it for: an equality on a list column, or an element on a
-    /// scalar one, claims nothing.
+    /// Writes into <paramref name="absent"/> the blocks the filters read at <paramref name="level"/>
+    /// prove <paramref name="expr"/> false in: a question's where a node's filter answers no, a
+    /// conjunction's where either side is, a disjunction's where both are.
     /// </summary>
-    private bool Absent(string path, FilterLiteral value, int block, int level, bool elements)
+    private void Absent(VortexExpr expr, Span<ulong> absent, int level)
     {
-        if (!_columns.TryGetValue(path, out Column? column)
-            || column.IsList != elements
-            || column.TreeOf(block) is not { } tree
-            || !tree.TryFilter(level, block, out ReadOnlySpan<uint> words))
+        if (expr is LogicalExpr logical)
         {
-            return false;
-        }
-
-        if (!column.Hashes(value, tree.Hash, out ulong first, out ulong second, out bool two))
-        {
-            return false;
-        }
-
-        return !SplitBlockBloom.Contains(words, first) && !(two && SplitBlockBloom.Contains(words, second));
-    }
-
-    /// <summary>
-    /// A string predicate is absent from a block when one trigram it requires is absent from the
-    /// filter over the block; a predicate that requires no trigram claims nothing.
-    /// </summary>
-    private bool AbsentTrigrams(StringMatchExpr match, int block, int level)
-    {
-        if (!_columns.TryGetValue(TrigramKey(match.Field.Path), out Column? column)
-            || column.TreeOf(block) is not { } tree
-            || !tree.TryFilter(level, block, out ReadOnlySpan<uint> words))
-        {
-            return false;
-        }
-
-        foreach (byte[] trigram in column.Required(match))
-        {
-            if (!SplitBlockBloom.Contains(words, SplitBlockBloom.Hash(trigram, tree.Hash)))
+            Absent(logical.Left, absent, level);
+            ulong[] rented = ArrayPool<ulong>.Shared.Rent(absent.Length);
+            try
             {
-                return true;
+                Span<ulong> right = rented.AsSpan(0, absent.Length);
+                Absent(logical.Right, right, level);
+                for (int i = 0; i < absent.Length; i++)
+                {
+                    absent[i] = logical.IsAnd ? absent[i] | right[i] : absent[i] & right[i];
+                }
             }
+            finally
+            {
+                ArrayPool<ulong>.Shared.Return(rented);
+            }
+
+            return;
         }
 
-        return false;
+        absent.Clear();
+        if (_questions.TryGetValue(expr, out Question? question))
+        {
+            question.Absent(level, absent);
+        }
     }
 
     /// <summary>The trigram entries of a column live beside its value entries, under their own key.</summary>
@@ -471,9 +487,6 @@ internal sealed class BloomPruner
     {
         private readonly bool _keyed;
         private readonly KeyLayout _layout;
-        private readonly bool _fold;
-        private readonly Dictionary<StringMatchExpr, List<byte[]>> _required = new(ReferenceEqualityComparer.Instance);
-        private readonly Dictionary<(FilterLiteral Value, BloomHash Hash), (bool Ok, ulong First, ulong Second, bool Two)> _hashes = [];
 
         internal Column(DType dtype, bool trigrams, bool fold)
         {
@@ -486,71 +499,23 @@ internal sealed class BloomPruner
 
             IsList = storage.Kind is DTypeKind.List or DTypeKind.FixedSizeList;
             _keyed = !trigrams && KeyLayout.TryOf(IsList ? storage.ElementType : dtype, out _layout);
-            _fold = fold;
+            Fold = fold;
         }
 
         /// <summary>Whether the column is a list, whose filter answers for its elements.</summary>
         internal bool IsList { get; }
 
+        /// <summary>For trigram filters, whether their trigrams were folded.</summary>
+        internal bool Fold { get; }
+
         /// <summary>The column's trees, in block order; their runs are disjoint.</summary>
         internal List<Tree> Trees { get; } = [];
 
-        /// <summary>The tree whose run covers <paramref name="block"/>, or null.</summary>
-        internal Tree? TreeOf(int block)
-        {
-            int low = 0;
-            int high = Trees.Count - 1;
-            while (low <= high)
-            {
-                int mid = (low + high) >>> 1;
-                IndexRun run = Trees[mid].Run;
-                if ((ulong)block < run.FirstBlock)
-                {
-                    high = mid - 1;
-                }
-                else if ((ulong)block >= run.EndBlock)
-                {
-                    low = mid + 1;
-                }
-                else
-                {
-                    return Trees[mid];
-                }
-            }
-
-            return null;
-        }
-
-        /// <summary>The trigrams a predicate requires, folded as this column's filters were, computed once.</summary>
-        internal List<byte[]> Required(StringMatchExpr match)
-        {
-            if (!_required.TryGetValue(match, out List<byte[]>? trigrams))
-            {
-                trigrams = Trigrams.Required(match, _fold);
-                _required[match] = trigrams;
-            }
-
-            return trigrams;
-        }
-
         /// <summary>
         /// The hash (or the two, for a float zero) of <paramref name="value"/> as this column stores
-        /// it, computed once per query; <see langword="false"/> when the conversion is not exact and
-        /// nothing can be claimed.
+        /// it; <see langword="false"/> when the conversion is not exact and nothing can be claimed.
         /// </summary>
-        internal bool Hashes(FilterLiteral value, BloomHash hash, out ulong first, out ulong second, out bool two)
-        {
-            if (!_hashes.TryGetValue((value, hash), out (bool Ok, ulong First, ulong Second, bool Two) known))
-            {
-                known.Ok = Compute(value, hash, out known.First, out known.Second, out known.Two);
-                _hashes[(value, hash)] = known;
-            }
-
-            (first, second, two) = (known.First, known.Second, known.Two);
-            return known.Ok;
-        }
-
-        private bool Compute(FilterLiteral value, BloomHash hash, out ulong first, out ulong second, out bool two)
+        internal bool TryHash(FilterLiteral value, BloomHash hash, out ulong first, out ulong second, out bool two)
         {
             first = 0;
             second = 0;
@@ -567,6 +532,143 @@ internal sealed class BloomPruner
             {
                 second = SplitBlockBloom.Hash(zero[.._layout.Width], hash);
                 two = true;
+            }
+
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// A question of the filter a column's filters answer, its keys hashed once per hash the
+    /// column's trees use.
+    /// </summary>
+    /// <remarks>
+    /// An equality, an <c>IN</c> or a list's element is false under a filter that holds none of its
+    /// keys, and claims nothing unless every key converts exactly; a text match is false under a
+    /// filter that lacks one trigram it requires, and one that requires none claims nothing.
+    /// </remarks>
+    private sealed class Question
+    {
+        private readonly Column _column;
+        private readonly IReadOnlyList<FilterLiteral>? _values;
+        private readonly List<byte[]>? _trigrams;
+        private readonly ulong[] _first;
+        private readonly ulong[] _second;
+        private readonly bool[] _two;
+        private BloomHash _hash;
+        private bool _hashed;
+        private bool _claims;
+
+        internal Question(Column column, IReadOnlyList<FilterLiteral> values)
+        {
+            _column = column;
+            _values = values;
+            _first = new ulong[values.Count];
+            _second = new ulong[values.Count];
+            _two = new bool[values.Count];
+        }
+
+        internal Question(Column column, List<byte[]> trigrams)
+        {
+            _column = column;
+            _trigrams = trigrams;
+            _first = new ulong[trigrams.Count];
+            _second = [];
+            _two = [];
+        }
+
+        /// <summary>
+        /// Sets in <paramref name="absent"/> the blocks under every node read at
+        /// <paramref name="level"/> whose filter answers no, each node asked once.
+        /// </summary>
+        internal void Absent(int level, Span<ulong> absent)
+        {
+            foreach (Tree tree in _column.Trees)
+            {
+                if (!Hash(tree.Hash))
+                {
+                    continue;
+                }
+
+                long first = (long)tree.Run.FirstBlock;
+                if (level == 0)
+                {
+                    foreach ((long relative, (uint[] Words, int Start, int Length) leaf) in tree.Leaves)
+                    {
+                        if (Proves(leaf.Words.AsSpan(leaf.Start, leaf.Length)))
+                        {
+                            long block = first + relative;
+                            absent[(int)(block >> 6)] |= 1UL << (int)(block & 63);
+                        }
+                    }
+                }
+                else if (tree.NodesAt(level) is { } nodes)
+                {
+                    foreach ((long index, BloomNode node) in nodes)
+                    {
+                        if (node.FilterBlocks > 0 && Proves(node.Filter))
+                        {
+                            long start = first + (index << (4 * level));
+                            long end = Math.Min(start + (1L << (4 * level)), (long)tree.Run.EndBlock);
+                            BitmapKernels.FillRange(MemoryMarshal.AsBytes(absent), (int)start, (int)(end - start), true);
+                        }
+                    }
+                }
+            }
+        }
+
+        /// <summary>Hashes the keys for <paramref name="hash"/> unless they already are; whether the question claims anything.</summary>
+        private bool Hash(BloomHash hash)
+        {
+            if (_hashed && _hash == hash)
+            {
+                return _claims;
+            }
+
+            _hashed = true;
+            _hash = hash;
+            if (_trigrams is not null)
+            {
+                for (int i = 0; i < _trigrams.Count; i++)
+                {
+                    _first[i] = SplitBlockBloom.Hash(_trigrams[i], hash);
+                }
+
+                _claims = _trigrams.Count > 0;
+                return _claims;
+            }
+
+            _claims = _values!.Count > 0;
+            for (int i = 0; i < _values.Count && _claims; i++)
+            {
+                _claims = _column.TryHash(_values[i], hash, out _first[i], out _second[i], out _two[i]);
+            }
+
+            return _claims;
+        }
+
+        /// <summary>Whether a filter's words prove the question false for the blocks under it.</summary>
+        private bool Proves(ReadOnlySpan<uint> words)
+        {
+            if (_trigrams is not null)
+            {
+                for (int i = 0; i < _first.Length; i++)
+                {
+                    if (!SplitBlockBloom.Contains(words, _first[i]))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            for (int i = 0; i < _first.Length; i++)
+            {
+                if (SplitBlockBloom.Contains(words, _first[i]) || (_two[i] && SplitBlockBloom.Contains(words, _second[i])))
+                {
+                    return false;
+                }
             }
 
             return true;
@@ -600,8 +702,11 @@ internal sealed class BloomPruner
             }
         }
 
-        internal IEnumerable<KeyValuePair<long, BloomNode>> NodesAt(int level) =>
-            level < _nodes.Count ? _nodes[level] : [];
+        /// <summary>The nodes read at <paramref name="level"/>, by index at that level; null when none were.</summary>
+        internal Dictionary<long, BloomNode>? NodesAt(int level) => level < _nodes.Count ? _nodes[level] : null;
+
+        /// <summary>The leaves read, by block relative to the run: where each one's filter lies.</summary>
+        internal Dictionary<long, (uint[] Words, int Start, int Length)> Leaves => _leaves;
 
         internal bool IsOpened(int level, long index) => _opened.Contains((level, index));
 
@@ -634,33 +739,6 @@ internal sealed class BloomPruner
 
                 at += length;
             }
-        }
-
-        /// <summary>The filter over <paramref name="block"/> at <paramref name="level"/>, when one was read.</summary>
-        internal bool TryFilter(int level, int block, out ReadOnlySpan<uint> words)
-        {
-            long relative = block - (long)Run.FirstBlock;
-            if (level == 0)
-            {
-                if (_leaves.TryGetValue(relative, out (uint[] Words, int Start, int Length) leaf))
-                {
-                    words = leaf.Words.AsSpan(leaf.Start, leaf.Length);
-                    return true;
-                }
-
-                words = default;
-                return false;
-            }
-
-            if (level < _nodes.Count && _nodes[level].TryGetValue(relative >> (4 * level), out BloomNode? node)
-                && node.FilterBlocks > 0)
-            {
-                words = node.Filter;
-                return true;
-            }
-
-            words = default;
-            return false;
         }
 
         private Dictionary<long, BloomNode> Level(int level)

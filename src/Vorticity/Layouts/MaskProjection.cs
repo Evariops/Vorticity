@@ -56,23 +56,15 @@ internal static class MaskProjection
         int length = node.Length;
         Validity validity = node.Validity;
 
-        int selected = 0;
-        for (int i = 0; i < fieldCount; i++)
-        {
-            if (mask.Includes(i))
-            {
-                selected++;
-            }
-        }
-
+        int selected = mask.SelectedCount(fieldCount);
         if (selected == fieldCount)
         {
             // Every field is named at this level; the sub-masks may still narrow deeper, so the
             // walk continues rather than returning early.
             bool narrowsDeeper = false;
-            for (int i = 0; i < fieldCount && !narrowsDeeper; i++)
+            for (int s = 0; s < selected && !narrowsDeeper; s++)
             {
-                narrowsDeeper = !mask.Descend(i).IsAll;
+                narrowsDeeper = !mask.SelectedMask(s).IsAll;
             }
 
             if (!narrowsDeeper)
@@ -92,24 +84,18 @@ internal static class MaskProjection
             Span<int> nameSpan = names.Span;
             Span<DType> typeSpan = fieldTypes.Span;
 
-            int next = 0;
-            for (int i = 0; i < fieldCount; i++)
+            for (int s = 0; s < selected; s++)
             {
-                if (!mask.Includes(i))
-                {
-                    continue;
-                }
-
-                FieldMask child = mask.Descend(i);
+                int i = mask.SelectedField(s);
+                FieldMask child = mask.SelectedMask(s);
 
                 // Re-read the node: the arena's records can be reallocated by the recursion below.
                 int fieldNode = arena.GetNode(nodeIndex).GetFieldIndex(i);
                 int projected = Apply(context, fieldNode, in child, depth + 1);
 
-                childSpan[next] = projected;
-                nameSpan[next] = context.Types.InternName(dtype.GetFieldNameUtf8(i));
-                typeSpan[next] = DTypeImport.Into(context.Types, arena.GetNode(projected).DType);
-                next++;
+                childSpan[s] = projected;
+                nameSpan[s] = context.Types.InternName(dtype.GetFieldNameUtf8(i));
+                typeSpan[s] = DTypeImport.Into(context.Types, arena.GetNode(projected).DType);
             }
 
             DType projectedType = context.Types.Struct(nameSpan, typeSpan, dtype.Nullability);

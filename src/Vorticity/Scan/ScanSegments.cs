@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Sources;
@@ -35,6 +36,11 @@ namespace Vorticity.Scanning;
 /// segment last asked for by a batch before <c>n</c> is needed by no batch from <c>n</c> on:
 /// <see cref="Release"/> drops it. What is held is bounded by the batches in flight, whose
 /// segments were live anyway, since every batch holds its own reference until it is released.
+/// </para>
+/// <para>
+/// A batch looks for each segment it lacks by the hash of its offset and length, in chains threaded
+/// through the entries themselves, so that a batch opening G segments while the scan holds E pays
+/// G steps under the lock rather than G times E.
 /// </para>
 /// <para>
 /// The set is its own lock: a scan of one lane never contends for it, and an uncontended monitor
@@ -105,9 +111,10 @@ internal sealed class ScanSegments : IDisposable
                     }
 
                     SegmentSpec spec = requests.GetSpec(slot);
-                    if (Find(spec.Offset, spec.Length) < 0)
+                    int hash = SegmentRequestSet.HashOf(spec.Offset, spec.Length);
+                    if (Find(spec.Offset, spec.Length, hash) < 0)
                     {
-                        Add(new Entry { Offset = spec.Offset, Length = spec.Length, Claimant = batch, LastUse = batch });
+                        Add(new Entry { Offset = spec.Offset, Length = spec.Length, Hash = hash, Claimant = batch, LastUse = batch });
                     }
                 }
             }
@@ -133,7 +140,7 @@ internal sealed class ScanSegments : IDisposable
             int kept = 0;
             for (int i = 0; i < _count; i++)
             {
-                Entry entry = _entries[i];
+                ref Entry entry = ref _entries[i];
                 if (entry.Owner is null && entry.Claimant == batch)
                 {
                     int slot = requests.IndexOf(entry.Offset, entry.Length);
@@ -146,7 +153,7 @@ internal sealed class ScanSegments : IDisposable
                     entry.View = requests.GetBuffer(slot);
                 }
 
-                _entries[kept++] = entry;
+                Keep(i, ref kept);
             }
 
             Truncate(kept);
@@ -164,13 +171,12 @@ internal sealed class ScanSegments : IDisposable
             int kept = 0;
             for (int i = 0; i < _count; i++)
             {
-                Entry entry = _entries[i];
-                if (entry.Owner is null && entry.Claimant == batch)
+                if (_entries[i].Owner is null && _entries[i].Claimant == batch)
                 {
                     continue;
                 }
 
-                _entries[kept++] = entry;
+                Keep(i, ref kept);
             }
 
             Truncate(kept);
@@ -192,18 +198,31 @@ internal sealed class ScanSegments : IDisposable
             int kept = 0;
             for (int i = 0; i < _count; i++)
             {
-                Entry entry = _entries[i];
-                if (entry.Owner is { } owner && entry.LastUse < batch)
+                if (_entries[i].Owner is { } owner && _entries[i].LastUse < batch)
                 {
                     owner.Release();
                     continue;
                 }
 
-                _entries[kept++] = entry;
+                Keep(i, ref kept);
             }
 
             Truncate(kept);
         }
+    }
+
+    /// <summary>
+    /// Keeps entry <paramref name="i"/>, moving it down to <paramref name="kept"/> when entries before
+    /// it were dropped; its chain is mended by <see cref="Truncate"/>, which follows every such loop.
+    /// </summary>
+    private void Keep(int i, ref int kept)
+    {
+        if (kept != i)
+        {
+            _entries[kept] = _entries[i];
+        }
+
+        kept++;
     }
 
     /// <summary>Releases everything held and gives the array back, once no batch runs.</summary>
@@ -252,13 +271,21 @@ internal sealed class ScanSegments : IDisposable
         return false;
     }
 
-    private int Find(ulong offset, uint length)
+    /// <summary>The entry of the segment at <paramref name="offset"/>, whose hash is <paramref name="hash"/>, or -1, by the chain of its bucket.</summary>
+    private int Find(ulong offset, uint length, int hash)
     {
-        for (int i = 0; i < _count; i++)
+        Entry[] entries = _entries;
+        if (entries.Length == 0)
         {
-            if (_entries[i].Offset == offset && _entries[i].Length == length)
+            return -1;
+        }
+
+        int bucket = hash & (Buckets(entries) - 1);
+        for (int e = entries[bucket].Head - 1; e >= 0; e = entries[e].Next - 1)
+        {
+            if (entries[e].Offset == offset && entries[e].Length == length)
             {
-                return i;
+                return e;
             }
         }
 
@@ -279,15 +306,63 @@ internal sealed class ScanSegments : IDisposable
             }
 
             _entries = bigger;
+            Relink();
         }
 
-        _entries[_count++] = entry;
+        // The slot's head belongs to the bucket its index names, not to the entry stored in it.
+        ref Entry slot = ref _entries[_count];
+        entry.Head = slot.Head;
+        slot = entry;
+        Link(_count++);
     }
 
+    /// <summary>
+    /// Drops the entries from <paramref name="kept"/> on, the loop before it having moved the ones it
+    /// keeps down to the front, and rechains them all when any moved.
+    /// </summary>
     private void Truncate(int kept)
     {
+        if (kept == _count)
+        {
+            return;
+        }
+
         Array.Clear(_entries, kept, _count - kept);
         _count = kept;
+        Relink();
+    }
+
+    /// <summary>
+    /// The number of hash buckets of <paramref name="entries"/>: its length, down to a power of two.
+    /// Bucket <c>b</c>'s chain starts at the <see cref="Entry.Head"/> of entry <c>b</c>, so the
+    /// buckets cost no array of their own and are never fewer than the entries.
+    /// </summary>
+    private static int Buckets(Entry[] entries) => 1 << BitOperations.Log2((uint)entries.Length);
+
+    /// <summary>Puts entry <paramref name="e"/> at the head of the chain of its segment's bucket.</summary>
+    private void Link(int e)
+    {
+        Entry[] entries = _entries;
+        ref Entry entry = ref entries[e];
+        int bucket = entry.Hash & (Buckets(entries) - 1);
+        entry.Next = entries[bucket].Head;
+        entries[bucket].Head = e + 1;
+    }
+
+    /// <summary>Chains every entry anew, once entries have moved.</summary>
+    private void Relink()
+    {
+        Entry[] entries = _entries;
+        int buckets = Buckets(entries);
+        for (int b = 0; b < buckets; b++)
+        {
+            entries[b].Head = 0;
+        }
+
+        for (int e = 0; e < _count; e++)
+        {
+            Link(e);
+        }
     }
 
     /// <summary>Wakes each parked batch no unread claim of another batch holds back any more; every one, once the scan has failed.</summary>
@@ -335,6 +410,12 @@ internal sealed class ScanSegments : IDisposable
         internal ulong Offset;
         internal uint Length;
 
+        /// <summary>The hash of the segment, <see cref="SegmentRequestSet.HashOf"/>, kept for the rechaining after a move.</summary>
+        internal int Hash;
+
+        /// <summary>The next entry of the chain of this segment's hash bucket, plus one; zero ends the chain.</summary>
+        internal int Next;
+
         /// <summary>The batch that reads the segment.</summary>
         internal long Claimant;
 
@@ -343,6 +424,12 @@ internal sealed class ScanSegments : IDisposable
 
         internal SegmentOwner? Owner;
         internal VortexBuffer View;
+
+        /// <summary>
+        /// The first entry of the chain of the hash bucket this entry's index names, plus one; zero
+        /// when the bucket is empty. It belongs to the slot, whichever entry the slot holds.
+        /// </summary>
+        internal int Head;
     }
 }
 

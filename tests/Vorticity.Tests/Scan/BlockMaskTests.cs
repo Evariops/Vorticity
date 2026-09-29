@@ -47,6 +47,53 @@ public sealed class BlockMaskTests
     }
 
     [Fact]
+    public void NarrowingLeavesLiveTheBlocksOfTheLastRangeAloneWhateverCameBefore()
+    {
+        // A thousand blocks, the last one short; ranges drawn anywhere, across words, some empty,
+        // and now and then a block killed after the narrowing.
+        const long Rows = (999 * 64) + 17;
+        BlockMask mask = new BlockMask(Rows, 64);
+        Random random = new Random(33);
+        for (int step = 0; step < 500; step++)
+        {
+            long start = random.Next((int)Rows);
+            long end = Math.Min(Rows, start + random.Next(0, 64 * 150));
+            mask.KeepOnly(new RowRange(start, end));
+            long killed = step % 3 == 0 && end > start ? start / 64 : -1;
+            if (killed >= 0)
+            {
+                mask.Kill((int)killed);
+            }
+
+            int live = 0;
+            for (int block = 0; block < mask.BlockCount; block++)
+            {
+                bool expected = end > start && block >= start / 64 && block <= (end - 1) / 64 && block != killed;
+                live += expected ? 1 : 0;
+                Assert.True(expected == mask.IsLive(block), $"step {step}, block {block}");
+            }
+
+            Assert.Equal(live, mask.LiveCount);
+        }
+    }
+
+    /// <summary>
+    /// A block holds as many rows as a zone length's 32 bits count and no more: the largest is a
+    /// mask of whole-file blocks, one past it is refused rather than wrapped.
+    /// </summary>
+    [Fact]
+    public void ABlockHoldsAsManyRowsAsAZoneLengthCounts()
+    {
+        long rows = 3L * uint.MaxValue;
+        BlockMask widest = new BlockMask(rows, uint.MaxValue);
+
+        Assert.Equal(uint.MaxValue, widest.BlockRows);
+        Assert.Equal(3, widest.BlockCount);
+        Assert.Equal(new RowRange(2L * uint.MaxValue, rows), widest.BlockRange(2));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new BlockMask(rows, (long)uint.MaxValue + 1));
+    }
+
+    [Fact]
     public void TheLastBlockIsClippedToTheFile()
     {
         BlockMask mask = new BlockMask(65_537, 1024);

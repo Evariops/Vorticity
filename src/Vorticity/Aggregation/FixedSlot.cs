@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
+using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
 
@@ -19,7 +20,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
     private readonly Func<TState, TResult> _finish;
     private TState[] _states = [];
     private int _groups;
-    private TValue[] _values = [];
+    private ValuesCache<TValue> _values;
     private MaskCache _rows;
     private int[] _counts = [];
 
@@ -65,7 +66,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             case ColumnEncoding.RunEnd:
             {
                 int runs = EncodedForms.RunEnd(arena, node, out ReadOnlySpan<uint> ends);
-                ReadOnlySpan<TValue> values = FixedReader.Values(arena, runs, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, runs, _kind, out ReadOnlySpan<ulong> valid);
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
                 int r = Runs.FirstEndingAfter(ends, start);
                 int runStart = r == 0 ? 0 : (int)ends[r - 1];
@@ -90,7 +91,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             case ColumnEncoding.Dictionary:
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
-                ReadOnlySpan<TValue> dictionary = FixedReader.Values(arena, entries, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
                 if (end - start < dictionary.Length)
                 {
@@ -130,7 +131,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
             default:
             {
-                ReadOnlySpan<TValue> values = FixedReader.Values(arena, node, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
                 Accumulate(ref state, values, _rows.And(input, input.Selection, valid), start, end);
                 return;
             }
@@ -159,7 +160,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             case ColumnEncoding.Dictionary:
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
-                ReadOnlySpan<TValue> dictionary = FixedReader.Values(arena, entries, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
                 while (rows.Next(out int row))
                 {
@@ -175,7 +176,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
             default:
             {
-                ReadOnlySpan<TValue> values = FixedReader.Values(arena, node, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), 0, input.Rows);
                 while (rows.Next(out int row))
                 {
@@ -293,9 +294,9 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
     private readonly HashSet<DistinctEntry<TValue>> _seen = [];
     private long[] _counts = [];
     private int _groups;
-    private TValue[] _values = [];
+    private ValuesCache<TValue> _values;
     private MaskCache _rows;
-    private bool[] _present = [];
+    private CodeSet _distinct;
 
     internal FixedDistinctSlot(StorageKind kind) => _kind = kind;
 
@@ -326,7 +327,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
             case ColumnEncoding.RunEnd:
             {
                 int runs = EncodedForms.RunEnd(arena, node, out ReadOnlySpan<uint> ends);
-                ReadOnlySpan<TValue> values = FixedReader.Values(arena, runs, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, runs, _kind, out ReadOnlySpan<ulong> valid);
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
                 int r = Runs.FirstEndingAfter(ends, start);
                 int runStart = r == 0 ? 0 : (int)ends[r - 1];
@@ -347,22 +348,15 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
             case ColumnEncoding.Dictionary:
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
-                ReadOnlySpan<TValue> dictionary = FixedReader.Values(arena, entries, _kind, ref _values, out ReadOnlySpan<ulong> valid);
-                Scratch.Grow(ref _present, dictionary.Length);
-                Span<bool> present = _present.AsSpan(0, dictionary.Length);
-                present.Clear();
-                RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
-                while (rows.Next(out int row))
+                ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
+                if (end - start < dictionary.Length)
                 {
-                    present[(int)codes[row]] = true;
+                    FewCodes(codes, rows, start, end, group, dictionary, valid);
                 }
-
-                for (int code = 0; code < present.Length; code++)
+                else
                 {
-                    if (present[code] && StorageValues.IsValid(valid, code))
-                    {
-                        Add(group, dictionary[code]);
-                    }
+                    ManyCodes(codes, rows, start, end, group, dictionary, valid);
                 }
 
                 return;
@@ -370,7 +364,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 
             default:
             {
-                ReadOnlySpan<TValue> values = FixedReader.Values(arena, node, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
                 RowCursor rows = new RowCursor(_rows.And(input, input.Selection, valid), start, end);
                 while (rows.Next(out int row))
                 {
@@ -389,7 +383,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
         if (FixedReader.EncodingOf(arena, node, _kind) == ColumnEncoding.Dictionary)
         {
             int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
-            ReadOnlySpan<TValue> dictionary = FixedReader.Values(arena, entries, _kind, ref _values, out ReadOnlySpan<ulong> valid);
+            ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
             RowCursor coded = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), 0, input.Rows);
             while (coded.Next(out int row))
             {
@@ -403,7 +397,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
             return;
         }
 
-        ReadOnlySpan<TValue> values = FixedReader.Values(arena, node, _kind, ref _values, out ReadOnlySpan<ulong> validity);
+        ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> validity);
         RowCursor rows = new RowCursor(_rows.And(input, input.Selection, validity), 0, input.Rows);
         while (rows.Next(out int row))
         {
@@ -421,6 +415,42 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 
     internal override long Result(int group) => _counts[group];
 
+    /// <summary>The values of a range of fewer rows than its dictionary has codes, each once.</summary>
+    /// <remarks>Each walk of a dictionary range is a method of its own, so that neither loop takes its shape from the other.</remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void FewCodes(
+        ReadOnlySpan<uint> codes, ReadOnlySpan<ulong> rows, int start, int end, int group, ReadOnlySpan<TValue> dictionary, ReadOnlySpan<ulong> valid)
+    {
+        foreach (int code in _distinct.Few(codes, rows, start, end, dictionary.Length))
+        {
+            if (StorageValues.IsValid(valid, code))
+            {
+                Add(group, dictionary[code]);
+            }
+        }
+    }
+
+    /// <summary>The values of a range as long as its dictionary or longer, each once, in code order.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ManyCodes(
+        ReadOnlySpan<uint> codes, ReadOnlySpan<ulong> rows, int start, int end, int group, ReadOnlySpan<TValue> dictionary, ReadOnlySpan<ulong> valid)
+    {
+        Span<byte> present = _distinct.Table(dictionary.Length);
+        RowCursor all = new RowCursor(rows, start, end);
+        while (all.Next(out int row))
+        {
+            present[(int)codes[row]] = 1;
+        }
+
+        for (int code = 0; code < present.Length; code++)
+        {
+            if (present[code] != 0 && StorageValues.IsValid(valid, code))
+            {
+                Add(group, dictionary[code]);
+            }
+        }
+    }
+
     private void Add(int group, TValue value)
     {
         if (_seen.Add(new DistinctEntry<TValue>(group, value)))
@@ -431,5 +461,53 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
 }
 
 /// <summary>A value seen by one group.</summary>
+/// <remarks>
+/// Hashed under multipliers drawn once a process (<see cref="KeyHash.Chained"/>): the default hash
+/// of a 64-bit value folds its halves together, and a prime bucket count takes an integer's
+/// multiples to one bucket, so values could be built to share one chain of the set and make every
+/// insert a walk of the values before it. Equal values hash alike: every NaN and both zeros of a
+/// float are equal, so they are given one pattern of bits first.
+/// </remarks>
 internal readonly record struct DistinctEntry<TValue>(int Group, TValue Value)
-    where TValue : unmanaged, IEquatable<TValue>;
+    where TValue : unmanaged, IEquatable<TValue>
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public override int GetHashCode()
+    {
+        (ulong low, ulong high) = Words(Value);
+        return KeyHash.Chained(low, high, Group);
+    }
+
+    /// <summary>A value's bits as two words, zero-extended, a float's made one pattern per value.</summary>
+    /// <remarks>Cast rather than read through a reference, which would take the value through memory before the multiply.</remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static (ulong Low, ulong High) Words(TValue value)
+    {
+        if (typeof(TValue) == typeof(double))
+        {
+            double d = Unsafe.BitCast<TValue, double>(value);
+            return (double.IsNaN(d) ? 0x7FF8_0000_0000_0000UL : d == 0 ? 0 : BitConverter.DoubleToUInt64Bits(d), 0);
+        }
+
+        if (typeof(TValue) == typeof(float))
+        {
+            float f = Unsafe.BitCast<TValue, float>(value);
+            return (float.IsNaN(f) ? 0x7FC0_0000U : f == 0 ? 0 : BitConverter.SingleToUInt32Bits(f), 0);
+        }
+
+        if (typeof(TValue) == typeof(Half))
+        {
+            Half h = Unsafe.BitCast<TValue, Half>(value);
+            return (Half.IsNaN(h) ? (ushort)0x7E00 : h == Half.Zero ? (ushort)0 : BitConverter.HalfToUInt16Bits(h), 0);
+        }
+
+        return Unsafe.SizeOf<TValue>() switch
+        {
+            1 => (Unsafe.BitCast<TValue, byte>(value), 0),
+            2 => (Unsafe.BitCast<TValue, ushort>(value), 0),
+            4 => (Unsafe.BitCast<TValue, uint>(value), 0),
+            8 => (Unsafe.BitCast<TValue, ulong>(value), 0),
+            _ => ((ulong)Unsafe.BitCast<TValue, UInt128>(value), (ulong)(Unsafe.BitCast<TValue, UInt128>(value) >> 64)),
+        };
+    }
+}

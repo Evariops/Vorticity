@@ -71,6 +71,29 @@ internal static class CanonicalSlice
         CanonicalArena source, CanonicalArena destination, int nodeIndex, int start, int length) =>
         Slice(source, destination, nodeIndex, start, length, depth: 1);
 
+    /// <summary>
+    /// <see cref="SliceAcross"/> for a node lent to the arenas that read it, a child shared by every
+    /// range of its parent: a window over the whole node keeps the node's origin, so that what a
+    /// consumer learned of a retained node it knows again in every arena the node is lent to.
+    /// </summary>
+    /// <param name="source">The arena holding the node.</param>
+    /// <param name="destination">The arena the window's records are appended to.</param>
+    /// <param name="nodeIndex">The node, indexed in <paramref name="source"/>.</param>
+    /// <param name="start">First row of the window.</param>
+    /// <param name="length">Rows in the window.</param>
+    /// <returns>The window's index in <paramref name="destination"/>.</returns>
+    internal static int LendAcross(
+        CanonicalArena source, CanonicalArena destination, int nodeIndex, int start, int length)
+    {
+        int lent = Slice(source, destination, nodeIndex, start, length, depth: 1);
+        if (start == 0 && length == source.RecordRef(nodeIndex).Length)
+        {
+            destination.NoteOrigin(lent, source.OriginOf(nodeIndex));
+        }
+
+        return lent;
+    }
+
     private static int Slice(
         CanonicalArena source, CanonicalArena destination, int nodeIndex, int start, int length, int depth)
     {
@@ -143,7 +166,7 @@ internal static class CanonicalSlice
 
     /// <remarks>
     /// The codes narrow like any fixed-width buffer; the distinct values are every row's, so they
-    /// are shared whole, as a list's elements are.
+    /// are shared whole, as a list's elements are, and keep their origin.
     /// </remarks>
     private static int SliceDictionary(
         CanonicalArena source,
@@ -156,7 +179,7 @@ internal static class CanonicalSlice
     {
         int values = ReferenceEquals(source, destination)
             ? node.EncodedValuesIndex
-            : destination.ReferenceFrom(source, node.EncodedValuesIndex);
+            : destination.LendFrom(source, node.EncodedValuesIndex);
         return destination.AddDictionary(
             dtype, length, validity, node.Codes.Slice(start * sizeof(uint), length * sizeof(uint)), values);
     }

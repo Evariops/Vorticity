@@ -23,7 +23,9 @@ internal readonly record struct MergeObject(ObjectEntry Entry, ReadOnlyMemory<by
 /// Objects' key-ordered batches merged into one key order, one contiguous run of a batch at a time.
 /// Rows compare by their row encoding, the same order the tree and the seeks use, so the merge
 /// cannot disagree with the sources it merges; an object is opened only once its bound is at or
-/// below the smallest key an open input holds.
+/// below the smallest key an open input holds. Past a few open inputs they are a heap by key and
+/// rank, so a run's input is the top and the key that ends its run is the smaller of the top's two
+/// children: a run costs the logarithm of the inputs open rather than passes over all of them.
 /// </summary>
 internal sealed class KeyOrderedMerge : IAsyncDisposable
 {
@@ -35,6 +37,8 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
     private readonly RowSortField[] _fields;
     private readonly bool _rankedTies;
     private readonly CancellationToken _cancellationToken;
+
+    // The open inputs; past LinearOpen of them, a binary min-heap by current key, then rank.
     private readonly List<MergeInput> _open = [];
     private bool _started;
     private bool _pending;
@@ -195,12 +199,39 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         _current = null;
         _window?.Dispose();
         _windows?.Reset();
-        if (!await input.AdvanceAsync(count).ConfigureAwait(false))
+
+        // Over the heap, the run's input is its top: it sinks to its new key, or leaves.
+        bool heaped = Heaped;
+        if (await input.AdvanceAsync(count).ConfigureAwait(false))
         {
-            _open.Remove(input);
+            if (heaped)
+            {
+                SiftDown(0);
+            }
+        }
+        else
+        {
+            if (heaped)
+            {
+                RemoveTop();
+            }
+            else
+            {
+                _open.Remove(input);
+            }
+
             await input.DisposeAsync().ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// The most inputs the merge looks over in full rather than keeps in a heap: a pass over this
+    /// few costs less than sifting its keys.
+    /// </summary>
+    private const int LinearOpen = 8;
+
+    /// <summary>Whether the open inputs are ordered as a heap, which they are past <see cref="LinearOpen"/>.</summary>
+    private bool Heaped => _open.Count > LinearOpen;
 
     /// <summary>Whether the next unopened object could hold a key at or below every open input's.</summary>
     private bool MayHoldNext()
@@ -216,11 +247,14 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         }
 
         ReadOnlySpan<byte> smallest = _open[0].Key;
-        for (int i = 1; i < _open.Count; i++)
+        if (!Heaped)
         {
-            if (_open[i].Key.SequenceCompareTo(smallest) < 0)
+            for (int i = 1; i < _open.Count; i++)
             {
-                smallest = _open[i].Key;
+                if (_open[i].Key.SequenceCompareTo(smallest) < 0)
+                {
+                    smallest = _open[i].Key;
+                }
             }
         }
 
@@ -255,38 +289,58 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
             return;
         }
 
-        _open.Add(input);
+        Push(input);
         MostOpen = Math.Max(MostOpen, _open.Count);
     }
 
     /// <summary>The input holding the smallest key, and how many of its rows go before any other's.</summary>
     private (MergeInput Chosen, int Count) Choose()
     {
-        // One pass, keeping each key in a local: fetching a key costs more than comparing two, and
-        // choosing then bounding separately would read every key three times over. The run ends at
-        // the smallest key another input holds, including it only when that input ranks after the
-        // chosen one -- which is the same as asking whether the lowest rank among the inputs
-        // sharing that key ranks after it, and that can be tracked in the same pass.
+        // The run ends at the smallest key another input holds, including it only when that input
+        // ranks after the chosen one -- which is the same as asking whether the lowest rank among
+        // the inputs sharing that key ranks after it.
         MergeInput chosen = _open[0];
-        ReadOnlySpan<byte> chosenKey = chosen.Key;
         ReadOnlySpan<byte> limit = default;
         long limitRank = 0;
         bool bounded = false;
-        for (int i = 1; i < _open.Count; i++)
+        if (Heaped)
         {
-            MergeInput input = _open[i];
-            ReadOnlySpan<byte> key = input.Key;
-            int order = key.SequenceCompareTo(chosenKey);
-            if (order < 0 || (order == 0 && input.Rank < chosen.Rank))
+            // The chosen input is the top, and the smallest key another holds is the smaller of
+            // the top's children, with the lowest rank among its holders: the heap orders ties by
+            // rank.
+            MergeInput left = _open[1];
+            limit = left.Key;
+            limitRank = left.Rank;
+            bounded = true;
+            MergeInput right = _open[2];
+            ReadOnlySpan<byte> rightKey = right.Key;
+            if (Before(rightKey, right.Rank, limit, limitRank))
             {
-                // The input it displaces becomes one of the others, and bounds the run like them.
-                Tighten(ref limit, ref limitRank, ref bounded, chosenKey, chosen.Rank);
-                chosen = input;
-                chosenKey = key;
+                limit = rightKey;
+                limitRank = right.Rank;
             }
-            else
+        }
+        else
+        {
+            // One pass, keeping each key in a local: fetching a key costs more than comparing two,
+            // and choosing then bounding separately would read every key three times over.
+            ReadOnlySpan<byte> chosenKey = chosen.Key;
+            for (int i = 1; i < _open.Count; i++)
             {
-                Tighten(ref limit, ref limitRank, ref bounded, key, input.Rank);
+                MergeInput input = _open[i];
+                ReadOnlySpan<byte> key = input.Key;
+                int order = key.SequenceCompareTo(chosenKey);
+                if (order < 0 || (order == 0 && input.Rank < chosen.Rank))
+                {
+                    // The input it displaces becomes one of the others, and bounds the run like them.
+                    Tighten(ref limit, ref limitRank, ref bounded, chosenKey, chosen.Rank);
+                    chosen = input;
+                    chosenKey = key;
+                }
+                else
+                {
+                    Tighten(ref limit, ref limitRank, ref bounded, key, input.Rank);
+                }
             }
         }
 
@@ -331,6 +385,101 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
 
     private MergeInput Emitting() =>
         _emitting ?? throw new InvalidOperationException("The merge is not on a run.");
+
+    private void Push(MergeInput input)
+    {
+        _open.Add(input);
+        if (_open.Count == LinearOpen + 1)
+        {
+            // Past the inputs looked over in full: the list becomes a heap, bottom up.
+            for (int node = (_open.Count / 2) - 1; node >= 0; node--)
+            {
+                SiftDown(node);
+            }
+
+            return;
+        }
+
+        if (!Heaped)
+        {
+            return;
+        }
+
+        ReadOnlySpan<byte> key = input.Key;
+        int at = _open.Count - 1;
+        while (at > 0)
+        {
+            int parent = (at - 1) >> 1;
+            MergeInput above = _open[parent];
+            if (!Before(key, input.Rank, above.Key, above.Rank))
+            {
+                break;
+            }
+
+            _open[at] = above;
+            at = parent;
+        }
+
+        _open[at] = input;
+    }
+
+    private void RemoveTop()
+    {
+        int last = _open.Count - 1;
+        _open[0] = _open[last];
+        _open.RemoveAt(last);
+        if (_open.Count > 0)
+        {
+            SiftDown(0);
+        }
+    }
+
+    private void SiftDown(int at)
+    {
+        // Each key is read once a level: reading one costs more than comparing two.
+        MergeInput input = _open[at];
+        ReadOnlySpan<byte> key = input.Key;
+        int count = _open.Count;
+        while (true)
+        {
+            int child = (2 * at) + 1;
+            if (child >= count)
+            {
+                break;
+            }
+
+            MergeInput smaller = _open[child];
+            ReadOnlySpan<byte> smallerKey = smaller.Key;
+            if (child + 1 < count)
+            {
+                MergeInput right = _open[child + 1];
+                ReadOnlySpan<byte> rightKey = right.Key;
+                if (Before(rightKey, right.Rank, smallerKey, smaller.Rank))
+                {
+                    child++;
+                    smaller = right;
+                    smallerKey = rightKey;
+                }
+            }
+
+            if (!Before(smallerKey, smaller.Rank, key, input.Rank))
+            {
+                break;
+            }
+
+            _open[at] = smaller;
+            at = child;
+        }
+
+        _open[at] = input;
+    }
+
+    /// <summary>Whether a row of key <paramref name="left"/> comes before one of key <paramref name="right"/>: by key, a tie to the lower rank.</summary>
+    private static bool Before(ReadOnlySpan<byte> left, long leftRank, ReadOnlySpan<byte> right, long rightRank)
+    {
+        int order = left.SequenceCompareTo(right);
+        return order < 0 || (order == 0 && leftRank < rightRank);
+    }
 
     /// <summary>One input of the merge: an object's batches in key order, and their keys row-encoded.</summary>
     private sealed class MergeInput : IAsyncDisposable

@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
+using System.Runtime.InteropServices;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Dataset;
@@ -50,17 +51,39 @@ internal sealed class CommitObjectBuilder : IPageSink
     PageReference IPageSink.WritePage(ReadOnlySpan<byte> page) => AddPage(page);
 
     /// <summary>
-    /// The bytes of a page this builder wrote, for a caller that wants to inline it. A linear walk
-    /// rather than a map: the question is asked rarely enough that indexing the list would not pay.
+    /// The bytes of a page this builder wrote, for a caller that wants to inline it or a walk over
+    /// the tree this commit is writing. Every reference it handed out names its version, and the
+    /// pages lie in the order they were added, so their offsets rise: a search on the offset finds
+    /// the page, and a reference into another version is refused at once.
     /// </summary>
     public bool TryGetPage(PageReference reference, out ReadOnlyMemory<byte> page)
     {
-        for (int i = 0; i < _pageReferences.Count; i++)
+        if (reference.Version == _version)
         {
-            if (_pageReferences[i] == reference)
+            ReadOnlySpan<PageReference> references = CollectionsMarshal.AsSpan(_pageReferences);
+            int low = 0;
+            int high = references.Length;
+            while (low < high)
             {
-                page = _pages[i];
-                return true;
+                int middle = (int)((uint)(low + high) >> 1);
+                if (references[middle].Offset < reference.Offset)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+
+            // An empty page shares its offset with the page after it.
+            for (; low < references.Length && references[low].Offset == reference.Offset; low++)
+            {
+                if (references[low] == reference)
+                {
+                    page = _pages[low];
+                    return true;
+                }
             }
         }
 

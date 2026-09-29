@@ -405,19 +405,26 @@ public static class VortexFileIndexer
             throw Refused("its root is not a struct of columns");
         }
 
+        // Each column's chunks, reached one by one from the layout that holds them; the first
+        // column's give the rows every column's must start at.
         int fields = schema.FieldCount;
         LayoutTree tree = file.LayoutTree;
-        (List<(LayoutNode Flat, long Start)> chunks, long zoneLength) = VortexFileWriter.AppendPlan.ColumnChunks(tree, 0, Refused);
+        (LayoutNode chunks, long zoneLength) = VortexFileWriter.AppendPlan.ColumnNode(tree, 0, Refused);
+        LayoutNode[] columnNodes = new LayoutNode[fields];
+        columnNodes[0] = chunks;
         for (int field = 1; field < fields; field++)
         {
-            (List<(LayoutNode Flat, long Start)> other, long length) = VortexFileWriter.AppendPlan.ColumnChunks(tree, field, Refused);
-            if (!VortexFileWriter.AppendPlan.SameChunks(chunks, other) || (length != 0 && zoneLength != 0 && length != zoneLength))
+            (columnNodes[field], long length) = VortexFileWriter.AppendPlan.ColumnNode(tree, field, Refused);
+            if (!VortexFileWriter.AppendPlan.SameChunks(chunks, columnNodes[field])
+                || (length != 0 && zoneLength != 0 && length != zoneLength))
             {
                 throw Refused("its columns are not chunked alike");
             }
 
             zoneLength = Math.Max(zoneLength, length);
         }
+
+        int chunkCount = VortexFileWriter.AppendPlan.ChunkCount(chunks);
 
         int blockRows = zoneLength > 0
             ? checked((int)zoneLength)
@@ -428,11 +435,12 @@ public static class VortexFileIndexer
         }
 
         long rows = file.RowCount;
-        for (int c = 1; c < chunks.Count; c++)
+        for (int c = 1; c < chunkCount; c++)
         {
-            if (chunks[c].Start % blockRows != 0)
+            long start = VortexFileWriter.AppendPlan.ChunkStart(chunks, c);
+            if (start % blockRows != 0)
             {
-                throw Refused($"its chunk at row {chunks[c].Start} does not start a block of {blockRows}");
+                throw Refused($"its chunk at row {start} does not start a block of {blockRows}");
             }
         }
 
@@ -472,24 +480,25 @@ public static class VortexFileIndexer
             int blockCount = VortexFileWriter.ChunkBlocks(rows, blockRows);
             ColumnWriter[] columns = new ColumnWriter[fields];
             List<long> chunkRows = [];
-            bool[] dict = new bool[fields * chunks.Count];
+            bool[] dict = new bool[fields * chunkCount];
+            ArrayNodeArena probe = new ArrayNodeArena();
             for (int field = 0; field < fields; field++)
             {
-                (List<(LayoutNode Flat, long Start)> own, _) = VortexFileWriter.AppendPlan.ColumnChunks(tree, field);
-                for (int c = 0; c < own.Count; c++)
+                for (int c = 0; c < chunkCount; c++)
                 {
-                    dict[(field * chunks.Count) + c] = await IsDictionaryAsync(file, own[c].Flat, cancellationToken).ConfigureAwait(false);
+                    dict[(field * chunkCount) + c] = await IsDictionaryAsync(
+                        file, VortexFileWriter.AppendPlan.Chunk(columnNodes[field], c), probe, cancellationToken).ConfigureAwait(false);
                 }
             }
 
             for (int field = 0; field < fields; field++)
             {
                 BlockStats[] blocks = new BlockStats[blockCount];
-                for (int c = 0; c < chunks.Count; c++)
+                for (int c = 0; c < chunkCount; c++)
                 {
-                    long start = chunks[c].Start;
-                    long end = c + 1 < chunks.Count ? chunks[c + 1].Start : rows;
-                    byte scheme = dict[(field * chunks.Count) + c] ? (byte)(ColumnScheme.Dict + 1) : (byte)0;
+                    long start = VortexFileWriter.AppendPlan.ChunkStart(chunks, c);
+                    long end = c + 1 < chunkCount ? VortexFileWriter.AppendPlan.ChunkStart(chunks, c + 1) : rows;
+                    byte scheme = dict[(field * chunkCount) + c] ? (byte)(ColumnScheme.Dict + 1) : (byte)0;
                     for (long b = start / blockRows; b < VortexFileWriter.ChunkBlocks(end, blockRows); b++)
                     {
                         long blockEnd = Math.Min((b + 1) * blockRows, rows);
@@ -504,10 +513,10 @@ public static class VortexFileIndexer
             int[] fieldNodes = new int[fields];
             int filled = 0;
             int block = 0;
-            for (int c = 0; c < chunks.Count; c++)
+            for (int c = 0; c < chunkCount; c++)
             {
-                long start = chunks[c].Start;
-                long end = c + 1 < chunks.Count ? chunks[c + 1].Start : rows;
+                long start = VortexFileWriter.AppendPlan.ChunkStart(chunks, c);
+                long end = c + 1 < chunkCount ? VortexFileWriter.AppendPlan.ChunkStart(chunks, c + 1) : rows;
 
                 // Every chunk for the dictionary probe, which describes the file's layout and not
                 // the rows a pass reads; only the rows the range names for the builders.
@@ -540,8 +549,8 @@ public static class VortexFileIndexer
                 // `Auto` judges a filter against its column's written bytes: the chunk's segments.
                 for (int field = 0; field < fields; field++)
                 {
-                    (List<(LayoutNode Flat, long Start)> own, _) = VortexFileWriter.AppendPlan.ColumnChunks(tree, field);
-                    indexes.AddColumnBytes(field, file.SegmentSpecs[(int)own[c].Flat.Segments[0]].Length);
+                    LayoutNode flat = VortexFileWriter.AppendPlan.Chunk(columnNodes[field], c);
+                    indexes.AddColumnBytes(field, file.SegmentSpecs[(int)flat.Segments[0]].Length);
                 }
 
                 int firstBlock = checked((int)(from / blockRows));
@@ -636,29 +645,15 @@ public static class VortexFileIndexer
         }
     }
 
-    /// <summary>Whether a flat chunk's root array is a dictionary, read from its segment.</summary>
-    private static async ValueTask<bool> IsDictionaryAsync(VortexFile file, LayoutNode flat, CancellationToken cancellationToken)
+    /// <summary>
+    /// Whether a flat chunk's root array is a dictionary, from its array tree alone: the tree its
+    /// layout inlines, or the tail of its segment, and never the values the scan reads after.
+    /// </summary>
+    private static async ValueTask<bool> IsDictionaryAsync(
+        VortexFile file, LayoutNode flat, ArrayNodeArena tree, CancellationToken cancellationToken)
     {
-        using ScanContext context = new ScanContext(file, ScanContext.MetadataCapacity);
-        int slot = context.Segments.Add(file.SegmentSpecs[(int)flat.Segments[0]]);
-        await file.Segments.ReadManyAsync(context.Segments, cancellationToken).ConfigureAwait(false);
-        return RootIsDictionary(context, flat, slot);
-    }
-
-    private static bool RootIsDictionary(ScanContext context, LayoutNode flat, int slot)
-    {
-        VortexBuffer segment = context.Segments.GetBuffer(slot);
-        Arrays.Metadata.FlatLayoutMetadata metadata = Arrays.Metadata.FlatLayoutMetadata.Read(flat.Metadata);
-        if (metadata.HasArrayEncodingTree)
-        {
-            context.Decode.LoadBlob(metadata.ArrayEncodingTree, segment);
-        }
-        else
-        {
-            context.Decode.LoadBlob(segment);
-        }
-
-        return context.Nodes.Root.Encoding == ArrayEncodingId.Dict;
+        await file.LoadArrayTreeAsync(flat, tree, cancellationToken).ConfigureAwait(false);
+        return tree.Root.Encoding == ArrayEncodingId.Dict;
     }
 
     /// <summary>The statistics, directory, dtype, layout, footer, postscript and EOF, after the runs.</summary>

@@ -80,6 +80,13 @@ internal abstract class KeySource : IAsyncDisposable
     /// <summary>The entries whose key is at or below <paramref name="key"/>; the position does not move.</summary>
     internal abstract ValueTask<long> UpperRankAsync(FilterLiteral key, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// The entries whose key is below the key <paramref name="other"/> is on, or at or below it with
+    /// <paramref name="upper"/>: a byte key is compared where the other source lends it, never
+    /// copied. Neither position moves, and the other source stays on its entry throughout.
+    /// </summary>
+    internal abstract ValueTask<long> RankOfAsync(KeySource other, bool upper, CancellationToken cancellationToken);
+
     /// <summary>Positions on the entry of a rank.</summary>
     internal abstract ValueTask<bool> SeekRankAsync(long rank, CancellationToken cancellationToken);
 

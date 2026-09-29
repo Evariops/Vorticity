@@ -61,10 +61,19 @@ internal sealed class ScanContext : IDisposable
     {
     }
 
+    /// <summary>
+    /// A context that a pool keeps from one scan to the next, whose batches keep the names of the
+    /// retained nodes lent to them: see <see cref="RetainingArena"/>.
+    /// </summary>
+    /// <param name="file">The file the first scan reads.</param>
+    internal static ScanContext Pooled(VortexFile file) =>
+        new ScanContext(file, ScanCapacity, retaining: true) { KeepsBlobs = true };
+
     /// <summary>Creates a scan context whose arenas start at <paramref name="capacity"/>.</summary>
     /// <param name="file">The file being scanned.</param>
     /// <param name="capacity">Initial node capacity; see <see cref="MetadataCapacity"/>.</param>
-    internal ScanContext(VortexFile file, int capacity)
+    /// <param name="retaining">Whether the batch's arena is a <see cref="RetainingArena"/>.</param>
+    internal ScanContext(VortexFile file, int capacity, bool retaining = false)
     {
         ArgumentNullException.ThrowIfNull(file);
         _file = file;
@@ -95,7 +104,7 @@ internal sealed class ScanContext : IDisposable
         // takes the hint nor gives one.
         _notesTrees = capacity >= ScanCapacity;
         _scratchNodes = new ArrayNodeArena(capacity, _notesTrees ? file.LargestArrayTree : 0);
-        _batchCanonical = new CanonicalArena(capacity);
+        _batchCanonical = retaining ? new RetainingArena(capacity) : new CanonicalArena(capacity);
 
         // Deliberately not sized from the arena capacity. A batch registers one segment per leaf it
         // reads, which the set's own default already covers, so widening it to the arena capacity
@@ -897,6 +906,44 @@ internal sealed class ScanContext : IDisposable
         }
     }
 
+    /// <summary>
+    /// The valid rows before <paramref name="start"/> this context last counted in the node named by
+    /// <paramref name="key"/>, when it counted any there.
+    /// </summary>
+    /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
+    /// <param name="start">The row the count stops at.</param>
+    /// <param name="count">The valid rows before it.</param>
+    internal bool TryValidBefore(long key, out int start, out int count)
+    {
+        if (_memory is { } memory && memory.RankKey == key + 1)
+        {
+            start = memory.RankStart;
+            count = memory.RankCount;
+            return true;
+        }
+
+        start = 0;
+        count = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// Records that <paramref name="count"/> rows before <paramref name="start"/> are valid in the
+    /// node named by <paramref name="key"/>, for the next range of it this context reads.
+    /// </summary>
+    /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
+    /// <param name="start">The row the count stops at.</param>
+    /// <param name="count">The valid rows before it.</param>
+    internal void RememberValidBefore(long key, int start, int count)
+    {
+        if (_memory is { } memory)
+        {
+            memory.RankKey = key + 1;
+            memory.RankStart = start;
+            memory.RankCount = count;
+        }
+    }
+
     /// <summary>See <see cref="_memory"/>.</summary>
     private sealed class BatchMemory
     {
@@ -908,6 +955,17 @@ internal sealed class ScanContext : IDisposable
 
         /// <summary>The blobs kept parsed, made at the first one a context of the scans' pool keeps.</summary>
         internal KeptBlobs? Blobs;
+
+        /// <summary>
+        /// The node whose valid rows were last counted, stored as its key plus one, the row the count
+        /// stops at and the count: a context reads the ranges of a node in ascending order, and the
+        /// next count starts from this one rather than from the node's first row.
+        /// </summary>
+        internal long RankKey;
+
+        internal int RankStart;
+
+        internal int RankCount;
     }
 
     [InlineArray(CheckedNodeSlots + 1)]
@@ -1036,7 +1094,7 @@ internal sealed class ScanContext : IDisposable
             "No child is claimed on this scan context: a child's decode follows a miss of TryGetRetainedChild.");
         _childClaim = null;
         _child = claim;
-        CanonicalArena arena = claim.Arena ??= new CanonicalArena();
+        CanonicalArena arena = claim.Arena ??= new RetainingArena();
         claim.Depend(Segments.OwnerHolding(Nodes.FirstBlobBuffer()));
         return arena;
     }
@@ -1170,7 +1228,7 @@ internal sealed class ScanContext : IDisposable
 
         // The arena is made for the first decode the entry holds, not for the claim: a claim given
         // back without a decode, an answer an encoding declined, never needs one.
-        CanonicalArena arena = claim.Arena ??= new CanonicalArena();
+        CanonicalArena arena = claim.Arena ??= new RetainingArena();
 
         // What the decode views is the blob in the node arena, which a flat reader loads just
         // before it begins; a child decoded inside the redirect notes its own segment as it loads.
@@ -1300,6 +1358,7 @@ internal sealed class ScanContext : IDisposable
     {
         ResetBatch();
         _batchCanonical.Reset();
+        (_batchCanonical as RetainingArena)?.ForgetKept();
         AbandonRetained();
         if (_ownsRetained)
         {
@@ -1314,6 +1373,7 @@ internal sealed class ScanContext : IDisposable
         {
             memory.Checks = default;
             memory.Blobs?.Forget();
+            memory.RankKey = 0;
         }
 
         if (_pushed is { } pushed)

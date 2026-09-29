@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using Vorticity.Types;
@@ -100,6 +101,7 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
     private readonly int _hash;
     private VortexType? _twin;
     private string? _text;
+    private Dictionary<string, int>? _names;
 
     private VortexType(
         VortexTypeKind kind, bool nullable, PType ptype = default, int precision = 0, int scale = 0,
@@ -193,6 +195,12 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
 
     /// <summary>The fields of a struct, a map (key, value) or a union; empty for any other kind.</summary>
     public ReadOnlySpan<VortexField> Fields => _fields;
+
+    /// <summary>The index of the first of <see cref="Fields"/> named exactly <paramref name="name"/>, or -1.</summary>
+    internal int IndexOfField(ReadOnlySpan<char> name) => _fields is null ? -1 : FieldNames.IndexOf(_fields, ref _names, name);
+
+    /// <summary>The fields, as the array they are held in; never written to.</summary>
+    internal VortexField[] FieldArray => _fields ?? [];
 
     /// <summary>The number of decimal digits of a decimal; 0 for any other kind.</summary>
     public int Precision { get; }

@@ -70,10 +70,18 @@ internal sealed class SparseDecoder : ArrayDecoder
         int patchCount = ArrayDecodeContext.CheckedLength(
             patchesMetadata.Length, $"{Id} patch count");
 
+        // A selective read is one of the reads of a node larger than the batch, and each reads the
+        // whole patch set: decoded once for all of them, as a range's is, when there are enough
+        // patches for that to pay.
+        bool whole = selective && patchCount >= Patches.RetainedFrom;
         DType indicesType = context.Types.Primitive(
             patchesMetadata.IndicesPType, Nullability.NonNullable);
-        int indicesIndex = context.DecodeChild(in node, 0, indicesType, patchCount);
-        int valuesIndex = context.DecodeChild(in node, 1, dtype, patchCount);
+        int indicesIndex = whole
+            ? context.DecodeWholeChild(in node, 0, indicesType, patchCount)
+            : context.DecodeChild(in node, 0, indicesType, patchCount);
+        int valuesIndex = whole
+            ? context.DecodeWholeChild(in node, 1, dtype, patchCount)
+            : context.DecodeChild(in node, 1, dtype, patchCount);
 
         bool walked = context.IsNodeChecked(in node);
         Patches patches = Patches.Create(

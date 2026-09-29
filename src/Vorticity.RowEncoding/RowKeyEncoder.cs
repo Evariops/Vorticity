@@ -72,7 +72,7 @@ public static partial class RowEncoder
         CanonicalArena arena = new CanonicalArena(8, options.EnginePool);
         try
         {
-            ColumnsBuilder<TKey> builder = new ColumnsBuilder<TKey>(store, WriteBinding.Map(typeof(TKey), TKey.Schema, store.Type.Fields), null);
+            ColumnsBuilder<TKey> builder = new ColumnsBuilder<TKey>(store, WriteBinding.Map(typeof(TKey), TKey.Schema, store.Type.FieldArray), null);
             TKey.WriteRows(builder, new ReadOnlySpan<TKey>(in key));
             CanonicalNode root = arena.GetNode(store.Build(arena, 1));
             int count = root.FieldCount;
@@ -130,106 +130,190 @@ public static partial class RowEncoder
     internal static byte[] EncodeKey(
         ReadOnlySpan<FilterLiteral> values, ReadOnlySpan<DType> dtypes, ReadOnlySpan<RowSortField> fields)
     {
+        byte[] key = new byte[KeyLength(values, dtypes, fields)];
+        WriteKey(values, dtypes, fields, key);
+        return key;
+    }
+
+    /// <summary>The length of the row encoding of one tuple, the bytes <see cref="WriteKey"/> writes.</summary>
+    internal static int KeyLength(
+        ReadOnlySpan<FilterLiteral> values, ReadOnlySpan<DType> dtypes, ReadOnlySpan<RowSortField> fields)
+    {
+        CheckTuple(values, dtypes, fields);
+        int length = 0;
+        for (int i = 0; i < values.Length; i++)
+        {
+            length += ValueLength(values[i], dtypes[i]);
+        }
+
+        return length;
+    }
+
+    /// <summary>
+    /// Writes the row encoding of one tuple into <paramref name="destination"/>, which has room for
+    /// <see cref="KeyLength"/> bytes, allocating nothing: each value is written as the column encoder
+    /// writes a row of one value of its dtype.
+    /// </summary>
+    /// <returns>The bytes written.</returns>
+    internal static int WriteKey(
+        ReadOnlySpan<FilterLiteral> values, ReadOnlySpan<DType> dtypes, ReadOnlySpan<RowSortField> fields,
+        Span<byte> destination)
+    {
+        CheckTuple(values, dtypes, fields);
+        int written = 0;
+        for (int i = 0; i < values.Length; i++)
+        {
+            written += WriteValue(values[i], dtypes[i], fields[i], destination[written..]);
+        }
+
+        return written;
+    }
+
+    private static void CheckTuple(
+        ReadOnlySpan<FilterLiteral> values, ReadOnlySpan<DType> dtypes, ReadOnlySpan<RowSortField> fields)
+    {
         if (values.Length != dtypes.Length || values.Length != fields.Length || values.Length == 0)
         {
             throw new ArgumentException(
                 $"{values.Length} values, {dtypes.Length} dtypes and {fields.Length} sort fields: one of each per key column.",
                 nameof(values));
         }
-
-        CanonicalArena arena = new CanonicalArena();
-        try
-        {
-            int[] columns = new int[values.Length];
-            for (int i = 0; i < values.Length; i++)
-            {
-                columns[i] = OneValue(arena, values[i], dtypes[i]);
-            }
-
-            using RowKeys keys = Encode(arena, columns, fields);
-            return keys.Row(0).ToArray();
-        }
-        finally
-        {
-            arena.Reset();
-        }
     }
 
-    private static int OneValue(CanonicalArena arena, FilterLiteral value, DType dtype)
+    /// <summary>The bytes one value of <paramref name="dtype"/> takes in a row.</summary>
+    internal static int ValueLength(FilterLiteral value, DType dtype)
     {
-        bool isNull = value.Kind == FilterLiteralKind.Null;
-        if (isNull && !dtype.IsNullable)
-        {
-            throw new ArgumentException($"A null cannot be a value of the non-nullable {dtype.Kind} column.", nameof(value));
-        }
-
-        Validity validity = isNull ? Validity.AllInvalid : Validity.FromNullability(dtype.Nullability);
+        bool isNull = IsNull(value, dtype);
         switch (dtype.Kind)
         {
             case DTypeKind.Bool:
-            {
-                VortexBuffer bits = arena.Allocate(1, 1, out Span<byte> bit);
-                bit[0] = (byte)(!isNull && Expect(value, FilterLiteralKind.Bool).BoolValue ? 1 : 0);
-                return arena.AddBool(dtype, 1, validity, bits, 0);
-            }
+                return 2;
+
+            case DTypeKind.Primitive:
+                return dtype.PType.ByteWidth() + 1;
+
+            case DTypeKind.Utf8 or DTypeKind.Binary:
+                return BytesLength(isNull ? 0 : Expect(value, FilterLiteralKind.Bytes).BytesValue.Length);
+
+            default:
+                throw Unkeyed(dtype);
+        }
+    }
+
+    /// <summary>The bytes a utf8 or binary value of <paramref name="length"/> bytes takes in a row; a null takes as many as an empty one.</summary>
+    internal static int BytesLength(int length) =>
+        length == 0
+            ? RowWidths.VarEmptySize
+            : 1 + (((length + RowWidths.VarBlockData - 1) / RowWidths.VarBlockData) * RowWidths.VarBlockTotal);
+
+    /// <summary>
+    /// Writes a non-null utf8 or binary value as a row of its column holds it, into
+    /// <paramref name="destination"/>, which has room for <see cref="BytesLength"/> bytes: for a key
+    /// whose bytes are lent rather than held by a literal.
+    /// </summary>
+    /// <returns>The bytes written.</returns>
+    internal static int WriteBytes(ReadOnlySpan<byte> value, RowSortField field, Span<byte> destination)
+    {
+        if (value.IsEmpty)
+        {
+            destination[0] = RowSentinels.VarEmpty(field);
+            return RowWidths.VarEmptySize;
+        }
+
+        destination[0] = RowSentinels.VarNonEmpty(field);
+        return 1 + RowBytes.WriteVarBody(value, destination[1..], field.Descending);
+    }
+
+    /// <summary>
+    /// Writes one value as <see cref="RowEncodeKernel"/> writes a row of it: a sentinel, then the
+    /// ordered value big-endian for a fixed width, or the value in blocks for a variable one.
+    /// </summary>
+    /// <returns>The bytes written.</returns>
+    internal static int WriteValue(FilterLiteral value, DType dtype, RowSortField field, Span<byte> destination)
+    {
+        bool isNull = IsNull(value, dtype);
+        switch (dtype.Kind)
+        {
+            case DTypeKind.Bool:
+                if (isNull)
+                {
+                    destination[0] = RowSentinels.FixedNull(field);
+                    destination[1] = 0;
+                }
+                else
+                {
+                    destination[0] = RowSentinels.FixedNonNull;
+                    byte order = Expect(value, FilterLiteralKind.Bool).BoolValue ? (byte)0x02 : (byte)0x01;
+                    destination[1] = field.Descending ? (byte)(order ^ 0xFF) : order;
+                }
+
+                return 2;
 
             case DTypeKind.Primitive:
             {
                 PType ptype = dtype.PType;
                 int width = ptype.ByteWidth();
-                VortexBuffer buffer = arena.Allocate(width, width, out Span<byte> bytes);
-                bytes.Clear();
-                if (!isNull)
+                Span<byte> slot = destination[..(width + 1)];
+                if (isNull)
                 {
-                    WritePrimitive(value, ptype, bytes);
+                    // A null's value bytes are zeros even descending: the fill is not a value.
+                    slot[0] = RowSentinels.FixedNull(field);
+                    slot[1..].Clear();
+                    return width + 1;
                 }
 
-                return arena.AddPrimitive(dtype, 1, validity, ptype, buffer);
+                ulong mask = width == sizeof(ulong) ? ulong.MaxValue : (1UL << (8 * width)) - 1;
+                ulong ordered = Ordered(value, ptype, width);
+                if (field.Descending)
+                {
+                    ordered = ~ordered & mask;
+                }
+
+                slot[0] = RowSentinels.FixedNonNull;
+                for (int i = 0; i < width; i++)
+                {
+                    slot[1 + i] = (byte)(ordered >> (8 * (width - 1 - i)));
+                }
+
+                return width + 1;
             }
 
             case DTypeKind.Utf8 or DTypeKind.Binary:
             {
-                ReadOnlySpan<byte> text = isNull ? default : Expect(value, FilterLiteralKind.Bytes).BytesValue;
-                VortexBuffer views = arena.Allocate(16, 16, out Span<byte> view);
-                view.Clear();
-                BinaryPrimitives.WriteUInt32LittleEndian(view, (uint)text.Length);
-                if (text.Length <= 12)
+                if (isNull)
                 {
-                    text.CopyTo(view[4..]);
-                    return arena.AddVarBinView(dtype, 1, validity, views, default);
+                    destination[0] = RowSentinels.VarNull(field);
+                    return RowWidths.VarNullSize;
                 }
 
-                VortexBuffer data = arena.Allocate(text.Length, 1, out Span<byte> heap);
-                text.CopyTo(heap);
-                text[..4].CopyTo(view[4..]);
-                return arena.AddVarBinView(dtype, 1, validity, views, [data]);
+                return WriteBytes(Expect(value, FilterLiteralKind.Bytes).BytesValue, field, destination);
             }
 
             default:
-                throw new VortexUnsupportedException(
-                    dtype.Kind.ToString(), ComponentKind.DType, "A seek key is built for boolean, primitive, utf8 and binary columns.");
+                throw Unkeyed(dtype);
         }
     }
 
-    private static void WritePrimitive(FilterLiteral value, PType ptype, Span<byte> bytes)
+    /// <summary>
+    /// The value's bits at the column's width, mapped as <see cref="IRowOrdering{T}"/> maps them so
+    /// that their unsigned order is the values' order.
+    /// </summary>
+    private static ulong Ordered(FilterLiteral value, PType ptype, int width)
     {
+        ulong sign = 1UL << ((8 * width) - 1);
+        ulong mask = width == sizeof(ulong) ? ulong.MaxValue : (1UL << (8 * width)) - 1;
         if (ptype.IsFloat())
         {
             double d = Expect(value, FilterLiteralKind.Float).FloatValue;
-            switch (ptype)
+            ulong raw = ptype switch
             {
-                case PType.F16:
-                    BinaryPrimitives.WriteHalfLittleEndian(bytes, (Half)d);
-                    break;
-                case PType.F32:
-                    BinaryPrimitives.WriteSingleLittleEndian(bytes, (float)d);
-                    break;
-                default:
-                    BinaryPrimitives.WriteDoubleLittleEndian(bytes, d);
-                    break;
-            }
+                PType.F16 => BitConverter.HalfToUInt16Bits((Half)d),
+                PType.F32 => BitConverter.SingleToUInt32Bits((float)d),
+                _ => BitConverter.DoubleToUInt64Bits(d),
+            };
 
-            return;
+            // A non-negative gets its sign bit set, a negative every bit flipped.
+            return raw ^ ((raw & sign) == 0 ? sign : mask);
         }
 
         ulong bits;
@@ -242,7 +326,7 @@ public static partial class RowEncoder
                     string.Create(CultureInfo.InvariantCulture, $"{signed} does not fit a {ptype} column."), nameof(value));
             }
 
-            bits = unchecked((ulong)signed);
+            bits = unchecked((ulong)signed) & mask;
         }
         else
         {
@@ -256,11 +340,24 @@ public static partial class RowEncoder
             bits = unsigned;
         }
 
-        for (int i = 0; i < bytes.Length; i++)
-        {
-            bytes[i] = (byte)(bits >> (8 * i));
-        }
+        // Two's complement puts the negatives above the positives; flipping the sign bit moves them below.
+        return ptype.IsSignedInteger() ? bits ^ sign : bits;
     }
+
+    private static bool IsNull(FilterLiteral value, DType dtype)
+    {
+        bool isNull = value.Kind == FilterLiteralKind.Null;
+        if (isNull && !dtype.IsNullable)
+        {
+            throw new ArgumentException($"A null cannot be a value of the non-nullable {dtype.Kind} column.", nameof(value));
+        }
+
+        return isNull;
+    }
+
+    private static VortexUnsupportedException Unkeyed(DType dtype) =>
+        new VortexUnsupportedException(
+            dtype.Kind.ToString(), ComponentKind.DType, "A seek key is built for boolean, primitive, utf8 and binary columns.");
 
     private static bool Fits(long value, PType ptype) => ptype switch
     {

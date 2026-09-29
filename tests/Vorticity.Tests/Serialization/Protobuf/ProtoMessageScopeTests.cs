@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Vorticity.Serialization.Protobuf;
 using Xunit;
 
@@ -298,6 +299,71 @@ public sealed class ProtoMessageScopeTests
     }
 
     /// <summary>
+    /// A clear while a message is open drops the longer lengths its closed children left waiting:
+    /// what is written next is encoded as a new writer would encode it.
+    /// </summary>
+    [Fact]
+    public void A_clear_drops_the_longer_lengths_an_open_message_had_waiting()
+    {
+        Part fresh = new Part(1, null, [new Part(2, null, [new Part(3, ProtoTestHelpers.Payload(300), [])]), new Part(4, ProtoTestHelpers.Payload(150), [])]);
+        byte[] written = ProtoTestHelpers.Write(
+            (ref ProtoWriter w) =>
+            {
+                _ = w.BeginMessage(7);
+                ProtoWriter.MessageScope inner = w.BeginMessage(8);
+                w.WriteBytesAlways(1, ProtoTestHelpers.Payload(200));
+                inner.End();
+                w.Clear();
+                Write(ref w, fresh);
+            },
+            initialCapacity: 16);
+
+        List<byte> expected = [];
+        Encode(fresh, expected);
+        Assert.Equal(expected.ToArray(), written);
+    }
+
+    /// <summary>
+    /// A close that fails as the outermost one, here of a scope opened before a clear whose slot
+    /// lies past everything written since, drops the longer lengths waiting under it: a clear and
+    /// a new message then give the bytes a new writer would.
+    /// </summary>
+    [Fact]
+    public void An_outermost_close_that_fails_leaves_no_longer_length_waiting()
+    {
+        Part fresh = new Part(1, null, [new Part(2, ProtoTestHelpers.Payload(300), [])]);
+        bool threw = false;
+        byte[] written = ProtoTestHelpers.Write(
+            (ref ProtoWriter w) =>
+            {
+                w.WriteBytesAlways(9, ProtoTestHelpers.Payload(1_000));
+                ProtoWriter.MessageScope stale = w.BeginMessage(1);
+                w.Clear();
+                _ = w.BeginMessage(2);
+                ProtoWriter.MessageScope inner = w.BeginMessage(3);
+                w.WriteBytesAlways(1, ProtoTestHelpers.Payload(200));
+                inner.End();
+                try
+                {
+                    stale.End();
+                }
+                catch (InvalidOperationException)
+                {
+                    threw = true;
+                }
+
+                w.Clear();
+                Write(ref w, fresh);
+            },
+            initialCapacity: 16);
+
+        List<byte> expected = [];
+        Encode(fresh, expected);
+        Assert.True(threw);
+        Assert.Equal(expected.ToArray(), written);
+    }
+
+    /// <summary>
     /// The scope holds a <c>ref</c> to the writer, so a body that outgrows the pooled array and
     /// forces a reallocation must still backpatch into the array the writer ended up with.
     /// </summary>
@@ -334,5 +400,119 @@ public sealed class ProtoMessageScopeTests
         }
 
         Assert.True(inner.End);
+    }
+
+    /// <summary>
+    /// Trees of messages drawn at random, as deep as eight and as wide as four, whose bytes fields
+    /// cross the one-, two- and three-byte prefixes at every depth, with fields between them: the
+    /// writer, which places every length once the outermost message closes, gives the bytes a
+    /// recursive encoder gives.
+    /// </summary>
+    [Fact]
+    public void Random_message_trees_encode_as_a_recursive_encoder_encodes_them()
+    {
+        Random random = new Random(43);
+        for (int round = 0; round < 300; round++)
+        {
+            List<Part> parts = [];
+            for (int i = random.Next(1, 4); i > 0; i--)
+            {
+                parts.Add(Draw(random, depth: 0));
+            }
+
+            byte[] written = ProtoTestHelpers.Write(
+                (ref ProtoWriter w) =>
+                {
+                    foreach (Part part in parts)
+                    {
+                        Write(ref w, part);
+                    }
+                },
+                initialCapacity: 16);
+
+            List<byte> expected = [];
+            foreach (Part part in parts)
+            {
+                Encode(part, expected);
+            }
+
+            Assert.Equal(expected.ToArray(), written);
+        }
+    }
+
+    private sealed record Part(int Field, byte[]? Bytes, List<Part> Children);
+
+    private static Part Draw(Random random, int depth)
+    {
+        if (depth >= 8 || random.Next(3) == 0)
+        {
+            int length = random.Next(6) switch
+            {
+                0 => 0,
+                1 => random.Next(120, 140),
+                2 => random.Next(16_370, 16_400),
+                3 => random.Next(20_000, 40_000),
+                _ => random.Next(1, 64),
+            };
+            byte[] bytes = new byte[length];
+            random.NextBytes(bytes);
+            return new Part(random.Next(1, 20), bytes, []);
+        }
+
+        List<Part> children = [];
+        for (int i = random.Next(0, 5); i > 0; i--)
+        {
+            children.Add(Draw(random, depth + 1));
+        }
+
+        return new Part(random.Next(1, 20), null, children);
+    }
+
+    private static void Write(ref ProtoWriter w, Part part)
+    {
+        if (part.Bytes is { } bytes)
+        {
+            w.WriteBytesAlways(part.Field, bytes);
+            return;
+        }
+
+        ProtoWriter.MessageScope scope = w.BeginMessage(part.Field);
+        foreach (Part child in part.Children)
+        {
+            Write(ref w, child);
+        }
+
+        scope.End();
+    }
+
+    private static void Encode(Part part, List<byte> output)
+    {
+        List<byte> body = [];
+        if (part.Bytes is { } bytes)
+        {
+            body.AddRange(bytes);
+        }
+        else
+        {
+            foreach (Part child in part.Children)
+            {
+                Encode(child, body);
+            }
+        }
+
+        Varint(output, ((ulong)part.Field << 3) | 2);
+        Varint(output, (ulong)body.Count);
+        output.AddRange(body);
+    }
+
+    private static void Varint(List<byte> output, ulong value)
+    {
+        while (value >= 0x80)
+        {
+            output.Add((byte)(value | 0x80));
+            value >>= 7;
+        }
+
+        output.Add((byte)value);
     }
 }

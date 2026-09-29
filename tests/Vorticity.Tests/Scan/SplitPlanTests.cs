@@ -120,6 +120,47 @@ public sealed class SplitPlanTests
     }
 
     [Fact]
+    public void ARangeSplitsAtEveryChunkBoundaryInsideItAndNoOther()
+    {
+        // Forty chunks, a quarter of them empty, and ranges that start and end anywhere: the chunks
+        // before a range, which the plan finds without walking them, give nothing, and every chunk
+        // the range meets gives its end.
+        Random random = new Random(39);
+        long[] offsets = new long[41];
+        LayoutSpecNode[] chunks = new LayoutSpecNode[40];
+        for (int i = 0; i < chunks.Length; i++)
+        {
+            int rows = random.Next(4) == 0 ? 0 : random.Next(1, 30);
+            chunks[i] = Node(Flat, (ulong)rows, segments: [(uint)(i % 16)]);
+            offsets[i + 1] = offsets[i] + rows;
+        }
+
+        long total = offsets[^1];
+        LayoutTree tree = Tree(Node(Chunked, (ulong)total, children: chunks), I64());
+        for (int round = 0; round < 2_000; round++)
+        {
+            long start = random.NextInt64(0, total);
+            long end = random.NextInt64(start + 1, total + 1);
+            List<long> expected = [start];
+            foreach (long offset in offsets)
+            {
+                if (offset > start && offset < end && offset != expected[^1])
+                {
+                    expected.Add(offset);
+                }
+            }
+
+            expected.Add(end);
+            List<RowRange> splits = Splits(tree, new RowRange(start, end), 8192);
+            Assert.Equal(expected.Count - 1, splits.Count);
+            for (int i = 0; i < splits.Count; i++)
+            {
+                Assert.Equal(new RowRange(expected[i], expected[i + 1]), splits[i]);
+            }
+        }
+    }
+
+    [Fact]
     public void AChunkedLayoutWithNoChunksAndNoRowsHasNoSplits()
     {
         LayoutTree tree = Tree(Node(Chunked, 0), I64());

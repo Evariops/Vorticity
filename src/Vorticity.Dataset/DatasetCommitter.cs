@@ -19,6 +19,12 @@ internal sealed record CommitOptions
     /// <summary>How many times to rebase before giving up.</summary>
     public int MaxAttempts { get; init; } = 8;
 
+    /// <summary>
+    /// A version the writer has seen, from which the latest is found by asking for the ones after
+    /// it; 0 lists the commits instead.
+    /// </summary>
+    public ulong Known { get; init; }
+
     /// <summary>The boundary rule, or null for the prolly rule at this dataset's seed.</summary>
     public IBoundaryRule? Rule { get; init; }
 
@@ -74,12 +80,15 @@ internal static class DatasetCommitter
         ArgumentNullException.ThrowIfNull(options);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxAttempts);
 
+        ulong known = options.Known;
         for (int attempt = 1; attempt <= options.MaxAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            // 1. The latest version, in one request.
-            (ulong parent, CommitObject? commit) = await LatestAsync(store, cancellationToken).ConfigureAwait(false);
+            // 1. The latest version: asked for from the one the writer last saw, which a lost
+            // attempt moves up to the one it built on.
+            (ulong parent, CommitObject? commit) = await LatestAsync(store, known, cancellationToken).ConfigureAwait(false);
+            known = parent;
             CommitPageSource pages = new CommitPageSource(store);
             DatasetLevels levels = DatasetLevels.Empty;
             CommitHeader template = options.Template ?? new CommitHeader { Version = 1 };
@@ -162,6 +171,74 @@ internal static class DatasetCommitter
         throw new ObjectStoreException(
             $"The commit lost {options.MaxAttempts} times; a coordinator that batches commits is the " +
             "answer to contention, not more attempts.");
+    }
+
+    /// <summary>
+    /// The latest version and its commit object; (0, null) when the dataset has none. From
+    /// <paramref name="known"/>, a version the caller has seen, the versions after it are asked
+    /// for; from 0, or when the answer is gone by the time it is read, the commits are listed.
+    /// </summary>
+    public static async ValueTask<(ulong Version, CommitObject? Commit)> LatestAsync(
+        IObjectStore store, ulong known, CancellationToken cancellationToken)
+    {
+        if (known > 0)
+        {
+            ulong newest = await NewestFromAsync(store, known, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return (newest, await CommitObject.OpenAsync(store, CommitKey.For(newest), cancellationToken).ConfigureAwait(false));
+            }
+            catch (ObjectNotFoundException)
+            {
+                // Vacuumed since it was seen: the listing finds what is there now.
+            }
+            catch (CommitFormatException torn)
+            {
+                throw TornCommitException.Of(newest, torn);
+            }
+        }
+
+        return await LatestAsync(store, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The newest version from <paramref name="known"/> on: the versions after it asked for in
+    /// doubling steps, then bisected. The commits a dataset keeps run without a gap above any that
+    /// is still there, since vacuum takes the oldest first, so a version that is missing ends the
+    /// run; a single request answers when nothing is newer.
+    /// </summary>
+    private static async ValueTask<ulong> NewestFromAsync(IObjectStore store, ulong known, CancellationToken cancellationToken)
+    {
+        ulong present = known;
+        ulong step = 1;
+        ulong absent;
+        while (true)
+        {
+            ulong probe = present + step;
+            if (await store.HeadAsync(CommitKey.For(probe), cancellationToken).ConfigureAwait(false) is null)
+            {
+                absent = probe;
+                break;
+            }
+
+            present = probe;
+            step <<= 1;
+        }
+
+        while (absent - present > 1)
+        {
+            ulong middle = present + ((absent - present) >> 1);
+            if (await store.HeadAsync(CommitKey.For(middle), cancellationToken).ConfigureAwait(false) is null)
+            {
+                absent = middle;
+            }
+            else
+            {
+                present = middle;
+            }
+        }
+
+        return present;
     }
 
     /// <summary>The latest version and its commit object, in one listing and one read; (0, null)
@@ -423,10 +500,19 @@ internal static class DatasetCommitter
                     {
                         await foreach (TreeEntry leaf in tree.EnumerateAsync(pages, cancellationToken).ConfigureAwait(false))
                         {
-                            ObjectEntry entry = await CurrentAsync(level, leaf.Key).ConfigureAwait(false)
-                                ?? ObjectEntry.FromBytes(leaf.Value.Span);
+                            // The entry as this commit leaves it: its own change when an earlier
+                            // operation made one, else the leaf the walk holds, which is the tree's
+                            // and is read in place until it names a fragment to move.
+                            ObjectEntry? held = pending.Count > 0 && pending.TryGetValue(Named(level, leaf.Key), out ObjectEntry? change)
+                                ? change
+                                : null;
+                            if (held is null ? !ObjectEntry.NamesAny(leaf.Value.Span, repack.Versions) : !held.NamesAny(repack.Versions))
+                            {
+                                continue;
+                            }
+
+                            ObjectEntry entry = held ?? ObjectEntry.FromBytes(leaf.Value.Span);
                             PageReference[] fragments = [.. entry.Fragments];
-                            bool changed = false;
                             for (int i = 0; i < fragments.Length; i++)
                             {
                                 if (repack.Versions.Contains(fragments[i].Version))
@@ -434,15 +520,11 @@ internal static class DatasetCommitter
                                     ReadOnlyMemory<byte> bytes = await pages
                                         .ReadFragmentAsync(fragments[i], cancellationToken).ConfigureAwait(false);
                                     fragments[i] = builder.AddFragment(bytes.Span);
-                                    changed = true;
                                     repack.Moved++;
                                 }
                             }
 
-                            if (changed)
-                            {
-                                Put(level, leaf.Key, entry with { Fragments = fragments });
-                            }
+                            Put(level, leaf.Key, entry with { Fragments = fragments });
                         }
                     }
 

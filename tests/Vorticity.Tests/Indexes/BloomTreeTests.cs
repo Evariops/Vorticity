@@ -339,6 +339,41 @@ public sealed class BloomTreeTests
     }
 
     [Fact]
+    public async Task AnAppendHashedAnotherWayIsProbedWithItsOwnHash()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        string path = Path.Combine(Path.GetTempPath(), $"vorticity-bloomtree-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            int rows = 200 * Block;
+            (byte[] first, _) = await WriteAsync(rows, Policy());
+            await System.IO.File.WriteAllBytesAsync(path, first, ct);
+            int added = 120 * Block;
+            IndexSpec other = IndexSpec.Bloom(falsePositivePpm: 100, resolutions: 2, hash: BloomHash.XxHash64);
+            await using (VortexFileWriter writer = await VortexFileWriter.AppendAsync(path, Options(other), ct))
+            {
+                await FeedAsync(writer, rows, rows + added);
+                await writer.CompleteAsync(ct);
+            }
+
+            // A question hashed for the first part's trees is hashed again for the second part's.
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            foreach (int row in (int[])[0, rows - 1, rows, rows + added - 1])
+            {
+                Assert.Equal(1, await CountAsync(file, Equal(K(row)), indexes: true));
+                Assert.Equal(1, (await file.ScanBuilder().Where(Equal(K(row))).ExplainAsync(ct)).LiveBlocks);
+            }
+
+            Assert.Equal(0, (await file.ScanBuilder().Where(Equal(Absent)).ExplainAsync(ct)).LiveBlocks);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task ATornRegionClaimsNothingBeneathIt()
     {
         // Two hundred blocks: a root of level 2, whose children are the one group of generations.

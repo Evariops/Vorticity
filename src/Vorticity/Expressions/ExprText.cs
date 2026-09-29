@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
@@ -214,7 +215,13 @@ internal static class ExprText
         while (IsWord(tokens, at, "or"))
         {
             Token or = tokens[at++];
-            left = Logical(false, left, ParseAnd(tokens, ref at, nesting), or);
+            VortexExpr right = ParseAnd(tokens, ref at, nesting);
+            if (ExprDepth.TooDeep(left, right))
+            {
+                return ParseRun(isAnd: false, left, or.Position, right, tokens, ref at, nesting);
+            }
+
+            left = Expr.Logical(false, left, right);
         }
 
         return left;
@@ -226,10 +233,70 @@ internal static class ExprText
         while (IsWord(tokens, at, "and"))
         {
             Token and = tokens[at++];
-            left = Logical(true, left, ParseUnary(tokens, ref at, nesting), and);
+            VortexExpr right = ParseUnary(tokens, ref at, nesting);
+            if (ExprDepth.TooDeep(left, right))
+            {
+                return ParseRun(isAnd: true, left, and.Position, right, tokens, ref at, nesting);
+            }
+
+            left = Expr.Logical(true, left, right);
         }
 
         return left;
+    }
+
+    /// <summary>
+    /// The rest of a run of one operator whose next node, at <paramref name="position"/>, would nest
+    /// past the evaluator's depth as the run leans: the run so far taken apart into its operands,
+    /// then <paramref name="right"/> and every operand after it, read whole and joined as a balanced
+    /// tree of one node between two operands. When a deep operand would put that tree past the depth
+    /// too, the run is joined one operand at a time as a join past the depth goes, and refused at
+    /// the operator where even that goes too deep.
+    /// </summary>
+    private static VortexExpr ParseRun(
+        bool isAnd, VortexExpr left, int position, VortexExpr right, List<Token> tokens, ref int at, int nesting)
+    {
+        string word = isAnd ? "and" : "or";
+        VortexExpr[] operands = ArrayPool<VortexExpr>.Shared.Rent(128);
+        int[] operators = ArrayPool<int>.Shared.Rent(16);
+        int count = 0;
+        int read = 0;
+        try
+        {
+            Expr.Flatten(isAnd, left, ref operands, ref count);
+            int taken = count;
+            Expr.Append(ref operators, ref read, position);
+            Expr.Append(ref operands, ref count, right);
+            while (IsWord(tokens, at, word))
+            {
+                Expr.Append(ref operators, ref read, tokens[at++].Position);
+                Expr.Append(ref operands, ref count, isAnd ? ParseUnary(tokens, ref at, nesting) : ParseAnd(tokens, ref at, nesting));
+            }
+
+            ReadOnlySpan<VortexExpr> run = operands.AsSpan(0, count);
+            if (Expr.Balance(isAnd, run) is { } balanced)
+            {
+                return balanced;
+            }
+
+            // The operands taken apart were joined within the depth as the run leaned: one refused
+            // among them is reported at the operator that brought the run here.
+            VortexExpr joined = run[0];
+            for (int i = 1; i < count; i++)
+            {
+                joined = ExprDepth.TooDeep(joined, run[i])
+                    ? throw TooDeep(operators[Math.Max(i - taken, 0)])
+                    : Expr.Joined(isAnd, joined, run[i]);
+            }
+
+            return joined;
+        }
+        finally
+        {
+            Array.Clear(operands, 0, count);
+            ArrayPool<VortexExpr>.Shared.Return(operands);
+            ArrayPool<int>.Shared.Return(operators);
+        }
     }
 
     /// <remarks>
@@ -248,13 +315,13 @@ internal static class ExprText
         Token opening = tokens[at++];
         if (nesting == FilterEvaluator.MaxDepth)
         {
-            throw TooDeep(opening);
+            throw TooDeep(opening.Position);
         }
 
         if (not)
         {
             VortexExpr operand = ParseUnary(tokens, ref at, nesting + 1);
-            return ExprDepth.TooDeep(operand, operand) ? throw TooDeep(opening) : Expr.Not(operand);
+            return ExprDepth.TooDeep(operand, operand) ? throw TooDeep(opening.Position) : Expr.Not(operand);
         }
 
         VortexExpr inner = ParseOr(tokens, ref at, nesting + 1);
@@ -262,11 +329,8 @@ internal static class ExprText
         return inner;
     }
 
-    private static LogicalExpr Logical(bool isAnd, VortexExpr left, VortexExpr right, Token at) =>
-        ExprDepth.TooDeep(left, right) ? throw TooDeep(at) : Expr.Logical(isAnd, left, right);
-
-    private static FormatException TooDeep(Token at) =>
-        new FormatException($"The filter nests deeper than {FilterEvaluator.MaxDepth} levels at position {at.Position}.");
+    private static FormatException TooDeep(int position) =>
+        new FormatException($"The filter nests deeper than {FilterEvaluator.MaxDepth} levels at position {position}.");
 
     private static VortexExpr ParsePredicate(List<Token> tokens, ref int at)
     {

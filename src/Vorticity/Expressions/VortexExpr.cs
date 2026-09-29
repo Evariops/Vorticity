@@ -1,6 +1,8 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using Vorticity.Compute;
 
@@ -204,15 +206,42 @@ internal sealed class ComparisonExpr : VortexExpr
 /// <summary><c>AND</c> or <c>OR</c> over two operands.</summary>
 internal sealed class LogicalExpr : VortexExpr
 {
+    /// <summary>What <see cref="JoinHeight"/> adds to the height of a node of a run joined balanced: past any height the evaluator takes.</summary>
+    private const int BalancedMark = 128;
+
+    private readonly int _joinHeight;
+
     internal LogicalExpr(bool isAnd, VortexExpr left, VortexExpr right)
+        : this(isAnd, left, right, ExprDepth.Over(left, right), balanced: false)
+    {
+    }
+
+    /// <param name="isAnd"><see langword="true"/> for <c>AND</c>.</param>
+    /// <param name="left">The left operand.</param>
+    /// <param name="right">The right operand.</param>
+    /// <param name="height">The node's height, which the caller has taken and checked against the evaluator's depth.</param>
+    /// <param name="balanced">Whether the node is of a run of its operator joined as a balanced tree.</param>
+    internal LogicalExpr(bool isAnd, VortexExpr left, VortexExpr right, int height, bool balanced)
     {
         IsAnd = isAnd;
         Left = left;
         Right = right;
-        Height = ExprDepth.Over(left, right);
+        _joinHeight = balanced ? height + BalancedMark : height;
     }
 
-    internal override int Height { get; }
+    internal override int Height => _joinHeight & (BalancedMark - 1);
+
+    /// <summary>
+    /// Whether the node is of a run of its operator joined as a balanced tree, which a join then
+    /// keeps balanced rather than leaning a node over it.
+    /// </summary>
+    internal bool Balanced => _joinHeight >= BalancedMark;
+
+    /// <summary>
+    /// The height, or past any height the evaluator takes for a node of a run joined balanced: the
+    /// one figure a join reads of a side to know that a node over it as it is will do.
+    /// </summary>
+    internal int JoinHeight => _joinHeight;
 
     /// <summary><see langword="true"/> for <c>AND</c>, <see langword="false"/> for <c>OR</c>.</summary>
     public bool IsAnd { get; }
@@ -604,12 +633,211 @@ internal static class Expr
         return new StringMatchExpr(field, op, pattern, escape);
     }
 
+    /// <summary><c>left AND right</c>, or <c>OR</c>.</summary>
+    /// <remarks>
+    /// A node over both sides as they are while it is within the evaluator's depth and neither side
+    /// is a run of the same operator joined balanced: a chain built one operand at a time leans, a
+    /// node an operand. Both operators are associative, so a run whose next node would pass the
+    /// depth is rebuilt balanced, once, then joined as an AVL tree joins, down the taller side's
+    /// spine of the same operator and rotated back on the way up: from then on it is O(log n) high
+    /// whichever way it grows, where a node over it as it leaned would be refused. The operands keep
+    /// their order, which evaluation follows.
+    /// </remarks>
     internal static LogicalExpr Logical(bool isAnd, VortexExpr left, VortexExpr right)
     {
         ArgumentNullException.ThrowIfNull(left);
         ArgumentNullException.ThrowIfNull(right);
-        return new LogicalExpr(isAnd, left, right);
+        int height = Math.Max(JoinHeight(left), JoinHeight(right)) + 1;
+        return height <= FilterEvaluator.MaxDepth
+            ? new LogicalExpr(isAnd, left, right, height, balanced: false)
+            : Beyond(isAnd, left, right);
     }
+
+    /// <summary>
+    /// <c>left AND right</c>, or <c>OR</c>, past the evaluator's depth or beside a node of a run
+    /// joined balanced: joined balanced when the node would be too deep or the run is of this
+    /// operator; a run of the other one is an operand like any other.
+    /// </summary>
+    private static LogicalExpr Beyond(bool isAnd, VortexExpr left, VortexExpr right)
+    {
+        int height = Math.Max(left.Height, right.Height) + 1;
+        return height <= FilterEvaluator.MaxDepth && !InBalancedRun(isAnd, left) && !InBalancedRun(isAnd, right)
+            ? new LogicalExpr(isAnd, left, right, height, balanced: false)
+            : Joined(isAnd, left, right);
+    }
+
+    private static int JoinHeight(VortexExpr side) => side is LogicalExpr node ? node.JoinHeight : side.Height;
+
+    /// <summary>
+    /// <c>left AND right</c>, or <c>OR</c>, joined balanced: each side that is a run of the operator
+    /// as it leans rebuilt balanced, then the two joined as an AVL tree joins.
+    /// </summary>
+    /// <exception cref="ArgumentException">Even so, the node nests deeper than the evaluator takes.</exception>
+    internal static LogicalExpr Joined(bool isAnd, VortexExpr left, VortexExpr right) =>
+        Join(isAnd, Rebuilt(isAnd, left), Rebuilt(isAnd, right));
+
+    /// <summary>
+    /// <paramref name="operands"/>, at least two, in order, joined by one operator as a balanced
+    /// tree of one node between two operands, or <see langword="null"/> when a deep operand would
+    /// put that tree past the evaluator's depth.
+    /// </summary>
+    internal static VortexExpr? Balance(bool isAnd, ReadOnlySpan<VortexExpr> operands)
+    {
+        // The tree is no higher than its highest operand and the ceiling of the log of the run; only
+        // a run that bound puts past the depth is measured exactly.
+        int highest = 0;
+        foreach (VortexExpr operand in operands)
+        {
+            highest = Math.Max(highest, operand.Height);
+        }
+
+        return highest + BitOperations.Log2((uint)(operands.Length - 1)) + 1 <= FilterEvaluator.MaxDepth
+            || ChainHeight(operands) <= FilterEvaluator.MaxDepth
+            ? Chain(isAnd, operands)
+            : null;
+    }
+
+    /// <summary>
+    /// Appends the operands of <paramref name="expr"/>'s run of one operator, in order, or
+    /// <paramref name="expr"/> itself when it is not one, to a pooled array.
+    /// </summary>
+    internal static void Flatten(bool isAnd, VortexExpr expr, ref VortexExpr[] operands, ref int count)
+    {
+        if (expr is LogicalExpr run && run.IsAnd == isAnd)
+        {
+            Flatten(isAnd, run.Left, ref operands, ref count);
+            Flatten(isAnd, run.Right, ref operands, ref count);
+            return;
+        }
+
+        Append(ref operands, ref count, expr);
+    }
+
+    /// <summary>Appends <paramref name="item"/> to a pooled array, which grows from the pool when full.</summary>
+    internal static void Append<T>(ref T[] array, ref int count, T item)
+    {
+        if (count == array.Length)
+        {
+            T[] next = ArrayPool<T>.Shared.Rent(array.Length * 2);
+            array.AsSpan(0, count).CopyTo(next);
+            ArrayPool<T>.Shared.Return(array, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<T>());
+            array = next;
+        }
+
+        array[count++] = item;
+    }
+
+    private static bool InBalancedRun(bool isAnd, VortexExpr side) =>
+        side is LogicalExpr { Balanced: true } run && run.IsAnd == isAnd;
+
+    /// <summary>
+    /// <paramref name="side"/> as a run joined balanced: itself when it is one already or is not a
+    /// run of the operator, else its operands in order, rebuilt balanced once.
+    /// </summary>
+    private static VortexExpr Rebuilt(bool isAnd, VortexExpr side)
+    {
+        if (side is not LogicalExpr { Balanced: false } leaning || leaning.IsAnd != isAnd)
+        {
+            return side;
+        }
+
+        VortexExpr[] operands = ArrayPool<VortexExpr>.Shared.Rent(128);
+        int count = 0;
+        try
+        {
+            Flatten(isAnd, leaning, ref operands, ref count);
+            if (Balance(isAnd, operands.AsSpan(0, count)) is { } balanced)
+            {
+                return balanced;
+            }
+
+            // A deep operand would put the balanced tree past the depth: joined one operand at a
+            // time, a tall operand stays near the root.
+            VortexExpr joined = operands[0];
+            for (int i = 1; i < count; i++)
+            {
+                joined = Join(isAnd, joined, operands[i]);
+            }
+
+            return joined;
+        }
+        finally
+        {
+            Array.Clear(operands, 0, count);
+            ArrayPool<VortexExpr>.Shared.Return(operands);
+        }
+    }
+
+    private static VortexExpr Chain(bool isAnd, ReadOnlySpan<VortexExpr> operands)
+    {
+        if (operands.Length == 1)
+        {
+            return operands[0];
+        }
+
+        int middle = operands.Length / 2;
+        return Node(isAnd, Chain(isAnd, operands[..middle]), Chain(isAnd, operands[middle..]));
+    }
+
+    /// <summary>The height <see cref="Chain(bool, ReadOnlySpan{VortexExpr})"/> gives <paramref name="operands"/>, without building it.</summary>
+    private static int ChainHeight(ReadOnlySpan<VortexExpr> operands)
+    {
+        if (operands.Length == 1)
+        {
+            return operands[0].Height;
+        }
+
+        int middle = operands.Length / 2;
+        return Math.Max(ChainHeight(operands[..middle]), ChainHeight(operands[middle..])) + 1;
+    }
+
+    /// <summary>
+    /// A node over two balanced sides: beside the side it is not more than one level from, down the
+    /// other's spine of the same operator, and rotated back on the way up.
+    /// </summary>
+    private static LogicalExpr Join(bool isAnd, VortexExpr left, VortexExpr right)
+    {
+        if (left.Height > right.Height + 1 && left is LogicalExpr high && high.IsAnd == isAnd)
+        {
+            return Rotated(isAnd, high.Left, Join(isAnd, high.Right, right));
+        }
+
+        if (right.Height > left.Height + 1 && right is LogicalExpr tall && tall.IsAnd == isAnd)
+        {
+            return Rotated(isAnd, Join(isAnd, left, tall.Left), tall.Right);
+        }
+
+        return Node(isAnd, left, right);
+    }
+
+    /// <summary>
+    /// A node over two sides whose heights differ by two at most, rotated once or twice to within
+    /// one where the taller side is of the same operator. An operand of another kind is whole, and
+    /// a node over it keeps its height.
+    /// </summary>
+    private static LogicalExpr Rotated(bool isAnd, VortexExpr left, VortexExpr right)
+    {
+        if (right.Height > left.Height + 1 && right is LogicalExpr r && r.IsAnd == isAnd)
+        {
+            return r.Left.Height > r.Right.Height && r.Left is LogicalExpr inner && inner.IsAnd == isAnd
+                ? Node(isAnd, Node(isAnd, left, inner.Left), Node(isAnd, inner.Right, r.Right))
+                : Node(isAnd, Node(isAnd, left, r.Left), r.Right);
+        }
+
+        if (left.Height > right.Height + 1 && left is LogicalExpr l && l.IsAnd == isAnd)
+        {
+            return l.Right.Height > l.Left.Height && l.Right is LogicalExpr inner && inner.IsAnd == isAnd
+                ? Node(isAnd, Node(isAnd, l.Left, inner.Left), Node(isAnd, inner.Right, right))
+                : Node(isAnd, l.Left, Node(isAnd, l.Right, right));
+        }
+
+        return Node(isAnd, left, right);
+    }
+
+    /// <summary>A node of a run joined balanced.</summary>
+    /// <exception cref="ArgumentException">The node nests deeper than the evaluator takes.</exception>
+    private static LogicalExpr Node(bool isAnd, VortexExpr left, VortexExpr right) =>
+        new(isAnd, left, right, ExprDepth.Over(left, right), balanced: true);
 
     /// <summary>
     /// Normalizes a comparison so the field is on the left, rejecting the two shapes the 1.0 filter

@@ -247,6 +247,41 @@ public sealed class VortexDatasetTests
         Assert.Equal(writer.Seed, reader.Seed);
     }
 
+    [Fact]
+    public async Task AHandleAnyNumberOfVersionsBehindRefreshesAndCommitsOnTheLatest()
+    {
+        // Behind by one version and by more, so that the versions after the handle's are asked for
+        // in doubling steps and bisected, every way the steps can end.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, schema, Options(), ct);
+        await using VortexDataset reader = await VortexDataset.OpenAsync(store, Options(), ct);
+        long rows = 0;
+        for (int behind = 1; behind <= 12; behind++)
+        {
+            for (int commit = 0; commit < behind; commit++)
+            {
+                await writer.AppendAsync(Batches(types, schema, rows, 10), ct);
+                rows += 10;
+            }
+
+            Assert.Equal(writer.Version, await reader.RefreshAsync(ct));
+            Assert.Equal(rows, reader.RowCount);
+        }
+
+        // Behind again, a commit finds the latest before it builds on it.
+        await writer.AppendAsync(Batches(types, schema, rows, 10), ct);
+        await writer.AppendAsync(Batches(types, schema, rows + 10, 10), ct);
+        await writer.AppendAsync(Batches(types, schema, rows + 20, 10), ct);
+        await reader.AppendAsync(Batches(types, schema, rows + 30, 10), ct);
+        Assert.Equal(writer.Version + 1, reader.Version);
+        Assert.Equal(rows + 40, reader.RowCount);
+    }
+
     private static async Task<List<ObjectEntry>> ObjectsAsync(VortexDataset dataset)
     {
         List<ObjectEntry> entries = [];

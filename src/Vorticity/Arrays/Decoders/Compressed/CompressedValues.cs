@@ -440,6 +440,16 @@ internal ref struct ValueWriter
         where TEnd : unmanaged
         where TValue : unmanaged
     {
+        // Without 256-bit vectors, a node whose runs average more than two steps of stores is
+        // filled run by run: at that length the stores' tests cost a run more than they save.
+        if (!(Vector256.IsHardwareAccelerated && Vector256<TValue>.IsSupported)
+            && (!(Vector128.IsHardwareAccelerated && Vector128<TValue>.IsSupported)
+                || ends.IsEmpty
+                || WidenEnd(ends[^1]) > (ulong)ends.Length * (ulong)(8 * Vector128<TValue>.Count)))
+        {
+            return FilledRuns<TEnd, TValue>(ends, in source, firstRun, offset, length, in sourceValidity, in validity, tracked);
+        }
+
         ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(source.Bytes);
         Span<TValue> destination = MemoryMarshal.Cast<byte, TValue>(_bytes)[..length];
         ref TValue into = ref MemoryMarshal.GetReference(destination);
@@ -447,7 +457,9 @@ internal ref struct ValueWriter
 
         // A run is stores of the value in every lane, a vector at a time, the last written past the
         // run's end into rows the next runs write again: a run holds few rows, and the call a fill
-        // makes outweighs them. The runs whose last vector would pass the rows are filled.
+        // makes outweighs them. The runs whose last vector would pass the rows are filled. With
+        // 128-bit vectors a step is four stores and a run longer than two steps is filled, since a
+        // fill's own unrolled loop outruns one store a step there.
         int lanes = Vector256.IsHardwareAccelerated && Vector256<TValue>.IsSupported ? Vector256<TValue>.Count
             : Vector128.IsHardwareAccelerated && Vector128<TValue>.IsSupported ? Vector128<TValue>.Count
             : 0;
@@ -467,9 +479,9 @@ internal ref struct ValueWriter
             }
 
             int rows = endRow - position;
-            if (lanes != 0 && position + rows + lanes - 1 <= length)
+            if (lanes == Vector256<TValue>.Count && Vector256.IsHardwareAccelerated)
             {
-                if (lanes == Vector256<TValue>.Count && Vector256.IsHardwareAccelerated)
+                if (position + rows + lanes - 1 <= length)
                 {
                     Vector256<TValue> repeated = Vector256.Create(values[run]);
                     for (int k = 0; k < rows; k += lanes)
@@ -479,17 +491,63 @@ internal ref struct ValueWriter
                 }
                 else
                 {
-                    Vector128<TValue> repeated = Vector128.Create(values[run]);
-                    for (int k = 0; k < rows; k += lanes)
-                    {
-                        repeated.StoreUnsafe(ref into, (nuint)(position + k));
-                    }
+                    destination[position..endRow].Fill(values[run]);
+                }
+            }
+            else if (lanes != 0 && rows <= 8 * lanes && position + rows + (4 * lanes) - 1 <= length)
+            {
+                Vector128<TValue> repeated = Vector128.Create(values[run]);
+                for (int k = 0; k < rows; k += 4 * lanes)
+                {
+                    ref TValue at = ref Unsafe.Add(ref into, position + k);
+                    repeated.StoreUnsafe(ref at);
+                    repeated.StoreUnsafe(ref at, (nuint)lanes);
+                    repeated.StoreUnsafe(ref at, (nuint)(2 * lanes));
+                    repeated.StoreUnsafe(ref at, (nuint)(3 * lanes));
                 }
             }
             else
             {
                 destination[position..endRow].Fill(values[run]);
             }
+            if (tracked && sourceValidity.IsValid(run))
+            {
+                validity.SetValidRange(position, endRow - position);
+            }
+
+            position = endRow;
+        }
+
+        return position;
+    }
+
+    /// <summary>The run loop of long runs: a span fill a run.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private readonly int FilledRuns<TEnd, TValue>(
+        ReadOnlySpan<TEnd> ends, in ValueReader source, int firstRun, ulong offset, int length,
+        in ValidityReader sourceValidity, in ValidityWriter validity, bool tracked)
+        where TEnd : unmanaged
+        where TValue : unmanaged
+    {
+        ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(source.Bytes);
+        Span<TValue> destination = MemoryMarshal.Cast<byte, TValue>(_bytes)[..length];
+        ulong unsignedLength = (ulong)(uint)length;
+        int position = 0;
+        for (int run = firstRun; run < ends.Length && position < length; run++)
+        {
+            ulong end = WidenEnd(ends[run]) - offset;
+            if (end > unsignedLength)
+            {
+                end = unsignedLength;
+            }
+
+            int endRow = (int)end;
+            if (endRow <= position)
+            {
+                continue;
+            }
+
+            destination[position..endRow].Fill(values[run]);
             if (tracked && sourceValidity.IsValid(run))
             {
                 validity.SetValidRange(position, endRow - position);

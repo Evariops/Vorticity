@@ -51,9 +51,12 @@ public static class ScenarioSet
     /// <summary>The column a projection out of a fifty-column file keeps.</summary>
     public const string WideField = "c07";
 
+    /// <summary>Rows an append adds: a tenth of the report's larger table, as its append adds.</summary>
+    public const long AppendRows = 1_048_576;
+
     /// <summary>The scenario names this assembly answers to.</summary>
     public static string[] Names =>
-        ["fullscan", "projected", "projected-wide", "take", "filtered", "filtered-pruned", "write", "write-bloom", "write-postings", "write-sorted-runs", "lookup-sorted-runs"];
+        ["fullscan", "projected", "projected-wide", "take", "filtered", "filtered-pruned", "write", "write-bloom", "write-postings", "write-sorted-runs", "lookup-sorted-runs", "append"];
 
     /// <summary>
     /// The scenario <paramref name="name"/> names, as a delegate of shared-runtime types only.
@@ -79,6 +82,7 @@ public static class ScenarioSet
         "write-sorted-runs" => p => ReadAndWriteIndexed(p, IndexSpec.SortedRuns),
         "lookup-sorted-runs" => LookupSortedRuns,
         "prune-in" => PruneIn,
+        "append" => p => Append(p, AppendRows),
         _ => null,
     };
 

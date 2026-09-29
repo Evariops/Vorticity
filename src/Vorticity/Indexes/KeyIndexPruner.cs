@@ -1,9 +1,12 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -29,14 +32,15 @@ internal sealed class KeyIndexPruner
     private readonly VortexExpr _filter;
     private readonly Dictionary<string, Column> _columns;
 
-    /// <summary>Each <c>IN</c> of the filter, by reference, with what <see cref="Resolve"/> found.</summary>
-    private readonly Dictionary<InExpr, (Column? Column, int[] Slots)> _ins =
-        new Dictionary<InExpr, (Column? Column, int[] Slots)>(ReferenceEqualityComparer.Instance);
+    /// <summary>Each question of the filter a column answers, by reference, with the presence sets it reads.</summary>
+    private readonly Dictionary<VortexExpr, Leaf> _leaves =
+        new Dictionary<VortexExpr, Leaf>(ReferenceEqualityComparer.Instance);
 
     private KeyIndexPruner(VortexExpr filter, Dictionary<string, Column> columns)
     {
         _filter = filter;
         _columns = columns;
+        Plan(filter);
     }
 
     /// <summary>Segments read to consult the runs.</summary>
@@ -210,6 +214,28 @@ internal sealed class KeyIndexPruner
     /// <param name="cancellationToken">Cancels the reads.</param>
     internal async ValueTask RefineAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
     {
+        foreach (Column column in _columns.Values)
+        {
+            column.Rent();
+        }
+
+        try
+        {
+            await ClaimAsync(file, live, cancellationToken).ConfigureAwait(false);
+            Kill(live);
+        }
+        finally
+        {
+            foreach (Column column in _columns.Values)
+            {
+                column.Return();
+            }
+        }
+    }
+
+    /// <summary>Reads the runs and the dictionaries, and records what they claim.</summary>
+    private async ValueTask ClaimAsync(VortexFile file, BlockMask live, CancellationToken cancellationToken)
+    {
         using IndexBatches<(Column Column, Run Run, Fence Fence, int[] Slots)> batches = new();
         foreach (Column column in _columns.Values)
         {
@@ -286,13 +312,27 @@ internal sealed class KeyIndexPruner
                 }
             }
         }
+    }
 
-        for (int block = 0; block < live.BlockCount; block++)
+    /// <summary>Kills the blocks the claims prove the filter false in, a word of blocks at a time.</summary>
+    private void Kill(BlockMask live)
+    {
+        int words = live.Words.Length;
+        ulong[] rented = ArrayPool<ulong>.Shared.Rent(words);
+        try
         {
-            if (live.IsLive(block) && ProvesAbsent(_filter, block))
+            Span<ulong> kept = rented.AsSpan(0, words);
+            Absent(_filter, kept);
+            for (int i = 0; i < kept.Length; i++)
             {
-                live.Kill(block);
+                kept[i] = ~kept[i];
             }
+
+            live.Keep(kept);
+        }
+        finally
+        {
+            ArrayPool<ulong>.Shared.Return(rented);
         }
     }
 
@@ -318,60 +358,84 @@ internal sealed class KeyIndexPruner
 
     // ------------------------------------------------------------------------------ the proof
 
-    private bool ProvesAbsent(VortexExpr expr, int block)
+    /// <summary>
+    /// Records, once, which presence sets each question of the filter reads: an equality or an
+    /// <c>IN</c> reads one, fed by its literals; a text match one per trigram it requires.
+    /// </summary>
+    private void Plan(VortexExpr expr)
     {
         switch (expr)
         {
-            case LogicalExpr { IsAnd: true } and:
-                return ProvesAbsent(and.Left, block) || ProvesAbsent(and.Right, block);
+            case LogicalExpr logical:
+                Plan(logical.Left);
+                Plan(logical.Right);
+                break;
 
-            case LogicalExpr or:
-                return ProvesAbsent(or.Left, block) && ProvesAbsent(or.Right, block);
+            case ComparisonExpr { Op: ComparisonOp.Equal } equal when _columns.TryGetValue(equal.Field.Path, out Column? column):
+                _leaves[expr] = new Leaf(column, column.Ask(equal.Value), 1);
+                break;
 
-            case ComparisonExpr { Op: ComparisonOp.Equal } equal:
-                return Absent(equal.Field.Path, equal.Value, block);
-
-            case InExpr @in:
-            {
-                // Resolved once, asked per block: "is every one of these literals absent from this
-                // block" is asked for each of the file's blocks against the same expression, so the
-                // literals' slots are found once and each block then costs one array read.
-                (Column? column, int[] slots) = Resolve(@in);
-                if (column is null || slots.Length == 0)
-                {
-                    return false;
-                }
-
-                foreach (int slot in slots)
-                {
-                    if (slot < 0 || !column.AbsentAt(slot, block))
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
-            }
+            case InExpr @in when _columns.TryGetValue(@in.Field.Path, out Column? column):
+                _leaves[expr] = new Leaf(column, column.Ask(@in.Values), 1);
+                break;
 
             case StringMatchExpr match when _columns.TryGetValue(TrigramKey(match.Field.Path), out Column? text):
+            {
                 // Absent as soon as one required trigram is: a matching value holds them all.
+                int first = -1;
+                int count = 0;
                 foreach (byte[] trigram in Trigrams.Required(match, text.Fold))
                 {
-                    if (text.Absent(FilterLiteral.From(trigram), block))
-                    {
-                        return true;
-                    }
+                    int set = text.Ask(FilterLiteral.From(trigram));
+                    first = count++ == 0 ? set : first;
                 }
 
-                return false;
+                _leaves[expr] = new Leaf(text, first, count);
+                break;
+            }
 
             default:
-                return false;
+                break;
         }
     }
 
-    private bool Absent(string path, FilterLiteral value, int block) =>
-        _columns.TryGetValue(path, out Column? column) && column.Absent(value, block);
+    /// <summary>
+    /// Writes into <paramref name="absent"/> the blocks the claims prove <paramref name="expr"/>
+    /// false in: a question's where one of its presence sets is absent, a conjunction's where
+    /// either side is, a disjunction's where both are.
+    /// </summary>
+    private void Absent(VortexExpr expr, Span<ulong> absent)
+    {
+        if (expr is LogicalExpr logical)
+        {
+            Absent(logical.Left, absent);
+            ulong[] rented = ArrayPool<ulong>.Shared.Rent(absent.Length);
+            try
+            {
+                Span<ulong> right = rented.AsSpan(0, absent.Length);
+                Absent(logical.Right, right);
+                for (int i = 0; i < absent.Length; i++)
+                {
+                    absent[i] = logical.IsAnd ? absent[i] | right[i] : absent[i] & right[i];
+                }
+            }
+            finally
+            {
+                ArrayPool<ulong>.Shared.Return(rented);
+            }
+
+            return;
+        }
+
+        absent.Clear();
+        if (_leaves.TryGetValue(expr, out Leaf leaf))
+        {
+            for (int set = leaf.First; set < leaf.First + leaf.Sets; set++)
+            {
+                leaf.Column.OrAbsent(set, absent);
+            }
+        }
+    }
 
     /// <summary>
     /// Fills a dictionary-backed column's claims: opens the column's chunks' dictionaries and asks
@@ -406,34 +470,6 @@ internal sealed class KeyIndexPruner
                 column.Dictionary(source, chunk, live.BlockRows);
             }
         }
-    }
-
-    /// <summary>The column an <c>IN</c> asks about and its literals' slots in it, found once.</summary>
-    /// <param name="expr">The expression, the same instance at every block.</param>
-    private (Column? Column, int[] Slots) Resolve(InExpr expr)
-    {
-        if (_ins.TryGetValue(expr, out (Column? Column, int[] Slots) found))
-        {
-            return found;
-        }
-
-        if (!_columns.TryGetValue(expr.Field.Path, out Column? column))
-        {
-            found = (null, []);
-        }
-        else
-        {
-            int[] slots = new int[expr.Values.Count];
-            for (int i = 0; i < slots.Length; i++)
-            {
-                slots[i] = column.SlotOf(expr.Values[i]);
-            }
-
-            found = (column, slots);
-        }
-
-        _ins[expr] = found;
-        return found;
     }
 
     private static string TrigramKey(string path) => path + "\0ngram3";
@@ -532,25 +568,51 @@ internal sealed class KeyIndexPruner
 
     private sealed record Run(IndexRun Meta, FenceTable Table);
 
+    /// <summary>A question of the filter a column answers: its presence sets, <paramref name="Sets"/> from <paramref name="First"/>.</summary>
+    private readonly record struct Leaf(Column Column, int First, int Sets);
+
     /// <summary>A descent's comparison: a fence whose last key comes before the key.</summary>
     private readonly struct KeyProbe(KeyLayout layout, byte[] key) : IFenceProbe
     {
         public bool Below(ReadOnlySpan<byte> max) => layout.Compare(max, key) < 0;
     }
 
-    /// <summary>One column's runs and, per literal, which blocks the runs prove it absent from.</summary>
+    /// <summary>
+    /// One column's runs and what they claim: the blocks they cover, and per question of the filter
+    /// the blocks where one of its keys was seen. A covered block holds none of a question's keys
+    /// but those its presence set records, so the question is false there.
+    /// </summary>
     private sealed class Column
     {
         private readonly bool _rows;
         private readonly KeyLayout _layout;
-        private readonly DType _storage;
         private readonly List<FilterLiteral> _literals;
+
+        /// <summary>The dtypes a segment's arrays decode as: its keys, and its offsets, block lists or rows.</summary>
+        private readonly DType _keyType;
+        private readonly DType _u32;
+        private readonly DType _u64;
 
         /// <summary>Each literal's slot, the first when the filter names one twice.</summary>
         private readonly Dictionary<FilterLiteral, int> _slots;
         private readonly byte[]?[] _keys;
         private readonly byte[]?[] _otherZeros;
-        private readonly bool[][] _absent;
+
+        /// <summary>The file's blocks, and the words of a bit per block.</summary>
+        private readonly int _blocks;
+        private readonly int _words;
+
+        // Per literal slot, the presence sets it feeds, a list threaded through two arrays: each
+        // slot's first feed, and per feed its set and the slot's next feed.
+        private readonly int[] _firstFeed;
+        private readonly List<int> _feedSet = [];
+        private readonly List<int> _nextFeed = [];
+
+        /// <summary>Per presence set, whether it can prove absence: its question names keys, and every one encodes.</summary>
+        private readonly List<bool> _keyed = [];
+
+        // While a refinement runs: the covered blocks, then each presence set, a bit per block.
+        private ulong[]? _bits;
 
         /// <summary>
         /// The keys the filter asks for, in the runs' own order, with their sort keys: the
@@ -570,19 +632,28 @@ internal sealed class KeyIndexPruner
             Fold = fold;
             _rows = rows;
             _layout = layout;
-            _storage = storage;
+            DTypeArena types = new DTypeArena();
+            _keyType = storage.Kind == DTypeKind.Primitive
+                ? types.Primitive(storage.PType, Nullability.NonNullable)
+                : storage.Kind == DTypeKind.Utf8
+                    ? types.Utf8(Nullability.NonNullable)
+                    : types.Binary(Nullability.NonNullable);
+            _u32 = types.Primitive(PType.U32, Nullability.NonNullable);
+            _u64 = types.Primitive(PType.U64, Nullability.NonNullable);
             Runs = runs;
             _literals = literals;
             _slots = new Dictionary<FilterLiteral, int>(literals.Count);
             _keys = new byte[]?[literals.Count];
             _otherZeros = new byte[]?[literals.Count];
-            _absent = new bool[literals.Count][];
+            _blocks = blocks;
+            _words = (blocks + 63) >> 6;
+            _firstFeed = new int[literals.Count];
+            _firstFeed.AsSpan().Fill(-1);
             Span<byte> scratch = stackalloc byte[sizeof(ulong)];
             Span<byte> zero = stackalloc byte[sizeof(ulong)];
             for (int i = 0; i < literals.Count; i++)
             {
                 _slots.TryAdd(literals[i], i);
-                _absent[i] = new bool[blocks];
                 if (layout.TryEncode(literals[i], scratch, out ReadOnlySpan<byte> key, zero, out bool hasOtherZero))
                 {
                     _keys[i] = key.ToArray();
@@ -615,9 +686,9 @@ internal sealed class KeyIndexPruner
             SortedDictionary<long, Fence> found = [];
             for (int i = 0; i < _keys.Length; i++)
             {
-                foreach (byte[]? key in (byte[]?[])[_keys[i], _otherZeros[i]])
+                for (int zero = 0; zero < 2; zero++)
                 {
-                    if (key is null)
+                    if ((zero == 0 ? _keys[i] : _otherZeros[i]) is not { } key)
                     {
                         continue;
                     }
@@ -667,18 +738,18 @@ internal sealed class KeyIndexPruner
         internal void Dictionary(Keys.SortedRunsSource source, int chunk, long blockRows)
         {
             (long firstRow, long rows) = source.DictionaryExtent(chunk);
-            int count = _absent.Length == 0 ? 0 : _absent[0].Length;
             long last = firstRow + rows;
             ulong first = (ulong)((firstRow + blockRows - 1) / blockRows);
 
             // The chunk's last block counts as whole when the file holds no row past it: the tail
             // of the file's last block is not another chunk's, it is nothing at all.
-            ulong end = (ulong)((last + blockRows - 1) / blockRows >= count ? count : last / blockRows);
+            ulong end = (ulong)((last + blockRows - 1) / blockRows >= _blocks ? _blocks : last / blockRows);
             if (end <= first)
             {
                 return;
             }
 
+            Fill(Covered, first, end, true);
             for (int i = 0; i < _keys.Length; i++)
             {
                 if (_keys[i] is not { } key)
@@ -687,69 +758,115 @@ internal sealed class KeyIndexPruner
                 }
 
                 // The two zeros of a float are one literal, and a dictionary may hold either.
-                bool holds = source.DictionaryHolds(chunk, key)
-                    || (_otherZeros[i] is { } other && source.DictionaryHolds(chunk, other));
-                if (holds)
+                if (source.DictionaryHolds(chunk, key)
+                    || (_otherZeros[i] is { } other && source.DictionaryHolds(chunk, other)))
                 {
-                    continue;
-                }
-
-                for (ulong block = first; block < end && block < (ulong)_absent[i].Length; block++)
-                {
-                    _absent[i][block] = true;
+                    for (int feed = _firstFeed[i]; feed >= 0; feed = _nextFeed[feed])
+                    {
+                        Fill(Set(_feedSet[feed]), first, end, true);
+                    }
                 }
             }
         }
 
-        /// <summary>Marks every block of the run absent for every encodable literal.</summary>
-        internal void Cover(IndexRun run)
-        {
-            for (int i = 0; i < _keys.Length; i++)
-            {
-                if (_keys[i] is null)
-                {
-                    continue;
-                }
-
-                for (ulong block = run.FirstBlock; block < run.EndBlock; block++)
-                {
-                    _absent[i][block] = true;
-                }
-            }
-        }
+        /// <summary>Claims every block of the run: none holds a key but where a lookup finds one.</summary>
+        internal void Cover(IndexRun run) => Fill(Covered, run.FirstBlock, run.EndBlock, true);
 
         /// <summary>Lifts the run's claim: a lookup in it failed.</summary>
-        internal void Uncover(IndexRun run)
+        internal void Uncover(IndexRun run) => Fill(Covered, run.FirstBlock, run.EndBlock, false);
+
+        /// <summary>A question about one literal: a presence set it feeds.</summary>
+        /// <returns>The set.</returns>
+        internal int Ask(FilterLiteral value)
         {
-            for (int i = 0; i < _keys.Length; i++)
+            int set = _keyed.Count;
+            _keyed.Add(Feed(value, set));
+            return set;
+        }
+
+        /// <summary>
+        /// A question about any of <paramref name="values"/>: one presence set they all feed. It
+        /// proves absence only where it names a literal and every one of them encodes.
+        /// </summary>
+        /// <returns>The set.</returns>
+        internal int Ask(IReadOnlyList<FilterLiteral> values)
+        {
+            int set = _keyed.Count;
+            bool keyed = values.Count > 0;
+            for (int i = 0; i < values.Count; i++)
             {
-                for (ulong block = run.FirstBlock; block < run.EndBlock; block++)
-                {
-                    _absent[i][block] = false;
-                }
+                keyed &= Feed(values[i], set);
+            }
+
+            _keyed.Add(keyed);
+            return set;
+        }
+
+        /// <summary>Takes the bits a refinement fills, no block claimed.</summary>
+        internal void Rent()
+        {
+            int length = (1 + _keyed.Count) * _words;
+            _bits = ArrayPool<ulong>.Shared.Rent(length);
+            _bits.AsSpan(0, length).Clear();
+        }
+
+        /// <summary>Gives the bits back once the refinement has killed its blocks.</summary>
+        internal void Return()
+        {
+            if (_bits is not null)
+            {
+                ArrayPool<ulong>.Shared.Return(_bits);
+                _bits = null;
             }
         }
 
-        /// <summary>Whether the runs prove <paramref name="value"/> absent from <paramref name="block"/>.</summary>
-        /// <remarks>
-        /// This is asked once per literal per block, so the literal's slot is found through a map
-        /// and not by walking the list: a long `IN` over a file with many blocks would otherwise
-        /// spend more on literal comparisons than the scan it guards spends on reading.
-        /// </remarks>
-        /// <param name="value">The literal.</param>
-        /// <param name="block">The block.</param>
-        internal bool Absent(FilterLiteral value, int block) =>
-            _slots.TryGetValue(value, out int i) && AbsentAt(i, block);
+        /// <summary>
+        /// Adds to <paramref name="absent"/> the covered blocks where presence set
+        /// <paramref name="set"/> saw none of its keys, when the set can prove absence.
+        /// </summary>
+        internal void OrAbsent(int set, Span<ulong> absent)
+        {
+            if (!_keyed[set])
+            {
+                return;
+            }
 
-        /// <summary>The slot of <paramref name="value"/>, or −1 when the filter never named it.</summary>
-        /// <param name="value">The literal.</param>
-        internal int SlotOf(FilterLiteral value) => _slots.TryGetValue(value, out int i) ? i : -1;
+            ReadOnlySpan<ulong> covered = Covered;
+            ReadOnlySpan<ulong> present = Set(set);
+            int words = Math.Min(absent.Length, _words);
+            for (int i = 0; i < words; i++)
+            {
+                absent[i] |= covered[i] & ~present[i];
+            }
+        }
 
-        /// <summary>Whether the runs prove slot <paramref name="slot"/>'s key absent from the block.</summary>
-        /// <param name="slot">The literal's slot.</param>
-        /// <param name="block">The block.</param>
-        internal bool AbsentAt(int slot, int block) =>
-            (uint)block < (uint)_absent[slot].Length && _absent[slot][block];
+        private Span<ulong> Covered => _bits.AsSpan(0, _words);
+
+        private Span<ulong> Set(int set) => _bits.AsSpan((1 + set) * _words, _words);
+
+        /// <summary>Makes <paramref name="value"/>'s slot feed <paramref name="set"/>; whether the literal has a key.</summary>
+        private bool Feed(FilterLiteral value, int set)
+        {
+            if (!_slots.TryGetValue(value, out int slot))
+            {
+                return false;
+            }
+
+            // A literal a list names twice feeds its set once.
+            int head = _firstFeed[slot];
+            if (head < 0 || _feedSet[head] != set)
+            {
+                _feedSet.Add(set);
+                _nextFeed.Add(head);
+                _firstFeed[slot] = _feedSet.Count - 1;
+            }
+
+            return _keys[slot] is not null;
+        }
+
+        /// <summary>Sets or clears the bits of blocks [<paramref name="first"/>, <paramref name="end"/>).</summary>
+        private static void Fill(Span<ulong> bits, ulong first, ulong end, bool value) =>
+            BitmapKernels.FillRange(MemoryMarshal.AsBytes(bits), (int)first, (int)(end - first), value);
 
         /// <summary>
         /// Decodes one segment's arrays and marks, for every literal, the blocks that hold it.
@@ -766,15 +883,7 @@ internal sealed class KeyIndexPruner
             int entries = (int)expected;
             try
             {
-                DTypeArena types = new DTypeArena();
-                DType keyType = _storage.Kind == DTypeKind.Primitive
-                    ? types.Primitive(_storage.PType, Nullability.NonNullable)
-                    : _storage.Kind == DTypeKind.Utf8
-                        ? types.Utf8(Nullability.NonNullable)
-                        : types.Binary(Nullability.NonNullable);
-                DType u32 = types.Primitive(PType.U32, Nullability.NonNullable);
-
-                int keys = Decode(context, requests.GetBuffer(slots[0]), keyType, entries);
+                int keys = Decode(context, requests.GetBuffer(slots[0]), _keyType, entries);
                 CanonicalNode keyNode = context.Canonical.GetNode(keys);
                 if (!Fits(keyNode, entries))
                 {
@@ -787,8 +896,7 @@ internal sealed class KeyIndexPruner
                     // A run spanning 2³² rows or more writes them at 64 bits; its dtype says so.
                     bool wide = run.Table.WideRows;
                     PType width = wide ? PType.U64 : PType.U32;
-                    int rowsNode = Decode(
-                        context, requests.GetBuffer(slots[1]), types.Primitive(width, Nullability.NonNullable), entries);
+                    int rowsNode = Decode(context, requests.GetBuffer(slots[1]), wide ? _u64 : _u32, entries);
                     CanonicalNode rows = context.Canonical.GetNode(rowsNode);
                     if (rows.Kind != CanonicalKind.Primitive || rows.PType != width || rows.Length != entries)
                     {
@@ -810,7 +918,7 @@ internal sealed class KeyIndexPruner
                     return true;
                 }
 
-                int offsetsNode = Decode(context, requests.GetBuffer(slots[1]), u32, entries + 1);
+                int offsetsNode = Decode(context, requests.GetBuffer(slots[1]), _u32, entries + 1);
                 CanonicalNode offsetArray = context.Canonical.GetNode(offsetsNode);
                 if (offsetArray.Kind != CanonicalKind.Primitive || offsetArray.PType != PType.U32 || offsetArray.Length != entries + 1)
                 {
@@ -819,7 +927,7 @@ internal sealed class KeyIndexPruner
 
                 ReadOnlySpan<uint> starts = offsetArray.Values.Cast<uint>();
                 int listLength = checked((int)starts[entries]);
-                int listsNode = Decode(context, requests.GetBuffer(slots[2]), u32, listLength);
+                int listsNode = Decode(context, requests.GetBuffer(slots[2]), _u32, listLength);
                 CanonicalNode lists = context.Canonical.GetNode(listsNode);
                 if (lists.Kind != CanonicalKind.Primitive || lists.PType != PType.U32 || lists.Length != listLength)
                 {
@@ -882,10 +990,18 @@ internal sealed class KeyIndexPruner
 
         private void Present(int literal, ulong block)
         {
-            // The literal's own absent array is shared by the two zeros; a bad block id claims nothing.
-            if (block < (ulong)_absent[literal].Length)
+            // The literal's sets are shared by a float's two zeros; a bad block id claims nothing.
+            if (block >= (ulong)_blocks)
             {
-                _absent[literal][block] = false;
+                return;
+            }
+
+            ulong[] bits = _bits!;
+            int word = (int)(block >> 6);
+            ulong bit = 1UL << (int)(block & 63);
+            for (int feed = _firstFeed[literal]; feed >= 0; feed = _nextFeed[feed])
+            {
+                bits[((1 + _feedSet[feed]) * _words) + word] |= bit;
             }
         }
 

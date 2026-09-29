@@ -291,7 +291,24 @@ internal sealed class SplitPlan
             return;
         }
 
-        for (int i = 0; i < chunks; i++)
+        // The first chunk that ends past the range's start, by halving, since the offsets are sums
+        // of row counts and never go down: a narrow range walks the chunks it meets and no other.
+        int first = 0;
+        int past = chunks;
+        while (first < past)
+        {
+            int middle = (int)((uint)(first + past) >> 1);
+            if (offsets[middle + 1] <= local.Start)
+            {
+                first = middle + 1;
+            }
+            else
+            {
+                past = middle;
+            }
+        }
+
+        for (int i = first; i < chunks; i++)
         {
             long start = offsets[i];
             long end = offsets[i + 1];
@@ -341,16 +358,11 @@ internal sealed class SplitPlan
             Walk(in validity, local, rowOffset, in all, ref list, depth + 1);
         }
 
-        int fieldCount = dtype.FieldCount;
-        for (int k = 0; k < fieldCount; k++)
+        int selected = mask.SelectedCount(dtype.FieldCount);
+        for (int s = 0; s < selected; s++)
         {
-            if (!mask.Includes(k))
-            {
-                continue;
-            }
-
-            LayoutNode child = node.GetChild(k + validityChildren);
-            FieldMask childMask = mask.Descend(k);
+            LayoutNode child = node.GetChild(mask.SelectedField(s) + validityChildren);
+            FieldMask childMask = mask.SelectedMask(s);
             Walk(in child, local, rowOffset, in childMask, ref list, depth + 1);
         }
 

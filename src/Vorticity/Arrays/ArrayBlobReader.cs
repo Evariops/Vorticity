@@ -60,7 +60,7 @@ internal static class ArrayBlobReader
         // 3. Located from the end: the padding in front of it is recorded nowhere.
         int regionLength = segment.Length - 4 - (int)fbLength;
         ReadOnlySpan<byte> flatBuffer = bytes.Slice(regionLength, (int)fbLength);
-        LoadCore(arena, flatBuffer, segment.Slice(0, regionLength), encodings);
+        LoadCore(arena, flatBuffer, segment.Slice(0, regionLength), encodings, buffers: true);
     }
 
     /// <summary>
@@ -88,14 +88,36 @@ internal static class ArrayBlobReader
         ReadOnlySpan<ArrayEncodingId> encodings)
     {
         ArgumentNullException.ThrowIfNull(arena);
-        LoadCore(arena, arrayTree, segment, encodings);
+        LoadCore(arena, arrayTree, segment, encodings, buffers: true);
+    }
+
+    /// <summary>
+    /// The tree alone, for a caller that asks what a chunk was written as and reads none of its
+    /// values: its nodes, their encodings, metadata and statistics, and no buffer.
+    /// </summary>
+    /// <param name="arena">The arena to populate. It is <see cref="ArrayNodeArena.Reset"/> first.</param>
+    /// <param name="arrayTree">
+    /// The <c>Array</c> FlatBuffer, from the layout's <c>array_encoding_tree</c> metadata or from
+    /// the tail of the segment, copied into the arena.
+    /// </param>
+    /// <param name="encodings">Spec index to resolved id, as for the other overloads.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="arena"/> is null.</exception>
+    /// <exception cref="VortexFormatException">The tree is malformed in any way.</exception>
+    public static void LoadTree(
+        ArrayNodeArena arena,
+        ReadOnlySpan<byte> arrayTree,
+        ReadOnlySpan<ArrayEncodingId> encodings)
+    {
+        ArgumentNullException.ThrowIfNull(arena);
+        LoadCore(arena, arrayTree, default, encodings, buffers: false);
     }
 
     private static void LoadCore(
         ArrayNodeArena arena,
         ReadOnlySpan<byte> flatBuffer,
         VortexBuffer region,
-        ReadOnlySpan<ArrayEncodingId> encodings)
+        ReadOnlySpan<ArrayEncodingId> encodings,
+        bool buffers)
     {
         arena.Reset();
 
@@ -119,7 +141,10 @@ internal static class ArrayBlobReader
         int tableBudget = VortexLimits.MaxFlatBufferTables;
         ArrayView view = ArrayView.Root(treeSpan, ref tableBudget);
 
-        ResolveBuffers(arena, view, region);
+        if (buffers)
+        {
+            ResolveBuffers(arena, view, region);
+        }
 
         // Two more budgets, on the work the arena is made to do. The table budget bounds how many
         // tables are visited, not how much they materialize: one shared child re-expanded under
@@ -138,7 +163,7 @@ internal static class ArrayBlobReader
         int indexBudget = (flatBuffer.Length / 2) + 1;
 
         int root = arena.ReserveNodes(1);
-        Fill(arena, view.Root_, root, 1, encodings, treeSpan, ref nodeBudget, ref indexBudget);
+        Fill(arena, view.Root_, root, 1, encodings, treeSpan, buffers, ref nodeBudget, ref indexBudget);
         arena.SetRoot(root);
     }
 
@@ -192,6 +217,7 @@ internal static class ArrayBlobReader
         int depth,
         ReadOnlySpan<ArrayEncodingId> encodings,
         ReadOnlySpan<byte> treeSpan,
+        bool buffers,
         ref int nodeBudget,
         ref int indexBudget)
     {
@@ -215,7 +241,8 @@ internal static class ArrayBlobReader
             metadataOffset = InTree(treeSpan, metadata, "ArrayNode.metadata");
         }
 
-        ReadOnlySpan<ushort> bufferIndices = node.BufferIndices;
+        // A tree loaded without its buffers keeps no reference to them.
+        ReadOnlySpan<ushort> bufferIndices = buffers ? node.BufferIndices : default;
         int childCount = node.ChildCount;
 
         Charge(ref nodeBudget, 1 + childCount, "nodes");
@@ -269,6 +296,7 @@ internal static class ArrayBlobReader
                 depth + 1,
                 encodings,
                 treeSpan,
+                buffers,
                 ref nodeBudget,
                 ref indexBudget);
         }

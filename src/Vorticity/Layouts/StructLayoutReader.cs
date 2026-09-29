@@ -51,16 +51,11 @@ internal sealed class StructLayoutReader : LayoutReader
             RegisterChild(in validity, rows, in all, segments);
         }
 
-        int fieldCount = dtype.FieldCount;
-        for (int k = 0; k < fieldCount; k++)
+        int selected = fields.SelectedCount(dtype.FieldCount);
+        for (int s = 0; s < selected; s++)
         {
-            if (!fields.Includes(k))
-            {
-                continue;
-            }
-
-            LayoutNode child = node.GetChild(k + validityChildren);
-            FieldMask childMask = fields.Descend(k);
+            LayoutNode child = node.GetChild(fields.SelectedField(s) + validityChildren);
+            FieldMask childMask = fields.SelectedMask(s);
             RegisterChild(in child, rows, in childMask, segments);
         }
     }
@@ -78,16 +73,7 @@ internal sealed class StructLayoutReader : LayoutReader
         // declared length disagreed with its fields'.
         int length = context.HasSelection ? context.SelectionCount : BatchLength(rows);
         int validityChildren = dtype.IsNullable ? 1 : 0;
-        int fieldCount = dtype.FieldCount;
-
-        int selected = 0;
-        for (int k = 0; k < fieldCount; k++)
-        {
-            if (fields.Includes(k))
-            {
-                selected++;
-            }
-        }
+        int selected = fields.SelectedCount(dtype.FieldCount);
 
         Validity validity = Validity.FromNullability(dtype.Nullability);
         if (validityChildren == 1)
@@ -116,16 +102,11 @@ internal sealed class StructLayoutReader : LayoutReader
             Span<int> nameSpan = names.Span;
             Span<DType> typeSpan = fieldTypes.Span;
 
-            int next = 0;
-            for (int k = 0; k < fieldCount; k++)
+            for (int s = 0; s < selected; s++)
             {
-                if (!fields.Includes(k))
-                {
-                    continue;
-                }
-
+                int k = fields.SelectedField(s);
                 LayoutNode child = node.GetChild(k + validityChildren);
-                FieldMask childMask = fields.Descend(k);
+                FieldMask childMask = fields.SelectedMask(s);
 
                 // The pushed comparison names a field; this is the one place that knows which child
                 // that is. The flag is set for the matching child and cleared for every other, so a
@@ -144,14 +125,12 @@ internal sealed class StructLayoutReader : LayoutReader
                     context.PredicateAtNode = outer;
                 }
 
-                childSpan[next] = decoded;
+                childSpan[s] = decoded;
                 if (!whole)
                 {
-                    nameSpan[next] = context.Types.InternName(dtype.GetFieldNameUtf8(k));
-                    typeSpan[next] = DTypeImport.Into(context.Types, context.Canonical.GetNode(decoded).DType);
+                    nameSpan[s] = context.Types.InternName(dtype.GetFieldNameUtf8(k));
+                    typeSpan[s] = DTypeImport.Into(context.Types, context.Canonical.GetNode(decoded).DType);
                 }
-
-                next++;
             }
 
             DType produced = whole ? dtype : context.Types.Struct(nameSpan, typeSpan, dtype.Nullability);

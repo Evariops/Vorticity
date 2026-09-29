@@ -168,7 +168,7 @@ public sealed class PlanSeedTests
             for (int c = 0; c < flats.Count; c++)
             {
                 DType type = schema.GetField(field);
-                PlanSeed? seed = await VortexFileWriter.AppendPlan.SeedAsync(written, flats[c].Flat, type, CancellationToken.None);
+                PlanSeed? seed = await VortexFileWriter.AppendPlan.SeedAsync(written, flats[c].Flat, type, new ArrayNodeArena(), CancellationToken.None);
                 string read = seed?.Scheme switch
                 {
                     null or ColumnScheme.None => nameof(EncodingHint.Canonical),

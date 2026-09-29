@@ -177,29 +177,22 @@ internal readonly struct DType : IEquatable<DType>
 
     /// <summary>
     /// Index of the field whose name equals <paramref name="nameUtf8"/>, or -1. Allocation-free:
-    /// the arena interns names, so this resolves the bytes to a handle once and then compares ints.
+    /// the arena interns names, so this resolves the bytes to a handle once and then searches the
+    /// struct's handles for it, several at a time.
     /// </summary>
+    /// <remarks>
+    /// Kept out of line: the methods that resolve a path are optimized fully at their first call,
+    /// and the vector search this inlines would lengthen that compile for one lookup a field.
+    /// </remarks>
     /// <exception cref="InvalidOperationException">The kind is neither Struct nor Union.</exception>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public int IndexOfField(ReadOnlySpan<byte> nameUtf8)
     {
         ref readonly DTypeNode n = ref NodeRef();
         RequireNamed(in n);
-        if (!_arena!.TryGetName(nameUtf8, out int handle))
-        {
-            // The arena has never seen these bytes, so no field can carry them.
-            return -1;
-        }
 
-        ReadOnlySpan<int> handles = _arena.FieldNameHandles(in n);
-        for (int i = 0; i < handles.Length; i++)
-        {
-            if (handles[i] == handle)
-            {
-                return i;
-            }
-        }
-
-        return -1;
+        // An arena that has never seen these bytes has no field that carries them.
+        return _arena!.TryGetName(nameUtf8, out int handle) ? _arena.FieldNameHandles(in n).IndexOf(handle) : -1;
     }
 
     /// <summary>Index of the field named <paramref name="name"/>, or -1.</summary>

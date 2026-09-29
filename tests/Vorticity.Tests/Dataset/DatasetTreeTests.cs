@@ -175,6 +175,131 @@ public sealed class DatasetTreeTests
         }
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task ACommitThatReadsOnlyThePathsOfItsChangesEqualsARebuild(int seed)
+    {
+        // Oracle one on the batches a commit that opens only the pages it must finds hardest: deep
+        // trees, runs of neighbouring keys whose cuts run on past the pages they touch, keys past
+        // either end, and removals that keep a prefix or a suffix cut exactly where a subtree
+        // begins, so that what is left can be old subtrees alone and the new root an old page.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        for (int round = 0; round < 60; round++)
+        {
+            Random random = new Random((seed * 1_000) + round);
+            int min = random.Next(100, 600);
+            IBoundaryRule rule = new ProllyBoundaryRule(Seed, min, min + random.Next(100, 2_000));
+            ISummaryFold fold = random.Next(2) == 0 ? NoSummary.Instance : new KeyFold();
+            MemoryPageStore store = new MemoryPageStore();
+            int space = random.Next(10, 4_000);
+            SortedDictionary<int, TreeEntry> truth = [];
+            foreach (int k in Enumerable.Range(0, random.Next(0, space)).Select(_ => random.Next(space)))
+            {
+                truth[k] = Varied(k, random);
+            }
+
+            DatasetTree tree = DatasetTree.Build([.. truth.Values], rule, fold, store);
+            for (int commit = 0; commit < 5; commit++)
+            {
+                SortedDictionary<int, TreeChange> batch = await BatchAsync(tree, store, truth, space, random, ct);
+                tree = await tree.CommitAsync([.. batch.Values], rule, fold, store, store, ct);
+                foreach ((int k, TreeChange change) in batch)
+                {
+                    if (change.IsRemoval)
+                    {
+                        truth.Remove(k);
+                    }
+                    else
+                    {
+                        truth[k] = new TreeEntry(change.Key, change.Value!.Value, change.Rows);
+                    }
+                }
+
+                MemoryPageStore rebuilt = new MemoryPageStore(2);
+                DatasetTree reference = DatasetTree.Build([.. truth.Values], rule, fold, rebuilt);
+                Assert.Equal((reference.Entries, reference.Rows, reference.Depth), (tree.Entries, tree.Rows, tree.Depth));
+                Assert.Equal(await reference.ContentHashAsync(rebuilt, ct), await tree.ContentHashAsync(store, ct));
+                Assert.Equal(await EntriesAsync(reference, rebuilt), await EntriesAsync(tree, store));
+                Assert.Equal(await ShapeAsync(reference, rebuilt), await ShapeAsync(tree, store));
+            }
+        }
+    }
+
+    private static async Task<SortedDictionary<int, TreeChange>> BatchAsync(
+        DatasetTree tree, MemoryPageStore store, SortedDictionary<int, TreeEntry> truth, int space, Random random, CancellationToken ct)
+    {
+        SortedDictionary<int, TreeChange> batch = [];
+        if (random.Next(4) == 0 && truth.Count > 0)
+        {
+            int pivot = truth.Keys.ElementAt(random.Next(truth.Count));
+            if (tree.Depth >= 2 && random.Next(2) == 0)
+            {
+                // Where a child of the root begins, or a child of one of them.
+                InternalEntry chosen = Pick(TreePage.ReadInternal(await store.ReadPageAsync(tree.Root, ct)), random);
+                if (tree.Depth >= 3 && random.Next(2) == 0)
+                {
+                    chosen = Pick(TreePage.ReadInternal(await store.ReadPageAsync(chosen.Child, ct)), random);
+                }
+
+                pivot = int.Parse(Encoding.UTF8.GetString(chosen.MinKey.Span)[1..], System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            bool prefix = random.Next(2) == 0;
+            foreach (int k in truth.Keys.Where(k => prefix ? k >= pivot : k < pivot))
+            {
+                batch[k] = TreeChange.Remove(Key(k));
+            }
+
+            return batch;
+        }
+
+        int pattern = random.Next(6);
+        int from = random.Next(space);
+        int count = random.Next(1, pattern == 0 ? 3 : 150);
+        for (int i = 0; i < count; i++)
+        {
+            int k = pattern switch
+            {
+                0 or 1 => random.Next(space),
+                2 => from + i,
+                3 => space + random.Next(500),
+                4 => random.Next(3),
+                _ => truth.Count > 0 ? truth.Keys.ElementAt(random.Next(truth.Count)) : random.Next(space),
+            };
+            TreeEntry put = Varied(k, random);
+            batch[k] = pattern != 3 && random.Next(3) == 0 ? TreeChange.Remove(Key(k)) : TreeChange.Put(put.Key, put.Value, put.Rows);
+        }
+
+        if (random.Next(25) == 0)
+        {
+            foreach (int k in truth.Keys)
+            {
+                batch[k] = TreeChange.Remove(Key(k));
+            }
+        }
+
+        return batch;
+    }
+
+    private static InternalEntry Pick(IReadOnlyList<InternalEntry> page, Random random) => page[random.Next(page.Count)];
+
+    private static TreeEntry Varied(int i, Random random) =>
+        new TreeEntry(Key(i), Encoding.UTF8.GetBytes(new string('v', random.Next(0, 80))), random.Next(1, 1_000));
+
+    /// <summary>A summary that differs from page to page and in length, so that it moves internal cuts.</summary>
+    private sealed class KeyFold : ISummaryFold
+    {
+        public ReadOnlyMemory<byte> OfLeaf(TreeEntry entry) => entry.Value.Length % 2 == 0 ? entry.Key : default;
+
+        public ReadOnlyMemory<byte> Union(IReadOnlyList<ReadOnlyMemory<byte>> parts)
+        {
+            byte[] joined = [.. parts[0].Span, .. parts[^1].Span];
+            return joined.AsMemory(0, Math.Min(joined.Length, 24));
+        }
+    }
+
     [Fact]
     public async Task TheSameOperationsInTwoOrdersGiveOneContentHash()
     {
@@ -244,10 +369,9 @@ public sealed class DatasetTreeTests
     [Fact]
     public async Task WhatACommitWritesAndReads()
     {
-        // What a one-entry commit costs: its writes stay within the depth whatever the object
-        // count, and its reads of the levels above the leaves, this implementation's own cost, are
-        // held to a bound so that any growth shows.
-        foreach (int size in new[] { 500, 2_000, 8_000 })
+        // What a one-entry commit costs: its writes and its reads stay within the depth whatever the
+        // object count, since it opens only the pages on the path of its change.
+        foreach (int size in new[] { 500, 2_000, 8_000, 32_000 })
         {
             MemoryPageStore store = new MemoryPageStore();
             DatasetTree tree = DatasetTree.Build([.. Enumerable.Range(0, size).Select(i => Entry(i))], Rule(), store);
@@ -259,7 +383,7 @@ public sealed class DatasetTreeTests
 
             long written = store.Count - pagesBefore;
             Assert.InRange(written, 1, tree.Depth + 2);
-            Assert.InRange(store.Reads, 1, (tree.Depth * 4) + (size / 40));
+            Assert.InRange(store.Reads, 1, tree.Depth);
         }
     }
 

@@ -99,25 +99,19 @@ public sealed partial class VortexFile
     }
 
     /// <summary>
-    /// The layout tree, with each flat node's array encodings. It reads each flat node's segment to
-    /// name its encodings, decompressing nothing; a node that cannot be read says why in its place.
+    /// The layout tree, with each flat node's array encodings. It reads each flat node's array
+    /// tree, from the layout or the tail of its segment, to name its encodings, and none of its
+    /// values; a node whose tree cannot be read says why in its place.
     /// </summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The root node.</returns>
     public async ValueTask<VortexLayout> GetLayoutAsync(CancellationToken cancellationToken = default)
     {
-        LayoutTree tree = LayoutTree;
-        ArrayEncodingId[] encodings = new ArrayEncodingId[ArrayEncodingCount];
-        for (int i = 0; i < encodings.Length; i++)
-        {
-            encodings[i] = GetArrayEncoding(i);
-        }
-
         ArrayNodeArena arena = new ArrayNodeArena();
-        return await DescribeAsync(tree.Root, arena, encodings, cancellationToken).ConfigureAwait(false);
+        return await DescribeAsync(LayoutTree.Root, arena, cancellationToken).ConfigureAwait(false);
     }
 
-    private async ValueTask<VortexLayout> DescribeAsync(LayoutNode node, ArrayNodeArena arena, ArrayEncodingId[] encodings, CancellationToken cancellationToken)
+    private async ValueTask<VortexLayout> DescribeAsync(LayoutNode node, ArrayNodeArena arena, CancellationToken cancellationToken)
     {
         ReadOnlySpan<uint> segmentIndices = node.Segments;
         ImmutableArray<int>.Builder segments = ImmutableArray.CreateBuilder<int>(segmentIndices.Length);
@@ -142,7 +136,7 @@ public sealed partial class VortexFile
         string? array = null;
         if (node.Encoding == LayoutEncodingId.Flat)
         {
-            array = await ArrayEncodingOfAsync(node, arena, encodings, cancellationToken).ConfigureAwait(false);
+            array = await ArrayEncodingOfAsync(node, arena, cancellationToken).ConfigureAwait(false);
         }
 
         int childCount = node.ChildCount;
@@ -155,13 +149,62 @@ public sealed partial class VortexFile
         ImmutableArray<VortexLayout>.Builder described = ImmutableArray.CreateBuilder<VortexLayout>(childCount);
         foreach (LayoutNode child in children)
         {
-            described.Add(await DescribeAsync(child, arena, encodings, cancellationToken).ConfigureAwait(false));
+            described.Add(await DescribeAsync(child, arena, cancellationToken).ConfigureAwait(false));
         }
 
         return new VortexLayout(encoding, rows, type, segments.MoveToImmutable(), zoneCount, zoneLength, usable, array, described.MoveToImmutable());
     }
 
-    private async ValueTask<string> ArrayEncodingOfAsync(LayoutNode node, ArrayNodeArena arena, ArrayEncodingId[] encodings, CancellationToken cancellationToken)
+    /// <summary>The bytes read off the end of a segment for its array tree, which a tree longer than this is read whole after.</summary>
+    private const int ArrayTreeTailBytes = 1024;
+
+    /// <summary>
+    /// Loads the array tree of a flat chunk into <paramref name="arena"/>, its nodes and no buffer,
+    /// for a caller that asks what the chunk was written as: from the tree the layout inlines, or
+    /// else from the tail of the segment, which is all of it that is read.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The layout is not one flat segment, or its tree is malformed.</exception>
+    internal async ValueTask LoadArrayTreeAsync(LayoutNode flat, ArrayNodeArena arena, CancellationToken cancellationToken)
+    {
+        FlatLayoutMetadata metadata = FlatLayoutMetadata.Read(flat.Metadata);
+        if (metadata.HasArrayEncodingTree)
+        {
+            ArrayBlobReader.LoadTree(arena, metadata.ArrayEncodingTree, ResolvedArrayEncodings);
+            return;
+        }
+
+        if (flat.Segments.Length != 1)
+        {
+            throw new VortexFormatException($"A flat layout of {flat.Segments.Length} segments holds no one array tree.");
+        }
+
+        SegmentSpec spec = SegmentSpecs[(int)flat.Segments[0]];
+        long end = (long)spec.Offset + spec.Length;
+        int window = (int)Math.Min(spec.Length, ArrayTreeTailBytes);
+        int length;
+        using (SegmentOwner tail = await Segments.ReadRangeAsync(end - window, window, 1, cancellationToken).ConfigureAwait(false))
+        {
+            ReadOnlySpan<byte> bytes = tail.Buffer.Span;
+            uint declared = window < 4 ? uint.MaxValue : System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes[^4..]);
+            if (declared + 4L > spec.Length)
+            {
+                throw new VortexFormatException(
+                    $"An array blob of {spec.Length} bytes declares a {declared}-byte FlatBuffer before its length.");
+            }
+
+            length = (int)declared;
+            if (length + 4 <= window)
+            {
+                ArrayBlobReader.LoadTree(arena, bytes.Slice(window - 4 - length, length), ResolvedArrayEncodings);
+                return;
+            }
+        }
+
+        using SegmentOwner tree = await Segments.ReadRangeAsync(end - 4 - length, length, 1, cancellationToken).ConfigureAwait(false);
+        ArrayBlobReader.LoadTree(arena, tree.Buffer.Span, ResolvedArrayEncodings);
+    }
+
+    private async ValueTask<string> ArrayEncodingOfAsync(LayoutNode node, ArrayNodeArena arena, CancellationToken cancellationToken)
     {
         ReadOnlySpan<uint> segments = node.Segments;
         if (segments.Length != 1)
@@ -175,29 +218,9 @@ public sealed partial class VortexFile
             return $"(segment {index} is out of range)";
         }
 
-        SegmentSpec spec = SegmentSpecs[(int)index];
-
-        // Copied before the await: a flat node may inline its array tree in its metadata, and the
-        // metadata is a span over the layout buffer.
-        byte[]? inlined = null;
-        FlatLayoutMetadata metadata = FlatLayoutMetadata.Read(node.Metadata);
-        if (metadata.HasArrayEncodingTree)
-        {
-            inlined = metadata.ArrayEncodingTree.ToArray();
-        }
-
         try
         {
-            using SegmentOwner owner = await Segments.ReadAsync(spec, cancellationToken).ConfigureAwait(false);
-            if (inlined is null)
-            {
-                ArrayBlobReader.Load(arena, owner.Buffer, encodings);
-            }
-            else
-            {
-                ArrayBlobReader.Load(arena, inlined, owner.Buffer, encodings);
-            }
-
+            await LoadArrayTreeAsync(node, arena, cancellationToken).ConfigureAwait(false);
             StringBuilder tree = new StringBuilder();
             AppendArray(tree, arena.Root);
             return tree.ToString();

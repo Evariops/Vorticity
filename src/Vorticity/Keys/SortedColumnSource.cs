@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -233,19 +235,86 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     }
 
     /// <summary>
+    /// The entry just past <paramref name="entry"/>'s key, going forward or back -- the first after
+    /// its entries, or the last before them -- found in the loaded zone, which stays loaded for it;
+    /// -1 when the key reaches the zone's edge that way, where the zone cannot tell.
+    /// </summary>
+    /// <param name="entry">An entry whose zone is loaded, as every positioning call leaves it.</param>
+    /// <param name="forward">Whether to go past the key's last entry rather than before its first.</param>
+    /// <remarks>
+    /// O(log k) comparisons for a key held by k entries, against the two bisections of a bound, each
+    /// made where the keys lie: a primitive's values as they are, a string's bytes in place.
+    /// </remarks>
+    internal long PastKeyInZone(long entry, bool forward)
+    {
+        CanonicalArena arena = _context!.Canonical;
+        CanonicalNode node = arena.GetNode(ComparisonKernels.Unwrap(arena, _column));
+        int at = (int)(RowOf(entry) - _loadedStart);
+        int edge = (int)((forward ? Math.Min(_loadedEnd, _rowCount) - 1 : Math.Max(_loadedStart, _firstRow)) - _loadedStart);
+        int past = node.Kind switch
+        {
+            CanonicalKind.Primitive => node.PType switch
+            {
+                PType.F16 => PastValue<Half>(node.Values.Span, at, edge, forward),
+                PType.F32 => PastValue<float>(node.Values.Span, at, edge, forward),
+                PType.F64 => PastValue<double>(node.Values.Span, at, edge, forward),
+                _ => node.PType.ByteWidth() switch
+                {
+                    1 => PastValue<byte>(node.Values.Span, at, edge, forward),
+                    2 => PastValue<ushort>(node.Values.Span, at, edge, forward),
+                    4 => PastValue<uint>(node.Values.Span, at, edge, forward),
+                    _ => PastValue<ulong>(node.Values.Span, at, edge, forward),
+                },
+            },
+            CanonicalKind.VarBinView => PastView(node, at, edge, forward),
+
+            // Any other form is left to the bound: a constant, whose one key fills the zone, or one
+            // this source does not read in place.
+            _ => -1,
+        };
+
+        return past < 0 ? -1 : _loadedStart + past - _firstRow;
+    }
+
+    /// <summary>A primitive zone's gallop, one per width.</summary>
+    /// <remarks>
+    /// Out of line so that the dispatch stays small: each gallop inlined into it gets stack slots of
+    /// its own, which every call then clears, whichever width it takes.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int PastValue<T>(ReadOnlySpan<byte> values, int at, int edge, bool forward)
+        where T : unmanaged, IEquatable<T> =>
+        KeyGallop.Past(new Values<T>(values, at), at, edge, forward);
+
+    /// <summary>A string zone's gallop.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int PastView(CanonicalNode node, int at, int edge, bool forward) =>
+        KeyGallop.Past(new Views(node, at), at, edge, forward);
+
+    /// <summary>
     /// The number of entries whose key is below <paramref name="key"/>, which is also the index of
     /// the first entry at or after it: a lower bound, and the key's rank.
     /// </summary>
     /// <param name="key">The sought key.</param>
     /// <param name="cancellationToken">Cancels the decodes this makes.</param>
     internal ValueTask<long> LowerBoundAsync(FilterLiteral key, CancellationToken cancellationToken) =>
-        BoundAsync(key, strict: false, cancellationToken);
+        BoundAsync(new LiteralKey(this, key), strict: false, cancellationToken);
 
     /// <summary>The index of the first entry whose key is strictly after <paramref name="key"/>.</summary>
     /// <param name="key">The sought key.</param>
     /// <param name="cancellationToken">Cancels the decodes this makes.</param>
     internal ValueTask<long> UpperBoundAsync(FilterLiteral key, CancellationToken cancellationToken) =>
-        BoundAsync(key, strict: true, cancellationToken);
+        BoundAsync(new LiteralKey(this, key), strict: true, cancellationToken);
+
+    /// <summary>
+    /// <see cref="LowerBoundAsync"/>, or <see cref="UpperBoundAsync"/> when <paramref name="strict"/>,
+    /// of the byte key <paramref name="lender"/> is on, compared where it lends it.
+    /// </summary>
+    /// <param name="lender">A source on an entry, whose keys are bytes.</param>
+    /// <param name="strict">Whether the bound is past the key's entries.</param>
+    /// <param name="cancellationToken">Cancels the decodes this makes.</param>
+    internal ValueTask<long> BoundOfAsync(KeySource lender, bool strict, CancellationToken cancellationToken) =>
+        BoundAsync(new LentKey(this, lender), strict, cancellationToken);
 
     public ValueTask DisposeAsync()
     {
@@ -274,8 +343,8 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// values yields nothing and the search moves to the next one, which is the only case that
     /// decodes twice.
     /// </remarks>
-    private async ValueTask<long> BoundAsync(
-        FilterLiteral key, bool strict, CancellationToken cancellationToken)
+    private async ValueTask<long> BoundAsync<TKey>(TKey key, bool strict, CancellationToken cancellationToken)
+        where TKey : struct, ISoughtKey
     {
         long entries = EntryCount;
         if (entries <= 0)
@@ -300,7 +369,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
             while (low < high)
             {
                 long mid = low + ((high - low) >> 1);
-                int order = CompareLoaded(mid, key);
+                int order = key.OrderLoaded(mid);
                 bool before = strict ? order <= 0 : order < 0;
                 if (before)
                 {
@@ -325,7 +394,8 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     /// The first zone that may hold an entry at or after <paramref name="key"/>, from the bounds
     /// alone.
     /// </summary>
-    private int FirstZoneThatMayHold(FilterLiteral key, bool strict, int first, int last)
+    private int FirstZoneThatMayHold<TKey>(TKey key, bool strict, int first, int last)
+        where TKey : struct, ISoughtKey
     {
         int low = first;
         int high = last;
@@ -353,7 +423,8 @@ internal sealed class SortedColumnSource : IAsyncDisposable
     }
 
     /// <summary>Whether zone <paramref name="zone"/>'s every value is below the sought key.</summary>
-    private bool Below(int zone, FilterLiteral key, bool strict)
+    private bool Below<TKey>(int zone, TKey key, bool strict)
+        where TKey : struct, ISoughtKey
     {
         ZoneBounds bounds = _zones.Bounds(zone);
         if (!bounds.HasMax || bounds.Max.Kind != key.Kind)
@@ -361,7 +432,7 @@ internal sealed class SortedColumnSource : IAsyncDisposable
             return false;
         }
 
-        int order = Compare(bounds.Max, key);
+        int order = key.Order(bounds.Max);
         return strict ? order <= 0 : order < 0;
     }
 
@@ -390,6 +461,16 @@ internal sealed class SortedColumnSource : IAsyncDisposable
         }
 
         return Compare(Literal(row), key);
+    }
+
+    /// <summary>Orders the loaded zone's row against a byte key.</summary>
+    private int CompareLoaded(long row, ReadOnlySpan<byte> key)
+    {
+        CanonicalNode node = _context!.Canonical.GetNode(_column);
+        ReadOnlySpan<byte> value = node.Kind == CanonicalKind.VarBinView
+            ? LiteralReader.ViewAt(node, (int)(row - _loadedStart))
+            : Literal(row).BytesValue;
+        return Math.Sign(value.SequenceCompareTo(key));
     }
 
     private FilterLiteral Literal(long row) =>
@@ -579,5 +660,73 @@ internal sealed class SortedColumnSource : IAsyncDisposable
                 kind = FilterLiteralKind.Null;
                 return false;
         }
+    }
+
+    /// <summary>
+    /// A primitive zone's values as they lie, against the key of one row: an integer's bits, a
+    /// float's IEEE value, which holds <c>-0.0</c> and <c>+0.0</c> as one key the way
+    /// <see cref="Compare"/> does.
+    /// </summary>
+    private readonly ref struct Values<T> : KeyGallop.IKeyed
+        where T : unmanaged, IEquatable<T>
+    {
+        private readonly ReadOnlySpan<T> _values;
+        private readonly T _key;
+
+        internal Values(ReadOnlySpan<byte> bytes, int row)
+        {
+            _values = MemoryMarshal.Cast<byte, T>(bytes);
+            _key = _values[row];
+        }
+
+        public bool Holds(int index) => _values[index].Equals(_key);
+    }
+
+    /// <summary>A string zone's views against the key of one row, their bytes compared in place.</summary>
+    private readonly ref struct Views : KeyGallop.IKeyed
+    {
+        private readonly CanonicalNode _node;
+        private readonly ReadOnlySpan<byte> _key;
+
+        internal Views(CanonicalNode node, int row)
+        {
+            _node = node;
+            _key = LiteralReader.ViewAt(node, row);
+        }
+
+        public bool Holds(int index) => LiteralReader.ViewAt(_node, index).SequenceEqual(_key);
+    }
+
+    /// <summary>A key a bound is sought for, ordered against the zones' bounds and the loaded rows.</summary>
+    private interface ISoughtKey
+    {
+        /// <summary>The key's domain, which a bound must share to say anything.</summary>
+        FilterLiteralKind Kind { get; }
+
+        /// <summary>The sign of a zone's bound less the key.</summary>
+        int Order(FilterLiteral bound);
+
+        /// <summary>The sign of the loaded zone's row less the key.</summary>
+        int OrderLoaded(long row);
+    }
+
+    /// <summary>A key sought as a literal, as a seek names it.</summary>
+    private readonly struct LiteralKey(SortedColumnSource source, FilterLiteral key) : ISoughtKey
+    {
+        public FilterLiteralKind Kind => key.Kind;
+
+        public int Order(FilterLiteral bound) => Compare(bound, key);
+
+        public int OrderLoaded(long row) => source.CompareLoaded(row, key);
+    }
+
+    /// <summary>A byte key sought where another source lends it, on its current entry.</summary>
+    private readonly struct LentKey(SortedColumnSource source, KeySource lender) : ISoughtKey
+    {
+        public FilterLiteralKind Kind => FilterLiteralKind.Bytes;
+
+        public int Order(FilterLiteral bound) => Math.Sign(bound.BytesValue.SequenceCompareTo(lender.KeyBytes));
+
+        public int OrderLoaded(long row) => source.CompareLoaded(row, lender.KeyBytes);
     }
 }

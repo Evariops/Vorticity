@@ -16,6 +16,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -117,6 +118,22 @@ public sealed class AutoIndexTests
 
         // Neither postings nor sorted runs are ever Auto's.
         Assert.DoesNotContain(report.Indexes, index => index.Kind is IndexKinds.SortedRuns or IndexKinds.PostingsBlocks);
+    }
+
+    [Fact]
+    public async Task AFileIndexedAfterItsWriteJudgesEachColumnAgainstItsOwnBytes()
+    {
+        // The indexer adds each chunk's bytes to its own column, as the writer does: the blob's
+        // filter is 1,4 % of the blob's bytes and kept, and would be many times the share of any
+        // other column's.
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync(WritePolicy.None);
+        IndexFragment fragment = await VortexFileIndexer.BuildFragmentAsync(
+            written.File, WritePolicy.Auto, new RowRange(0, Rows), storeToken: "after", cancellationToken: TestContext.Current.CancellationToken);
+
+        IndexWriteReport blobBloom = FindIn(fragment.Reports, "blob", IndexKinds.BloomSbbf);
+        Assert.True(blobBloom.Outcome == IndexOutcome.Built, blobBloom.Reason);
+        Assert.Equal(IndexOutcome.Abandoned, FindIn(fragment.Reports, "ts", IndexKinds.BloomSbbf).Outcome);
     }
 
     [Fact]
@@ -267,6 +284,10 @@ public sealed class AutoIndexTests
 
     private static IndexWriteReport Find(WriteReport report, string path, string kind) =>
         report.Index(path, kind) ?? throw new InvalidOperationException($"no report for {path}/{kind}");
+
+    private static IndexWriteReport FindIn(IReadOnlyList<IndexWriteReport> reports, string column, string kind) =>
+        reports.FirstOrDefault(report => report.Column == column && report.Kind == kind)
+        ?? throw new InvalidOperationException($"no report for {column}/{kind}");
 
     private static int Holding(Func<int, bool> predicate)
     {

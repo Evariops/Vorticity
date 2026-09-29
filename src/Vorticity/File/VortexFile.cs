@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -1118,6 +1119,9 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <summary>Number of entries in the footer's <c>array_specs</c> dictionary.</summary>
     internal int ArrayEncodingCount => _arrayEncodings.Length;
 
+    /// <summary>The footer's <c>array_specs</c>, resolved, which an array tree's nodes index.</summary>
+    internal ReadOnlySpan<ArrayEncodingId> ResolvedArrayEncodings => _arrayEncodings;
+
     /// <summary>What scans decoded once and the file keeps for the next, made at the first of them.</summary>
     private DecodedStructures? _decoded;
 
@@ -1131,12 +1135,21 @@ public sealed partial class VortexFile : IAsyncDisposable
         /// <summary>The decoded index runs, made at the first index read.</summary>
         internal Indexes.IndexRunCache? Runs;
 
-        /// <summary>The zone maps decoded so far, by the index of their zoned layout node; replaced whole, never written in place.</summary>
-        internal ZoneEntry[]? Zones;
+        /// <summary>
+        /// The zone maps decoded so far: a <see cref="ZoneEntry"/> array of at most
+        /// <see cref="FewZones"/>, by the index of their zoned layout node, replaced whole and never
+        /// written in place; past them a map by node of every one, a wide file's, filtered on many
+        /// columns, which takes the list's place for good.
+        /// </summary>
+        /// <remarks>One field for both, so that a file filtered on a handful of columns holds no more than the list.</remarks>
+        internal object? Zones;
     }
 
     /// <summary>One decoded zone map: the zoned node it belongs to, and its bounds.</summary>
     private readonly record struct ZoneEntry(int Node, Compute.ZoneColumn Column);
+
+    /// <summary>The zone maps a file keeps in a list, walked, before it keeps them by node in a map.</summary>
+    private const int FewZones = 8;
 
     private DecodedStructures Decoded
     {
@@ -1157,13 +1170,19 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <param name="node">The zoned layout node's index.</param>
     /// <remarks>
     /// A zone map is a property of the file, so it is read and decoded once for every scan that
-    /// filters on the column: the next one reads nothing. A walk rather than a lookup, since a
-    /// file is filtered on a handful of columns.
+    /// filters on the column: the next one reads nothing. A file filtered on a handful of columns
+    /// walks a short list; a wide one filtered on many finds each map by its node.
     /// </remarks>
     internal Compute.ZoneColumn? DecodedZones(int node)
     {
-        ZoneEntry[]? entries = Volatile.Read(ref _decoded)?.Zones;
-        if (entries is not null)
+        DecodedStructures? decoded = Volatile.Read(ref _decoded);
+        if (decoded is null)
+        {
+            return null;
+        }
+
+        object? zones = Volatile.Read(ref decoded.Zones);
+        if (zones is ZoneEntry[] entries)
         {
             for (int i = 0; i < entries.Length; i++)
             {
@@ -1172,34 +1191,70 @@ public sealed partial class VortexFile : IAsyncDisposable
                     return entries[i].Column;
                 }
             }
+
+            return null;
         }
 
-        return null;
+        return zones is ConcurrentDictionary<int, Compute.ZoneColumn> many && many.TryGetValue(node, out Compute.ZoneColumn? found)
+            ? found
+            : null;
     }
 
     /// <summary>Keeps the zone map a scan decoded for zoned node <paramref name="node"/>, for the scans after it.</summary>
     /// <param name="node">The zoned layout node's index.</param>
     /// <param name="column">Its bounds.</param>
-    /// <remarks>Two scans that decode the same map at once keep the first: both are the same.</remarks>
+    /// <remarks>
+    /// Two scans that decode the same map at once keep the first: both are the same. The first
+    /// <see cref="FewZones"/> maps go to a list copied at every one, the rest to a map by node,
+    /// which takes the list's place whole in the one exchange that also keeps the new map: a keep
+    /// racing it finds the map on its next try, so nothing the list held is missed. The map is
+    /// keyed by node rather than laid out by it, since a file of many chunks has many more nodes
+    /// than zoned columns.
+    /// </remarks>
     internal void KeepZones(int node, Compute.ZoneColumn column)
     {
         DecodedStructures decoded = Decoded;
         while (true)
         {
-            ZoneEntry[]? seen = Volatile.Read(ref decoded.Zones);
-            int count = seen?.Length ?? 0;
+            object? seen = Volatile.Read(ref decoded.Zones);
+            if (seen is ConcurrentDictionary<int, Compute.ZoneColumn> many)
+            {
+                many.TryAdd(node, column);
+                return;
+            }
+
+            ZoneEntry[]? entries = (ZoneEntry[]?)seen;
+            int count = entries?.Length ?? 0;
             for (int i = 0; i < count; i++)
             {
-                if (seen![i].Node == node)
+                if (entries![i].Node == node)
                 {
                     return;
                 }
             }
 
-            ZoneEntry[] grown = new ZoneEntry[count + 1];
-            seen?.CopyTo(grown, 0);
-            grown[count] = new ZoneEntry(node, column);
-            if (Interlocked.CompareExchange(ref decoded.Zones, grown, seen) == seen)
+            object next;
+            if (count < FewZones)
+            {
+                ZoneEntry[] grown = new ZoneEntry[count + 1];
+                entries?.CopyTo(grown, 0);
+                grown[count] = new ZoneEntry(node, column);
+                next = grown;
+            }
+            else
+            {
+                ConcurrentDictionary<int, Compute.ZoneColumn> moved = new ConcurrentDictionary<int, Compute.ZoneColumn>(
+                    concurrencyLevel: 1, capacity: 4 * FewZones);
+                foreach (ZoneEntry entry in entries!)
+                {
+                    moved.TryAdd(entry.Node, entry.Column);
+                }
+
+                moved.TryAdd(node, column);
+                next = moved;
+            }
+
+            if (Interlocked.CompareExchange(ref decoded.Zones, next, seen) == seen)
             {
                 return;
             }

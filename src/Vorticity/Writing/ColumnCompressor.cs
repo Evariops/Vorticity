@@ -1163,9 +1163,13 @@ internal static class ColumnCompressor
             int mask = capacity - 1;
             int distinct = 0;
 
+            // Each row's hash is taken before the row ahead of it is looked up: a chain walk whose
+            // branch was guessed wrong throws away what came after it, never the hash waiting for it.
+            int next = length > 0 ? comparer.Hash(0) : 0;
             for (int row = 0; row < length; row++)
             {
-                int bucket = comparer.Hash(row) & mask;
+                int bucket = next & mask;
+                next = row + 1 < length ? comparer.Hash(row + 1) : 0;
                 int code = -1;
                 for (int candidate = buckets[bucket]; candidate >= 0; candidate = chain[candidate])
                 {

@@ -84,6 +84,33 @@ public sealed class DTypeAccessorTests
     }
 
     [Fact]
+    public void EveryFieldOfAWideStructIsFoundAtItsOwnIndex()
+    {
+        DTypeArena arena = new();
+        DType i32 = arena.Primitive(PType.I32, Nullability.NonNullable);
+        string[] names = new string[1_000];
+        DType[] fields = new DType[names.Length];
+        for (int i = 0; i < names.Length; i++)
+        {
+            names[i] = $"f{i}";
+            fields[i] = i32;
+        }
+
+        DType wide = arena.Struct(names, fields, Nullability.NonNullable);
+
+        // A name of another struct of the same arena is interned, so only the search over this
+        // struct's fields can say it is not one of them.
+        arena.Struct(["f1000", "g"], [i32, i32], Nullability.NonNullable);
+        for (int i = 0; i < names.Length; i++)
+        {
+            Assert.Equal(i, wide.IndexOfField(Encoding.UTF8.GetBytes(names[i])));
+        }
+
+        Assert.Equal(-1, wide.IndexOfField("f1000"u8));
+        Assert.Equal(-1, wide.IndexOfField("g"u8));
+    }
+
+    [Fact]
     public void PrefixOfAFieldNameIsNotAMatch()
     {
         DTypeArena arena = new();

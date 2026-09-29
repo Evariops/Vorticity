@@ -517,8 +517,12 @@ internal static class RowKernels
     /// </para>
     /// <para>
     /// A row is valid when its code is and its value is: the codes' own word when every value is
-    /// valid, and otherwise each row's bit ANDed with its value's flag, a byte per dictionary
-    /// entry expanded once. The output takes a word at a time.
+    /// valid, and otherwise each row's bit ANDed with its value's flag. The flags are a byte per
+    /// dictionary entry expanded once when the dictionary is at most a quarter of the rows gathered
+    /// from it, and read in the values' bitmap at each code otherwise: the expansion costs a pass
+    /// over every value at each gather, and a row reading its bit costs a few operations more than a
+    /// row reading its byte, which a dictionary of a quarter of the rows is where they cross. The
+    /// output takes a word at a time.
     /// </para>
     /// </remarks>
     private static int MaskedWords<TCode, TValue>(
@@ -530,11 +534,12 @@ internal static class RowKernels
         where TValue : unmanaged
     {
         int entries = (int)limit;
-        Scratch<byte> flagScratch = new Scratch<byte>(valuesAllValid ? 0 : entries, default);
+        bool expand = !valuesAllValid && entries * 4L <= target.Length;
+        Scratch<byte> flagScratch = new Scratch<byte>(expand ? entries : 0, default);
         try
         {
             Span<byte> flags = flagScratch.Span;
-            if (!valuesAllValid)
+            if (expand)
             {
                 for (int entry = 0; entry < entries; entry++)
                 {
@@ -547,6 +552,11 @@ internal static class RowKernels
             ref TValue sourceRef = ref MemoryMarshal.GetReference(source);
             ref TValue targetRef = ref MemoryMarshal.GetReference(target);
             ref byte flagRef = ref MemoryMarshal.GetReference(flags);
+
+            // The caller has checked that the bitmap covers every value, so a code below the
+            // dictionary's length, or the zero a null row's code is replaced by, reads inside it.
+            ref byte bitRef = ref MemoryMarshal.GetReference(valueBits);
+            bool bitmap = !valuesAllValid && !expand;
             for (int row = 0; row < target.Length; row += 64)
             {
                 int span = Math.Min(64, target.Length - row);
@@ -559,18 +569,23 @@ internal static class RowKernels
                 {
                     // Every code of the word names an entry, the null rows' included: each row is
                     // gathered as it stands, and the null rows emptied after.
-                    output = valuesAllValid
-                        ? GatherInside<TCode, TValue, AllValuesValid>(ref wordCodes, ref sourceRef, ref rows, ref flagRef, span) & valid
-                        : GatherInside<TCode, TValue, ValuesFlagged>(ref wordCodes, ref sourceRef, ref rows, ref flagRef, span) & valid;
+                    output = bitmap
+                        ? GatherInsideBits(ref wordCodes, ref sourceRef, ref rows, ref bitRef, valueBitOffset, span) & valid
+                        : valuesAllValid
+                            ? GatherInside<TCode, TValue, AllValuesValid>(ref wordCodes, ref sourceRef, ref rows, ref flagRef, span) & valid
+                            : GatherInside<TCode, TValue, ValuesFlagged>(ref wordCodes, ref sourceRef, ref rows, ref flagRef, span) & valid;
                 }
                 else
                 {
                     bool faulted;
-                    output = valuesAllValid
-                        ? GatherWord<TCode, TValue, AllValuesValid>(
-                            ref wordCodes, ref sourceRef, ref rows, ref flagRef, span, valid, limit, out faulted)
-                        : GatherWord<TCode, TValue, ValuesFlagged>(
-                            ref wordCodes, ref sourceRef, ref rows, ref flagRef, span, valid, limit, out faulted);
+                    output = bitmap
+                        ? GatherWordBits(
+                            ref wordCodes, ref sourceRef, ref rows, ref bitRef, valueBitOffset, span, valid, limit, out faulted)
+                        : valuesAllValid
+                            ? GatherWord<TCode, TValue, AllValuesValid>(
+                                ref wordCodes, ref sourceRef, ref rows, ref flagRef, span, valid, limit, out faulted)
+                            : GatherWord<TCode, TValue, ValuesFlagged>(
+                                ref wordCodes, ref sourceRef, ref rows, ref flagRef, span, valid, limit, out faulted);
                     if (faulted)
                     {
                         return FirstFault(codes, valid, limit, row, span);
@@ -638,6 +653,42 @@ internal static class RowKernels
     }
 
     /// <summary>
+    /// <see cref="GatherWord{TCode, TValue, TValidity}"/> with each value's validity read in the
+    /// values' bitmap at its code rather than in a byte per value.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ulong GatherWordBits<TCode, TValue>(
+        ref TCode codes, ref TValue source, ref TValue target, ref byte bits, int bitOffset, int count,
+        ulong valid, uint limit, out bool faulted)
+        where TCode : unmanaged
+        where TValue : unmanaged
+    {
+        ulong output = 0;
+        uint fault = 0;
+        for (int k = 0; k < count; k++)
+        {
+            uint bit = (uint)(valid >> k) & 1;
+            uint raw = WidenCode(Unsafe.Add(ref codes, k));
+            uint inside = raw < limit ? 1u : 0u;
+            fault |= bit & (inside ^ 1);
+            uint code = raw & (0u - (bit & inside));
+            Unsafe.Add(ref target, k) = Unsafe.Add(ref source, (nint)code);
+            output |= (ulong)(bit & ValueBit(ref bits, bitOffset, (nint)code)) << k;
+        }
+
+        faulted = fault != 0;
+        return output;
+    }
+
+    /// <summary>The validity of the value at <paramref name="code"/> in its bitmap, as 0 or 1.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint ValueBit(ref byte bits, int bitOffset, nint code)
+    {
+        nint at = bitOffset + code;
+        return (uint)(Unsafe.Add(ref bits, at >> 3) >> (int)(at & 7)) & 1;
+    }
+
+    /// <summary>
     /// Gathers <paramref name="count"/> rows whose codes all name an entry; returns, a bit a row,
     /// whether each row's value is valid, every bit set when the values carry no validity.
     /// </summary>
@@ -702,6 +753,61 @@ internal static class RowKernels
         }
 
         return TValidity.Flagged ? output : ulong.MaxValue;
+    }
+
+    /// <summary>
+    /// <see cref="GatherInside{TCode, TValue, TValidity}"/> with each value's validity read in the
+    /// values' bitmap at its code rather than in a byte per value.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static ulong GatherInsideBits<TCode, TValue>(
+        ref TCode codes, ref TValue source, ref TValue target, ref byte bits, int bitOffset, int count)
+        where TCode : unmanaged
+        where TValue : unmanaged
+    {
+        ulong output = 0;
+        int k = 0;
+        for (; k <= count - 8; k += 8)
+        {
+            ref TCode at = ref Unsafe.Add(ref codes, k);
+            nint c0 = (nint)WidenCode(at);
+            nint c1 = (nint)WidenCode(Unsafe.Add(ref at, 1));
+            nint c2 = (nint)WidenCode(Unsafe.Add(ref at, 2));
+            nint c3 = (nint)WidenCode(Unsafe.Add(ref at, 3));
+            nint c4 = (nint)WidenCode(Unsafe.Add(ref at, 4));
+            nint c5 = (nint)WidenCode(Unsafe.Add(ref at, 5));
+            nint c6 = (nint)WidenCode(Unsafe.Add(ref at, 6));
+            nint c7 = (nint)WidenCode(Unsafe.Add(ref at, 7));
+
+            ref TValue into = ref Unsafe.Add(ref target, k);
+            into = Unsafe.Add(ref source, c0);
+            Unsafe.Add(ref into, 1) = Unsafe.Add(ref source, c1);
+            Unsafe.Add(ref into, 2) = Unsafe.Add(ref source, c2);
+            Unsafe.Add(ref into, 3) = Unsafe.Add(ref source, c3);
+            Unsafe.Add(ref into, 4) = Unsafe.Add(ref source, c4);
+            Unsafe.Add(ref into, 5) = Unsafe.Add(ref source, c5);
+            Unsafe.Add(ref into, 6) = Unsafe.Add(ref source, c6);
+            Unsafe.Add(ref into, 7) = Unsafe.Add(ref source, c7);
+
+            uint mask = ValueBit(ref bits, bitOffset, c0) |
+                (ValueBit(ref bits, bitOffset, c1) << 1) |
+                (ValueBit(ref bits, bitOffset, c2) << 2) |
+                (ValueBit(ref bits, bitOffset, c3) << 3) |
+                (ValueBit(ref bits, bitOffset, c4) << 4) |
+                (ValueBit(ref bits, bitOffset, c5) << 5) |
+                (ValueBit(ref bits, bitOffset, c6) << 6) |
+                (ValueBit(ref bits, bitOffset, c7) << 7);
+            output |= (ulong)mask << k;
+        }
+
+        for (; k < count; k++)
+        {
+            nint code = (nint)WidenCode(Unsafe.Add(ref codes, k));
+            Unsafe.Add(ref target, k) = Unsafe.Add(ref source, code);
+            output |= (ulong)ValueBit(ref bits, bitOffset, code) << k;
+        }
+
+        return output;
     }
 
     /// <summary>

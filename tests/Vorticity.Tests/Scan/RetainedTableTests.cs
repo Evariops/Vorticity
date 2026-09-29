@@ -98,6 +98,57 @@ public sealed class RetainedTableTests
         }
     }
 
+    [Fact]
+    public void AWideTableFindsEveryLiveEntryThroughEvictionsAndGrowth()
+    {
+        using ScanContext claimant = new ScanContext(["vortex.primitive"]);
+        using RetainedChunks table = new RetainedChunks(columns: 40, lanes: 1);
+
+        // Two hundred keys a segment number apart by 4096, past the table's first room of 128: the
+        // table grows, and the keys agree in every low bit.
+        const int Keys = 200;
+        for (long i = 0; i < Keys; i++)
+        {
+            Assert.False(table.TryGet(i * 4096, claimant, batch: 1, out RetainedChunk? claim, out _, out _));
+            table.Publish(claim!, nodeIndex: (int)i, batch: 1);
+        }
+
+        for (long i = 0; i < Keys; i++)
+        {
+            Assert.True(table.Peek(i * 4096, batch: 2, out _, out int node));
+            Assert.Equal((int)i, node);
+        }
+
+        // Batch 3 touches one key in three: releasing it evicts the others, from wherever their
+        // removals leave the rest.
+        table.Release(2);
+        for (long i = 0; i < Keys; i += 3)
+        {
+            Assert.True(table.Peek(i * 4096, batch: 3, out _, out _));
+        }
+
+        table.Release(3);
+        for (long i = 0; i < Keys; i++)
+        {
+            Assert.Equal(i % 3 == 0, table.Peek(i * 4096, batch: 3, out _, out int node));
+            Assert.Equal(i % 3 == 0 ? (int)i : -1, node);
+        }
+
+        // New keys land in the slots the evictions freed, and every key is still found.
+        for (long i = Keys; i < 2 * Keys; i++)
+        {
+            Assert.False(table.TryGet(i * 4096, claimant, batch: 4, out RetainedChunk? claim, out _, out _));
+            table.Publish(claim!, nodeIndex: (int)i, batch: 4);
+        }
+
+        for (long i = 0; i < 2 * Keys; i++)
+        {
+            bool live = i >= Keys || i % 3 == 0;
+            Assert.Equal(live, table.Peek(i * 4096, batch: 4, out _, out int node));
+            Assert.Equal(live ? (int)i : -1, node);
+        }
+    }
+
     private static void Cycle(ScanContext claimant, bool claims)
     {
         RetainedChunks table = new RetainedChunks(columns: 4, lanes: 1);

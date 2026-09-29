@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Threading;
 using Vorticity.Buffers;
 
@@ -35,11 +36,14 @@ namespace Vorticity.Arrays;
 /// </para>
 /// <para>
 /// Evicted entries keep their arena and are refilled, so a scan that walks many chunks allocates
-/// none per chunk; an entry claimed and given back without a decode never had one. The entries are
-/// a dozen or two, held in a table the scans of the process take in turn and searched in order,
-/// so a scan allocates no table of its own. The table is its own lock, since a claim waits on it,
-/// and wakes the waiters only when there are some: a signal with none would still give the object
-/// a monitor, allocated for every scan.
+/// none per chunk; an entry claimed and given back without a decode never had one. The entries,
+/// two a column or so, are held in a table the scans of the process take in turn, so a scan
+/// allocates no table of its own: in order, which a release walks and a lookup walks too while the
+/// scan reads a few columns, and past that hashed by key again after them, which a lookup probes, so
+/// that a batch looking up each of its columns pays for each column once rather than for every
+/// entry before it. The table is its own lock, since a claim waits on it, and wakes the waiters only
+/// when there are some: a signal with none would still give the object a monitor, allocated for
+/// every scan.
 /// </para>
 /// </remarks>
 internal sealed class RetainedChunks : IDisposable
@@ -47,6 +51,11 @@ internal sealed class RetainedChunks : IDisposable
     private readonly int _capacity;
     private readonly int _lendingCapacity;
     private RetainedChunk?[] _entries = [];
+
+    // How many entries the table has room for, a power of two: in order in the first slots, and past
+    // OrderedHeld, hashed by key again in the twice as many after them, so that the probes run over
+    // slots at most half full.
+    private int _held;
     private int _count;
     private RetainedChunk? _spares;
     private long _floor;
@@ -172,7 +181,9 @@ internal sealed class RetainedChunks : IDisposable
                 taken.LastTouched = batch;
                 if (_entries.Length == 0)
                 {
-                    _entries = Tables.Rent(_capacity);
+                    // Sized for this scan whatever the size of the table another scan gave back.
+                    _held = (int)BitOperations.RoundUpToPowerOf2((uint)_capacity);
+                    _entries = Tables.Rent(3 * _held);
                 }
 
                 if (borrower is not null && !_lending)
@@ -248,6 +259,7 @@ internal sealed class RetainedChunks : IDisposable
     {
         lock (this)
         {
+            claim.Arena?.Seal();
             claim.NodeIndex = nodeIndex;
             claim.Claimant = null;
             if (claim.LastTouched < batch)
@@ -308,7 +320,7 @@ internal sealed class RetainedChunks : IDisposable
                 for (int i = 0; i < retained; i++)
                 {
                     RetainedChunk spare = RetainedChunkPool.Shared.Rent();
-                    spare.Arena ??= new CanonicalArena();
+                    spare.Arena ??= new RetainingArena();
                     Recycle(spare);
                 }
             }
@@ -374,9 +386,10 @@ internal sealed class RetainedChunks : IDisposable
 
             if (_entries.Length != 0)
             {
-                Array.Clear(_entries, 0, _count);
+                Array.Clear(_entries, 0, _held > OrderedHeld ? 3 * _held : _count);
                 Tables.Return(_entries);
                 _entries = [];
+                _held = 0;
             }
 
             _count = 0;
@@ -446,44 +459,97 @@ internal sealed class RetainedChunks : IDisposable
         }
     }
 
+    /// <summary>The slot of the hash part where <paramref name="key"/>'s probe starts, below <paramref name="mask"/>.</summary>
+    /// <remarks>
+    /// The keys are the file's segment and layout numbers, and a file could number its segments so
+    /// that a fixed mix sends them all to one slot. A seed the file cannot know makes such a set
+    /// impossible to build; it changes where an entry is stored, never what is found.
+    /// </remarks>
+    private static int Home(long key, int mask) =>
+        (int)((((ulong)key ^ HashSeed) * 0x9E3779B97F4A7C15UL) >> 32) & mask;
+
+    private static readonly ulong HashSeed = DrawHashSeed();
+
+    private static ulong DrawHashSeed()
+    {
+        Span<byte> bytes = stackalloc byte[16];
+        Guid.NewGuid().TryWriteBytes(bytes);
+        return BitConverter.ToUInt64(bytes) | 1UL;
+    }
+
+    /// <summary>
+    /// The most entries a table searches in order rather than by hash: a scan of a few columns, which
+    /// a walk over its entries answers sooner than a hash would.
+    /// </summary>
+    private const int OrderedHeld = 16;
+
     /// <summary>The entry under <paramref name="key"/>, or null; the table's lock is held.</summary>
-    /// <remarks>A scan holds two entries a column or so, which a walk in order finds sooner than a hash would.</remarks>
     private RetainedChunk? Find(long key)
     {
         RetainedChunk?[] entries = _entries;
-        for (int i = 0; i < _count; i++)
+        int held = _held;
+        if (held <= OrderedHeld)
         {
-            RetainedChunk entry = entries[i]!;
-            if (entry.Key == key)
+            for (int i = 0; i < _count; i++)
+            {
+                RetainedChunk entry = entries[i]!;
+                if (entry.Key == key)
+                {
+                    return entry;
+                }
+            }
+
+            return null;
+        }
+
+        int mask = (2 * held) - 1;
+        for (int slot = Home(key, mask); ; slot = (slot + 1) & mask)
+        {
+            RetainedChunk? entry = entries[held + slot];
+            if (entry is null || entry.Key == key)
             {
                 return entry;
             }
         }
-
-        return null;
     }
 
     /// <summary>Adds <paramref name="entry"/>, doubling the table when it is full; the table's lock is held.</summary>
     private void Add(RetainedChunk entry)
     {
-        if (_count == _entries.Length)
+        if (_count == _held)
         {
-            Reserve(_count * 2);
+            Reserve(2 * _count);
         }
 
+        entry.Index = _count;
         _entries[_count++] = entry;
+        if (_held > OrderedHeld)
+        {
+            Hash(_entries, _held, entry);
+        }
+    }
+
+    /// <summary>Stores <paramref name="entry"/> at the first free slot of its probe, in a table with room for <paramref name="held"/> entries.</summary>
+    private static void Hash(RetainedChunk?[] entries, int held, RetainedChunk entry)
+    {
+        int mask = (2 * held) - 1;
+        int slot = Home(entry.Key, mask);
+        while (entries[held + slot] is not null)
+        {
+            slot = (slot + 1) & mask;
+        }
+
+        entries[held + slot] = entry;
     }
 
     /// <summary>Removes <paramref name="entry"/> when the table holds it; the table's lock is held.</summary>
     private bool Remove(RetainedChunk entry)
     {
-        for (int i = 0; i < _count; i++)
+        int index = entry.Index;
+        if ((uint)index < (uint)_count && ReferenceEquals(_entries[index], entry))
         {
-            if (ReferenceEquals(_entries[i], entry))
-            {
-                RemoveAt(i);
-                return true;
-            }
+            RemoveAt(index);
+            return true;
         }
 
         return false;
@@ -492,18 +558,61 @@ internal sealed class RetainedChunks : IDisposable
     /// <summary>Removes the entry at <paramref name="index"/>, moving the last one into its place.</summary>
     private void RemoveAt(int index)
     {
-        _entries[index] = _entries[--_count];
-        _entries[_count] = null;
+        RetainedChunk?[] entries = _entries;
+        int held = _held;
+        if (held > OrderedHeld)
+        {
+            Unhash(entries, held, entries[index]!);
+        }
+
+        RetainedChunk last = entries[--_count]!;
+        entries[index] = last;
+        last.Index = index;
+        entries[_count] = null;
+    }
+
+    /// <summary>Clears the slot of <paramref name="removed"/> in a table with room for <paramref name="held"/> entries.</summary>
+    private static void Unhash(RetainedChunk?[] entries, int held, RetainedChunk removed)
+    {
+        int mask = (2 * held) - 1;
+        int hole = Home(removed.Key, mask);
+        while (!ReferenceEquals(entries[held + hole], removed))
+        {
+            hole = (hole + 1) & mask;
+        }
+
+        // Every entry after the hole whose probe starts at or before it moves back into it, so that
+        // no probe meets a free slot before the entry it looks for.
+        for (int slot = (hole + 1) & mask; entries[held + slot] is { } moved; slot = (slot + 1) & mask)
+        {
+            if (((slot - Home(moved.Key, mask)) & mask) >= ((slot - hole) & mask))
+            {
+                entries[held + hole] = moved;
+                hole = slot;
+            }
+        }
+
+        entries[held + hole] = null;
     }
 
     /// <summary>Grows the table to hold <paramref name="capacity"/> entries.</summary>
     private void Reserve(int capacity)
     {
-        if (_entries.Length < capacity)
+        if (_held < capacity)
         {
-            RetainedChunk?[] grown = new RetainedChunk?[capacity];
+            int held = (int)BitOperations.RoundUpToPowerOf2((uint)capacity);
+            RetainedChunk?[] grown = new RetainedChunk?[3 * held];
             Array.Copy(_entries, grown, _count);
+            if (held > OrderedHeld)
+            {
+                for (int i = 0; i < _count; i++)
+                {
+                    Hash(grown, held, grown[i]!);
+                }
+            }
+
             _entries = grown;
+            _held = held;
         }
     }
 
@@ -573,12 +682,15 @@ internal sealed class RetainedChunks : IDisposable
 internal sealed class RetainedChunk
 {
     /// <summary>The arena the chunk is decoded into, made when its first decode begins; an entry claimed and given back has none.</summary>
-    internal CanonicalArena? Arena;
+    internal RetainingArena? Arena;
 
     internal long Key;
 
     /// <summary>The decoded node, or -1 while the entry is claimed and not yet published.</summary>
     internal int NodeIndex = -1;
+
+    /// <summary>Where the entry sits among the table's entries, while a table holds it.</summary>
+    internal int Index;
 
     /// <summary>The number of the last batch that borrowed this entry.</summary>
     internal long LastTouched;

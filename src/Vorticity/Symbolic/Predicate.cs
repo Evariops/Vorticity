@@ -55,7 +55,7 @@ public readonly struct Predicate
             return right;
         }
 
-        return right.IsAll ? left : new Predicate(new LogicalExpr(true, left.Node!, right.Node!));
+        return right.IsAll ? left : new Predicate(Expr.Logical(true, left.Node!, right.Node!));
     }
 
     /// <summary>The rows either predicate keeps.</summary>
@@ -74,7 +74,7 @@ public readonly struct Predicate
             return right;
         }
 
-        return right.IsNone ? left : new Predicate(new LogicalExpr(false, left.Node!, right.Node!));
+        return right.IsNone ? left : new Predicate(Expr.Logical(false, left.Node!, right.Node!));
     }
 
     /// <summary>The rows the predicate does not keep, under three-valued logic: a null stays unknown.</summary>

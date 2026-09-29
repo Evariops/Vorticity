@@ -159,6 +159,8 @@ public sealed class LocatingIndexTests
             string.Create(c, $"key in {present},{absent},{other}"),
             string.Create(c, $"key = {present} and key < 50000"),
             string.Create(c, $"key = {present} or key = {other}"),
+            string.Create(c, $"key = {present} and key in {present},{other}"),
+            string.Create(c, $"key in {present},{other} and key = {present}"),
             string.Create(c, $"key = {present}.0f"),
             string.Create(c, $"key = {present}u"),
             "key = 2.5f",

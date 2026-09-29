@@ -85,6 +85,81 @@ public sealed class MergeFanInTests
         Assert.Equal(expected, back);
     }
 
+    // Two groups of twelve objects, one after the other in key order: the merge holds a group open
+    // at once, more than it looks over in full, lets it close, then opens the next one by one. Past
+    // its own minimum, which ranks it, each object holds a random half of a small range of keys, so
+    // the keys tie across objects that stand at different places, and the ties come in the order of
+    // the objects' minima.
+    [Fact]
+    public async Task MergesGroupsThatOpenAndCloseWithTiesInTheOrderOfTheirObjects()
+    {
+        const int Group = 12;
+        const int Range = 40;
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        Random random = new Random(20260927);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        List<(long Key, int Source)> expected = [];
+        for (int source = (2 * Group) - 1; source >= 0; source--)
+        {
+            long start = source < Group ? 0 : 100_000;
+            List<long> keys = [start + (source % Group)];
+            for (int i = 0; i < Range; i++)
+            {
+                if (random.Next(2) == 0)
+                {
+                    keys.Add(start + Group + i);
+                }
+            }
+
+            foreach (long key in keys)
+            {
+                expected.Add((key, source));
+            }
+
+            await dataset.AppendAsync(Rows(types, schema, [.. keys], source), ct);
+        }
+
+        expected.Sort();
+
+        List<(long Key, int Source)> walked = [];
+        await foreach (RecordBatch batch in dataset.ScanBuilder().InKeyOrder("key")
+            .ExecuteAsync(ct).WithCancellation(CancellationToken.None))
+        {
+            using (batch)
+            {
+                ReadOnlySpan<long> keys = batch.Column(0).AsPrimitive<long>().Values;
+                ReadOnlySpan<double> sources = batch.Column(1).AsPrimitive<double>().Values;
+                for (int row = 0; row < batch.RowCount; row++)
+                {
+                    walked.Add((keys[row], (int)sources[row]));
+                }
+            }
+        }
+
+        Assert.Equal(expected, walked);
+    }
+
+    /// <summary>One object holding <paramref name="keys"/>, each row's measure the object's number.</summary>
+    private static async IAsyncEnumerable<RecordBatch> Rows(DTypeArena types, DType schema, long[] keys, int source)
+    {
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
+        CanonicalArena arena = new CanonicalArena();
+        VortexBuffer keyBuffer = arena.Allocate(keys.Length * sizeof(long), sizeof(long), out Span<byte> keyBytes);
+        VortexBuffer measures = arena.Allocate(keys.Length * sizeof(double), sizeof(double), out Span<byte> measureBytes);
+        keys.AsSpan().CopyTo(MemoryMarshal.Cast<byte, long>(keyBytes));
+        MemoryMarshal.Cast<byte, double>(measureBytes).Fill(source);
+        int key = arena.AddPrimitive(i64, keys.Length, Validity.NonNullable, PType.I64, keyBuffer);
+        int measure = arena.AddPrimitive(f64, keys.Length, Validity.NonNullable, PType.F64, measures);
+        int root = arena.AddStruct(schema, keys.Length, Validity.NonNullable, [key, measure]);
+        yield return new RecordBatch(arena, root, 0);
+        await Task.CompletedTask.ConfigureAwait(false);
+    }
+
     // The walk holds all sixty-four objects open at once, far more than the cache keeps between
     // scans. The next walk opens the others first, in the same order, and must still find the ones
     // the cache kept.

@@ -322,7 +322,7 @@ internal sealed class ZstdDecoder : ArrayDecoder
                 $"{Id}'s validity decoded to {bits.Length} rows of {bits.Kind} for an array of {length}.");
         }
 
-        return BitmapKernels.CountSet(bits.Bits.Span, bits.BitOffset, start);
+        return context.ValidBefore(in node, bits.Bits.Span, bits.BitOffset, start);
     }
 
     /// <summary>

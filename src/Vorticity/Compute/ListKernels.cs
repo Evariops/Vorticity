@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -145,6 +146,7 @@ internal static class ListKernels
         // take no part, as an empty row's offset does not.
         long low = long.MaxValue;
         long high = -1;
+        long named = 0;
         for (int row = 0; row < rows; row++)
         {
             long size = ListViewDecoder.Widen(sizes[row]);
@@ -156,6 +158,7 @@ internal static class ListKernels
             long offset = ListViewDecoder.Widen(offsets[row]);
             low = Math.Min(low, offset);
             high = Math.Max(high, offset + size);
+            named += size;
         }
 
         if (high <= low)
@@ -181,7 +184,80 @@ internal static class ListKernels
         {
             ReadOnlySpan<byte> equal = matches.AsSpan(0, length);
             ComparisonKernels.Compare(arena, window, ComparisonOp.Equal, literal, matches.AsSpan(0, length));
-            for (int row = 0; row < rows; row++)
+
+            // Rows whose views overlap name far more elements than the window holds: each asks a
+            // count of the matches before its end and before its start rather than reading its
+            // elements again.
+            if (named > (long)OverlapFactor * length)
+            {
+                Overlapping<TOffset, TSize>(equal, offsets, sizes, mask, low, destination);
+            }
+            else
+            {
+                Searched<TOffset, TSize>(equal, offsets, sizes, mask, low, destination);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(matches);
+        }
+    }
+
+    /// <summary>The rows answered by a search of each row's elements for a match.</summary>
+    /// <remarks>Each way of answering the rows is a method of its own, so that neither loop takes its shape from the other.</remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Searched<TOffset, TSize>(
+        ReadOnlySpan<byte> equal, ReadOnlySpan<TOffset> offsets, ReadOnlySpan<TSize> sizes, ValidityMask mask, long low,
+        Span<byte> destination)
+        where TOffset : unmanaged
+        where TSize : unmanaged
+    {
+        bool allValid = mask.AllValid;
+        for (int row = 0; row < destination.Length; row++)
+        {
+            if (!allValid && !mask.IsValid(row))
+            {
+                destination[row] = Trilean.Unknown;
+                continue;
+            }
+
+            long size = ListViewDecoder.Widen(sizes[row]);
+            destination[row] = size > 0
+                && equal.Slice((int)(ListViewDecoder.Widen(offsets[row]) - low), (int)size).Contains(Trilean.True)
+                ? Trilean.True
+                : Trilean.False;
+        }
+    }
+
+    /// <summary>
+    /// How many times the window the rows name may be read, summed over the rows, before counting
+    /// the matches once costs less than a search in each row's elements: a vector search reads a
+    /// match state in about a thirtieth of the time the count takes to add it.
+    /// </summary>
+    private const int OverlapFactor = 32;
+
+    /// <summary>The rows answered from a running count of the window's matches: one subtraction a row.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void Overlapping<TOffset, TSize>(
+        ReadOnlySpan<byte> equal, ReadOnlySpan<TOffset> offsets, ReadOnlySpan<TSize> sizes, ValidityMask mask, long low,
+        Span<byte> destination)
+        where TOffset : unmanaged
+        where TSize : unmanaged
+    {
+        int[] counted = ArrayPool<int>.Shared.Rent(equal.Length + 1);
+        try
+        {
+            Span<int> before = counted.AsSpan(0, equal.Length + 1);
+            int count = 0;
+            for (int i = 0; i < equal.Length; i++)
+            {
+                before[i] = count;
+                count += equal[i] == Trilean.True ? 1 : 0;
+            }
+
+            before[equal.Length] = count;
+            bool allValid = mask.AllValid;
+            for (int row = 0; row < destination.Length; row++)
             {
                 if (!allValid && !mask.IsValid(row))
                 {
@@ -190,15 +266,19 @@ internal static class ListKernels
                 }
 
                 long size = ListViewDecoder.Widen(sizes[row]);
-                destination[row] = size > 0
-                    && equal.Slice((int)(ListViewDecoder.Widen(offsets[row]) - low), (int)size).Contains(Trilean.True)
-                    ? Trilean.True
-                    : Trilean.False;
+                if (size <= 0)
+                {
+                    destination[row] = Trilean.False;
+                    continue;
+                }
+
+                int start = (int)(ListViewDecoder.Widen(offsets[row]) - low);
+                destination[row] = before[start + (int)size] > before[start] ? Trilean.True : Trilean.False;
             }
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(matches);
+            ArrayPool<int>.Shared.Return(counted);
         }
     }
 }

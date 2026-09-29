@@ -257,6 +257,37 @@ internal sealed class KeyCursor : IKeyWalker
         return _source.RankAsync(key, cancellationToken);
     }
 
+    /// <summary>
+    /// How many entries have a key below the key <paramref name="other"/> is on, or at or below it
+    /// with <paramref name="upper"/>.
+    /// </summary>
+    /// <param name="other">Another cursor over keys of the same domain, positioned; it stays on its entry.</param>
+    /// <param name="upper">Whether the key's own entries count.</param>
+    /// <param name="cancellationToken">Cancels the reads this makes.</param>
+    /// <returns>The rank, between zero and <see cref="EntryCount"/>.</returns>
+    /// <remarks>
+    /// A byte key is compared where the other cursor lends it, never copied. This cursor is left
+    /// unpositioned, which spares a source that decodes to rank the decode that would put its
+    /// position back.
+    /// </remarks>
+    /// <exception cref="ArgumentException">The other cursor's keys are of another domain.</exception>
+    /// <exception cref="InvalidOperationException">The other cursor is not positioned, or this one's source has no rows (<see cref="HasRows"/>).</exception>
+    internal ValueTask<long> RankOfAsync(KeyCursor other, bool upper, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        other.RequireValid();
+        if (other.KeyKind != KeyKind)
+        {
+            throw new ArgumentException(
+                $"This column's keys are {KeyKind}; a {other.KeyKind} key cannot be ordered against them.",
+                nameof(other));
+        }
+
+        RequireRows(nameof(RankOfAsync));
+        _source.Invalidate();
+        return _source.RankOfAsync(other._source, upper, cancellationToken);
+    }
+
     /// <summary>Positions on the entry of rank <paramref name="rank"/>, zero-based.</summary>
     /// <param name="rank">The rank.</param>
     /// <param name="cancellationToken">Cancels the reads this makes.</param>

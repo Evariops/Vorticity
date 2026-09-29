@@ -89,7 +89,7 @@ public sealed partial class VortexFileWriter
         }
 
         StructStore root = Root();
-        typed = new ColumnsBuilder<TRecord>(root, WriteBinding.Map(typeof(TRecord), TRecord.Schema, root.Type.Fields), this);
+        typed = new ColumnsBuilder<TRecord>(root, WriteBinding.Map(typeof(TRecord), TRecord.Schema, root.Type.FieldArray), this);
         _typedBuilder = typed;
         return typed;
     }

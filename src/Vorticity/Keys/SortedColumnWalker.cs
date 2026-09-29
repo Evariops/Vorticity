@@ -87,15 +87,35 @@ internal sealed class SortedColumnWalker : KeySource
     internal override ValueTask<bool> PrevAsync(CancellationToken cancellationToken) =>
         PositionAsync(_entry - 1, cancellationToken);
 
-    internal override async ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken)
+    internal override ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken) =>
+        PastKeyAsync(forward: true, cancellationToken);
+
+    internal override ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken) =>
+        PastKeyAsync(forward: false, cancellationToken);
+
+    /// <remarks>
+    /// The key's neighbour is sought from here, in the loaded zone, where it usually is, and landing
+    /// there is the whole step; a bound over the whole column is taken only when the key reaches the
+    /// zone's edge.
+    /// </remarks>
+    private ValueTask<bool> PastKeyAsync(bool forward, CancellationToken cancellationToken)
     {
-        long at = await _source.UpperBoundAsync(Key, cancellationToken).ConfigureAwait(false);
-        return await PositionAsync(at, cancellationToken).ConfigureAwait(false);
+        long at = _source.PastKeyInZone(_entry, forward);
+        if (at < 0)
+        {
+            return PastZoneAsync(forward, cancellationToken);
+        }
+
+        _entry = at;
+        return new ValueTask<bool>(true);
     }
 
-    internal override async ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken)
+    /// <summary>Steps past the current key the long way, when its entries reach the loaded zone's edge.</summary>
+    private async ValueTask<bool> PastZoneAsync(bool forward, CancellationToken cancellationToken)
     {
-        long at = await _source.LowerBoundAsync(Key, cancellationToken).ConfigureAwait(false) - 1;
+        long at = forward
+            ? await _source.UpperBoundAsync(Key, cancellationToken).ConfigureAwait(false)
+            : await _source.LowerBoundAsync(Key, cancellationToken).ConfigureAwait(false) - 1;
         return await PositionAsync(at, cancellationToken).ConfigureAwait(false);
     }
 
@@ -105,11 +125,19 @@ internal sealed class SortedColumnWalker : KeySource
     internal override ValueTask<long> UpperRankAsync(FilterLiteral key, CancellationToken cancellationToken) =>
         BoundAsync(key, upper: true, cancellationToken);
 
-    private async ValueTask<long> BoundAsync(FilterLiteral key, bool upper, CancellationToken cancellationToken)
+    internal override ValueTask<long> RankOfAsync(KeySource other, bool upper, CancellationToken cancellationToken) =>
+        KeyKind == FilterLiteralKind.Bytes
+            ? KeepingPositionAsync(_source.BoundOfAsync(other, upper, cancellationToken), cancellationToken)
+            : BoundAsync(other.Key, upper, cancellationToken);
+
+    private ValueTask<long> BoundAsync(FilterLiteral key, bool upper, CancellationToken cancellationToken) =>
+        KeepingPositionAsync(
+            upper ? _source.UpperBoundAsync(key, cancellationToken) : _source.LowerBoundAsync(key, cancellationToken),
+            cancellationToken);
+
+    private async ValueTask<long> KeepingPositionAsync(ValueTask<long> bound, CancellationToken cancellationToken)
     {
-        long rank = upper
-            ? await _source.UpperBoundAsync(key, cancellationToken).ConfigureAwait(false)
-            : await _source.LowerBoundAsync(key, cancellationToken).ConfigureAwait(false);
+        long rank = await bound.ConfigureAwait(false);
 
         // The bisection may have decoded another zone; the position is put back.
         if (IsValid)

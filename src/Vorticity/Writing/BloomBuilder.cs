@@ -50,6 +50,9 @@ internal sealed class BloomBuilder : IndexBuilder
     /// <summary>Values hashed together before their hashes go to the set: a quarter of <see cref="CheckStride"/>.</summary>
     private const int HashBatch = 64;
 
+    /// <summary>The recent hashes a string column's rows are checked against, a power of two.</summary>
+    private const int RecentHashes = 1024;
+
     /// <summary>The blocks `Auto` watches for a column that repeats one set.</summary>
     private const int RepeatBlocks = 4;
 
@@ -404,7 +407,11 @@ internal sealed class BloomBuilder : IndexBuilder
                 return;
 
             case CanonicalKind.VarBinView when _trigrams:
+            {
                 Span<byte> trigram = stackalloc byte[Trigrams.Length];
+                Span<ulong> hashes = stackalloc ulong[CheckStride];
+                Span<ulong> recent = stackalloc ulong[RecentHashes];
+                int gathered = 0;
                 bool fold = _policy.CaseInsensitive;
                 _rawBytes += 16L * count;
                 for (int row = start; row < start + count; row++)
@@ -416,14 +423,24 @@ internal sealed class BloomBuilder : IndexBuilder
                         for (int i = 0; i + Trigrams.Length <= value.Length; i++)
                         {
                             Trigrams.Copy(value.Slice(i, Trigrams.Length), fold, trigram);
-                            block.Add(SplitBlockBloom.Hash(trigram, hash));
+                            if (Fresh(recent, SplitBlockBloom.Hash(trigram, hash), hashes, ref gathered))
+                            {
+                                block.AddRange(hashes);
+                                gathered = 0;
+                            }
                         }
                     }
                 }
 
+                block.AddRange(hashes[..gathered]);
                 return;
+            }
 
             case CanonicalKind.VarBinView:
+            {
+                Span<ulong> hashes = stackalloc ulong[CheckStride];
+                Span<ulong> recent = stackalloc ulong[RecentHashes];
+                int gathered = 0;
                 _rawBytes += 16L * count;
                 for (int row = start; row < start + count; row++)
                 {
@@ -431,11 +448,17 @@ internal sealed class BloomBuilder : IndexBuilder
                     {
                         ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
                         _rawBytes += value.Length;
-                        block.Add(SplitBlockBloom.Hash(value, hash));
+                        if (Fresh(recent, SplitBlockBloom.Hash(value, hash), hashes, ref gathered))
+                        {
+                            block.AddRange(hashes);
+                            gathered = 0;
+                        }
                     }
                 }
 
+                block.AddRange(hashes[..gathered]);
                 return;
+            }
 
             default:
                 Abandon($"a Bloom filter does not index a {node.Kind} column");
@@ -460,23 +483,27 @@ internal sealed class BloomBuilder : IndexBuilder
         int end = start + count;
         int row = start;
         bool inline = hash == BloomHash.XxHash3 && allValid && width <= 16;
+        Span<ulong> hashes = stackalloc ulong[CheckStride];
         while (row < end)
         {
             int stop = Math.Min(end, row + CheckStride);
             if (inline)
             {
-                HashRows(values, width, row, stop, block);
+                HashRows(values, width, row, stop, block, hashes);
                 row = stop;
             }
 
+            // The stride's hashes before any probe, as HashRows takes them.
+            int gathered = 0;
             for (; row < stop; row++)
             {
                 if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
                 {
-                    block.Add(SplitBlockBloom.Hash(values.Slice(row * width, width), hash));
+                    hashes[gathered++] = SplitBlockBloom.Hash(values.Slice(row * width, width), hash);
                 }
             }
 
+            block.AddRange(hashes[..gathered]);
             if (checks && GivesUpInBlock(_blockRawStart + (capacity * width)))
             {
                 return;
@@ -485,18 +512,44 @@ internal sealed class BloomBuilder : IndexBuilder
     }
 
     /// <summary>
-    /// Rows <c>[start, stop)</c> of an all-valid fixed-width column, hashed by XxHash3's own short
-    /// path for the width, resolved once for the whole range instead of per row.
+    /// Gathers <paramref name="value"/> unless it is a recent hash, which the set holds already or
+    /// will once the gathered ones are added; returns whether the gathered hashes fill their span.
     /// </summary>
     /// <remarks>
-    /// Four- and eight-byte values are hashed <see cref="HashBatch"/> at a time where
-    /// <see cref="XxHash3Fixed.IsVectorized"/>, eight an instruction, and the batch then added to
-    /// the set, whose probe is the one part left a value at a time.
+    /// A column of few strings hashes the same few values row after row, each of which would pay
+    /// the set's mix and probe again. The recent hashes are a direct-mapped table on the stack for
+    /// one call, picked by the hash's own low bits: a collision there only costs the probe it would
+    /// have saved, so it takes no seed. Zero is the empty slot, and a zero hash always goes on.
     /// </remarks>
-    [SkipLocalsInit]
-    internal static void HashRows(ReadOnlySpan<byte> values, int width, int start, int stop, HashSet64 block)
+    private static bool Fresh(Span<ulong> recent, ulong value, Span<ulong> hashes, ref int gathered)
     {
-        Span<ulong> hashes = stackalloc ulong[HashBatch];
+        ref ulong seen = ref recent[(int)value & (RecentHashes - 1)];
+        if (seen == value && value != 0)
+        {
+            return false;
+        }
+
+        seen = value;
+        hashes[gathered++] = value;
+        return gathered == hashes.Length;
+    }
+
+    /// <summary>
+    /// Rows <c>[start, stop)</c> of an all-valid fixed-width column hashed by XxHash3's own short
+    /// path for the width, resolved once for the whole range instead of per row, into
+    /// <paramref name="hashes"/>, the caller's scratch of at least that many, then added to the set.
+    /// </summary>
+    /// <remarks>
+    /// Every row is hashed before the set takes any of them, so that a probe whose branch was
+    /// guessed wrong waits for no hash: the rows' hashes do not depend on one another, and a loop
+    /// that only computes them overlaps them all. Four- and eight-byte values are hashed
+    /// <see cref="HashBatch"/> at a time where <see cref="XxHash3Fixed.IsVectorized"/>, eight an
+    /// instruction.
+    /// </remarks>
+    internal static void HashRows(
+        ReadOnlySpan<byte> values, int width, int start, int stop, HashSet64 block, Span<ulong> hashes)
+    {
+        hashes = hashes[..(stop - start)];
         switch (width)
         {
             case 4:
@@ -507,20 +560,16 @@ internal sealed class BloomBuilder : IndexBuilder
                 {
                     for (; i <= words.Length - HashBatch; i += HashBatch)
                     {
-                        XxHash3Fixed.Hash4(words.Slice(i, HashBatch), hashes);
-                        foreach (ulong hash in hashes)
-                        {
-                            block.Add(hash);
-                        }
+                        XxHash3Fixed.Hash4(words.Slice(i, HashBatch), hashes.Slice(i, HashBatch));
                     }
                 }
 
-                foreach (uint word in words[i..])
+                for (; i < words.Length; i++)
                 {
-                    block.Add(XxHash3Fixed.Hash4(word));
+                    hashes[i] = XxHash3Fixed.Hash4(words[i]);
                 }
 
-                return;
+                break;
             }
 
             case 8:
@@ -531,38 +580,36 @@ internal sealed class BloomBuilder : IndexBuilder
                 {
                     for (; i <= words.Length - HashBatch; i += HashBatch)
                     {
-                        XxHash3Fixed.Hash8(words.Slice(i, HashBatch), hashes);
-                        foreach (ulong hash in hashes)
-                        {
-                            block.Add(hash);
-                        }
+                        XxHash3Fixed.Hash8(words.Slice(i, HashBatch), hashes.Slice(i, HashBatch));
                     }
                 }
 
-                foreach (ulong word in words[i..])
+                for (; i < words.Length; i++)
                 {
-                    block.Add(XxHash3Fixed.Hash8(word));
+                    hashes[i] = XxHash3Fixed.Hash8(words[i]);
                 }
 
-                return;
+                break;
             }
 
             case <= 3:
                 for (int row = start; row < stop; row++)
                 {
-                    block.Add(XxHash3Fixed.Hash1To3(values.Slice(row * width, width)));
+                    hashes[row - start] = XxHash3Fixed.Hash1To3(values.Slice(row * width, width));
                 }
 
-                return;
+                break;
 
             default:
                 for (int row = start; row < stop; row++)
                 {
-                    block.Add(XxHash3Fixed.Hash9To16(values.Slice(row * width, width)));
+                    hashes[row - start] = XxHash3Fixed.Hash9To16(values.Slice(row * width, width));
                 }
 
-                return;
+                break;
         }
+
+        block.AddRange(hashes);
     }
 
     /// <summary>

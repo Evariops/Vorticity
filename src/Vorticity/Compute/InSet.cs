@@ -6,24 +6,19 @@ using System.Runtime.Intrinsics;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Expressions;
 using Vorticity.Types;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Compute;
 
 /// <summary>
-/// The candidates of an <c>IN</c>, hashed once for the whole scan: built per batch, the set would
-/// merely move the candidate count from the row loop to the setup. Signedness belongs to the set,
+/// The numeric candidates of an <c>IN</c>, as the 64 bits of each. Signedness belongs to the set,
 /// because a candidate above <see cref="long.MaxValue"/> shares its bit pattern with a negative
 /// value and a set built for an unsigned column would make a signed column match a row it must not.
+/// A float set holds each candidate as a double, the zeros as one key and no NaN: the equality it
+/// answers is IEEE 754's, which a NaN never satisfies and the two zeros do.
 /// </summary>
-internal sealed class InSet
+internal sealed class InSet : CandidateSet
 {
-    /// <summary>
-    /// Fewer candidates than this and the equality kernel wins: a compare against a value already
-    /// in a register beats a hash, a mask and a load, and the OR path pays it once per candidate.
-    /// The set costs the same whatever the count, so the two paths cross here.
-    /// </summary>
-    private const int LeastCandidates = 4;
-
     /// <summary>
     /// An eighth full, which is emptier than a hash table is usually built. Almost every row misses,
     /// and an unsuccessful linear probe costs <c>(1 + 1/(1-a)^2)/2</c> slots: 2,5 at a half against
@@ -43,54 +38,61 @@ internal sealed class InSet
     private readonly bool _hasZero;
     private readonly byte _miss;
 
-    /// <summary>The distinct keys, zero included, when there are at most <see cref="FewKeys"/>; else null.</summary>
+    /// <summary>
+    /// The distinct keys, zero included, when there are at most <see cref="FewKeys"/>; else null,
+    /// and null for a float set, whose keys are folded and no row's bits equal as they are.
+    /// </summary>
     private readonly ulong[]? _keys;
 
-    private InSet(ulong[] slots, int mask, bool hasZero, byte miss, bool signed, ulong[]? keys)
+    private InSet(ulong[] slots, int mask, bool hasZero, byte miss, CandidateKind kind, ulong[]? keys)
     {
         _slots = slots;
         _mask = mask;
         _hasZero = hasZero;
         _miss = miss;
-        Signed = signed;
+        Kind = kind;
         _keys = keys;
     }
 
-    /// <summary>Whether this set was built for a signed column.</summary>
-    internal bool Signed { get; }
+    /// <inheritdoc/>
+    internal override CandidateKind Kind { get; }
 
     /// <summary>
-    /// Hashes <paramref name="literals"/> for a column of the given signedness, or reports that
-    /// they are not a set worth building.
+    /// Hashes <paramref name="literals"/> for a column of the given kind, or reports that they are
+    /// not a set worth building.
     /// </summary>
     /// <param name="literals">The candidates.</param>
-    /// <param name="signed">Whether the column is signed.</param>
+    /// <param name="kind">The column's kind: signed, unsigned, float or decimal.</param>
     /// <returns><see langword="null"/> when the caller must keep to an OR of equalities.</returns>
-    internal static InSet? TryBuild(ReadOnlySpan<FilterLiteral> literals, bool signed)
+    internal static InSet? TryBuild(ReadOnlySpan<FilterLiteral> literals, CandidateKind kind)
     {
         bool hasNull = false;
         int candidates = 0;
         for (int i = 0; i < literals.Length; i++)
         {
-            switch (literals[i].Kind)
+            FilterLiteral literal = literals[i];
+            switch (literal.Kind)
             {
                 case FilterLiteralKind.Null:
                     hasNull = true;
                     break;
 
                 case FilterLiteralKind.Signed:
-                case FilterLiteralKind.Unsigned:
+                case FilterLiteralKind.Unsigned when kind != CandidateKind.Decimal:
+                case FilterLiteralKind.Float when kind == CandidateKind.Float:
+                case FilterLiteralKind.Bytes when kind == CandidateKind.Decimal && ComparisonKernels.TryDecimal(literal, out _):
                     candidates++;
                     break;
 
                 default:
-                    // A float against an integer column has its own kernel and a bool is a type
-                    // error the equality path reports. Neither belongs in a set of integers.
+                    // What the equality refuses -- a bool, bytes against a number, an unsigned
+                    // literal against a decimal -- is left for it to refuse, and a float against an
+                    // integer column has a kernel of its own. None belongs in a set.
                     return null;
             }
         }
 
-        if (candidates < LeastCandidates)
+        if (candidates < LeastCandidates(kind))
         {
             return null;
         }
@@ -117,29 +119,7 @@ internal sealed class InSet
 
         for (int i = 0; i < literals.Length; i++)
         {
-            FilterLiteral literal = literals[i];
-            ulong key;
-            if (literal.Kind == FilterLiteralKind.Signed)
-            {
-                long value = literal.SignedValue;
-                if (!signed && value < 0)
-                {
-                    continue;
-                }
-
-                key = unchecked((ulong)value);
-            }
-            else if (literal.Kind == FilterLiteralKind.Unsigned)
-            {
-                ulong value = literal.UnsignedValue;
-                if (signed && value > long.MaxValue)
-                {
-                    continue;
-                }
-
-                key = value;
-            }
-            else
+            if (!TryKey(literals[i], kind, out ulong key))
             {
                 continue;
             }
@@ -166,7 +146,7 @@ internal sealed class InSet
             distinct += slot != 0 ? 1 : 0;
         }
 
-        if (distinct <= FewKeys)
+        if (distinct <= FewKeys && kind != CandidateKind.Float)
         {
             keys = new ulong[distinct];
             int k = 0;
@@ -186,7 +166,70 @@ internal sealed class InSet
 
         // A null candidate cannot be put in a set -- nothing equals it -- but its whole effect is
         // to turn the no-match answer from false into unknown.
-        return new InSet(table, mask, hasZero, hasNull ? Trilean.Unknown : Trilean.False, signed, keys);
+        return new InSet(table, mask, hasZero, hasNull ? Trilean.Unknown : Trilean.False, kind, keys);
+    }
+
+    /// <summary>The key a candidate is held under, or false when no value of the column can equal it.</summary>
+    private static bool TryKey(FilterLiteral literal, CandidateKind kind, out ulong key)
+    {
+        if (kind == CandidateKind.Float)
+        {
+            // Converted as the equality kernel converts a literal against a float column.
+            double value = literal.Kind switch
+            {
+                FilterLiteralKind.Float => literal.FloatValue,
+                FilterLiteralKind.Signed => literal.SignedValue,
+                FilterLiteralKind.Unsigned => literal.UnsignedValue,
+                _ => double.NaN,
+            };
+
+            key = FloatKey(value);
+            return !double.IsNaN(value);
+        }
+
+        if (literal.Kind == FilterLiteralKind.Bytes)
+        {
+            // A decimal's wide literal, which counts when it fits the eight bytes every row does.
+            ComparisonKernels.TryDecimal(literal, out Int256 wide);
+            bool fits = wide.TryToInt64(out long narrow);
+            key = unchecked((ulong)narrow);
+            return fits;
+        }
+
+        bool signed = kind != CandidateKind.Unsigned;
+        if (literal.Kind == FilterLiteralKind.Signed)
+        {
+            long value = literal.SignedValue;
+            key = unchecked((ulong)value);
+            return signed || value >= 0;
+        }
+
+        if (literal.Kind == FilterLiteralKind.Unsigned)
+        {
+            ulong value = literal.UnsignedValue;
+            key = value;
+            return !signed || value <= long.MaxValue;
+        }
+
+        key = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// A double's key: both zeros as zero, since IEEE 754 holds them equal, and any other value as
+    /// its bits with the high half folded onto the low.
+    /// </summary>
+    /// <remarks>
+    /// A double of few significant bits -- a price in quarters, an integer -- has its low forty or so
+    /// bits zero, and the slot is read from bits a product only carries up: every such key would
+    /// start at one slot. The fold is a bijection, so the keys stay as distinct as the values, and
+    /// zero stays the key of zero alone.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong FloatKey(double value)
+    {
+        ulong bits = BitConverter.DoubleToUInt64Bits(value);
+        return value == 0 ? 0 : bits ^ (bits >> 32);
     }
 
     /// <summary>Writes one state per row of <paramref name="destination"/>.</summary>
@@ -252,6 +295,15 @@ internal sealed class InSet
                 break;
             case PType.U32:
                 Core<uint>(values, mask, destination);
+                break;
+            case PType.F16:
+                FloatCore<Half>(values, mask, destination);
+                break;
+            case PType.F32:
+                FloatCore<float>(values, mask, destination);
+                break;
+            case PType.F64:
+                FloatCore<double>(values, mask, destination);
                 break;
             default:
                 Core<ulong>(values, mask, destination);
@@ -347,6 +399,37 @@ internal sealed class InSet
             }
 
             ulong key = ulong.CreateTruncating(Unsafe.Add(ref value, i));
+            destination[i] = Holds(ref table, key) ? Trilean.True : miss;
+        }
+    }
+
+    /// <summary>
+    /// The membership loop of a float set, each value widened to a double as the equality kernel
+    /// widens it. A NaN's bits are no key of the set, which holds no NaN, so it misses.
+    /// </summary>
+    private void FloatCore<TValue>(ReadOnlySpan<byte> bytes, ValidityMask mask, Span<byte> destination)
+        where TValue : unmanaged, IFloatingPoint<TValue>
+    {
+        if (mask.AllInvalid)
+        {
+            Trilean.Fill(destination, Trilean.Unknown);
+            return;
+        }
+
+        ReadOnlySpan<TValue> values = MemoryMarshal.Cast<byte, TValue>(bytes)[..destination.Length];
+        ref ulong table = ref MemoryMarshal.GetArrayDataReference(_slots);
+        ref TValue value = ref MemoryMarshal.GetReference(values);
+        byte miss = _miss;
+        bool allValid = mask.AllValid;
+        for (int i = 0; i < destination.Length; i++)
+        {
+            if (!allValid && !mask.IsValid(i))
+            {
+                destination[i] = Trilean.Unknown;
+                continue;
+            }
+
+            ulong key = FloatKey(double.CreateTruncating(Unsafe.Add(ref value, i)));
             destination[i] = Holds(ref table, key) ? Trilean.True : miss;
         }
     }
