@@ -5,22 +5,24 @@ One file of code, a few minutes, and the only page that shows both directions.
 
 ## Reference the library
 
-The library is consumed from source: reference the projects from a project that targets .NET 11:
+The library ships on nuget.org. Reference its packages from a project that targets .NET 11; the
+generator is a build-time dependency, which `PrivateAssets` keeps out of whatever your project
+packs:
 
 ```xml
 <ItemGroup>
-  <ProjectReference Include="path/to/Vorticity/src/Vorticity/Vorticity.csproj" />
-  <ProjectReference Include="path/to/Vorticity/src/Vorticity.Generators/Vorticity.Generators.csproj"
-                    OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  <PackageReference Include="Vorticity" Version="0.1.0" />
+  <PackageReference Include="Vorticity.Generators" Version="0.1.0" PrivateAssets="all" />
 </ItemGroup>
 ```
 
 `Vorticity` is the whole format: opening, scanning, filtering, aggregating, indexes and the
 writer, with `System.IO.Hashing` as its only dependency. `Vorticity.Generators` runs at build time
 only: it turns a `[VortexRecord]` type into the code that reads and writes it, and ships the
-analyzers. The two other assemblies are separate subjects, both experimental:
-`Vorticity.Dataset` for a versioned dataset over an object store ([datasets.md](datasets.md)),
-`Vorticity.RowEncoding` for byte-sortable keys ([row-keys.md](row-keys.md)).
+analyzers. The two other packages are separate subjects, both experimental, and referenced the
+same way at the same version as the core: `Vorticity.Dataset` for a versioned dataset over an
+object store ([datasets.md](datasets.md)), `Vorticity.RowEncoding` for byte-sortable keys
+([row-keys.md](row-keys.md)).
 
 Everything that touches bytes is asynchronous: a file is opened with `await`, a scan is consumed
 with `await foreach`, a writer is fed with `WriteAsync`. There is no synchronous path to look for.

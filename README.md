@@ -98,15 +98,16 @@ That SDK is all `dotnet build` and `dotnet test` need. Everything that compares 
 reference — the cross-check, the ratio axes of the bench, and the corpus generator — wants a Rust
 toolchain on top.
 
-The library is consumed from source: reference the projects, as
-[the samples](samples/Vorticity.Samples/Vorticity.Samples.csproj) do; the generator is an
-analyzer reference:
+The library ships on nuget.org, for a project that targets `net11.0`; the generator is a
+build-time dependency, which `PrivateAssets` keeps out of whatever your project packs:
 
 ```xml
-<ProjectReference Include="src/Vorticity/Vorticity.csproj" />
-<ProjectReference Include="src/Vorticity.Generators/Vorticity.Generators.csproj"
-                  OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+<PackageReference Include="Vorticity" Version="0.1.0" />
+<PackageReference Include="Vorticity.Generators" Version="0.1.0" PrivateAssets="all" />
 ```
+
+`Vorticity.Dataset` and `Vorticity.RowEncoding`, both experimental, are referenced the same way,
+at the same version as the core.
 
 ## Documentation
 
