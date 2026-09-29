@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -34,11 +35,25 @@ jobs:
         with:
           global-json-file: global.json
 
+      # A tag v1.2.3 is a release, and everything built from it carries 1.2.3: the assemblies, and
+      # the packages the publish job pushes. Any other run leaves the version unset and packs the
+      # SDK's default, a file name and not a claim.
+      - name: Resolve the version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::$GITHUB_REF_NAME is not a v followed by a SemVer version"
+              exit 1
+            fi
+            echo "VERSION_PROPERTY=-p:Version=$version" >> "$GITHUB_ENV"
+          fi
+
       - name: Restore
         run: dotnet restore Vorticity.slnx
 
       - name: Build
-        run: dotnet build Vorticity.slnx --no-restore -c Release
+        run: dotnet build Vorticity.slnx --no-restore -c Release ${VERSION_PROPERTY:+"$VERSION_PROPERTY"}
 
       # The variable also has the suite write the corpus out for the Rust cross-check below; the
       # test that writes it skips when the variable is unset.
@@ -60,7 +75,7 @@ jobs:
       # being found, a license expression that stops parsing, a project that becomes packable by
       # accident. Warnings are errors, so a pack warning fails the job.
       - name: Pack
-        run: dotnet pack Vorticity.slnx --no-build -c Release
+        run: dotnet pack Vorticity.slnx --no-build -c Release ${VERSION_PROPERTY:+"$VERSION_PROPERTY"}
 
       # A satellite reads the internals of the packages it references, so it must depend on exactly
       # the version it was built with. Pack writes "this version or later" unless a private target
@@ -85,6 +100,21 @@ jobs:
             echo "::error::no package depends on a Vorticity package"
             exit 1
           fi
+
+      # A release's packages are kept for the publish job, which pushes them only once every check
+      # below has passed on the same build.
+      - name: Gather the packages of a release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          mkdir -p "$RUNNER_TEMP/packages"
+          cp src/*/bin/Release/*.nupkg src/*/bin/Release/*.snupkg "$RUNNER_TEMP/packages/"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: packages
+          path: ${{ runner.temp }}/packages
+          if-no-files-found: error
 
       # The long campaign belongs to a nightly run rather than to each commit, and the per-commit
       # half already runs as FuzzSmokeTests. This is the middle: enough mutations to be worth the
@@ -196,3 +226,35 @@ jobs:
           else
             echo "spec/ matches upstream develop"
           fi
+
+  # A release tag's packages go to nuget.org, under the Evariops account. Trusted Publishing trades
+  # the job's GitHub OIDC token for an API key that lives an hour, so no key is stored here; the
+  # policy nuget.org holds names this repository, this file (build.yml) and the release
+  # environment: renaming either stops the push.
+  publish:
+    name: push the packages to nuget.org
+    needs: ci
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: packages
+          path: packages
+
+      - uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0
+        id: login
+        with:
+          user: Evariops
+
+      # Each .snupkg goes up with its .nupkg. A package already there is skipped, so a push that
+      # failed halfway can be re-run.
+      - name: Push
+        run: |
+          dotnet nuget push "packages/*.nupkg" --skip-duplicate \
+            --api-key "${{ steps.login.outputs.NUGET_API_KEY }}" \
+            --source https://api.nuget.org/v3/index.json
