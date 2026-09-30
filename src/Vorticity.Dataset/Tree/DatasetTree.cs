@@ -667,7 +667,7 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
 
         private void Cut()
         {
-            ReadOnlyMemory<byte> summary = _fold.Union(_summaries);
+            ReadOnlyMemory<byte> summary = _fold.Union(_summaries, _leaf);
             if (_leaf)
             {
                 long rows = 0;

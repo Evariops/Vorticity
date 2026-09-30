@@ -57,7 +57,7 @@ internal sealed class DatasetSnapshot
         Func<InternalEntry, bool>? descend = pruner is null ? null : node =>
         {
             if (node.Summary.IsEmpty
-                || ObjectSummaries.FromBytes(node.Summary.Span).MayMatch(pruner, node.Rows))
+                || ObjectSummaries.FromBytes(ObjectSummaryFold.SummariesOf(node.Summary.Span, out _)).MayMatch(pruner, node.Rows))
             {
                 return true;
             }
@@ -155,7 +155,7 @@ internal sealed class DatasetSnapshot
         foreach (InternalEntry child in TreePage.ReadInternal(page))
         {
             bool refuted = !child.Summary.IsEmpty
-                && !ObjectSummaries.FromBytes(child.Summary.Span).MayMatch(pruner, child.Rows);
+                && !ObjectSummaries.FromBytes(ObjectSummaryFold.SummariesOf(child.Summary.Span, out _)).MayMatch(pruner, child.Rows);
             if (!refuted && MayMatch(child.Child, depth - 1, pruner))
             {
                 return true;

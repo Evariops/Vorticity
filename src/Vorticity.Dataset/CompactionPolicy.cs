@@ -9,6 +9,21 @@ using Vorticity.Scanning;
 namespace Vorticity.Dataset;
 
 /// <summary>Decides what to compact. The planner reads leaf entries only, never rows.</summary>
+/// <remarks>
+/// <para>
+/// A leveled plan descends the trees rather than reading them. Every page's summary carries the
+/// tally of what lies under it: the bytes, the largest object, the most fragments one object
+/// carries. A level's bytes are then the sum over its top page; the largest object of a full level
+/// is at the end of one descent that follows the largest tally; the objects a job overlaps, and the
+/// objects over their fragments, are found by a walk that skips every subtree whose summary rules it
+/// out. A plan reads a level's top page and a path or two below it, and the job's own objects.
+/// </para>
+/// <para>
+/// A tiered plan concatenates the longest run of one level's objects nothing else sits between,
+/// which only every level's order in full says; it reads every leaf, as does a leveled plan over a
+/// level whose top page was written before tallies. Both choose the same job.
+/// </para>
+/// </remarks>
 internal static class CompactionPolicy
 {
     /// <summary>
@@ -22,9 +37,33 @@ internal static class CompactionPolicy
     {
         ArgumentNullException.ThrowIfNull(dataset);
         CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
+        CompactionStyle style = settings.StyleFor(dataset.Key is not null);
+        if (style == CompactionStyle.Leveled && dataset.Key is not null
+            && await TalliesAsync(dataset, cancellationToken).ConfigureAwait(false) is { } tallies)
+        {
+            return await DescendAsync(dataset, settings, tallies, cancellationToken).ConfigureAwait(false);
+        }
 
+        return await ReadEveryLeafAsync(dataset, settings, style, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The plan read from every leaf of every level: the tiered plan, the plan of a level written
+    /// before tallies, and the one a descent is held to.
+    /// </summary>
+    internal static async ValueTask<CompactionPlan> PlanByReadingEveryLeafAsync(
+        VortexDataset dataset, CompactionOptions? options, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(dataset);
+        CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
+        return await ReadEveryLeafAsync(dataset, settings, settings.StyleFor(dataset.Key is not null), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async ValueTask<CompactionPlan> ReadEveryLeafAsync(
+        VortexDataset dataset, CompactionOptions settings, CompactionStyle style, CancellationToken cancellationToken)
+    {
         bool clustered = dataset.Key is not null;
-        CompactionStyle style = settings.StyleFor(clustered);
         List<List<CompactionInput>> levels = await ReadAsync(dataset, cancellationToken).ConfigureAwait(false);
 
         long[] objects = new long[levels.Count];
@@ -315,19 +354,259 @@ internal static class CompactionPolicy
             return true;
         }
 
-        if (!candidate.Entry.Summaries.TryGet(key.Paths[0], out ColumnSummary column))
+        return !candidate.Entry.Summaries.TryGet(key.Paths[0], out ColumnSummary column) || Overlaps(column, low, high);
+    }
+
+    /// <summary>
+    /// Whether a column's bounds may meet <c>[low, high]</c>. Only a positive proof of disjointness
+    /// excludes: a missing bound proves nothing, so it overlaps.
+    /// </summary>
+    private static bool Overlaps(ColumnSummary column, FilterLiteral low, FilterLiteral high) =>
+        !(column.HasMin && KeyCursor.Compare(column.Min, high) > 0)
+        && (!column.HasMax || KeyCursor.Compare(column.Max, low) >= 0);
+
+    /// <summary>
+    /// The leveled plan by descent: the same job the full read chooses, found from the levels' top
+    /// pages, one descent to the largest object of a full level, and walks that skip what the
+    /// summaries rule out.
+    /// </summary>
+    private static async ValueTask<CompactionPlan> DescendAsync(
+        VortexDataset dataset, CompactionOptions settings, ObjectTally[] tallies, CancellationToken cancellationToken)
+    {
+        int count = dataset.Levels.Count;
+        long[] objects = new long[count];
+        long[] bytes = new long[count];
+        for (int level = 0; level < count; level++)
+        {
+            objects[level] = dataset.Levels[level].Entries;
+            bytes[level] = tallies[level].Bytes;
+        }
+
+        List<CompactionInput> fragmented = await FragmentedAsync(dataset, tallies, settings.MaxFragments, cancellationToken)
+            .ConfigureAwait(false);
+        CompactionJob? job = null;
+        if (count > 0 && objects[0] > settings.LevelZeroCeiling)
+        {
+            List<CompactionInput> sources = [];
+            await foreach (TreeEntry entry in dataset.Levels[0].EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
+            {
+                sources.Add(new CompactionInput(0, entry.Key, ObjectEntry.FromBytes(entry.Value)));
+            }
+
+            job = await LeveledAsync(dataset, sources, 0, settings.LevelZeroDestination(bytes[0]), settings, CompactionTrigger.LevelZeroCeiling, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        for (int level = 1; job is null && level < count; level++)
+        {
+            if (!settings.IsTop(level) && objects[level] > 1 && bytes[level] > settings.CapacityBytes(level))
+            {
+                CompactionInput largest = await LargestAsync(dataset, level, cancellationToken).ConfigureAwait(false);
+                job = await LeveledAsync(dataset, [largest], level, level + 1, settings, CompactionTrigger.LevelSize, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        if (job is null && fragmented.Count > 0)
+        {
+            job = new CompactionJob(
+                fragmented[0].Level, fragmented[0].Level, CompactionStyle.Leveled, CompactionTrigger.Fragments, fragmented, 0, 0);
+        }
+
+        return new CompactionPlan
+        {
+            Version = dataset.Version,
+            ObjectsByLevel = [.. objects],
+            BytesByLevel = [.. bytes],
+            Lag = dataset.Lag,
+            IsClustered = true,
+            Style = CompactionStyle.Leveled,
+            Job = job,
+            FragmentedObjects = fragmented.Count,
+        };
+    }
+
+    /// <summary>
+    /// The job that merges <paramref name="sources"/> into level <paramref name="to"/>, with the
+    /// objects there the union of their key range overlaps, found by a walk that skips every
+    /// subtree whose summary puts it outside the range. A clustered dataset's outputs are keyed by
+    /// their smallest key, so the job's first row is not read.
+    /// </summary>
+    private static async ValueTask<CompactionJob> LeveledAsync(
+        VortexDataset dataset,
+        List<CompactionInput> sources,
+        int from,
+        int to,
+        CompactionOptions settings,
+        CompactionTrigger trigger,
+        CancellationToken cancellationToken)
+    {
+        List<CompactionInput> inputs = [.. sources];
+        if (to < dataset.Levels.Count)
+        {
+            ClusteringKey key = dataset.Key!;
+            (FilterLiteral low, bool hasLow, FilterLiteral high, bool hasHigh) = Range(sources, key);
+            await foreach (PositionedEntry held in dataset.Levels[to]
+                .WalkAsync(dataset.Pages, 0, long.MaxValue, node => MayOverlap(node, key, low, hasLow, high, hasHigh), cancellationToken)
+                .ConfigureAwait(false))
+            {
+                CompactionInput candidate = new CompactionInput(to, held.Entry.Key, ObjectEntry.FromBytes(held.Entry.Value));
+                if (Overlaps(candidate, key, low, hasLow, high, hasHigh))
+                {
+                    inputs.Add(candidate);
+                }
+            }
+        }
+
+        return new CompactionJob(from, to, CompactionStyle.Leveled, trigger, inputs, settings.TargetBytes(to), 0);
+    }
+
+    /// <summary>
+    /// The largest object of a level, the first of equals in key order as a full read would find
+    /// it: at each page, the first entry whose tally holds the largest object below.
+    /// </summary>
+    private static async ValueTask<CompactionInput> LargestAsync(VortexDataset dataset, int level, CancellationToken cancellationToken)
+    {
+        DatasetTree tree = dataset.Levels[level];
+        PageReference reference = tree.Root;
+        for (int depth = tree.Depth; depth > 1; depth--)
+        {
+            IReadOnlyList<InternalEntry> page = TreePage.ReadInternal(
+                await dataset.Pages.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false));
+            int best = 0;
+            long largest = -1;
+            for (int i = 0; i < page.Count; i++)
+            {
+                long below = TallyOf(page[i]).Largest;
+                if (below > largest)
+                {
+                    largest = below;
+                    best = i;
+                }
+            }
+
+            reference = page[best].Child;
+        }
+
+        IReadOnlyList<TreeEntry> leaf = TreePage.ReadLeaf(
+            await dataset.Pages.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false));
+        TreeEntry chosen = leaf[0];
+        long most = -1;
+        foreach (TreeEntry entry in leaf)
+        {
+            long held = ObjectTally.Of(entry.Value.Span).Bytes;
+            if (held > most)
+            {
+                most = held;
+                chosen = entry;
+            }
+        }
+
+        return new CompactionInput(level, chosen.Key, ObjectEntry.FromBytes(chosen.Value));
+    }
+
+    /// <summary>
+    /// Every object carrying more than <paramref name="most"/> index fragments, level by level in key
+    /// order, found by walks that enter only the subtrees whose tally holds one.
+    /// </summary>
+    private static async ValueTask<List<CompactionInput>> FragmentedAsync(
+        VortexDataset dataset, ObjectTally[] tallies, int most, CancellationToken cancellationToken)
+    {
+        List<CompactionInput> found = [];
+        for (int level = 0; level < tallies.Length; level++)
+        {
+            if (tallies[level].MostFragments <= most)
+            {
+                continue;
+            }
+
+            await foreach (PositionedEntry held in dataset.Levels[level]
+                .WalkAsync(dataset.Pages, 0, long.MaxValue, node => TallyOf(node).MostFragments > most, cancellationToken)
+                .ConfigureAwait(false))
+            {
+                ObjectEntry entry = ObjectEntry.FromBytes(held.Entry.Value);
+                if (entry.Fragments.Count > most)
+                {
+                    found.Add(new CompactionInput(level, held.Entry.Key, entry));
+                }
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// Every level's tally, from its top page alone; null when a level's top page holds a subtree
+    /// written before tallies, whose leaves the plan then reads. A page's tally is known only when
+    /// every page below it carries one, so a top page whose entries all have one vouches for its tree.
+    /// </summary>
+    private static async ValueTask<ObjectTally[]?> TalliesAsync(VortexDataset dataset, CancellationToken cancellationToken)
+    {
+        ObjectTally[] tallies = new ObjectTally[dataset.Levels.Count];
+        for (int level = 0; level < tallies.Length; level++)
+        {
+            DatasetTree tree = dataset.Levels[level];
+            if (tree.IsEmpty)
+            {
+                continue;
+            }
+
+            ReadOnlyMemory<byte> top = await dataset.Pages.ReadPageAsync(tree.Root, cancellationToken).ConfigureAwait(false);
+            ObjectTally? tally = null;
+            if (tree.Depth == 1)
+            {
+                foreach (TreeEntry entry in TreePage.ReadLeaf(top))
+                {
+                    ObjectTally one = ObjectTally.Of(entry.Value.Span);
+                    tally = tally is { } sum ? sum.With(one) : one;
+                }
+            }
+            else
+            {
+                foreach (InternalEntry child in TreePage.ReadInternal(top))
+                {
+                    ObjectSummaryFold.SummariesOf(child.Summary.Span, out ObjectTally? below);
+                    if (below is not { } known)
+                    {
+                        return null;
+                    }
+
+                    tally = tally is { } sum ? sum.With(known) : known;
+                }
+            }
+
+            tallies[level] = tally ?? default;
+        }
+
+        return tallies;
+    }
+
+    /// <summary>The tally a page's summary carries, which every page of a tree its top page vouches for has.</summary>
+    private static ObjectTally TallyOf(InternalEntry node)
+    {
+        ObjectSummaryFold.SummariesOf(node.Summary.Span, out ObjectTally? tally);
+        return tally ?? throw new CommitFormatException("A page under a tallied page carries no tally.");
+    }
+
+    /// <summary>
+    /// Whether a subtree may hold an object overlapping <c>[low, high]</c>: the test an object's own
+    /// summary is put to, asked of the union of its summaries, whose bounds hold every object's under it.
+    /// </summary>
+    private static bool MayOverlap(
+        InternalEntry node, ClusteringKey key, FilterLiteral low, bool hasLow, FilterLiteral high, bool hasHigh)
+    {
+        if (!hasLow || !hasHigh)
         {
             return true;
         }
 
-        // Only a positive proof of disjointness excludes the object: a missing bound proves
-        // nothing, so it overlaps.
-        if (column.HasMin && KeyCursor.Compare(column.Min, high) > 0)
+        ReadOnlySpan<byte> summaries = ObjectSummaryFold.SummariesOf(node.Summary.Span, out _);
+        if (summaries.IsEmpty || !ObjectSummaries.FromBytes(summaries).TryGet(key.Paths[0], out ColumnSummary column))
         {
-            return false;
+            return true;
         }
 
-        return !column.HasMax || KeyCursor.Compare(column.Max, low) >= 0;
+        return Overlaps(column, low, high);
     }
 
     /// <summary>Every level's leaves, in key order, with the key each one sits at.</summary>

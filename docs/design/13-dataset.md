@@ -131,8 +131,10 @@ A **leaf entry** describes one data object:
   which the fan-out of the page holding it pays until the object is next rewritten: a page of
   entries all at the cap holds about a hundred.
 
-An **internal entry** holds a page reference to a child, the sum of its rows, and the **union** of its
-children's summaries. The union is intersection-shaped, which is the one thing about it a reader must
+An **internal entry** holds a page reference to a child, the sum of its rows, the **union** of its
+children's summaries, and the **tally** of the objects under it: their bytes, the largest of them, the
+rows marked deleted in them and the most index fragments one of them carries, which a compaction plans
+by (§5.3). The union is intersection-shaped, which is the one thing about it a reader must
 get right: a column travels up only when every child carries it, and a bound only when every child
 has one, since keeping a bound because another child was silent would prune a subtree that holds the
 answer. One inexact child makes the union inexact.
@@ -225,7 +227,17 @@ it must not have. Measured on four interleaved level-0 objects: 42 808 bytes in,
 16 596 out.
 
 Triggers: level 0 above its ceiling, a level above its size, then an entry above K fragments, a
-compaction of index bytes only (§6.4). When many processes append, one coordinator batching their
+compaction of index bytes only (§6.4).
+
+**A leveled plan descends the trees rather than reading them.** A level's bytes are the sum of the
+tallies its top page carries, and the header carries that page. The largest object of a level over
+its size, the one a job pushes down, is at the end of one descent that follows the largest tally at
+each page. The objects of the level below that the job's key range meets, and the objects over
+their fragments, are found by walks that skip every subtree whose summary or tally rules it out. A
+cold plan over 125 000 objects asks the store for two pages, where reading every leaf asks for 124.
+A tiered plan still reads every leaf: its job is the longest run of one level's objects that nothing
+else sits between, which only the order of every level says. So does a plan over a level whose pages
+were written before tallies, until a commit rewrites them. Both choose the job the other would. When many processes append, one coordinator batching their
 rows into one commit answers the contention; without it the protocol of §8 stays correct, only
 slower.
 
@@ -608,6 +620,9 @@ by widening a number or making it nullable (§13).
 - **Deletes and updates**: the rows left equal the rows written filtered in C# under three-valued
   logic, across levels and without a clustering key, and a delete that loses its objects to a
   compaction is worked out again.
+- **The plan**: a descent chooses the job a read of every leaf chooses, on random shapes and options
+  that meet every trigger; every page's tally is the one its leaves add up to; a cold plan asks for
+  the same one or two pages over 3 000, 31 000 and 125 000 objects.
 - **Marks**: a dataset that marks reads as a second one taking the same changes by rewrites, through
   every read — rows by position, rows in key order both ways with null keys around the marks, key
   cursors, their ranks and seeks, counts, extremes, aggregates — under a seeded fuzzer of deletes and

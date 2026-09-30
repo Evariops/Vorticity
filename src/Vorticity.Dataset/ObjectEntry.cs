@@ -335,6 +335,34 @@ internal sealed record ObjectEntry(
     }
 
     /// <summary>
+    /// The bytes, the deleted rows and the fragment count an entry's bytes carry, read in place as
+    /// <see cref="SummaryOf"/> reads the summaries: what a page's tally sums, without an allocation.
+    /// </summary>
+    /// <exception cref="CommitFormatException">The bytes are not an entry.</exception>
+    public static (long Bytes, long DeletedRows, long Fragments) TallyOf(ReadOnlySpan<byte> value)
+    {
+        int at = 0;
+        Skip(value, ref at, (long)Read(value, ref at));
+        Skip(value, ref at, 16);
+        Read(value, ref at);
+        long bytes = (long)Read(value, ref at);
+        Skip(value, ref at, 16);
+        ulong listed = Read(value, ref at);
+        if (listed > (ulong)((value.Length - at) / PageReference.Bytes))
+        {
+            throw new CommitFormatException("An object entry's fragment list is cut short.");
+        }
+
+        long fragments = (long)listed;
+        Skip(value, ref at, fragments * PageReference.Bytes);
+        Skip(value, ref at, (long)Read(value, ref at));
+        long deleted = at < value.Length ? (long)Read(value, ref at) : 0;
+        return bytes < 0 || deleted < 0
+            ? throw new CommitFormatException("An object entry counts its bytes or its deleted rows past a long.")
+            : (bytes, deleted, fragments);
+    }
+
+    /// <summary>
     /// Moves past <paramref name="bytes"/> bytes, or says the entry is not one. The count is a long
     /// because it comes from a varint this code did not write, and an int would wrap to a small
     /// positive number that skips somewhere plausible.
