@@ -71,21 +71,54 @@ internal sealed class CommitPageSource : IPageSource
     }
 
     /// <summary>
+    /// The bytes of a page in hand, without any request: one this source holds, or one the handle
+    /// kept from an earlier version.
+    /// </summary>
+    /// <exception cref="TornCommitException">A page an open read holds does not hash to its reference.</exception>
+    public bool TryGetInHand(PageReference reference, out ReadOnlyMemory<byte> page)
+    {
+        if (TryGetKnown(reference, out page))
+        {
+            return true;
+        }
+
+        if (!TryGetKept(reference, out page))
+        {
+            return false;
+        }
+
+        _known[reference] = page;
+        return true;
+    }
+
+    /// <summary>
     /// Takes what the open read of a version's commit object holds, which costs no further request:
-    /// the pages its header inlines, where its pages region starts, and the start of that region,
-    /// where the pages the version wrote without inlining them lie.
+    /// the pages its header inlines, where its pages region starts and where those of the earlier
+    /// versions it names start, and the start of that region, where the pages the version wrote
+    /// without inlining them lie.
     /// </summary>
     public void Open(ulong version, CommitObject commit)
     {
         ArgumentNullException.ThrowIfNull(commit);
         Inline(commit.Header);
         Know(version, commit.HeaderEnd);
+        foreach (PagesStart start in commit.Header.Starts)
+        {
+            Know(start.Version, start.Offset);
+        }
+
         if (!commit.Held.IsEmpty)
         {
             _held[version] = commit.Held;
             _cache?.Hold(version, commit.Held);
         }
     }
+
+    /// <summary>
+    /// Where the pages region of <paramref name="version"/> starts, when this source learned it: from
+    /// a header it opened, or by reading a page of that version.
+    /// </summary>
+    public bool TryGetStart(ulong version, out long start) => _starts.TryGetValue(version, out start);
 
     /// <summary>Records where a version's pages region starts, learned without a request.</summary>
     public void Know(ulong version, long pagesStart)

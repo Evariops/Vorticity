@@ -128,8 +128,8 @@ write. For one object that is its marked share, and the descent of §3 finds it.
 
 **What it saves.** A vector lives in its object's leaf entry. Every commit that marks a row in any
 object of a page writes that page again. While a level's pages fit the header's inline room, 192 KiB,
-every commit carries them too, marks or not. So a page's bytes grow with the vectors it holds, and so
-does every commit's.
+every commit carried them too, marks or not, until headers left such pages out (below). So a page's
+bytes grow with the vectors it holds, and so did every commit's.
 
 The churn measures it on ten million rows. Each update or delete takes ten keys in a row, one run in
 one of the 31 objects of level 4, and those objects' entries share one leaf page. A commit writes
@@ -146,22 +146,23 @@ due. On the churn the purges move the rewrites more than they remove them. Once 
 filled, a commit writes about 56 KiB rather than 77, compaction about 83 KiB rather than 65, and the
 two together the same 140; the reads and the store are the same. What they buy is where a rewrite
 happens: in compaction rather than inside a user's delete, which a background driver (§2) takes off
-the write path altogether, and the fold the top level lacked. A commit's bytes are still mostly the
-leaf page the header carries, which only the two options below remove.
+the write path altogether, and the fold the top level lacked. What a commit writes of the vectors is
+then the leaf page of the objects it marks, which only vectors out of line would shrink.
 
 **A second copy, removed.** Every commit wrote the pages it changed twice: in its pages region, and
 inlined in its header so that the read opening the commit would hold them. The region follows the
 header, so a page that ends inside that read needs no copy: the reader keeps the part of the region
 the read brought back. On the churn this took 39 % off a commit object, 26.6 KiB to 16.2 on average
 over the first 15 000 commits, and costs a reader nothing. What a header still carries is pages
-other commits wrote: every level's that fits, the leaf page with the vectors among them.
+other commits wrote: every level's that fits, save the leaves with marks (below).
 
-**Or out of the header.** The header could leave out a leaf page whose entries carry marks when this
-commit did not write it. A mark would then cost only the commits that change its own level. A reader
-that opens the version would read that page when it walks the level: one ranged read more, cached with
-the version. A handle opens a fresh page source on each version, so it would pay that read after each
-commit it does not write itself, unless it kept pages across versions: a page is immutable, and its
-reference names it in every version that shares it.
+**Out of the header, built.** A header leaves out a leaf whose entries carry marks when its commit
+did not write it, and says instead where the version that wrote it keeps its pages: a mark costs only
+the commits that change its own level. A reader that opens the version reads that page when it walks
+the level, in one ranged read. A handle keeps from one version to the next the pages it read and the
+regions its last versions' open reads held (13-dataset.md §3), so neither its commits nor its
+refreshes read the page again until a commit changes it. On the churn a commit object is 30 % smaller,
+16.2 KiB to 11.3 on average over the first 15 000 commits, and every read asks for what it asked for.
 
 **Out of line, the alternative.** A vector could be written once into the commit object that made
 it, as an index fragment is (13-dataset.md §6.4), and the entry would name it by reference. Pages
@@ -245,8 +246,9 @@ subject destroyed in place of the rows. It belongs to the store library or to th
    deterministic choice. A lease only if deployments run loops they cannot count.
 4. **Inline level-0 compaction** (§2), bounded by a byte budget, as an option off by default.
 5. **The locked-store profile** (§5), and the retention date on the seam.
-6. **Marked pages out of the header, or vectors out of line** (§4), if the churn with purges still
-   shows leaf pages dominating a commit's bytes.
+6. **Marked pages out of the header** (§4). Built, over a handle that keeps its pages across
+   versions: a commit object is 30 % smaller on the churn. **Vectors out of line** are left, for
+   deletes that scatter rows over many objects, each commit then changing many vectors.
 
 Each step is measured the way the churn measures the dataset today, from the first commit to the
 ten-thousandth ([13-dataset.md](13-dataset.md) §15): a step that does not keep every cost flat is

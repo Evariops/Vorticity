@@ -93,9 +93,8 @@ public sealed record DatasetOptions
     /// <summary>
     /// The most bytes an object's marks take in its entry, past which a delete rewrites the object
     /// instead; 1 KiB by default, a few hundred runs. The entry lives in a leaf page, which every
-    /// commit that marks a row of any object on it writes again, and which a small dataset's header
-    /// carries in every commit: the bound trades the rewrites it saves against the bytes it adds to
-    /// each of those commits.
+    /// commit that marks a row of any object on it writes again: the bound trades the rewrites it
+    /// saves against the bytes it adds to each of those commits.
     /// </summary>
     internal int MarkedVectorBytes { get; init; } = 1 << 10;
 

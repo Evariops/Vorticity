@@ -38,7 +38,7 @@ Like everything in `Vorticity.Dataset`, they are experimental: see [datasets.md]
 Level 0 is where appends land, and it holds eight objects before compaction has work to do. `Lag`
 is how far past that ceiling it is: here ten objects, a lag of 2, and every lookup by key touches
 the two extra objects until compaction catches up. Ask before doing: `PlanCompactionAsync` reads
-the top page of each level, which the version's header carries and the handle already holds, and
+the top page of each level, which the version's header carries or the handle already holds, and
 descends from it only to the objects a job would take: no request at all here, and two over 125 000
 objects. `HasWork`
 is the question; `Job` is the one job it would run: the levels it moves between, what triggered
