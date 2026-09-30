@@ -29,6 +29,13 @@ internal sealed record CommitOptions
     public DateTimeOffset KnownAt { get; init; } = DateTimeOffset.MinValue;
 
     /// <summary>
+    /// The commit object of <see cref="Known"/> as the writer holds it, or null. While
+    /// <see cref="KnownAt"/> is within <see cref="TrustSpan"/>, the first attempt builds on it without
+    /// asking the store anything: the conditional creation says whether another writer went first.
+    /// </summary>
+    public CommitObject? Held { get; init; }
+
+    /// <summary>
     /// How long after <see cref="KnownAt"/> every version after <see cref="Known"/> is surely still in
     /// the store: half the retention window, since vacuum takes a commit only a window after the next
     /// one superseded it. Past it the commits are listed. Zero never trusts.
@@ -102,17 +109,27 @@ internal static class DatasetCommitter
 
         ulong known = options.Known;
         DateTimeOffset knownAt = options.KnownAt;
+        CommitObject? held = options.Held is { } given && given.Header.Version == known ? given : null;
         for (int attempt = 1; attempt <= options.MaxAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            // 1. The latest version: asked for from the one the writer last saw, which a lost
-            // attempt moves up to the one it built on, and which was the latest when it was asked.
+            // 1. The latest version: the one the writer holds, taken as it is while every version
+            // after it is surely in the store, since the creation tells a writer that another went
+            // first; otherwise asked for from the one the writer last saw, which a lost attempt moves
+            // past the one it built on, and which was the latest when it was asked.
             DateTimeOffset asked = options.TimeProvider.GetUtcNow();
             bool trusted = known > 0 && asked - knownAt < options.TrustSpan;
-            (ulong parent, CommitObject? commit) = await LatestAsync(store, known, trusted, cancellationToken).ConfigureAwait(false);
+            bool outright = trusted && held is not null;
+            (ulong parent, CommitObject? commit) = outright
+                ? (known, held)
+                : await LatestAsync(store, known, trusted, held, cancellationToken).ConfigureAwait(false);
+            if (!outright)
+            {
+                knownAt = asked;
+            }
+
             known = parent;
-            knownAt = asked;
             CommitPageSource pages = new CommitPageSource(store, options.PageCache);
             DatasetLevels levels = DatasetLevels.Empty;
             CommitHeader template = options.Template ?? new CommitHeader { Version = 1 };
@@ -166,10 +183,19 @@ internal static class DatasetCommitter
             }
 
             // A batch in which nothing applied would publish a copy of its parent under a new
-            // number; it publishes nothing, and names the version it was decided against.
+            // number; it publishes nothing, and names the version it was decided against, which has
+            // to be the latest: one taken as held is asked for first, and the batch decided again.
             if (operations.Count > 0 && commit is not null && !outcomes.Contains(OperationOutcome.Applied))
             {
-                return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages, commit, asked);
+                if (outright)
+                {
+                    // The same attempt again, on the version the store says is the latest.
+                    held = null;
+                    attempt--;
+                    continue;
+                }
+
+                return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages, commit, knownAt);
             }
 
             (IReadOnlyList<CommitLevel> recorded, IReadOnlyList<PagesStart> starts) = LevelsOf(next, builder, pages);
@@ -196,6 +222,10 @@ internal static class DatasetCommitter
                 pages.Placed(bytes);
                 return new CommitResult(version, key, next, outcomes, attempt, pages, CommitObject.Placed(header, bytes), put);
             }
+
+            // Another writer created this number: the search for the latest starts past it.
+            known = version;
+            held = null;
         }
 
         throw new ObjectStoreException(
@@ -212,11 +242,26 @@ internal static class DatasetCommitter
     /// ones after it, so above a version learned too long ago a missing one does not end the run.
     /// </summary>
     public static async ValueTask<(ulong Version, CommitObject? Commit)> LatestAsync(
-        IObjectStore store, ulong known, bool trusted, CancellationToken cancellationToken)
+        IObjectStore store, ulong known, bool trusted, CancellationToken cancellationToken) =>
+        await LatestAsync(store, known, trusted, null, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// As <see cref="LatestAsync(IObjectStore, ulong, bool, CancellationToken)"/>, handing back
+    /// <paramref name="held"/>, the caller's commit object of <paramref name="known"/>, when nothing
+    /// follows it rather than reading it again.
+    /// </summary>
+    public static async ValueTask<(ulong Version, CommitObject? Commit)> LatestAsync(
+        IObjectStore store, ulong known, bool trusted, CommitObject? held, CancellationToken cancellationToken)
     {
+        held = held is not null && held.Header.Version == known ? held : null;
         if (known > 0 && trusted)
         {
             ulong newest = await NewestFromAsync(store, known, cancellationToken).ConfigureAwait(false);
+            if (newest == known && held is not null)
+            {
+                return (known, held);
+            }
+
             try
             {
                 return (newest, await CommitObject.OpenAsync(store, CommitKey.For(newest), cancellationToken).ConfigureAwait(false));
@@ -231,7 +276,13 @@ internal static class DatasetCommitter
             }
         }
 
-        return await LatestAsync(store, cancellationToken).ConfigureAwait(false);
+        ulong listed = await NewestVersionAsync(store, cancellationToken).ConfigureAwait(false);
+        if (listed == known && held is not null)
+        {
+            return (known, held);
+        }
+
+        return listed == 0 ? (0, null) : (listed, await OpenAsync(store, listed, cancellationToken).ConfigureAwait(false));
     }
 
     /// <summary>
@@ -281,14 +332,15 @@ internal static class DatasetCommitter
         IObjectStore store, CancellationToken cancellationToken)
     {
         ulong version = await NewestVersionAsync(store, cancellationToken).ConfigureAwait(false);
-        if (version == 0)
-        {
-            return (0, null);
-        }
+        return version == 0 ? (0, null) : (version, await OpenAsync(store, version, cancellationToken).ConfigureAwait(false));
+    }
 
+    /// <summary>The commit object of <paramref name="version"/>, a torn one reported against it.</summary>
+    private static async ValueTask<CommitObject> OpenAsync(IObjectStore store, ulong version, CancellationToken cancellationToken)
+    {
         try
         {
-            return (version, await CommitObject.OpenAsync(store, CommitKey.For(version), cancellationToken).ConfigureAwait(false));
+            return await CommitObject.OpenAsync(store, CommitKey.For(version), cancellationToken).ConfigureAwait(false);
         }
         catch (CommitFormatException torn)
         {

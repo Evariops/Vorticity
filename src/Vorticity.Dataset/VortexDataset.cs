@@ -163,7 +163,7 @@ public sealed class VortexDataset : IAsyncDisposable
         DatasetSnapshot held = Snapshot;
         DateTimeOffset asked = _options.TimeProvider.GetUtcNow();
         (ulong version, CommitObject? commit) = await DatasetCommitter
-            .LatestAsync(_store, held.Version, asked - held.KnownAt < TrustSpan(held), cancellationToken).ConfigureAwait(false);
+            .LatestAsync(_store, held.Version, asked - held.KnownAt < TrustSpan(held), held.Commit, cancellationToken).ConfigureAwait(false);
         if (commit is not null)
         {
             MoveTo(version, commit, asked);
@@ -727,6 +727,7 @@ public sealed class VortexDataset : IAsyncDisposable
                     Known = held.Version,
                     KnownAt = held.KnownAt,
                     TrustSpan = TrustSpan(held),
+                    Held = held.Commit,
                     PageCache = _pageCache,
                 },
                 cancellationToken)

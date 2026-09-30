@@ -386,10 +386,13 @@ then creates `commit/<inverted N+1>` — header, pages and fragments in one obje
 **put-if-absent**, streamed from a pipe whose length is given up front, so the store chooses between
 one request and a multipart upload. Put-if-absent linearizes commits: no lease, no lock, no external
 service. Uncontended, a commit is **three dependent requests**: the listing, the read of `N`'s header,
-the creation; the data objects cost the commit nothing more. A handle commits from the version it
-holds, probing for the one after it instead of listing, and then reads the version it created as it
-wrote it: nothing is read back, and a handle whose commit found nothing to change reads the version
-that commit was decided on.
+the creation; the data objects cost the commit nothing more. A handle that knows its version was
+the latest less than half a retention window ago (§8.3) builds on it as it holds it, so its commit is
+**one request**, the creation: a refusal is what tells it another writer went first, and it then asks
+for the versions after the number it lost and rebases. Past that half window it lists first. Either
+way it reads the version it created as it wrote it, with nothing read back. A handle whose commit
+found nothing to change reads the version that commit was decided on, which is asked for first when
+the batch was decided on the version held, since a no-op names the latest version.
 
 ### 8.2 Rebase by re-applying operations
 
@@ -677,8 +680,8 @@ by widening a number or making it nullable (§13).
 - **The churn** (`bench/Vorticity.Benchmarks.Churn`): ten million rows, then thirty thousand commits of
   ten rows — appends, updates and deletes at random keys — with compaction drained and vacuum run
   between them. Every cost stays flat, or levels off once the marks have filled: an append 0.6 to
-  0.8 ms, an update 1.9 to 3.0 ms, a delete 0.9 to 1.7 ms, seven to eight requests a commit,
-  compaction about a millisecond a commit, a commit's bytes 12 KiB and then 29 to 57 KiB; a point
+  0.8 ms, an update 1.9 to 3.0 ms, a delete 0.9 to 1.7 ms, five to six requests an operation with
+  its commit's one among them, compaction about a millisecond a commit, a commit's bytes 12 KiB and then 29 to 57 KiB; a point
   lookup 0.8 to 1.2 ms in three to four requests, a seek and ten steps either way 0.3 to 0.8 ms, a
   hundred rows by position 0.2 to 0.4 ms, a scan of every row 28 ms; the heap between 64 and 87 MiB. Rewriting instead of marking, an update takes 19 ms and
   a commit writes 3.3 MiB. Before the level-0 destination, the cap on an object and the chunked buffer,

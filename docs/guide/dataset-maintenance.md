@@ -50,7 +50,7 @@ CompactionResult? compacted = await dataset.CompactAsync();
 
 ```
 compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128862 bytes in and 79036 out, 50000 rows
-  cost: 24 requests (11 get, 11 head, 2 put, 0 delete, 0 list), 24 dependent steps, 130770 bytes read, 79429 written
+  cost: 22 requests (10 get, 10 head, 2 put, 0 delete, 0 list), 22 dependent steps, 128862 bytes read, 79429 written
 now: 1 objects, lag 0; again: nothing to do
 ```
 
@@ -139,7 +139,7 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 | | requests | what they are |
 |---|---|---|
 | `PlanCompactionAsync` | 0 | the header the handle holds |
-| `CompactAsync` | 24 | every input object read, one object written, one commit |
+| `CompactAsync` | 22 | every input object read, one object written, one commit |
 | `VerifyAsync` | 9 | every object hashed, every page read |
 | `VerifyAsync(since)` | 12 | what the earlier version does not share |
 | `VacuumAsync` | 28 to 30 | a listing, a head per commit object, the retained trees, the deletes in batches |

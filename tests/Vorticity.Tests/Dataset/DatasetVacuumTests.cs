@@ -105,7 +105,7 @@ public sealed class DatasetVacuumTests
         await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
         await dataset.AppendAsync(Of(types, schema, 0, PerObject), ct);
-        await using VortexDataset stale = await VortexDataset.OpenAsync(store, cancellationToken: ct);
+        await using VortexDataset stale = await VortexDataset.OpenAsync(store, Options() with { TimeProvider = clock }, ct);
         ulong staleVersion = stale.Version;
         for (int i = 1; i < Objects; i++)
         {
@@ -113,7 +113,8 @@ public sealed class DatasetVacuumTests
         }
 
         // Two hours on, the sweep takes every commit but the latest, the stale handle's with them,
-        // and the versions right after it: nothing is left above it to be asked for.
+        // and the versions right after it: nothing is left above it to be asked for, and the handle,
+        // on the store's clock, knows its version too old to take the gap for the end.
         clock.Advance(TimeSpan.FromHours(2));
         VacuumResult swept = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
         Assert.Contains(CommitKey.For(staleVersion), swept.Deleted);
