@@ -29,7 +29,23 @@ internal static class CanonicalFill
     /// </exception>
     internal static int BuildZeroed(
         ArrayDecodeContext context, DType dtype, int length, Validity validity) =>
-        BuildZeroed(context, dtype, length, validity, depth: 1);
+        BuildZeroed(context.Canonical, context, dtype, length, validity, depth: 1);
+
+    /// <summary>
+    /// <see cref="BuildZeroed(ArrayDecodeContext, DType, int, Validity)"/> in an arena outside any
+    /// decode: a column a reader adds to a batch it already holds, whose rows were charged against
+    /// the ceiling when they were decoded.
+    /// </summary>
+    /// <param name="arena">The arena that receives the node.</param>
+    /// <param name="dtype">The dtype to build.</param>
+    /// <param name="length">Row count.</param>
+    /// <param name="validity">The validity the result carries.</param>
+    /// <returns>The new canonical node's index.</returns>
+    /// <exception cref="VortexFormatException">
+    /// <paramref name="dtype"/> is a Map, Union or Variant, which have no zeroed canonical form.
+    /// </exception>
+    internal static int BuildZeroed(CanonicalArena arena, DType dtype, int length, Validity validity) =>
+        BuildZeroed(arena, null, dtype, length, validity, depth: 1);
 
     /// <summary>Whether <see cref="BuildZeroed(ArrayDecodeContext, DType, int, Validity)"/> can build <paramref name="dtype"/>.</summary>
     /// <param name="dtype">The dtype.</param>
@@ -72,11 +88,10 @@ internal static class CanonicalFill
     }
 
     private static int BuildZeroed(
-        ArrayDecodeContext context, DType dtype, int length, Validity validity, int depth)
+        CanonicalArena arena, ArrayDecodeContext? context, DType dtype, int length, Validity validity, int depth)
     {
         VortexLimits.CheckDepth(depth, VortexLimits.MaxDTypeDepth, "Canonical fill");
 
-        CanonicalArena arena = context.Canonical;
         if (dtype.IsDefault)
         {
             throw new VortexFormatException("A canonical array cannot be built without a dtype.");
@@ -89,8 +104,8 @@ internal static class CanonicalFill
 
             case DTypeKind.Bool:
             {
-                VortexBuffer bits = CanonicalSupport.Allocate(
-                    context, CanonicalSupport.BitmapByteCount(length), Align);
+                VortexBuffer bits = Allocate(
+                    arena, context, CanonicalSupport.BitmapByteCount(length), Align);
                 return arena.AddBool(dtype, length, validity, bits, 0);
             }
 
@@ -100,7 +115,7 @@ internal static class CanonicalFill
                 int bytes = ArrayDecodeContext.CheckedMultiply(length, ptype.ByteWidth(), "values");
                 return arena.AddPrimitive(
                     dtype, length, validity, ptype,
-                    CanonicalSupport.Allocate(context, bytes, Align));
+                    Allocate(arena, context, bytes, Align));
             }
 
             case DTypeKind.Decimal:
@@ -110,7 +125,7 @@ internal static class CanonicalFill
                     length, DecimalStorage.ByteWidth(storage), "decimal values");
                 return arena.AddDecimal(
                     dtype, length, validity, storage, dtype.Precision, dtype.Scale,
-                    CanonicalSupport.Allocate(context, bytes, Align));
+                    Allocate(arena, context, bytes, Align));
             }
 
             case DTypeKind.Utf8:
@@ -119,7 +134,7 @@ internal static class CanonicalFill
                 // A zeroed view is the empty view, so no data buffer is needed at all.
                 int bytes = ArrayDecodeContext.CheckedMultiply(
                     length, CanonicalSupport.ViewSize, "views");
-                VortexBuffer views = CanonicalSupport.Allocate(context, bytes, CanonicalSupport.ViewSize);
+                VortexBuffer views = Allocate(arena, context, bytes, CanonicalSupport.ViewSize);
                 return arena.AddVarBinView(dtype, length, validity, views, default);
             }
 
@@ -127,12 +142,12 @@ internal static class CanonicalFill
             {
                 DType element = dtype.ElementType;
                 int elements = BuildZeroed(
-                    context, element, 0, Validity.FromNullability(element.Nullability), depth + 1);
+                    arena, context, element, 0, Validity.FromNullability(element.Nullability), depth + 1);
                 int bytes = ArrayDecodeContext.CheckedMultiply(length, 8, "list offsets");
                 return arena.AddListView(
                     dtype, length, validity, elements,
-                    CanonicalSupport.Allocate(context, bytes, Align), PType.U64,
-                    CanonicalSupport.Allocate(context, bytes, Align), PType.U64);
+                    Allocate(arena, context, bytes, Align), PType.U64,
+                    Allocate(arena, context, bytes, Align), PType.U64);
             }
 
             case DTypeKind.FixedSizeList:
@@ -140,17 +155,17 @@ internal static class CanonicalFill
                 DType element = dtype.ElementType;
                 int count = FixedSizeListDecoder.ElementCount(length, dtype.FixedSize);
                 int elements = BuildZeroed(
-                    context, element, count, Validity.FromNullability(element.Nullability), depth + 1);
+                    arena, context, element, count, Validity.FromNullability(element.Nullability), depth + 1);
                 return arena.AddFixedSizeList(dtype, length, validity, elements, dtype.FixedSize);
             }
 
             case DTypeKind.Struct:
-                return BuildZeroedStruct(context, dtype, length, validity, depth);
+                return BuildZeroedStruct(arena, context, dtype, length, validity, depth);
 
             case DTypeKind.Extension:
             {
                 DType storage = dtype.StorageType;
-                int child = BuildZeroed(context, storage, length, validity, depth + 1);
+                int child = BuildZeroed(arena, context, storage, length, validity, depth + 1);
                 return arena.AddExtension(dtype, length, child);
             }
 
@@ -160,8 +175,12 @@ internal static class CanonicalFill
         }
     }
 
+    /// <summary>Zeroed bytes of the arena, charged against the decode's ceiling when there is a decode.</summary>
+    private static VortexBuffer Allocate(CanonicalArena arena, ArrayDecodeContext? context, int byteLength, int alignment) =>
+        context is null ? arena.Allocate(byteLength, alignment) : CanonicalSupport.Allocate(context, byteLength, alignment);
+
     private static int BuildZeroedStruct(
-        ArrayDecodeContext context, DType dtype, int length, Validity validity, int depth)
+        CanonicalArena arena, ArrayDecodeContext? context, DType dtype, int length, Validity validity, int depth)
     {
         int fieldCount = dtype.FieldCount;
         Span<int> stack = stackalloc int[StackFields];
@@ -173,10 +192,10 @@ internal static class CanonicalFill
             {
                 DType field = dtype.GetField(i);
                 fields[i] = BuildZeroed(
-                    context, field, length, Validity.FromNullability(field.Nullability), depth + 1);
+                    arena, context, field, length, Validity.FromNullability(field.Nullability), depth + 1);
             }
 
-            return context.Canonical.AddStruct(dtype, length, validity, fields);
+            return arena.AddStruct(dtype, length, validity, fields);
         }
         finally
         {

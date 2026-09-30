@@ -142,10 +142,11 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         VortexDataset dataset, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(dataset);
-        ClusteringKey key = dataset.Key ?? throw new InvalidOperationException(
+        DatasetSnapshot version = dataset.Snapshot;
+        ClusteringKey key = version.Schema.Key ?? throw new InvalidOperationException(
             "A key-ordered walk needs a clustering key; this dataset is ordered by row position, " +
             "whose order a scan already delivers.");
-        return OpenAsync(dataset.Snapshot, key, bounded: true, distinct: false, indexes: true, cancellationToken);
+        return OpenAsync(version, key, bounded: true, distinct: false, indexes: true, cancellationToken);
     }
 
     /// <summary>
@@ -156,8 +157,9 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     internal static ValueTask<DatasetKeyCursor> OpenAsync(
         VortexDataset dataset, DatasetSnapshot version, string path, bool distinct, bool indexes, CancellationToken cancellationToken)
     {
-        bool clustering = dataset.Key is { IsComposite: false } key && string.Equals(key.Paths[0], path, StringComparison.Ordinal);
-        ClusteringKey walked = clustering ? dataset.Key! : ClusteringKey.For([path], dataset.DType)!;
+        ClusteringKey? key = version.Schema.Key;
+        bool clustering = key is { IsComposite: false } && string.Equals(key.Paths[0], path, StringComparison.Ordinal);
+        ClusteringKey walked = clustering ? key! : ClusteringKey.For([path], version.Schema.DType)!;
         return OpenAsync(version, walked, clustering, distinct, indexes, cancellationToken);
     }
 
@@ -177,13 +179,26 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         await foreach (PositionedObject held in version
             .WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
         {
-            KeyPlan plan;
+            KeyPlan? plan = null;
             ObjectLease lease = await version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
-                KeyCursorBuilder keys = lease.File.Keys(path);
-                plan = await (indexes ? keys : keys.WithSource(KeySourceKind.SortedColumn))
-                    .ExplainAsync(cancellationToken).ConfigureAwait(false);
+                // An object of an earlier schema holds the column under the name it had then, and
+                // one that lacks the column holds only nulls, which are no entries.
+                string? named = version.Schema.ColumnsOf(lease.File.DType, held.Entry.Key) is { } columns
+                    ? columns.SourcePath(path)
+                    : path;
+                if (named is not null)
+                {
+                    KeyCursorBuilder keys = lease.File.Keys(named);
+                    plan = await (indexes ? keys : keys.WithSource(KeySourceKind.SortedColumn))
+                        .ExplainAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            if (plan is null)
+            {
+                continue;
             }
 
             foreach (KeySourceRejection rejection in plan.Rejected)
@@ -351,8 +366,8 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         _next[level]++;
         Slot joined = _slots[slot];
         joined.Walked = true;
-        KeyCursor cursor = await CursorOfAsync(joined, cancellationToken).ConfigureAwait(false);
-        long count = cursor.EntryCount ?? 0;
+        KeyCursor? cursor = await CursorOfAsync(joined, cancellationToken).ConfigureAwait(false);
+        long count = cursor?.EntryCount ?? 0;
         _windows![slot].Count = count;
         return count;
     }
@@ -614,8 +629,10 @@ internal sealed class DatasetKeyCursor : IKeyWalker
                 continue;
             }
 
-            KeyCursor cursor = await CursorOfAsync(slot, cancellationToken).ConfigureAwait(false);
-            rank += await cursor.RankAsync(key, cancellationToken).ConfigureAwait(false);
+            if (await CursorOfAsync(slot, cancellationToken).ConfigureAwait(false) is { } cursor)
+            {
+                rank += await cursor.RankAsync(key, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         return rank;
@@ -901,8 +918,8 @@ internal sealed class DatasetKeyCursor : IKeyWalker
             _next[level] += _direction;
             Slot slot = _slots[next];
             slot.Walked = true;
-            KeyCursor cursor = await CursorOfAsync(slot, cancellationToken).ConfigureAwait(false);
-            slot.Live = await PositionAsync(next, cursor, cancellationToken).ConfigureAwait(false);
+            slot.Live = await CursorOfAsync(slot, cancellationToken).ConfigureAwait(false) is { } cursor
+                && await PositionAsync(next, cursor, cancellationToken).ConfigureAwait(false);
             if (slot.Live)
             {
                 Push(next);
@@ -1129,18 +1146,40 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         _heap[at] = slot;
     }
 
-    /// <summary>The object's cursor, opened on first use and kept for the life of the walk. An
-    /// object with no key source is refused rather than skipped, since skipping it would silently
-    /// leave its rows out of the walk.</summary>
-    private async ValueTask<KeyCursor> CursorOfAsync(Slot slot, CancellationToken cancellationToken)
+    /// <summary>
+    /// The object's cursor, opened on first use and kept for the life of the walk; null for an object
+    /// of an earlier schema that lacks the column, whose rows are all null there and so no entries.
+    /// An object with no key source is refused rather than skipped, since skipping it would
+    /// silently leave its rows out of the walk.
+    /// </summary>
+    private async ValueTask<KeyCursor?> CursorOfAsync(Slot slot, CancellationToken cancellationToken)
     {
         if (slot.Cursor is { } open)
         {
             return open;
         }
 
+        if (slot.Empty)
+        {
+            return null;
+        }
+
         slot.Lease = await _version.RentAsync(slot.Entry, cancellationToken).ConfigureAwait(false);
-        slot.Cursor = await _key.TryOpenAsync(slot.Lease.File, _indexes, cancellationToken).ConfigureAwait(false)
+        IReadOnlyList<string> paths = _key.Paths;
+        if (_version.Schema.ColumnsOf(slot.Lease.File.DType, slot.Entry.Key) is { } columns)
+        {
+            if (columns.SourcePaths(paths) is not { } named)
+            {
+                slot.Empty = true;
+                await slot.Lease.DisposeAsync().ConfigureAwait(false);
+                slot.Lease = null;
+                return null;
+            }
+
+            paths = named;
+        }
+
+        slot.Cursor = await _key.TryOpenAsync(slot.Lease.File, paths, _indexes, cancellationToken).ConfigureAwait(false)
             ?? throw new VortexUnsupportedException(
                 slot.Entry.Key,
                 ComponentKind.Index,
@@ -1188,6 +1227,9 @@ internal sealed class DatasetKeyCursor : IKeyWalker
 
         /// <summary>It was positioned by the current walk, rather than only opened to rank a key.</summary>
         internal bool Walked { get; set; }
+
+        /// <summary>The object lacks the column, having been written under an earlier schema: it holds no entry.</summary>
+        internal bool Empty { get; set; }
     }
 
     /// <summary>An object's part in a selection: the window of its ranks still candidates.</summary>

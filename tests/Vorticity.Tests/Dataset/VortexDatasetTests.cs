@@ -139,15 +139,20 @@ public sealed class VortexDatasetTests
     [Fact]
     public async Task AFileOfAnotherSchemaIsRefusedAtImportAndNothingIsCommitted()
     {
-        // An object with another schema is refused at the import that would add it, not at the
-        // first scan that would trip over it. A nullable key is another schema.
+        // An object whose columns do not read as the dataset's is refused at the import that would
+        // add it, not at the first scan that would trip over it. A column the dataset holds as not
+        // nullable and the file lacks has no value to read in any of its rows.
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
         DType other = types.Struct(
-            ["key", "measure"],
-            [types.Primitive(PType.I64, Nullability.Nullable), types.Primitive(PType.F64, Nullability.NonNullable)],
+            ["key", "measure", "station"],
+            [
+                types.Primitive(PType.I64, Nullability.NonNullable),
+                types.Primitive(PType.F64, Nullability.NonNullable),
+                types.Primitive(PType.I32, Nullability.NonNullable),
+            ],
             Nullability.NonNullable);
 
         await using MemoryObjectStore store = new MemoryObjectStore();

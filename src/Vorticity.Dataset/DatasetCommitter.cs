@@ -105,8 +105,9 @@ internal static class DatasetCommitter
             // it and its entry names it there; a lost attempt throws both away.
             ulong version = parent + 1;
             CommitObjectBuilder builder = new CommitObjectBuilder(version);
+            SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired);
             (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes, Relocation repack) =
-                await ApplyAsync(levels, operations, pages, builder, cancellationToken).ConfigureAwait(false);
+                await ApplyAsync(levels, operations, pages, builder, schema, cancellationToken).ConfigureAwait(false);
 
             pages.Writing(builder, version);
             DatasetLevels next = levels;
@@ -155,6 +156,8 @@ internal static class DatasetCommitter
                 Seed = options.Seed,
                 CreatedAtUnixMilliseconds = options.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
                 Levels = LevelsOf(next, builder, pages),
+                Schema = schema.Schema,
+                Retired = schema.Retired,
             };
 
             // 3. One conditional creation.
@@ -387,6 +390,7 @@ internal static class DatasetCommitter
             IReadOnlyList<DatasetOperation> operations,
             CommitPageSource pages,
             CommitObjectBuilder builder,
+            SchemaEdit schema,
             CancellationToken cancellationToken)
     {
         Relocation repack = new Relocation();
@@ -531,6 +535,28 @@ internal static class DatasetCommitter
                     break;
                 }
 
+                case DatasetOperation.ChangeSchema change:
+                {
+                    if (Same(schema.Schema, schema.Retired, change.To, change.Retired))
+                    {
+                        outcomes.Add(OperationOutcome.AlreadyThere);
+                    }
+                    else if (Same(schema.Schema, schema.Retired, change.From, schema.Retired) && change.From.Length > 0)
+                    {
+                        schema.Schema = change.To;
+                        schema.Retired = change.Retired;
+                        outcomes.Add(OperationOutcome.Applied);
+                    }
+                    else
+                    {
+                        // Another writer changed the schema first: what this change checked of the
+                        // columns was checked against a schema the dataset no longer has.
+                        outcomes.Add(OperationOutcome.Dropped);
+                    }
+
+                    break;
+                }
+
                 default:
                     throw new ArgumentException(
                         $"An operation of type {operation.GetType().Name} is not one a commit knows.", nameof(operations));
@@ -584,6 +610,33 @@ internal static class DatasetCommitter
         // another, so the pending map is keyed by both: the same key at two levels is two objects.
         static string Named(int level, ReadOnlyMemory<byte> key) =>
             level.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + Convert.ToHexString(key.Span);
+    }
+
+    /// <summary>Whether two schemas and their retired names are the same.</summary>
+    private static bool Same(ReadOnlyMemory<byte> schema, IReadOnlyList<RetiredColumn> retired, ReadOnlyMemory<byte> other, IReadOnlyList<RetiredColumn> otherRetired)
+    {
+        if (!schema.Span.SequenceEqual(other.Span) || retired.Count != otherRetired.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < retired.Count; i++)
+        {
+            if (retired[i] != otherRetired[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>The schema a commit leaves, as its operations change it.</summary>
+    private sealed class SchemaEdit(ReadOnlyMemory<byte> schema, IReadOnlyList<RetiredColumn> retired)
+    {
+        internal ReadOnlyMemory<byte> Schema { get; set; } = schema;
+
+        internal IReadOnlyList<RetiredColumn> Retired { get; set; } = retired;
     }
 
     private sealed class Relocation

@@ -10,6 +10,7 @@ using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Layouts;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
@@ -79,17 +80,17 @@ internal static class DatasetRowChanges
     /// </summary>
     /// <param name="dataset">The dataset.</param>
     /// <param name="filter">The rows to take, checked against the schema; null for all of them.</param>
-    /// <param name="start">Makes, for one attempt, the sink the taken rows go to, given the position of a row that follows every other; null for a delete.</param>
+    /// <param name="start">Makes, for one attempt, the sink the taken rows go to, given the schema they are read as and the position of a row that follows every other; null for a delete.</param>
     /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
     /// <exception cref="ObjectStoreException">Concurrent commits took an object first on every attempt.</exception>
     internal static async ValueTask<RowChangeResult> RunAsync(
-        VortexDataset dataset, VortexExpr? filter, Func<long, ChangedRows>? start, CancellationToken cancellationToken)
+        VortexDataset dataset, VortexExpr? filter, Func<DatasetSchema, long, ChangedRows>? start, CancellationToken cancellationToken)
     {
         int attempts = Math.Max(dataset.Options.MaxAttempts, 1);
         for (int attempt = 1; attempt <= attempts; attempt++)
         {
             DatasetSnapshot version = dataset.Snapshot;
-            ChangedRows? changed = start?.Invoke(await dataset.EndAsync(cancellationToken).ConfigureAwait(false));
+            ChangedRows? changed = start?.Invoke(version.Schema, await dataset.EndAsync(cancellationToken).ConfigureAwait(false));
             List<(int Level, ReadOnlyMemory<byte> Key)> inputs = [];
             List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> outputs = [];
             long rows = 0;
@@ -183,18 +184,18 @@ internal static class DatasetRowChanges
         await using (lease.ConfigureAwait(false))
         {
             VortexFile file = lease.File;
-            long matched = filter is null
-                ? held.Entry.Rows
-                : await file.ScanBuilder().Where(filter).CountAsync(cancellationToken).ConfigureAwait(false);
+            ObjectColumns? columns = version.Schema.ColumnsOf(file.DType, held.Entry.Key);
+            long matched = await CountAsync(file, held, columns, filter, cancellationToken).ConfigureAwait(false);
             if (matched == 0 || (matched == held.Entry.Rows && changed is null))
             {
                 return (matched, null);
             }
 
-            ObjectDraft? draft = matched < held.Entry.Rows ? dataset.StartObject() : null;
+            // Written in the version's schema, which an object of an earlier one is read as.
+            ObjectDraft? draft = matched < held.Entry.Rows ? dataset.StartObjectUnder(version.Schema) : null;
             try
             {
-                long kept = await SplitAsync(file, filter, draft?.Writer, changed, cancellationToken).ConfigureAwait(false);
+                long kept = await SplitAsync(file, columns, filter, draft?.Writer, changed, cancellationToken).ConfigureAwait(false);
                 if (draft is null)
                 {
                     return (matched, null);
@@ -238,14 +239,19 @@ internal static class DatasetRowChanges
     /// </summary>
     /// <returns>The rows written to <paramref name="writer"/>.</returns>
     private static async ValueTask<long> SplitAsync(
-        VortexFile file, VortexExpr? filter, VortexFileWriter? writer, ChangedRows? changed, CancellationToken cancellationToken)
+        VortexFile file,
+        ObjectColumns? columns,
+        VortexExpr? filter,
+        VortexFileWriter? writer,
+        ChangedRows? changed,
+        CancellationToken cancellationToken)
     {
         FilterEvaluator? evaluator = filter is null ? null : new FilterEvaluator(filter);
         byte[] states = [];
         long kept = 0;
         try
         {
-            await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
+            await foreach (RecordBatch batch in RowsOfAsync(file, columns, cancellationToken)
                 .WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 int rows = batch.RowCount;
@@ -303,6 +309,59 @@ internal static class DatasetRowChanges
     }
 
     /// <summary>
+    /// How many of an object's rows the filter takes, every one when there is none: the object's
+    /// own count, answered from its statistics when they settle it, or for an object of an earlier
+    /// schema the count of what the filter comes to over its columns.
+    /// </summary>
+    private static async ValueTask<long> CountAsync(
+        VortexFile file, PositionedObject held, ObjectColumns? columns, VortexExpr? filter, CancellationToken cancellationToken)
+    {
+        if (filter is null)
+        {
+            return held.Entry.Rows;
+        }
+
+        if (columns is null)
+        {
+            return await file.ScanBuilder().Where(filter).CountAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        ObjectRead read = columns.Read(filter, FieldMask.Empty);
+        switch (read.Fate)
+        {
+            case FilterFate.None:
+                return 0;
+            case FilterFate.Every:
+                return held.Entry.Rows;
+            case FilterFate.Pushed:
+                return await file.ScanBuilder().Where(read.Pushed!).CountAsync(cancellationToken).ConfigureAwait(false);
+            default:
+                long rows = 0;
+                ScanBuilder scan = file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false);
+                await foreach (RecordBatch batch in ObjectColumns.ReshapeAsync(scan.ExecuteAsync(), read.Shape, read.Evaluated, 0, compact: false, cancellationToken)
+                    .ConfigureAwait(false))
+                {
+                    rows += batch.SelectedRows;
+                }
+
+                return rows;
+        }
+    }
+
+    /// <summary>An object's rows, whole and in order, as the version's columns.</summary>
+    private static IAsyncEnumerable<RecordBatch> RowsOfAsync(VortexFile file, ObjectColumns? columns, CancellationToken cancellationToken)
+    {
+        if (columns is null)
+        {
+            return file.ScanBuilder().ExecuteAsync();
+        }
+
+        ObjectRead read = columns.Read(null, FieldMask.All);
+        ScanBuilder scan = file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false);
+        return ObjectColumns.ReshapeAsync(scan.ExecuteAsync(), read.Shape, null, 0, compact: true, cancellationToken);
+    }
+
+    /// <summary>
     /// The rows whose state is <see cref="Trilean.True"/>, or with <paramref name="matching"/> false
     /// the others, as selection words in the batch's arena, and how many there are.
     /// </summary>
@@ -340,6 +399,7 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
     where TRecord : IVortexRecord<TRecord>
 {
     private readonly VortexDataset _dataset;
+    private readonly DatasetSchema _schema;
     private readonly Func<TRecord, TRecord> _update;
     private readonly RecordBinding _binding;
     private readonly long _target;
@@ -350,14 +410,15 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
     private long _firstRow;
 
     /// <param name="dataset">The dataset the objects are written for.</param>
+    /// <param name="schema">The schema the rows are read as and written in.</param>
     /// <param name="update">The change, applied to every row once.</param>
-    /// <param name="binding">The record bound to the dataset's schema.</param>
     /// <param name="firstRow">Where the first object's rows go when the dataset has no clustering key: after every other row.</param>
-    internal ChangedRecords(VortexDataset dataset, Func<TRecord, TRecord> update, RecordBinding binding, long firstRow)
+    internal ChangedRecords(VortexDataset dataset, DatasetSchema schema, Func<TRecord, TRecord> update, long firstRow)
     {
         _dataset = dataset;
+        _schema = schema;
         _update = update;
-        _binding = binding;
+        _binding = RecordBinding.For<TRecord>(schema.Columns, dataset.Session.Options.Extensions);
         _firstRow = firstRow;
         long levelOne = dataset.Compaction.LevelTargetBytes > 0
             ? dataset.Compaction.LevelTargetBytes
@@ -373,7 +434,7 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
             _rows[i] = _update(_rows[i]);
         }
 
-        _draft ??= _dataset.StartObject();
+        _draft ??= _dataset.StartObjectUnder(_schema);
         await _draft.Writer.WriteAsync<TRecord>(_rows.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
         _draftRows += count;
         if (_draft.Sink.Position >= _target)

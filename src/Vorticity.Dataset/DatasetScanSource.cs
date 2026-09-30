@@ -24,7 +24,7 @@ internal sealed class DatasetScanSource : ScanSource
         _version = version;
     }
 
-    internal override VortexSchema Schema => _dataset.Schema;
+    internal override VortexSchema Schema => _version.Schema.Columns;
 
     internal override VortexSession Session => _dataset.Session;
 

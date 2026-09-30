@@ -16,16 +16,20 @@ internal sealed class DatasetSnapshot
 {
     private readonly ObjectCache _objects;
 
-    internal DatasetSnapshot(CommitHeader header, CommitPageSource pages, ObjectCache objects)
+    internal DatasetSnapshot(CommitHeader header, CommitPageSource pages, ObjectCache objects, DatasetSchema? previous = null)
     {
         Header = header;
         Levels = DatasetLevels.Of(header);
         Pages = pages;
+        Schema = DatasetSchema.Of(header, previous);
         _objects = objects;
     }
 
     /// <summary>The version's header.</summary>
     internal CommitHeader Header { get; }
+
+    /// <summary>The version's schema, which every object it holds reads as.</summary>
+    internal DatasetSchema Schema { get; }
 
     /// <summary>The version.</summary>
     internal ulong Version => Header.Version;

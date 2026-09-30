@@ -39,7 +39,6 @@ public sealed class VortexDataset : IAsyncDisposable
 
     private readonly IObjectStore _store;
     private readonly DatasetOptions _options;
-    private readonly DTypeArena _types = new DTypeArena();
     private readonly ObjectCache _objects;
     private DatasetSnapshot _snapshot;
 
@@ -49,18 +48,16 @@ public sealed class VortexDataset : IAsyncDisposable
         _options = options;
         _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session);
         _snapshot = new DatasetSnapshot(header, pages, _objects);
-        DType = header.Schema.IsEmpty
-            ? default
-            : DTypeProtobuf.Read(header.Schema.Span, _types);
-        Schema = DType.IsDefault ? VortexSchema.Create([]) : VortexTypes.SchemaOf(DType);
-        Key = DType.IsDefault ? null : ClusteringKey.For(header.ClusteringKey, DType);
     }
 
     /// <summary>The version this handle reads; it moves only when this handle commits or refreshes.</summary>
     public ulong Version => Snapshot.Version;
 
-    /// <summary>The columns every object of the dataset holds.</summary>
-    public VortexSchema Schema { get; }
+    /// <summary>
+    /// The dataset's columns at the version this handle reads. An object written under an earlier
+    /// schema reads as this one: a column it lacks as nulls, a column renamed under its new name.
+    /// </summary>
+    public VortexSchema Schema => Snapshot.Schema.Columns;
 
     /// <summary>The session the dataset's scans run in.</summary>
     public VortexSession Session => _options.Session;
@@ -81,7 +78,7 @@ public sealed class VortexDataset : IAsyncDisposable
     public IReadOnlyList<string> ClusteringKeyPaths => Snapshot.Header.ClusteringKey;
 
     /// <summary>The dataset's schema as the engine holds it.</summary>
-    internal DType DType { get; }
+    internal DType DType => Snapshot.Schema.DType;
 
     /// <summary>The version this handle reads, whole: what a scan built now keeps reading.</summary>
     internal DatasetSnapshot Snapshot => Volatile.Read(ref _snapshot);
@@ -108,7 +105,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal RetentionSettings Retention => Snapshot.Header.Retention;
 
     /// <summary>Its clustering key, or null when it is ordered by arrival.</summary>
-    internal ClusteringKey? Key { get; }
+    internal ClusteringKey? Key => Snapshot.Schema.Key;
 
     /// <summary>
     /// Creates a dataset in a store that holds none, and returns a handle on its first version.
@@ -170,7 +167,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return Version;
         }
 
-        Volatile.Write(ref _snapshot, new DatasetSnapshot(commit.Header, PagesOf(_store, version, commit), _objects));
+        Volatile.Write(ref _snapshot, new DatasetSnapshot(commit.Header, PagesOf(_store, version, commit), _objects, Snapshot.Schema));
         return version;
     }
 
@@ -250,19 +247,25 @@ public sealed class VortexDataset : IAsyncDisposable
     /// options, plus the sorted run the clustering key requires.
     /// </summary>
     /// <returns>The draft; write its rows, then append it, or dispose it to abandon it.</returns>
-    public ObjectDraft StartObject()
+    public ObjectDraft StartObject() => StartObjectUnder(Snapshot.Schema);
+
+    /// <summary>
+    /// Starts a data object under <paramref name="schema"/>: what a rewrite uses, whose rows are read
+    /// as the schema of the version it read, whatever the handle has moved to since.
+    /// </summary>
+    internal ObjectDraft StartObjectUnder(DatasetSchema schema)
     {
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes);
         VortexWriteOptions write = _options.Write.WithIdentity(identity);
-        if (Key is { } clustering)
+        if (schema.Key is { } clustering)
         {
             // The mandatory sorted run on the clustering key, added to the caller's own policy.
             write = clustering.Applied(write);
         }
 
-        return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, DType, write));
+        return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write));
     }
 
     /// <summary>
@@ -328,7 +331,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// indexed apart from itself until a compaction rewrites it with one.
     /// </remarks>
     /// <exception cref="ObjectNotFoundException">The store holds no object at <paramref name="objectKey"/>.</exception>
-    /// <exception cref="ArgumentException">The file's schema is not the dataset's.</exception>
+    /// <exception cref="ArgumentException">The file's columns do not read as the dataset's: one it lacks is not nullable, one is of a type the dataset's does not widen, or one is no column the dataset has or had.</exception>
     public async ValueTask<ulong> ImportAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         ObjectKey.Check(objectKey);
@@ -345,14 +348,23 @@ public sealed class VortexDataset : IAsyncDisposable
                 .OpenAsync(source, ObjectCache.OpenOptions, cancellationToken).ConfigureAwait(false);
             await using (file.ConfigureAwait(false))
             {
-                // Every object has the dataset's schema; one with another is refused here rather
-                // than failing the first scan.
-                if (!DType.IsDefault && file.DType != DType)
+                // An object reads as the dataset's schema, or is refused here rather than failing
+                // the first scan: the same columns, or those of an earlier schema, each under a
+                // name the column has or had and of a type its values survive the dataset's in.
+                DatasetSchema schema = Snapshot.Schema;
+                if (!schema.DType.IsDefault && file.DType != schema.DType)
                 {
-                    throw new ArgumentException(
-                        $"The object '{objectKey}' has a schema other than the dataset's; a dataset " +
-                        "holds objects of one schema.",
-                        nameof(objectKey));
+                    try
+                    {
+                        _ = ObjectColumns.Map(schema, file.DType, objectKey, strict: true);
+                    }
+                    catch (VortexSchemaException refused)
+                    {
+                        throw new ArgumentException(
+                            $"The object '{objectKey}' does not read as the dataset's schema: {refused.Message}",
+                            nameof(objectKey),
+                            refused);
+                    }
                 }
 
                 entry = new ObjectEntry(
@@ -535,8 +547,58 @@ public sealed class VortexDataset : IAsyncDisposable
             : DatasetRowChanges.RunAsync(
                 this,
                 Checked(predicate.Node),
-                end => new ChangedRecords<TRecord>(this, update, binding, end),
+                (schema, end) => new ChangedRecords<TRecord>(this, schema, update, end),
                 cancellationToken);
+    }
+
+    /// <summary>
+    /// Changes the dataset's columns to <paramref name="schema"/>, in one commit that rewrites no
+    /// object: the objects written before read as the new schema, and compaction writes each one it
+    /// takes in it.
+    /// </summary>
+    /// <param name="schema">The columns the dataset holds from the version this creates, in the order a scan delivers them.</param>
+    /// <param name="renamed">The columns renamed, each new name mapped to the column's current one; null when none is.</param>
+    /// <param name="cancellationToken">Cancels the commit.</param>
+    /// <returns>The version created, which this handle now reads; the one it held when the schema already is this one.</returns>
+    /// <remarks>
+    /// <para>
+    /// A column is added, nullable, under a name no column of the dataset ever had; dropped, unless it
+    /// is part of the clustering key; renamed; its numbers widened within their kind, a signed
+    /// integer to a wider signed one, an unsigned to a wider unsigned, a float to a wider float; or
+    /// made nullable. Nothing else: a change that some value already written would not survive is
+    /// refused before anything is committed.
+    /// </para>
+    /// <para>
+    /// An object written before the change holds a new column as nulls, a renamed one under its old
+    /// name and a widened one in its old type: it is read through the name the column had, and its
+    /// values widened, batch by batch, until compaction rewrites it. A name dropped or renamed away is
+    /// never used again, so that an object written with it never lends its values to another column.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentException">The new schema is not one the dataset's objects read as; the message names the column and why.</exception>
+    /// <exception cref="InvalidOperationException">Another writer changed the schema first; refresh, and change the schema the dataset has now.</exception>
+    public async ValueTask<ulong> EvolveSchemaAsync(
+        VortexSchema schema, IReadOnlyDictionary<string, string>? renamed = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+        DatasetSnapshot version = Snapshot;
+        DatasetSchema current = version.Schema;
+        DType next = VortexTypes.ToDType(schema, new DTypeArena());
+        byte[] bytes = DTypeProtobuf.Serialize(next);
+        if (bytes.AsSpan().SequenceEqual(current.Bytes.Span))
+        {
+            // Already the dataset's: a writer retrying a change another one made first is done.
+            return version.Version;
+        }
+
+        IReadOnlyList<RetiredColumn> retired = current.Evolve(next, renamed);
+        CommitResult commit = await CommitAsync([new DatasetOperation.ChangeSchema(current.Bytes, bytes, retired)], cancellationToken)
+            .ConfigureAwait(false);
+        return commit.Outcomes[0] is OperationOutcome.Applied or OperationOutcome.AlreadyThere
+            ? commit.Version
+            : throw new InvalidOperationException(
+                $"Another writer changed the dataset's schema after version {version.Version}, which this change was checked " +
+                $"against; version {commit.Version} has another. Refresh, and change the schema the dataset has now.");
     }
 
     /// <summary>

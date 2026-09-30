@@ -73,8 +73,9 @@ imported: version 4, 120000 rows, 3 objects, lag 0
 ```
 
 `ImportAsync` takes a key in the store, not a path on disk: putting the bytes there is yours to
-do, and the file's schema must be the dataset's. `ObjectsAsync()` lists the objects of the version,
-reading the tree and never an object.
+do, and the file's columns must read as the dataset's: the same ones, or those of an earlier schema
+of the dataset ([Changing the schema](#changing-the-schema)). `ObjectsAsync()` lists the objects of
+the version, reading the tree and never an object.
 
 ## Reading
 
@@ -177,12 +178,51 @@ worked out are not touched; if another writer rewrites an object the change read
 instance, the change is worked out again on the version that won, and `Attempts` counts how many
 times.
 
+## Changing the schema
+
+```csharp
+[VortexRecord]
+public partial record struct Observation(int Day, double? Celsius, string Town, double? Humidity);
+
+ulong evolved = await dataset.EvolveSchemaAsync(Observation.Schema, new Dictionary<string, string> { ["Town"] = "City" });
+await using (ObjectDraft draft = dataset.StartObject())
+{
+    await draft.Writer.WriteAsync<Observation>(Observations(140, 10));
+    await dataset.AppendAsync(draft);
+}
+
+long humid = await dataset.Scan<Observation>().Where(r => r.Humidity > 50.0).CountAsync();
+long unknown = await dataset.Scan<Observation>().Where(r => r.Humidity.IsNull).CountAsync();
+```
+
+```
+evolved: version 10, columns Day, Celsius, Town, Humidity
+  humidity above 50: 4900 rows; unknown, in every row written before: 99200 rows
+  a row written before: Observation { Day = 10, Celsius = 10.1, Town = Nice, Humidity =  }
+```
+
+`EvolveSchemaAsync` gives the dataset new columns in one commit that rewrites no object. A column is
+added, nullable, under a name no column ever had; dropped, unless the clustering key holds it;
+renamed, the new name mapped to the old one; its numbers widened within their kind, `int` to `long`,
+`uint` to `ulong`, `float` to `double`; or made nullable. Anything else would lose a value already
+written, and is refused before anything is committed, with the column and the reason.
+
+The objects written before read as the new schema: a column they lack as nulls, a renamed one
+through the name it had, a widened one converted batch by batch. A filter is pushed down to such an
+object in its own terms, and one over a column it lacks is settled without reading it: `Humidity >
+50.0` skips every earlier object, `Humidity.IsNull` takes them whole. Compaction writes each object
+it rewrites in the current schema, so the conversion lasts until an object's level is next
+compacted. A dropped or renamed name is never used again, so an object written with it cannot lend
+its values to another column.
+
 ## Watch out
 
 * **Experimental, and this repository's own format.** Pin the package version, and do not expect
   another Vortex implementation to read the tree.
 * **A delete or an update rewrites whole objects.** Batch the rows you change into few calls: two
   deletes of one row each in one object rewrite it twice.
+* **Two writers changing the schema at once do not both succeed**: the second is refused with
+  `InvalidOperationException` and changes the schema the dataset has once it has refreshed.
 * **The store must create objects atomically and list them consistently**: see
   [object-store.md](object-store.md). A store that cannot promise `PutIfAbsent` cannot host a
   dataset safely.

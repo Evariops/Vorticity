@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Columns;
+using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Writing;
 
@@ -84,13 +85,16 @@ internal static class DatasetCompactor
             Check(key, job);
         }
 
-        ObjectStream outputs = new ObjectStream(dataset, job.TargetBytes, job.FirstRow);
+        // Every input is read as this schema and every output written in it: a compaction is also
+        // how objects of an earlier schema come to hold the current one.
+        DatasetSchema schema = dataset.Snapshot.Schema;
+        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow);
         long rows;
         try
         {
             rows = merge
-                ? await MergeAsync(dataset, job, key!, outputs, cancellationToken).ConfigureAwait(false)
-                : await ConcatenateAsync(dataset, job, outputs, cancellationToken).ConfigureAwait(false);
+                ? await MergeAsync(dataset, schema, job, key!, outputs, cancellationToken).ConfigureAwait(false)
+                : await ConcatenateAsync(dataset, schema, job, outputs, cancellationToken).ConfigureAwait(false);
             await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
         }
         catch
@@ -231,9 +235,31 @@ internal static class DatasetCompactor
         };
     }
 
+    /// <summary>
+    /// An input's rows, in its own order or in key order along <paramref name="paths"/>, as
+    /// <paramref name="schema"/>'s columns: its own scan, each batch reshaped when it was written
+    /// under another schema.
+    /// </summary>
+    private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
+        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, IReadOnlyList<string>? paths, CancellationToken cancellationToken)
+    {
+        ScanBuilder scan = lease.File.ScanBuilder();
+        if (schema.ColumnsOf(lease.File.DType, entry.Key) is not { } columns)
+        {
+            return (paths is null ? scan : scan.InKeyOrder(paths)).ExecuteAsync();
+        }
+
+        // The clustering key keeps its columns under every schema, so a key-ordered read of an
+        // earlier object names them as the dataset does.
+        ObjectRead read = columns.Read(null, FieldMask.All);
+        scan = scan.ProjectMask(read.Shape.Source).WithEncodings(false, false);
+        return ObjectColumns.ReshapeAsync(
+            (paths is null ? scan : scan.InKeyOrder(paths)).ExecuteAsync(), read.Shape, null, 0, compact: true, cancellationToken);
+    }
+
     /// <summary>Each input's rows, in its own order, one after another.</summary>
     private static async ValueTask<long> ConcatenateAsync(
-        VortexDataset dataset, CompactionJob job, ObjectStream outputs, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ObjectStream outputs, CancellationToken cancellationToken)
     {
         long rows = 0;
         foreach (CompactionInput input in job.Inputs)
@@ -241,8 +267,8 @@ internal static class DatasetCompactor
             ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in lease.File.ScanBuilder()
-                    .ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+                await foreach (RecordBatch batch in RowsOfAsync(lease, input.Entry, schema, null, cancellationToken)
+                    .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     await outputs.RollIfFullAsync(cancellationToken).ConfigureAwait(false);
                     await outputs.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
@@ -257,6 +283,7 @@ internal static class DatasetCompactor
     /// <summary>The k-way merge, one run of rows at a time.</summary>
     private static async ValueTask<long> MergeAsync(
         VortexDataset dataset,
+        DatasetSchema schema,
         CompactionJob job,
         ClusteringKey key,
         ObjectStream outputs,
@@ -280,7 +307,7 @@ internal static class DatasetCompactor
             key.Paths,
             descending: false,
             rankedTies: false,
-            file => file.ScanBuilder().InKeyOrder(paths),
+            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken),
             opened: null,
             cancellationToken);
         long rows = 0;
@@ -309,6 +336,7 @@ internal static class DatasetCompactor
     private sealed class ObjectStream
     {
         private readonly VortexDataset _dataset;
+        private readonly DatasetSchema _schema;
         private readonly long _target;
         private readonly List<WrittenObject> _written = [];
         private byte[] _lastKey = [];
@@ -317,9 +345,10 @@ internal static class DatasetCompactor
         private long _rows;
         private long _firstRow;
 
-        internal ObjectStream(VortexDataset dataset, long target, long firstRow)
+        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow)
         {
             _dataset = dataset;
+            _schema = schema;
             _target = target;
             _firstRow = firstRow;
         }
@@ -362,7 +391,7 @@ internal static class DatasetCompactor
 
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
         {
-            _draft ??= _dataset.StartObject();
+            _draft ??= _dataset.StartObjectUnder(_schema);
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
             _rows += batch.RowCount;
         }

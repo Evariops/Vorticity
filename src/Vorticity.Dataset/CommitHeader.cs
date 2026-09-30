@@ -81,6 +81,12 @@ internal sealed record CommitHeader
     /// <summary>The levels, lowest first.</summary>
     public IReadOnlyList<CommitLevel> Levels { get; init; } = [];
 
+    /// <summary>
+    /// Every name a column gave up when the schema changed, in the order they were given up: the
+    /// objects written before the change hold their columns under them, and no column takes one again.
+    /// </summary>
+    public IReadOnlyList<RetiredColumn> Retired { get; init; } = [];
+
     internal static class Field
     {
         internal const int Version = 1;
@@ -94,6 +100,13 @@ internal sealed record CommitHeader
         internal const int Retention = 9;
         internal const int CreatedAt = 10;
         internal const int Levels = 11;
+        internal const int Retired = 12;
+    }
+
+    internal static class RetiredField
+    {
+        internal const int Name = 1;
+        internal const int Current = 2;
     }
 
     internal static class LevelField
@@ -143,6 +156,30 @@ internal sealed record CommitHeader
         foreach (CommitLevel level in Levels)
         {
             WriteLevel(ref writer, level);
+        }
+
+        foreach (RetiredColumn column in Retired)
+        {
+            WriteRetired(ref writer, column);
+        }
+    }
+
+    private static void WriteRetired(ref ProtoWriter writer, RetiredColumn column)
+    {
+        ProtoWriter inner = new ProtoWriter();
+        try
+        {
+            inner.WriteString(RetiredField.Name, column.Name);
+            if (column.Current.Length > 0)
+            {
+                inner.WriteString(RetiredField.Current, column.Current);
+            }
+
+            writer.WriteBytes(Field.Retired, inner.WrittenSpan);
+        }
+        finally
+        {
+            inner.Dispose();
         }
     }
 
@@ -257,6 +294,7 @@ internal sealed record CommitHeader
         RetentionSettings retention = default;
         long createdAt = 0;
         List<CommitLevel> levels = [];
+        List<RetiredColumn> retired = [];
 
         try
         {
@@ -298,6 +336,9 @@ internal sealed record CommitHeader
                     case (Field.Levels, ProtoWireType.LengthDelimited):
                         levels.Add(ReadLevel(reader.ReadLengthDelimited()));
                         break;
+                    case (Field.Retired, ProtoWireType.LengthDelimited):
+                        retired.Add(ReadRetired(reader.ReadLengthDelimited()));
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -329,7 +370,32 @@ internal sealed record CommitHeader
             Retention = retention,
             CreatedAtUnixMilliseconds = createdAt,
             Levels = levels,
+            Retired = retired,
         };
+    }
+
+    private static RetiredColumn ReadRetired(ReadOnlySpan<byte> bytes)
+    {
+        string name = string.Empty;
+        string current = string.Empty;
+        ProtoReader reader = new ProtoReader(bytes);
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            switch (field, wire)
+            {
+                case (RetiredField.Name, ProtoWireType.LengthDelimited):
+                    name = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case (RetiredField.Current, ProtoWireType.LengthDelimited):
+                    current = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return new RetiredColumn(name, current);
     }
 
     private static ChunkerSettings ReadChunker(ReadOnlySpan<byte> bytes)

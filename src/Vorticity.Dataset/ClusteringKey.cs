@@ -128,12 +128,20 @@ internal sealed class ClusteringKey
     /// <see cref="TryOpenAsync(VortexFile, CancellationToken)"/>, from the file's key indexes or,
     /// without <paramref name="indexes"/>, from a column its statistics say is sorted only.
     /// </summary>
-    public async ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, bool indexes, CancellationToken cancellationToken)
+    public ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, bool indexes, CancellationToken cancellationToken) =>
+        TryOpenAsync(file, _paths, indexes, cancellationToken);
+
+    /// <summary>
+    /// <see cref="TryOpenAsync(VortexFile, bool, CancellationToken)"/> over the key's columns as the
+    /// object names them: an object written under an earlier schema may hold a column under the name
+    /// it had then.
+    /// </summary>
+    public async ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, IReadOnlyList<string> paths, bool indexes, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(file);
         try
         {
-            KeyCursorBuilder keys = file.Keys(_paths);
+            KeyCursorBuilder keys = file.Keys(paths as string[] ?? [.. paths]);
             return await (indexes ? keys : keys.WithSource(KeySourceKind.SortedColumn))
                 .OpenAsync(cancellationToken).ConfigureAwait(false);
         }

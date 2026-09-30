@@ -31,7 +31,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
 {
     private readonly DatasetSnapshot _version;
     private readonly IAsyncEnumerator<MergeObject> _objects;
-    private readonly Func<VortexFile, ScanBuilder> _scan;
+    private readonly Func<ObjectLease, ObjectEntry, IAsyncEnumerable<RecordBatch>> _batches;
     private readonly Action<ObjectLease>? _opened;
     private readonly string[] _paths;
     private readonly RowSortField[] _fields;
@@ -59,7 +59,8 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
 
     /// <summary>
     /// A merge over <paramref name="objects"/>, which must arrive by ascending bound, and whose
-    /// scans must all deliver <paramref name="paths"/> in the same direction. With
+    /// batches, from <paramref name="batches"/>, must all deliver <paramref name="paths"/> in the same
+    /// direction and gathered, a batch holding only the rows it delivers. With
     /// <paramref name="rankedTies"/>, equal keys come in rank order as a read promises; without it
     /// the emitting input runs through them, which keeps a compaction's runs longest.
     /// </summary>
@@ -69,13 +70,13 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         IReadOnlyList<string> paths,
         bool descending,
         bool rankedTies,
-        Func<VortexFile, ScanBuilder> scan,
+        Func<ObjectLease, ObjectEntry, IAsyncEnumerable<RecordBatch>> batches,
         Action<ObjectLease>? opened,
         CancellationToken cancellationToken)
     {
         _version = version;
         _objects = objects.GetAsyncEnumerator(cancellationToken);
-        _scan = scan;
+        _batches = batches;
         _opened = opened;
         _paths = [.. paths];
         _fields = new RowSortField[_paths.Length];
@@ -268,7 +269,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
         MergeInput input = new MergeInput(lease, next.Entry.Key, next.Rank, next.FirstRow, _paths, _fields);
         try
         {
-            await input.StartAsync(_scan(lease.File), _cancellationToken).ConfigureAwait(false);
+            await input.StartAsync(_batches(lease, next.Entry), _cancellationToken).ConfigureAwait(false);
             if (input.IsLive && input.Key.SequenceCompareTo(next.Bound.Span) < 0)
             {
                 throw new VortexFormatException(
@@ -529,9 +530,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
 
         internal ReadOnlySpan<byte> KeyAt(int row) => _keys!.Row(row);
 
-        internal ValueTask StartAsync(ScanBuilder scan, CancellationToken cancellationToken)
+        internal ValueTask StartAsync(IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken)
         {
-            _batches = scan.ExecuteAsync().GetAsyncEnumerator(cancellationToken);
+            _batches = batches.GetAsyncEnumerator(cancellationToken);
             return NextAsync();
         }
 

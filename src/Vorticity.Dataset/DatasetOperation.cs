@@ -60,6 +60,16 @@ internal abstract record DatasetOperation
     /// changes the entry that names it, and with it the hash.
     /// </remarks>
     public sealed record Repack(IReadOnlyList<ulong> Versions) : DatasetOperation;
+
+    /// <summary>
+    /// Changes the dataset's schema, from the one the change was worked out against: a rebase onto
+    /// a version whose schema is another does not apply it, since what it checked of the columns
+    /// no longer holds.
+    /// </summary>
+    /// <param name="From">The schema the change was checked against, as a header records it.</param>
+    /// <param name="To">The schema the dataset takes.</param>
+    /// <param name="Retired">The names retired once it has, the earlier ones included.</param>
+    public sealed record ChangeSchema(ReadOnlyMemory<byte> From, ReadOnlyMemory<byte> To, IReadOnlyList<RetiredColumn> Retired) : DatasetOperation;
 }
 
 /// <summary>What a commit made of one change, once re-applied to the version it landed on.</summary>

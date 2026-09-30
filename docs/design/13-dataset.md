@@ -64,7 +64,8 @@ format version, the header's length, the header (Protobuf), then pages and fragm
 they were added, the table, and a 32-byte trailer — the table's offset and length, **the object's own
 length**, an XXH3-64 over the header and the table, and magic `VXCT`. Recording the length turns any
 truncation into a stated error rather than a shorter object. The **header** holds the version, its
-parent, the schema, the clustering key, the write policy, the tree's chunking parameters and seed,
+parent, the schema and the names its columns gave up (§13), the clustering key, the write policy,
+the tree's chunking parameters and seed,
 the compaction and retention settings, and per level its top page **inlined**, with the pages below
 it while the header stays under 256 KiB. One ranged read of the first 256 KiB opens a commit.
 
@@ -93,7 +94,7 @@ probabilistic B-tree of Noms and Dolt. Once a commit is a sorted batch of change
 tree and a B+tree with path copying are one algorithm — load the touched leaves, merge the changes,
 re-emit them, rebuild the nodes above up to the top — and only the rule that places page boundaries
 differs. From the prolly rule alone follow history independence, deduplication across writers and
-the strongest test oracle there is (§13).
+the strongest test oracle there is (§14).
 
 **The boundary rule.** A boundary is decided per entry from the XXH3-64 of the entry's key alone,
 seeded with sixteen random bytes the dataset draws once, so values never move a boundary and an
@@ -343,6 +344,8 @@ merges two trees. Each operation carries its own answer to a moved ground:
 | vacuum, anything | vacuum deletes only what no retained version references and what is older than the window (§10) |
 | delete or update, append | the appended object is not among those the change read: it stays, and its rows are not touched |
 | delete or update, anything that rewrites an object it read | an input is gone: the replacement is abandoned, and the change is worked out again on the version that won (§12) |
+| schema change, schema change | the second finds another schema than the one it was checked against, and is dropped (§13) |
+| append, schema change | the object lands as it was written, and reads as the new schema like any earlier one (§13) |
 | reader, anything | the reader holds a version; everything it references is immutable |
 
 An object's key ends with its uid, which makes it unique and a function of the object: two appenders
@@ -469,7 +472,45 @@ rewrites an object the change read — a compaction, another delete — abandons
 and the change is worked out again on the version that won, up to `MaxAttempts` times. What a lost
 attempt wrote is left for vacuum.
 
-## 13. Alternatives weighed
+## 13. Schema evolution
+
+A change of schema is a commit that changes the header's schema and rewrites no object. Per top-level
+column, a change is one of: added, nullable; dropped, unless the clustering key holds it; renamed;
+widened within its kind, a signed integer to a wider signed one, an unsigned to a wider unsigned, a
+float to a wider float; made nullable. Each keeps every value already written readable, and anything
+else is refused before the commit. The clustering key's columns keep their names and types in every
+object: they order the objects and the trees.
+
+**Names are identities.** An object's field belongs to the column of its name, or to the column a
+rename moved that name to. The header records every name a column gave up, with the column carrying it
+now, or none when it was dropped, and no column takes one of them again. That is what makes names
+enough: an object written while a name was in use never lends its values to another column, and the
+summaries its entry carries, keyed by the names it had, never describe another column. A summary under
+a former name prunes nothing for the new one, which is conservative and ends at the next rewrite.
+
+**Reading an object of an earlier schema.** When an object's dtype is the version's — every object
+written since the last change — its read is its own scan, as before, after one comparison of dtypes
+whose hashes are cached. Otherwise its columns are mapped when it opens, and each batch its own scan
+delivers is reshaped in the batch's arena: a struct over its fields in the dataset's order, a missing
+column filled with nulls, a column written non-nullable declared nullable over the same buffers,
+narrower numbers widened into a buffer of the arena. The filter goes down to the object in its own
+terms: renamed, and each predicate over a column the object lacks folded to what a null makes it, a
+comparison unknown and `IS NULL` true, so that a filter over an added column refutes every earlier
+object without a read. Under a negation an unknown is not false; a predicate that cannot be stated
+over the object's columns there is evaluated on the reshaped batches instead. Key cursors, key-ordered
+reads, compaction, deletes and updates read through the same mapping, and an object that lacks a
+cursor's column holds no entry.
+
+**Compaction folds the change into the data**, as it folds indexes (§2): every object it writes is in
+the current schema. Until then, reading an earlier object costs the reshaping — records per batch, and
+a copy for a widened column — and reading any other costs nothing more.
+
+**Concurrent changes.** The operation carries the schema it was checked against. A rebase onto a
+version whose schema is another drops it, since what it checked no longer holds, and the caller is told
+to refresh; one that finds its own schema already there is done. An append prepared under the earlier
+schema lands after the change, its object read as the new schema like any other.
+
+## 14. Alternatives weighed
 
 | question | chosen | rejected, and why |
 |---|---|---|
@@ -485,10 +526,10 @@ attempt wrote is left for vacuum.
 
 **Not in this design:** a clustering key picked automatically, since it decides the write amplification
 and is the user's to state; deleting rows by a mask of positions, which moves the cost of a delete onto
-every read (§12); schema evolution, where the header records one schema and an object with another is
-refused.
+every read (§12); evolving the fields of a nested struct, or a column's type otherwise than by widening
+a number or making it nullable (§13).
 
-## 14. How it is tested
+## 15. How it is tested
 
 - **The counting matrix** of §9.2.
 - **An interleaving fuzzer** over the in-memory store: readers, writers, indexers, compactions and
@@ -506,6 +547,9 @@ refused.
 - **Deletes and updates**: the rows left equal the rows written filtered in C# under three-valued
   logic, across levels and without a clustering key, and a delete that loses its objects to a
   compaction is worked out again.
+- **Schema evolution**: objects of each earlier schema read as the current one through scans, counts,
+  extremes, key order, key cursors, deletes, updates and compaction, filters over added columns
+  included; every change that would lose a value is refused.
 - **Tampering**: an object replaced at equal size, a page, a root and a fragment torn at every byte, a
   fragment of another object: readers answer exactly, and verify names each.
 - **Rust**: compaction outputs are among the files the cross-check hands to Rust 0.86.1.
