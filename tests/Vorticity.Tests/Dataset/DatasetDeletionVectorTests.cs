@@ -272,6 +272,34 @@ public sealed class DatasetDeletionVectorTests
     }
 
     [Fact]
+    public async Task ARangeTooLongForTheVectorsWorstCaseIsMarkedAsTheFewRunsItIs()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore markedStore = new MemoryObjectStore();
+        await using MemoryObjectStore rewrittenStore = new MemoryObjectStore();
+        await using VortexDataset marked = await CreateAsync(markedStore, Options(clustered: true, marking: true), ct);
+        await using VortexDataset rewritten = await CreateAsync(rewrittenStore, Options(clustered: true, marking: false), ct);
+        await DrainAsync(marked, ct);
+        await DrainAsync(rewritten, ct);
+
+        // 450 rows in a row: at a run a row their vector would pass a kilobyte, and as the one run
+        // they are it takes a few bytes.
+        RowChangeResult deleted = await marked.DeleteAsync<ChangeRow>(r => r.Key < 2_050, ct);
+        Assert.Equal((450L, 1L, 0L), (deleted.Rows, deleted.ObjectsMarked, deleted.ObjectsOut));
+        await rewritten.DeleteAsync<ChangeRow>(r => r.Key < 2_050, ct);
+
+        // An update of 350 rows is marked the same way, and its rows are written once, changed: the
+        // pass that finds their places hands them to no one, and the one that marks them does.
+        RowChangeResult updated = await marked.UpdateAsync<ChangeRow>(r => r.Key >= 3_000 & r.Key < 4_150, row => row with { Measure = -2.0 }, ct);
+        Assert.Equal((350L, 1L), (updated.Rows, updated.ObjectsMarked));
+        await rewritten.UpdateAsync<ChangeRow>(r => r.Key >= 3_000 & r.Key < 4_150, row => row with { Measure = -2.0 }, ct);
+
+        await AgreeAsync(marked, rewritten, clustered: true, ct);
+        Assert.Equal(350, await marked.Scan<ChangeRow>().Where(r => r.Measure == -2.0).CountAsync(ct));
+        Assert.True((await marked.VerifyAsync(cancellationToken: ct)).Holds);
+    }
+
+    [Fact]
     public async Task MarksRunUpToTheirBoundAndTheDeleteThatWouldPassItRewrites()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

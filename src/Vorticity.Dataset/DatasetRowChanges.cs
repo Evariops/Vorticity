@@ -212,17 +212,29 @@ internal static class DatasetRowChanges
                 return new Change(matched, null, null);
             }
 
-            if (matched < held.Entry.Rows && Marks(dataset.Options, held.Entry, matched))
+            if (matched < held.Entry.Rows && MayMark(dataset.Options, held.Entry, matched))
             {
-                DeletionVector deletions = await MarkAsync(file, held, columns, filter, changed, cancellationToken).ConfigureAwait(false);
-                if (deletions.Count - held.Entry.Deletions.Count != matched)
+                // Marked at once when the rows fit the vector's bound even as a run each; otherwise
+                // their positions are found first, since rows a range takes lie in a few runs, and
+                // only then handed to the sink, which a rewrite would hand them to instead.
+                bool fits = FitsAtWorst(dataset.Options, held.Entry, matched);
+                DeletionVector deletions = await MarkAsync(file, held, columns, filter, fits ? changed : null, cancellationToken).ConfigureAwait(false);
+                if (fits || deletions.EncodedBytes <= dataset.Options.MarkedVectorBytes)
                 {
-                    throw new InvalidOperationException(
-                        $"'{held.Entry.Key}' marked {deletions.Count - held.Entry.Deletions.Count} rows where its count took {matched}: " +
-                        "a delete that loses or doubles rows is the one failure it must not have.");
-                }
+                    if (!fits && changed is not null)
+                    {
+                        deletions = await MarkAsync(file, held, columns, filter, changed, cancellationToken).ConfigureAwait(false);
+                    }
 
-                return new Change(matched, null, held.Entry.WithDeletions(deletions));
+                    if (deletions.Count - held.Entry.Deletions.Count != matched)
+                    {
+                        throw new InvalidOperationException(
+                            $"'{held.Entry.Key}' marked {deletions.Count - held.Entry.Deletions.Count} rows where its count took {matched}: " +
+                            "a delete that loses or doubles rows is the one failure it must not have.");
+                    }
+
+                    return new Change(matched, null, held.Entry.WithDeletions(deletions));
+                }
             }
 
             // Written in the version's schema, which an object of an earlier one is read as. The rows
@@ -269,20 +281,22 @@ internal static class DatasetRowChanges
     }
 
     /// <summary>
-    /// Whether an object takes <paramref name="matched"/> more deleted rows as marks rather than a
-    /// rewrite: it is large enough for a rewrite to cost more than the marks' reads, its deleted rows
-    /// stay under a share of its rows, which a read skips over and the store keeps, and its marks
-    /// stay under the bound that keeps its entry a small part of a tree page: those it has, and the
-    /// new rows counted at a run each.
+    /// Whether an object may take <paramref name="matched"/> more deleted rows as marks rather than a
+    /// rewrite: it is large enough for a rewrite to cost more than the marks' reads, and its deleted
+    /// rows stay under a share of its rows, which a read skips over and the store keeps. Its vector
+    /// has a bound too, which <see cref="FitsAtWorst"/> or the vector itself settles.
     /// </summary>
-    private static bool Marks(DatasetOptions options, ObjectEntry entry, long matched)
-    {
-        if (entry.Bytes < options.MarkedObjectBytes
-            || (entry.DeletedRows + matched) * Math.Max(options.MarkedShare, 1) > entry.PhysicalRows)
-        {
-            return false;
-        }
+    private static bool MayMark(DatasetOptions options, ObjectEntry entry, long matched) =>
+        entry.Bytes >= options.MarkedObjectBytes
+        && (entry.DeletedRows + matched) * Math.Max(options.MarkedShare, 1) <= entry.PhysicalRows;
 
+    /// <summary>
+    /// Whether an object's marks stay under the bound that keeps its entry a small part of a tree page
+    /// even when each of the <paramref name="matched"/> rows is a run of its own: settled before a
+    /// position is read.
+    /// </summary>
+    private static bool FitsAtWorst(DatasetOptions options, ObjectEntry entry, long matched)
+    {
         int varint = TreePage.VarintBytes((ulong)entry.PhysicalRows);
         long held = entry.HasDeletions ? entry.Deletions.EncodedBytes : 0;
         return held + (matched * 2 * varint) <= options.MarkedVectorBytes;

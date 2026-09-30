@@ -501,7 +501,9 @@ another key. One `ReplaceObjects` commits the whole change, so a reader sees all
 the marks would cost its reads more than they save the write: under `MarkedObjectBytes`, a mebibyte,
 where a rewrite is a few requests and leaves the object exact; when the rows marked in it would pass an
 eighth of its rows (`MarkedShare`), since every read of it steps over them; and when its vector would
-pass 1 KiB (`MarkedVectorBytes`), a few hundred runs. The vector lives in a leaf page: a commit that
+pass 1 KiB (`MarkedVectorBytes`), a few hundred runs. The vector is counted as the runs it will form:
+at a run a row when that already fits, and otherwise from the rows' places, read before anything is
+written, since the rows a range takes are one run whatever their number. The vector lives in a leaf page: a commit that
 marks a row in any object of a page writes the page again, and while a level's pages fit the header's
 inline room (§3) every commit carries them, so the bound weighs the rewrites the marks save against
 the bytes they add to each commit. The rows a rewritten object keeps are a subset of
@@ -627,7 +629,8 @@ by widening a number or making it nullable (§13).
   every read — rows by position, rows in key order both ways with null keys around the marks, key
   cursors, their ranks and seeks, counts, extremes, aggregates — under a seeded fuzzer of deletes and
   updates; a compaction that read an object before rows were marked in it is abandoned; a count told
-  to leave rows out counts none of them on any tier, each switched off in turn.
+  to leave rows out counts none of them on any tier, each switched off in turn; a range too long for
+  a vector's worst case is marked as the run it is, an update's rows written once.
 - **Schema evolution**: objects of each earlier schema read as the current one through scans, counts,
   extremes, key order, key cursors, deletes, updates and compaction, filters over added columns
   included; every change that would lose a value is refused.
