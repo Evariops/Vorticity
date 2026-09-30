@@ -257,7 +257,7 @@ public sealed class VortexDataset : IAsyncDisposable
     {
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
-        ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes);
+        ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool);
         VortexWriteOptions write = _options.Write.WithIdentity(identity);
         if (schema.Key is { } clustering)
         {
@@ -801,10 +801,10 @@ public sealed class VortexDataset : IAsyncDisposable
         long bytes = draft.Sink.Position;
         UInt128 hash = draft.Sink.ContentHash;
 
-        // Read out of the buffer the sink still holds, before the put: the entry's bounds and the
+        // Read out of the chunks the sink still holds, before the put: the entry's bounds and the
         // smallest key its leaf is ordered by then cost no request at all.
         (ObjectSummaries summaries, byte[] prefix) =
-            await DescribeAsync(draft.Sink.Written, firstRow, cancellationToken).ConfigureAwait(false);
+            await DescribeAsync(draft.Sink.Content(), firstRow, cancellationToken).ConfigureAwait(false);
         if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
         {
             throw new ObjectStoreException($"'{draft.Key}' was taken, which a fresh uid cannot be.");
@@ -949,13 +949,14 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// The two things a leaf entry needs, read out of the whole file as the sink still holds it,
-    /// before it has reached the store: the object's bounds and the key its leaf sits at.
+    /// The two things a leaf entry needs, read out of the file as the sink still holds it, before it
+    /// has reached the store: the object's bounds and the key its leaf sits at. Only the ranges the
+    /// open and the first key ask for are read, where they lie.
     /// </summary>
     private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix)> DescribeAsync(
-        ReadOnlyMemory<byte> bytes, long firstRow, CancellationToken cancellationToken)
+        ISegmentSource bytes, long firstRow, CancellationToken cancellationToken)
     {
-        MemorySegmentSource source = new MemorySegmentSource(bytes);
+        SourceReader source = new SourceReader(bytes, ownsSource: true, _options.Session.Options.EnginePool);
         VortexFile file = await VortexFile
             .OpenAsync(source, ObjectCache.OpenOptions, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
