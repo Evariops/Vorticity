@@ -616,6 +616,48 @@ fn b_pco(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
     Ok(Pco::from_primitive(parray.as_view(), 8, 1024, &mut ctx)?.into_array())
 }
 
+/// A `vortex.pco` over a NULLABLE f64, nulls every fifth row: the stream then holds only the
+/// valid rows' values, which the reader has to spread back, and a float's latents are its ordered
+/// bits, which the reader has to turn back into floats.
+fn b_pco_nullable(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let mut ctx = session.create_execution_ctx();
+    let values: Buffer<f64> = (0..rows).map(|i| (i as f64) * 0.25 - 100.0).collect();
+    let validity = Validity::Array(
+        BoolArray::new(
+            BitBuffer::collect_bool(rows, |i| i % 5 != 2),
+            Validity::NonNullable,
+        )
+        .into_array(),
+    );
+    let parray = PrimitiveArray::new(values, validity);
+    Ok(Pco::from_primitive(parray.as_view(), 8, 1024, &mut ctx)?.into_array())
+}
+
+/// A `vortex.pco` over i16: latents of 16 bits, whose delta recentres at 2^15.
+fn b_pco_i16(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let mut ctx = session.create_execution_ctx();
+    let values: Buffer<i16> = (0..rows).map(|i| (((i as f64) / 30.0).sin() * 12_000.0) as i16).collect();
+    let parray = PrimitiveArray::new(values, Validity::NonNullable);
+    Ok(Pco::from_primitive(parray.as_view(), 8, 1024, &mut ctx)?.into_array())
+}
+
+/// A `vortex.pco` over u32 multiples of a thousand plus a little: latents of 32 bits, the kind of
+/// values IntMult is for.
+fn b_pco_u32(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let mut ctx = session.create_execution_ctx();
+    let values: Buffer<u32> = (0..rows as u32).map(|i| ((i * 7919) % 5000) * 1000 + (i % 3)).collect();
+    let parray = PrimitiveArray::new(values, Validity::NonNullable);
+    Ok(Pco::from_primitive(parray.as_view(), 8, 1024, &mut ctx)?.into_array())
+}
+
+/// A `vortex.pco` over f32 prices in cents: float latents of 32 bits, the kind FloatMult is for.
+fn b_pco_f32(session: &VortexSession, rows: usize) -> VortexResult<ArrayRef> {
+    let mut ctx = session.create_execution_ctx();
+    let values: Buffer<f32> = (0..rows).map(|i| (((i * 7919) % 100_000) as f32) * 0.01).collect();
+    let parray = PrimitiveArray::new(values, Validity::NonNullable);
+    Ok(Pco::from_primitive(parray.as_view(), 8, 1024, &mut ctx)?.into_array())
+}
+
 // -------------------------------------------------------------------------------------------
 // Recent members: map, variant
 // -------------------------------------------------------------------------------------------
@@ -902,6 +944,35 @@ pub fn encoding_cases() -> Vec<EncodingCase> {
             array_id: "vortex.pco",
             how: "Pco::from_primitive, level 8",
             build: b_pco,
+            disable_editions: false,
+        },
+        EncodingCase {
+            id: "pco_nullable",
+            array_id: "vortex.pco",
+            how: "Pco::from_primitive over a nullable f64, nulls every fifth row, so the stream holds \
+                  the valid rows only and the reader's scatter and float join run",
+            build: b_pco_nullable,
+            disable_editions: false,
+        },
+        EncodingCase {
+            id: "pco_i16",
+            array_id: "vortex.pco",
+            how: "Pco::from_primitive over an i16 wave: 16-bit latents",
+            build: b_pco_i16,
+            disable_editions: false,
+        },
+        EncodingCase {
+            id: "pco_u32",
+            array_id: "vortex.pco",
+            how: "Pco::from_primitive over u32 multiples of 1000 plus a remainder: 32-bit latents",
+            build: b_pco_u32,
+            disable_editions: false,
+        },
+        EncodingCase {
+            id: "pco_f32",
+            array_id: "vortex.pco",
+            how: "Pco::from_primitive over f32 hundredths: 32-bit float latents",
+            build: b_pco_f32,
             disable_editions: false,
         },
         EncodingCase {

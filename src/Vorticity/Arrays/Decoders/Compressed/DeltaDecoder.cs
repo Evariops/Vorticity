@@ -141,7 +141,7 @@ internal sealed class DeltaDecoder : ArrayDecoder
     private static CanonicalNode RequirePrimitive(
         ArrayDecodeContext context, int index, PType ptype, string what, int expected)
     {
-        CanonicalNode child = context.Canonical.GetNode(index);
+        CanonicalNode child = context.Canonical.GetNode(CanonicalSupport.ExpandIfConstant(context, index));
         if (child.Kind != CanonicalKind.Primitive)
         {
             CompressedThrow.ChildKind(Id, what, child.Kind, "a Primitive");

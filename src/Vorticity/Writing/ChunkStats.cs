@@ -61,6 +61,9 @@ internal readonly struct ChunkStats
     /// </summary>
     internal ChunkStats Dry() => new ChunkStats(_column, _firstBlock, _blockCount, ledger: null, dry: true);
 
+    /// <summary>Whether this is a <see cref="Dry"/> chunk: one priced as every profile but size first prices it.</summary>
+    internal bool IsDry => _dry;
+
     /// <summary>This column's summary over the chunk, or an absent one.</summary>
     internal BlockStats Stats =>
         _column is null ? default : _column.Chunk(_firstBlock, _blockCount);

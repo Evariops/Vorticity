@@ -29,6 +29,9 @@ internal enum StorageKind : byte
 
     /// <summary>Text or binary.</summary>
     Bytes,
+
+    /// <summary>A decimal of more than 38 digits, read as its unscaled value in 256 bits whatever width a block stores.</summary>
+    Decimal256,
 }
 
 /// <summary>A column an aggregate or a key reads, with what its type makes of it.</summary>
@@ -81,7 +84,7 @@ internal sealed class ColumnShape
         return type.Kind switch
         {
             VortexTypeKind.Primitive => (StorageKind.Primitive, type.PrimitiveType),
-            VortexTypeKind.Decimal => (type.Precision <= 38 ? StorageKind.Decimal : StorageKind.Unsupported, default),
+            VortexTypeKind.Decimal => (type.Precision <= 38 ? StorageKind.Decimal : StorageKind.Decimal256, default),
             VortexTypeKind.Bool => (StorageKind.Bool, default),
             VortexTypeKind.Utf8 or VortexTypeKind.Binary => (StorageKind.Bytes, default),
             _ => (StorageKind.Unsupported, default),
@@ -180,6 +183,21 @@ internal static class FixedReader
                 return scratch.AsSpan(0, length);
             }
 
+            case StorageKind.Decimal256:
+            {
+                if (record.Storage == DecimalStorageType.I256)
+                {
+                    return MemoryMarshal.Cast<byte, TValue>(record.BufferA.Span)[..length];
+                }
+
+                // A precision above 38 is stored in 256 bits, so a narrower block is a constant's
+                // element or a writer's narrowing, widened here once a batch.
+                Scratch.Grow(ref scratch, length);
+                Span<Int256> into = MemoryMarshal.Cast<TValue, Int256>(scratch.AsSpan(0, length));
+                WidenDecimals(record.BufferA.Span, record.Storage, into);
+                return scratch.AsSpan(0, length);
+            }
+
             case StorageKind.Uuid:
             {
                 ReadOnlySpan<byte> bytes = ColumnData.Values(arena, arena.GetNode(canonical).ElementsIndex);
@@ -201,7 +219,8 @@ internal static class FixedReader
     /// <summary>Whether <see cref="Values{TValue}"/> copies <paramref name="node"/> into a wider type rather than viewing it.</summary>
     internal static bool Widens(CanonicalArena arena, int node, StorageKind kind) =>
         kind == StorageKind.Uuid
-        || (kind == StorageKind.Decimal && arena.RecordRef(EncodedForms.Canonical(arena, node)).Storage != DecimalStorageType.I128);
+        || (kind == StorageKind.Decimal && arena.RecordRef(EncodedForms.Canonical(arena, node)).Storage != DecimalStorageType.I128)
+        || (kind == StorageKind.Decimal256 && arena.RecordRef(EncodedForms.Canonical(arena, node)).Storage != DecimalStorageType.I256);
 
     /// <summary>The one value of a constant node.</summary>
     internal static TValue Constant<TValue>(CanonicalArena arena, int node, StorageKind kind)
@@ -209,26 +228,62 @@ internal static class FixedReader
     {
         ref readonly CanonicalRecord record = ref arena.RecordRef(node);
         ReadOnlySpan<byte> element = record.BufferA.Span[..(int)record.FixedSize];
+        if (kind == StorageKind.Decimal256)
+        {
+            Int256 wide = element.Length == Int256.ByteCount ? Int256.FromLittleEndianBytes(element) : new Int256(Narrow(element));
+            return Unsafe.As<Int256, TValue>(ref wide);
+        }
+
         if (kind != StorageKind.Decimal)
         {
             return MemoryMarshal.Read<TValue>(element);
         }
 
-        Int128 value = element.Length switch
-        {
-            1 => (sbyte)element[0],
-            2 => BinaryPrimitives.ReadInt16LittleEndian(element),
-            4 => BinaryPrimitives.ReadInt32LittleEndian(element),
-            8 => BinaryPrimitives.ReadInt64LittleEndian(element),
-            16 => BinaryPrimitives.ReadInt128LittleEndian(element),
-            _ => throw new VortexUnsupportedException("decimal256", ComponentKind.Feature, "A decimal of more than 38 digits is not aggregated."),
-        };
+        Int128 value = Narrow(element);
         return Unsafe.As<Int128, TValue>(ref value);
     }
+
+    /// <summary>A decimal element of at most 128 bits, sign-extended.</summary>
+    private static Int128 Narrow(ReadOnlySpan<byte> element) => element.Length switch
+    {
+        1 => (sbyte)element[0],
+        2 => BinaryPrimitives.ReadInt16LittleEndian(element),
+        4 => BinaryPrimitives.ReadInt32LittleEndian(element),
+        8 => BinaryPrimitives.ReadInt64LittleEndian(element),
+        16 => BinaryPrimitives.ReadInt128LittleEndian(element),
+        _ => throw new VortexFormatException($"A decimal of at most 38 digits is stored in 16 bytes or fewer, not {element.Length}."),
+    };
 
     /// <summary>Whether a block's encoded form may be read directly for this kind of column.</summary>
     internal static ColumnEncoding EncodingOf(CanonicalArena arena, int node, StorageKind kind) =>
         kind == StorageKind.Uuid ? ColumnEncoding.Canonical : EncodedForms.EncodingOf(arena, node);
+
+    private static void WidenDecimals(ReadOnlySpan<byte> bytes, DecimalStorageType storage, Span<Int256> into)
+    {
+        if (storage == DecimalStorageType.I128)
+        {
+            ReadOnlySpan<Int128> values = MemoryMarshal.Cast<byte, Int128>(bytes);
+            for (int i = 0; i < into.Length; i++)
+            {
+                into[i] = new Int256(values[i]);
+            }
+
+            return;
+        }
+
+        // The narrower widths through the 128-bit widening, a block at a time on the stack.
+        Span<Int128> step = stackalloc Int128[256];
+        for (int start = 0; start < into.Length; start += step.Length)
+        {
+            int count = Math.Min(step.Length, into.Length - start);
+            int width = DecimalStorage.ByteWidth(storage);
+            WidenDecimals(bytes.Slice(start * width, count * width), storage, step[..count]);
+            for (int i = 0; i < count; i++)
+            {
+                into[start + i] = new Int256(step[i]);
+            }
+        }
+    }
 
     private static void WidenDecimals(ReadOnlySpan<byte> bytes, DecimalStorageType storage, Span<Int128> into)
     {
@@ -279,7 +334,7 @@ internal static class FixedReader
             }
 
             default:
-                throw new VortexUnsupportedException("decimal256", ComponentKind.Feature, "A decimal of more than 38 digits is not aggregated.");
+                throw new VortexFormatException($"A decimal of at most 38 digits is not stored as {storage}.");
         }
     }
 }
@@ -374,6 +429,22 @@ internal static class StorageValues
             return Unsafe.As<TValue?, T>(ref nullable);
         }
 
+        // A decimal as a VortexDecimal, built from its unscaled value: a literal would pass it
+        // through a BigInteger, one allocation per group of a grouped aggregate.
+        if ((typeof(T) == typeof(VortexDecimal) || typeof(T) == typeof(VortexDecimal?))
+            && (typeof(TValue) == typeof(Int128) || typeof(TValue) == typeof(Int256)))
+        {
+            Int256 unscaled = typeof(TValue) == typeof(Int128) ? new Int256(Unsafe.As<TValue, Int128>(ref value)) : Unsafe.As<TValue, Int256>(ref value);
+            VortexDecimal wide = new VortexDecimal(unscaled, (byte)shape.Type.Precision, (sbyte)shape.Type.Scale);
+            if (typeof(T) == typeof(VortexDecimal))
+            {
+                return Unsafe.As<VortexDecimal, T>(ref wide);
+            }
+
+            VortexDecimal? present = wide;
+            return Unsafe.As<VortexDecimal?, T>(ref present);
+        }
+
         return LiteralValues.ToValue<T>(Literal(value, shape), shape.Type)!;
     }
 
@@ -405,6 +476,8 @@ internal static class StorageValues
         {
             case StorageKind.Decimal:
                 return ToClr<Int128, T>(MemoryMarshal.Read<Int128>(bytes), shape);
+            case StorageKind.Decimal256:
+                return ToClr<Int256, T>(Int256.FromLittleEndianBytes(bytes[..Int256.ByteCount]), shape);
             case StorageKind.Uuid:
                 return ToClr<UInt128, T>(BinaryPrimitives.ReadUInt128BigEndian(bytes), shape);
             default:
@@ -429,6 +502,7 @@ internal static class StorageValues
     internal static int Width(ColumnShape shape) => shape.Kind switch
     {
         StorageKind.Decimal or StorageKind.Uuid => 16,
+        StorageKind.Decimal256 => Int256.ByteCount,
         _ => shape.PType.ByteWidth(),
     };
 
@@ -439,6 +513,13 @@ internal static class StorageValues
         {
             case StorageKind.Decimal:
                 return SymLowering.WideLiteral((BigInteger)Unsafe.As<TValue, Int128>(ref value));
+            case StorageKind.Decimal256:
+            {
+                Span<byte> wide = stackalloc byte[Int256.ByteCount];
+                Unsafe.As<TValue, Int256>(ref value).WriteLittleEndianBytes(wide);
+                return SymLowering.WideLiteral(new BigInteger(wide, isUnsigned: false, isBigEndian: false));
+            }
+
             case StorageKind.Uuid:
             {
                 Span<byte> bytes = stackalloc byte[16];

@@ -11,6 +11,7 @@ using Vorticity.Keys;
 using Vorticity.Layouts;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Scanning;
 
@@ -384,6 +385,10 @@ internal sealed class TerminalScan
             return FilterLiteral.Null;
         }
 
+        // A decimal's literals order as the numbers they scale to, which is not the order a
+        // literal of eight bytes and one of sixteen compare in; every comparison below takes it.
+        bool numeric = IsDecimal(_file.DType, path);
+
         if (_filter is null && _wholeFile && (_tiers & TerminalTiers.FileStatistic) != 0 &&
             TryFileStatistic(path, wantMin, out FilterLiteral statistic))
         {
@@ -392,7 +397,7 @@ internal sealed class TerminalScan
 
         // A predicate that an ordered source on the same column covers exactly has its extremes at
         // the two ends of its slices.
-        if (_filter is not null && _wholeFile && _prune && (_tiers & TerminalTiers.ExactCover) != 0)
+        if (!numeric && _filter is not null && _wholeFile && _prune && (_tiers & TerminalTiers.ExactCover) != 0)
         {
             ExactCover? cover = await ExactCover
                 .TryCreateAsync(_file, _filter, _indexes, cancellationToken, zones: null, _metrics)
@@ -540,7 +545,7 @@ internal sealed class TerminalScan
                     FilterLiteral found = await DecodeExtremeAsync(
                         context, decodes, undecided[i], field, wantMin, states, indices, cancellationToken)
                         .ConfigureAwait(false);
-                    Keep(ref best, found, wantMin);
+                    Keep(ref best, found, wantMin, numeric);
                 }
             }
 
@@ -562,7 +567,7 @@ internal sealed class TerminalScan
                     FilterLiteral found = await DecodeExtremeAsync(
                         context, decodes, candidates[i].Split, field, wantMin, states, indices, cancellationToken)
                         .ConfigureAwait(false);
-                    Keep(ref best, found, wantMin);
+                    Keep(ref best, found, wantMin, numeric);
                 }
             }
         }
@@ -710,8 +715,16 @@ internal sealed class TerminalScan
                 }
             }
 
-            return Extremes.TryFind(context.Canonical, column, selected, listed, wantMin, out int bestRow) &&
-                   LiteralReader.TryRead(context.Canonical, column, bestRow, out FilterLiteral literal)
+            if (!Extremes.TryFind(context.Canonical, column, selected, listed, wantMin, out int bestRow))
+            {
+                return FilterLiteral.Null;
+            }
+
+            CanonicalArena arena = context.Canonical;
+            bool numeric = arena.GetNode(ComparisonKernels.Unwrap(arena, column)).DType.Kind == DTypeKind.Decimal;
+            return (numeric
+                    ? LiteralReader.TryReadDecimal(arena, column, bestRow, out FilterLiteral literal)
+                    : LiteralReader.TryRead(arena, column, bestRow, out literal))
                 ? literal
                 : FilterLiteral.Null;
         }
@@ -730,17 +743,67 @@ internal sealed class TerminalScan
     }
 
     /// <summary>Keeps <paramref name="candidate"/> when it beats <paramref name="best"/>, or when there is no best yet.</summary>
-    private static void Keep(ref FilterLiteral best, FilterLiteral candidate, bool wantMin)
+    private static void Keep(ref FilterLiteral best, FilterLiteral candidate, bool wantMin, bool numeric = false)
     {
         if (candidate.Kind == FilterLiteralKind.Null)
         {
             return;
         }
 
-        if (best.Kind == FilterLiteralKind.Null || Beats(candidate, best, wantMin))
+        if (best.Kind == FilterLiteralKind.Null
+            || (numeric ? BeatsAsDecimal(candidate, best, wantMin) : Beats(candidate, best, wantMin)))
         {
             best = candidate;
         }
+    }
+
+    /// <summary>Whether one unscaled decimal is strictly better than another, compared as the numbers they are.</summary>
+    private static bool BeatsAsDecimal(FilterLiteral candidate, FilterLiteral best, bool wantMin) =>
+        ComparisonKernels.TryDecimal(candidate, out Int256 value) && ComparisonKernels.TryDecimal(best, out Int256 current)
+        && (wantMin ? value.CompareTo(current) < 0 : value.CompareTo(current) > 0);
+
+    /// <summary>Whether <paramref name="path"/> names a decimal column, an extension over one included.</summary>
+    private static bool IsDecimal(DType schema, string path)
+    {
+        if (schema.IsDefault)
+        {
+            return false;
+        }
+
+        DType type = schema;
+        if (schema.Kind == DTypeKind.Struct)
+        {
+            int top = schema.IndexOfField(path);
+            if (top >= 0)
+            {
+                type = schema.GetField(top);
+            }
+            else
+            {
+                foreach (string name in path.Split('.'))
+                {
+                    while (type.Kind == DTypeKind.Extension)
+                    {
+                        type = type.StorageType;
+                    }
+
+                    int field = type.Kind == DTypeKind.Struct ? type.IndexOfField(name) : -1;
+                    if (field < 0)
+                    {
+                        return false;
+                    }
+
+                    type = type.GetField(field);
+                }
+            }
+        }
+
+        while (type.Kind == DTypeKind.Extension)
+        {
+            type = type.StorageType;
+        }
+
+        return type.Kind == DTypeKind.Decimal;
     }
 
     /// <summary>Whether <paramref name="candidate"/> is strictly better than <paramref name="best"/>, in the filter's order.</summary>

@@ -19,6 +19,9 @@ public readonly struct Aggregates<TRecord>
 
     internal Aggregates(RecordBinding binding) => _binding = binding;
 
+    /// <summary>The binding the aggregates read their columns through, for the extensions that add aggregates.</summary>
+    internal RecordBinding? Binding => _binding;
+
     /// <summary>The number of rows the scan keeps, nulls included.</summary>
     /// <returns>The symbol of the count.</returns>
     public Sym<long> Count() => Aggregators.Count();

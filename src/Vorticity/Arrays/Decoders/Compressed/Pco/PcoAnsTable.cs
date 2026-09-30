@@ -56,7 +56,8 @@ internal sealed class PcoAnsTable
     }
 
     /// <summary><see cref="Spread"/> into the first 2^<paramref name="sizeLog"/> slots of <paramref name="symbols"/>.</summary>
-    private static void SpreadInto(int sizeLog, ReadOnlySpan<uint> weights, Span<uint> symbols)
+    /// <remarks>The writer's ANS encoder spreads its symbols here too, so the two cannot drift apart.</remarks>
+    internal static void SpreadInto(int sizeLog, ReadOnlySpan<uint> weights, Span<uint> symbols)
     {
         int tableSize = 1 << sizeLog;
         long total = 0;

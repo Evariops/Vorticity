@@ -1,4 +1,5 @@
 using System;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Types;
 
@@ -75,6 +76,7 @@ internal sealed class ZigZagDecoder : ArrayDecoder
             ? context.DecodeChildSelected(in node, 0, encodedType, length, wanted)
             : context.DecodeChild(in node, 0, encodedType, length);
         int produced = selective ? wanted.Length : length;
+        encoded = CanonicalSupport.ExpandIfConstant(context, encoded);
         CanonicalNode child = context.Canonical.GetNode(encoded);
         if (child.Kind != CanonicalKind.Primitive)
         {

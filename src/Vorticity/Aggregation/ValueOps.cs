@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Aggregating;
 
@@ -227,6 +228,134 @@ internal readonly struct DecimalSum : IValueOp<Int128, SumState<Int128>>
 
     public static void AddWords(ref SumState<Int128> state, ReadOnlySpan<Int128> block, ReadOnlySpan<ulong> words) =>
         WordFold.Each<Int128, SumState<Int128>, DecimalSum>(ref state, block, words);
+}
+
+/// <summary>
+/// A sum of unscaled decimals of up to 38 digits, exact whatever their count: two such values can
+/// overflow 128 bits, so the loop keeps an <see cref="Int128"/> total and spills it into 320 bits
+/// only when the next value would overflow it.
+/// </summary>
+internal readonly struct WideDecimalSum : IValueOp<Int128, SumState<WideSum>>
+{
+    public static SumState<WideSum> Seed() => default;
+
+    public static void Add(ref SumState<WideSum> state, Int128 value)
+    {
+        state.Sum.Add(value);
+        state.Count++;
+    }
+
+    public static void AddWeighted(ref SumState<WideSum> state, Int128 value, long count)
+    {
+        state.Sum.AddProduct(value, count);
+        state.Count += count;
+    }
+
+    public static void AddSpan(ref SumState<WideSum> state, ReadOnlySpan<Int128> values)
+    {
+        NarrowTotals.Add(ref state.Sum, values);
+        state.Count += values.Length;
+    }
+
+    public static void Merge(ref SumState<WideSum> into, in SumState<WideSum> other)
+    {
+        into.Sum.Merge(in other.Sum);
+        into.Count += other.Count;
+    }
+
+    public static void AddWords(ref SumState<WideSum> state, ReadOnlySpan<Int128> block, ReadOnlySpan<ulong> words) =>
+        WordFold.Each<Int128, SumState<WideSum>, WideDecimalSum>(ref state, block, words);
+}
+
+/// <summary>A sum of unscaled decimals of more than 38 digits, exact whatever their count, through an <see cref="Int256"/> total spilled into 320 bits.</summary>
+internal readonly struct Decimal256Sum : IValueOp<Int256, SumState<WideSum>>
+{
+    public static SumState<WideSum> Seed() => default;
+
+    public static void Add(ref SumState<WideSum> state, Int256 value)
+    {
+        state.Sum.Add(in value);
+        state.Count++;
+    }
+
+    public static void AddWeighted(ref SumState<WideSum> state, Int256 value, long count)
+    {
+        state.Sum.AddProduct(in value, count);
+        state.Count += count;
+    }
+
+    public static void AddSpan(ref SumState<WideSum> state, ReadOnlySpan<Int256> values)
+    {
+        NarrowTotals.Add(ref state.Sum, values);
+        state.Count += values.Length;
+    }
+
+    public static void Merge(ref SumState<WideSum> into, in SumState<WideSum> other)
+    {
+        into.Sum.Merge(in other.Sum);
+        into.Count += other.Count;
+    }
+
+    public static void AddWords(ref SumState<WideSum> state, ReadOnlySpan<Int256> block, ReadOnlySpan<ulong> words) =>
+        WordFold.Each<Int256, SumState<WideSum>, Decimal256Sum>(ref state, block, words);
+}
+
+/// <summary>The smallest or the largest value of a type with an order and no NaN: a decimal of 256 bits, which no vector kernel folds.</summary>
+/// <typeparam name="TValue">The value.</typeparam>
+/// <typeparam name="TMax">Whether the largest is kept rather than the smallest.</typeparam>
+internal readonly struct OrderedExtremeOp<TValue, TMax> : IValueOp<TValue, ExtremeState<TValue>>
+    where TValue : unmanaged, IComparable<TValue>
+    where TMax : struct, IFlag
+{
+    public static ExtremeState<TValue> Seed() => default;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void Add(ref ExtremeState<TValue> state, TValue value)
+    {
+        int order = value.CompareTo(state.Value);
+        if (!state.Has || (TMax.Value ? order > 0 : order < 0))
+        {
+            state.Value = value;
+            state.Has = true;
+        }
+    }
+
+    public static void AddWeighted(ref ExtremeState<TValue> state, TValue value, long count) => Add(ref state, value);
+
+    public static void AddSpan(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> values)
+    {
+        foreach (TValue value in values)
+        {
+            Add(ref state, value);
+        }
+    }
+
+    public static void Merge(ref ExtremeState<TValue> into, in ExtremeState<TValue> other)
+    {
+        if (other.Has)
+        {
+            Add(ref into, other.Value);
+        }
+    }
+
+    public static void AddWords(ref ExtremeState<TValue> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words) =>
+        WordFold.Each<TValue, ExtremeState<TValue>, OrderedExtremeOp<TValue, TMax>>(ref state, block, words);
+}
+
+/// <summary>A compile-time boolean, so that a generic op's branch on it is specialised away.</summary>
+internal interface IFlag
+{
+    static abstract bool Value { get; }
+}
+
+internal readonly struct Yes : IFlag
+{
+    public static bool Value => true;
+}
+
+internal readonly struct No : IFlag
+{
+    public static bool Value => false;
 }
 
 /// <summary>The smallest value, NaN skipped.</summary>

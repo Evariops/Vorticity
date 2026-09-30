@@ -4,7 +4,7 @@ namespace MustNotCompile.Declarations;
 
 // What the generator refuses, and says why, rather than emitting a record that cannot bind.
 [VortexRecord]
-internal partial record struct WithAChar(int Day, char Initial); // expect: VX1005
+internal partial record struct WithAUri(int Day, System.Uri Site); // expect: VX1005
 
 [VortexRecord]
 internal record struct NotPartial(int Day); // expect: VX1006

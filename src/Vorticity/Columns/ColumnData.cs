@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -161,6 +162,52 @@ internal static class ColumnData
         return new VortexDecimal(Int256.FromLittleEndianBytes(record.Values.Span.Slice(index * 32, 32)), record.Precision, record.Scale);
     }
 
+    /// <summary>Row <paramref name="index"/> of a decimal node of scale 0 as an <see cref="Int128"/>; a 256-bit value past it is refused.</summary>
+    internal static Int128 Integer128(CanonicalArena arena, int node, int index)
+    {
+        int values = EncodedForms.Canonical(arena, node);
+        CanonicalNode record = arena.GetNode(values);
+        CheckRow(index, record.Length);
+        return Integer128At(in record, index);
+    }
+
+    /// <summary>Row <paramref name="index"/> of a decimal node of scale 0 as a <see cref="UInt128"/>; a negative value, or one past it, is refused.</summary>
+    internal static UInt128 UInteger128(CanonicalArena arena, int node, int index)
+    {
+        int values = EncodedForms.Canonical(arena, node);
+        CanonicalNode record = arena.GetNode(values);
+        CheckRow(index, record.Length);
+        return UInteger128At(in record, index);
+    }
+
+    /// <summary>Row <paramref name="index"/> of a decimal node of scale 0 as a <see cref="BigInteger"/>.</summary>
+    internal static BigInteger Big(CanonicalArena arena, int node, int index)
+    {
+        int values = EncodedForms.Canonical(arena, node);
+        CanonicalNode record = arena.GetNode(values);
+        CheckRow(index, record.Length);
+        return BigAt(in record, index);
+    }
+
+    /// <summary>
+    /// The values of a decimal node stored in 128 bits, as the unscaled integers they are: the span an
+    /// <see cref="Int128"/> column's <c>Values</c> is, with no copy.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The node is stored in another width, which only the indexer and <c>CopyTo</c> convert.</exception>
+    internal static ReadOnlySpan<T> Values128<T>(CanonicalArena arena, int node)
+        where T : unmanaged
+    {
+        int values = EncodedForms.Canonical(arena, node);
+        ref readonly CanonicalRecord record = ref arena.RecordRef(values);
+        if (record.Kind != CanonicalKind.Decimal || record.Storage != DecimalStorageType.I128)
+        {
+            Columns.ColumnsThrow.WrongKind($"stored {(record.Kind == CanonicalKind.Decimal ? DecimalStorage.ByteWidth(record.Storage) * 8 + " bits wide" : record.Kind.ToString())}",
+                "values stored in 128 bits; read the others with the indexer or CopyTo");
+        }
+
+        return Values<T>(arena, values);
+    }
+
     /// <summary>Row <paramref name="index"/> of a decimal node of at most 28 digits as a <see cref="decimal"/>.</summary>
     internal static decimal Decimal(CanonicalArena arena, int node, int index)
     {
@@ -290,6 +337,110 @@ internal static class ColumnData
         }
     }
 
+    /// <summary>Copies the rows of a decimal node of scale 0 as <see cref="Int128"/>.</summary>
+    internal static void CopyIntegers128(CanonicalArena arena, int node, Span<Int128> destination)
+    {
+        int values = EncodedForms.Canonical(arena, node);
+        CanonicalNode record = arena.GetNode(values);
+        Span<Int128> into = Destination(destination, record.Length);
+        if (record.Storage == DecimalStorageType.I128)
+        {
+            MemoryMarshal.Cast<byte, Int128>(record.Values.Span)[..into.Length].CopyTo(into);
+            return;
+        }
+
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = Integer128At(in record, i);
+        }
+    }
+
+    /// <summary>Copies the rows of a nullable decimal node of scale 0 as <see cref="Int128"/>, a null for a null row.</summary>
+    internal static void CopyIntegers128(CanonicalArena arena, int node, Span<Int128?> destination)
+    {
+        int values = EncodedForms.Canonical(arena, node);
+        CanonicalNode record = arena.GetNode(values);
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
+        Span<Int128?> into = Destination(destination, record.Length);
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = IsValid(valid, i) ? Integer128At(in record, i) : null;
+        }
+    }
+
+    /// <summary>Copies the rows of a decimal node of scale 0 as <see cref="UInt128"/>.</summary>
+    internal static void CopyUIntegers128(CanonicalArena arena, int node, Span<UInt128> destination)
+    {
+        int values = EncodedForms.Canonical(arena, node);
+        CanonicalNode record = arena.GetNode(values);
+        Span<UInt128> into = Destination(destination, record.Length);
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = UInteger128At(in record, i);
+        }
+    }
+
+    /// <summary>Copies the rows of a nullable decimal node of scale 0 as <see cref="UInt128"/>, a null for a null row.</summary>
+    internal static void CopyUIntegers128(CanonicalArena arena, int node, Span<UInt128?> destination)
+    {
+        int values = EncodedForms.Canonical(arena, node);
+        CanonicalNode record = arena.GetNode(values);
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
+        Span<UInt128?> into = Destination(destination, record.Length);
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = IsValid(valid, i) ? UInteger128At(in record, i) : null;
+        }
+    }
+
+    /// <summary>Copies the rows of a decimal node of scale 0 as <see cref="BigInteger"/>.</summary>
+    internal static void CopyBigs(CanonicalArena arena, int node, Span<BigInteger> destination)
+    {
+        int values = EncodedForms.Canonical(arena, node);
+        CanonicalNode record = arena.GetNode(values);
+        Span<BigInteger> into = Destination(destination, record.Length);
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = BigAt(in record, i);
+        }
+    }
+
+    /// <summary>Copies the rows of a nullable decimal node of scale 0 as <see cref="BigInteger"/>, a null for a null row.</summary>
+    internal static void CopyBigs(CanonicalArena arena, int node, Span<BigInteger?> destination)
+    {
+        int values = EncodedForms.Canonical(arena, node);
+        CanonicalNode record = arena.GetNode(values);
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
+        Span<BigInteger?> into = Destination(destination, record.Length);
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = IsValid(valid, i) ? BigAt(in record, i) : null;
+        }
+    }
+
+    /// <summary>Copies the rows of an i64 node as <see cref="TimeSpan"/> ticks.</summary>
+    internal static void CopySpans(CanonicalArena arena, int node, Span<TimeSpan> destination)
+    {
+        ReadOnlySpan<long> ticks = Values<long>(arena, node);
+        Span<TimeSpan> into = Destination(destination, ticks.Length);
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = new TimeSpan(ticks[i]);
+        }
+    }
+
+    /// <summary>Copies the rows of a nullable i64 node as <see cref="TimeSpan"/> ticks, a null for a null row.</summary>
+    internal static void CopySpans(CanonicalArena arena, int node, Span<TimeSpan?> destination)
+    {
+        ReadOnlySpan<long> ticks = Values<long>(arena, node);
+        ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, node);
+        Span<TimeSpan?> into = Destination(destination, ticks.Length);
+        for (int i = 0; i < into.Length; i++)
+        {
+            into[i] = IsValid(valid, i) ? new TimeSpan(ticks[i]) : null;
+        }
+    }
+
     /// <summary>Copies the rows of a uuid node.</summary>
     internal static void CopyGuids(CanonicalArena arena, int node, Span<Guid> destination)
     {
@@ -395,6 +546,44 @@ internal static class ColumnData
         UInt128 magnitude = (UInt128)(negative ? -unscaled : unscaled);
         return new decimal((int)(uint)magnitude, (int)(uint)(magnitude >> 32), (int)(uint)(magnitude >> 64), negative, (byte)scale);
     }
+
+    private static Int128 Integer128At(in CanonicalNode record, int index)
+    {
+        ReadOnlySpan<byte> bytes = record.Values.Span;
+        if (record.Storage != DecimalStorageType.I256)
+        {
+            return Unscaled(bytes, record.Storage, index);
+        }
+
+        Int256 wide = Int256.FromLittleEndianBytes(bytes.Slice(index * Int256.ByteCount, Int256.ByteCount));
+        return wide.TryToInt128(out Int128 value) ? value : OutOfRange<Int128>(index, wide);
+    }
+
+    private static UInt128 UInteger128At(in CanonicalNode record, int index)
+    {
+        ReadOnlySpan<byte> bytes = record.Values.Span;
+        if (record.Storage != DecimalStorageType.I256)
+        {
+            Int128 narrow = Unscaled(bytes, record.Storage, index);
+            return narrow >= 0 ? (UInt128)narrow : OutOfRange<UInt128>(index, new Int256(narrow));
+        }
+
+        Int256 wide = Int256.FromLittleEndianBytes(bytes.Slice(index * Int256.ByteCount, Int256.ByteCount));
+        wide.GetLimbs(out ulong l0, out ulong l1, out ulong l2, out ulong l3);
+        return (l2 | l3) == 0 ? new UInt128(l1, l0) : OutOfRange<UInt128>(index, wide);
+    }
+
+    private static BigInteger BigAt(in CanonicalNode record, int index)
+    {
+        ReadOnlySpan<byte> bytes = record.Values.Span;
+        return record.Storage == DecimalStorageType.I256
+            ? new BigInteger(bytes.Slice(index * Int256.ByteCount, Int256.ByteCount), isUnsigned: false, isBigEndian: false)
+            : Unscaled(bytes, record.Storage, index);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static T OutOfRange<T>(int index, Int256 value) =>
+        Columns.ColumnsThrow.Format<T>($"Row {index} stores {value}, which is outside what a {typeof(T).Name} holds.");
 
     private static VortexDecimal WideAt(in CanonicalNode record, int index)
     {

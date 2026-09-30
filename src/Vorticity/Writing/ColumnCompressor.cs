@@ -59,6 +59,45 @@ internal enum ColumnScheme : byte
     /// form exists.
     /// </summary>
     AlpRd = 8,
+
+    /// <summary>
+    /// A decimal whose unscaled values fit 64 bits, written as those integers at the narrowest
+    /// signed width that holds them, which then take the integer schemes like any column.
+    /// </summary>
+    DecimalByteParts = 9,
+
+    /// <summary>
+    /// One value on every row, or a null on every row: the scalar and the length, nothing a row.
+    /// Decided before any other scheme and before a hint, as a progression is: nothing costs less,
+    /// and a reader answers a filter or an aggregate from the one value without expanding it.
+    /// </summary>
+    Constant = 10,
+
+    /// <summary>
+    /// A timestamp's instants as their days, seconds within the day and units within the second,
+    /// each then taking the integer schemes: priced against the instants' own best plan.
+    /// </summary>
+    DateTimeParts = 11,
+
+    /// <summary>
+    /// A chunk nulls dominate, nine rows in ten or more: the valid rows' positions and values, and
+    /// a null everywhere else, with no validity -- where the nulls' runs would cost more.
+    /// </summary>
+    Sparse = 12,
+
+    /// <summary>
+    /// Text as the longest tokens of a trained dictionary that spell each row, the 256 single bytes
+    /// and the pairs a sample repeats, a twelve-bit code each: a trial, like FSST, which it has to
+    /// beat by a tenth.
+    /// </summary>
+    OnPair = 13,
+
+    /// <summary>
+    /// Numbers as pco compresses them: entropy-coded bins of their latents, after a consecutive
+    /// delta or a common divisor where they pay -- a trial of the size-first profile, for a
+    /// primitive of sixteen bits or more.
+    /// </summary>
+    Pco = 14,
 }
 
 /// <summary>The chosen scheme and the indices it needs.</summary>
@@ -96,6 +135,21 @@ internal readonly struct ColumnPlan
     /// The transform, the width and the exceptions, for <see cref="ColumnScheme.BitPacked"/>.
     /// </summary>
     internal BitPackPlan? BitPack { get; private init; }
+
+    /// <summary>The signed width the unscaled values are written at, for <see cref="ColumnScheme.DecimalByteParts"/>.</summary>
+    internal PType PartsPType { get; private init; }
+
+    /// <summary>The row whose value every row holds, for <see cref="ColumnScheme.Constant"/>; -1 when every row is null.</summary>
+    internal int ConstantRow { get; private init; }
+
+    /// <summary>The split instants, for <see cref="ColumnScheme.DateTimeParts"/>.</summary>
+    internal DateTimePartsPlan? DateTimeParts { get; private init; }
+
+    /// <summary>The dictionary and the code stream, for <see cref="ColumnScheme.OnPair"/>.</summary>
+    internal OnPairPlan? OnPair { get; private init; }
+
+    /// <summary>The chunks' metadata and pages, for <see cref="ColumnScheme.Pco"/>.</summary>
+    internal PcoPlan? Pco { get; private init; }
 
     /// <summary>What to do.</summary>
     internal ColumnScheme Scheme { get; }
@@ -189,6 +243,24 @@ internal readonly struct ColumnPlan
     internal static ColumnPlan ForSequence(SequencePlan plan) =>
         new ColumnPlan(ColumnScheme.Sequence, [], []) { Sequence = plan };
 
+    internal static ColumnPlan ForDecimalParts(PType parts) =>
+        new ColumnPlan(ColumnScheme.DecimalByteParts, [], []) { PartsPType = parts };
+
+    internal static ColumnPlan ForConstant(int row) =>
+        new ColumnPlan(ColumnScheme.Constant, [], []) { ConstantRow = row };
+
+    internal static ColumnPlan ForOnPair(OnPairPlan plan) =>
+        new ColumnPlan(ColumnScheme.OnPair, [], []) { OnPair = plan, PredictedBytes = plan.EncodedSize };
+
+    internal static ColumnPlan ForPco(PcoPlan plan) =>
+        new ColumnPlan(ColumnScheme.Pco, [], []) { Pco = plan, PredictedBytes = plan.Price };
+
+    internal static ColumnPlan ForSparse(long predicted) =>
+        new ColumnPlan(ColumnScheme.Sparse, [], []) { PredictedBytes = predicted };
+
+    internal static ColumnPlan ForDateTimeParts(DateTimePartsPlan plan) =>
+        new ColumnPlan(ColumnScheme.DateTimeParts, [], []) { DateTimeParts = plan, PredictedBytes = plan.EncodedSize };
+
     /// <summary>Hands a rented codes array back, for a plan that will not be written.</summary>
     internal void ReleaseCodes()
     {
@@ -205,6 +277,9 @@ internal readonly struct ColumnPlan
         Alp?.Release();
         AlpRd?.Release();
         Fsst?.Release();
+        DateTimeParts?.Release();
+        OnPair?.Release();
+        Pco?.Release();
         ReleaseCodes();
     }
 
@@ -242,6 +317,14 @@ internal readonly struct ColumnPlan
         ColumnScheme.AlpRd =>
             $"alprd right={AlpRd!.RightBitWidth} dictionary={AlpRd.DictionaryLength} " +
             $"exceptions={AlpRd.ExceptionCount} size={AlpRd.EncodedSize}",
+        ColumnScheme.DecimalByteParts => $"decimalparts msp={PartsPType}",
+        ColumnScheme.Constant => ConstantRow < 0 ? "constant null" : "constant",
+        ColumnScheme.Sparse => $"sparse size={PredictedBytes}",
+        ColumnScheme.OnPair => $"onpair tokens={OnPair!.Tokens} codes={OnPair.CodeCount} size={OnPair.EncodedSize}",
+        ColumnScheme.Pco => $"pco chunks={Pco!.ChunkCount} pages={Pco.PageCount} size={Pco.EncodedSize}",
+        ColumnScheme.DateTimeParts =>
+            $"datetimeparts days={DateTimeParts!.DaysPType} seconds={DateTimeParts.SecondsPType} " +
+            $"subseconds={DateTimeParts.SubsecondsPType} size={DateTimeParts.EncodedSize}",
         _ => Scheme.ToString(),
     };
 
@@ -576,11 +659,14 @@ internal static class ColumnCompressor
     /// sees it, because every scheme below reads rows; tiling it a second time to decide dominates
     /// the write of a constant column.
     /// <para>
-    /// A progression is the one scheme that needs neither the rows nor a walk — the step between
-    /// two equal values is zero — and it is what the writer produces for an integer constant, so
-    /// deciding it here skips the expansion entirely. Everything else still expands: the guards
-    /// below are the expanded path's own, in its order, so a constant this accepts is one that path
-    /// would have written the same way, and one it declines takes exactly that route.
+    /// Such a node is one scalar already, and <c>vortex.constant</c> writes it as one when every row
+    /// holds it, or every row is null: the expanded path would reach the same plan through the
+    /// ingest pass's counts, and here nothing is expanded at all. A constant with nulls on some rows
+    /// only is not one scalar. For it a progression is the one scheme that needs neither the rows
+    /// nor a walk — the step between two equal values is zero — so an integer takes it here and
+    /// skips the expansion too. Everything else still expands: the guards below are the expanded
+    /// path's own, in its order, so a constant this accepts is one that path would have written the
+    /// same way, and one it declines takes exactly that route.
     /// </para>
     /// </remarks>
     internal static ColumnPlan ChooseConstant(
@@ -588,14 +674,22 @@ internal static class ColumnCompressor
         Cascade cascade)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
-        if (node.Kind != CanonicalKind.Constant
-            || !Allows(target, "vortex.sequence") || cascade.SequenceIsDead)
+        if (node.Kind != CanonicalKind.Constant)
         {
             return ColumnPlan.Canonical;
         }
 
         DType dtype = node.DType;
         int length = node.Length;
+        if (length > 0 && Allows(target, "vortex.constant"))
+        {
+            int valid = ValidRows(arena, in node);
+            if (valid == length || valid == 0)
+            {
+                return ColumnPlan.ForConstant(valid == 0 ? -1 : 0);
+            }
+        }
+
         long expanded = ExpandedBytes(node, dtype);
         if (expanded < 0)
         {
@@ -604,6 +698,11 @@ internal static class ColumnCompressor
 
         // The small-column guard, on the bytes the expansion would have produced.
         if (length < MinimumRows && expanded < MinimumBytes)
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        if (!Allows(target, "vortex.sequence") || cascade.SequenceIsDead)
         {
             return ColumnPlan.Canonical;
         }
@@ -710,7 +809,11 @@ internal static class ColumnCompressor
         // the other candidates changes a handful of chunks and is weighed on its own before it is
         // taken.
         DifferentialProbe? probe = Differential.Value;
-        bool sizeFirst = chunk.SizeFirst;
+
+        // A column's chunk says so for itself; a child, which has no chunk of its own, takes it
+        // from the writer's workspace, so that the size-first profile reaches every array written.
+        // A dry chunk is the one exception: it asks for the plan every other profile writes.
+        bool sizeFirst = chunk.SizeFirst || (!chunk.IsDry && workspace is { SizeFirst: true });
         ColumnPlan plan = ChooseByFormula(
             arena, nodeIndex, target, in stats, cascade, chunk,
             runEndCompetes: sizeFirst || (probe is not null && probe.RunEndCompetes), workspace, sizeFirst);
@@ -735,11 +838,7 @@ internal static class ColumnCompressor
             // The reference plan is thrown away, and a zstd frame, ALP's integers and patches, an
             // FSST code stream and row tables or a row of dictionary codes among its candidates is
             // holding a pooled buffer that nothing will write.
-            reference.Zstd?.Release();
-            reference.Alp?.Release();
-            reference.AlpRd?.Release();
-            reference.Fsst?.Release();
-            reference.ReleaseCodes();
+            reference.Release();
         }
 
         return plan;
@@ -767,9 +866,30 @@ internal static class ColumnCompressor
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
         bool measured = stats.IsPresent && stats.Rows == length;
+
+        // One value, or nulls only, before anything, the small-column guard included: nothing costs
+        // less whatever the kind and the length, and the one node it writes is no second array.
+        ColumnPlan constant = ConstantOf(arena, in node, target, in stats, measured);
+        if (constant.Scheme != ColumnScheme.None)
+        {
+            return constant;
+        }
+
         if (!IsComparable(node.Kind) || (length < MinimumRows && DataBytes(node) < MinimumBytes))
         {
             return ColumnPlan.Canonical;
+        }
+
+        ColumnPlan sparse = SparseOf(arena, in node, target, in stats, measured);
+        if (sparse.Scheme != ColumnScheme.None)
+        {
+            return sparse;
+        }
+
+        ColumnPlan decimalParts = DecimalPartsOf(arena, node, target);
+        if (decimalParts.Scheme != ColumnScheme.None)
+        {
+            return decimalParts;
         }
 
         // First, because where it applies nothing else can beat it: an arithmetic progression goes
@@ -892,6 +1012,14 @@ internal static class ColumnCompressor
         // the table abandoned -- and the writer counts every such fallback through the same
         // predicate, so it cannot go quiet.
         long budget = packed is { } bitPacking ? Math.Min(plain, bitPacking.Cost) : plain;
+
+        // A timestamp's split instants, against the bit-packing, and the dictionary against both.
+        DateTimePartsPlan? temporal = TemporalParts(arena, in node, target, cascade, budget);
+        if (temporal is not null)
+        {
+            budget = temporal.EncodedSize;
+        }
+
         ColumnPlan dictionary = ColumnPlan.Canonical;
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
@@ -901,7 +1029,13 @@ internal static class ColumnCompressor
         }
         if (dictionary.Scheme != ColumnScheme.None)
         {
+            temporal?.Release();
             return dictionary;
+        }
+
+        if (temporal is not null)
+        {
+            return ColumnPlan.ForDateTimeParts(temporal);
         }
 
         if (packed is { } winner)
@@ -1039,6 +1173,30 @@ internal static class ColumnCompressor
             fsst = FsstPlan.TryBuild(arena, nodeIndex, ceiling);
         }
 
+        // OnPair, on text the same bars hold for, and a tenth under FSST where FSST priced: two
+        // encodings that decode alike, so the second has to be worth it. Its training scans a
+        // sample, and the sample's codes decide before the pass over every row.
+        if (node.Kind == CanonicalKind.VarBinView && node.DType.Kind == DTypeKind.Utf8 && Allows(target, "vortex.onpair"))
+        {
+            long ceiling = plain * 9 / 10;
+            if (frame is { } priced)
+            {
+                ceiling = Math.Min(ceiling, priced.CompressedLength * 10L / 9);
+            }
+
+            if (fsst is not null)
+            {
+                ceiling = Math.Min(ceiling, fsst.EncodedSize * 9 / 10);
+            }
+
+            if (OnPairPlan.TryBuild(arena, nodeIndex, ceiling) is { } onpair)
+            {
+                fsst?.Release();
+                frame?.Release();
+                return ColumnPlan.ForOnPair(onpair);
+            }
+        }
+
         if (fsst is not null)
         {
             // The zstd plan lost, and it is holding a pooled buffer that nothing will write.
@@ -1105,6 +1263,16 @@ internal static class ColumnCompressor
             smallest.Release();
             smallest = ColumnPlan.ForZstd(frame) with { PredictedBytes = frame.CompressedLength };
             bound = frame.CompressedLength;
+        }
+
+        // pco, on numbers of sixteen bits and more: its bins entropy-code what a frame of reference
+        // packs to a fixed width, and its deltas and divisors see what zstd's matches do not.
+        if (PcoPlan.Stores(in node) && Allows(target, "vortex.pco")
+            && PcoPlan.TryBuild(arena, nodeIndex, bound) is { } pco)
+        {
+            smallest.Release();
+            smallest = ColumnPlan.ForPco(pco);
+            bound = pco.Price;
         }
 
         if (node.Kind == CanonicalKind.VarBinView && Allows(target, "vortex.fsst")
@@ -1422,6 +1590,17 @@ internal static class ColumnCompressor
         CanonicalNode node = arena.GetNode(nodeIndex);
         int length = node.Length;
         bool measured = stats.IsPresent && stats.Rows == length;
+
+        // 0. One value, or nulls only, of any kind and length: before the small-column guard, since
+        // the one node it writes is no second array; before the progression an integer constant
+        // also is, because a progression decodes to its rows where a constant stays one value
+        // through a scan; and before a hint, because nothing is left for a hint to decide.
+        ColumnPlan constant = ConstantOf(arena, in node, target, in stats, measured);
+        if (constant.Scheme != ColumnScheme.None)
+        {
+            return constant;
+        }
+
         if (!IsComparable(node.Kind) || (length < MinimumRows && DataBytes(node) < MinimumBytes))
         {
             return ColumnPlan.Canonical;
@@ -1448,11 +1627,31 @@ internal static class ColumnCompressor
         // is re-priced on this chunk and written when it applies, as a remembered plan is.
         if (measured && chunk.Memory is { Pinned: true } pin)
         {
-            ColumnPlan pinned = Reprice(pin.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain, workspace);
+            ColumnPlan pinned = Reprice(pin.Scheme, arena, nodeIndex, node, target, in stats, cascade, chunk, plain, workspace, pinned: true);
             if (pinned.Scheme == pin.Scheme)
             {
                 return pinned with { FromMemory = true };
             }
+        }
+
+        // Nulls on nine rows in ten or more, from the pass's counts: the valid rows alone, at their
+        // positions, when that costs less than the runs the nulls make -- before the run-end rule,
+        // which would otherwise take every such chunk as runs, and before a decimal's parts, which
+        // would take its nulls into the integers.
+        ColumnPlan sparse = SparseOf(arena, in node, target, in stats, measured);
+        if (sparse.Scheme != ColumnScheme.None)
+        {
+            return sparse;
+        }
+
+        // A decimal whose values fit 64 bits is those integers, and the integers' own schemes --
+        // a progression, runs, a frame of reference, a dictionary -- then price them, which is
+        // what the reference writer does with every such decimal: a decimal of its own has no
+        // scheme but runs and a dictionary, and a plain decimal(28, 10) spends 16 bytes a value.
+        ColumnPlan decimalParts = DecimalPartsOf(arena, node, target);
+        if (decimalParts.Scheme != ColumnScheme.None)
+        {
+            return decimalParts;
         }
 
         RowComparer comparer = cascade.RunsAreDead && cascade.DictionaryIsDead
@@ -1554,6 +1753,16 @@ internal static class ColumnCompressor
             bestScheme = ColumnScheme.RunEnd;
         }
 
+        // A timestamp's instants split into days, seconds and subseconds, when the parts bit-pack a
+        // tenth under the best so far: instants coarser than their unit, whose multiples of a
+        // second a frame of reference cannot see. Before the dictionary, which then has to beat it.
+        DateTimePartsPlan? temporal = TemporalParts(arena, in node, target, cascade, best);
+        if (temporal is not null)
+        {
+            best = temporal.EncodedSize;
+            bestScheme = ColumnScheme.DateTimeParts;
+        }
+
         // The dictionary, against the best so far: it returns a plan only when it beats it.
         if (Allows(target, "vortex.dict") && !cascade.DictionaryIsDead)
         {
@@ -1562,6 +1771,7 @@ internal static class ColumnCompressor
                 : Dictionary(arena, node, comparer, length, best);
             if (dictionary.Scheme != ColumnScheme.None)
             {
+                temporal?.Release();
                 if (sizeFirst && dictionary.PredictedBytes > 0
                     && SmallestTrial(arena, nodeIndex, node, target, dictionary.PredictedBytes, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } smaller)
                 {
@@ -1578,10 +1788,15 @@ internal static class ColumnCompressor
         // bit-packing already holds -- smaller on disk, slower to decode, and different bytes -- so
         // a trial is offered only the columns no exactly priced scheme took, under the plain
         // column's bytes as its ceiling. Size first is the one profile that wants exactly that.
+        //
+        // The trial is held to what the winner writes, its buffers, and not to its price, which
+        // adds the framing of its node: a trial's size is its buffers too, and held to the price it
+        // would take a column by less than that framing while writing more than the winner would.
         if (sizeFirst && bestScheme != ColumnScheme.None
-            && SmallestTrial(arena, nodeIndex, node, target, best, cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } trial)
+            && SmallestTrial(arena, nodeIndex, node, target, ExactBytes(bestScheme, best, packed), cascade.IsValuesChild, workspace) is { Scheme: not ColumnScheme.None } trial)
         {
             walkedRuns.ReleaseCodes();
+            temporal?.Release();
             return trial with { DisplacedExact = true };
         }
 
@@ -1589,6 +1804,9 @@ internal static class ColumnCompressor
         {
             case ColumnScheme.RunEnd:
                 return MaterializeRuns(in node, in comparer, length, runs, in walkedRuns, runEndCost);
+
+            case ColumnScheme.DateTimeParts:
+                return ColumnPlan.ForDateTimeParts(temporal!);
 
             case ColumnScheme.BitPacked:
                 BitPackPlan chosen = packed.GetValueOrDefault();
@@ -1599,6 +1817,135 @@ internal static class ColumnCompressor
                     ? SmallestTrial(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace)
                     : Trials(arena, nodeIndex, node, target, plain, cascade.IsValuesChild, workspace);
         }
+    }
+
+    /// <summary>
+    /// The constant plan for a chunk whose every row is null, of any dtype a reader can fill with
+    /// nulls -- a struct's and a list's included, whose validity is otherwise a bitmap of zeros a
+    /// row -- or whose every row holds one value a scalar spells; canonical for any other chunk.
+    /// </summary>
+    /// <remarks>
+    /// The ingest pass has counted the nulls and the runs, so a chunk it measured is decided by two
+    /// comparisons; one it did not, a child a scheme invented, is asked of its validity alone,
+    /// which is a population count. Never priced, as a progression is not: the plan costs a few
+    /// bytes whatever the column holds.
+    /// </remarks>
+    private static ColumnPlan ConstantOf(
+        CanonicalArena arena, in CanonicalNode node, VortexEdition target, in BlockStats stats, bool measured)
+    {
+        int length = node.Length;
+        if (length == 0 || node.Kind == CanonicalKind.Null || !Allows(target, "vortex.constant"))
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        if ((measured ? stats.NullCount == length : ValidRows(arena, in node) == 0) && CanonicalFill.CanBuild(node.DType))
+        {
+            return ColumnPlan.ForConstant(-1);
+        }
+
+        return measured && IsComparable(node.Kind) && stats.NullCount == 0 && stats.HasRunBoundaries && stats.RunCount == 1
+            ? ColumnPlan.ForConstant(0)
+            : ColumnPlan.Canonical;
+    }
+
+    /// <summary>The rows a node's validity says are valid.</summary>
+    private static int ValidRows(CanonicalArena arena, in CanonicalNode node)
+    {
+        ValidityMask mask = ValidityMask.From(arena, node.Validity);
+        return mask.AllValid ? node.Length
+            : mask.AllInvalid ? 0
+            : BitmapKernels.CountSet(mask.Bits, mask.BitOffset, node.Length);
+    }
+
+    /// <summary>
+    /// The sparse plan for a chunk nulls dominate -- nine rows in ten or more, from the pass's null
+    /// count -- when its valid rows at their positions cost less than the runs its nulls make; a
+    /// pin takes any chunk with a null in it. Canonical for any other chunk.
+    /// </summary>
+    /// <remarks>
+    /// Every other scheme pays for a null row: a bit of validity, and its slot at the packed width
+    /// besides. A sparse chunk pays for its valid rows only, a position each and a value, priced
+    /// as a frame of reference packs them: the positions over the chunk's rows, the values over
+    /// the bounds the pass took, or plain where it took none. Run-end is the one scheme that also
+    /// skips null rows, a run at a time, and is what it has to beat.
+    /// </remarks>
+    private static ColumnPlan SparseOf(
+        CanonicalArena arena, in CanonicalNode node, VortexEdition target, in BlockStats stats, bool measured,
+        bool pinned = false)
+    {
+        int length = node.Length;
+        long valid = length - stats.NullCount;
+        if (!measured || !IsComparable(node.Kind) || !Allows(target, "vortex.sparse") || valid <= 0 || valid == length
+            || (!pinned && stats.NullCount * 10 < (long)length * 9))
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        long cost = SparseCostOf(in node, in stats, valid, length);
+        if (pinned)
+        {
+            return ColumnPlan.ForSparse(cost);
+        }
+
+        long runs = Allows(target, "vortex.runend") && stats.HasRunBoundaries
+            ? RunEndCostOf(stats.RunCount, length, DataBytes(node))
+            : long.MaxValue;
+        return cost < runs ? ColumnPlan.ForSparse(cost) : ColumnPlan.Canonical;
+    }
+
+    /// <summary>
+    /// A sparse chunk's bytes: its positions and its values, each bit-packed in blocks of 1 024 or
+    /// plain, whichever is smaller -- a few hundred valid rows do not fill the one block they would
+    /// pad -- and its framing.
+    /// </summary>
+    private static long SparseCostOf(in CanonicalNode node, in BlockStats stats, long valid, int length)
+    {
+        long blocks = (valid + 1023) / 1024;
+        long positions = Math.Min(
+            blocks * 128 * (64 - BitOperations.LeadingZeroCount((ulong)Math.Max(length - 1, 1))),
+            valid * FsstPlan.IndexPType(length - 1).ByteWidth());
+        long values = node.Kind switch
+        {
+            CanonicalKind.Bool => (valid + 7) / 8,
+            CanonicalKind.Primitive when node.PType.IsInteger() && stats.HasBounds => Math.Min(
+                blocks * 128 * (64 - BitOperations.LeadingZeroCount(node.PType.IsSignedInteger()
+                    ? unchecked((ulong)(stats.Max.SignedValue - stats.Min.SignedValue))
+                    : stats.Max.UnsignedValue - stats.Min.UnsignedValue)),
+                valid * node.PType.ByteWidth()),
+            CanonicalKind.Primitive => valid * node.PType.ByteWidth(),
+            CanonicalKind.Decimal => valid * DecimalStorage.ByteWidth(node.Storage),
+            _ => stats.TotalBytes + (valid * sizeof(int)),
+        };
+        return positions + values + 96;
+    }
+
+    /// <summary>
+    /// The instants of a timestamp's storage split into days, seconds and subseconds, when the parts
+    /// bit-pack a tenth under <paramref name="ceiling"/>; null for any other column.
+    /// </summary>
+    private static DateTimePartsPlan? TemporalParts(
+        CanonicalArena arena, in CanonicalNode node, VortexEdition target, Cascade cascade, long ceiling) =>
+        cascade.UnitsPerSecond > 0 && Allows(target, "vortex.datetimeparts")
+            ? DateTimePartsPlan.TryBuild(arena, in node, cascade.UnitsPerSecond, ceiling)
+            : null;
+
+    /// <summary>
+    /// The byte-parts plan for a decimal chunk whose unscaled values fit 64 bits, at the narrowest
+    /// signed width that holds every valid one; canonical for any other chunk.
+    /// </summary>
+    /// <remarks>
+    /// Never priced: the integers' own chooser decides what they cost, once they exist, so there is
+    /// no number to hold a memory to, and the walk that settles the width is what each chunk pays.
+    /// </remarks>
+    private static ColumnPlan DecimalPartsOf(CanonicalArena arena, CanonicalNode node, VortexEdition target)
+    {
+        if (node.Kind != CanonicalKind.Decimal || !Allows(target, "vortex.decimal_byte_parts"))
+        {
+            return ColumnPlan.Canonical;
+        }
+
+        return DecimalParts.Width(arena, in node) is PType parts ? ColumnPlan.ForDecimalParts(parts) : ColumnPlan.Canonical;
     }
 
     /// <summary>
@@ -1659,11 +2006,15 @@ internal static class ColumnCompressor
     /// winning returns a plan of another scheme, which the caller reads as "back to full pricing";
     /// a remembered canonical is the cheapest case of all, and the one the distinct table is turned
     /// off for.
+    /// <para>
+    /// A caller's pin (<c>pinned</c>) is honoured wherever the scheme applies, so a dictionary no
+    /// table served is walked for, where a memory gives up rather than pay the walk it exists to skip.
+    /// </para>
     /// </remarks>
     private static ColumnPlan Reprice(
         ColumnScheme scheme, CanonicalArena arena, int nodeIndex, CanonicalNode node,
         VortexEdition target, in BlockStats stats, Cascade cascade, ChunkStats chunk, long plain,
-        ArrayBlobWriter.Workspace? workspace)
+        ArrayBlobWriter.Workspace? workspace, bool pinned = false)
     {
         int length = node.Length;
         switch (scheme)
@@ -1673,6 +2024,41 @@ internal static class ColumnCompressor
 
             case ColumnScheme.Sequence:
                 return SequenceOf(node, target, in stats, cascade, measured: true);
+
+            case ColumnScheme.DecimalByteParts:
+                return DecimalPartsOf(arena, node, target);
+
+            case ColumnScheme.Constant:
+                return ConstantOf(arena, in node, target, in stats, measured: stats.IsPresent && stats.Rows == length);
+
+            case ColumnScheme.OnPair:
+            {
+                // Held to the plain column, as every remembered plan is; a pin to nothing at all.
+                OnPairPlan? onpair = node.Kind == CanonicalKind.VarBinView && node.DType.Kind == DTypeKind.Utf8
+                    && Allows(target, "vortex.onpair")
+                    ? OnPairPlan.TryBuild(arena, nodeIndex, pinned ? long.MaxValue : plain)
+                    : null;
+                return onpair is null ? ColumnPlan.Canonical : ColumnPlan.ForOnPair(onpair);
+            }
+
+            case ColumnScheme.Sparse:
+                return SparseOf(arena, in node, target, in stats, measured: stats.IsPresent && stats.Rows == length, pinned);
+
+            case ColumnScheme.Pco:
+            {
+                // Held to the plain column, as every remembered plan is; a pin to nothing at all.
+                PcoPlan? pco = PcoPlan.Stores(in node) && Allows(target, "vortex.pco")
+                    ? PcoPlan.TryBuild(arena, nodeIndex, pinned ? long.MaxValue : plain)
+                    : null;
+                return pco is null ? ColumnPlan.Canonical : ColumnPlan.ForPco(pco);
+            }
+
+            case ColumnScheme.DateTimeParts:
+            {
+                // Held to the plain column, as every remembered plan is; a pin to nothing at all.
+                DateTimePartsPlan? parts = TemporalParts(arena, in node, target, cascade, pinned ? long.MaxValue : plain);
+                return parts is null ? ColumnPlan.Canonical : ColumnPlan.ForDateTimeParts(parts);
+            }
 
             case ColumnScheme.RunEnd:
             {
@@ -1722,9 +2108,21 @@ internal static class ColumnCompressor
             }
 
             case ColumnScheme.Dict:
-                return Allows(target, "vortex.dict") && !cascade.DictionaryIsDead
-                    && chunk.TableServes(length)
-                    ? TabledDictionary(node, in chunk, length, plain)
+                if (!Allows(target, "vortex.dict") || cascade.DictionaryIsDead)
+                {
+                    return ColumnPlan.Canonical;
+                }
+
+                if (chunk.TableServes(length))
+                {
+                    return TabledDictionary(node, in chunk, length, plain);
+                }
+
+                // No table runs on a column two bytes wide or narrower, whose worst case no
+                // dictionary beats, though sixteen values of a short take a byte a row. Memory
+                // exists to skip this walk; a caller's pin pays it.
+                return pinned
+                    ? Dictionary(arena, node, new RowComparer(arena, nodeIndex), length, plain)
                     : ColumnPlan.Canonical;
 
             default:
@@ -1796,6 +2194,17 @@ internal static class ColumnCompressor
                 return ColumnPlan.Canonical;
         }
     }
+
+    /// <summary>
+    /// The bytes an exact winner writes, its buffers: a bit-packing's price less its node's framing,
+    /// run-end's the same as <see cref="MaterializeRuns"/> predicts them, any other's its price.
+    /// </summary>
+    private static long ExactBytes(ColumnScheme scheme, long price, BitPackPlan? packed) => scheme switch
+    {
+        ColumnScheme.BitPacked when packed is { } plan => plan.BufferBytes,
+        ColumnScheme.RunEnd => Math.Max(0, price - 256),
+        _ => price,
+    };
 
     /// <summary>The run-end plan for a winner: one run needs no gather, a walked count already has it.</summary>
     private static ColumnPlan MaterializeRuns(

@@ -2285,7 +2285,7 @@ internal static class BlockStatsPass
     /// per width to say so would buy nothing the measurement does not.
     /// </para>
     /// </remarks>
-    private static void Bounds<T>(ReadOnlySpan<T> values, out T min, out T max)
+    internal static void Bounds<T>(ReadOnlySpan<T> values, out T min, out T max)
         where T : unmanaged, INumber<T>, IMinMaxValue<T>
     {
         min = T.MaxValue;
@@ -2433,7 +2433,7 @@ internal static class BlockStatsPass
     /// through a select rather than behind a branch, two rows a step on two pairs of bounds.
     /// </summary>
     /// <returns>Whether a row of the range is valid.</returns>
-    private static bool MaskedBounds<T>(ReadOnlySpan<T> values, in ValidityMask mask, int start, out T min, out T max)
+    internal static bool MaskedBounds<T>(ReadOnlySpan<T> values, in ValidityMask mask, int start, out T min, out T max)
         where T : unmanaged, IBinaryInteger<T>, IMinMaxValue<T>
     {
         int count = values.Length;

@@ -29,7 +29,7 @@ anchored in the Rust reference, in both directions. Tests use xUnit v3 on Micros
 ## 3. The golden corpus
 
 `tools/conformance-gen`, a Rust crate pinned to `vortex = "=0.86.1"`, writes the corpus under
-`tests/Vorticity.Conformance/corpus`: 856 files, deterministic from a fixed seed, across the seven
+`tests/Vorticity.Conformance/corpus`: 876 files, deterministic from a fixed seed, across the seven
 core editions from `core2025.05.0` to `core2026.08.3`. The matrix is deliberate:
 
 - every dtype × nullability × row counts of 0, 1, 1 023, 1 024, 1 025, 8 191, 8 192 and 8 193,

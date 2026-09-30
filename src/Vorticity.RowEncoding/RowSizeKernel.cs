@@ -61,6 +61,10 @@ internal static class RowSizeKernel
                 Add(arena, arena.MaterializeEncoded(nodeIndex), field, sizes);
                 return;
 
+            case CanonicalKind.Constant:
+                Add(arena, arena.MaterializeConstant(nodeIndex), field, sizes);
+                return;
+
             default:
                 // Rejected here as well as by width classification: the canonical form is the last
                 // place a dtype and its physical shape can disagree.

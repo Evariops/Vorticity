@@ -41,6 +41,16 @@ internal readonly struct Cascade
     /// </remarks>
     internal bool IsValuesChild { get; }
 
+    /// <summary>
+    /// For the storage of a timestamp, the number of its units in a second, so the chooser can
+    /// price the instants split into days, seconds and subseconds; zero for any other column.
+    /// </summary>
+    internal long UnitsPerSecond { get; private init; }
+
+    /// <summary>The storage of a timestamp in units of <c>1 / unitsPerSecond</c> seconds.</summary>
+    internal static Cascade TimestampStorage(long unitsPerSecond) =>
+        new Cascade(runs: false, dictionary: false, sequence: false, reference: null) { UnitsPerSecond = unitsPerSecond };
+
     /// <summary>The values child of a dictionary or a run-end: a column like any other, ungated.</summary>
     internal static Cascade ValuesChild() =>
         new Cascade(runs: false, dictionary: false, sequence: false, reference: null, valuesChild: true);

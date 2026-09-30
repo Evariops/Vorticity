@@ -20,6 +20,7 @@
 // after this one still need their own evidence.
 using System;
 using Vorticity.Arrays.Decoders.Compressed.Pco;
+using Vorticity.Types;
 using Xunit;
 
 namespace Vorticity.Tests.Arrays;
@@ -55,7 +56,7 @@ public sealed class PcoChunkMetaTests
     [Fact]
     public void TheChunkMetadataMatchesTheReferenceParser()
     {
-        PcoChunkMeta chunk = PcoChunkMeta.Read(Header, Meta, latentBits: 64);
+        PcoChunkMeta chunk = PcoChunkMeta.Read(Header, Meta, PcoNumber.Of(PType.I64)!.Value);
 
         Assert.Equal(4, chunk.FormatMajor);
         Assert.Equal(1, chunk.FormatMinor);

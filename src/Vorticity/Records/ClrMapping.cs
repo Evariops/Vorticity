@@ -24,6 +24,18 @@ internal enum ClrKind : byte
     Guid,
     List,
     Extension,
+
+    /// <summary>A <see cref="System.TimeSpan"/>: an i64 column of 100 ns ticks.</summary>
+    TimeSpan,
+
+    /// <summary>An <see cref="System.Int128"/>: a decimal column of scale 0.</summary>
+    Integer128,
+
+    /// <summary>A <see cref="System.UInt128"/>: a decimal column of scale 0 holding no negative value.</summary>
+    UInteger128,
+
+    /// <summary>A <see cref="System.Numerics.BigInteger"/>: a decimal column of scale 0, of any precision.</summary>
+    BigInteger,
 }
 
 /// <summary>The shape of a .NET type a column may be read or written as.</summary>
@@ -38,9 +50,13 @@ internal sealed class ClrShape
         PType = ptype;
         IsNullableValue = nullableValue;
         Element = element;
+        Core = Nullable.GetUnderlyingType(type) ?? type;
     }
 
     internal Type Type { get; }
+
+    /// <summary>The type without its <see cref="Nullable{T}"/>, resolved once.</summary>
+    internal Type Core { get; }
 
     internal ClrKind Kind { get; }
 
@@ -95,6 +111,18 @@ internal sealed class ClrShape
             _ when core == typeof(DateTime) => (ClrKind.DateTime, default(PType)),
             _ when core == typeof(DateTimeOffset) => (ClrKind.DateTimeOffset, default(PType)),
             _ when core == typeof(Guid) => (ClrKind.Guid, default(PType)),
+
+            // A UTF-16 code unit, lone surrogates included, which is what a char holds and a string may not.
+            _ when core == typeof(char) => (ClrKind.Unsigned, PType.U16),
+
+            // A native integer is read as the storage it is on a 64-bit host, and refused on another:
+            // its width would then disagree with the column's.
+            _ when core == typeof(nint) => IntPtr.Size == sizeof(long) ? (ClrKind.Signed, PType.I64) : (ClrKind.Unsupported, default(PType)),
+            _ when core == typeof(nuint) => IntPtr.Size == sizeof(long) ? (ClrKind.Unsigned, PType.U64) : (ClrKind.Unsupported, default(PType)),
+            _ when core == typeof(TimeSpan) => (ClrKind.TimeSpan, PType.I64),
+            _ when core == typeof(Int128) => (ClrKind.Integer128, default(PType)),
+            _ when core == typeof(UInt128) => (ClrKind.UInteger128, default(PType)),
+            _ when core == typeof(System.Numerics.BigInteger) => (ClrKind.BigInteger, default(PType)),
             _ => (ClrKind.Unsupported, default(PType)),
         };
 
@@ -138,6 +166,11 @@ internal static class ClrFit
         if (Nullable.GetUnderlyingType(type) is { } underlying)
         {
             return Name(underlying) + "?";
+        }
+
+        if (type == typeof(nint) || type == typeof(nuint))
+        {
+            return type == typeof(nint) ? "nint" : "nuint";
         }
 
         string? keyword = Type.GetTypeCode(type) switch
@@ -197,8 +230,9 @@ internal static class ClrFit
 
         if (shape.Kind == ClrKind.Unsupported)
         {
-            reason = shape.Type == typeof(char)
-                ? "a char is not a dtype; read the text column as string."
+            Type core = Nullable.GetUnderlyingType(shape.Type) ?? shape.Type;
+            reason = core == typeof(nint) || core == typeof(nuint)
+                ? $"a {Name(core)} is {IntPtr.Size * 8} bits on this host, and the column's integers are 64; read it as {(core == typeof(nint) ? "long" : "ulong")}."
                 : column.Kind == VortexTypeKind.Extension
                     ? $"'{column.ExtensionId}' is not registered on the session, or not by this type."
                     : "the type has no mapping to a dtype.";
@@ -244,6 +278,17 @@ internal static class ClrFit
                     "a DateTimeOffset reads a vortex.timestamp column whose zone this host resolves; read another as long.", out reason);
             case ClrKind.Guid:
                 return Expect(target.ExtensionId == ExtensionIds.Uuid, "a Guid reads a vortex.uuid column.", out reason);
+            case ClrKind.TimeSpan:
+                return Expect(target.Kind == VortexTypeKind.Primitive && target.PrimitiveType == PType.I64,
+                    "a TimeSpan reads an i64 column of 100 ns ticks.", out reason);
+            case ClrKind.Integer128 or ClrKind.UInteger128:
+                // Thirty-nine digits hold every value of either type, and 38 every value a decimal of
+                // 128 bits holds: a value beyond the type in a wider column is refused as it is read.
+                return Expect(target.Kind == VortexTypeKind.Decimal && target.Scale == 0 && target.Precision <= 39,
+                    $"a {Name(shape.Type)} reads a decimal column of scale 0 and at most 39 digits.", out reason);
+            case ClrKind.BigInteger:
+                return Expect(target.Kind == VortexTypeKind.Decimal && target.Scale == 0,
+                    "a BigInteger reads a decimal column of scale 0.", out reason);
             case ClrKind.List:
                 if (target.Kind is not (VortexTypeKind.List or VortexTypeKind.FixedSizeList))
                 {

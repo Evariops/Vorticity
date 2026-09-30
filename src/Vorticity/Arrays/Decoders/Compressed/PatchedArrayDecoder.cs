@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Types;
@@ -135,7 +136,7 @@ internal sealed class PatchedArrayDecoder : ArrayDecoder
     private static CanonicalNode Require(
         ArrayDecodeContext context, int index, PType ptype, string what, int expected)
     {
-        CanonicalNode child = context.Canonical.GetNode(index);
+        CanonicalNode child = context.Canonical.GetNode(CanonicalSupport.ExpandIfConstant(context, index));
         if (child.Kind != CanonicalKind.Primitive)
         {
             CompressedThrow.ChildKind(Id, what, child.Kind, "a Primitive");

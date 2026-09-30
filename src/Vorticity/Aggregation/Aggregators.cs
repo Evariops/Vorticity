@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Vorticity.Types;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Aggregating;
 
@@ -49,6 +50,7 @@ internal static class Aggregators
                 _ => static () => new FixedDistinctSlot<double>(StorageKind.Primitive),
             },
             StorageKind.Decimal => static () => new FixedDistinctSlot<Int128>(StorageKind.Decimal),
+            StorageKind.Decimal256 => static () => new FixedDistinctSlot<Int256>(StorageKind.Decimal256),
             StorageKind.Uuid => static () => new FixedDistinctSlot<UInt128>(StorageKind.Uuid),
             StorageKind.Bool => static () => new BoolSlot<long>(BoolFlags.Distinct),
             StorageKind.Bytes => static () => new BytesDistinctSlot(),
@@ -60,37 +62,51 @@ internal static class Aggregators
     internal static Sym<T> Sum<T>(ColumnShape shape)
         where T : INumber<T>
     {
-        Func<AggregateSlot<T>> create;
-        switch (shape.Kind)
+        Func<AggregateSlot<T>> create = shape.Kind switch
         {
-            case StorageKind.Primitive:
-                create = shape.PType switch
-                {
-                    PType.I8 => static () => new FixedSlot<sbyte, SumState<Int128>, SignedSum<sbyte>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                    PType.I16 => static () => new FixedSlot<short, SumState<Int128>, SignedSum<short>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                    PType.I32 => static () => new FixedSlot<int, SumState<Int128>, SignedSum<int>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                    PType.I64 => static () => new FixedSlot<long, SumState<Int128>, SignedSum<long>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                    PType.U8 => static () => new FixedSlot<byte, SumState<UInt128>, UnsignedSum<byte>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                    PType.U16 => static () => new FixedSlot<ushort, SumState<UInt128>, UnsignedSum<ushort>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                    PType.U32 => static () => new FixedSlot<uint, SumState<UInt128>, UnsignedSum<uint>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                    PType.U64 => static () => new FixedSlot<ulong, SumState<UInt128>, UnsignedSum<ulong>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                    PType.F16 => static () => new FixedSlot<Half, SumState<double>, FloatSum<Half>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                    PType.F32 => static () => new FixedSlot<float, SumState<double>, FloatSum<float>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                    _ => static () => new FixedSlot<double, SumState<double>, FloatSum<double>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                };
-                break;
-            case StorageKind.Decimal:
+            StorageKind.Primitive => shape.PType switch
             {
-                int scale = shape.Type.Scale;
-                create = () => new FixedSlot<Int128, SumState<Int128>, DecimalSum, T>(StorageKind.Decimal, s => DecimalAs<T>(s.Sum, scale));
-                break;
-            }
-
-            default:
-                throw shape.Unsupported("a sum");
-        }
+                PType.I8 => static () => new FixedSlot<sbyte, SumState<Int128>, SignedSum<sbyte>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                PType.I16 => static () => new FixedSlot<short, SumState<Int128>, SignedSum<short>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                PType.I32 => static () => new FixedSlot<int, SumState<Int128>, SignedSum<int>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                PType.I64 => static () => new FixedSlot<long, SumState<Int128>, SignedSum<long>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                PType.U8 => static () => new FixedSlot<byte, SumState<UInt128>, UnsignedSum<byte>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                PType.U16 => static () => new FixedSlot<ushort, SumState<UInt128>, UnsignedSum<ushort>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                PType.U32 => static () => new FixedSlot<uint, SumState<UInt128>, UnsignedSum<uint>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                PType.U64 => static () => new FixedSlot<ulong, SumState<UInt128>, UnsignedSum<ulong>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                PType.F16 => static () => new FixedSlot<Half, SumState<double>, FloatSum<Half>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                PType.F32 => static () => new FixedSlot<float, SumState<double>, FloatSum<float>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                _ => static () => new FixedSlot<double, SumState<double>, FloatSum<double>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+            },
+            StorageKind.Decimal or StorageKind.Decimal256 => DecimalSumSlot<T>(shape),
+            _ => throw shape.Unsupported("a sum"),
+        };
 
         return new Sym<T>(new AggregateNode<T>(AggregateKind.Sum, shape, create, (StatisticsView view, out T value) => SettleSum(shape, view, out value)));
+    }
+
+    /// <summary>The sum of a decimal column as a <see cref="VortexDecimal"/>, exact at any precision.</summary>
+    internal static Sym<VortexDecimal> SumDecimal(ColumnShape shape) =>
+        shape.Kind is StorageKind.Decimal or StorageKind.Decimal256
+            ? new Sym<VortexDecimal>(new AggregateNode<VortexDecimal>(AggregateKind.Sum, shape, DecimalSumSlot<VortexDecimal>(shape), null))
+            : throw shape.Unsupported("a sum as VortexDecimal");
+
+    /// <summary>
+    /// The state of a decimal sum: a 128-bit total for eighteen digits or fewer, which cannot overflow
+    /// below 2^67 rows, and above that a narrow total spilled into 320 bits, which never does.
+    /// </summary>
+    private static Func<AggregateSlot<T>> DecimalSumSlot<T>(ColumnShape shape)
+    {
+        int precision = shape.Type.Precision;
+        int scale = shape.Type.Scale;
+        return shape.Kind switch
+        {
+            StorageKind.Decimal when precision <= 18 =>
+                () => new FixedSlot<Int128, SumState<Int128>, DecimalSum, T>(StorageKind.Decimal, s => DecimalAs<T>(new Int256(s.Sum), precision, scale)),
+            StorageKind.Decimal =>
+                () => new FixedSlot<Int128, SumState<WideSum>, WideDecimalSum, T>(StorageKind.Decimal, s => DecimalAs<T>(in s.Sum, precision, scale)),
+            _ => () => new FixedSlot<Int256, SumState<WideSum>, Decimal256Sum, T>(StorageKind.Decimal256, s => DecimalAs<T>(in s.Sum, precision, scale)),
+        };
     }
 
     internal static Sym<double?> Avg(ColumnShape shape)
@@ -114,10 +130,24 @@ internal static class Aggregators
                     _ => static () => new FixedSlot<double, SumState<double>, FloatSum<double>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
                 };
                 break;
-            case StorageKind.Decimal:
+            case StorageKind.Decimal when shape.Type.Precision <= 18:
             {
                 double unit = Math.Pow(10, shape.Type.Scale);
                 create = () => new FixedSlot<Int128, SumState<Int128>, DecimalSum, double?>(StorageKind.Decimal, s => s.Count == 0 ? null : (double)s.Sum / unit / s.Count);
+                break;
+            }
+
+            case StorageKind.Decimal:
+            {
+                double unit = Math.Pow(10, shape.Type.Scale);
+                create = () => new FixedSlot<Int128, SumState<WideSum>, WideDecimalSum, double?>(StorageKind.Decimal, s => s.Count == 0 ? null : s.Sum.ToDouble() / unit / s.Count);
+                break;
+            }
+
+            case StorageKind.Decimal256:
+            {
+                double unit = Math.Pow(10, shape.Type.Scale);
+                create = () => new FixedSlot<Int256, SumState<WideSum>, Decimal256Sum, double?>(StorageKind.Decimal256, s => s.Count == 0 ? null : s.Sum.ToDouble() / unit / s.Count);
                 break;
             }
 
@@ -147,6 +177,7 @@ internal static class Aggregators
                 _ => Extreme<double, T>(shape, max),
             },
             StorageKind.Decimal => Extreme<Int128, T>(shape, max),
+            StorageKind.Decimal256 => OrderedExtreme<Int256, T>(shape, max),
             StorageKind.Uuid => Extreme<UInt128, T>(shape, max),
             StorageKind.Bool => BoolExtreme<T>(shape, max),
             StorageKind.Bytes => () => new BytesExtremeSlot<T?>(shape, max),
@@ -213,6 +244,18 @@ internal static class Aggregators
         return () => new FixedSlot<TValue, ExtremeState<TValue>, MinOp<TValue>, T?>(shape.Kind, finish);
     }
 
+    private static Func<AggregateSlot<T?>> OrderedExtreme<TValue, T>(ColumnShape shape, bool max)
+        where TValue : unmanaged, IComparable<TValue>
+    {
+        Func<ExtremeState<TValue>, T?> finish = s => s.Has ? StorageValues.ToClr<TValue, T>(s.Value, shape) : default;
+        if (max)
+        {
+            return () => new FixedSlot<TValue, ExtremeState<TValue>, OrderedExtremeOp<TValue, Yes>, T?>(shape.Kind, finish);
+        }
+
+        return () => new FixedSlot<TValue, ExtremeState<TValue>, OrderedExtremeOp<TValue, No>, T?>(shape.Kind, finish);
+    }
+
     private static Func<AggregateSlot<T?>> BoolExtreme<T>(ColumnShape shape, bool max)
     {
         Func<byte, T?> finish = max
@@ -225,23 +268,73 @@ internal static class Aggregators
         where TAcc : INumberBase<TAcc> =>
         count == 0 ? null : double.CreateTruncating(sum) / count;
 
-    /// <summary>An unscaled sum as a <see cref="decimal"/> of the column's scale.</summary>
-    /// <exception cref="OverflowException">The sum has more than 96 bits.</exception>
-    private static T DecimalAs<T>(Int128 unscaled, int scale)
+    /// <summary>An exact decimal total as the sum's type, <see cref="OverflowException"/> when it does not fit.</summary>
+    private static T DecimalAs<T>(in WideSum total, int precision, int scale)
     {
-        if (typeof(T) != typeof(decimal))
+        if (typeof(T) == typeof(BigInteger))
         {
-            throw new VortexSchemaException($"A decimal column sums as decimal, not as {ClrFit.Name(typeof(T))}.");
+            BigInteger big = total.ToBigInteger();
+            return Unsafe.As<BigInteger, T>(ref big);
         }
 
-        bool negative = unscaled < 0;
-        UInt128 magnitude = negative ? (UInt128)(-unscaled) : (UInt128)unscaled;
-        if (magnitude >> 96 != UInt128.Zero)
+        return total.TryToInt256(out Int256 narrow)
+            ? DecimalAs<T>(narrow, precision, scale)
+            : throw new OverflowException($"The sum of a decimal({precision}, {scale}) column passes 76 digits.");
+    }
+
+    /// <summary>An unscaled total as a <see cref="decimal"/> or a <see cref="VortexDecimal"/> of the column's scale.</summary>
+    /// <remarks>
+    /// A <see cref="VortexDecimal"/> sum carries 38 digits while it fits them, as a sum of a narrower
+    /// decimal does in SQL, and 76 beyond, which is as far as a decimal goes.
+    /// </remarks>
+    private static T DecimalAs<T>(Int256 total, int precision, int scale)
+    {
+        if (typeof(T) == typeof(VortexDecimal))
+        {
+            if (!DecimalDigits.Fits(total, 76))
+            {
+                throw new OverflowException($"The sum of a decimal({precision}, {scale}) column passes 76 digits.");
+            }
+
+            byte digits = (byte)(precision <= 38 && DecimalDigits.Fits(total, 38) ? 38 : 76);
+            VortexDecimal wide = new VortexDecimal(total, digits, (sbyte)scale);
+            return Unsafe.As<VortexDecimal, T>(ref wide);
+        }
+
+        // An integer read from a decimal of scale 0: the unscaled sum is the sum.
+        if (typeof(T) == typeof(Int128))
+        {
+            Int128 integer = total.TryToInt128(out Int128 narrow) ? narrow : throw new OverflowException("The sum does not fit an Int128.");
+            return Unsafe.As<Int128, T>(ref integer);
+        }
+
+        if (typeof(T) == typeof(UInt128))
+        {
+            total.GetLimbs(out ulong l0, out ulong l1, out ulong l2, out ulong l3);
+            UInt128 unsigned = (l2 | l3) == 0 ? new UInt128(l1, l0) : throw new OverflowException("The sum does not fit a UInt128.");
+            return Unsafe.As<UInt128, T>(ref unsigned);
+        }
+
+        if (typeof(T) == typeof(BigInteger))
+        {
+            Span<byte> bytes = stackalloc byte[Int256.ByteCount];
+            total.WriteLittleEndianBytes(bytes);
+            BigInteger big = new BigInteger(bytes, isUnsigned: false, isBigEndian: false);
+            return Unsafe.As<BigInteger, T>(ref big);
+        }
+
+        if (typeof(T) != typeof(decimal))
+        {
+            throw new VortexSchemaException($"A decimal column sums as decimal or VortexDecimal, not as {ClrFit.Name(typeof(T))}.");
+        }
+
+        total.GetMagnitude(out ulong m0, out ulong m1, out ulong m2, out ulong m3);
+        if (!Int256.FitsIn96Bits(m1, m2, m3) || scale is < 0 or > 28)
         {
             throw new OverflowException("The sum does not fit a decimal.");
         }
 
-        decimal value = new decimal((int)(uint)magnitude, (int)(uint)(magnitude >> 32), (int)(uint)(magnitude >> 64), negative, (byte)scale);
+        decimal value = Int256.MakeDecimal(m0, m1, total.IsNegative, (byte)scale);
         return Unsafe.As<decimal, T>(ref value);
     }
 

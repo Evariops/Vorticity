@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Types;
 
@@ -104,6 +105,7 @@ internal sealed class ForDecoder : ArrayDecoder
 
         // The child is checked before the zero-reference shortcut, so a child that decoded to the
         // wrong shape is rejected whatever the reference happens to be.
+        encoded = CanonicalSupport.ExpandIfConstant(context, encoded);
         CanonicalNode child = context.Canonical.GetNode(encoded);
         if (child.Kind != CanonicalKind.Primitive)
         {

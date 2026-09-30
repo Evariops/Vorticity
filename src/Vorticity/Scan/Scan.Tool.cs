@@ -343,12 +343,15 @@ public ref struct FilterHandler
             }
 
             ColumnSym target = new ColumnSym(new FieldExpr(column.Name), column.Type, null, null, -1, []);
-            if (shape.Kind is ClrKind.Decimal or ClrKind.VortexDecimal)
+            if (shape.Kind is ClrKind.Decimal or ClrKind.VortexDecimal or ClrKind.Integer128 or ClrKind.UInteger128 or ClrKind.BigInteger)
             {
                 // Refused here when it has more digits than the column keeps; the check of the
                 // whole filter then scales the exact text once, as it scales a number typed inline.
+                // An integer of 128 bits or more is a decimal of scale 0, and goes the same way.
                 _ = ToolPaths.ExactDecimal(target, value);
-                _values.Add(FilterLiteral.From(value is decimal d ? d.ToString(CultureInfo.InvariantCulture) : value.ToString()!));
+                _values.Add(FilterLiteral.From(value is IFormattable formattable
+                    ? formattable.ToString(null, CultureInfo.InvariantCulture)
+                    : value.ToString()!));
             }
             else if (shape.Kind is ClrKind.TimeOnly or ClrKind.DateTime or ClrKind.DateTimeOffset
                 && column.Type.ExtensionId is ExtensionIds.Time or ExtensionIds.Timestamp)

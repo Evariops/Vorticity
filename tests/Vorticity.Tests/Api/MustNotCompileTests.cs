@@ -61,7 +61,10 @@ public sealed partial class MustNotCompileTests
         Assert.True(problems.Length == 0, $"{problems}{Environment.NewLine}{output}");
     }
 
-    /// <summary>The <c>// expect: ID "fragment"</c> markers, keyed by <c>file:line:ID</c>.</summary>
+    /// <summary>
+    /// The <c>// expect: ID "fragment"</c> markers, keyed by <c>file:line:ID</c>; a line the compiler
+    /// reports twice names both, <c>// expect: ID ID</c>, and a fragment then holds for each.
+    /// </summary>
     private static Dictionary<string, string?> Markers(string directory)
     {
         Dictionary<string, string?> markers = new Dictionary<string, string?>(StringComparer.Ordinal);
@@ -73,8 +76,10 @@ public sealed partial class MustNotCompileTests
                 Match match = Marker().Match(lines[i]);
                 if (match.Success)
                 {
-                    string site = $"{Path.GetFileName(path)}:{i + 1}:{match.Groups["id"].Value}";
-                    markers.Add(site, match.Groups["text"].Success ? match.Groups["text"].Value : null);
+                    foreach (string id in match.Groups["ids"].Value.Split(' '))
+                    {
+                        markers.Add($"{Path.GetFileName(path)}:{i + 1}:{id}", match.Groups["text"].Success ? match.Groups["text"].Value : null);
+                    }
                 }
             }
         }
@@ -134,7 +139,7 @@ public sealed partial class MustNotCompileTests
         throw new InvalidOperationException($"No Vorticity.slnx above {AppContext.BaseDirectory}.");
     }
 
-    [GeneratedRegex("""// expect: (?<id>[A-Z]+[0-9]+)(?: "(?<text>[^"]*)")?\s*$""")]
+    [GeneratedRegex("""// expect: (?<ids>[A-Z]+[0-9]+(?: [A-Z]+[0-9]+)*)(?: "(?<text>[^"]*)")?\s*$""")]
     private static partial Regex Marker();
 
     [GeneratedRegex("""^(?<file>[^(]+)\((?<line>[0-9]+),[0-9]+\): (?:error|warning) (?<id>[A-Z]+[0-9]+): (?<message>.*?)(?: \[[^\]]+\])?$""")]

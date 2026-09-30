@@ -1,5 +1,5 @@
 using System;
-using System.Runtime.InteropServices;
+using System.Buffers;
 using System.Threading;
 
 using Vorticity.Arrays.Decoders.Canonical;
@@ -29,6 +29,11 @@ internal sealed class PcoDecoder : ArrayDecoder
     public override ArrayEncodingId EncodingId => ArrayEncodingId.Pco;
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// The pco stream holds the valid rows' values only, as upstream's writer collects them: a
+    /// column without nulls is decoded straight into its output, one with nulls into a dense
+    /// rental first and then spread over its valid rows, a null row zero.
+    /// </remarks>
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
@@ -39,14 +44,13 @@ internal sealed class PcoDecoder : ArrayDecoder
         }
 
         PType ptype = dtype.PType;
-        int width = ptype.ByteWidth();
-        if (width != 8)
+        if (PcoNumber.Of(ptype) is not { } number)
         {
-            // Only the 64-bit latent path is ported. Refusing is the whole point of this check:
-            // a narrower type would decode with the wrong latent width and produce numbers.
-            CompressedThrow.Format($"{Id} is implemented for 64-bit types only; this node is {ptype.Name()}.");
+            CompressedThrow.Format($"{Id} stores numbers of 16 bits and more; this node is {ptype.Name()}.");
+            return -1;
         }
 
+        int width = number.LatentBits / 8;
         PcoWrapperMetadata wrapper = PcoWrapperMetadata.Read(node.Metadata);
 
         int expected = wrapper.ChunkCount + wrapper.PageCount;
@@ -57,26 +61,60 @@ internal sealed class PcoDecoder : ArrayDecoder
                 $"needing {expected} buffers; the node has {node.BufferCount}.");
         }
 
-        if (wrapper.ValueCount != length)
+        Validity validity = context.DecodeValidity(in node, 0, dtype.Nullability, length);
+        int valid = ValidRows.Count(context, validity, length);
+
+        // Upstream's checks: no more values than rows, every row's when none is null, and no
+        // fewer than the valid rows, which take the first of them.
+        if (wrapper.ValueCount > length || wrapper.ValueCount < valid || (valid == length && wrapper.ValueCount != length))
         {
             CompressedThrow.Format(
-                $"{Id}'s pages hold {wrapper.ValueCount} values; the node declares {length} rows.");
+                $"{Id}'s pages hold {wrapper.ValueCount} values; the node declares {length} rows, {valid} of them valid.");
         }
 
-        VortexBuffer output = CompressedValues.Allocate(
-            context, length * width, width, Id, out Span<byte> destination);
+        int outputBytes = ArrayDecodeContext.CheckedMultiply(length, width, Id + " rows");
+        VortexBuffer output;
+        if (valid == length)
+        {
+            output = CompressedValues.AllocateUninitialized(context, outputBytes, width, Id, out Span<byte> destination);
+            DecodeValues(node, wrapper, number, destination);
+        }
+        else
+        {
+            output = CompressedValues.Allocate(context, outputBytes, width, Id, out Span<byte> destination);
+            int denseBytes = (int)wrapper.ValueCount * width;
+            byte[] dense = ArrayPool<byte>.Shared.Rent(Math.Max(denseBytes, 1));
+            try
+            {
+                DecodeValues(node, wrapper, number, dense.AsSpan(0, denseBytes));
+                ValidityMask mask = ValidityMask.From(context, validity);
+                ValidRows.Spread(dense.AsSpan(0, valid * width), destination, in mask, length, width, Id);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(dense);
+            }
+        }
 
-        bool signed = ptype.IsSignedInteger();
+        return context.Canonical.AddPrimitive(dtype, length, validity, ptype, output);
+    }
+
+    /// <summary>Every page of every chunk decoded into <paramref name="destination"/>, the values back to back.</summary>
+    private static void DecodeValues(in ArrayNode node, PcoWrapperMetadata wrapper, PcoNumber number, Span<byte> destination)
+    {
+        int width = number.LatentBits / 8;
 
         // A batch's working buffers and the secondary latent variable's, rented once for the whole
         // node rather than allocated per page: a large column runs to many hundreds of pages, and a
-        // decode path must not allocate once per page. The primary is decoded into the output
-        // itself. They belong to this decode and to nothing wider; PcoBatchScratch says why sharing
-        // them beyond it is not an option.
+        // decode path must not allocate once per page. 64-bit numbers are decoded into the output
+        // itself, narrower ones a batch at a time through a primary buffer. They belong to this
+        // decode and to nothing wider; PcoBatchScratch says why sharing them beyond it is not an
+        // option.
         Scratch<ulong> secondaryScratch = new Scratch<ulong>(PcoPageDecoder.BatchSize, default);
         Scratch<ulong> batchValues = new Scratch<ulong>(PcoPageDecoder.BatchSize, default);
         Scratch<int> batchOffsetBits = new Scratch<int>(PcoPageDecoder.BatchSize, default);
         Scratch<long> batchOffsetCumulative = new Scratch<long>(PcoPageDecoder.BatchSize, default);
+        Scratch<ulong> primaryScratch = new Scratch<ulong>(width == 8 ? 0 : PcoPageDecoder.BatchSize, default);
 
         // The latent states are reset by each page, and the chunk metadata with its tables refilled
         // by each chunk, rather than rebuilt, for the same reason as the buffers above; and both are
@@ -86,27 +124,20 @@ internal sealed class PcoDecoder : ArrayDecoder
         try
         {
             PcoBatchScratch batchScratch = new PcoBatchScratch(
-                batchValues.Span, batchOffsetBits.Span, batchOffsetCumulative.Span, reused.States);
+                batchValues.Span, batchOffsetBits.Span, batchOffsetCumulative.Span, reused.States, primaryScratch.Span);
             int pageBuffer = wrapper.ChunkCount;
             int written = 0;
             int chunk = 0;
             foreach (PcoWrapperMetadata.PageEnumerator pages in wrapper.GetChunks())
             {
-                PcoChunkMeta meta = reused.Meta.Refill(
-                    wrapper.Header, node.GetBuffer(chunk).Span, latentBits: 64);
+                PcoChunkMeta meta = reused.Meta.Refill(wrapper.Header, node.GetBuffer(chunk).Span, number);
                 chunk++;
 
                 foreach (int pageValues in pages)
                 {
-                    // The ordered latent form is shifted so the type's minimum is zero. For an
-                    // unsigned type it is the value itself, and for a signed one the shift back is
-                    // a single addition of the midpoint rather than a sign test, made as the page's
-                    // latents are joined into the output.
-                    Span<ulong> target = MemoryMarshal.Cast<byte, ulong>(
-                        destination.Slice(written * width, pageValues * width));
                     PcoPageDecoder.DecodeJoined(
-                        meta, node.GetBuffer(pageBuffer).Span, pageValues,
-                        secondaryScratch.Span, in batchScratch, target, signed ? 1UL << 63 : 0);
+                        meta, node.GetBuffer(pageBuffer).Span, pageValues, secondaryScratch.Span, in batchScratch,
+                        destination.Slice(written * width, pageValues * width));
                     pageBuffer++;
                     written += pageValues;
                 }
@@ -114,15 +145,15 @@ internal sealed class PcoDecoder : ArrayDecoder
         }
         finally
         {
+            // A dictionary is rented by its chunk; the metadata kept for the next decode holds none.
+            reused.Meta.Release();
             Volatile.Write(ref Spare, reused);
+            primaryScratch.Dispose();
             batchOffsetCumulative.Dispose();
             batchOffsetBits.Dispose();
             batchValues.Dispose();
             secondaryScratch.Dispose();
         }
-
-        Validity validity = context.DecodeValidity(in node, 0, dtype.Nullability, length);
-        return context.Canonical.AddPrimitive(dtype, length, validity, ptype, output);
     }
 
     /// <summary>

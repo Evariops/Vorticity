@@ -22,10 +22,10 @@ namespace Vorticity.Tests.Writing;
 /// default profile writes it, and every value read back as it went in.
 /// </summary>
 /// <remarks>
-/// Size first offers a column to zstd, FSST and ALP under the best exact plan's price, and that
-/// price counts the plan's own layer -- a run-end's ends and values, a dictionary's codes at a
-/// whole byte -- before its children take schemes of their own. A frame that comes in under the
-/// price can still write more than the plan does, so the shapes here are the ones where it did.
+/// Size first offers a column to zstd, pco, FSST and ALP under what the best exact plan writes,
+/// and that counts the plan's own layer -- a run-end's ends and values, a dictionary's codes at a
+/// whole byte -- before its children take schemes of their own. A trial that comes in under it
+/// can still write more than the plan does, so the shapes here are the ones where one did.
 /// </remarks>
 public sealed class SizeFirstTests
 {
@@ -56,13 +56,14 @@ public sealed class SizeFirstTests
     }
 
     [Fact]
-    public async Task AFrameThatWritesLessIsStillTaken()
+    public async Task ATrialThatWritesLessIsStillTaken()
     {
         // Jittered timestamps bit-pack at the 27 bits a chunk's span needs over its frame of
-        // reference, and zstd gets them under 17: the one shape here where the frame is smaller.
+        // reference; zstd gets them under 17, and pco, whose first-order delta leaves the jitter
+        // for its bins to entropy-code, under 11: the one shape here where a trial is smaller.
         (_, string encodings) = await WriteAsync("jittered timestamps", CompressionProfile.Smallest);
 
-        Assert.Contains("Zstd", encodings, StringComparison.Ordinal);
+        Assert.Contains("Pco", encodings, StringComparison.Ordinal);
     }
 
     /// <summary>Writes the shape under <paramref name="profile"/>, reads every value back, and returns the file's bytes and its column's encodings.</summary>

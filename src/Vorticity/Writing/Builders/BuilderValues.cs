@@ -72,6 +72,90 @@ internal static class BuilderValues
         bytes[..store.Width].CopyTo(store.Reserve(1));
     }
 
+    /// <summary>Appends an integer to a decimal column of scale 0, which must hold it within its precision.</summary>
+    internal static void AppendInteger(FixedStore store, Int128 value) => AppendUnscaled(store, new Int256(value));
+
+    /// <summary>Appends an unsigned integer to a decimal column of scale 0.</summary>
+    internal static void AppendInteger(FixedStore store, UInt128 value) =>
+        AppendUnscaled(store, Int256.FromLimbs((ulong)value, (ulong)(value >> 64), 0, 0));
+
+    /// <summary>Appends an integer of any size to a decimal column of scale 0.</summary>
+    internal static void AppendInteger(FixedStore store, System.Numerics.BigInteger value)
+    {
+        Span<byte> bytes = stackalloc byte[Int256.ByteCount];
+        bytes.Fill(value.Sign < 0 ? (byte)0xFF : (byte)0);
+        if (!value.TryWriteBytes(bytes, out _, isUnsigned: false, isBigEndian: false))
+        {
+            throw PastPrecision(value.ToString(System.Globalization.CultureInfo.InvariantCulture), store);
+        }
+
+        AppendUnscaled(store, Int256.FromLittleEndianBytes(bytes));
+    }
+
+    /// <summary>
+    /// The span a builder of 128-bit integers fills in place: the store's own values, which only a
+    /// column stored in 128 bits has in that shape.
+    /// </summary>
+    internal static Span<T> IntegerSpan<T>(FixedStore store, int sizeHint)
+        where T : unmanaged
+    {
+        RequireInteger(store);
+        if (store.Width != 16)
+        {
+            throw new InvalidOperationException(
+                $"The column is {store.Type}, stored in {store.Width} bytes a value: append its values one by one, or as a span.");
+        }
+
+        return store.GetSpan<T>(sizeHint);
+    }
+
+    /// <summary>Commits <paramref name="count"/> integers written into the last span, each held to the column's precision first.</summary>
+    internal static void AdvanceIntegers<T>(FixedStore store, int count)
+        where T : unmanaged
+    {
+        foreach (T value in store.Pending<T>(count))
+        {
+            Int256 wide = typeof(T) == typeof(Int128)
+                ? new Int256(Unsafe.As<T, Int128>(ref Unsafe.AsRef(in value)))
+                : Int256.FromLimbs((ulong)Unsafe.As<T, UInt128>(ref Unsafe.AsRef(in value)), (ulong)(Unsafe.As<T, UInt128>(ref Unsafe.AsRef(in value)) >> 64), 0, 0);
+            if (!DecimalDigits.Fits(wide, store.Precision))
+            {
+                throw PastPrecision(wide.ToString(), store);
+            }
+        }
+
+        store.Advance(count);
+    }
+
+    /// <summary>An unscaled integer into the store's width, once the precision is known to hold it.</summary>
+    private static void AppendUnscaled(FixedStore store, Int256 value)
+    {
+        RequireInteger(store);
+        if (!DecimalDigits.Fits(value, store.Precision))
+        {
+            throw PastPrecision(value.ToString(), store);
+        }
+
+        // The precision picks the storage width, so a value within it fits the width: its low bytes
+        // are the value, the rest its sign.
+        Span<byte> bytes = stackalloc byte[Int256.ByteCount];
+        value.WriteLittleEndianBytes(bytes);
+        bytes[..store.Width].CopyTo(store.Reserve(1));
+    }
+
+    private static void RequireInteger(FixedStore store)
+    {
+        if (!store.IsDecimal || store.Scale != 0)
+        {
+            throw new VortexSchemaException($"The column is {store.Type}, not a decimal of scale 0.");
+        }
+    }
+
+    private static VortexSchemaException PastPrecision(string value, FixedStore store) =>
+        new VortexSchemaException(store.Precision == 38
+            ? $"{value} does not fit a decimal(38, 0) column; declare it [VortexColumn(Precision = 39)] for every value of a 128-bit integer."
+            : $"{value} does not fit a decimal({store.Precision}, 0) column.");
+
     /// <summary>Writes a registered extension's value through its storage.</summary>
     internal static void AppendExtension<T>(ColumnStore leaf, in T value)
         where T : IVortexExtension<T>
@@ -366,6 +450,34 @@ internal static class ElementWriter
                 ((FixedListStore)leaf).AppendGuid(value);
             }
         }
+        else if (typeof(T) == typeof(TimeSpan))
+        {
+            foreach (TimeSpan value in As<T, TimeSpan>(values))
+            {
+                ((FixedStore)leaf).Append(value.Ticks);
+            }
+        }
+        else if (typeof(T) == typeof(Int128))
+        {
+            foreach (Int128 value in As<T, Int128>(values))
+            {
+                BuilderValues.AppendInteger((FixedStore)leaf, value);
+            }
+        }
+        else if (typeof(T) == typeof(UInt128))
+        {
+            foreach (UInt128 value in As<T, UInt128>(values))
+            {
+                BuilderValues.AppendInteger((FixedStore)leaf, value);
+            }
+        }
+        else if (typeof(T) == typeof(System.Numerics.BigInteger))
+        {
+            foreach (System.Numerics.BigInteger value in As<T, System.Numerics.BigInteger>(values))
+            {
+                BuilderValues.AppendInteger((FixedStore)leaf, value);
+            }
+        }
         else
         {
             return AppendNullable(leaf, values);
@@ -387,6 +499,9 @@ internal static class ElementWriter
         else if (typeof(T) == typeof(Half?)) { Nullable(leaf, As<T, Half?>(values)); }
         else if (typeof(T) == typeof(float?)) { Nullable(leaf, As<T, float?>(values)); }
         else if (typeof(T) == typeof(double?)) { Nullable(leaf, As<T, double?>(values)); }
+        else if (typeof(T) == typeof(char?)) { Nullable(leaf, As<T, char?>(values)); }
+        else if (typeof(T) == typeof(nint?)) { Nullable(leaf, As<T, nint?>(values)); }
+        else if (typeof(T) == typeof(nuint?)) { Nullable(leaf, As<T, nuint?>(values)); }
         else if (typeof(T) == typeof(bool?))
         {
             BoolStore bits = (BoolStore)leaf;
@@ -419,7 +534,8 @@ internal static class ElementWriter
         }
         else if (typeof(T) == typeof(decimal?) || typeof(T) == typeof(VortexDecimal?) || typeof(T) == typeof(DateOnly?)
             || typeof(T) == typeof(TimeOnly?) || typeof(T) == typeof(DateTime?) || typeof(T) == typeof(DateTimeOffset?)
-            || typeof(T) == typeof(Guid?))
+            || typeof(T) == typeof(Guid?) || typeof(T) == typeof(TimeSpan?) || typeof(T) == typeof(Int128?)
+            || typeof(T) == typeof(UInt128?) || typeof(T) == typeof(System.Numerics.BigInteger?))
         {
             NullableConverted(leaf, values);
         }
@@ -464,6 +580,22 @@ internal static class ElementWriter
             {
                 ((FixedListStore)leaf).AppendGuid(guid);
             }
+            else if (typeof(T) == typeof(TimeSpan?) && Unsafe.As<T, TimeSpan?>(ref value) is { } span)
+            {
+                ((FixedStore)leaf).Append(span.Ticks);
+            }
+            else if (typeof(T) == typeof(Int128?) && Unsafe.As<T, Int128?>(ref value) is { } integer)
+            {
+                BuilderValues.AppendInteger((FixedStore)leaf, integer);
+            }
+            else if (typeof(T) == typeof(UInt128?) && Unsafe.As<T, UInt128?>(ref value) is { } unsigned)
+            {
+                BuilderValues.AppendInteger((FixedStore)leaf, unsigned);
+            }
+            else if (typeof(T) == typeof(System.Numerics.BigInteger?) && Unsafe.As<T, System.Numerics.BigInteger?>(ref value) is { } big)
+            {
+                BuilderValues.AppendInteger((FixedStore)leaf, big);
+            }
             else
             {
                 leaf.AppendNull();
@@ -491,7 +623,8 @@ internal static class ElementWriter
     private static bool IsPrimitive<T>() =>
         typeof(T) == typeof(sbyte) || typeof(T) == typeof(short) || typeof(T) == typeof(int) || typeof(T) == typeof(long)
         || typeof(T) == typeof(byte) || typeof(T) == typeof(ushort) || typeof(T) == typeof(uint) || typeof(T) == typeof(ulong)
-        || typeof(T) == typeof(Half) || typeof(T) == typeof(float) || typeof(T) == typeof(double) || typeof(T).IsEnum;
+        || typeof(T) == typeof(Half) || typeof(T) == typeof(float) || typeof(T) == typeof(double) || typeof(T).IsEnum
+        || typeof(T) == typeof(char) || typeof(T) == typeof(nint) || typeof(T) == typeof(nuint);
 
     private static ReadOnlySpan<TOut> As<T, TOut>(ReadOnlySpan<T> values) =>
         MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<T, TOut>(ref MemoryMarshal.GetReference(values)), values.Length);

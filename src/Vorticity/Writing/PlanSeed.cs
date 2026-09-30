@@ -29,6 +29,12 @@ internal sealed class PlanSeed
     {
         if (dtype.Kind == DTypeKind.Extension)
         {
+            // Split instants stand in for the extension node and were the storage's choice.
+            if (node.Encoding == ArrayEncodingId.DateTimeParts)
+            {
+                return new PlanSeed(null, false, [new PlanSeed(ColumnScheme.DateTimeParts, false, [])]);
+            }
+
             if (node.Encoding != ArrayEncodingId.Extension || node.ChildCount != 1)
             {
                 return null;
@@ -122,6 +128,11 @@ internal sealed class PlanSeed
         ArrayEncodingId.AlpRd => ColumnScheme.AlpRd,
         ArrayEncodingId.Fsst => ColumnScheme.Fsst,
         ArrayEncodingId.Zstd => ColumnScheme.Zstd,
+        ArrayEncodingId.DecimalByteParts => ColumnScheme.DecimalByteParts,
+        ArrayEncodingId.Constant => ColumnScheme.Constant,
+        ArrayEncodingId.Sparse => ColumnScheme.Sparse,
+        ArrayEncodingId.OnPair => ColumnScheme.OnPair,
+        ArrayEncodingId.Pco => ColumnScheme.Pco,
         _ => null,
     };
 }

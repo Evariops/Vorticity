@@ -9,14 +9,18 @@
 //     ../../tests/Vorticity.Tests/Arrays/PcoVectors.json
 //
 // The cases are chosen for what the corpus lacks: a 20-bin table at ANS size log 7, a narrow one at
-// log 9, a second-order consecutive delta, and an IntMult chunk split across five pages.
+// log 9, a second-order consecutive delta, an IntMult chunk split across five pages; then each of
+// the nine types Vortex stores as pco, and each mode and delta over the latents they need --
+// FloatMult, FloatQuant and Dict, lookbacks, and convolutions over 16- and 32-bit latents.
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 
 using Vorticity.Arrays.Decoders.Compressed.Pco;
+using Vorticity.Types;
 using Xunit;
 
 namespace Vorticity.Tests.Arrays;
@@ -26,6 +30,7 @@ public sealed class PcoVectorTests
     /// <summary>One generated case.</summary>
     internal sealed record Vector(
         string Name,
+        PType PType,
         string Mode,
         string Delta,
         (string Key, int AnsSizeLog, int BinCount)[] Latents,
@@ -33,7 +38,11 @@ public sealed class PcoVectorTests
         byte[] Meta,
         byte[][] Pages,
         int[] PerPage,
-        long[] Values);
+        ulong[] Bits)
+    {
+        /// <summary>The numbers the case holds.</summary>
+        internal PcoNumber Number => PcoNumber.Of(PType)!.Value;
+    }
 
     internal static Vector[] Load([CallerFilePath] string thisFile = "")
     {
@@ -65,14 +74,15 @@ public sealed class PcoVectorTests
                 perPage.Add(n.GetInt32());
             }
 
-            List<long> values = [];
-            foreach (JsonElement value in element.GetProperty("values").EnumerateArray())
+            List<ulong> bits = [];
+            foreach (JsonElement value in element.GetProperty("bits").EnumerateArray())
             {
-                values.Add(value.GetInt64());
+                bits.Add(value.GetUInt64());
             }
 
             vectors.Add(new Vector(
                 element.GetProperty("name").GetString()!,
+                PTypeOf(element.GetProperty("ptype").GetString()!),
                 element.GetProperty("mode").GetString()!,
                 element.GetProperty("delta").GetString()!,
                 [.. latents],
@@ -80,45 +90,42 @@ public sealed class PcoVectorTests
                 Convert.FromHexString(element.GetProperty("meta").GetString()!),
                 [.. pages],
                 [.. perPage],
-                [.. values]));
+                [.. bits]));
         }
 
         return [.. vectors];
     }
 
+    private static PType PTypeOf(string name) => name switch
+    {
+        "u16" => PType.U16,
+        "u32" => PType.U32,
+        "u64" => PType.U64,
+        "i16" => PType.I16,
+        "i32" => PType.I32,
+        "i64" => PType.I64,
+        "f16" => PType.F16,
+        "f32" => PType.F32,
+        _ => PType.F64,
+    };
+
     /// <summary>Every generated case's metadata parses to what pco says it is.</summary>
     /// <remarks>
     /// The corpus file checked in <c>PcoChunkMetaTests</c> has a single bin, so it cannot tell a
-    /// correct bin loop from one that reads the first bin and stops. The 20-bin case here can.
+    /// correct bin loop from one that reads the first bin and stops. The 20-bin case here can, and
+    /// the others each a mode, a delta or a latent width the corpus has none of.
     /// </remarks>
     [Fact]
     public void EveryVectorsMetadataMatchesTheReferenceParse()
     {
         Vector[] vectors = Load();
-        Assert.Equal(4, vectors.Length);
+        Assert.Equal(26, vectors.Length);
 
         foreach (Vector vector in vectors)
         {
-            PcoChunkMeta chunk = PcoChunkMeta.Read(vector.Header, vector.Meta, latentBits: 64);
-
-            string mode = chunk.Mode switch
-            {
-                PcoModeKind.Classic => "Classic",
-                PcoModeKind.IntMult => $"IntMult(U64({chunk.ModeBase}))",
-                PcoModeKind.FloatMult => $"FloatMult(U64({chunk.ModeBase}))",
-                _ => "FloatQuant",
-            };
-            Assert.Equal(vector.Mode, mode);
-
-            string delta = chunk.Delta switch
-            {
-                PcoDeltaKind.NoOp => "NoOp",
-                PcoDeltaKind.Consecutive =>
-                    $"Consecutive {{ order: {chunk.DeltaOrder}, secondary_uses_delta: " +
-                    $"{(chunk.SecondaryUsesDelta ? "true" : "false")} }}",
-                _ => "Lookback",
-            };
-            Assert.Equal(vector.Delta, delta);
+            PcoChunkMeta chunk = PcoChunkMeta.Read(vector.Header, vector.Meta, vector.Number);
+            Assert.Equal(vector.Mode, Describe(chunk));
+            Assert.Equal(vector.Delta, DescribeDelta(chunk));
 
             List<(string, int, int)> parsed = [];
             if (chunk.DeltaLatent is { } deltaVar)
@@ -140,6 +147,46 @@ public sealed class PcoVectorTests
         }
     }
 
+    /// <summary>The mode as pco's <c>Debug</c> prints it, latents in their width's variant.</summary>
+    private static string Describe(PcoChunkMeta chunk)
+    {
+        PcoNumber number = chunk.Number;
+        string variant = $"U{number.LatentBits}";
+        return chunk.Mode switch
+        {
+            PcoModeKind.Classic => "Classic",
+            PcoModeKind.IntMult => $"IntMult({variant}({chunk.ModeBase}))",
+            PcoModeKind.FloatMult => $"FloatMult({variant}({chunk.ModeBase}))",
+            PcoModeKind.FloatQuant => $"FloatQuant({chunk.ModeBase})",
+            _ => $"Dict({variant}([{string.Join(", ", chunk.Dictionary.ToArray().Select(n => Latent(n, number)))}]))",
+        };
+    }
+
+    /// <summary>A number's bits back as the latent pco keeps it, <c>to_latent_ordered</c>.</summary>
+    private static ulong Latent(ulong bits, PcoNumber number) => number.Kind switch
+    {
+        PcoNumberKind.Signed => unchecked(bits - number.Mid) & number.Mask,
+        PcoNumberKind.Float => number.FloatToLatentOrdered(bits),
+        _ => bits,
+    };
+
+    /// <summary>The delta encoding as pco's <c>Debug</c> prints it.</summary>
+    private static string DescribeDelta(PcoChunkMeta chunk)
+    {
+        string secondary = chunk.SecondaryUsesDelta ? "true" : "false";
+        return chunk.Delta switch
+        {
+            PcoDeltaKind.NoOp => "NoOp",
+            PcoDeltaKind.Consecutive => $"Consecutive {{ order: {chunk.DeltaOrder}, secondary_uses_delta: {secondary} }}",
+            PcoDeltaKind.Lookback =>
+                $"Lookback {{ config: DeltaLookbackConfig {{ state_n_log: {chunk.LookbackStateLog}, " +
+                $"window_n_log: {chunk.LookbackWindowLog} }}, secondary_uses_delta: {secondary} }}",
+            _ =>
+                $"Conv1(DeltaConv1Config {{ quantization: {chunk.Conv1Quantization}, bias: {chunk.Conv1Bias}, " +
+                $"weights: [{string.Join(", ", chunk.Conv1Weights.ToArray())}] }})",
+        };
+    }
+
     /// <summary>The 20-bin case builds a full ANS table whose weights fill it exactly.</summary>
     /// <remarks>
     /// The weights come from a real encoder rather than from a hand-made list, so this is the first
@@ -149,7 +196,7 @@ public sealed class PcoVectorTests
     public void TheManyBinCaseBuildsAFullAnsTable()
     {
         Vector vector = Array.Find(Load(), v => v.Name == "many_bins_classic")!;
-        PcoChunkMeta chunk = PcoChunkMeta.Read(vector.Header, vector.Meta, latentBits: 64);
+        PcoChunkMeta chunk = PcoChunkMeta.Read(vector.Header, vector.Meta, vector.Number);
 
         Assert.Equal(20, chunk.Primary.Bins.Length);
         Assert.Equal(7, chunk.Primary.AnsSizeLog);
@@ -171,18 +218,27 @@ public sealed class PcoVectorTests
 
     /// <summary>
     /// Metadata refilled vector after vector -- a 20-bin table, then single bins, then 20 bins
-    /// again -- reads each as metadata read afresh would, tables included.
+    /// again, every type and mode between -- reads each as metadata read afresh would, tables,
+    /// dictionaries and delta parameters included.
     /// </summary>
     [Fact]
     public void RefilledMetadataReadsAsFreshMetadata()
     {
         Vector[] vectors = Load();
-        PcoChunkMeta refilled = PcoChunkMeta.Read(vectors[0].Header, vectors[0].Meta, latentBits: 64);
+        PcoChunkMeta refilled = PcoChunkMeta.Read(vectors[0].Header, vectors[0].Meta, vectors[0].Number);
         foreach (Vector vector in (Vector[])[.. vectors, .. vectors])
         {
-            refilled.Refill(vector.Header, vector.Meta, latentBits: 64);
-            PcoChunkMeta fresh = PcoChunkMeta.Read(vector.Header, vector.Meta, latentBits: 64);
+            refilled.Refill(vector.Header, vector.Meta, vector.Number);
+            PcoChunkMeta fresh = PcoChunkMeta.Read(vector.Header, vector.Meta, vector.Number);
 
+            Assert.Equal(fresh.Number, refilled.Number);
+            Assert.Equal(fresh.Dictionary.ToArray(), refilled.Dictionary.ToArray());
+            Assert.Equal(fresh.LookbackWindowLog, refilled.LookbackWindowLog);
+            Assert.Equal(fresh.LookbackStateLog, refilled.LookbackStateLog);
+            Assert.Equal(fresh.Conv1Quantization, refilled.Conv1Quantization);
+            Assert.Equal(fresh.Conv1Bias, refilled.Conv1Bias);
+            Assert.Equal(fresh.Conv1Weights.ToArray(), refilled.Conv1Weights.ToArray());
+            Assert.Equal(fresh.DeltaLatent is null, refilled.DeltaLatent is null);
             Assert.Equal(fresh.Mode, refilled.Mode);
             Assert.Equal(fresh.ModeBase, refilled.ModeBase);
             Assert.Equal(fresh.Delta, refilled.Delta);

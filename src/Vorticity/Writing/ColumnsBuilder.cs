@@ -65,6 +65,28 @@ public class ColumnsBuilder
         return nested.Facade ??= new ColumnsBuilder(nested, VortexSchema.Create(nested.Type.Fields), null, null);
     }
 
+    /// <summary>The builder of the map column <paramref name="index"/>.</summary>
+    /// <typeparam name="TKey">A .NET type the keys' dtype maps to.</typeparam>
+    /// <typeparam name="TValue">A .NET type the values' dtype maps to.</typeparam>
+    /// <param name="index">The column's position in <see cref="Schema"/>.</param>
+    /// <returns>The maps' builder: a map is the entries appended between its <c>BeginMap</c> and its <c>EndMap</c>.</returns>
+    /// <exception cref="VortexSchemaException">The column is not a map, or its keys or values do not fit the types asked for.</exception>
+    public MapColumnsBuilder<TKey, TValue> MapOf<TKey, TValue>(int index)
+    {
+        ColumnStore column = Child(index);
+        if (column is not ListStore { Elements: StructStore { Children.Length: 2 } entries } list || column.Type.Kind != VortexTypeKind.Map)
+        {
+            throw new VortexSchemaException($"Column '{Schema[index].Name}' is {column.Type}, not a map.");
+        }
+
+        ColumnStore keys = entries.Children[0];
+        ColumnStore values = entries.Children[1];
+        return new MapColumnsBuilder<TKey, TValue>(
+            list,
+            ReferenceEquals(keys.Checked, typeof(TKey)) ? new ColumnBuilder<TKey>(keys.Leaf) : Checked<TKey>(keys, $"Column '{Schema[index].Name}''s keys"),
+            ReferenceEquals(values.Checked, typeof(TValue)) ? new ColumnBuilder<TValue>(values.Leaf) : Checked<TValue>(values, $"Column '{Schema[index].Name}''s values"));
+    }
+
     /// <summary>Appends one null row to a nested struct builder: every field gets a default value and the struct row is null.</summary>
     /// <exception cref="VortexSchemaException">The builder is not a nullable struct column.</exception>
     public void AppendNull() => Store.AppendNull();
@@ -85,7 +107,7 @@ public class ColumnsBuilder
             ?? throw new VortexSchemaException($"Column '{Schema[index].Name}' is {Child(index).Type}, not a struct.");
     }
 
-    private ColumnStore Child(int index)
+    private protected ColumnStore Child(int index)
     {
         if ((uint)index >= (uint)Schema.Count)
         {
@@ -138,6 +160,8 @@ public class ColumnsBuilder
             ClrKind.DateOnly or ClrKind.TimeOnly or ClrKind.DateTime or ClrKind.DateTimeOffset => leaf is FixedStore { IsDecimal: false },
             ClrKind.Guid => leaf is FixedListStore { Size: 16, Elements: FixedStore { Width: 1 } },
             ClrKind.List => leaf is ListStore or FixedListStore,
+            ClrKind.TimeSpan => leaf is FixedStore { IsDecimal: false },
+            ClrKind.Integer128 or ClrKind.UInteger128 or ClrKind.BigInteger => leaf is FixedStore { IsDecimal: true, Scale: 0 },
             _ => leaf is FixedStore or FixedListStore { Elements: FixedStore },
         };
 
@@ -177,6 +201,107 @@ public sealed class ColumnsBuilder<TRecord> : ColumnsBuilder
         nested.TypedFacade = typed;
         return typed;
     }
+
+    /// <summary>The builder of the lists of records held by member <paramref name="index"/>.</summary>
+    /// <typeparam name="TNested">The record the lists hold.</typeparam>
+    /// <param name="index">The member's position in the record.</param>
+    /// <returns>The lists' builder: a list is the records written between its <c>BeginList</c> and its <c>EndList</c>.</returns>
+    /// <exception cref="VortexSchemaException">The member is not a list of records, or a field of <typeparamref name="TNested"/> has no column in its elements.</exception>
+    public ListColumnsBuilder<TNested> ListOf<TNested>(int index)
+        where TNested : IVortexRecord<TNested>
+    {
+        ColumnStore column = Child(index);
+        if (column is not ListStore { Elements: StructStore elements } list)
+        {
+            throw new VortexSchemaException($"Column '{Schema[index].Name}' is {column.Type}, not a list of records.");
+        }
+
+        if (elements.TypedFacade is not ColumnsBuilder<TNested> typed)
+        {
+            typed = new ColumnsBuilder<TNested>(elements, WriteBinding.Map(typeof(TNested), TNested.Schema, elements.Type.FieldArray), null);
+            elements.TypedFacade = typed;
+        }
+
+        return new ListColumnsBuilder<TNested>(list, typed);
+    }
+}
+
+/// <summary>
+/// The maps of one column of a builder: a map is the entries appended between its
+/// <see cref="BeginMap"/> and its <see cref="EndMap"/>, each a key appended to <see cref="Keys"/> and
+/// its value to <see cref="Values"/>.
+/// </summary>
+/// <typeparam name="TKey">The keys' .NET type.</typeparam>
+/// <typeparam name="TValue">The values' .NET type.</typeparam>
+public readonly struct MapColumnsBuilder<TKey, TValue>
+{
+    private readonly ListStore _store;
+
+    internal MapColumnsBuilder(ListStore store, ColumnBuilder<TKey> keys, ColumnBuilder<TValue> values)
+    {
+        _store = store;
+        Keys = keys;
+        Values = values;
+    }
+
+    /// <summary>The builder of every map's keys.</summary>
+    public ColumnBuilder<TKey> Keys { get; }
+
+    /// <summary>The builder of every map's values, one per key.</summary>
+    public ColumnBuilder<TValue> Values { get; }
+
+    /// <summary>The maps appended since the builder was last written or cleared.</summary>
+    public int Count => _store.Count - _store.Committed;
+
+    /// <summary>Opens a map: the entries appended until <see cref="EndMap"/> belong to it.</summary>
+    public void BeginMap() => _store.BeginList();
+
+    /// <summary>Closes the open map.</summary>
+    /// <exception cref="VortexSchemaException">The map was given more keys than values, or more values than keys.</exception>
+    public void EndMap()
+    {
+        if (Keys.Store.Rows != Values.Store.Rows)
+        {
+            throw new VortexSchemaException($"A map was given {Keys.Store.Rows} keys and {Values.Store.Rows} values; each key takes one value.");
+        }
+
+        _store.EndList();
+    }
+
+    /// <summary>Appends a null map, to a nullable column.</summary>
+    public void AppendNull() => _store.AppendNull();
+}
+
+/// <summary>
+/// The lists of records of one column of a builder: a list is the records written to
+/// <see cref="Elements"/> between its <see cref="BeginList"/> and its <see cref="EndList"/>.
+/// </summary>
+/// <typeparam name="TRecord">The record the lists hold.</typeparam>
+public readonly struct ListColumnsBuilder<TRecord>
+    where TRecord : IVortexRecord<TRecord>
+{
+    private readonly ListStore _store;
+
+    internal ListColumnsBuilder(ListStore store, ColumnsBuilder<TRecord> elements)
+    {
+        _store = store;
+        Elements = elements;
+    }
+
+    /// <summary>The builder of every list's records.</summary>
+    public ColumnsBuilder<TRecord> Elements { get; }
+
+    /// <summary>The lists appended since the builder was last written or cleared.</summary>
+    public int Count => _store.Count - _store.Committed;
+
+    /// <summary>Opens a list: the records written to <see cref="Elements"/> until <see cref="EndList"/> belong to it.</summary>
+    public void BeginList() => _store.BeginList();
+
+    /// <summary>Closes the open list.</summary>
+    public void EndList() => _store.EndList();
+
+    /// <summary>Appends a null list, to a nullable column.</summary>
+    public void AppendNull() => _store.AppendNull();
 }
 
 /// <summary>One column of a <see cref="ColumnsBuilder"/>; the appends come from <see cref="ColumnBuilderExtensions"/>.</summary>
@@ -552,6 +677,228 @@ public static class ColumnBuilderExtensions
 
         /// <summary>Appends a null.</summary>
         public void AppendNull() => Uuids(b.Store).AppendNull();
+    }
+
+    extension(ColumnBuilder<Int128> b)
+    {
+        /// <summary>A span to fill in place, of a column stored in 128 bits; <c>Advance</c> holds each value to the precision and commits it.</summary>
+        /// <exception cref="InvalidOperationException">The column is stored in another width.</exception>
+        public Span<Int128> GetSpan(int sizeHint = 0) => BuilderValues.IntegerSpan<Int128>(Fixed(b.Store), sizeHint);
+
+        /// <summary>Commits <paramref name="count"/> values written into the last span.</summary>
+        /// <exception cref="VortexSchemaException">A value does not fit the column's precision.</exception>
+        public void Advance(int count) => BuilderValues.AdvanceIntegers<Int128>(Fixed(b.Store), count);
+
+        /// <summary>Appends one value, which must fit the column's precision.</summary>
+        public void Append(Int128 value) => BuilderValues.AppendInteger(Fixed(b.Store), value);
+
+        /// <summary>Appends values.</summary>
+        public void Append(ReadOnlySpan<Int128> values)
+        {
+            FixedStore store = Fixed(b.Store);
+            foreach (Int128 value in values)
+            {
+                BuilderValues.AppendInteger(store, value);
+            }
+        }
+    }
+
+    extension(ColumnBuilder<Int128?> b)
+    {
+        /// <summary>A span to fill in place with valid values, of a column stored in 128 bits.</summary>
+        public Span<Int128> GetSpan(int sizeHint = 0) => BuilderValues.IntegerSpan<Int128>(Fixed(b.Store), sizeHint);
+
+        /// <summary>Commits <paramref name="count"/> valid values written into the last span.</summary>
+        public void Advance(int count) => BuilderValues.AdvanceIntegers<Int128>(Fixed(b.Store), count);
+
+        /// <summary>Appends one valid value.</summary>
+        public void Append(Int128 value) => BuilderValues.AppendInteger(Fixed(b.Store), value);
+
+        /// <summary>Appends one value or a null.</summary>
+        public void Append(Int128? value)
+        {
+            if (value is { } present)
+            {
+                BuilderValues.AppendInteger(Fixed(b.Store), present);
+            }
+            else
+            {
+                Fixed(b.Store).AppendNulls(1);
+            }
+        }
+
+        /// <summary>Appends valid values.</summary>
+        public void Append(ReadOnlySpan<Int128> values)
+        {
+            FixedStore store = Fixed(b.Store);
+            foreach (Int128 value in values)
+            {
+                BuilderValues.AppendInteger(store, value);
+            }
+        }
+
+        /// <summary>Appends values with their validity: bit <c>i % 64</c> of word <c>i / 64</c> for value <c>i</c>.</summary>
+        public void Append(ReadOnlySpan<Int128> values, ReadOnlySpan<ulong> validity)
+        {
+            FixedStore store = Fixed(b.Store);
+            for (int i = 0; i < values.Length; i++)
+            {
+                if (((validity[i >> 6] >> (i & 63)) & 1) != 0)
+                {
+                    BuilderValues.AppendInteger(store, values[i]);
+                }
+                else
+                {
+                    store.AppendNulls(1);
+                }
+            }
+        }
+    }
+
+    extension(ColumnBuilder<UInt128> b)
+    {
+        /// <summary>A span to fill in place, of a column stored in 128 bits; <c>Advance</c> holds each value to the precision and commits it.</summary>
+        /// <exception cref="InvalidOperationException">The column is stored in another width.</exception>
+        public Span<UInt128> GetSpan(int sizeHint = 0) => BuilderValues.IntegerSpan<UInt128>(Fixed(b.Store), sizeHint);
+
+        /// <summary>Commits <paramref name="count"/> values written into the last span.</summary>
+        /// <exception cref="VortexSchemaException">A value does not fit the column's precision.</exception>
+        public void Advance(int count) => BuilderValues.AdvanceIntegers<UInt128>(Fixed(b.Store), count);
+
+        /// <summary>Appends one value, which must fit the column's precision.</summary>
+        public void Append(UInt128 value) => BuilderValues.AppendInteger(Fixed(b.Store), value);
+
+        /// <summary>Appends values.</summary>
+        public void Append(ReadOnlySpan<UInt128> values)
+        {
+            FixedStore store = Fixed(b.Store);
+            foreach (UInt128 value in values)
+            {
+                BuilderValues.AppendInteger(store, value);
+            }
+        }
+    }
+
+    extension(ColumnBuilder<UInt128?> b)
+    {
+        /// <summary>A span to fill in place with valid values, of a column stored in 128 bits.</summary>
+        public Span<UInt128> GetSpan(int sizeHint = 0) => BuilderValues.IntegerSpan<UInt128>(Fixed(b.Store), sizeHint);
+
+        /// <summary>Commits <paramref name="count"/> valid values written into the last span.</summary>
+        public void Advance(int count) => BuilderValues.AdvanceIntegers<UInt128>(Fixed(b.Store), count);
+
+        /// <summary>Appends one valid value.</summary>
+        public void Append(UInt128 value) => BuilderValues.AppendInteger(Fixed(b.Store), value);
+
+        /// <summary>Appends one value or a null.</summary>
+        public void Append(UInt128? value)
+        {
+            if (value is { } present)
+            {
+                BuilderValues.AppendInteger(Fixed(b.Store), present);
+            }
+            else
+            {
+                Fixed(b.Store).AppendNulls(1);
+            }
+        }
+
+        /// <summary>Appends valid values.</summary>
+        public void Append(ReadOnlySpan<UInt128> values)
+        {
+            FixedStore store = Fixed(b.Store);
+            foreach (UInt128 value in values)
+            {
+                BuilderValues.AppendInteger(store, value);
+            }
+        }
+
+        /// <summary>Appends values with their validity: bit <c>i % 64</c> of word <c>i / 64</c> for value <c>i</c>.</summary>
+        public void Append(ReadOnlySpan<UInt128> values, ReadOnlySpan<ulong> validity)
+        {
+            FixedStore store = Fixed(b.Store);
+            for (int i = 0; i < values.Length; i++)
+            {
+                if (((validity[i >> 6] >> (i & 63)) & 1) != 0)
+                {
+                    BuilderValues.AppendInteger(store, values[i]);
+                }
+                else
+                {
+                    store.AppendNulls(1);
+                }
+            }
+        }
+    }
+
+    extension(ColumnBuilder<BigInteger> b)
+    {
+        /// <summary>Appends one value, which must fit the column's precision.</summary>
+        public void Append(BigInteger value) => BuilderValues.AppendInteger(Fixed(b.Store), value);
+
+        /// <summary>Appends values.</summary>
+        public void Append(ReadOnlySpan<BigInteger> values)
+        {
+            FixedStore store = Fixed(b.Store);
+            foreach (BigInteger value in values)
+            {
+                BuilderValues.AppendInteger(store, value);
+            }
+        }
+    }
+
+    extension(ColumnBuilder<BigInteger?> b)
+    {
+        /// <summary>Appends one value or a null.</summary>
+        public void Append(BigInteger? value)
+        {
+            if (value is { } present)
+            {
+                BuilderValues.AppendInteger(Fixed(b.Store), present);
+            }
+            else
+            {
+                Fixed(b.Store).AppendNulls(1);
+            }
+        }
+
+        /// <summary>Appends a null.</summary>
+        public void AppendNull() => Fixed(b.Store).AppendNulls(1);
+    }
+
+    extension(ColumnBuilder<TimeSpan> b)
+    {
+        /// <summary>Appends one value, as its ticks.</summary>
+        public void Append(TimeSpan value) => Fixed(b.Store).Append(value.Ticks);
+
+        /// <summary>Appends values.</summary>
+        public void Append(ReadOnlySpan<TimeSpan> values)
+        {
+            FixedStore store = Fixed(b.Store);
+            foreach (TimeSpan value in values)
+            {
+                store.Append(value.Ticks);
+            }
+        }
+    }
+
+    extension(ColumnBuilder<TimeSpan?> b)
+    {
+        /// <summary>Appends one value or a null.</summary>
+        public void Append(TimeSpan? value)
+        {
+            if (value is { } present)
+            {
+                Fixed(b.Store).Append(present.Ticks);
+            }
+            else
+            {
+                Fixed(b.Store).AppendNulls(1);
+            }
+        }
+
+        /// <summary>Appends a null.</summary>
+        public void AppendNull() => Fixed(b.Store).AppendNulls(1);
     }
 
     extension<T>(ColumnBuilder<ReadOnlyMemory<T>> b)

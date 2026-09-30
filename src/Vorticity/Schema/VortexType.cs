@@ -328,6 +328,23 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
     internal static VortexType Primitive(PType ptype) =>
         Intern(new VortexType(VortexTypeKind.Primitive, nullable: false, ptype: ptype));
 
+    /// <summary>A non-nullable map from <paramref name="key"/> to <paramref name="value"/>: a list of entries per row, each a key and its value.</summary>
+    /// <param name="key">The keys' type, which a map holds no null of.</param>
+    /// <param name="value">The values' type.</param>
+    /// <returns>The map type.</returns>
+    /// <exception cref="ArgumentException"><paramref name="key"/> is nullable.</exception>
+    public static VortexType Map(VortexType key, VortexType value)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(value);
+        if (key.IsNullable)
+        {
+            throw new ArgumentException($"A map's keys are never null; {key} is nullable.", nameof(key));
+        }
+
+        return Map(key, value, nullable: false);
+    }
+
     internal static VortexType Map(VortexType key, VortexType value, bool nullable) =>
         Intern(new VortexType(VortexTypeKind.Map, nullable, fields: [new VortexField("key", key), new VortexField("value", value)]));
 

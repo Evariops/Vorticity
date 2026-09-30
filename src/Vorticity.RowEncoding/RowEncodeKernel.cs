@@ -74,6 +74,10 @@ internal static class RowEncodeKernel
                 Encode(arena, arena.MaterializeEncoded(nodeIndex), field, offsets, cursors, destination);
                 return;
 
+            case CanonicalKind.Constant:
+                Encode(arena, arena.MaterializeConstant(nodeIndex), field, offsets, cursors, destination);
+                return;
+
             default:
                 throw RowThrow.UnsupportedCanonical(node);
         }

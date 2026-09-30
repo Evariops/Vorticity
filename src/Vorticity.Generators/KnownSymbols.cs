@@ -29,8 +29,28 @@ internal sealed class KnownSymbols
         TimeOnly = compilation.GetTypeByMetadataName("System.TimeOnly");
         DateTimeOffset = compilation.GetTypeByMetadataName("System.DateTimeOffset");
         Guid = compilation.GetTypeByMetadataName("System.Guid");
+        TimeSpan = compilation.GetTypeByMetadataName("System.TimeSpan");
+        Int128 = compilation.GetTypeByMetadataName("System.Int128");
+        UInt128 = compilation.GetTypeByMetadataName("System.UInt128");
+        BigInteger = compilation.GetTypeByMetadataName("System.Numerics.BigInteger");
         ReadOnlyMemory = compilation.GetTypeByMetadataName("System.ReadOnlyMemory`1");
         Memory = compilation.GetTypeByMetadataName("System.Memory`1");
+        List = compilation.GetTypeByMetadataName("System.Collections.Generic.List`1");
+        Dictionaries =
+        [
+            compilation.GetTypeByMetadataName("System.Collections.Generic.Dictionary`2"),
+            compilation.GetTypeByMetadataName("System.Collections.Generic.IDictionary`2"),
+            compilation.GetTypeByMetadataName("System.Collections.Generic.IReadOnlyDictionary`2"),
+        ];
+        ImmutableArray = compilation.GetTypeByMetadataName("System.Collections.Immutable.ImmutableArray`1");
+        Sequences =
+        [
+            compilation.GetTypeByMetadataName("System.Collections.Generic.IEnumerable`1"),
+            compilation.GetTypeByMetadataName("System.Collections.Generic.IReadOnlyList`1"),
+            compilation.GetTypeByMetadataName("System.Collections.Generic.IReadOnlyCollection`1"),
+            compilation.GetTypeByMetadataName("System.Collections.Generic.IList`1"),
+            compilation.GetTypeByMetadataName("System.Collections.Generic.ICollection`1"),
+        ];
         Span = compilation.GetTypeByMetadataName("System.Span`1");
         ReadOnlySpan = compilation.GetTypeByMetadataName("System.ReadOnlySpan`1");
     }
@@ -79,9 +99,27 @@ internal sealed class KnownSymbols
 
     public INamedTypeSymbol? Guid { get; }
 
+    public INamedTypeSymbol? TimeSpan { get; }
+
+    public INamedTypeSymbol? Int128 { get; }
+
+    public INamedTypeSymbol? UInt128 { get; }
+
+    public INamedTypeSymbol? BigInteger { get; }
+
     public INamedTypeSymbol? ReadOnlyMemory { get; }
 
     public INamedTypeSymbol? Memory { get; }
+
+    public INamedTypeSymbol? List { get; }
+
+    /// <summary>The dictionary types a map member may be declared as, read back as a <c>Dictionary&lt;TKey, TValue&gt;</c>.</summary>
+    public INamedTypeSymbol?[] Dictionaries { get; }
+
+    public INamedTypeSymbol? ImmutableArray { get; }
+
+    /// <summary>The interfaces an array implements, which a member may be declared as and read back into an array through.</summary>
+    public INamedTypeSymbol?[] Sequences { get; }
 
     public INamedTypeSymbol? Span { get; }
 

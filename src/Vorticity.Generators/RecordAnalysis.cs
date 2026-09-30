@@ -415,12 +415,18 @@ internal static class RecordAnalysis
             ? ((INamedTypeSymbol)mapped.Core).EnumUnderlyingType!.ToDisplayString(TypeFormat)
             : core;
         ValueModel? element = null;
+        ValueModel? key = null;
         string? schema;
         switch (mapped.Kind)
         {
             case ValueKind.List:
-                element = Build(mapped.Element!, ((INamedTypeSymbol)mapped.Core).TypeArguments[0], options, helpers, out error);
+                element = Build(mapped.Element!, mapped.ElementType!, options, helpers, out error);
                 schema = element is null ? null : "global::Vorticity.VortexType.List(" + element.Schema + ")";
+                break;
+            case ValueKind.Map:
+                key = Build(mapped.Key!, mapped.KeyType!, options, helpers, out error);
+                element = key is null ? null : Build(mapped.Element!, mapped.ElementType!, options, helpers, out error);
+                schema = element is null ? null : "global::Vorticity.VortexType.Map(" + key!.Schema + ", " + element.Schema + ")";
                 break;
             case ValueKind.Record:
                 helpers.Schema = true;
@@ -448,7 +454,9 @@ internal static class RecordAnalysis
             core,
             underlying,
             mapped.IsNullable ? schema + ".Nullable" : schema,
-            element);
+            element,
+            mapped.Shape,
+            key);
     }
 
     private static string? ScalarSchema(ScalarKind scalar, ColumnOptions options, out string? error)
@@ -496,6 +504,32 @@ internal static class RecordAnalysis
                 return Type + "Date";
             case ScalarKind.Uuid:
                 return Type + "Uuid";
+            case ScalarKind.Duration:
+                return Type + "Int64";
+            case ScalarKind.Int128:
+            case ScalarKind.UInt128:
+            case ScalarKind.BigInteger:
+            {
+                // Thirty-eight digits by default, which a 128-bit decimal holds and every reader of
+                // one reads; 39 hold every value of a 128-bit integer, and 76 are as far as a
+                // decimal goes. An integer has no scale.
+                int limit = scalar == ScalarKind.BigInteger ? 76 : 39;
+                int precision = options.HasPrecision ? options.Precision : scalar == ScalarKind.BigInteger ? 76 : 38;
+                if (precision < 1 || precision > limit)
+                {
+                    error = $"its decimal column has 1 to {limit} digits, not {precision}";
+                    return null;
+                }
+
+                if (options.HasScale && options.Scale != 0)
+                {
+                    error = "an integer's decimal column has a scale of 0";
+                    return null;
+                }
+
+                return Type + $"Decimal({precision}, 0)";
+            }
+
             default:
                 return Type + scalar.ToString();
         }
@@ -815,13 +849,15 @@ internal static class RecordAnalysis
     /// <summary>What a <c>[VortexColumn]</c> says, with the attribute's defaults where it is silent.</summary>
     private readonly struct ColumnOptions
     {
-        private ColumnOptions(string? name, int precision, int scale, int unit, string? timeZone)
+        private ColumnOptions(string? name, int precision, int scale, int unit, string? timeZone, bool hasPrecision, bool hasScale)
         {
             Name = name;
             Precision = precision;
             Scale = scale;
             Unit = unit;
             TimeZone = timeZone;
+            HasPrecision = hasPrecision;
+            HasScale = hasScale;
         }
 
         public string? Name { get; }
@@ -834,6 +870,12 @@ internal static class RecordAnalysis
 
         public string? TimeZone { get; }
 
+        /// <summary>Whether the attribute names a precision, rather than leaving the decimal default.</summary>
+        public bool HasPrecision { get; }
+
+        /// <summary>Whether the attribute names a scale.</summary>
+        public bool HasScale { get; }
+
         public static ColumnOptions From(ImmutableArray<AttributeData> attributes, INamedTypeSymbol? columnAttribute)
         {
             string? name = null;
@@ -841,6 +883,8 @@ internal static class RecordAnalysis
             int scale = 10;
             int unit = 1;
             string? timeZone = null;
+            bool hasPrecision = false;
+            bool hasScale = false;
             foreach (AttributeData attribute in attributes)
             {
                 if (columnAttribute is null || !SymbolEqualityComparer.Default.Equals(attribute.AttributeClass, columnAttribute))
@@ -859,9 +903,11 @@ internal static class RecordAnalysis
                     {
                         case "Precision" when argument.Value.Value is int value:
                             precision = value;
+                            hasPrecision = true;
                             break;
                         case "Scale" when argument.Value.Value is int value:
                             scale = value;
+                            hasScale = true;
                             break;
                         case "Unit" when argument.Value.Value is not null:
                             unit = Convert.ToInt32(argument.Value.Value, System.Globalization.CultureInfo.InvariantCulture);
@@ -873,7 +919,7 @@ internal static class RecordAnalysis
                 }
             }
 
-            return new ColumnOptions(name, precision, scale, unit, timeZone);
+            return new ColumnOptions(name, precision, scale, unit, timeZone, hasPrecision, hasScale);
         }
     }
 }

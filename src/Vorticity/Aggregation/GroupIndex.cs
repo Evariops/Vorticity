@@ -132,11 +132,16 @@ internal struct GroupIndex<TValue>
                 2 => Mix(Unsafe.As<TValue, ushort>(ref value), 0),
                 4 => Mix(Unsafe.As<TValue, uint>(ref value), 0),
                 8 => Mix(Unsafe.As<TValue, ulong>(ref value), 0),
-                _ => Mix((ulong)Unsafe.As<TValue, UInt128>(ref value), (ulong)(Unsafe.As<TValue, UInt128>(ref value) >> 64)),
+                16 => Mix((ulong)Unsafe.As<TValue, UInt128>(ref value), (ulong)(Unsafe.As<TValue, UInt128>(ref value) >> 64)),
+                _ => Wide(ref Unsafe.As<TValue, ulong>(ref value)),
             };
         }
 
         private static int Mix(ulong low, ulong high) =>
             HashCode.Combine((uint)low, (uint)(low >> 32), (uint)high, (uint)(high >> 32));
+
+        /// <summary>A key of four words, a decimal of 256 bits: every word hashed, two rounds of the seeded combine.</summary>
+        private static int Wide(ref ulong words) =>
+            HashCode.Combine(Mix(words, Unsafe.Add(ref words, 1)), Mix(Unsafe.Add(ref words, 2), Unsafe.Add(ref words, 3)));
     }
 }

@@ -42,12 +42,22 @@ Vorticity: struct Vorticity.ColumnBuilder<T>
 Vorticity:     property int Count { get; }
 Vorticity: static class Vorticity.ColumnBuilderExtensions
 Vorticity:     method ColumnBuilder<T> get_Elements<T>(ColumnBuilder<ReadOnlyMemory<T>>)
+Vorticity:     method Span<Int128> GetSpan(ColumnBuilder<Int128>, int = default)
+Vorticity:     method Span<Int128> GetSpan(ColumnBuilder<Nullable<Int128>>, int = default)
 Vorticity:     method Span<T> GetSpan<T>(ColumnBuilder<Nullable<T>>, int = default)
 Vorticity:     method Span<T> GetSpan<T>(ColumnBuilder<T>, int = default)
+Vorticity:     method Span<UInt128> GetSpan(ColumnBuilder<Nullable<UInt128>>, int = default)
+Vorticity:     method Span<UInt128> GetSpan(ColumnBuilder<UInt128>, int = default)
 Vorticity:     method Span<byte> GetSpan(ColumnBuilder<Nullable<ReadOnlyMemory<byte>>>, int = default)
 Vorticity:     method Span<byte> GetSpan(ColumnBuilder<ReadOnlyMemory<byte>>, int = default)
+Vorticity:     method void Advance(ColumnBuilder<Int128>, int)
+Vorticity:     method void Advance(ColumnBuilder<Nullable<Int128>>, int)
+Vorticity:     method void Advance(ColumnBuilder<Nullable<UInt128>>, int)
+Vorticity:     method void Advance(ColumnBuilder<UInt128>, int)
 Vorticity:     method void Advance<T>(ColumnBuilder<Nullable<T>>, int)
 Vorticity:     method void Advance<T>(ColumnBuilder<T>, int)
+Vorticity:     method void Append(ColumnBuilder<BigInteger>, BigInteger)
+Vorticity:     method void Append(ColumnBuilder<BigInteger>, ReadOnlySpan<BigInteger>)
 Vorticity:     method void Append(ColumnBuilder<DateOnly>, DateOnly)
 Vorticity:     method void Append(ColumnBuilder<DateOnly>, ReadOnlySpan<DateOnly>)
 Vorticity:     method void Append(ColumnBuilder<DateTime>, DateTime)
@@ -56,18 +66,34 @@ Vorticity:     method void Append(ColumnBuilder<DateTimeOffset>, DateTimeOffset)
 Vorticity:     method void Append(ColumnBuilder<DateTimeOffset>, ReadOnlySpan<DateTimeOffset>)
 Vorticity:     method void Append(ColumnBuilder<Guid>, Guid)
 Vorticity:     method void Append(ColumnBuilder<Guid>, ReadOnlySpan<Guid>)
+Vorticity:     method void Append(ColumnBuilder<Int128>, Int128)
+Vorticity:     method void Append(ColumnBuilder<Int128>, ReadOnlySpan<Int128>)
+Vorticity:     method void Append(ColumnBuilder<Nullable<BigInteger>>, Nullable<BigInteger>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<DateOnly>>, Nullable<DateOnly>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<DateTime>>, Nullable<DateTime>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<DateTimeOffset>>, Nullable<DateTimeOffset>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<Guid>>, Nullable<Guid>)
+Vorticity:     method void Append(ColumnBuilder<Nullable<Int128>>, Int128)
+Vorticity:     method void Append(ColumnBuilder<Nullable<Int128>>, Nullable<Int128>)
+Vorticity:     method void Append(ColumnBuilder<Nullable<Int128>>, ReadOnlySpan<Int128>)
+Vorticity:     method void Append(ColumnBuilder<Nullable<Int128>>, ReadOnlySpan<Int128>, ReadOnlySpan<ulong>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<ReadOnlyMemory<byte>>>, ReadOnlySpan<byte>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<TimeOnly>>, Nullable<TimeOnly>)
+Vorticity:     method void Append(ColumnBuilder<Nullable<TimeSpan>>, Nullable<TimeSpan>)
+Vorticity:     method void Append(ColumnBuilder<Nullable<UInt128>>, Nullable<UInt128>)
+Vorticity:     method void Append(ColumnBuilder<Nullable<UInt128>>, ReadOnlySpan<UInt128>)
+Vorticity:     method void Append(ColumnBuilder<Nullable<UInt128>>, ReadOnlySpan<UInt128>, ReadOnlySpan<ulong>)
+Vorticity:     method void Append(ColumnBuilder<Nullable<UInt128>>, UInt128)
 Vorticity:     method void Append(ColumnBuilder<Nullable<VortexDecimal>>, Nullable<VortexDecimal>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<bool>>, Nullable<bool>)
 Vorticity:     method void Append(ColumnBuilder<Nullable<decimal>>, Nullable<decimal>)
 Vorticity:     method void Append(ColumnBuilder<ReadOnlyMemory<byte>>, ReadOnlySpan<byte>)
 Vorticity:     method void Append(ColumnBuilder<TimeOnly>, ReadOnlySpan<TimeOnly>)
 Vorticity:     method void Append(ColumnBuilder<TimeOnly>, TimeOnly)
+Vorticity:     method void Append(ColumnBuilder<TimeSpan>, ReadOnlySpan<TimeSpan>)
+Vorticity:     method void Append(ColumnBuilder<TimeSpan>, TimeSpan)
+Vorticity:     method void Append(ColumnBuilder<UInt128>, ReadOnlySpan<UInt128>)
+Vorticity:     method void Append(ColumnBuilder<UInt128>, UInt128)
 Vorticity:     method void Append(ColumnBuilder<VortexDecimal>, ReadOnlySpan<VortexDecimal>)
 Vorticity:     method void Append(ColumnBuilder<VortexDecimal>, VortexDecimal)
 Vorticity:     method void Append(ColumnBuilder<bool>, ReadOnlySpan<bool>)
@@ -82,12 +108,14 @@ Vorticity:     method void Append<T>(ColumnBuilder<ReadOnlyMemory<T>>, ReadOnlyS
 Vorticity:     method void Append<T>(ColumnBuilder<T>, ReadOnlySpan<T>)
 Vorticity:     method void Append<T>(ColumnBuilder<T>, T)
 Vorticity:     method void AppendBits(ColumnBuilder<bool>, ReadOnlySpan<ulong>, int)
+Vorticity:     method void AppendNull(ColumnBuilder<Nullable<BigInteger>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<DateOnly>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<DateTime>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<DateTimeOffset>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<Guid>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<ReadOnlyMemory<byte>>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<TimeOnly>>)
+Vorticity:     method void AppendNull(ColumnBuilder<Nullable<TimeSpan>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<VortexDecimal>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<bool>>)
 Vorticity:     method void AppendNull(ColumnBuilder<Nullable<decimal>>)
@@ -104,6 +132,15 @@ Vorticity:     method void Append(Nullable<DateOnly>)
 Vorticity:     method void AppendNull()
 Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$0068AAC09112EE75D1A63C9B66F4646C.<M>$212324D67CA9953CAE7B0D29565C911C
 Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<DateOnly>>)
+Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$063BF81652224AAA6FF738CBD03B97BF
+Vorticity:     method Span<UInt128> GetSpan(int = default)
+Vorticity:     method void Advance(int)
+Vorticity:     method void Append(Nullable<UInt128>)
+Vorticity:     method void Append(ReadOnlySpan<UInt128>)
+Vorticity:     method void Append(ReadOnlySpan<UInt128>, ReadOnlySpan<ulong>)
+Vorticity:     method void Append(UInt128)
+Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$063BF81652224AAA6FF738CBD03B97BF.<M>$22952183E9CAD56EAD5F024F1C598B56
+Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<UInt128>>)
 Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$0982BA668099B1A887C7AB7080E3FBE0
 Vorticity:     method void Append(ReadOnlySpan<decimal>)
 Vorticity:     method void Append(decimal)
@@ -115,6 +152,11 @@ Vorticity:     method void Append(ReadOnlySpan<byte>)
 Vorticity:     method void Commit(int)
 Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$1949A7997C5BA5BEE45ACC6460299348.<M>$0CFCFAF751E3618630A7EE60CB03EE59
 Vorticity:     method void <Extension>$(ColumnBuilder<ReadOnlyMemory<byte>>)
+Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$1AD66B86361B490B85539B8A8D606A63
+Vorticity:     method void Append(ReadOnlySpan<TimeSpan>)
+Vorticity:     method void Append(TimeSpan)
+Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$1AD66B86361B490B85539B8A8D606A63.<M>$5E4C155334CEFE325809BF62C65EC585
+Vorticity:     method void <Extension>$(ColumnBuilder<TimeSpan>)
 Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$22B89F4229AE6D2DD7BE1D0D1DC9872A
 Vorticity:     method void Append(DateTime)
 Vorticity:     method void Append(ReadOnlySpan<DateTime>)
@@ -130,6 +172,13 @@ Vorticity:     method void Append(Nullable<VortexDecimal>)
 Vorticity:     method void AppendNull()
 Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$33BC24EF460B5816671365453C3D6960.<M>$7471C28CF4555129C549D461039A3400
 Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<VortexDecimal>>)
+Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$3F205296E6F084AA351616B06A8BB100
+Vorticity:     method Span<Int128> GetSpan(int = default)
+Vorticity:     method void Advance(int)
+Vorticity:     method void Append(Int128)
+Vorticity:     method void Append(ReadOnlySpan<Int128>)
+Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$3F205296E6F084AA351616B06A8BB100.<M>$8C3F95726D7622B0B493C57790B3C5AE
+Vorticity:     method void <Extension>$(ColumnBuilder<Int128>)
 Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$528E0A989B665D639C15FB0E7EA10BB3<$T0>
 Vorticity:     method Span<$T0> GetSpan(int = default)
 Vorticity:     method void Advance(int)
@@ -146,6 +195,13 @@ Vorticity:     method void Append(ReadOnlySpan<VortexDecimal>)
 Vorticity:     method void Append(VortexDecimal)
 Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$539404E0147AF666DCF6F6CA1BD9EB05.<M>$19D386389C6CB6B7028F16C3B96DA6F0
 Vorticity:     method void <Extension>$(ColumnBuilder<VortexDecimal>)
+Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$6BA1AA30F37ADC20B826CE35EAB9B1D8
+Vorticity:     method Span<UInt128> GetSpan(int = default)
+Vorticity:     method void Advance(int)
+Vorticity:     method void Append(ReadOnlySpan<UInt128>)
+Vorticity:     method void Append(UInt128)
+Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$6BA1AA30F37ADC20B826CE35EAB9B1D8.<M>$718D06A70F05504CB5197B44C2CA89D2
+Vorticity:     method void <Extension>$(ColumnBuilder<UInt128>)
 Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$6C9E31EB35A821E841C9E9475B2B1AD4
 Vorticity:     method Span<byte> GetSpan(int = default)
 Vorticity:     method void Append(ReadOnlySpan<byte>)
@@ -154,6 +210,15 @@ Vorticity:     method void AppendNulls(int)
 Vorticity:     method void Commit(int)
 Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$6C9E31EB35A821E841C9E9475B2B1AD4.<M>$735DDF62B77AE3B62567623779978374
 Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<ReadOnlyMemory<byte>>>)
+Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$6FCC5697E7CADE9A8FE19EB7B201A63C
+Vorticity:     method Span<Int128> GetSpan(int = default)
+Vorticity:     method void Advance(int)
+Vorticity:     method void Append(Int128)
+Vorticity:     method void Append(Nullable<Int128>)
+Vorticity:     method void Append(ReadOnlySpan<Int128>)
+Vorticity:     method void Append(ReadOnlySpan<Int128>, ReadOnlySpan<ulong>)
+Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$6FCC5697E7CADE9A8FE19EB7B201A63C.<M>$5CBE2191905A79A93F693341D986F00E
+Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<Int128>>)
 Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$838CF2E8E5FA7DBA36C1B794CA527C24
 Vorticity:     method void Append(Nullable<bool>)
 Vorticity:     method void AppendNull()
@@ -166,6 +231,11 @@ Vorticity:     method void Append($T0)
 Vorticity:     method void Append(ReadOnlySpan<$T0>)
 Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$86DF8C334542E54C799950C596CFC7BF<$T0>.<M>$E95369BD63F13762FC613AB71B7E9831<T>
 Vorticity:     method void <Extension>$(ColumnBuilder<T>)
+Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$8CD5B06F2F923EA4AA5E3D5BCB218ABF
+Vorticity:     method void Append(BigInteger)
+Vorticity:     method void Append(ReadOnlySpan<BigInteger>)
+Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$8CD5B06F2F923EA4AA5E3D5BCB218ABF.<M>$975902CBADABE538B6874C10B9EE5BB3
+Vorticity:     method void <Extension>$(ColumnBuilder<BigInteger>)
 Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$8FCFF8CDF3979DD61545FD6FF56D18E9<$T0>
 Vorticity:     method void Append(ReadOnlySpan<$T0>)
 Vorticity:     method void AppendNull()
@@ -190,6 +260,11 @@ Vorticity:     method void Append(Nullable<DateTime>)
 Vorticity:     method void AppendNull()
 Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$CC021BF414A338A4BD2B340635276FA1.<M>$9EC5531EB68C47E69BCE0B5A2B2FC62E
 Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<DateTime>>)
+Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$CD5EABD7F0BC13A20CC13B635C4C17CE
+Vorticity:     method void Append(Nullable<BigInteger>)
+Vorticity:     method void AppendNull()
+Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$CD5EABD7F0BC13A20CC13B635C4C17CE.<M>$BEEF9B9866DD37EADB021511E50EFED8
+Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<BigInteger>>)
 Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$E2AB45CC00E4516E037EA5F0698A276D
 Vorticity:     method void Append(Nullable<Guid>)
 Vorticity:     method void AppendNull()
@@ -205,6 +280,11 @@ Vorticity:     method void Append(Nullable<DateTimeOffset>)
 Vorticity:     method void AppendNull()
 Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$E7F36D25997A02A6E30C0F7944791B16.<M>$BB9D0FAF14174FB6836D24200D1E4AD7
 Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<DateTimeOffset>>)
+Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$EFB2D070600F9F0DB19037B6FCFFCF75
+Vorticity:     method void Append(Nullable<TimeSpan>)
+Vorticity:     method void AppendNull()
+Vorticity: static class Vorticity.ColumnBuilderExtensions.<G>$EFB2D070600F9F0DB19037B6FCFFCF75.<M>$57B823D3F0A74F16FD56E530027E367F
+Vorticity:     method void <Extension>$(ColumnBuilder<Nullable<TimeSpan>>)
 Vorticity: sealed class Vorticity.ColumnBuilderExtensions.<G>$F1EA3FAA75C918872A225C4D915EF3E4
 Vorticity:     method void Append(DateOnly)
 Vorticity:     method void Append(ReadOnlySpan<DateOnly>)
@@ -242,31 +322,45 @@ Vorticity:     property ImmutableArray<EncodingCandidate> Candidates { get; init
 Vorticity:     property string Path { get; init; }
 Vorticity:     property string Reason { get; init; }
 Vorticity: static class Vorticity.ColumnExtensions
+Vorticity:     method BigInteger get_Item(Column<BigInteger>, int)
 Vorticity:     method Column<Nullable<long>> Storage(Column<Nullable<DateTime>>)
+Vorticity:     method Column<Nullable<long>> Storage(Column<Nullable<TimeSpan>>)
 Vorticity:     method Column<T> get_Elements<T>(Column<ReadOnlyMemory<T>>)
+Vorticity:     method Column<TStorage> Storage<TStorage>(Column<BigInteger>)
 Vorticity:     method Column<TStorage> Storage<TStorage>(Column<DateOnly>)
+Vorticity:     method Column<TStorage> Storage<TStorage>(Column<Int128>)
 Vorticity:     method Column<TStorage> Storage<TStorage>(Column<Nullable<decimal>>)
 Vorticity:     method Column<TStorage> Storage<TStorage>(Column<TimeOnly>)
 Vorticity:     method Column<TStorage> Storage<TStorage>(Column<VortexDecimal>)
 Vorticity:     method Column<TStorage> Storage<TStorage>(Column<decimal>)
 Vorticity:     method Column<long> Storage(Column<DateTime>)
 Vorticity:     method Column<long> Storage(Column<DateTimeOffset>)
+Vorticity:     method Column<long> Storage(Column<TimeSpan>)
 Vorticity:     method DateOnly get_Item(Column<DateOnly>, int)
 Vorticity:     method DateTime get_Item(Column<DateTime>, int)
 Vorticity:     method DateTimeOffset get_Item(Column<DateTimeOffset>, int)
 Vorticity:     method Guid get_Item(Column<Guid>, int)
+Vorticity:     method Int128 get_Item(Column<Int128>, int)
+Vorticity:     method Nullable<BigInteger> get_Item(Column<Nullable<BigInteger>>, int)
 Vorticity:     method Nullable<DateOnly> get_Item(Column<Nullable<DateOnly>>, int)
 Vorticity:     method Nullable<DateTime> get_Item(Column<Nullable<DateTime>>, int)
 Vorticity:     method Nullable<DateTimeOffset> get_Item(Column<Nullable<DateTimeOffset>>, int)
 Vorticity:     method Nullable<Guid> get_Item(Column<Nullable<Guid>>, int)
+Vorticity:     method Nullable<Int128> get_Item(Column<Nullable<Int128>>, int)
 Vorticity:     method Nullable<T> get_Item<T>(Column<Nullable<T>>, int)
 Vorticity:     method Nullable<TimeOnly> get_Item(Column<Nullable<TimeOnly>>, int)
+Vorticity:     method Nullable<TimeSpan> get_Item(Column<Nullable<TimeSpan>>, int)
+Vorticity:     method Nullable<UInt128> get_Item(Column<Nullable<UInt128>>, int)
 Vorticity:     method Nullable<VortexDecimal> get_Item(Column<Nullable<VortexDecimal>>, int)
 Vorticity:     method Nullable<bool> get_Item(Column<Nullable<bool>>, int)
 Vorticity:     method Nullable<decimal> get_Item(Column<Nullable<decimal>>, int)
 Vorticity:     method Range get_Item<T>(Column<ReadOnlyMemory<T>>, int)
+Vorticity:     method ReadOnlySpan<Int128> get_Values(Column<Int128>)
+Vorticity:     method ReadOnlySpan<Int128> get_Values(Column<Nullable<Int128>>)
 Vorticity:     method ReadOnlySpan<T> get_Values<T>(Column<Nullable<T>>)
 Vorticity:     method ReadOnlySpan<T> get_Values<T>(Column<T>)
+Vorticity:     method ReadOnlySpan<UInt128> get_Values(Column<Nullable<UInt128>>)
+Vorticity:     method ReadOnlySpan<UInt128> get_Values(Column<UInt128>)
 Vorticity:     method ReadOnlySpan<byte> get_Item(Column<Nullable<ReadOnlyMemory<byte>>>, int)
 Vorticity:     method ReadOnlySpan<byte> get_Item(Column<ReadOnlyMemory<byte>>, int)
 Vorticity:     method ReadOnlySpan<ulong> get_Bits(Column<Nullable<bool>>)
@@ -274,6 +368,7 @@ Vorticity:     method ReadOnlySpan<ulong> get_Bits(Column<bool>)
 Vorticity:     method T get_Item<T>(Column<T>, int)
 Vorticity:     method T[] ToArray<T>(Column<T>)
 Vorticity:     method TimeOnly get_Item(Column<TimeOnly>, int)
+Vorticity:     method TimeSpan get_Item(Column<TimeSpan>, int)
 Vorticity:     method TimeUnit get_Unit(Column<DateTime>)
 Vorticity:     method TimeUnit get_Unit(Column<DateTimeOffset>)
 Vorticity:     method TimeUnit get_Unit(Column<Nullable<DateTime>>)
@@ -282,24 +377,33 @@ Vorticity:     method TimeUnit get_Unit(Column<Nullable<TimeOnly>>)
 Vorticity:     method TimeUnit get_Unit(Column<TimeOnly>)
 Vorticity:     method TimeZoneInfo get_TimeZone(Column<DateTimeOffset>)
 Vorticity:     method TimeZoneInfo get_TimeZone(Column<Nullable<DateTimeOffset>>)
+Vorticity:     method UInt128 get_Item(Column<UInt128>, int)
 Vorticity:     method VortexDecimal get_Item(Column<VortexDecimal>, int)
 Vorticity:     method bool get_Item(Column<bool>, int)
 Vorticity:     method decimal get_Item(Column<decimal>, int)
 Vorticity:     method int get_Scale(Column<Nullable<decimal>>)
 Vorticity:     method int get_Scale(Column<decimal>)
+Vorticity:     method void CopyTo(Column<BigInteger>, Span<BigInteger>)
 Vorticity:     method void CopyTo(Column<DateOnly>, Span<DateOnly>)
 Vorticity:     method void CopyTo(Column<DateTime>, Span<DateTime>)
 Vorticity:     method void CopyTo(Column<DateTimeOffset>, Span<DateTimeOffset>)
 Vorticity:     method void CopyTo(Column<Guid>, Span<Guid>)
+Vorticity:     method void CopyTo(Column<Int128>, Span<Int128>)
+Vorticity:     method void CopyTo(Column<Nullable<BigInteger>>, Span<Nullable<BigInteger>>)
 Vorticity:     method void CopyTo(Column<Nullable<DateOnly>>, Span<Nullable<DateOnly>>)
 Vorticity:     method void CopyTo(Column<Nullable<DateTime>>, Span<Nullable<DateTime>>)
 Vorticity:     method void CopyTo(Column<Nullable<DateTimeOffset>>, Span<Nullable<DateTimeOffset>>)
 Vorticity:     method void CopyTo(Column<Nullable<Guid>>, Span<Nullable<Guid>>)
+Vorticity:     method void CopyTo(Column<Nullable<Int128>>, Span<Nullable<Int128>>)
 Vorticity:     method void CopyTo(Column<Nullable<TimeOnly>>, Span<Nullable<TimeOnly>>)
+Vorticity:     method void CopyTo(Column<Nullable<TimeSpan>>, Span<Nullable<TimeSpan>>)
+Vorticity:     method void CopyTo(Column<Nullable<UInt128>>, Span<Nullable<UInt128>>)
 Vorticity:     method void CopyTo(Column<Nullable<VortexDecimal>>, Span<Nullable<VortexDecimal>>)
 Vorticity:     method void CopyTo(Column<Nullable<bool>>, Span<Nullable<bool>>)
 Vorticity:     method void CopyTo(Column<Nullable<decimal>>, Span<Nullable<decimal>>)
 Vorticity:     method void CopyTo(Column<TimeOnly>, Span<TimeOnly>)
+Vorticity:     method void CopyTo(Column<TimeSpan>, Span<TimeSpan>)
+Vorticity:     method void CopyTo(Column<UInt128>, Span<UInt128>)
 Vorticity:     method void CopyTo(Column<VortexDecimal>, Span<VortexDecimal>)
 Vorticity:     method void CopyTo(Column<bool>, Span<bool>)
 Vorticity:     method void CopyTo(Column<decimal>, Span<decimal>)
@@ -334,6 +438,12 @@ Vorticity:     property TimeUnit Unit { get; }
 Vorticity:     property TimeZoneInfo TimeZone { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$26B50BB7193039853C110A7B53B50037.<M>$26932BA2993FD5DDAD0753C06A211C67
 Vorticity:     method void <Extension>$(Column<DateTimeOffset>)
+Vorticity: sealed class Vorticity.ColumnExtensions.<G>$44BC987BBD0F9B92D66B2B7903A6EDE2
+Vorticity:     method void CopyTo(Span<Nullable<UInt128>>)
+Vorticity:     property Nullable<UInt128> Item[int] { get; }
+Vorticity:     property ReadOnlySpan<UInt128> Values { get; }
+Vorticity: static class Vorticity.ColumnExtensions.<G>$44BC987BBD0F9B92D66B2B7903A6EDE2.<M>$8F248CFE598BF8F12B52501FF042F0D5
+Vorticity:     method void <Extension>$(Column<Nullable<UInt128>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$479A7D937CBF85B8CB0E18B700136070
 Vorticity:     method void CopyTo(Span<bool>)
 Vorticity:     property ReadOnlySpan<ulong> Bits { get; }
@@ -374,6 +484,11 @@ Vorticity:     property DateTime Item[int] { get; }
 Vorticity:     property TimeUnit Unit { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$6DA0AC3EDE4247869BB52ECFB4321B2A.<M>$483D38E2ECB9BF1C0686C622614BDD70
 Vorticity:     method void <Extension>$(Column<DateTime>)
+Vorticity: sealed class Vorticity.ColumnExtensions.<G>$739833C638BC2E1FDA8E7081F900ACDC
+Vorticity:     method void CopyTo(Span<Nullable<BigInteger>>)
+Vorticity:     property Nullable<BigInteger> Item[int] { get; }
+Vorticity: static class Vorticity.ColumnExtensions.<G>$739833C638BC2E1FDA8E7081F900ACDC.<M>$D9A0C2862A95B879A345484410662F3C
+Vorticity:     method void <Extension>$(Column<Nullable<BigInteger>>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$74D2991A37BBB0990C1D079414CF5377
 Vorticity:     method Column<TStorage> Storage<TStorage>()
 Vorticity:     method void CopyTo(Span<Nullable<decimal>>)
@@ -381,6 +496,13 @@ Vorticity:     property Nullable<decimal> Item[int] { get; }
 Vorticity:     property int Scale { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$74D2991A37BBB0990C1D079414CF5377.<M>$3853BBD2552A86D0075A37D9D5476488
 Vorticity:     method void <Extension>$(Column<Nullable<decimal>>)
+Vorticity: sealed class Vorticity.ColumnExtensions.<G>$7B643A86D38F2A5E728E286578F56E3A
+Vorticity:     method Column<TStorage> Storage<TStorage>()
+Vorticity:     method void CopyTo(Span<Int128>)
+Vorticity:     property Int128 Item[int] { get; }
+Vorticity:     property ReadOnlySpan<Int128> Values { get; }
+Vorticity: static class Vorticity.ColumnExtensions.<G>$7B643A86D38F2A5E728E286578F56E3A.<M>$DC8C0C467D235D77257469297915BE5F
+Vorticity:     method void <Extension>$(Column<Int128>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$7FFF222DD38BFECFF8FBB10F27326BD4
 Vorticity:     method Column<Nullable<long>> Storage()
 Vorticity:     method void CopyTo(Span<Nullable<DateTime>>)
@@ -394,6 +516,18 @@ Vorticity:     method void CopyTo(Span<DateOnly>)
 Vorticity:     property DateOnly Item[int] { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$8F60AB3A3B8DB97391BCB982E98D1533.<M>$8F7A59011FB521B2FE076679AB2061D0
 Vorticity:     method void <Extension>$(Column<DateOnly>)
+Vorticity: sealed class Vorticity.ColumnExtensions.<G>$97B771CAE5245D13938FAD7A6A26F2B6
+Vorticity:     method Column<Nullable<long>> Storage()
+Vorticity:     method void CopyTo(Span<Nullable<TimeSpan>>)
+Vorticity:     property Nullable<TimeSpan> Item[int] { get; }
+Vorticity: static class Vorticity.ColumnExtensions.<G>$97B771CAE5245D13938FAD7A6A26F2B6.<M>$DAC1F4EDDD9A0EF402004F0F2DB7D3F5
+Vorticity:     method void <Extension>$(Column<Nullable<TimeSpan>>)
+Vorticity: sealed class Vorticity.ColumnExtensions.<G>$9D9F317AD1D9E24D853D8E25C38256FD
+Vorticity:     method Column<long> Storage()
+Vorticity:     method void CopyTo(Span<TimeSpan>)
+Vorticity:     property TimeSpan Item[int] { get; }
+Vorticity: static class Vorticity.ColumnExtensions.<G>$9D9F317AD1D9E24D853D8E25C38256FD.<M>$41B8854DA8D375B9F0FC732133E4086F
+Vorticity:     method void <Extension>$(Column<TimeSpan>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$B906C546EFAA16BAFF2D13D7BC097B9E
 Vorticity:     property ReadOnlySpan<byte> Item[int] { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$B906C546EFAA16BAFF2D13D7BC097B9E.<M>$EAF88447D137001B0E19DECF34AE2360
@@ -425,6 +559,24 @@ Vorticity:     property Nullable<TimeOnly> Item[int] { get; }
 Vorticity:     property TimeUnit Unit { get; }
 Vorticity: static class Vorticity.ColumnExtensions.<G>$D8ECAAEFE236692E56AA64BCEB298616.<M>$B2942897961584289AE6834082E3ECF5
 Vorticity:     method void <Extension>$(Column<Nullable<TimeOnly>>)
+Vorticity: sealed class Vorticity.ColumnExtensions.<G>$DC63574E39AEBA245877BA299EC3D8D9
+Vorticity:     method void CopyTo(Span<Nullable<Int128>>)
+Vorticity:     property Nullable<Int128> Item[int] { get; }
+Vorticity:     property ReadOnlySpan<Int128> Values { get; }
+Vorticity: static class Vorticity.ColumnExtensions.<G>$DC63574E39AEBA245877BA299EC3D8D9.<M>$44747D6A3B45B2F2F5810AC8DA0E3892
+Vorticity:     method void <Extension>$(Column<Nullable<Int128>>)
+Vorticity: sealed class Vorticity.ColumnExtensions.<G>$E42392E2B31F9560973FC5BC31A2D718
+Vorticity:     method void CopyTo(Span<UInt128>)
+Vorticity:     property ReadOnlySpan<UInt128> Values { get; }
+Vorticity:     property UInt128 Item[int] { get; }
+Vorticity: static class Vorticity.ColumnExtensions.<G>$E42392E2B31F9560973FC5BC31A2D718.<M>$1D4FE02EA1564CBB61455E2EB667E5CE
+Vorticity:     method void <Extension>$(Column<UInt128>)
+Vorticity: sealed class Vorticity.ColumnExtensions.<G>$FD0E6A78E6F80A864C64A1CE47A1CE69
+Vorticity:     method Column<TStorage> Storage<TStorage>()
+Vorticity:     method void CopyTo(Span<BigInteger>)
+Vorticity:     property BigInteger Item[int] { get; }
+Vorticity: static class Vorticity.ColumnExtensions.<G>$FD0E6A78E6F80A864C64A1CE47A1CE69.<M>$79B973E48551687E869571A021932A9C
+Vorticity:     method void <Extension>$(Column<BigInteger>)
 Vorticity: sealed class Vorticity.ColumnExtensions.<G>$FFA9D64B944DCB26CA7833C1AE6204D8
 Vorticity:     method Column<TStorage> Storage<TStorage>()
 Vorticity:     method void CopyTo(Span<VortexDecimal>)
@@ -463,6 +615,8 @@ Vorticity:     property string Path { get; init; }
 Vorticity: ref struct Vorticity.Columns<TRecord>
 Vorticity:     method Column<T> Column<T>(int)
 Vorticity:     method Columns<TNested> Struct<TNested>(int)
+Vorticity:     method ListColumns<TNested> ListOf<TNested>(int)
+Vorticity:     method MapColumns<TKey, TValue> MapOf<TKey, TValue>(int)
 Vorticity:     method RecordBatch ToOwned()
 Vorticity:     method bool IsValid(int)
 Vorticity:     property ReadOnlySpan<ulong> ValidityWords { get; }
@@ -474,12 +628,14 @@ Vorticity: class Vorticity.ColumnsBuilder
 Vorticity:     method ColumnBuilder<T> Column<T>(int)
 Vorticity:     method ColumnBuilder<T> Column<T>(string)
 Vorticity:     method ColumnsBuilder Struct(int)
+Vorticity:     method MapColumnsBuilder<TKey, TValue> MapOf<TKey, TValue>(int)
 Vorticity:     method void AppendNull()
 Vorticity:     method void Clear()
 Vorticity:     property VortexSchema Schema { get; }
 Vorticity:     property int RowCount { get; }
 Vorticity: sealed class Vorticity.ColumnsBuilder<TRecord> : ColumnsBuilder
 Vorticity:     method ColumnsBuilder<TNested> Struct<TNested>(int)
+Vorticity:     method ListColumnsBuilder<TNested> ListOf<TNested>(int)
 Vorticity: enum Vorticity.ComponentKind
 Vorticity:     const ComponentKind Aggregate = 3
 Vorticity:     const ComponentKind Array = 0
@@ -511,6 +667,40 @@ Vorticity:     property int Decoded { get; init; }
 Vorticity:     property int Proven { get; init; }
 Vorticity:     property int Pruned { get; init; }
 Vorticity:     property long Rows { get; init; }
+Vorticity: static class Vorticity.DecimalAggregates
+Vorticity:     method Sym<Nullable<double>> Avg<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<Nullable<double>> Avg<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
+Vorticity:     method Sym<Nullable<double>> Avg<TRecord>(Aggregates<TRecord>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<Nullable<double>> Avg<TRecord>(Aggregates<TRecord>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
+Vorticity:     method Sym<VortexDecimal> Sum<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<VortexDecimal> Sum<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
+Vorticity:     method Sym<VortexDecimal> Sum<TRecord>(Aggregates<TRecord>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<VortexDecimal> Sum<TRecord>(Aggregates<TRecord>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
+Vorticity:     method ValueTask<Nullable<double>> AvgAsync<TRecord>(Scan<TRecord>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>, CancellationToken = default)
+Vorticity:     method ValueTask<Nullable<double>> AvgAsync<TRecord>(Scan<TRecord>, Func<Probe<TRecord>, Sym<VortexDecimal>>, CancellationToken = default)
+Vorticity:     method ValueTask<VortexDecimal> SumAsync<TRecord>(Scan<TRecord>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>, CancellationToken = default)
+Vorticity:     method ValueTask<VortexDecimal> SumAsync<TRecord>(Scan<TRecord>, Func<Probe<TRecord>, Sym<VortexDecimal>>, CancellationToken = default)
+Vorticity: sealed class Vorticity.DecimalAggregates.<G>$1EBB15957CA0249D4A0D301558178D06<$T0>
+Vorticity:     method Sym<Nullable<double>> Avg(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<Nullable<double>> Avg(Func<Probe<$T0>, Sym<VortexDecimal>>)
+Vorticity:     method Sym<VortexDecimal> Sum(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<VortexDecimal> Sum(Func<Probe<$T0>, Sym<VortexDecimal>>)
+Vorticity: static class Vorticity.DecimalAggregates.<G>$1EBB15957CA0249D4A0D301558178D06<$T0>.<M>$6F3873FFCE579848283ACAD2693430B7<TRecord>
+Vorticity:     method void <Extension>$(Aggregates<TRecord>)
+Vorticity: sealed class Vorticity.DecimalAggregates.<G>$72DE36724C555033F8204B840E249439<$T0>
+Vorticity:     method ValueTask<Nullable<double>> AvgAsync(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>, CancellationToken = default)
+Vorticity:     method ValueTask<Nullable<double>> AvgAsync(Func<Probe<$T0>, Sym<VortexDecimal>>, CancellationToken = default)
+Vorticity:     method ValueTask<VortexDecimal> SumAsync(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>, CancellationToken = default)
+Vorticity:     method ValueTask<VortexDecimal> SumAsync(Func<Probe<$T0>, Sym<VortexDecimal>>, CancellationToken = default)
+Vorticity: static class Vorticity.DecimalAggregates.<G>$72DE36724C555033F8204B840E249439<$T0>.<M>$085E8D515B6E4BA70E5E605D6D3E8173<TRecord>
+Vorticity:     method void <Extension>$(Scan<TRecord>)
+Vorticity: sealed class Vorticity.DecimalAggregates.<G>$C1E42583B8013135E71F75E7D46AEC83<$T0, $T1>
+Vorticity:     method Sym<Nullable<double>> Avg(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<Nullable<double>> Avg(Func<Probe<$T0>, Sym<VortexDecimal>>)
+Vorticity:     method Sym<VortexDecimal> Sum(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<VortexDecimal> Sum(Func<Probe<$T0>, Sym<VortexDecimal>>)
+Vorticity: static class Vorticity.DecimalAggregates.<G>$C1E42583B8013135E71F75E7D46AEC83<$T0, $T1>.<M>$198C58B7997C7BFF248392BF61EDAD42<TRecord, TKey>
+Vorticity:     method void <Extension>$(Group<TRecord, TKey>)
 Vorticity: ref struct Vorticity.DictionaryView<T>
 Vorticity:     property Column<T> Values { get; }
 Vorticity:     property ReadOnlySpan<uint> Codes { get; }
@@ -569,10 +759,16 @@ Vorticity:     const EncodingHint AlpRd = 9
 Vorticity:     const EncodingHint Auto = 0
 Vorticity:     const EncodingHint BitPacked = 4
 Vorticity:     const EncodingHint Canonical = 1
+Vorticity:     const EncodingHint Constant = 11
+Vorticity:     const EncodingHint DateTimeParts = 12
+Vorticity:     const EncodingHint DecimalByteParts = 10
 Vorticity:     const EncodingHint Dictionary = 3
 Vorticity:     const EncodingHint Fsst = 5
+Vorticity:     const EncodingHint OnPair = 14
+Vorticity:     const EncodingHint Pco = 15
 Vorticity:     const EncodingHint RunEnd = 2
 Vorticity:     const EncodingHint Sequence = 7
+Vorticity:     const EncodingHint Sparse = 13
 Vorticity:     const EncodingHint Zstd = 8
 Vorticity:     field byte value__
 Vorticity: enum Vorticity.EncodingObjective
@@ -795,6 +991,34 @@ Vorticity:     method string ToString()
 Vorticity:     method void Deconstruct(out KeySourceKind, out string)
 Vorticity:     property KeySourceKind Source { get; init; }
 Vorticity:     property string Reason { get; init; }
+Vorticity: ref struct Vorticity.ListColumns<TRecord>
+Vorticity:     method bool IsValid(int)
+Vorticity:     property Columns<TRecord> Elements { get; }
+Vorticity:     property Range Item[int] { get; }
+Vorticity:     property ReadOnlySpan<ulong> ValidityWords { get; }
+Vorticity:     property bool IsAllValid { get; }
+Vorticity:     property int Length { get; }
+Vorticity: struct Vorticity.ListColumnsBuilder<TRecord>
+Vorticity:     method void AppendNull()
+Vorticity:     method void BeginList()
+Vorticity:     method void EndList()
+Vorticity:     property ColumnsBuilder<TRecord> Elements { get; }
+Vorticity:     property int Count { get; }
+Vorticity: ref struct Vorticity.MapColumns<TKey, TValue>
+Vorticity:     method bool IsValid(int)
+Vorticity:     property Column<TKey> Keys { get; }
+Vorticity:     property Column<TValue> Values { get; }
+Vorticity:     property Range Item[int] { get; }
+Vorticity:     property ReadOnlySpan<ulong> ValidityWords { get; }
+Vorticity:     property bool IsAllValid { get; }
+Vorticity:     property int Length { get; }
+Vorticity: struct Vorticity.MapColumnsBuilder<TKey, TValue>
+Vorticity:     method void AppendNull()
+Vorticity:     method void BeginMap()
+Vorticity:     method void EndMap()
+Vorticity:     property ColumnBuilder<TKey> Keys { get; }
+Vorticity:     property ColumnBuilder<TValue> Values { get; }
+Vorticity:     property int Count { get; }
 Vorticity: sealed class Vorticity.OrderPlan : IEquatable<OrderPlan>
 Vorticity:     ctor OrderPlan(string, int, Nullable<long>, bool)
 Vorticity:     method OrderPlan <Clone>$()
@@ -1140,6 +1364,8 @@ Vorticity:     property bool Supported { get; init; }
 Vorticity:     property string Id { get; init; }
 Vorticity: struct Vorticity.VortexDecimal : IComparable<VortexDecimal>, IEquatable<VortexDecimal>
 Vorticity:     const int MaxFormattedLength = 206
+Vorticity:     method BigInteger GetUnscaledValue()
+Vorticity:     method VortexDecimal FromBigInteger(BigInteger, byte, sbyte)
 Vorticity:     method VortexDecimal FromInt128(Int128, byte, sbyte)
 Vorticity:     method VortexDecimal FromInt64(long, byte, sbyte)
 Vorticity:     method bool Equals(VortexDecimal)
@@ -1435,6 +1661,7 @@ Vorticity:     method VortexType Decimal(int, int)
 Vorticity:     method VortexType Extension(string, VortexType, ReadOnlyMemory<byte> = default)
 Vorticity:     method VortexType FixedSizeList(VortexType, int)
 Vorticity:     method VortexType List(VortexType)
+Vorticity:     method VortexType Map(VortexType, VortexType)
 Vorticity:     method VortexType Struct(ReadOnlySpan<VortexField>)
 Vorticity:     method VortexType Time(TimeUnit)
 Vorticity:     method VortexType Timestamp(TimeUnit, string = default)

@@ -23,6 +23,9 @@ public readonly struct Group<TRecord, TKey>
     /// <summary>The group's key.</summary>
     public Sym<TKey> Key { get; }
 
+    /// <summary>The binding the aggregates read their columns through, for the extensions that add aggregates.</summary>
+    internal RecordBinding? Binding => _binding;
+
     /// <summary>The number of rows of the group, nulls included.</summary>
     /// <returns>The symbol of the count.</returns>
     public Sym<long> Count() => Aggregators.Count();

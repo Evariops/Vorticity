@@ -52,8 +52,15 @@ public sealed class WrittenSizeTests
     /// this ceiling accepts, because it is what lets an index or a dataset prove which bytes it
     /// describes without reading them.
     /// </para>
+    /// <para>
+    /// Raised from 0.632 when the corpus took twenty files of <c>vortex.pco</c> -- a nullable f64,
+    /// an i16, a u32 and an f32, each at five lengths -- that the reference wrote with pco by hand:
+    /// the default profile rewrites them without it, as Vortex's own default compressor would,
+    /// three to four times larger, which moved the whole corpus from 0.6292 to 0.6325. The
+    /// headroom above the ratio is the one the ceiling had.
+    /// </para>
     /// </remarks>
-    private const double CorpusCeiling = 0.653;
+    private const double CorpusCeiling = 0.635;
 
     /// <summary>How many of the worst offenders to name, so the number is actionable.</summary>
     private const int Worst = 12;
@@ -115,8 +122,9 @@ public sealed class WrittenSizeTests
         // directory); the file's identity in every postscript -- 16 bytes of value, the entry's
         // key and segment, and the padding they move (80 or 104 B); and the index directory's
         // XXH3-64 trailer, on the files that carry one (8 B).
-        ("types/utf8_nonnull_r8193", 47_052),    // 17 chunks, 17 zones; including the file statistics segment (96 B), the dictionary probe (96 B), the identity (80 B) and the directory checksum (8 B)
-        ("types/utf8_nullable_r8193", 46_708),   // 17 chunks, 17 zones; including the same four
+        // Their seventeenth chunk is the one row past 8 192, written as a constant.
+        ("types/utf8_nonnull_r8193", 46_988),    // 17 chunks, 17 zones; including the file statistics segment (96 B), the dictionary probe (96 B), the identity (80 B) and the directory checksum (8 B)
+        ("types/utf8_nullable_r8193", 46_644),   // 17 chunks, 17 zones; including the same four
         // The copy of the carried remainder materializes only the bytes its views name, so the
         // heap written for a chunk never carries the strings of blocks already emitted.
         ("encodings/fsst", 6_748),               // 8 chunks, 8 zones; including the file statistics segment (96 B) and the identity (104 B)

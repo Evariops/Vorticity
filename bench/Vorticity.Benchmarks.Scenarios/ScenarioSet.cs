@@ -56,7 +56,7 @@ public static class ScenarioSet
 
     /// <summary>The scenario names this assembly answers to.</summary>
     public static string[] Names =>
-        ["fullscan", "projected", "projected-wide", "take", "filtered", "filtered-pruned", "write", "write-bloom", "write-postings", "write-sorted-runs", "lookup-sorted-runs", "append"];
+        ["fullscan", "projected", "projected-wide", "take", "filtered", "filtered-pruned", "write", "write-smallest", "write-bloom", "write-postings", "write-sorted-runs", "lookup-sorted-runs", "append"];
 
     /// <summary>
     /// The scenario <paramref name="name"/> names, as a delegate of shared-runtime types only.
@@ -77,6 +77,7 @@ public static class ScenarioSet
         "filtered" => p => FilteredScan(p, BandLow, NarrowBand),
         "filtered-pruned" => FilteredPruned,
         "write" => ReadAndWrite,
+        "write-smallest" => p => ReadAndWrite(p, new VortexWriteOptions { Compression = CompressionProfile.Smallest }),
         "write-bloom" => p => ReadAndWriteIndexed(p, IndexSpec.Bloom()),
         "write-postings" => p => ReadAndWriteIndexed(p, IndexSpec.Postings),
         "write-sorted-runs" => p => ReadAndWriteIndexed(p, IndexSpec.SortedRuns),

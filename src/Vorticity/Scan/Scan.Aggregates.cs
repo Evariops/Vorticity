@@ -86,7 +86,7 @@ public sealed partial class Scan<TRecord>
         where TAggregator : IAggregator<T, TState> =>
         ScalarAsync(Aggregators.Custom<T, TAggregator, TState>(Aggregators.Input(Binding, column)), cancellationToken);
 
-    private async ValueTask<T> ScalarAsync<T>(Sym<T> aggregate, CancellationToken cancellationToken)
+    internal async ValueTask<T> ScalarAsync<T>(Sym<T> aggregate, CancellationToken cancellationToken)
     {
         ResultNode<T> node = AggregationPlan.Result(aggregate);
         AggregationOutcome outcome = await Host.RunAsync(new AggregationPlan([node], []), cancellationToken).ConfigureAwait(false);
