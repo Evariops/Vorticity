@@ -30,7 +30,7 @@ internal sealed record ChurnOptions
         "usage: Vorticity.Benchmarks.Churn [--rows N] [--ops N] [--batch N] [--mix A:U:D] [--keys random|tail]\n" +
         "         [--compact none|drain] [--compact-every N] [--vacuum-every N] [--probe-every N] [--report-every N]\n" +
         "         [--store file|memory] [--dir PATH] [--seed N] [--minutes N] [--load-chunk N] [--index-budget PERMILLE]\n" +
-        "         [--max-object MiB] [--level-one KiB] [--open-objects N] [--marks on|off] [--mark-bytes KiB] [--probe-rounds N]";
+        "         [--max-object MiB] [--level-one KiB] [--open-objects N] [--marks on|off] [--mark-bytes KiB] [--purge on|off] [--probe-rounds N]";
 
     /// <summary>The rows loaded before the first operation.</summary>
     public long Rows { get; init; } = 1_000_000;
@@ -107,6 +107,9 @@ internal sealed record ChurnOptions
     /// <summary>The most an object's marks take before a delete rewrites it, in KiB; 0 for the library's default.</summary>
     public int MarkKiB { get; init; }
 
+    /// <summary>Whether compaction rewrites an object whose marks reach half a delete's bounds, as the library does by default.</summary>
+    public bool Purge { get; init; } = true;
+
     /// <summary>
     /// How many times each probe's calls are timed at a checkpoint, the fastest round kept: what
     /// other work on the machine adds to a round, the fastest one holds the least of.
@@ -159,6 +162,7 @@ internal sealed record ChurnOptions
                 "--open-objects" => options with { OpenObjects = Int(flag, value) },
                 "--marks" => options with { Marks = value == "on" ? true : value == "off" ? false : throw new ArgumentException($"--marks takes on or off, not '{value}'.") },
                 "--mark-bytes" => options with { MarkKiB = Int(flag, value) },
+                "--purge" => options with { Purge = value == "on" ? true : value == "off" ? false : throw new ArgumentException($"--purge takes on or off, not '{value}'.") },
                 "--probe-rounds" => options with { ProbeRounds = Math.Max(1, Int(flag, value)) },
                 _ => throw new ArgumentException($"Unknown argument '{flag}'."),
             };
@@ -178,7 +182,8 @@ internal sealed record ChurnOptions
             $"{Rows} rows, {Ops} ops of {Batch} rows, mix {Appends}:{Updates}:{Deletes} (append:update:delete), " +
             $"keys {Keys.ToString().ToLowerInvariant()}, compaction {cadence}, vacuum every {VacuumEvery}, " +
             $"{(Memory ? "memory" : "file")} store, index budget {(IndexBudget > 0 ? IndexBudget.ToString(CultureInfo.InvariantCulture) + "‰" : "default")}, " +
-            $"deletes by {(Marks ? "marks" : "rewrites")}{(Marks && MarkKiB > 0 ? string.Create(CultureInfo.InvariantCulture, $" of at most {MarkKiB} KiB") : "")}, seed {Seed}");
+            $"deletes by {(Marks ? "marks" : "rewrites")}{(Marks && MarkKiB > 0 ? string.Create(CultureInfo.InvariantCulture, $" of at most {MarkKiB} KiB") : "")}" +
+            $"{(Marks && !Purge ? ", never purged" : "")}, seed {Seed}");
     }
 
     private static ChurnOptions Mix(ChurnOptions options, string value)
