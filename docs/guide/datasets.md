@@ -170,8 +170,9 @@ insert, applied together. Its record must have a member for every column. `Delet
 is the delete for a caller without a record type.
 
 It is copy on write: reading pays nothing and every statistic stays exact, and the price is the
-rewrite of every object a row is taken from, however few rows that is. A delete of one row in a
-256 MiB object rewrites the object. `BytesIn` and `BytesOut` say what a change rewrote.
+rewrite of every object a row is taken from, however few rows that is. A delete of one row rewrites
+the object that held it, which compaction keeps under `CompactionOptions.MaxObjectBytes`, 4 MiB by
+default, whatever the size of the dataset. `BytesIn` and `BytesOut` say what a change rewrote.
 
 A reader sees the change whole or not at all. Rows appended by another writer while the change is
 worked out are not touched; if another writer rewrites an object the change read, a compaction for

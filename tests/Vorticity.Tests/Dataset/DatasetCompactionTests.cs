@@ -122,10 +122,10 @@ public sealed class DatasetCompactionTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
 
-        // A small target so the merges roll into several objects per level, a fan-out of three so
-        // level 1 goes over its size and the second trigger fires too, and a ceiling of two so
-        // level 0 is over its bound most of the time.
-        CompactionOptions options = Options(target: 3 << 10) with { Fanout = 3 };
+        // A small target and a small cap on an object, so the merges roll into several objects per
+        // level wherever level 0 lands, a fan-out of three so the levels go over their size and the
+        // second trigger fires too, and a ceiling of two so level 0 is over its bound most of the time.
+        CompactionOptions options = Options(target: 1 << 10) with { Fanout = 3, MaxObjectBytes = 2 << 10 };
         Random random = new Random(0x5A1AD);
         List<long> appended = [];
         int compactions = 0;
@@ -403,8 +403,9 @@ public sealed class DatasetCompactionTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // The level-size trigger. Level 0 goes up first; then level 1 is over the size its fan-out
-        // allows, and the next step moves it to level 2 — the lowest level over its size first.
+        // The level-size trigger. Level 0 goes up first, into a level 1 that holds it, in objects
+        // capped at 4 KiB; then, under a level 1 of 4 KiB, level 1 is over its size, and the next
+        // step moves it to level 2 — the lowest level over its size first.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
         DType schema = Schema(types);
@@ -416,12 +417,16 @@ public sealed class DatasetCompactionTests
             await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
+        CompactionOptions roomy = Options(target: 1 << 20) with { MaxObjectBytes = 4 << 10 };
+        CompactionPlan first = await dataset.PlanCompactionAsync(roomy, ct);
+        Assert.Equal(CompactionTrigger.LevelZeroCeiling, first.Job!.Trigger);
+        Assert.Equal(1, first.Job.ToLevel);
+        _ = await dataset.CompactAsync(roomy, ct);
+        Assert.True(dataset.Levels[1].Entries > 1, "the capped outputs must be several objects");
+
         // A target of 2 KiB and a fan-out of 2: level 1 holds at most 4 KiB, and the rolled outputs
         // are well past it.
         CompactionOptions options = Options(target: 2 << 10) with { Fanout = 2 };
-        Assert.Equal(CompactionTrigger.LevelZeroCeiling, (await dataset.PlanCompactionAsync(options, ct)).Job!.Trigger);
-        _ = await dataset.CompactAsync(options, ct);
-
         CompactionPlan second = await dataset.PlanCompactionAsync(options, ct);
         Assert.Equal(CompactionTrigger.LevelSize, second.Job!.Trigger);
         Assert.Equal(1, second.Job.FromLevel);
@@ -491,6 +496,83 @@ public sealed class DatasetCompactionTests
 
         List<long> walked = await KeysAsync(dataset.ScanBuilder().InKeyOrder("key"));
         Assert.Equal(Enumerable.Range(0, Keys).Select(key => (long)key), walked);
+    }
+
+    [Fact]
+    public void ALevelHoldsFanoutTimesTheOneBelowWhateverTheCapOnAnObject()
+    {
+        // Objects stop growing at the cap; the levels do not, or a dataset would need a level for
+        // every F capped objects rather than one for every factor of F.
+        CompactionOptions options = new CompactionOptions { TargetBytesAtLevelOne = 1 << 20, Fanout = 10, MaxObjectBytes = 16 << 20 };
+        Assert.Equal(1L << 20, options.TargetBytes(1));
+        Assert.Equal(10L << 20, options.TargetBytes(2));
+        Assert.Equal(16L << 20, options.TargetBytes(3));
+        Assert.Equal(16L << 20, options.TargetBytes(6));
+        Assert.Equal(10L << 20, options.CapacityBytes(1));
+        Assert.Equal(1_000L << 20, options.CapacityBytes(3));
+        Assert.Equal(1_000_000L << 20, options.CapacityBytes(6));
+        Assert.Equal(long.MaxValue, options.CapacityBytes(40));
+
+        // Level 0 empties into the first level that holds it, and never past the top a cap allows.
+        Assert.Equal(1, options.LevelZeroDestination(1));
+        Assert.Equal(1, options.LevelZeroDestination(10L << 20));
+        Assert.Equal(2, options.LevelZeroDestination((10L << 20) + 1));
+        Assert.Equal(4, options.LevelZeroDestination(5L << 30));
+        Assert.Equal(2, (options with { MaxLevels = 3 }).LevelZeroDestination(5L << 30));
+        Assert.Equal(1, (options with { Fanout = 1 }).LevelZeroDestination(5L << 30));
+    }
+
+    [Fact]
+    public async Task SmallCommitsMergeIntoLevelOneAndALoadGoesPastTheLevelsItWouldOverflow()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // Level 0 empties into the first level that holds it: a few small commits into a small
+        // level 1, rewriting a few times their size rather than every row the dataset holds; and a
+        // load many times that size past the levels it would only overflow, written once rather
+        // than once per level on its way up.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+
+        // Level 1 holds 20 KiB, level 2 200 KiB, level 3 2 MiB.
+        CompactionOptions options = Options(target: 2 << 10);
+        List<long> appended = [];
+        for (int commit = 0; commit < 3; commit++)
+        {
+            await dataset.AppendAsync(Ordered(types, schema, commit * 20, 20), ct);
+            appended.AddRange(Enumerable.Range(commit * 20, 20).Select(key => (long)key));
+        }
+
+        CompactionJob small = (await dataset.PlanCompactionAsync(options, ct)).Job!;
+        Assert.InRange(small.Bytes, 1, options.CapacityBytes(1));
+        Assert.Equal(1, small.ToLevel);
+        while (await dataset.CompactAsync(options, ct) is not null)
+        {
+        }
+
+        for (int load = 0; load < 3; load++)
+        {
+            await dataset.AppendAsync(Shuffled(types, schema, 1_000 + (load * 20_000), 20_000, load), ct);
+            appended.AddRange(Enumerable.Range(1_000 + (load * 20_000), 20_000).Select(key => (long)key));
+        }
+
+        CompactionJob large = (await dataset.PlanCompactionAsync(options, ct)).Job!;
+        Assert.InRange(large.Bytes, options.CapacityBytes(2) + 1, options.CapacityBytes(3));
+        Assert.Equal(3, large.ToLevel);
+        Assert.Equal(3, large.Inputs.Count);
+        CompactionResult moved = Assert.IsType<CompactionResult>(await dataset.CompactAsync(options, ct));
+        Assert.Equal(3, moved.ToLevel);
+        Assert.Equal(60_000, moved.Rows);
+
+        Assert.Equal(1, dataset.Levels[1].Entries);
+        Assert.Equal(0, dataset.Levels[2].Entries);
+        await AssertInvariantAsync(dataset, options, appended);
+        Console.Out.Write(FormattableString.Invariant(
+            $"DATASET LEVEL ZERO DESTINATION: {small.Bytes} bytes of small commits went to level {small.ToLevel}, a load of {large.Bytes} to level {large.ToLevel}.\n"));
     }
 
     [Fact]

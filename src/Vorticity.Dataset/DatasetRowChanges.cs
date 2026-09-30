@@ -422,10 +422,9 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
         _update = update;
         _binding = RecordBinding.For<TRecord>(schema.Columns, dataset.Session.Options.Extensions);
         _firstRow = firstRow;
-        long levelOne = dataset.Compaction.LevelTargetBytes > 0
-            ? dataset.Compaction.LevelTargetBytes
-            : CompactionOptions.DefaultTargetBytesAtLevelOne;
-        _target = Math.Min(levelOne, Math.Max(dataset.Options.MaxObjectBytes / 2, 1));
+        // Rolled at what compaction writes at most: the changed rows land in level 0, where a
+        // large change in many small objects would put the level over its ceiling at once.
+        _target = Math.Min(CompactionOptions.DefaultMaxObjectBytes, Math.Max(dataset.Options.MaxObjectBytes / 2, 1));
     }
 
     internal override async ValueTask TakeAsync(RecordBatch batch, CancellationToken cancellationToken)
