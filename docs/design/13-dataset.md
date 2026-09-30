@@ -78,7 +78,14 @@ object's pages region, its length, and its XXH3-128. A commit references every p
 where it already lies, in an older commit object, and checks the hash on read; fixed-width,
 relative references are what let a header name offsets that depend on its own length, and what make
 two identical trees identical page for page. There is no separate page object, no orphan page after
-a crash, and one conditional creation per commit.
+a crash, and one conditional creation per commit. A reference names its page in every version that
+shares it, so a handle keeps what it has from one version to the next: the pages it read from the
+store, least recently used first out within `DatasetOptions.PageCacheBytes` (32 MiB by default); what
+the reads opening its last sixteen versions brought back of their pages regions; and where each
+version's pages start. A refresh or a commit asks the store again only for the pages that changed.
+Pages are kept page by page only when read from the store, and by version when a read brought them
+back with their commit: most of what a version wrote, the next one rewrites, and a budget in bytes
+would fill with those.
 
 **`<inverted version>`** is `10²⁰ − 1 − version` in twenty digits, so the **newest commit sorts
 first** and the first key of a listing of `commit/` is the latest version (§8.3). There is no mutable
@@ -420,7 +427,7 @@ On an object store a request costs 10 to 100 ms whatever its size below a megaby
 | step | dependent requests | cached by |
 |---|---|---|
 | list the latest commit, read its header | 2 | version |
-| descend a level's tree | 0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million | page, forever: pages are immutable |
+| descend a level's tree | 0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million | page, across versions: pages are immutable |
 | open the object's tail | 1, in parallel across the ≤ 8 + L objects touched | object |
 | its fences, then the two payload segments | 1 + 1 | run |
 | the data segments | 1, coalesced | — |

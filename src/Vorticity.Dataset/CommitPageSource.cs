@@ -7,13 +7,19 @@ using System.Threading.Tasks;
 namespace Vorticity.Dataset;
 
 /// <summary>
-/// An <see cref="IPageSource"/> over a dataset's commit objects: a page inlined in a header or
-/// still in the builder's buffer costs no request, anything else is a ranged read of the commit
-/// object its reference names. Every page is checked against the reference that led here.
+/// An <see cref="IPageSource"/> over a dataset's commit objects: a page inlined in a header, held
+/// by the read that opened its version, kept by the handle's cache or still in the builder's buffer
+/// costs no request, anything else is a ranged read of the commit object its reference names. Every
+/// page is checked against the reference that led here.
 /// </summary>
 internal sealed class CommitPageSource : IPageSource
 {
     private readonly IObjectStore _store;
+
+    // The handle's, shared by every version it reads and every commit it makes: what one read, the
+    // next finds there.
+    private readonly PageCache? _cache;
+
     // Concurrent because a walk reads a window of siblings at once; two reads of one page race to
     // the same bytes, and either may keep them.
     private readonly ConcurrentDictionary<PageReference, ReadOnlyMemory<byte>> _known = [];
@@ -29,10 +35,12 @@ internal sealed class CommitPageSource : IPageSource
     private byte[]? _built;
     private long _builtStart;
 
-    public CommitPageSource(IObjectStore store)
+    /// <summary>A source reading through <paramref name="store"/>, and through the handle's cache when it has one.</summary>
+    public CommitPageSource(IObjectStore store, PageCache? cache = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         _store = store;
+        _cache = cache;
     }
 
     /// <summary>How many pages were read through the store rather than found in hand.</summary>
@@ -53,20 +61,8 @@ internal sealed class CommitPageSource : IPageSource
             return true;
         }
 
-        if (_held.TryGetValue(reference.Version, out ReadOnlyMemory<byte> region)
-            && reference.Offset >= 0 && reference.Offset + reference.Length <= region.Length)
+        if (_held.TryGetValue(reference.Version, out ReadOnlyMemory<byte> region) && TryHeld(reference, region, out page))
         {
-            try
-            {
-                page = Check(reference, region.Slice((int)reference.Offset, reference.Length));
-            }
-            catch (CommitFormatException torn)
-            {
-                // Held once, as any page a header does not inline: a byte torn in it is refused by its
-                // hash, never read as another page.
-                throw TornCommitException.Of(reference.Version, torn);
-            }
-
             _known[reference] = page;
             return true;
         }
@@ -87,11 +83,16 @@ internal sealed class CommitPageSource : IPageSource
         if (!commit.Held.IsEmpty)
         {
             _held[version] = commit.Held;
+            _cache?.Hold(version, commit.Held);
         }
     }
 
     /// <summary>Records where a version's pages region starts, learned without a request.</summary>
-    public void Know(ulong version, long pagesStart) => _starts[version] = pagesStart;
+    public void Know(ulong version, long pagesStart)
+    {
+        _starts[version] = pagesStart;
+        _cache?.AddStart(version, pagesStart);
+    }
 
     /// <summary>Takes the pages a header carries, which cost no request.</summary>
     public void Inline(CommitHeader header)
@@ -121,7 +122,7 @@ internal sealed class CommitPageSource : IPageSource
         _built = bytes;
         _builtStart = CommitFormat.PreambleBytes
             + System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(12));
-        _starts[_building] = _builtStart;
+        Know(_building, _builtStart);
     }
 
     /// <inheritdoc/>
@@ -144,6 +145,12 @@ internal sealed class CommitPageSource : IPageSource
             return fresh;
         }
 
+        if (TryGetKept(reference, out ReadOnlyMemory<byte> kept))
+        {
+            _known[reference] = kept;
+            return kept;
+        }
+
         byte[] page;
         try
         {
@@ -157,6 +164,7 @@ internal sealed class CommitPageSource : IPageSource
         // Kept because a page is immutable and a commit reads the same ones twice by construction:
         // the descent that looks a key up and the merge that rewrites its leaf are the same page.
         _known[reference] = page;
+        _cache?.Add(reference, page);
         return page;
     }
 
@@ -190,17 +198,87 @@ internal sealed class CommitPageSource : IPageSource
         }
     }
 
-    /// <summary>Where a version's body starts: one small read per version, remembered.</summary>
+    /// <summary>Where a version's body starts: one small read per version, remembered by the handle.</summary>
     private async ValueTask<long> StartAsync(ulong version, string key, CancellationToken cancellationToken)
     {
-        if (!_starts.TryGetValue(version, out long start))
+        if (_starts.TryGetValue(version, out long start))
         {
-            Interlocked.Increment(ref _reads);
-            start = await CommitObject.PagesStartAsync(_store, key, cancellationToken).ConfigureAwait(false);
-            _starts[version] = start;
+            return start;
         }
 
+        if (_cache is not null && _cache.TryGetStart(version, out start))
+        {
+            _starts[version] = start;
+            return start;
+        }
+
+        Interlocked.Increment(ref _reads);
+        start = await CommitObject.PagesStartAsync(_store, key, cancellationToken).ConfigureAwait(false);
+        Know(version, start);
         return start;
+    }
+
+    /// <summary>
+    /// A page the handle kept from an earlier version: read from the store then, or lying in the
+    /// region the read opening its own version brought back, checked as it is taken from there.
+    /// </summary>
+    private bool TryGetKept(PageReference reference, out ReadOnlyMemory<byte> page)
+    {
+        page = default;
+        if (_cache is null)
+        {
+            return false;
+        }
+
+        if (_cache.TryGet(reference, out page))
+        {
+            return true;
+        }
+
+        if (!_cache.TryGetHeld(reference.Version, out ReadOnlyMemory<byte> region) || !Within(reference, region))
+        {
+            return false;
+        }
+
+        page = region.Slice((int)reference.Offset, reference.Length);
+        if (XxHash128.HashToUInt128(page.Span) == reference.Hash)
+        {
+            return true;
+        }
+
+        // Kept from an open of the version whose object is not the one there now, as a torn object
+        // removed and written again is not: the store says what it holds.
+        _cache.Forget(reference.Version);
+        page = default;
+        return false;
+    }
+
+    /// <summary>Whether the page <paramref name="reference"/> names lies inside <paramref name="region"/>.</summary>
+    private static bool Within(PageReference reference, ReadOnlyMemory<byte> region) =>
+        reference.Offset >= 0 && reference.Offset + reference.Length <= region.Length;
+
+    /// <summary>The page <paramref name="reference"/> names, when it lies inside a region an open read held.</summary>
+    /// <exception cref="TornCommitException">It lies there and does not hash to its reference.</exception>
+    private static bool TryHeld(PageReference reference, ReadOnlyMemory<byte> region, out ReadOnlyMemory<byte> page)
+    {
+        if (!Within(reference, region))
+        {
+            page = default;
+            return false;
+        }
+
+        try
+        {
+            page = Check(reference, region.Slice((int)reference.Offset, reference.Length));
+        }
+        catch (CommitFormatException torn)
+        {
+            // Held once, as any page a header does not inline: a byte torn in it is refused by its
+            // hash, never read as another page.
+            throw TornCommitException.Of(reference.Version, torn);
+        }
+
+        return true;
     }
 
     private static ReadOnlyMemory<byte> Check(PageReference reference, ReadOnlyMemory<byte> page)

@@ -40,14 +40,16 @@ public sealed class VortexDataset : IAsyncDisposable
     private readonly IObjectStore _store;
     private readonly DatasetOptions _options;
     private readonly ObjectCache _objects;
+    private readonly PageCache _pageCache;
     private DatasetSnapshot _snapshot;
 
-    private VortexDataset(IObjectStore store, DatasetOptions options, CommitHeader header, CommitPageSource pages)
+    private VortexDataset(IObjectStore store, DatasetOptions options, ulong version, CommitObject commit)
     {
         _store = store;
         _options = options;
         _objects = new ObjectCache(store, options.MaxOpenObjects, options.Session);
-        _snapshot = new DatasetSnapshot(header, pages, _objects);
+        _pageCache = new PageCache(options.PageCacheBytes);
+        _snapshot = new DatasetSnapshot(commit.Header, PagesOf(version, commit), _objects);
     }
 
     /// <summary>The version this handle reads; it moves only when this handle commits or refreshes.</summary>
@@ -147,11 +149,7 @@ public sealed class VortexDataset : IAsyncDisposable
             throw ObjectNotFoundException.For(CommitKey.Prefix);
         }
 
-        return new VortexDataset(
-            store,
-            (options ?? new DatasetOptions()) with { Seed = commit.Header.Seed },
-            commit.Header,
-            PagesOf(store, version, commit));
+        return new VortexDataset(store, (options ?? new DatasetOptions()) with { Seed = commit.Header.Seed }, version, commit);
     }
 
     /// <summary>Moves this handle to the latest version.</summary>
@@ -167,7 +165,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return Version;
         }
 
-        Volatile.Write(ref _snapshot, new DatasetSnapshot(commit.Header, PagesOf(_store, version, commit), _objects, Snapshot.Schema));
+        Volatile.Write(ref _snapshot, new DatasetSnapshot(commit.Header, PagesOf(version, commit), _objects, Snapshot.Schema));
         return version;
     }
 
@@ -713,7 +711,7 @@ public sealed class VortexDataset : IAsyncDisposable
         IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken)
     {
         CommitResult result = await DatasetCommitter
-            .CommitAsync(_store, operations, Commit(_options, Snapshot.Header) with { Known = Version }, cancellationToken)
+            .CommitAsync(_store, operations, Commit(_options, Snapshot.Header) with { Known = Version, PageCache = _pageCache }, cancellationToken)
             .ConfigureAwait(false);
         await RefreshAsync(cancellationToken).ConfigureAwait(false);
         return result;
@@ -875,10 +873,13 @@ public sealed class VortexDataset : IAsyncDisposable
     internal static UInt128 Identity(VortexFile file) =>
         file.StoredIdentity is { } identity ? Uid(identity) : UInt128.Zero;
 
-    /// <summary>A page source for one version, holding the pages its header inlines.</summary>
-    private static CommitPageSource PagesOf(IObjectStore store, ulong version, CommitObject commit)
+    /// <summary>
+    /// A page source for one version, holding what the read that opened it brought back, and reading
+    /// through the pages this handle kept from the versions before.
+    /// </summary>
+    private CommitPageSource PagesOf(ulong version, CommitObject commit)
     {
-        CommitPageSource pages = new CommitPageSource(store) { Reading = version };
+        CommitPageSource pages = new CommitPageSource(_store, _pageCache) { Reading = version };
         pages.Open(version, commit);
         return pages;
     }

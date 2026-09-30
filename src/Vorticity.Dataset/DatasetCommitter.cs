@@ -34,6 +34,9 @@ internal sealed record CommitOptions
     /// <summary>The clock a header's creation time is read from.</summary>
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
+    /// <summary>The pages the writer's handle keeps across versions, which its commits read through; null for none.</summary>
+    public PageCache? PageCache { get; init; }
+
     /// <summary>A rule in its starting state.</summary>
     public IBoundaryRule NewRule() => Rule?.Fresh() ?? new ProllyBoundaryRule(Seed);
 
@@ -89,7 +92,7 @@ internal static class DatasetCommitter
             // attempt moves up to the one it built on.
             (ulong parent, CommitObject? commit) = await LatestAsync(store, known, cancellationToken).ConfigureAwait(false);
             known = parent;
-            CommitPageSource pages = new CommitPageSource(store);
+            CommitPageSource pages = new CommitPageSource(store, options.PageCache);
             DatasetLevels levels = DatasetLevels.Empty;
             CommitHeader template = options.Template ?? new CommitHeader { Version = 1 };
             if (commit is not null)
