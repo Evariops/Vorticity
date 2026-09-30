@@ -29,7 +29,16 @@ internal abstract record DatasetOperation
     /// </remarks>
     public sealed record ReplaceObjects(
         IReadOnlyList<(int Level, ReadOnlyMemory<byte> Key)> Inputs,
-        IReadOnlyList<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Outputs) : DatasetOperation;
+        IReadOnlyList<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Outputs) : DatasetOperation
+    {
+        /// <summary>
+        /// The entries the inputs were read as, in the inputs' order, or null to ask only that each is
+        /// still there. An input whose entry now names other rows -- another file, or rows a
+        /// concurrent delete marked in it -- abandons the whole replacement, since its outputs were
+        /// worked out from rows the input no longer holds.
+        /// </summary>
+        public IReadOnlyList<ObjectEntry>? Expected { get; init; }
+    }
 
     /// <summary>Attaches an index fragment to an object.</summary>
     /// <param name="Key">The object's sort key.</param>

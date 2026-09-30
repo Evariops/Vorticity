@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Columns;
 using Vorticity.Dataset;
 using Vorticity.Tests.Scan;
 using Xunit;
@@ -14,18 +15,25 @@ namespace Vorticity.Tests.Dataset;
 /// handles of which one often acts on the version it last saw: an append from a handle that has not
 /// seen a change lands an object of the earlier schema after it. After every step the rows read as
 /// the current schema, a count under a filter and the key cursor's walk both ways equal a model of
-/// the rows kept in plain C#, which applies each change as its commit lands.
+/// the rows kept in plain C#, which applies each change as its commit lands; and rows by position,
+/// rows in key order both ways, the extremes, a rank and the cursor's rows agree with the scan.
+/// Marked, every delete marks the rows in their objects rather than rewriting them, so that every
+/// read goes around deleted rows.
 /// </summary>
 public sealed class DatasetChangeFuzzTests
 {
     private static readonly string[] Sites = ["Paris", "Lyon", "Nice", "Lille"];
 
     [Theory]
-    [InlineData(7)]
-    [InlineData(19)]
-    [InlineData(31)]
-    [InlineData(43)]
-    public async Task AScheduleOfChangesAnswersAsTheModel(int seed)
+    [InlineData(7, false)]
+    [InlineData(19, false)]
+    [InlineData(31, false)]
+    [InlineData(43, false)]
+    [InlineData(7, true)]
+    [InlineData(19, true)]
+    [InlineData(31, true)]
+    [InlineData(43, true)]
+    public async Task AScheduleOfChangesAnswersAsTheModel(int seed, bool marked)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
@@ -35,6 +43,8 @@ public sealed class DatasetChangeFuzzTests
             Seed = 0xF022_C4A6,
             ClusteringKey = ["Key"],
             Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
+            MarkedObjectBytes = marked ? 0 : long.MaxValue,
+            MarkedShare = 1,
         };
         await using VortexDataset reader = await VortexDataset.CreateAsync(store, MeterV1.Schema, options, ct);
         await using VortexDataset first = await VortexDataset.OpenAsync(store, options, ct);
@@ -49,6 +59,7 @@ public sealed class DatasetChangeFuzzTests
         int deletes = 0;
         int updates = 0;
         int compactions = 0;
+        int markedObjects = 0;
         for (int step = 0; step < 40; step++)
         {
             VortexDataset handle = handles[random.Next(2)];
@@ -137,11 +148,97 @@ public sealed class DatasetChangeFuzzTests
             down.Reverse();
             Assert.Equal(keys, up);
             Assert.Equal(keys, down);
+            await AgreesAsync(reader, cursor, keys, random, ct);
+            markedObjects = Math.Max(markedObjects, await MarkedAsync(reader, ct));
         }
 
         Assert.True((await reader.VerifyAsync(cancellationToken: ct)).Holds);
+        Assert.True(!marked || markedObjects > 0, "a marked schedule must leave rows marked in some object");
         Console.Out.Write(FormattableString.Invariant(
-            $"DATASET CHANGE FUZZ seed {seed}: version {reader.Version}, schema {stage}, {reader.RowCount} rows in {reader.ObjectCount} objects, {deletes} delete(s), {updates} update(s), {compactions} compaction(s).\n"));
+            $"DATASET CHANGE FUZZ seed {seed}{(marked ? ", marked" : "")}: version {reader.Version}, schema {stage}, {reader.RowCount} rows in {reader.ObjectCount} objects, {deletes} delete(s), {updates} update(s), {compactions} compaction(s), at most {markedObjects} object(s) with marks.\n"));
+    }
+
+    /// <summary>
+    /// Reads that answer by position, by key order and by rank agree with the scan: rows by range
+    /// and by index are the scan's rows there, the key-ordered reads both ways give the keys in
+    /// order, the extremes and a rank are the model's, and the cursor's rows hold its keys.
+    /// </summary>
+    private static async Task AgreesAsync(VortexDataset reader, DatasetKeyCursor cursor, List<long> keys, Random random, CancellationToken ct)
+    {
+        List<(long Row, long Key)> scanned = await PositionedKeysAsync(reader.ScanBuilder());
+        Assert.Equal(keys.Count, scanned.Count);
+        for (int i = 0; i < scanned.Count; i++)
+        {
+            Assert.Equal(i, scanned[i].Row);
+        }
+
+        if (scanned.Count == 0)
+        {
+            return;
+        }
+
+        long from = random.Next(scanned.Count);
+        long to = Math.Min(scanned.Count, from + 1 + random.Next(120));
+        List<(long Row, long Key)> ranged = await PositionedKeysAsync(reader.ScanBuilder().Rows(from, to));
+        Assert.Equal(scanned.GetRange((int)from, (int)(to - from)), ranged);
+
+        long[] taken = [.. Enumerable.Range(0, 12).Select(_ => (long)random.Next(scanned.Count)).Distinct().Order()];
+        List<(long Row, long Key)> gathered = await PositionedKeysAsync(reader.ScanBuilder().Take(taken));
+        Assert.Equal(taken.Select(row => scanned[(int)row].Key), gathered.Select(row => row.Key));
+
+        Assert.Equal(keys, (await PositionedKeysAsync(reader.ScanBuilder().InKeyOrder("Key"))).Select(row => row.Key));
+        List<long> descending = [.. (await PositionedKeysAsync(reader.ScanBuilder().InKeyOrder("Key", descending: true))).Select(row => row.Key)];
+        descending.Reverse();
+        Assert.Equal(keys, descending);
+
+        Assert.Equal(keys[0], (await reader.ScanBuilder().MinAsync("Key", ct)).SignedValue);
+        Assert.Equal(keys[^1], (await reader.ScanBuilder().MaxAsync("Key", ct)).SignedValue);
+
+        long pivot = keys[random.Next(keys.Count)];
+        Assert.Equal(keys.Count(key => key < pivot), await cursor.RankAsync(Vorticity.Expressions.FilterLiteral.From(pivot), ct));
+        Assert.True(await cursor.SeekAsync(Vorticity.Expressions.FilterLiteral.From(pivot), SeekOp.AtOrAfter, ct));
+        Assert.Equal(keys.Count(key => key == pivot), await cursor.KeyCountAsync(ct));
+        for (int step = 0; step < 8; step++)
+        {
+            Assert.Equal(scanned[(int)cursor.Row].Key, cursor.Key.SignedValue);
+            if (!await cursor.NextAsync(ct))
+            {
+                break;
+            }
+        }
+
+        long rank = random.Next(keys.Count);
+        Assert.True(await cursor.SeekRankAsync(rank, ct));
+        Assert.Equal(keys[(int)rank], cursor.Key.SignedValue);
+    }
+
+    /// <summary>Every row's key, with the dataset row its batch says it is at.</summary>
+    private static async Task<List<(long Row, long Key)>> PositionedKeysAsync(DatasetScanBuilder scan)
+    {
+        List<(long Row, long Key)> rows = [];
+        await foreach (RecordBatch batch in scan.ExecuteAsync())
+        {
+            int field = batch.DType.IndexOfField("Key");
+            ReadOnlySpan<long> values = batch.Column(field).AsPrimitive<long>().Values;
+            for (int row = 0; row < batch.RowCount; row++)
+            {
+                rows.Add((batch.StartRow + row, values[row]));
+            }
+        }
+
+        return rows;
+    }
+
+    /// <summary>How many objects of the dataset hold marked rows.</summary>
+    private static async Task<int> MarkedAsync(VortexDataset reader, CancellationToken ct)
+    {
+        int marked = 0;
+        await foreach (DataObject held in reader.ObjectsAsync(ct))
+        {
+            marked += held.DeletedRows > 0 ? 1 : 0;
+        }
+
+        return marked;
     }
 
     /// <summary>A row as the model holds it: the widest form of each column, a place of null once the column is dropped.</summary>

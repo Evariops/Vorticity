@@ -196,7 +196,7 @@ internal static class DatasetVacuum
             {
                 foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
                 {
-                    ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
+                    ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value);
                     markedData.Add(entry.Key);
                     foreach (PageReference fragment in entry.Fragments)
                     {

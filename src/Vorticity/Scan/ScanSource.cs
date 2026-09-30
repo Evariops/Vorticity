@@ -42,6 +42,13 @@ internal sealed record ScanSpec
     internal bool SinkDecodes { get; init; }
 
     /// <summary>
+    /// Whether the consumer reads no row's place, as an aggregation folds values without asking
+    /// where they lie, so that a source may leave a row out of a batch by its selection alone rather
+    /// than gather the others: the rows kept are right, their numbering from the batch's start is not.
+    /// </summary>
+    internal bool PositionsUnread { get; init; }
+
+    /// <summary>
     /// Whether <see cref="Live"/> is the filter's mask of live blocks, refined already: the ranges of
     /// one aggregation share one read of the structures instead of each reading them again.
     /// </summary>

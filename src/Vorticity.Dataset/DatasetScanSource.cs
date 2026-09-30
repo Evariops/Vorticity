@@ -95,7 +95,7 @@ internal sealed class DatasetScanSource : ScanSource
         }
 
         ScanOptions options = spec.Options;
-        builder.WithOptions(options, spec.KeepEncodings, spec.SinkDecodes).WithIndexes(options.UseIndexes).WithSummaries(options.Pruning);
+        builder.WithOptions(options, spec.KeepEncodings, spec.SinkDecodes, spec.PositionsUnread).WithIndexes(options.UseIndexes).WithSummaries(options.Pruning);
         return counters is null ? builder : builder.WithCounters(counters);
     }
 }

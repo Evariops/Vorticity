@@ -415,15 +415,17 @@ public sealed class VortexDataset : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(removed);
         ArgumentNullException.ThrowIfNull(added);
         List<(int Level, ReadOnlyMemory<byte> Key)> inputs = new List<(int, ReadOnlyMemory<byte>)>(removed.Count);
+        List<ObjectEntry> expected = new List<ObjectEntry>(removed.Count);
         foreach (DataObject gone in removed)
         {
             ArgumentNullException.ThrowIfNull(gone, nameof(removed));
-            if (gone.TreeKey.Length == 0)
+            if (gone.TreeKey.Length == 0 || gone.Entry is not { } entry)
             {
                 throw new ArgumentException("An object to remove comes from ObjectsAsync, which knows where its entry is.", nameof(removed));
             }
 
             inputs.Add((gone.Level, Convert.FromHexString(gone.TreeKey)));
+            expected.Add(entry);
         }
 
         List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> outputs = new List<(int, ReadOnlyMemory<byte>, ObjectEntry)>(added.Count);
@@ -458,7 +460,7 @@ public sealed class VortexDataset : IAsyncDisposable
             return new ReplaceResult { Version = Version, Outcome = OperationOutcome.AlreadyThere };
         }
 
-        CommitResult commit = await CommitAsync([new DatasetOperation.ReplaceObjects(inputs, outputs)], cancellationToken)
+        CommitResult commit = await CommitAsync([new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }], cancellationToken)
             .ConfigureAwait(false);
         return new ReplaceResult { Version = commit.Version, Outcome = commit.Outcomes[0] };
     }

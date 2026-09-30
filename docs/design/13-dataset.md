@@ -29,6 +29,7 @@ library's**: another library implements the store seam (§11), and this one neve
 | entries of a run | two fence pages to 10¹² entries | fence pages ([10-indexes.md](10-indexes.md) §3) |
 | fragments | one ranged read each, inside the commit object that wrote it | §6.4 |
 | distinct keys, on a Bloom filter | the structure is chosen by cardinality | §6.5 |
+| rows deleted since compaction | a binary search over at most 1 KiB of runs per batch or step, and at most an eighth of an object's rows stepped over | a deletion vector per leaf entry, folded by compaction (§12) |
 
 ## 2. Principles
 
@@ -123,7 +124,12 @@ A **leaf entry** describes one data object:
   own file statistics before its put, so they cost the append no request. The first 32 top-level
   columns are summarized by default (`DatasetOptions.SummaryColumns`), and the clustering key's
   always;
-- its index descriptor: embedded in the object, or per entry the fragments that cover it (§6.4).
+- its index descriptor: embedded in the object, or per entry the fragments that cover it (§6.4);
+- **its deletion vector**, when a delete marked rows in it: their positions as sorted runs, after
+  everything else the entry holds, so that an entry without one is the bytes it always was. Its row
+  count is then the live rows, and its summaries bounds only (§12). A vector takes at most 1 KiB,
+  which the fan-out of the page holding it pays until the object is next rewritten: a page of
+  entries all at the cap holds about a hundred.
 
 An **internal entry** holds a page reference to a child, the sum of its rows, and the **union** of its
 children's summaries. The union is intersection-shaped, which is the one thing about it a reader must
@@ -363,7 +369,8 @@ merges two trees. Each operation carries its own answer to a moved ground:
 | compaction, compaction on overlapping inputs | the second finds an input missing and abandons; its outputs are garbage |
 | vacuum, anything | vacuum deletes only what no retained version references and what is older than the window (§10) |
 | delete or update, append | the appended object is not among those the change read: it stays, and its rows are not touched |
-| delete or update, anything that rewrites an object it read | an input is gone: the replacement is abandoned, and the change is worked out again on the version that won (§12) |
+| delete or update, anything that rewrites or marks an object it read | an input is gone or its entry changed: the replacement is abandoned, and the change is worked out again on the version that won (§12) |
+| compaction, delete or update that marks one of its inputs | the entry the compaction read changed: it abandons, since its outputs would bring the marked rows back, and they are garbage |
 | schema change, schema change | the second finds another schema than the one it was checked against, and is dropped (§13) |
 | append, schema change | the object lands as it was written, and reads as the new schema like any earlier one (§13) |
 | reader, anything | the reader holds a version; everything it references is immutable |
@@ -463,34 +470,62 @@ bytes and the **dependent steps** of the critical path. The contract is a test s
 
 ## 12. Deleting and updating rows
 
-**Copy on write.** A delete takes the rows its filter is true for — a row it is false or unknown for
-stays, as a scan would not return it — by rewriting every object that holds one: the rows left go into
-an object that takes the old one's place in its level, and an object left with none is removed from
-the tree without being read. An update is a delete and an insert applied together: the rows it takes
-are read as records, passed through the caller's function and written into new objects of level 0,
-where appended rows go, because a changed row may carry another key. One `ReplaceObjects` commits the
-whole change, so a reader sees all of it or none.
+**A delete marks rows, and rewrites no object it can mark.** A delete takes the rows its filter is
+true for — a row it is false or unknown for stays, as a scan would not return it — and records them in
+the leaf entry of each object that holds one: a **deletion vector**, the sorted runs of the object's
+own row positions it takes, two varints a run, after everything else the entry holds (§4.2). The
+object's bytes do not change, so the commit writes the pages on the path to the entries it changed and
+no data object. An object every row of which goes is removed from the tree without being read, and one
+whose summaries refute the filter is not opened. An update is a delete and an insert applied together:
+the rows it takes are marked where they were, read as records, passed through the caller's function
+and written into new objects of level 0, where appended rows go, because a changed row may carry
+another key. One `ReplaceObjects` commits the whole change, so a reader sees all of it or none.
 
-**Why not a mask of deleted rows.** A deletion vector per object would make a delete cost a few bytes
-rather than an object, and every read pay for it: each scan would apply the masks; the statistics and
-summaries would stop being exact, so a count, a minimum or a mean answered from them would count the
-deleted rows; and the zone maps and indexes would answer for rows that are gone. The read path is the
-one this design bounds (§1) and the write path the one it makes pay (§2), so a delete rewrites. What it
-costs is an object per object touched, whatever the number of rows; a filter on the clustering key
-touches at most the 8 + L objects a lookup does, and an object is at most `MaxObjectBytes`, 4 MiB by
-default (§5.2), so a delete of one row rewrites at most that much per level whatever the size of the
-dataset.
+**When a delete rewrites instead.** An object is rewritten without the rows, rather than marked, when
+the marks would cost its reads more than they save the write: under `MarkedObjectBytes`, a mebibyte,
+where a rewrite is a few requests and leaves the object exact; when the rows marked in it would pass an
+eighth of its rows (`MarkedShare`), since every read of it steps over them; and when its vector would
+pass 1 KiB (`MarkedVectorBytes`), a few hundred runs. The vector lives in a leaf page: a commit that
+marks a row in any object of a page writes the page again, and while a level's pages fit the header's
+inline room (§3) every commit carries them, so the bound weighs the rewrites the marks save against
+the bytes they add to each commit. The rows a rewritten object keeps are a subset of
+its rows, so its keys lie inside its old range: a level above 0 stays key-disjoint and the tree's order
+holds; without a clustering key the rewritten object keeps the old one's position. Either way the rows
+are judged by the scan's own evaluator, so a delete and a scan with the same filter agree on every row,
+nulls included, and a rewrite checks that it kept exactly the rows the count left.
 
-**What keeps the invariants.** The rows an object keeps are a subset of its rows, so its keys lie inside
-its old range: a level above 0 stays key-disjoint and the tree's order holds; without a clustering key
-the rewritten object keeps the old one's position. An object the summaries refute is not opened, one
-whose own count finds no row is not rewritten, and one every row of which goes is removed unread. The
-rows are judged by the scan's own evaluator, so a delete and a scan with the same filter agree on
-every row, nulls included, and the rewrite checks that it kept exactly the rows the count left.
+**What a read does with a vector.** An entry's row count is its live rows, so a count without a filter
+and every position stay arithmetic: a position maps to the object's own through the runs before it.
+The rest is the object's own read with its marked rows left out, for a binary search over the runs per
+batch or per step:
+
+| read | with marked rows |
+|---|---|
+| a filtered count, an any | the object's count with the rows left out, tier by tier, in one pass: on a sorted column's slices, arithmetic; on an index's rows, a test of each; on a zone the maps decide whole, its rows less the marked ones; on a decode, the marked rows cleared before the count |
+| rows in file order | a batch without a marked row as it came, renumbered; one with some, gathered without them; an aggregation's batches whole, the marked rows deselected, their columns still encoded |
+| rows in key order, a key cursor | the key source steps over the marked rows' entries as it walks, and a rank takes away the entries marked below it: arithmetic when the ranks are rows, a sorted column's or the clustering run of a level above 0, and otherwise against the marked rows' keys, read by one take when the cursor opens |
+| a minimum, a maximum | on a column the object's statistics say is sorted and holds no null, its first or last live row: the statistic while that row is the column's end, one row read once a delete took it; otherwise the object's extreme when a count finds a live row holding it, and its live rows read when none does |
+| the summaries | an entry with marks keeps its bounds, which its live rows still lie inside, and drops what they no longer prove: exactness, a null count other than zero, a column left with no bound. They prune; they no longer answer |
+
+**Compaction folds the marks.** It reads each input's live rows and writes objects without marks, so
+a vector lasts until its object is next compacted, and an object whose marks would pass their share is
+rewritten by the delete that would pass it. A compaction that read an object before a delete marked
+rows in it would bring those rows back: its `ReplaceObjects` names the entries it read — uid, key and
+vector — and is abandoned when one of them changed (§8.2).
+
+**What it costs.** Measured by the churn (§15) on ten million rows and thirty thousand commits of ten
+rows at random keys: an update takes 1.8 to 3.1 ms and a delete 1.0 to 1.8 ms, where rewriting the
+4 MiB objects that hold the rows takes 19 and 14 ms. A commit writes 23 KiB at first and 63 to 101 KiB
+once the vectors have filled, most of it the leaf page the header carries, where a rewrite writes
+3.3 MiB. After a thousand commits the store holds 137 MiB rather than 449 MiB, since the retention
+window keeps every object a rewrite replaced (§10). The reads cost what they cost on the rewritten
+dataset: a filter over every object makes the same 220 requests, and a point lookup, a seek, a count
+under a key range and the largest key stay where they were. What the marks keep is space: up to an
+eighth of an object's rows, until its compaction.
 
 **Concurrent writers.** The change is worked out on the version the handle holds. An append that lands
-first adds objects the change never read, whose rows it does not touch; a commit that removes or
-rewrites an object the change read — a compaction, another delete — abandons the replacement (§8.2),
+first adds objects the change never read, whose rows it does not touch; a commit that removes, rewrites
+or marks an object the change read — a compaction, another delete — abandons the replacement (§8.2),
 and the change is worked out again on the version that won, up to `MaxAttempts` times. What a lost
 attempt wrote is left for vacuum.
 
@@ -542,14 +577,14 @@ schema lands after the change, its object read as the new schema like any other.
 | concurrency | put-if-absent, rebase by operations | leases and lock files; three-way merges of trees |
 | data across objects | leveled on a clustering key, tiered without | no compaction (O(appends)); a global secondary index (rewritten at every compaction) |
 | index placement | in the file, external fragments transient | in-file only (adding an index rewrites data); external only (the index no longer travels with the file) |
+| deleting rows | a deletion vector in the leaf entry, bounded, folded by compaction | copy on write of every object a row is taken from (an object per delete, 3 MiB a commit of ten rows, each kept through the retention window); positional delete files, as Iceberg (a read joins them, and they pile up until a rewrite); equality deletes (a read evaluates each of them against every row) |
 | binding | uid and store token; the writer's content hash for verify | a content hash on the read path (reads the data) |
 | metadata objects | one commit object per version | an object per page or per pack (sequential reads, orphans after a crash, two creations per commit) |
 | Iceberg or Delta as the table layer | — | their data formats are Parquet, ORC and Avro; a Vortex data file would make the table unreadable to every engine that reads them, which is the only reason to adopt them |
 
 **Not in this design:** a clustering key picked automatically, since it decides the write amplification
-and is the user's to state; deleting rows by a mask of positions, which moves the cost of a delete onto
-every read (§12); evolving the fields of a nested struct, or a column's type otherwise than by widening
-a number or making it nullable (§13).
+and is the user's to state; evolving the fields of a nested struct, or a column's type otherwise than
+by widening a number or making it nullable (§13).
 
 ## 15. How it is tested
 
@@ -569,17 +604,24 @@ a number or making it nullable (§13).
 - **Deletes and updates**: the rows left equal the rows written filtered in C# under three-valued
   logic, across levels and without a clustering key, and a delete that loses its objects to a
   compaction is worked out again.
+- **Marks**: a dataset that marks reads as a second one taking the same changes by rewrites, through
+  every read — rows by position, rows in key order both ways with null keys around the marks, key
+  cursors, their ranks and seeks, counts, extremes, aggregates — under a seeded fuzzer of deletes and
+  updates; a compaction that read an object before rows were marked in it is abandoned; a count told
+  to leave rows out counts none of them on any tier, each switched off in turn.
 - **Schema evolution**: objects of each earlier schema read as the current one through scans, counts,
   extremes, key order, key cursors, deletes, updates and compaction, filters over added columns
   included; every change that would lose a value is refused.
 - **Tampering**: an object replaced at equal size, a page, a root and a fragment torn at every byte, a
   fragment of another object: readers answer exactly, and verify names each.
 - **Rust**: compaction outputs are among the files the cross-check hands to Rust 0.86.1.
-- **The churn** (`bench/Vorticity.Benchmarks.Churn`): ten million rows, then ten thousand commits of
+- **The churn** (`bench/Vorticity.Benchmarks.Churn`): ten million rows, then thirty thousand commits of
   ten rows — appends, updates and deletes at random keys — with compaction drained and vacuum run
-  between them. Every cost stays flat from the first commit to the last: an append 1.2 ms, an update
-  19 ms, a delete 14 ms, compaction under a millisecond a commit; a point lookup 0.9 ms in four
-  requests, a seek and ten steps either way 0.5 ms, a hundred rows by position 0.3 ms, a scan of
-  every row 20 ms; the heap between 60 and 80 MiB. Before the level-0 destination, the cap on an
-  object and the chunked buffer, an update cost 820 ms, compaction 100 ms a commit and the heap grew
-  to 2.2 GiB over the first 150 commits.
+  between them. Every cost stays flat, or levels off once the marks have filled: an append 0.8 ms, an
+  update 1.8 to 3.1 ms, a delete 1.0 to 1.8 ms, compaction under a millisecond a commit, a commit's
+  bytes 23 KiB and then 63 to 101 KiB; a point lookup 0.6 to 0.8 ms in two to three requests, a
+  seek and ten steps either way 0.2 to 0.6 ms, a hundred rows by position 0.2 ms, a scan of every
+  row 27 ms; the heap between 60 and 80 MiB. Rewriting instead of marking, an update takes 19 ms and
+  a commit writes 3.3 MiB. Before the level-0 destination, the cap on an object and the chunked buffer,
+  an update cost 820 ms, compaction 100 ms a commit and the heap grew to 2.2 GiB over the first 150
+  commits.

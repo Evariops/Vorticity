@@ -467,9 +467,12 @@ internal static class DatasetCommitter
                 case DatasetOperation.ReplaceObjects replace:
                 {
                     bool complete = true;
-                    foreach ((int level, ReadOnlyMemory<byte> input) in replace.Inputs)
+                    for (int i = 0; i < replace.Inputs.Count; i++)
                     {
-                        complete &= await CurrentAsync(level, input).ConfigureAwait(false) is not null;
+                        (int level, ReadOnlyMemory<byte> input) = replace.Inputs[i];
+                        ObjectEntry? current = await CurrentAsync(level, input).ConfigureAwait(false);
+                        complete &= current is not null
+                            && (replace.Expected is not { } expected || SameRows(current, expected[i]));
                     }
 
                     if (!complete)
@@ -515,7 +518,7 @@ internal static class DatasetCommitter
                                 continue;
                             }
 
-                            ObjectEntry entry = held ?? ObjectEntry.FromBytes(leaf.Value.Span);
+                            ObjectEntry entry = held ?? ObjectEntry.FromBytes(leaf.Value);
                             PageReference[] fragments = [.. entry.Fragments];
                             for (int i = 0; i < fragments.Length; i++)
                             {
@@ -580,7 +583,7 @@ internal static class DatasetCommitter
             }
 
             TreeEntry? entry = await levels[level].FindAsync(key, pages, cancellationToken).ConfigureAwait(false);
-            return entry is { } found ? ObjectEntry.FromBytes(found.Value.Span) : null;
+            return entry is { } found ? ObjectEntry.FromBytes(found.Value) : null;
         }
 
         void Put(int level, ReadOnlyMemory<byte> key, ObjectEntry entry)
@@ -611,6 +614,15 @@ internal static class DatasetCommitter
         static string Named(int level, ReadOnlyMemory<byte> key) =>
             level.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + Convert.ToHexString(key.Span);
     }
+
+    /// <summary>
+    /// Whether an entry still names the rows another did: the same file and the same deleted rows.
+    /// A fragment attached meanwhile changes no row.
+    /// </summary>
+    private static bool SameRows(ObjectEntry current, ObjectEntry read) =>
+        current.Uid == read.Uid
+        && string.Equals(current.Key, read.Key, StringComparison.Ordinal)
+        && current.SameDeletions(read);
 
     /// <summary>Whether two schemas and their retired names are the same.</summary>
     private static bool Same(ReadOnlyMemory<byte> schema, IReadOnlyList<RetiredColumn> retired, ReadOnlyMemory<byte> other, IReadOnlyList<RetiredColumn> otherRetired)

@@ -152,12 +152,28 @@ internal sealed class ClusteringKey
     /// object names them: an object written under an earlier schema may hold a column under the name
     /// it had then.
     /// </summary>
-    public async ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, IReadOnlyList<string> paths, bool indexes, CancellationToken cancellationToken)
+    public ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, IReadOnlyList<string> paths, bool indexes, CancellationToken cancellationToken) =>
+        TryOpenAsync(file, paths, indexes, DeletionVector.Empty, ranksAreRows: false, cancellationToken);
+
+    /// <summary>
+    /// <see cref="TryOpenAsync(VortexFile, IReadOnlyList{string}, bool, CancellationToken)"/> without
+    /// the entries of the rows <paramref name="deletions"/> names: no step lands on one and no rank
+    /// counts one. With <paramref name="ranksAreRows"/> the file's rows are in this key's order, null
+    /// keys last, and the ranks follow from the rows alone; otherwise the deleted rows' keys are read
+    /// when the source needs them.
+    /// </summary>
+    public async ValueTask<KeyCursor?> TryOpenAsync(
+        VortexFile file, IReadOnlyList<string> paths, bool indexes, DeletionVector deletions, bool ranksAreRows, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(file);
         try
         {
             KeyCursorBuilder keys = file.Keys(paths as string[] ?? [.. paths]);
+            if (!deletions.IsEmpty)
+            {
+                keys.Excluding(deletions, ranksAreRows, token => LiveRows.ExcludedKeysAsync(file, deletions, paths, this, token));
+            }
+
             return await (indexes ? keys : keys.WithSource(KeySourceKind.SortedColumn))
                 .OpenAsync(cancellationToken).ConfigureAwait(false);
         }

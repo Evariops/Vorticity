@@ -68,7 +68,12 @@ Level 0 goes to the first level that holds it: the ten appends here, 126 KiB, fi
 holds ten objects of 128 KiB; a load of gigabytes goes past the levels it would only overflow and
 is written once. A dataset that takes many small commits then pays for each a merge into a level a
 few times its size, never one into the levels that hold the bulk of its rows. An output object is
-at most `MaxObjectBytes`, 4 MiB by default, which is also what a delete of one row rewrites.
+at most `MaxObjectBytes`, 4 MiB by default.
+
+Compaction writes the live rows only: the rows a delete marked in an input object end with it, and
+its outputs carry no marks. A compaction that read an object before a delete marked rows in it
+finds the object's entry changed at its commit, and is `Abandoned` rather than bringing those rows
+back.
 
 ## Verify
 

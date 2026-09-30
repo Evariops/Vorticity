@@ -1883,6 +1883,7 @@ Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property int Level { get; init; }
 Vorticity.Dataset:     property long Bytes { get; init; }
+Vorticity.Dataset:     property long DeletedRows { get; init; }
 Vorticity.Dataset:     property long FirstRow { get; init; }
 Vorticity.Dataset:     property long Rows { get; init; }
 Vorticity.Dataset:     property string Key { get; init; }
@@ -2031,6 +2032,7 @@ Vorticity.Dataset:     property int Attempts { get; init; }
 Vorticity.Dataset:     property long BytesIn { get; init; }
 Vorticity.Dataset:     property long BytesOut { get; init; }
 Vorticity.Dataset:     property long ObjectsIn { get; init; }
+Vorticity.Dataset:     property long ObjectsMarked { get; init; }
 Vorticity.Dataset:     property long ObjectsOut { get; init; }
 Vorticity.Dataset:     property long Rows { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }

@@ -249,7 +249,7 @@ internal static class DatasetVerifier
                 }
                 else
                 {
-                    entries!.Add(ObjectEntry.FromBytes(leaf.Value.Span));
+                    entries!.Add(ObjectEntry.FromBytes(leaf.Value));
                 }
             }
         }
@@ -350,9 +350,25 @@ internal static class DatasetVerifier
 
                 await using (file.ConfigureAwait(false))
                 {
-                    if (file.RowCount != entry.Rows)
+                    // The file holds its deleted rows too, which the entry counts apart.
+                    if (file.RowCount != entry.PhysicalRows)
                     {
-                        Problems.Add(Invariant($"'{entry.Key}' holds {file.RowCount} rows and its entry says {entry.Rows}"));
+                        Problems.Add(entry.HasDeletions
+                            ? Invariant($"'{entry.Key}' holds {file.RowCount} rows and its entry says {entry.Rows} and {entry.DeletedRows} deleted")
+                            : Invariant($"'{entry.Key}' holds {file.RowCount} rows and its entry says {entry.Rows}"));
+                    }
+
+                    // A read decodes the vector when it opens the object; verify decodes every one.
+                    if (entry.HasDeletions)
+                    {
+                        try
+                        {
+                            _ = entry.Deletions;
+                        }
+                        catch (CommitFormatException malformed)
+                        {
+                            Problems.Add($"'{entry.Key}': its deleted rows are not a vector of its own rows: {malformed.Message}");
+                        }
                     }
 
                     if (entry.Uid != UInt128.Zero && VortexDataset.Identity(file) != entry.Uid)
