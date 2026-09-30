@@ -575,3 +575,11 @@ a number or making it nullable (§13).
 - **Tampering**: an object replaced at equal size, a page, a root and a fragment torn at every byte, a
   fragment of another object: readers answer exactly, and verify names each.
 - **Rust**: compaction outputs are among the files the cross-check hands to Rust 0.86.1.
+- **The churn** (`bench/Vorticity.Benchmarks.Churn`): ten million rows, then ten thousand commits of
+  ten rows — appends, updates and deletes at random keys — with compaction drained and vacuum run
+  between them. Every cost stays flat from the first commit to the last: an append 1.2 ms, an update
+  19 ms, a delete 14 ms, compaction under a millisecond a commit; a point lookup 0.9 ms in four
+  requests, a seek and ten steps either way 0.5 ms, a hundred rows by position 0.3 ms, a scan of
+  every row 20 ms; the heap between 60 and 80 MiB. Before the level-0 destination, the cap on an
+  object and the chunked buffer, an update cost 820 ms, compaction 100 ms a commit and the heap grew
+  to 2.2 GiB over the first 150 commits.
