@@ -30,10 +30,12 @@ public enum CompressionProfile : byte
 
     /// <summary>
     /// Size over decode speed: every column chunk is priced by its bytes alone, run-end among the
-    /// other candidates, and zstd, FSST, ALP and ALP-RD are all tried under the best exact plan's
-    /// bytes, with no margin kept for a faster decode, the smallest taken. A trial that beats an
-    /// exact plan is held to what that plan writes, not to its price. The write costs more, and a
-    /// read may decode slower.
+    /// other candidates, and zstd, pco, FSST, ALP and ALP-RD are all tried under the bytes of the
+    /// best exact plan, with no margin kept for a faster decode, the smallest taken -- on the
+    /// column and on every array an encoding makes of it, an ALP's integers, a dictionary's codes
+    /// or a run's values, as the reference's compact compressor does. A trial that beats an exact
+    /// plan is held to what that plan writes, children included, not to its price. The write costs
+    /// more, and a read may decode slower.
     /// </summary>
     Smallest,
 

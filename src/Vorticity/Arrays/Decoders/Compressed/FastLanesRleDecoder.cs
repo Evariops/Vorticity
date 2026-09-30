@@ -1,4 +1,5 @@
 using System;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Types;
@@ -101,6 +102,7 @@ internal sealed class FastLanesRleDecoder : ArrayDecoder
             context, offsetsIndex, metadata.ValuesIdxOffsetsPType, offsetsLength, Id,
             "values_idx_offsets");
 
+        indicesIndex = CanonicalSupport.ExpandIfConstant(context, indicesIndex);
         CanonicalNode indicesNode = context.Canonical.GetNode(indicesIndex);
         if (indicesNode.Kind != CanonicalKind.Primitive)
         {

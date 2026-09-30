@@ -398,6 +398,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 EncodingHint.Sequence => ColumnScheme.Sequence,
                 EncodingHint.Zstd => ColumnScheme.Zstd,
                 EncodingHint.AlpRd => ColumnScheme.AlpRd,
+                EncodingHint.DecimalByteParts => ColumnScheme.DecimalByteParts,
+                EncodingHint.Constant => ColumnScheme.Constant,
+                EncodingHint.DateTimeParts => ColumnScheme.DateTimeParts,
+                EncodingHint.Sparse => ColumnScheme.Sparse,
+                EncodingHint.OnPair => ColumnScheme.OnPair,
+                EncodingHint.Pco => ColumnScheme.Pco,
                 _ => throw new ArgumentOutOfRangeException(
                     nameof(hints), hint, "not a defined encoding hint"),
             });
@@ -427,7 +433,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int top = _schema.IndexOfField(path);
         if (top >= 0)
         {
-            column = _columns[top];
+            column = ToValues(_columns[top], _schema.GetField(top));
             return true;
         }
 
@@ -464,8 +470,33 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             dtype = dtype.GetField(field);
         }
 
-        column = writer;
+        column = ToValues(writer, dtype);
         return true;
+    }
+
+    /// <summary>
+    /// The node that holds a column's values, which is the one a scheme is chosen for: an
+    /// extension's storage and a list's elements, each its node's only child. A pin left on the
+    /// extension or the list itself would never be read, since no chooser runs there.
+    /// </summary>
+    private static ColumnWriter ToValues(ColumnWriter writer, DType dtype)
+    {
+        while (true)
+        {
+            switch (dtype.Kind)
+            {
+                case DTypeKind.Extension:
+                    writer = writer.Descend(0, 1);
+                    dtype = dtype.StorageType;
+                    continue;
+                case DTypeKind.List or DTypeKind.FixedSizeList:
+                    writer = writer.Descend(0, 1);
+                    dtype = dtype.ElementType;
+                    continue;
+                default:
+                    return writer;
+            }
+        }
     }
 
     /// <summary>The schema every batch must match.</summary>
@@ -1249,7 +1280,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// The workspace every blob is assembled in, one after the other: a column's chunk, a zone map,
     /// an index payload.
     /// </summary>
-    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace { FrameRows = _rowBlock, Fan = Fan };
+    private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace { FrameRows = _rowBlock, Fan = Fan, SizeFirst = _sizeFirst };
 
     /// <summary>The writer's threads, or null when it has one.</summary>
     private WorkFan? Fan => _lanes > 1 ? _fan ??= WorkFan.Rent(_lanes) : null;

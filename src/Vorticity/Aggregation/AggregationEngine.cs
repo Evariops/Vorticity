@@ -80,6 +80,7 @@ internal sealed class AggregationPlan
                 _ => new FixedKeys<double>(key, sorted),
             },
             StorageKind.Decimal => new FixedKeys<Int128>(key, sorted),
+            StorageKind.Decimal256 => new FixedKeys<Vorticity.Types.Numerics.Int256>(key, sorted),
             StorageKind.Uuid => new FixedKeys<UInt128>(key, sorted),
             StorageKind.Bool => new BoolKeys(key),
             StorageKind.Bytes => new BytesKeys(key, sorted),

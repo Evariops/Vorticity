@@ -47,16 +47,16 @@ public sealed class ZstdExpandTests
                     switch (width)
                     {
                         case 1:
-                            ZstdDecoder.Expand<byte>(values, destination, in mask, rows);
+                            ValidRows.Expand<byte>(values, destination, in mask, rows, ZstdDecoder.Id);
                             break;
                         case 2:
-                            ZstdDecoder.Expand<ushort>(values, destination, in mask, rows);
+                            ValidRows.Expand<ushort>(values, destination, in mask, rows, ZstdDecoder.Id);
                             break;
                         case 4:
-                            ZstdDecoder.Expand<uint>(values, destination, in mask, rows);
+                            ValidRows.Expand<uint>(values, destination, in mask, rows, ZstdDecoder.Id);
                             break;
                         default:
-                            ZstdDecoder.Expand<ulong>(values, destination, in mask, rows);
+                            ValidRows.Expand<ulong>(values, destination, in mask, rows, ZstdDecoder.Id);
                             break;
                     }
 

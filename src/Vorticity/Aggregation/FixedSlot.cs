@@ -501,6 +501,14 @@ internal readonly record struct DistinctEntry<TValue>(int Group, TValue Value)
             return (Half.IsNaN(h) ? (ushort)0x7E00 : h == Half.Zero ? (ushort)0 : BitConverter.HalfToUInt16Bits(h), 0);
         }
 
+        if (Unsafe.SizeOf<TValue>() == 32)
+        {
+            // A decimal of 256 bits: the high words folded into the low ones through a multiply,
+            // so that values differing only above bit 127 do not share a chain.
+            ref ulong words = ref Unsafe.As<TValue, ulong>(ref value);
+            return (words ^ (Unsafe.Add(ref words, 2) * 0x9E3779B97F4A7C15UL), Unsafe.Add(ref words, 1) ^ (Unsafe.Add(ref words, 3) * 0xC2B2AE3D27D4EB4FUL));
+        }
+
         return Unsafe.SizeOf<TValue>() switch
         {
             1 => (Unsafe.BitCast<TValue, byte>(value), 0),

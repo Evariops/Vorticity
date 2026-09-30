@@ -1,4 +1,5 @@
 using System;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
@@ -130,7 +131,7 @@ internal sealed class DictDecoder : ArrayDecoder
             }
 
             DType codesType = context.Types.Primitive(metadata.CodesPType, codesNullability);
-            int codesIndex = context.DecodeChild(in node, 0, codesType, length);
+            int codesIndex = CanonicalSupport.ExpandIfConstant(context, context.DecodeChild(in node, 0, codesType, length));
             CanonicalNode codesNode = context.Canonical.GetNode(codesIndex);
             if (codesNode.Kind != CanonicalKind.Primitive)
             {
@@ -249,6 +250,7 @@ internal sealed class DictDecoder : ArrayDecoder
                 : context.DecodeChildRange(in node, 0, codesType, length, start, count);
         int produced = count;
 
+        codesIndex = CanonicalSupport.ExpandIfConstant(context, codesIndex);
         CanonicalNode codesNode = context.Canonical.GetNode(codesIndex);
         if (codesNode.Kind != CanonicalKind.Primitive)
         {

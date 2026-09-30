@@ -139,10 +139,11 @@ internal static class EncodingAdvisor
             }
 
             string name = root.GetFieldName(field);
+            EncodingHint[] hints = HintsFor(kind, root.GetField(field));
             AlignedBytes plain = await source.ColumnAsync(field, windows, session, cancellationToken).ConfigureAwait(false);
-            await SettleAsync(plain, name, kind, goal, session, cancellationToken).ConfigureAwait(false);
+            await SettleAsync(plain, name, hints, goal, session, cancellationToken).ConfigureAwait(false);
             (List<MeasuredCandidate> measured, int chunkRows) = await CandidatesAsync(
-                plain, sampled, name, kind, goal, session, cancellationToken).ConfigureAwait(false);
+                plain, sampled, name, hints, goal, session, cancellationToken).ConfigureAwait(false);
             ColumnProfile profile = await ProfileAsync(plain, kind, chunkRows, cancellationToken).ConfigureAwait(false);
 
             // A column whose values repeat across the data more than inside a chunk is tried at
@@ -156,7 +157,7 @@ internal static class EncodingAdvisor
                 if (wideRows > sampled)
                 {
                     plain = await source.ColumnAsync(field, wide, session, cancellationToken).ConfigureAwait(false);
-                    (measured, _) = await CandidatesAsync(plain, wideRows, name, kind, goal, session, cancellationToken).ConfigureAwait(false);
+                    (measured, _) = await CandidatesAsync(plain, wideRows, name, hints, goal, session, cancellationToken).ConfigureAwait(false);
                 }
 
                 long measuredRows = Math.Max(wideRows, sampled);
@@ -277,10 +278,19 @@ internal static class EncodingAdvisor
         _ => "text",
     };
 
-    private static EncodingHint[] HintsFor(ColumnKind kind) => kind switch
+    /// <summary>
+    /// The hints a column of <paramref name="type"/> is measured under besides the writer's own
+    /// choice: pco for numbers of sixteen bits and more, which it stores, and OnPair for UTF-8 text,
+    /// which is what its dictionary spells.
+    /// </summary>
+    private static EncodingHint[] HintsFor(ColumnKind kind, DType type) => kind switch
     {
+        ColumnKind.Integer when type.PType.ByteWidth() >= 2 =>
+            [EncodingHint.Canonical, EncodingHint.Dictionary, EncodingHint.BitPacked, EncodingHint.Zstd, EncodingHint.Pco],
         ColumnKind.Integer => [EncodingHint.Canonical, EncodingHint.Dictionary, EncodingHint.BitPacked, EncodingHint.Zstd],
-        ColumnKind.Float => [EncodingHint.Canonical, EncodingHint.Dictionary, EncodingHint.Alp, EncodingHint.AlpRd, EncodingHint.Zstd],
+        ColumnKind.Float => [EncodingHint.Canonical, EncodingHint.Dictionary, EncodingHint.Alp, EncodingHint.AlpRd, EncodingHint.Zstd, EncodingHint.Pco],
+        ColumnKind.Text when type.Kind == DTypeKind.Utf8 =>
+            [EncodingHint.Canonical, EncodingHint.Dictionary, EncodingHint.Fsst, EncodingHint.Zstd, EncodingHint.OnPair],
         ColumnKind.Text => [EncodingHint.Canonical, EncodingHint.Dictionary, EncodingHint.Fsst, EncodingHint.Zstd],
         _ => [EncodingHint.Canonical, EncodingHint.RunEnd],
     };
@@ -290,12 +300,12 @@ internal static class EncodingAdvisor
     /// writer's own chunk size; and the rows of the first chunk the writer's own choice made.
     /// </summary>
     private static async ValueTask<(List<MeasuredCandidate> Measured, int ChunkRows)> CandidatesAsync(
-        AlignedBytes plain, long rows, string name, ColumnKind kind, EncodingGoal goal, VortexSession session, CancellationToken cancellationToken)
+        AlignedBytes plain, long rows, string name, EncodingHint[] hints, EncodingGoal goal, VortexSession session, CancellationToken cancellationToken)
     {
         (MeasuredCandidate auto, int chunkRows) = await TrialAsync(
             plain, name, EncodingHint.Auto, 0, rows, goal, session, cancellationToken).ConfigureAwait(false);
         List<MeasuredCandidate> measured = [auto];
-        foreach (EncodingHint hint in HintsFor(kind))
+        foreach (EncodingHint hint in hints)
         {
             (MeasuredCandidate candidate, _) = await TrialAsync(plain, name, hint, 0, rows, goal, session, cancellationToken).ConfigureAwait(false);
             AddDistinct(measured, candidate);
@@ -477,7 +487,7 @@ internal static class EncodingAdvisor
     /// one, which is enough to swap two candidates.
     /// </summary>
     private static async ValueTask SettleAsync(
-        AlignedBytes plain, string name, ColumnKind kind, EncodingGoal goal, VortexSession session, CancellationToken cancellationToken)
+        AlignedBytes plain, string name, EncodingHint[] hints, EncodingGoal goal, VortexSession session, CancellationToken cancellationToken)
     {
         // Ahead of time, nothing is ever compiled; the feature switches cannot say so, since a
         // project that publishes ahead of time turns them off for its runs under the JIT too.
@@ -486,7 +496,6 @@ internal static class EncodingAdvisor
             return;
         }
 
-        EncodingHint[] hints = HintsFor(kind);
         List<(VortexFile File, long[] Lookups)> slices = new List<(VortexFile File, long[] Lookups)>(hints.Length + 1);
         try
         {

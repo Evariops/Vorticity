@@ -54,7 +54,7 @@ internal sealed class DecimalBytePartsDecoder : ArrayDecoder
         // The child is typed with the array's own nullability, and its validity becomes the whole
         // array's.
         DType childType = context.Types.Primitive(msp, dtype.Nullability);
-        int childIndex = context.DecodeChild(in node, 0, childType, length);
+        int childIndex = CanonicalSupport.ExpandIfConstant(context, context.DecodeChild(in node, 0, childType, length));
         CanonicalNode child = context.Canonical.GetNode(childIndex);
 
         if (child.Kind != CanonicalKind.Primitive)

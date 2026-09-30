@@ -21,32 +21,32 @@ the frames or chunks that hold them; the others decode the chunk once per scan a
 | `vortex.varbinview` | 16-byte views, Arrow's string view; the plain form of text | `core2025.05.0` | yes | gather |
 | `vortex.varbin` | offsets and bytes, Arrow's string | `core2025.05.0` | yes, when smaller than views | selective |
 | `vortex.struct` | a child per field | `core2025.05.0` | yes | per field |
-| `vortex.list` | Arrow's list, offsets | `core2025.05.0` | no: lists are written as list views | gather |
-| `vortex.listview` | offsets and sizes; the plain form of lists | `core2025.10.0` | yes | gather |
+| `vortex.list` | Arrow's list, offsets | `core2025.05.0` | yes, for lists whose rows abut: one offset a row | gather |
+| `vortex.listview` | offsets and sizes; the plain form of lists | `core2025.10.0` | yes, for lists whose rows do not abut, and a map's entries | gather |
 | `vortex.fixed_size_list` | a fixed-size list | `core2025.10.0` | yes | gather |
 | `vortex.map` | a list view of key-value structs under the map dtype | `core2026.08.2` | yes | gather |
 | `vortex.ext` | an extension's storage | `core2025.05.0` | yes | its storage's |
 | `vortex.chunked` | a concatenation | `core2025.05.0` | no: chunks are a layout here | per chunk |
-| `vortex.constant` | one value repeated | `core2025.05.0` | no: integers as a sequence, others as one run | selective |
+| `vortex.constant` | one value repeated | `core2025.05.0` | yes: a chunk of one value, or of nulls only, whatever its dtype | selective |
 | `vortex.masked` | a validity applied to a child | `core2025.10.0` | no | gather |
 | `fastlanes.bitpacked` | bit-packing in 1 024-value transposed blocks, with patches | `core2025.05.0` | yes | selective, through the inverse transposition |
 | `fastlanes.for` | frame of reference over bit-packing | `core2025.05.0` | yes | selective |
-| `fastlanes.rle` | run-length in FastLanes blocks | `core2025.10.0` | no | gather |
+| `fastlanes.rle` | run-length in FastLanes blocks | `core2025.10.0` | no: without `fastlanes.delta`, which no edition carries, its per-row indices cost more than run-end's ends at every run length | gather |
 | `fastlanes.delta` | per-lane deltas | none: written only with edition enforcement off | no | gather |
 | `vortex.zigzag` | signed integers made non-negative | `core2025.05.0` | yes | selective |
 | `vortex.sequence` | `base + i × step` | `core2025.06.0` | yes | selective |
 | `vortex.runend` | run ends and values | `core2025.05.0` | yes | selective, a binary search in the ends |
 | `vortex.dict` | codes and values | `core2025.05.0` | yes | selective, on the codes |
-| `vortex.sparse` | a fill value and patches | `core2025.05.0` | no | selective |
+| `vortex.sparse` | a fill value and patches | `core2025.05.0` | yes, with a null fill: a chunk nulls dominate, when their runs would cost more | selective |
 | `vortex.bytebool` | a byte per boolean | `core2025.05.0` | no | gather |
 | `vortex.alp` | adaptive lossless floating point: decimals scaled to integers, with patches | `core2025.05.0` | yes | selective |
 | `vortex.alprd` | ALP for real doubles: high bits into a small dictionary | `core2025.05.0` | yes | selective |
 | `vortex.fsst` | a static symbol table, 255 codes and an escape | `core2025.05.0` | yes | selective, through each row's code offsets |
-| `vortex.onpair` | a pair-merging dictionary of tokens | `core2026.08.1` | no | selective |
-| `vortex.datetimeparts` | days, seconds and subseconds apart | `core2025.05.0` | no | selective |
-| `vortex.decimal_byte_parts` | decimals split by bytes; the lower part must be empty | `core2025.05.0` | no | gather |
+| `vortex.onpair` | a pair-merging dictionary of tokens | `core2026.08.1` | yes: text a trained dictionary spells in a tenth fewer bytes than FSST | selective |
+| `vortex.datetimeparts` | days, seconds and subseconds apart | `core2025.05.0` | yes: a timestamp coarser than its unit, priced against its instants' own plan | selective |
+| `vortex.decimal_byte_parts` | decimals split by bytes; the lower part must be empty | `core2025.05.0` | yes: every decimal chunk whose values fit 64 bits | gather |
 | `vortex.zstd` | zstd frames | `core2025.06.0` | yes, a frame per block | selective, by frame |
-| `vortex.pco` | Pcodec | `core2025.06.0` | no | gather |
+| `vortex.pco` | Pcodec: entropy-coded bins after a delta or a divisor | `core2025.06.0` | yes: under the size-first profile and a pin, for numbers of 16 bits and more | gather |
 | `vortex.zstd_buffers` | each buffer of another array compressed apart | draft `zstd2026.02.0` | no | gather |
 | `vortex.variant` | a variant over its storage | `core2026.08.3` | no: written as `vortex.parquet.variant` | selective |
 | `vortex.parquet.variant` | the Parquet variant binary format | `core2026.08.3` | yes | gather |
@@ -107,18 +107,24 @@ The writer's schemes are named after algorithms, and editions constrain ids:
 
 | scheme | writes |
 |---|---|
-| progression, constant integers | `vortex.sequence` |
-| runs, other constants | `vortex.runend` |
+| one value, or nulls only | `vortex.constant` |
+| progression | `vortex.sequence` |
+| runs | `vortex.runend` |
+| nulls on nine rows in ten or more | `vortex.sparse`, with a null fill |
+| a decimal whose values fit 64 bits | `vortex.decimal_byte_parts`, over the integers' own scheme |
+| a timestamp coarser than its unit | `vortex.datetimeparts`, each part under its own scheme |
 | bit-packing, in the raw, zigzag or frame-of-reference domain | `fastlanes.bitpacked`, under `vortex.zigzag` or `fastlanes.for` |
 | dictionary | `vortex.dict` |
 | ALP, ALP-RD | `vortex.alp`, `vortex.alprd` |
-| FSST | `vortex.fsst` |
+| FSST | `vortex.fsst`, its row tables under the integer schemes |
+| OnPair | `vortex.onpair`, its codes, offsets and lengths under the integer schemes |
 | zstd | `vortex.zstd` |
 | the plain form | `vortex.primitive`, `vortex.bool`, `vortex.decimal`, and for text `vortex.varbin` or `vortex.varbinview`, whichever is smaller |
 
 A compression reaches every child: a list's elements, offsets and sizes, a struct's fields, an
-extension's storage, a dictionary's or a run's values. Validity bitmaps are one bit a row and stay
-plain. How the chooser prices each is [11-write-strategy.md](11-write-strategy.md) §3.4. Over the 856
+extension's storage, a dictionary's or a run's values, a sparse chunk's positions and values, a
+decimal's integers and a timestamp's parts. Validity bitmaps are one bit a row and stay
+plain. How the chooser prices each is [11-write-strategy.md](11-write-strategy.md) §3.4. Over the 876
 files of the conformance corpus, the writer's files are smaller than the reference's, held under a
 ceiling by `WrittenSizeTests`, which prints the ratio and the files worst by bytes lost.
 
@@ -142,7 +148,7 @@ defaults to, and the first with `vortex.uuid`. Lower targets are honoured, not a
 |---|---|
 | `core2026.08.0` and later | nothing: this is what the writer emits |
 | below `core2026.08.0` | the zone map is **omitted**, since `vortex.zoned` and its aggregates arrived then; `vortex.stats` is not written instead, since no release ever emitted it and pruning's absence costs no correctness |
-| below `core2025.10.0` | a list or fixed-size list column **fails the write**: its forms here, `vortex.listview` and `vortex.fixed_size_list`, arrived then |
+| below `core2025.10.0` | a fixed-size list column **fails the write**, and so does a list whose rows do not abut: their forms, `vortex.fixed_size_list` and `vortex.listview`, arrived then; a list whose rows abut, which is every list a builder fills, goes out as `vortex.list` |
 | below `core2026.08.2`, `core2026.08.3` | a map, a variant or a uuid column fails the write |
 | below `core2025.06.0` | progressions and zstd are not candidates |
 

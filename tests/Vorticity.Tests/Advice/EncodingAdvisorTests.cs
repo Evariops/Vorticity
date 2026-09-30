@@ -167,11 +167,11 @@ public sealed class EncodingAdvisorTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // Jittered timestamps: bit-packing is what decodes fastest, zstd what is smallest.
+        // Jittered timestamps: bit-packing is what decodes fastest, pco what is smallest.
         EncodingAdvice advice = await AdviseLongsAsync(
             262_144, row => 1_700_000_000_000L + (row * 1000) + (long)(Mix(row) % 1000), ct, EncodingGoal.Smallest);
 
-        Assert.Contains(advice.Columns[0].Recommended.WrittenAs, w => w.StartsWith("Zstd", StringComparison.Ordinal));
+        Assert.Contains(advice.Columns[0].Recommended.WrittenAs, w => w.StartsWith("Pco", StringComparison.Ordinal));
         Assert.Equal(CompressionProfile.Smallest, advice.ToWriteOptions().Compression);
     }
 

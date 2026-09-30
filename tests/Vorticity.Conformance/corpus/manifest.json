@@ -18,9 +18,9 @@
     ]
   },
   "coverage": {
-    "files": 856,
-    "total_bytes": 15984453,
-    "total_rows": 2547199,
+    "files": 876,
+    "total_bytes": 16029725,
+    "total_rows": 2571779,
     "row_counts": [
       0,
       1,
@@ -16278,6 +16278,773 @@
       ]
     },
     {
+      "id": "encodings/pco_f32",
+      "dimension": "B",
+      "description": "vortex.pco forced (4096 rows): Pco::from_primitive over f32 hundredths: 32-bit float latents",
+      "path": "encodings/pco_f32.vortex",
+      "sidecar": "encodings/pco_f32.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 4096,
+      "dtype": "f32",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b5"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "0b7acedb09bf49e0199dbe25594c10f47aa6bd90bb5320f470d474cc45358a55",
+      "sidecar_sha256": "7b38514e4e064051d9c1b2f2f6bebcc127eae378823b77db91ab4a1f9dd4e878",
+      "size_bytes": 7452,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 11360491864921107416,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_f32_r0",
+      "dimension": "B",
+      "description": "vortex.pco forced (0 rows): Pco::from_primitive over f32 hundredths: 32-bit float latents",
+      "path": "encodings/pco_f32_r0.vortex",
+      "sidecar": "encodings/pco_f32_r0.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "f32",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "6dcac70c9002019c5f9c00f3d80267d35d311db31153427b30daa0a6201ec83f",
+      "sidecar_sha256": "e14d1669bb0b8f20e99ba69eefa93c6833ec41b5e1e492aa601c30c3f592f8be",
+      "size_bytes": 1360,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 11236536836896507109,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
+        "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed"
+      ]
+    },
+    {
+      "id": "encodings/pco_f32_r1",
+      "dimension": "B",
+      "description": "vortex.pco forced (1 rows): Pco::from_primitive over f32 hundredths: 32-bit float latents",
+      "path": "encodings/pco_f32_r1.vortex",
+      "sidecar": "encodings/pco_f32_r1.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1,
+      "dtype": "f32",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "c97cbab487ee013aec13e68c035498751dd8c02b56380d38a7b95d78d2c21182",
+      "sidecar_sha256": "f1e35df01f20006839fe317fe93d2d85059649e04f2b70472cb129e5753d3468",
+      "size_bytes": 1548,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 3342725940254260676,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_f32_r1023",
+      "dimension": "B",
+      "description": "vortex.pco forced (1023 rows): Pco::from_primitive over f32 hundredths: 32-bit float latents",
+      "path": "encodings/pco_f32_r1023.vortex",
+      "sidecar": "encodings/pco_f32_r1023.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1023,
+      "dtype": "f32",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "6a007a3c48795d2e885151d9cc09822536aa23b9f0360a5fc4843725722af7f4",
+      "sidecar_sha256": "23569b98d15cea24045d3024e119b601b383e0105a4cb374a51c463d49ad539c",
+      "size_bytes": 3116,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 3188352487817079946,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_f32_r1025",
+      "dimension": "B",
+      "description": "vortex.pco forced (1025 rows): Pco::from_primitive over f32 hundredths: 32-bit float latents",
+      "path": "encodings/pco_f32_r1025.vortex",
+      "sidecar": "encodings/pco_f32_r1025.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1025,
+      "dtype": "f32",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b3"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "69222efc69896f7c456679a2cd9cfe4aed1104cd4c5cef28988a31aa063a7ab0",
+      "sidecar_sha256": "fe73dc4d0968a6943fdaab7b77863de7493acb21f30db1d99942f5f10411666e",
+      "size_bytes": 3124,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 4837487586245036737,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_i16",
+      "dimension": "B",
+      "description": "vortex.pco forced (4096 rows): Pco::from_primitive over an i16 wave: 16-bit latents",
+      "path": "encodings/pco_i16.vortex",
+      "sidecar": "encodings/pco_i16.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 4096,
+      "dtype": "i16",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b5"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "db4e3bf5b5936c5c775221c5d741f8da1049adf2ae38ba98beac78789a8e5d4e",
+      "sidecar_sha256": "cd216a2fefb6dd6c38b791abbb643c40208b06b167e802229ce7173c814582e6",
+      "size_bytes": 2948,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 17259664503040284724,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_i16_r0",
+      "dimension": "B",
+      "description": "vortex.pco forced (0 rows): Pco::from_primitive over an i16 wave: 16-bit latents",
+      "path": "encodings/pco_i16_r0.vortex",
+      "sidecar": "encodings/pco_i16_r0.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "i16",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "27e7f746c29f65fa29e578647e2539ad5c6706a7d9dc00ad96a1258307bdd146",
+      "sidecar_sha256": "f910c45bf86ead6313b70b5880cf4f865c268fd4a35a45d68f3f3709bca39b14",
+      "size_bytes": 1360,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 11381288650557744976,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
+        "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed"
+      ]
+    },
+    {
+      "id": "encodings/pco_i16_r1",
+      "dimension": "B",
+      "description": "vortex.pco forced (1 rows): Pco::from_primitive over an i16 wave: 16-bit latents",
+      "path": "encodings/pco_i16_r1.vortex",
+      "sidecar": "encodings/pco_i16_r1.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1,
+      "dtype": "i16",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "dd30db6acca5f1dd19c54a018a852abcf2eb777ab03473d989f514f00785a224",
+      "sidecar_sha256": "d9f0895071ad1fb85eb3207b3c90b02d5d5ad170251b934b1e546cbc7362a1c7",
+      "size_bytes": 1548,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 10549979072544442689,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_i16_r1023",
+      "dimension": "B",
+      "description": "vortex.pco forced (1023 rows): Pco::from_primitive over an i16 wave: 16-bit latents",
+      "path": "encodings/pco_i16_r1023.vortex",
+      "sidecar": "encodings/pco_i16_r1023.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1023,
+      "dtype": "i16",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "c6e90bce3e536e41aefe2162e0e15c0537dacc4c1d92d15e91a481b3c638768d",
+      "sidecar_sha256": "057db921177c6be01fc2f0165882c96683e483775b4bfa79c08daa9cdafedf53",
+      "size_bytes": 1908,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 12937758682254404424,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_i16_r1025",
+      "dimension": "B",
+      "description": "vortex.pco forced (1025 rows): Pco::from_primitive over an i16 wave: 16-bit latents",
+      "path": "encodings/pco_i16_r1025.vortex",
+      "sidecar": "encodings/pco_i16_r1025.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1025,
+      "dtype": "i16",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b3"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "84c831a649f2a281d81a56bb70e58c3f3b9b5c1c025f9d0a8effef5b5489ccfc",
+      "sidecar_sha256": "cb5e040890d364d6a8b67605afab9e06fd06ed85a1e43eae30a5e705a4a05ff8",
+      "size_bytes": 1932,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 15887447549167261043,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_nullable",
+      "dimension": "B",
+      "description": "vortex.pco forced (4096 rows): Pco::from_primitive over a nullable f64, nulls every fifth row, so the stream holds the valid rows only and the reader's scatter and float join run",
+      "path": "encodings/pco_nullable.vortex",
+      "sidecar": "encodings/pco_nullable.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 4096,
+      "dtype": "f64?",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.pco/c1/b5"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "1673eaf819ca461dffc5f88404e2b94b9c31abbe475f3d44211055d888531b89",
+      "sidecar_sha256": "191911fa7abe7450663aa3d64ae1ba56f8be7a7f687c43e299fea337a31c0e59",
+      "size_bytes": 2596,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 819
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 16529645007065191270,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_nullable_r0",
+      "dimension": "B",
+      "description": "vortex.pco forced (0 rows): Pco::from_primitive over a nullable f64, nulls every fifth row, so the stream holds the valid rows only and the reader's scatter and float join run",
+      "path": "encodings/pco_nullable_r0.vortex",
+      "sidecar": "encodings/pco_nullable_r0.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "f64?",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "f4a6f099a301f811e155ed12978809f1703a053f7eba4ca9aaaaf7da9e06d0f4",
+      "sidecar_sha256": "32413f107f21a6ac5f33a7133ec78f4fae1a48419bae8eb99e91779778e18f73",
+      "size_bytes": 1360,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 6692330264517022317,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
+        "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed"
+      ]
+    },
+    {
+      "id": "encodings/pco_nullable_r1",
+      "dimension": "B",
+      "description": "vortex.pco forced (1 rows): Pco::from_primitive over a nullable f64, nulls every fifth row, so the stream holds the valid rows only and the reader's scatter and float join run",
+      "path": "encodings/pco_nullable_r1.vortex",
+      "sidecar": "encodings/pco_nullable_r1.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1,
+      "dtype": "f64?",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.pco/c1/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "c4ee3a0a41f4d532123b535aa5e0cff7ea1e94bc174cfd13a5890f462c7d984d",
+      "sidecar_sha256": "f5ed6d2e5639491270bb8e5d73f9ea15c2af24d01abfdedf16dc7ff3cc876350",
+      "size_bytes": 1612,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 2758716675412049368,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_nullable_r1023",
+      "dimension": "B",
+      "description": "vortex.pco forced (1023 rows): Pco::from_primitive over a nullable f64, nulls every fifth row, so the stream holds the valid rows only and the reader's scatter and float join run",
+      "path": "encodings/pco_nullable_r1023.vortex",
+      "sidecar": "encodings/pco_nullable_r1023.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1023,
+      "dtype": "f64?",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.pco/c1/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "f046e95d73a8fe7ec5800c5c672cb0e7a0d2110f0c79f5b20d7f0c2b30eb0ce4",
+      "sidecar_sha256": "05c7271c6b96f31098e459b7a79cbfab0b9c4d53aeed8654021eb3284f0dd2aa",
+      "size_bytes": 1868,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 205
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 2787251000038532581,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_nullable_r1025",
+      "dimension": "B",
+      "description": "vortex.pco forced (1025 rows): Pco::from_primitive over a nullable f64, nulls every fifth row, so the stream holds the valid rows only and the reader's scatter and float join run",
+      "path": "encodings/pco_nullable_r1025.vortex",
+      "sidecar": "encodings/pco_nullable_r1025.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1025,
+      "dtype": "f64?",
+      "array_ids": [
+        "vortex.bool",
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.bool/c0/b1",
+        "vortex.pco/c1/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "96dcf944791a8a429a987098e8f4b70f83b83fa712138bae0889f0735f6de806",
+      "sidecar_sha256": "ad9d3f885fb6a79f8d1f46b62d48903c8399a0dce94d3a025c89d4e260511911",
+      "size_bytes": 1868,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 205
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 8107827596598187758,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
       "id": "encodings/pco_r0",
       "dimension": "B",
       "description": "vortex.pco forced (0 rows): Pco::from_primitive, level 8",
@@ -16473,6 +17240,259 @@
       ],
       "missing_expected_array_ids": [],
       "seed": 905830283112468105,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_u32",
+      "dimension": "B",
+      "description": "vortex.pco forced (4096 rows): Pco::from_primitive over u32 multiples of 1000 plus a remainder: 32-bit latents",
+      "path": "encodings/pco_u32.vortex",
+      "sidecar": "encodings/pco_u32.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 4096,
+      "dtype": "u32",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b5"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "1ccb708859990abbf21e2c20ce26ffd872a799534f5345771941471578257c1a",
+      "sidecar_sha256": "55509100a92acb3e07687a84b6c3527a154315de14c4fdc8a927df2fb0924827",
+      "size_bytes": 2996,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 11756266487124155460,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_u32_r0",
+      "dimension": "B",
+      "description": "vortex.pco forced (0 rows): Pco::from_primitive over u32 multiples of 1000 plus a remainder: 32-bit latents",
+      "path": "encodings/pco_u32_r0.vortex",
+      "sidecar": "encodings/pco_u32_r0.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 0,
+      "dtype": "u32",
+      "array_ids": [],
+      "array_node_shapes": [],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.chunked"
+      ],
+      "declared_array_ids": 0,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "d0cb4c7335433c06c2e2dffb4ff6f17b91daf5a5ecde60bded545303a158e472",
+      "sidecar_sha256": "e83ceb134c70fc7886ee5e0ca33edce3c436ba88d8dc49496f890976ad26ffcc",
+      "size_bytes": 1360,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {},
+      "expected_array_ids": [],
+      "missing_expected_array_ids": [],
+      "seed": 7503259717962556089,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed",
+        "zero rows: the layout has no children and no segments, so `array_ids` is empty by construction and no encoding is claimed"
+      ]
+    },
+    {
+      "id": "encodings/pco_u32_r1",
+      "dimension": "B",
+      "description": "vortex.pco forced (1 rows): Pco::from_primitive over u32 multiples of 1000 plus a remainder: 32-bit latents",
+      "path": "encodings/pco_u32_r1.vortex",
+      "sidecar": "encodings/pco_u32_r1.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1,
+      "dtype": "u32",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "71375622567c06664db9beea04f2ebe8b3714fb30ff77c252e5ad2f069992e2e",
+      "sidecar_sha256": "42bfdd31cdb99974aab6ee9083b4f7eb8be1dfa35f0e8025e03aabc79fe6fb1f",
+      "size_bytes": 1548,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 1297666251000632489,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_u32_r1023",
+      "dimension": "B",
+      "description": "vortex.pco forced (1023 rows): Pco::from_primitive over u32 multiples of 1000 plus a remainder: 32-bit latents",
+      "path": "encodings/pco_u32_r1023.vortex",
+      "sidecar": "encodings/pco_u32_r1023.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1023,
+      "dtype": "u32",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b2"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "3ce50fe554dae87206731873536de51ad25504f7cde4b98c1e2e56eb5ad26921",
+      "sidecar_sha256": "05e8c05d1e3a4896ece4defbf21ab2c9f4c785328ccc364fdeeca57fba2b5743",
+      "size_bytes": 1924,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 2691269452942664225,
+      "env": {},
+      "notes": [
+        "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"
+      ]
+    },
+    {
+      "id": "encodings/pco_u32_r1025",
+      "dimension": "B",
+      "description": "vortex.pco forced (1025 rows): Pco::from_primitive over u32 multiples of 1000 plus a remainder: 32-bit latents",
+      "path": "encodings/pco_u32_r1025.vortex",
+      "sidecar": "encodings/pco_u32_r1025.jsonl",
+      "vortex_version": "0.86.1",
+      "target_edition": "core2026.08.3",
+      "row_count": 1025,
+      "dtype": "u32",
+      "array_ids": [
+        "vortex.pco"
+      ],
+      "array_node_shapes": [
+        "vortex.pco/c0/b3"
+      ],
+      "dict_nodes": [],
+      "max_bool_bit_offset": 0,
+      "layout_ids": [
+        "vortex.flat"
+      ],
+      "declared_array_ids": 34,
+      "declared_layout_ids": 1,
+      "aggregate_ids": [],
+      "aggregate_specs": [],
+      "extension_dtype_ids": [],
+      "sha256": "35f3d3f1d870cd64cee751b796886c8d8b5016869faf650589b84fc84c260c95",
+      "sidecar_sha256": "715298df9ba09621950296147679c1642a8a0c8dca23b3b76eb61be59d3231e9",
+      "size_bytes": 1844,
+      "file_format_version": 1,
+      "postscript_bytes": 120,
+      "has_dtype_segment": true,
+      "has_file_statistics": false,
+      "metadata_segments": [],
+      "zone_maps": 0,
+      "total_zones": 0,
+      "zone_maps_with_distinct_zones": 0,
+      "utf8_non_ascii": false,
+      "utf8_embedded_nul": false,
+      "null_counts": {
+        "": 0
+      },
+      "expected_array_ids": [
+        "vortex.pco"
+      ],
+      "missing_expected_array_ids": [],
+      "seed": 15189280328042124712,
       "env": {},
       "notes": [
         "written with a chunked(flat) strategy so the array reaches the segment exactly as constructed"

@@ -103,6 +103,18 @@ internal sealed unsafe class FixedStore : ColumnStore
         return new Span<T>(_data + ((long)Count * Width), sizeHint > 0 ? sizeHint : _capacity - Count);
     }
 
+    /// <summary>The <paramref name="count"/> values written past the last since the last span, not yet committed.</summary>
+    internal ReadOnlySpan<T> Pending<T>(int count)
+        where T : unmanaged
+    {
+        if ((uint)count > (uint)(_capacity - Count))
+        {
+            throw new ArgumentOutOfRangeException(nameof(count), count, $"The last span holds {_capacity - Count} values.");
+        }
+
+        return new ReadOnlySpan<T>(_data + ((long)Count * Width), count);
+    }
+
     internal void Advance(int count)
     {
         if ((uint)count > (uint)(_capacity - Count))

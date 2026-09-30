@@ -168,8 +168,8 @@ internal sealed class FsstPlan
             }
 
             long encoded = ((long)table.Count * (FsstSymbols.MaxSymbolLength + 1)) + written
-                + ((long)rows * Width(MaxOf(lengths.AsSpan(0, rows))))
-                + ((long)(rows + 1) * Width(written));
+                + RowTableBytes(rows, MaxOf(lengths.AsSpan(0, rows)))
+                + RowTableBytes(rows + 1, written);
             if (encoded > sizeCeiling)
             {
                 return null;
@@ -228,7 +228,16 @@ internal sealed class FsstPlan
         return maximum;
     }
 
-    private static int Width(long maximum) => IndexPType(maximum).ByteWidth();
+    /// <summary>
+    /// A row table's bytes once the integer schemes have it: <paramref name="count"/> values up to
+    /// <paramref name="maximum"/>, packed to the bits the largest takes, as a frame of reference
+    /// packs lengths and offsets; the plain table's when that is smaller.
+    /// </summary>
+    internal static long RowTableBytes(long count, long maximum)
+    {
+        int bits = maximum <= 0 ? 0 : 64 - System.Numerics.BitOperations.LeadingZeroCount((ulong)maximum);
+        return Math.Min(((count * bits) + 7) / 8, count * IndexPType(maximum).ByteWidth());
+    }
 
     /// <summary>
     /// Whether row <paramref name="row"/> of a canonical varbinview node holds a value. This is for

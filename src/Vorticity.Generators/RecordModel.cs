@@ -25,6 +25,8 @@ internal enum MemberFill : byte
 /// <param name="UnderlyingType">An enum's underlying integer; the core type otherwise.</param>
 /// <param name="Schema">The <c>VortexType</c> expression of the column.</param>
 /// <param name="Element">A list's element.</param>
+/// <param name="Shape">The container of a list, or of a binary value's bytes.</param>
+/// <param name="Key">A map's key; its value is <paramref name="Element"/>.</param>
 internal sealed record ValueModel(
     ValueKind Kind,
     ScalarKind Scalar,
@@ -33,21 +35,36 @@ internal sealed record ValueModel(
     string CoreType,
     string UnderlyingType,
     string Schema,
-    ValueModel? Element)
+    ValueModel? Element,
+    ListShape Shape = ListShape.ReadOnlyMemory,
+    ValueModel? Key = null)
 {
     /// <summary>Whether the values are an <c>IBinaryNumber</c> the columns expose as a span.</summary>
     public bool IsNumber => Kind is ValueKind.Scalar or ValueKind.Enum && Scalar is >= ScalarKind.Int8 and <= ScalarKind.Float64;
 
-    /// <summary>The <c>T</c> of <c>Column&lt;T&gt;</c> and <c>ColumnBuilder&lt;T&gt;</c>: an enum as its integer, a list without its nullability.</summary>
+    /// <summary>Whether the member is a list of records, read through <c>ListOf</c> rather than a column.</summary>
+    public bool IsRecordList => Kind == ValueKind.List && Element!.Kind == ValueKind.Record;
+
+    /// <summary>Whether the member is a binary value, whatever buffer holds its bytes.</summary>
+    public bool IsBinary => Kind == ValueKind.Scalar && Scalar == ScalarKind.Binary;
+
+    /// <summary>
+    /// The <c>T</c> of <c>Column&lt;T&gt;</c> and <c>ColumnBuilder&lt;T&gt;</c>: an enum as its integer, a
+    /// list as a <c>ReadOnlyMemory</c> of its elements without its nullability, and bytes as a
+    /// <c>ReadOnlyMemory&lt;byte&gt;</c> whatever buffer the member declares.
+    /// </summary>
     public string ColumnType => Kind switch
     {
         ValueKind.Enum => UnderlyingType + (IsNullable ? "?" : string.Empty),
         ValueKind.List => "global::System.ReadOnlyMemory<" + Element!.ColumnType + ">",
+        _ when IsBinary => "global::System.ReadOnlyMemory<byte>" + (IsNullable ? "?" : string.Empty),
         _ => MemberType,
     };
 
-    /// <summary>The <c>T</c> of <c>Sym&lt;T&gt;</c>: the member's own type, a list without its nullability.</summary>
-    public string SymbolType => Kind == ValueKind.List ? "global::System.ReadOnlyMemory<" + Element!.MemberType + ">" : MemberType;
+    /// <summary>The <c>T</c> of <c>Sym&lt;T&gt;</c>: the member's own type, a list as a <c>ReadOnlyMemory</c> of its elements, bytes as a <c>ReadOnlyMemory&lt;byte&gt;</c>.</summary>
+    public string SymbolType => Kind == ValueKind.List
+        ? "global::System.ReadOnlyMemory<" + Element!.MemberType + ">"
+        : IsBinary ? ColumnType : MemberType;
 
     /// <summary>Whether a list's elements are written as they are, with no conversion per element.</summary>
     public bool ElementsAsDeclared => Element is not null && Element.ColumnType == Element.MemberType;

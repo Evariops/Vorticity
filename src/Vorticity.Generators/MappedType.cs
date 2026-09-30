@@ -26,6 +26,40 @@ internal enum ScalarKind : byte
     Timestamp,
     ZonedTimestamp,
     Uuid,
+
+    /// <summary>A <see cref="System.TimeSpan"/>, an i64 of ticks.</summary>
+    Duration,
+
+    /// <summary>An <see cref="System.Int128"/>, a decimal of scale 0.</summary>
+    Int128,
+
+    /// <summary>A <see cref="System.UInt128"/>, a decimal of scale 0.</summary>
+    UInt128,
+
+    /// <summary>A <see cref="System.Numerics.BigInteger"/>, a decimal of scale 0.</summary>
+    BigInteger,
+}
+
+/// <summary>The .NET container of a list, or of the bytes of a binary value.</summary>
+internal enum ListShape : byte
+{
+    /// <summary><c>ReadOnlyMemory&lt;T&gt;</c>.</summary>
+    ReadOnlyMemory,
+
+    /// <summary><c>Memory&lt;T&gt;</c>.</summary>
+    Memory,
+
+    /// <summary><c>T[]</c>.</summary>
+    Array,
+
+    /// <summary><c>List&lt;T&gt;</c>.</summary>
+    List,
+
+    /// <summary><c>ImmutableArray&lt;T&gt;</c>.</summary>
+    ImmutableArray,
+
+    /// <summary>An interface an array implements, <c>IReadOnlyList&lt;T&gt;</c> or <c>IEnumerable&lt;T&gt;</c>: read back as an array.</summary>
+    Sequence,
 }
 
 /// <summary>What a mapped .NET type is.</summary>
@@ -36,19 +70,27 @@ internal enum ValueKind : byte
     List,
     Record,
     Extension,
+
+    /// <summary>A dictionary: a map column of its keys and values.</summary>
+    Map,
 }
 
 /// <summary>A .NET type as the column mapping sees it: its family, its nullability, and for a list its element.</summary>
 internal sealed class MappedType
 {
-    private MappedType(ValueKind kind, ScalarKind scalar, bool nullable, ITypeSymbol core, MappedType? element, string? error)
+    private MappedType(ValueKind kind, ScalarKind scalar, bool nullable, ITypeSymbol core, MappedType? element, string? error,
+        ListShape shape = ListShape.ReadOnlyMemory, ITypeSymbol? elementType = null, MappedType? key = null, ITypeSymbol? keyType = null)
     {
+        Key = key;
+        KeyType = keyType;
         Kind = kind;
         Scalar = scalar;
         IsNullable = nullable;
         Core = core;
         Element = element;
         Error = error;
+        Shape = shape;
+        ElementType = elementType;
     }
 
     public ValueKind Kind { get; }
@@ -63,6 +105,18 @@ internal sealed class MappedType
     public ITypeSymbol Core { get; }
 
     public MappedType? Element { get; }
+
+    /// <summary>The container of a list, or of a binary value's bytes.</summary>
+    public ListShape Shape { get; }
+
+    /// <summary>A list's element type, or a map's value type, as declared, with its nullability.</summary>
+    public ITypeSymbol? ElementType { get; }
+
+    /// <summary>A map's key.</summary>
+    public MappedType? Key { get; }
+
+    /// <summary>A map's key type as declared.</summary>
+    public ITypeSymbol? KeyType { get; }
 
     /// <summary>Why the type has no mapping, or null when it has one.</summary>
     public string? Error { get; }
@@ -101,23 +155,38 @@ internal sealed class MappedType
             : KnownSymbols.Is(core, known.DateTimeOffset) ? ScalarKind.ZonedTimestamp
             : KnownSymbols.Is(core, known.Guid) ? ScalarKind.Uuid
             : KnownSymbols.Is(core, known.VortexDecimal) ? ScalarKind.WideDecimal
+            : KnownSymbols.Is(core, known.TimeSpan) ? ScalarKind.Duration
+            : KnownSymbols.Is(core, known.Int128) ? ScalarKind.Int128
+            : KnownSymbols.Is(core, known.UInt128) ? ScalarKind.UInt128
+            : KnownSymbols.Is(core, known.BigInteger) ? ScalarKind.BigInteger
             : null;
         if (named is ScalarKind scalar)
         {
             return new MappedType(ValueKind.Scalar, scalar, nullable, core, null, null);
         }
 
-        if (core.SpecialType == SpecialType.System_Char)
+        if (core is INamedTypeSymbol { TypeArguments.Length: 2 } dictionary
+            && System.Array.Exists(known.Dictionaries, candidate => KnownSymbols.Is(dictionary, candidate)))
         {
-            return Fail(core, "a char is not a dtype; use string");
+            MappedType key = Map(dictionary.TypeArguments[0], known);
+            MappedType value = Map(dictionary.TypeArguments[1], known);
+            string? problem = key.Error is not null ? $"its key type {key.Core.ToDisplayString()} does not map to a column: {key.Error}"
+                : value.Error is not null ? $"its value type {value.Core.ToDisplayString()} does not map to a column: {value.Error}"
+                : key.IsNullable ? "a map's keys are never null; declare the key type without '?'"
+                : key.Kind is not (ValueKind.Scalar or ValueKind.Enum) || value.Kind is not (ValueKind.Scalar or ValueKind.Enum)
+                    ? "a map's keys and values are scalars; hold anything deeper in a record"
+                : null;
+            return problem is not null
+                ? Fail(core, problem)
+                : new MappedType(ValueKind.Map, default, nullable, core, value, null, default, dictionary.TypeArguments[1], key, dictionary.TypeArguments[0]);
         }
 
-        if (core is INamedTypeSymbol generic && KnownSymbols.Is(generic, known.ReadOnlyMemory))
+        if (ListOf(core, known) is (ITypeSymbol elementType, ListShape shape))
         {
-            ITypeSymbol elementType = generic.TypeArguments[0];
-            if (elementType.SpecialType == SpecialType.System_Byte)
+            // Bytes in a buffer are a binary value; bytes in a list or an interface are a list of u8.
+            if (elementType.SpecialType == SpecialType.System_Byte && shape is ListShape.ReadOnlyMemory or ListShape.Memory or ListShape.Array)
             {
-                return new MappedType(ValueKind.Scalar, ScalarKind.Binary, nullable, core, null, null);
+                return new MappedType(ValueKind.Scalar, ScalarKind.Binary, nullable, core, null, null, shape);
             }
 
             MappedType element = Map(elementType, known);
@@ -126,22 +195,22 @@ internal sealed class MappedType
                 return Fail(core, $"its element type {element.Core.ToDisplayString()} does not map to a column: {element.Error}");
             }
 
-            if (element.Kind == ValueKind.Record)
+            if (element.Kind == ValueKind.Record && element.IsNullable)
             {
-                return Fail(core, "a list of records has no typed column to read it through; declare a list of a scalar type");
+                return Fail(core, "a list of records holds records, not nulls; declare its element type without '?'");
             }
 
-            return new MappedType(ValueKind.List, default, nullable, core, element, null);
+            if (element.Kind == ValueKind.List && element.Element!.Kind == ValueKind.Record)
+            {
+                return Fail(core, "a list of lists of records has no typed column to read it through; hold the inner lists in a record");
+            }
+
+            return new MappedType(ValueKind.List, default, nullable, core, element, null, shape, elementType);
         }
 
-        if (core is IArrayTypeSymbol array)
+        if (core is IArrayTypeSymbol)
         {
-            return Fail(core, $"an array is not a column type; declare the member ReadOnlyMemory<{array.ElementType.ToDisplayString()}>");
-        }
-
-        if (core is INamedTypeSymbol memory && KnownSymbols.Is(memory, known.Memory))
-        {
-            return Fail(core, $"declare the member ReadOnlyMemory<{memory.TypeArguments[0].ToDisplayString()}>");
+            return Fail(core, "an array of more than one dimension is not a column type; declare an array of arrays");
         }
 
         if (KnownSymbols.ImplementsSelf(core, known.ExtensionInterface))
@@ -157,6 +226,29 @@ internal sealed class MappedType
         }
 
         return Fail(core, "the type has no mapping to a dtype");
+    }
+
+    /// <summary>The element and the container of a type a list is declared as, or null for any other type.</summary>
+    private static (ITypeSymbol Element, ListShape Shape)? ListOf(ITypeSymbol core, KnownSymbols known)
+    {
+        if (core is IArrayTypeSymbol { Rank: 1 } array)
+        {
+            return (array.ElementType, ListShape.Array);
+        }
+
+        if (core is not INamedTypeSymbol { TypeArguments.Length: 1 } generic)
+        {
+            return null;
+        }
+
+        ListShape? shape =
+            KnownSymbols.Is(generic, known.ReadOnlyMemory) ? ListShape.ReadOnlyMemory
+            : KnownSymbols.Is(generic, known.Memory) ? ListShape.Memory
+            : KnownSymbols.Is(generic, known.List) ? ListShape.List
+            : KnownSymbols.Is(generic, known.ImmutableArray) ? ListShape.ImmutableArray
+            : System.Array.Exists(known.Sequences, sequence => KnownSymbols.Is(generic, sequence)) ? ListShape.Sequence
+            : null;
+        return shape is ListShape found ? (generic.TypeArguments[0], found) : null;
     }
 
     private static MappedType Fail(ITypeSymbol core, string error) =>
@@ -178,6 +270,11 @@ internal sealed class MappedType
         SpecialType.System_String => ScalarKind.Utf8,
         SpecialType.System_Decimal => ScalarKind.Decimal,
         SpecialType.System_DateTime => ScalarKind.Timestamp,
+
+        // A UTF-16 code unit is a u16, and a native integer the 64 bits it is where a record runs.
+        SpecialType.System_Char => ScalarKind.UInt16,
+        SpecialType.System_IntPtr => ScalarKind.Int64,
+        SpecialType.System_UIntPtr => ScalarKind.UInt64,
         _ => null,
     };
 }

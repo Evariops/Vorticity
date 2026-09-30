@@ -1177,7 +1177,7 @@ internal static class CompressedValues
         ArrayDecodeContext ctx, int nodeIndex, PType ptype, int length, string encodingId, string what)
     {
         ArgumentNullException.ThrowIfNull(ctx);
-        CanonicalNode node = ctx.Canonical.GetNode(nodeIndex);
+        CanonicalNode node = ctx.Canonical.GetNode(CanonicalSupport.ExpandIfConstant(ctx, nodeIndex));
         if (node.Kind != CanonicalKind.Primitive)
         {
             CompressedThrow.ChildKind(encodingId, what, node.Kind, "a Primitive");

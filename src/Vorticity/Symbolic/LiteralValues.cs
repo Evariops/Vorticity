@@ -35,6 +35,10 @@ internal static class LiteralValues
             ClrKind.Guid => new Guid(literal.BytesValue, bigEndian: true),
             ClrKind.Decimal => Decimal(literal, column),
             ClrKind.VortexDecimal => Wide(literal, column),
+            ClrKind.TimeSpan => new TimeSpan(Stored(literal)),
+            ClrKind.Integer128 => Integer<Int128>(literal),
+            ClrKind.UInteger128 => Integer<UInt128>(literal),
+            ClrKind.BigInteger => Unscaled(literal),
             _ => throw new NotSupportedException($"A {ClrFit.Name(typeof(T))} is not read back from a literal."),
         };
 
@@ -58,6 +62,9 @@ internal static class LiteralValues
             if (typeof(T) == typeof(uint)) { value = (T)(object)(uint)signed; return true; }
             if (typeof(T) == typeof(ushort)) { value = (T)(object)(ushort)signed; return true; }
             if (typeof(T) == typeof(byte)) { value = (T)(object)(byte)signed; return true; }
+            if (typeof(T) == typeof(char)) { value = (T)(object)(char)signed; return true; }
+            if (typeof(T) == typeof(nint)) { value = (T)(object)(nint)signed; return true; }
+            if (typeof(T) == typeof(nuint)) { value = (T)(object)unchecked((nuint)(ulong)signed); return true; }
         }
         else if (literal.Kind == FilterLiteralKind.Float)
         {
@@ -116,6 +123,23 @@ internal static class LiteralValues
         FilterLiteralKind.Unsigned => literal.UnsignedValue,
         _ => literal.SignedValue,
     };
+
+    /// <summary>An unscaled integer as a 128-bit integer; one past its range is a value this type cannot read.</summary>
+    private static object Integer<TInteger>(FilterLiteral literal)
+    {
+        BigInteger unscaled = Unscaled(literal);
+        if (typeof(TInteger) == typeof(Int128) && unscaled >= (BigInteger)Int128.MinValue && unscaled <= (BigInteger)Int128.MaxValue)
+        {
+            return (Int128)unscaled;
+        }
+
+        if (typeof(TInteger) == typeof(UInt128) && unscaled.Sign >= 0 && unscaled <= (BigInteger)UInt128.MaxValue)
+        {
+            return (UInt128)unscaled;
+        }
+
+        throw new VortexFormatException($"The value {unscaled} is outside what a {typeof(TInteger).Name} holds.");
+    }
 
     private static decimal Decimal(FilterLiteral literal, VortexType column)
     {

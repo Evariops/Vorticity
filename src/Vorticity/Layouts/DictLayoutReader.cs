@@ -124,6 +124,12 @@ internal sealed class DictLayoutReader : LayoutReader
         FieldMask all = FieldMask.All;
         int codesIndex = ExecuteChild(in codesLayout, rows, in all, context);
 
+        // A chunk of one code, which a writer spells as a constant, read as the codes it stands for.
+        if (context.Canonical.GetNode(codesIndex).Kind == CanonicalKind.Constant)
+        {
+            codesIndex = context.Canonical.MaterializeConstant(codesIndex);
+        }
+
         CanonicalNode codesNode = context.Canonical.GetNode(codesIndex);
         if (codesNode.Kind != CanonicalKind.Primitive)
         {

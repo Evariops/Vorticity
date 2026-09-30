@@ -736,6 +736,15 @@ internal sealed class FsstSymbols
                 }
             }
 
+            // A symbol ending in a zero byte the reference cannot hold: its symbols spell their
+            // length by their last non-zero byte. Its compressor, rebuilt from this table to push
+            // a predicate down, would then match such a symbol into the zero padding past a value's
+            // end and code the value otherwise than this table's own codes do.
+            if (candidate.Length >= 2 && (byte)(candidate.Bits >> ((candidate.Length - 1) * 8)) == 0)
+            {
+                continue;
+            }
+
             if (candidate.Length >= 3)
             {
                 int slot = ReferenceSlot(candidate.Bits);

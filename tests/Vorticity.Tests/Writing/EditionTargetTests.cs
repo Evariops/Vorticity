@@ -96,7 +96,7 @@ public sealed class EditionTargetTests
     /// </remarks>
     [Theory]
     [InlineData("types/uuid_nonnull_r1024", "vortex.uuid")]
-    [InlineData("types/list_i32_nonnull_r1024", "vortex.listview")]
+    [InlineData("encodings/fixed_size_list_r1025", "vortex.fixed_size_list")]
     public async Task AComponentOutsideTheTargetFailsTheWrite(string id, string component)
     {
         VortexUnsupportedException error = await Assert.ThrowsAsync<VortexUnsupportedException>(
@@ -112,6 +112,29 @@ public sealed class EditionTargetTests
                 component)!.Value),
             error.Message,
             StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A list is written as <c>vortex.list</c>, one offset a row, which the floor has held since it
+    /// was frozen: the list view it is read back as arrived later, and a list column no longer needs
+    /// it to be written.
+    /// </summary>
+    [Fact]
+    public async Task AListIsWrittenUnderTheFloorAsOneOffsetARow()
+    {
+        string path = await Write("types/list_i32_nonnull_r1024", VortexEdition.Core20250500);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+            List<string> arrays = ArrayIds(file);
+            Assert.Contains("vortex.list", arrays);
+            Assert.DoesNotContain("vortex.listview", arrays);
+            Assert.Equal(await Values("types/list_i32_nonnull_r1024", EditionRegistry.Newest), await Values("types/list_i32_nonnull_r1024", VortexEdition.Core20250500));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
     }
 
     /// <summary>

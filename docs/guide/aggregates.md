@@ -157,6 +157,26 @@ them: the same answers, 3.5 times faster for the composite group by on 14 cores,
 Welford fold. `ScanOptions.DegreeOfParallelism` overrides the session for one scan
 ([threads.md](threads.md)).
 
+## Decimals, at any precision
+
+A decimal column sums exactly, whatever its precision and its row count: the total is kept in 320
+bits, spilled from a 128-bit or 256-bit total only when that would overflow, so a column holding
+the largest value of 76 digits and its opposite in turn sums to what it should. The sum is
+converted once, at the end:
+
+```csharp
+decimal total = await file.Scan<Invoice>().SumAsync(i => i.Amount);          // decimal(18, 2): as decimal
+VortexDecimal wide = await file.Scan<Ledger>().SumAsync(l => l.Balance);     // decimal(76, 10): as VortexDecimal
+double? mean = await file.Scan<Ledger>().AvgAsync(l => l.Balance);
+```
+
+A sum as `VortexDecimal` carries 38 digits while it fits them, as a SQL sum of a narrower decimal
+does, and 76 beyond; one past 76 digits throws `OverflowException`, as a `decimal` sum past 96 bits
+does. An `Int128`, a `UInt128` or a `BigInteger` member sums as its own type, the last never
+throwing. `MinAsync` and `MaxAsync` order decimals as the numbers they are, the group keys of a
+`GroupBy` may be decimals of 256 bits, and every aggregate reads the column where it lies, a
+dictionary or run-end block included.
+
 ## Watch out
 
 * **A sum has the column's type.** It accumulates exactly in 128 bits and throws when the result

@@ -204,8 +204,13 @@ internal static class RecordEmitter
         for (int k = 0; k < model.Members.Count; k++)
         {
             ValueModel value = model.Members[k].Value;
-            nested |= value.Kind == ValueKind.Record;
-            if (value.Kind == ValueKind.List)
+            nested |= value.Kind == ValueKind.Record || value.IsRecordList;
+            if (value.IsRecordList)
+            {
+                w.Line();
+                EmitRecordListContainer(w, value, "RecordList" + k);
+            }
+            else if (value.Kind == ValueKind.List)
             {
                 w.Line();
                 EmitReadList(w, value, "ReadList" + k);
@@ -278,12 +283,19 @@ internal static class RecordEmitter
             case ValueKind.Record:
                 EmitReadNested(w, value, k, target);
                 break;
+            case ValueKind.List when value.IsRecordList:
+                EmitReadRecordList(w, value, k, target);
+                break;
+            case ValueKind.Map:
+                EmitReadMap(w, value, k, target);
+                break;
             case ValueKind.List:
                 w.Line($"{Vortex}Column<{value.ColumnType}> column = columns.Column<{value.ColumnType}>({k});");
                 w.Line($"{Vortex}Column<{value.Element!.ColumnType}> elements = column.Elements;");
+                string list = Contain(value, $"ReadList{k}(column, elements, i)");
                 Loop(w, value.IsNullable
-                    ? $"{target} = column.IsValid(i) ? new global::System.ReadOnlyMemory<{value.Element.MemberType}>(ReadList{k}(column, elements, i)) : default({value.MemberType});"
-                    : $"{target} = ReadList{k}(column, elements, i);");
+                    ? $"{target} = column.IsValid(i) ? {list} : default({value.MemberType});"
+                    : $"{target} = {list};");
                 break;
             default:
                 if (value.IsNumber && !value.IsNullable)
@@ -336,7 +348,8 @@ internal static class RecordEmitter
     private static bool Copies(ValueModel value) =>
         value.Kind == ValueKind.Scalar
         && value.Scalar is ScalarKind.Bool or ScalarKind.Utf8 or ScalarKind.Decimal or ScalarKind.WideDecimal
-            or ScalarKind.Date or ScalarKind.Time or ScalarKind.Timestamp or ScalarKind.ZonedTimestamp or ScalarKind.Uuid;
+            or ScalarKind.Date or ScalarKind.Time or ScalarKind.Timestamp or ScalarKind.ZonedTimestamp or ScalarKind.Uuid
+            or ScalarKind.Duration or ScalarKind.Int128 or ScalarKind.UInt128 or ScalarKind.BigInteger;
 
     /// <summary>
     /// Reads member <paramref name="k"/>'s nested record into a rented temporary, then copies it to
@@ -395,30 +408,182 @@ internal static class RecordEmitter
         {
             ScalarKind.Utf8 when value.Kind == ValueKind.Scalar => $"{column}.GetString({index})" + (value.IsNullable ? string.Empty : "!"),
             ScalarKind.Binary when value.Kind == ValueKind.Scalar => value.IsNullable
-                ? $"{column}.IsValid({index}) ? new global::System.ReadOnlyMemory<byte>({column}[{index}].ToArray()) : default(global::System.ReadOnlyMemory<byte>?)"
-                : $"new global::System.ReadOnlyMemory<byte>({column}[{index}].ToArray())",
+                ? $"{column}.IsValid({index}) ? {Bytes(value, $"{column}[{index}]")} : default({value.MemberType})"
+                : Bytes(value, $"{column}[{index}]"),
             _ => $"{column}[{index}]",
         };
     }
 
-    /// <summary>A local function that copies one list of <paramref name="list"/>'s column into a new array.</summary>
+    /// <summary>
+    /// Reads member <paramref name="k"/>'s lists of records: every record of the batch's lists in one
+    /// read of the nested record, into a rented buffer, then each row's range copied out of it.
+    /// </summary>
+    private static void EmitReadRecordList(SourceWriter w, ValueModel value, int k, string target)
+    {
+        string nested = value.Element!.CoreType;
+        w.Line($"{Vortex}ListColumns<{nested}> lists = columns.ListOf<{nested}>({k});");
+        w.Line($"{Vortex}Columns<{nested}> elements = lists.Elements;");
+        w.Line("int total = elements.RowCount;");
+        w.Line($"{nested}[] all = {Pool}{nested}>.Shared.Rent(total);");
+        w.Open("try");
+        w.Line($"ReadNested(elements, new global::System.Span<{nested}>(all, 0, total));");
+        w.Open("for (int i = 0; i < count; i++)");
+        w.Line("(int offset, int length) = lists[i].GetOffsetAndLength(total);");
+        string read = $"RecordList{k}(new global::System.ReadOnlySpan<{nested}>(all, offset, length))";
+        w.Line(value.IsNullable ? $"{target} = lists.IsValid(i) ? {read} : default({value.MemberType});" : $"{target} = {read};");
+        w.Close();
+        w.Close();
+        w.Open("finally");
+        w.Line($"{Pool}{nested}>.Shared.Return(all, {ContainsReferences}{nested}>());");
+        w.Close();
+    }
+
+    /// <summary>Reads member <paramref name="k"/>'s maps: each row's entries into a dictionary sized for them.</summary>
+    private static void EmitReadMap(SourceWriter w, ValueModel value, int k, string target)
+    {
+        ValueModel key = value.Key!;
+        ValueModel item = value.Element!;
+        w.Line($"{Vortex}MapColumns<{key.ColumnType}, {item.ColumnType}> maps = columns.MapOf<{key.ColumnType}, {item.ColumnType}>({k});");
+        w.Line($"{Vortex}Column<{key.ColumnType}> keys = maps.Keys;");
+        w.Line($"{Vortex}Column<{item.ColumnType}> values = maps.Values;");
+        string keyRead = EntryRead(w, key, "keys", "keyValues");
+        string valueRead = EntryRead(w, item, "values", "valueValues");
+        string dictionary = $"global::System.Collections.Generic.Dictionary<{key.MemberType}, {item.MemberType}>";
+        w.Open("for (int i = 0; i < count; i++)");
+        if (value.IsNullable)
+        {
+            w.Open("if (!maps.IsValid(i))");
+            w.Line($"{target} = default;");
+            w.Line("continue;");
+            w.Close();
+            w.Line();
+        }
+
+        w.Line("(int offset, int length) = maps[i].GetOffsetAndLength(keys.Length);");
+        w.Line($"{dictionary} map = new {dictionary}(length);");
+        w.Open("for (int j = offset; j < offset + length; j++)");
+        w.Line($"map[{keyRead}] = {valueRead};");
+        w.Close();
+        w.Line();
+        w.Line($"{target} = map;");
+        w.Close();
+    }
+
+    /// <summary>
+    /// The expression of entry <c>j</c> of a map's keys or values: a number from the column's
+    /// values, resolved once before the loop, anything else through its column.
+    /// </summary>
+    private static string EntryRead(SourceWriter w, ValueModel entry, string column, string span)
+    {
+        if (entry.IsNumber && !entry.IsNullable)
+        {
+            w.Line($"global::System.ReadOnlySpan<{entry.UnderlyingType}> {span} = {column}.Values;");
+            return entry.Kind == ValueKind.Enum ? $"({entry.MemberType}){span}[j]" : $"{span}[j]";
+        }
+
+        return ScalarRead(entry, column, "j");
+    }
+
+    /// <summary>Writes member <paramref name="k"/>'s maps: each row's entries, a key and its value, between its map's ends.</summary>
+    private static void EmitWriteMap(SourceWriter w, ValueModel value, int k, string source, ref int unique)
+    {
+        ValueModel key = value.Key!;
+        ValueModel item = value.Element!;
+        w.Line($"{Vortex}MapColumnsBuilder<{key.ColumnType}, {item.ColumnType}> maps = builder.MapOf<{key.ColumnType}, {item.ColumnType}>({k});");
+        w.Line($"{Vortex}ColumnBuilder<{key.ColumnType}> keys = maps.Keys;");
+        w.Line($"{Vortex}ColumnBuilder<{item.ColumnType}> values = maps.Values;");
+        w.Open("for (int i = 0; i < count; i++)");
+        if (value.IsNullable)
+        {
+            w.Open($"if ({source} is not {{ }} map)");
+            w.Line("maps.AppendNull();");
+            w.Line("continue;");
+            w.Close();
+            w.Line();
+        }
+        else
+        {
+            w.Line($"var map = {source};");
+        }
+
+        w.Line("maps.BeginMap();");
+        w.Open($"foreach (global::System.Collections.Generic.KeyValuePair<{key.MemberType}, {item.MemberType}> entry in map)");
+        EmitWriteValue(w, key, "keys", "entry.Key", ref unique);
+        EmitWriteValue(w, item, "values", "entry.Value", ref unique);
+        w.Close();
+        w.Line();
+        w.Line("maps.EndMap();");
+        w.Close();
+    }
+
+    /// <summary>A local function that copies one row's records into the container the member declares.</summary>
+    private static void EmitRecordListContainer(SourceWriter w, ValueModel list, string name)
+    {
+        string nested = list.Element!.CoreType;
+        w.Open($"static {list.CoreType} {name}(global::System.ReadOnlySpan<{nested}> records)");
+        switch (list.Shape)
+        {
+            case ListShape.List:
+                w.Line($"global::System.Collections.Generic.List<{nested}> list = new global::System.Collections.Generic.List<{nested}>(records.Length);");
+                w.Line("global::System.Runtime.InteropServices.CollectionsMarshal.SetCount(list, records.Length);");
+                w.Line("records.CopyTo(global::System.Runtime.InteropServices.CollectionsMarshal.AsSpan(list));");
+                w.Line("return list;");
+                break;
+            default:
+                w.Line($"return {Contain(list, "records.ToArray()")};");
+                break;
+        }
+
+        w.Close();
+    }
+
+    /// <summary>
+    /// A local function that copies one list of <paramref name="list"/>'s column into a new array,
+    /// or straight into a new <c>List&lt;T&gt;</c> for a member declared as one, so that no array is
+    /// copied twice.
+    /// </summary>
     private static void EmitReadList(SourceWriter w, ValueModel list, string name)
     {
         ValueModel element = list.Element!;
-        w.Open($"static {element.MemberType}[] {name}({Vortex}Column<{list.ColumnType}> column, {Vortex}Column<{element.ColumnType}> elements, int row)");
+        bool asList = list.Shape == ListShape.List;
+        string returns = asList ? $"global::System.Collections.Generic.List<{element.MemberType}>" : $"{element.MemberType}[]";
+        w.Open($"static {returns} {name}({Vortex}Column<{list.ColumnType}> column, {Vortex}Column<{element.ColumnType}> elements, int row)");
         w.Line("(int offset, int length) = column[row].GetOffsetAndLength(elements.Length);");
-        if (element.IsNumber && !element.IsNullable && element.Kind == ValueKind.Scalar)
+        bool bulk = element.IsNumber && !element.IsNullable && element.Kind == ValueKind.Scalar;
+        if (!asList && bulk)
         {
             w.Line("return elements.Values.Slice(offset, length).ToArray();");
             w.Close();
             return;
         }
 
-        w.Open("if (length == 0)");
-        w.Line("return [];");
-        w.Close();
-        w.Line();
-        w.Line($"{element.MemberType}[] list = new {element.MemberType}[length];");
+        string into;
+        if (asList)
+        {
+            w.Line($"{returns} list = new {returns}(length);");
+            w.Line("global::System.Runtime.InteropServices.CollectionsMarshal.SetCount(list, length);");
+            w.Line($"global::System.Span<{element.MemberType}> into = global::System.Runtime.InteropServices.CollectionsMarshal.AsSpan(list);");
+            into = "into";
+            if (bulk)
+            {
+                w.Line("elements.Values.Slice(offset, length).CopyTo(into);");
+                w.Line("return list;");
+                w.Close();
+                return;
+            }
+        }
+        else
+        {
+            w.Open("if (length == 0)");
+            w.Line("return [];");
+            w.Close();
+            w.Line();
+            // Every element is written below, and an array of arrays has no `new T[n]` spelling
+            // that holds for any T: `new int[][n]` is not C#.
+            w.Line($"{element.MemberType}[] list = global::System.GC.AllocateUninitializedArray<{element.MemberType}>(length);");
+            into = "list";
+        }
+
         string read;
         if (element.IsNumber && !element.IsNullable)
         {
@@ -428,9 +593,9 @@ internal static class RecordEmitter
         else if (element.Kind == ValueKind.List)
         {
             w.Line($"{Vortex}Column<{element.Element!.ColumnType}> inner = elements.Elements;");
-            string call = $"{name}_(elements, inner, offset + j)";
+            string call = Contain(element, $"{name}_(elements, inner, offset + j)");
             read = element.IsNullable
-                ? $"elements.IsValid(offset + j) ? new global::System.ReadOnlyMemory<{element.Element.MemberType}>({call}) : default({element.MemberType})"
+                ? $"elements.IsValid(offset + j) ? {call} : default({element.MemberType})"
                 : call;
         }
         else
@@ -439,7 +604,7 @@ internal static class RecordEmitter
         }
 
         w.Open("for (int j = 0; j < length; j++)");
-        w.Line($"list[j] = {read};");
+        w.Line($"{into}[j] = {read};");
         w.Close();
         w.Line();
         w.Line("return list;");
@@ -450,6 +615,36 @@ internal static class RecordEmitter
             EmitReadList(w, element, name + "_");
         }
     }
+
+    /// <summary>
+    /// A list read into an array, or into a list for a <c>List&lt;T&gt;</c>, as the member's
+    /// container: an array is already every interface it implements, and an immutable array wraps it
+    /// without a copy.
+    /// </summary>
+    private static string Contain(ValueModel list, string read) => list.Shape switch
+    {
+        ListShape.ReadOnlyMemory => $"new global::System.ReadOnlyMemory<{list.Element!.MemberType}>({read})",
+        ListShape.Memory => $"new global::System.Memory<{list.Element!.MemberType}>({read})",
+        ListShape.ImmutableArray => $"global::System.Runtime.InteropServices.ImmutableCollectionsMarshal.AsImmutableArray({read})",
+        _ => read,
+    };
+
+    /// <summary>A binary value's borrowed bytes copied into the buffer the member declares.</summary>
+    private static string Bytes(ValueModel value, string span) => value.Shape switch
+    {
+        ListShape.Array => $"{span}.ToArray()",
+        ListShape.Memory => $"new global::System.Memory<byte>({span}.ToArray())",
+        _ => $"new global::System.ReadOnlyMemory<byte>({span}.ToArray())",
+    };
+
+    /// <summary>The span over a binary value's bytes, or over a list's elements, whatever holds them.</summary>
+    private static string SpanOf(ValueModel value, string element, string source) => value.Shape switch
+    {
+        ListShape.ReadOnlyMemory or ListShape.Memory => $"{source}.Span",
+        ListShape.Array => $"new global::System.ReadOnlySpan<{element}>({source})",
+        ListShape.List => $"global::System.Runtime.InteropServices.CollectionsMarshal.AsSpan({source})",
+        _ => $"{source}.AsSpan()",
+    };
 
     private static void EmitWriteRows(SourceWriter w, RecordModel model)
     {
@@ -478,6 +673,15 @@ internal static class RecordEmitter
             {
                 nested = true;
                 EmitWriteNested(w, value, k, source);
+            }
+            else if (value.IsRecordList)
+            {
+                nested = true;
+                EmitWriteRecordList(w, value, k, source);
+            }
+            else if (value.Kind == ValueKind.Map)
+            {
+                EmitWriteMap(w, value, k, source, ref unique);
             }
             else if (value.IsNumber && !value.IsNullable)
             {
@@ -556,6 +760,35 @@ internal static class RecordEmitter
         w.Close();
     }
 
+    /// <summary>Writes member <paramref name="k"/>'s lists of records: each row's records in one write of the nested record, between its list's ends.</summary>
+    private static void EmitWriteRecordList(SourceWriter w, ValueModel value, int k, string source)
+    {
+        string nested = value.Element!.CoreType;
+        w.Line($"{Vortex}ListColumnsBuilder<{nested}> lists = builder.ListOf<{nested}>({k});");
+        w.Line($"{Vortex}ColumnsBuilder<{nested}> elements = lists.Elements;");
+        w.Open("for (int i = 0; i < count; i++)");
+        if (value.IsNullable)
+        {
+            w.Open($"if ({source} is not {{ }} records)");
+            w.Line("lists.AppendNull();");
+            w.Line("continue;");
+            w.Close();
+            w.Line();
+        }
+        else
+        {
+            w.Line($"var records = {source};");
+        }
+
+        string span = value.Shape == ListShape.Sequence
+            ? $"global::System.Linq.Enumerable.ToArray(records)"
+            : SpanOf(value, nested, "records");
+        w.Line("lists.BeginList();");
+        w.Line($"WriteNested(elements, {span});");
+        w.Line("lists.EndList();");
+        w.Close();
+    }
+
     /// <summary>Appends <paramref name="source"/>, one value of <paramref name="value"/>'s type, to <paramref name="builder"/>.</summary>
     private static void EmitWriteValue(SourceWriter w, ValueModel value, string builder, string source, ref int unique)
     {
@@ -576,10 +809,10 @@ internal static class RecordEmitter
                 return;
             case ScalarKind.Binary when value.IsNullable:
                 string bytes = "bytes" + unique++;
-                IfPresent(w, builder, source, bytes, $"{builder}.Append({bytes}.Span);");
+                IfPresent(w, builder, source, bytes, $"{builder}.Append({SpanOf(value, "byte", bytes)});");
                 return;
             case ScalarKind.Binary:
-                w.Line($"{builder}.Append({source}.Span);");
+                w.Line($"{builder}.Append({SpanOf(value, "byte", source)});");
                 return;
             case null:
                 break;
@@ -615,18 +848,18 @@ internal static class RecordEmitter
 
     private static void EmitWriteList(SourceWriter w, ValueModel list, string builder, string source, ref int unique)
     {
-        if (list.ElementsAsDeclared)
+        ValueModel element = list.Element!;
+        if (list.ElementsAsDeclared && list.Shape != ListShape.Sequence)
         {
-            w.Line($"{builder}.Append({source}.Span);");
+            w.Line($"{builder}.Append({SpanOf(list, element.MemberType, source)});");
             return;
         }
 
-        ValueModel element = list.Element!;
         string elements = "elements" + unique++;
         string item = "item" + unique++;
         w.Line($"{builder}.BeginList();");
         w.Line($"var {elements} = {builder}.Elements;");
-        w.Open($"foreach ({element.MemberType} {item} in {source}.Span)");
+        w.Open($"foreach ({element.MemberType} {item} in {(list.Shape == ListShape.Sequence ? source : SpanOf(list, element.MemberType, source))})");
         EmitWriteValue(w, element, elements, item, ref unique);
         w.Close();
         w.Line();
@@ -681,6 +914,12 @@ internal static class RecordEmitter
         {
             MemberModel member = model.Members[k];
             ValueModel value = member.Value;
+            if (value.IsRecordList || value.Kind == ValueKind.Map)
+            {
+                // No filter compares a list of records or a map, so neither has a symbol.
+                continue;
+            }
+
             Separate(w, k);
             w.Line($"/// <summary>The symbol of <see cref=\"{Cref(member)}\"/>, for the lambdas of a scan.</summary>");
             w.Line(value.Kind == ValueKind.Record
@@ -727,7 +966,11 @@ internal static class RecordEmitter
             w.Line($"/// <summary>The builder of <see cref=\"{Cref(member)}\"/>.</summary>");
             w.Line(value.Kind == ValueKind.Record
                 ? $"public {Vortex}ColumnsBuilder<{value.CoreType}> {RecordAnalysis.Escape(member.Name)} => {names.BuilderName}.Struct<{value.CoreType}>({k});"
-                : $"public {Vortex}ColumnBuilder<{value.ColumnType}> {RecordAnalysis.Escape(member.Name)} => {names.BuilderName}.Column<{value.ColumnType}>({k});");
+                : value.IsRecordList
+                    ? $"public {Vortex}ListColumnsBuilder<{value.Element!.CoreType}> {RecordAnalysis.Escape(member.Name)} => {names.BuilderName}.ListOf<{value.Element.CoreType}>({k});"
+                    : value.Kind == ValueKind.Map
+                        ? $"public {Vortex}MapColumnsBuilder<{value.Key!.ColumnType}, {value.Element!.ColumnType}> {RecordAnalysis.Escape(member.Name)} => {names.BuilderName}.MapOf<{value.Key.ColumnType}, {value.Element.ColumnType}>({k});"
+                        : $"public {Vortex}ColumnBuilder<{value.ColumnType}> {RecordAnalysis.Escape(member.Name)} => {names.BuilderName}.Column<{value.ColumnType}>({k});");
         }
 
         w.Close();
@@ -735,10 +978,16 @@ internal static class RecordEmitter
     }
 
     private static string ColumnsType(ValueModel value) =>
-        value.Kind == ValueKind.Record ? $"{Vortex}Columns<{value.CoreType}>" : $"{Vortex}Column<{value.ColumnType}>";
+        value.Kind == ValueKind.Record ? $"{Vortex}Columns<{value.CoreType}>"
+        : value.IsRecordList ? $"{Vortex}ListColumns<{value.Element!.CoreType}>"
+        : value.Kind == ValueKind.Map ? $"{Vortex}MapColumns<{value.Key!.ColumnType}, {value.Element!.ColumnType}>"
+        : $"{Vortex}Column<{value.ColumnType}>";
 
     private static string ColumnsAccess(ValueModel value, string receiver, int k) =>
-        value.Kind == ValueKind.Record ? $"{receiver}.Struct<{value.CoreType}>({k})" : $"{receiver}.Column<{value.ColumnType}>({k})";
+        value.Kind == ValueKind.Record ? $"{receiver}.Struct<{value.CoreType}>({k})"
+        : value.IsRecordList ? $"{receiver}.ListOf<{value.Element!.CoreType}>({k})"
+        : value.Kind == ValueKind.Map ? $"{receiver}.MapOf<{value.Key!.ColumnType}, {value.Element!.ColumnType}>({k})"
+        : $"{receiver}.Column<{value.ColumnType}>({k})";
 
     private static void Separate(SourceWriter w, int k)
     {

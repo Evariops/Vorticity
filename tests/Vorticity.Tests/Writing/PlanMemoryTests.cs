@@ -40,7 +40,7 @@ public sealed class PlanMemoryTests
     /// <summary>
     /// Four chunks of one i64 column -- a bit-packed one, a progression, a constant, a progression
     /// -- each one block long. After the packing has held, the progression must still be written as
-    /// a sequence and the constant as a single run: the verdicts the reference chooser reaches on
+    /// a sequence and the constant as a constant: the verdicts the reference chooser reaches on
     /// every chunk, and the bytes the writer produces without plan memory.
     /// </summary>
     [Fact]
@@ -52,8 +52,11 @@ public sealed class PlanMemoryTests
         (long size, List<string> disagreements) = await Write(rowBlock: Rows);
         // The framing includes the file's identity, which every postscript carries (16 bytes of
         // value, the entry's key and segment in the postscript, and the padding they move: 104
-        // bytes here), and the file statistics segment (120 bytes).
-        Assert.Equal(19_156, size);
+        // bytes here), and the file statistics segment (120 bytes). The constant is 96 bytes over
+        // the progression of step zero it used to be: its scalar is a buffer, which moves the
+        // segment past an alignment boundary, and its id is one more in the footer's list -- the
+        // price of a chunk a scan keeps as one value, where the progression decodes to its rows.
+        Assert.Equal(19_252, size);
         Assert.True(
             disagreements.Count == 0,
             "the chooser and the reference disagree on " + disagreements.Count + " chunk(s):\n  "
@@ -77,7 +80,7 @@ public sealed class PlanMemoryTests
     public async Task AProgressionThatStartsAChunkAfterAJumpIsStillAProgression()
     {
         (long size, List<string> disagreements) = await Write(rowBlock: 1024);
-        Assert.Equal(19_828, size);
+        Assert.Equal(19_924, size);
         Assert.True(
             disagreements.Count == 0,
             "the chooser and the reference disagree on " + disagreements.Count + " chunk(s):\n  "

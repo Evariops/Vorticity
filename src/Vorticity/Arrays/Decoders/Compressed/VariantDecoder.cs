@@ -196,8 +196,8 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
             ? context.DecodeChildSelected(in node, first + 1, valueType, length, wanted)
             : context.DecodeChild(in node, first + 1, valueType, length);
 
-        RequireBinary(context, metadataChild, produced, "metadata");
-        RequireBinary(context, valueChild, produced, "value");
+        metadataChild = RequireBinary(context, metadataChild, produced, "metadata");
+        valueChild = RequireBinary(context, valueChild, produced, "value");
 
         Span<int> fields = stackalloc int[2];
         fields[0] = metadataChild;
@@ -208,8 +208,17 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
         return context.Canonical.AddStruct(dtype, produced, validity, fields);
     }
 
-    private static void RequireBinary(ArrayDecodeContext context, int child, int length, string what)
+    /// <summary>
+    /// The child as a dense binary column: one checked for its kind and length, a constant -- one
+    /// metadata for every row is the common case -- expanded as a dense child would have held it.
+    /// </summary>
+    private static int RequireBinary(ArrayDecodeContext context, int child, int length, string what)
     {
+        if (context.Canonical.GetNode(child).Kind == CanonicalKind.Constant)
+        {
+            child = context.Canonical.MaterializeConstant(child);
+        }
+
         CanonicalNode node = context.Canonical.GetNode(child);
         if (node.Kind != CanonicalKind.VarBinView)
         {
@@ -220,6 +229,8 @@ internal sealed class ParquetVariantDecoder : ArrayDecoder
         {
             CompressedThrow.ChildLength(Id, what, node.Length, length);
         }
+
+        return child;
     }
 }
 

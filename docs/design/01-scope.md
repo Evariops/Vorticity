@@ -58,7 +58,7 @@ and trimming.
   ([90-registry.md](90-registry.md)). The reference reads every file this writer produces, value
   for value, in CI.
 - **Encodings chosen per chunk**, by exact formulas over statistics computed in one pass, with a
-  trial only for zstd, FSST, ALP and ALP-RD ([11-write-strategy.md](11-write-strategy.md)).
+  trial only for zstd, pco, FSST, OnPair, ALP and ALP-RD ([11-write-strategy.md](11-write-strategy.md)).
 - **Pruning structures**: a zone map per block of 8 192 rows, file statistics, bounded string
   bounds, and on request the skipping and locating indexes of [10-indexes.md](10-indexes.md), which
   a Rust reader ignores.
@@ -96,7 +96,7 @@ top of that:
 
 | guarantee | held by |
 |---|---|
-| every corpus file Rust wrote is read value for value | the conformance corpus, 856 files over seven editions ([04-conformance.md](04-conformance.md) §3) |
+| every corpus file Rust wrote is read value for value | the conformance corpus, 876 files over seven editions ([04-conformance.md](04-conformance.md) §3) |
 | Rust reads every file this library writes | the cross-check in CI ([04-conformance.md](04-conformance.md) §4) |
 | a scan allocates nothing per batch in steady state | allocation ratchets in the test suite ([05-benchmarks.md](05-benchmarks.md) §5) |
 | a full scan within 2× of Rust's time, a decoder within 1.5×, files no larger than 105 % of Rust's | the benchmark gates, and `WrittenSizeTests` for the bytes ([05-benchmarks.md](05-benchmarks.md) §1); where each stands is on [the benchmark page](../guide/benchmarks.md) |

@@ -1,9 +1,11 @@
 using System;
+using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Types;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Compute;
 
@@ -57,16 +59,38 @@ internal static class Extremes
             case CanonicalKind.VarBinView:
                 return Bytes(node, mask, rows, listed, wantMin, out bestRow);
 
+            case CanonicalKind.Decimal:
+                return Decimal(node, mask, rows, listed, wantMin, out bestRow);
+
             case CanonicalKind.Constant:
                 // Every row holds the same value, so every valid row is both the minimum and the
-                // maximum: the answer is the first one, and `wantMin` does not enter into it.
-                return FirstValid(mask, rows, listed, count, out bestRow);
+                // maximum: the answer is the first one, and `wantMin` does not enter into it --
+                // unless the value is a NaN, which an extreme skips, and then there is none.
+                return !IsNaN(node) && FirstValid(mask, rows, listed, count, out bestRow);
 
             default:
                 throw new NotSupportedException(
                     $"A {node.Kind} column has no minimum or maximum a filter can take: only " +
-                    "booleans, primitives, utf8 and binary do, plus extensions over those.");
+                    "booleans, primitives, decimals, utf8 and binary do, plus extensions over those.");
         }
+    }
+
+    /// <summary>Whether a constant's one value is a floating-point NaN.</summary>
+    private static bool IsNaN(CanonicalNode node)
+    {
+        if (node.DType.Kind != DTypeKind.Primitive)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<byte> element = node.ConstantElement;
+        return node.DType.PType switch
+        {
+            PType.F16 => Half.IsNaN(BinaryPrimitives.ReadHalfLittleEndian(element)),
+            PType.F32 => float.IsNaN(BinaryPrimitives.ReadSingleLittleEndian(element)),
+            PType.F64 => double.IsNaN(BinaryPrimitives.ReadDoubleLittleEndian(element)),
+            _ => false,
+        };
     }
 
     /// <summary>The first row of the selection that is not null, for a column with one value.</summary>
@@ -144,6 +168,50 @@ internal static class Extremes
             PType.F32 => Best<float>(bytes, mask, rows, listed, wantMin, out bestRow),
             _ => Best<double>(bytes, mask, rows, listed, wantMin, out bestRow),
         };
+    }
+
+    /// <summary>A decimal's unscaled values, which order as the numbers they scale to: every row of a column shares its scale.</summary>
+    private static bool Decimal(
+        CanonicalNode node, ValidityMask mask, ReadOnlySpan<int> rows, bool listed, bool wantMin, out int bestRow)
+    {
+        ReadOnlySpan<byte> bytes = node.Values.Span;
+        return node.Storage switch
+        {
+            DecimalStorageType.I8 => Best<sbyte>(bytes, mask, rows, listed, wantMin, out bestRow),
+            DecimalStorageType.I16 => Best<short>(bytes, mask, rows, listed, wantMin, out bestRow),
+            DecimalStorageType.I32 => Best<int>(bytes, mask, rows, listed, wantMin, out bestRow),
+            DecimalStorageType.I64 => Best<long>(bytes, mask, rows, listed, wantMin, out bestRow),
+            DecimalStorageType.I128 => Best<Int128>(bytes, mask, rows, listed, wantMin, out bestRow),
+            _ => Wide(bytes, mask, rows, listed, wantMin, out bestRow),
+        };
+    }
+
+    /// <summary><see cref="Best{T}"/> for 256-bit values, which have an order and no NaN.</summary>
+    private static bool Wide(
+        ReadOnlySpan<byte> bytes, ValidityMask mask, ReadOnlySpan<int> rows, bool listed, bool wantMin, out int bestRow)
+    {
+        ReadOnlySpan<Int256> values = MemoryMarshal.Cast<byte, Int256>(bytes);
+        int count = listed ? rows.Length : values.Length;
+        bool allValid = mask.AllValid;
+        bestRow = -1;
+        Int256 best = default;
+        for (int i = 0; i < count; i++)
+        {
+            int row = listed ? rows[i] : i;
+            if (!allValid && !mask.IsValid(row))
+            {
+                continue;
+            }
+
+            int order = values[row].CompareTo(best);
+            if (bestRow < 0 || (wantMin ? order < 0 : order > 0))
+            {
+                best = values[row];
+                bestRow = row;
+            }
+        }
+
+        return bestRow >= 0;
     }
 
     /// <summary>

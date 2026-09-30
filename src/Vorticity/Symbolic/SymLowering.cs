@@ -32,7 +32,7 @@ internal static class SymLowering
         }
 
         ClrShape shape = ClrShape.For<T>.Value;
-        if (shape.Kind is ClrKind.Decimal or ClrKind.VortexDecimal)
+        if (IsDecimal(shape.Kind))
         {
             return CompareDecimal(column, op, value);
         }
@@ -104,6 +104,10 @@ internal static class SymLowering
     private static DateTime Utc(VortexType type, DateTime instant) =>
         type.TimeZone is not null && instant.Kind == DateTimeKind.Local ? instant.ToUniversalTime() : instant;
 
+    /// <summary>Whether a .NET value compares with its column as a decimal does: by its unscaled value at the column's scale.</summary>
+    private static bool IsDecimal(ClrKind kind) =>
+        kind is ClrKind.Decimal or ClrKind.VortexDecimal or ClrKind.Integer128 or ClrKind.UInteger128 or ClrKind.BigInteger;
+
     internal static Predicate Compare(ColumnSym left, ComparisonOp op, ColumnSym right)
     {
         if (!left.Type.NonNullable.Equals(right.Type.NonNullable))
@@ -125,7 +129,7 @@ internal static class SymLowering
                 continue;
             }
 
-            if (shape.Kind is ClrKind.Decimal or ClrKind.VortexDecimal)
+            if (IsDecimal(shape.Kind))
             {
                 if (TryExactDecimal(column, value, out FilterLiteral exact))
                 {
@@ -192,9 +196,18 @@ internal static class SymLowering
             case ClrKind.Bool:
                 return FilterLiteral.From((bool)boxed);
             case ClrKind.Signed:
-                return FilterLiteral.From(Convert.ToInt64(boxed, System.Globalization.CultureInfo.InvariantCulture));
+                return FilterLiteral.From(boxed is nint native ? native : Convert.ToInt64(boxed, System.Globalization.CultureInfo.InvariantCulture));
             case ClrKind.Unsigned:
-                return FilterLiteral.From(Convert.ToUInt64(boxed, System.Globalization.CultureInfo.InvariantCulture));
+                return FilterLiteral.From(boxed switch
+                {
+                    nuint unsigned => unsigned,
+                    char unit => unit,
+                    _ => Convert.ToUInt64(boxed, System.Globalization.CultureInfo.InvariantCulture),
+                });
+            case ClrKind.TimeSpan:
+                return FilterLiteral.From(((TimeSpan)boxed).Ticks);
+            case ClrKind.Integer128 or ClrKind.UInteger128 or ClrKind.BigInteger:
+                return WideLiteral(MantissaOf(boxed).Mantissa);
             case ClrKind.Float:
                 return FilterLiteral.From(boxed is Half half ? (double)half : Convert.ToDouble(boxed, System.Globalization.CultureInfo.InvariantCulture));
             case ClrKind.String:
@@ -267,6 +280,9 @@ internal static class SymLowering
     {
         decimal d => Mantissa(d),
         VortexDecimal v => (Int256Big(v), v.Scale),
+        Int128 integer => ((BigInteger)integer, 0),
+        UInt128 unsigned => ((BigInteger)unsigned, 0),
+        BigInteger big => (big, 0),
         _ => throw new VortexSchemaException($"{value.GetType()} is not a decimal."),
     };
 

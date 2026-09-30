@@ -74,8 +74,36 @@ public readonly struct VortexDecimal : IEquatable<VortexDecimal>, IComparable<Vo
     public static VortexDecimal FromInt64(long unscaled, byte precision, sbyte scale) =>
         new VortexDecimal(new Int256(unscaled), precision, scale);
 
+    /// <summary>Creates a decimal from an unscaled integer of up to 256 bits: the one way to a value past what <see cref="Int128"/> holds.</summary>
+    /// <param name="unscaled">The unscaled integer.</param>
+    /// <param name="precision">The DType's precision, 1..76.</param>
+    /// <param name="scale">The DType's scale.</param>
+    /// <returns>The decimal.</returns>
+    /// <exception cref="OverflowException"><paramref name="unscaled"/> does not fit 256 bits of two's complement.</exception>
+    /// <exception cref="VortexFormatException"><paramref name="precision"/> is outside 1..76.</exception>
+    public static VortexDecimal FromBigInteger(System.Numerics.BigInteger unscaled, byte precision, sbyte scale)
+    {
+        Span<byte> bytes = stackalloc byte[Int256.ByteCount];
+        bytes.Fill(unscaled.Sign < 0 ? (byte)0xFF : (byte)0);
+        if (!unscaled.TryWriteBytes(bytes, out _, isUnsigned: false, isBigEndian: false))
+        {
+            throw new OverflowException($"The unscaled value {unscaled} does not fit 256 bits.");
+        }
+
+        return new VortexDecimal(Int256.FromLittleEndianBytes(bytes), precision, scale);
+    }
+
     /// <summary>The unscaled integer.</summary>
     internal Int256 Unscaled => _unscaled;
+
+    /// <summary>The unscaled integer, of any width: the value is this times 10^-<see cref="Scale"/>.</summary>
+    /// <returns>The unscaled integer, which allocates.</returns>
+    public System.Numerics.BigInteger GetUnscaledValue()
+    {
+        Span<byte> bytes = stackalloc byte[Int256.ByteCount];
+        _unscaled.WriteLittleEndianBytes(bytes);
+        return new System.Numerics.BigInteger(bytes, isUnsigned: false, isBigEndian: false);
+    }
 
     /// <summary>The DType's precision, 1..76.</summary>
     public byte Precision => _precision;

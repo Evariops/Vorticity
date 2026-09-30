@@ -1,8 +1,12 @@
 using System;
+using System.Buffers;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+
+using Vorticity.Types;
+using Vorticity.Compute;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 
@@ -23,6 +27,12 @@ namespace Vorticity.Arrays.Decoders.Compressed.Pco;
 /// and a running sum of those widths, and the offset pass then reads value i at that running sum
 /// past the base. Reading an offset inline would consume the stream in the wrong order.
 /// </para>
+/// <para>
+/// Latents are held as <c>ulong</c> whatever their width. Every operation on them wraps, as
+/// upstream's do, so arithmetic modulo 2^64 leaves the low bits exactly what arithmetic at the
+/// latent's own width would; the bits above only have to be cleared where a latent is compared,
+/// indexed or shifted right, and the numbers are truncated to their width as they are stored.
+/// </para>
 /// </remarks>
 internal static class PcoPageDecoder
 {
@@ -35,7 +45,7 @@ internal static class PcoPageDecoder
     /// <summary>Values per batch. Also the size of the buffers in <see cref="PcoBatchScratch"/>.</summary>
     internal const int BatchSize = 256;
 
-    /// <summary>Decodes a page of 64-bit latents, joins them and writes them shifted by <paramref name="shift"/>.</summary>
+    /// <summary>Decodes a page, joins its latents into the chunk's numbers and writes them into <paramref name="target"/>.</summary>
     /// <param name="chunk">The chunk's metadata.</param>
     /// <param name="page">The page's bytes.</param>
     /// <param name="valueCount">Values in this page.</param>
@@ -47,12 +57,9 @@ internal static class PcoPageDecoder
     /// A batch's working buffers, caller-owned so that every page of a node shares one rental.
     /// </param>
     /// <param name="target">
-    /// Exactly <paramref name="valueCount"/> slots: the primary latents are decoded into them and
-    /// joined there, a batch at a time.
-    /// </param>
-    /// <param name="shift">
-    /// Added to every joined latent: 2^63 turns a signed type's ordered form back into two's
-    /// complement, zero leaves an unsigned type's as it is.
+    /// Exactly <paramref name="valueCount"/> numbers of the chunk's width, little-endian. A page of
+    /// 64-bit numbers is decoded straight into them and joined there, a batch at a time; a
+    /// narrower one is joined in the scratch's primary buffer and truncated into them.
     /// </param>
     /// <remarks>
     /// A batch of a latent variable is not always written: one that is a single value, or that
@@ -63,22 +70,12 @@ internal static class PcoPageDecoder
     /// </remarks>
     internal static void DecodeJoined(
         PcoChunkMeta chunk, ReadOnlySpan<byte> page, int valueCount, Span<ulong> secondaryBatch,
-        in PcoBatchScratch scratch, Span<ulong> target, ulong shift)
+        in PcoBatchScratch scratch, Span<byte> target)
     {
-        bool classic = chunk.Mode == PcoModeKind.Classic;
-        if (!classic && chunk.Mode != PcoModeKind.IntMult)
-        {
-            CompressedThrow.Format($"pco mode {chunk.Mode} is not decoded yet.");
-        }
-
-        if (!classic && chunk.Secondary is null)
-        {
-            CompressedThrow.Format("A pco IntMult chunk has no secondary latent variable.");
-        }
-
+        PcoNumber number = chunk.Number;
         PcoBitReader reader = new PcoBitReader(page);
 
-        // The latent states are the caller's and are reset, not built. Each one owns two small
+        // The latent states are the caller's and are reset, not built. Each one owns a few small
         // arrays, a page needs at most three of them and never keeps them, so `PcoDecoder` builds
         // them once per node and every page refills them in place rather than leaving a page's
         // worth of objects on the managed heap.
@@ -86,72 +83,126 @@ internal static class PcoPageDecoder
         // Reset rather than a ref struct over borrowed spans: this method returns the state, so
         // spans it captured could outlive their frame and ref-safety refuses it. Objects reused
         // per node are the same saving without that argument.
-        PcoLatentState? delta = chunk.DeltaLatent is { } deltaVar
-            ? scratch.States[0].Reset(ref reader, deltaVar, 0)
-            : null;
-        PcoLatentState primary = scratch.States[1].Reset(
-            ref reader, chunk.Primary, DeltaOrderFor(chunk, primary: true));
-        PcoLatentState? secondary = chunk.Secondary is { } secondaryVar
-            ? scratch.States[2].Reset(
-                ref reader, secondaryVar, DeltaOrderFor(chunk, primary: false))
-            : null;
-
-        reader.DrainEmptyByte("page metadata");
-
-        target = target[..valueCount];
-        ulong modeBase = chunk.ModeBase;
-        int done = 0;
-        while (done < valueCount)
+        //
+        // A lookback's states rent their windows as they reset, so the resets are inside the try
+        // whose finally gives the windows back, a reset that fails halfway included.
+        try
         {
-            int remaining = valueCount - done;
-            int batch = Math.Min(BatchSize, remaining);
-            Span<ulong> values = target.Slice(done, batch);
+            PcoDeltaKind secondaryDelta = chunk.SecondaryStateCount > 0 ? chunk.Delta : PcoDeltaKind.NoOp;
+            PcoLatentState? delta = chunk.DeltaLatent is { } deltaVar
+                ? scratch.States[0].Reset(ref reader, deltaVar, chunk, PcoDeltaKind.NoOp, 0, chunk.PrimaryStateCount)
+                : null;
+            PcoLatentState primary = scratch.States[1].Reset(
+                ref reader, chunk.Primary, chunk, chunk.Delta, chunk.PrimaryStateCount, chunk.PrimaryStateCount);
+            PcoLatentState? secondary = chunk.Secondary is { } secondaryVar
+                ? scratch.States[2].Reset(
+                    ref reader, secondaryVar, chunk, secondaryDelta, chunk.SecondaryStateCount, chunk.SecondaryStateCount)
+                : null;
 
-            delta?.ReadBatch(ref reader, remaining, batch, default, in scratch, out _, out _);
-            PcoBatchShape primaryShape = primary.ReadBatch(
-                ref reader, remaining, batch, values, in scratch, out ulong primaryFirst, out ulong primaryStep);
+            reader.DrainEmptyByte("page metadata");
 
-            // Read whatever the mode, so the reader moves past it; a classic chunk has none.
-            Span<ulong> second = secondary is null ? default : secondaryBatch[..batch];
-            PcoBatchShape secondaryShape = PcoBatchShape.Written;
-            ulong secondaryFirst = 0;
-            if (secondary is not null)
+            bool wide = number.LatentBits == 64;
+            int width = number.LatentBits / 8;
+            Span<ulong> wideTarget = wide ? MemoryMarshal.Cast<byte, ulong>(target)[..valueCount] : default;
+            int done = 0;
+            while (done < valueCount)
             {
-                secondaryShape = secondary.ReadBatch(
-                    ref reader, remaining, batch, second, in scratch, out secondaryFirst, out ulong secondaryStep);
-                if (secondaryShape == PcoBatchShape.Ramp)
+                int remaining = valueCount - done;
+                int batch = Math.Min(BatchSize, remaining);
+                Span<ulong> values = wide ? wideTarget.Slice(done, batch) : scratch.Primary[..batch];
+
+                // A lookback's own latents come first, and are what the others look back by.
+                ReadOnlySpan<ulong> lookbacks = delta is null ? default : delta.ReadLookbacks(ref reader, remaining, batch, in scratch);
+                PcoBatchShape primaryShape = primary.ReadBatch(
+                    ref reader, remaining, batch, values, lookbacks, in scratch, out ulong primaryFirst, out ulong primaryStep);
+
+                // Read whatever the mode, so the reader moves past it; a classic chunk has none.
+                Span<ulong> second = secondary is null ? default : secondaryBatch[..batch];
+                PcoBatchShape secondaryShape = PcoBatchShape.Written;
+                ulong secondaryFirst = 0;
+                if (secondary is not null)
                 {
-                    Ramp(second, secondaryFirst, secondaryStep);
-                    secondaryShape = PcoBatchShape.Written;
+                    secondaryShape = secondary.ReadBatch(
+                        ref reader, remaining, batch, second, lookbacks, in scratch, out secondaryFirst, out ulong secondaryStep);
+                    if (secondaryShape == PcoBatchShape.Ramp)
+                    {
+                        Ramp(second, secondaryFirst, secondaryStep);
+                        secondaryShape = PcoBatchShape.Written;
+                    }
                 }
+
+                JoinBatch(chunk, values, primaryShape, primaryFirst, primaryStep, second, secondaryShape, secondaryFirst);
+                if (!wide)
+                {
+                    // The joined numbers' bits are the low bits of each slot.
+                    IntegerNarrowing.Truncate<long>(
+                        MemoryMarshal.Cast<ulong, long>(values), width == 4 ? PType.I32 : PType.I16,
+                        target.Slice(done * width, batch * width));
+                }
+
+                done += batch;
             }
 
-            if (classic)
-            {
-                Shift(values, primaryShape, primaryFirst, primaryStep, shift);
-            }
-            else
-            {
-                Join(values, primaryShape, primaryFirst, primaryStep, second, secondaryShape, secondaryFirst, modeBase, shift);
-            }
-
-            done += batch;
+            reader.DrainEmptyByte("page");
+        }
+        finally
+        {
+            scratch.States[1].EndPage();
+            scratch.States[2].EndPage();
         }
     }
 
-    /// <summary>The delta order applied to one latent variable.</summary>
-    /// <remarks>
-    /// The primary always takes the chunk's delta; the secondary takes it only when the metadata
-    /// says so, and a lookback delta's own latent is never itself delta-encoded.
-    /// </remarks>
-    private static int DeltaOrderFor(PcoChunkMeta chunk, bool primary)
+    /// <summary>One batch's latents joined into numbers, in place, as the chunk's mode says.</summary>
+    private static void JoinBatch(
+        PcoChunkMeta chunk, Span<ulong> values, PcoBatchShape primaryShape, ulong primaryFirst, ulong primaryStep,
+        Span<ulong> second, PcoBatchShape secondaryShape, ulong secondaryFirst)
     {
-        if (chunk.Delta != PcoDeltaKind.Consecutive)
+        PcoNumber number = chunk.Number;
+        switch (chunk.Mode)
         {
-            return 0;
+            case PcoModeKind.Classic when number.Kind != PcoNumberKind.Float:
+                // The ordered form is shifted so the type's minimum is zero. For an unsigned type it
+                // is the value itself, and for a signed one the shift back is a single addition of
+                // the midpoint rather than a sign test.
+                Shift(values, primaryShape, primaryFirst, primaryStep, number.Kind == PcoNumberKind.Signed ? number.Mid : 0);
+                break;
+            case PcoModeKind.Classic:
+                Materialize(values, primaryShape, primaryFirst, primaryStep);
+                FloatsFromLatents(values, number);
+                break;
+            case PcoModeKind.IntMult:
+                Join(
+                    values, primaryShape, primaryFirst, primaryStep, second, secondaryShape, secondaryFirst,
+                    chunk.ModeBase, number.Kind == PcoNumberKind.Signed ? number.Mid : 0);
+                break;
+            case PcoModeKind.FloatMult:
+                Materialize(values, primaryShape, primaryFirst, primaryStep);
+                Materialize(second, secondaryShape, secondaryFirst, 0);
+                FloatMult(values, second, chunk);
+                break;
+            case PcoModeKind.FloatQuant:
+                Materialize(values, primaryShape, primaryFirst, primaryStep);
+                Materialize(second, secondaryShape, secondaryFirst, 0);
+                FloatQuant(values, second, number, (int)chunk.ModeBase);
+                break;
+            default:
+                Materialize(values, primaryShape, primaryFirst, primaryStep);
+                Lookup(values, chunk.Dictionary);
+                break;
         }
+    }
 
-        return primary || chunk.SecondaryUsesDelta ? chunk.DeltaOrder : 0;
+    /// <summary>A described batch written out: its one value, or its ramp.</summary>
+    private static void Materialize(Span<ulong> values, PcoBatchShape shape, ulong first, ulong step)
+    {
+        if (shape == PcoBatchShape.Constant)
+        {
+            values.Fill(first);
+        }
+        else if (shape == PcoBatchShape.Ramp)
+        {
+            Ramp(values, first, step);
+        }
     }
 
     /// <summary>
@@ -171,6 +222,169 @@ internal static class PcoPageDecoder
             default:
                 Add(values, shift);
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Each latent as the float it orders, <c>from_latent_ordered</c>: a latent with the top bit set
+    /// is a positive float with that bit cleared, one without it a negative float with every bit
+    /// flipped -- one exclusive or either way, of the sign bit or of every bit, as the top bit says.
+    /// </summary>
+    private static void FloatsFromLatents(Span<ulong> values, PcoNumber number)
+    {
+        int top = number.LatentBits - 1;
+        ulong sign = number.Mid;
+        int i = 0;
+        if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
+        {
+            int lanes = Vector<ulong>.Count;
+            Vector<ulong> signs = new Vector<ulong>(sign);
+            for (; i <= values.Length - lanes; i += lanes)
+            {
+                Vector<ulong> latent = Vector.LoadUnsafe(in values[i]);
+                Vector<ulong> flip = signs | ((Vector.ShiftRightLogical(latent, top) & Vector<ulong>.One) - Vector<ulong>.One);
+                (latent ^ flip).StoreUnsafe(ref values[i]);
+            }
+        }
+
+        for (; i < values.Length; i++)
+        {
+            ulong latent = values[i];
+            values[i] = latent ^ (sign | unchecked(((latent >> top) & 1) - 1));
+        }
+    }
+
+    /// <summary>
+    /// A FloatMult batch, <c>float_mult::join_latents</c>: the primary's integer, as a float, times
+    /// the base, its ordered latent moved by the secondary's adjustment and recentred.
+    /// </summary>
+    /// <remarks>
+    /// The product is taken in the numbers' own type, so each width has its loop: it is what the
+    /// encoder took, and the adjustment is what makes it exact.
+    /// </remarks>
+    private static void FloatMult(Span<ulong> values, ReadOnlySpan<ulong> adjustments, PcoChunkMeta chunk)
+    {
+        PcoNumber number = chunk.Number;
+        ulong mask = number.Mask;
+        ulong mid = number.Mid;
+        ulong baseBits = number.FromLatentOrdered(chunk.ModeBase);
+        adjustments = adjustments[..values.Length];
+        switch (number.LatentBits)
+        {
+            case 64:
+            {
+                double factor = BitConverter.UInt64BitsToDouble(baseBits);
+                for (int i = 0; i < values.Length; i++)
+                {
+                    double unadjusted = BitConverter.UInt64BitsToDouble(IntFloat(values[i], number)) * factor;
+                    ulong latent = unchecked(number.FloatToLatentOrdered(BitConverter.DoubleToUInt64Bits(unadjusted)) + adjustments[i] + mid);
+                    values[i] = number.FromLatentOrdered(latent);
+                }
+
+                break;
+            }
+
+            case 32:
+            {
+                float factor = BitConverter.UInt32BitsToSingle((uint)baseBits);
+                for (int i = 0; i < values.Length; i++)
+                {
+                    float unadjusted = BitConverter.UInt32BitsToSingle((uint)IntFloat(values[i] & mask, number)) * factor;
+                    ulong latent = unchecked(number.FloatToLatentOrdered(BitConverter.SingleToUInt32Bits(unadjusted)) + adjustments[i] + mid);
+                    values[i] = number.FromLatentOrdered(latent);
+                }
+
+                break;
+            }
+
+            default:
+            {
+                Half factor = BitConverter.UInt16BitsToHalf((ushort)baseBits);
+                for (int i = 0; i < values.Length; i++)
+                {
+                    Half unadjusted = BitConverter.UInt16BitsToHalf((ushort)IntFloat(values[i] & mask, number)) * factor;
+                    ulong latent = unchecked(number.FloatToLatentOrdered(BitConverter.HalfToUInt16Bits(unadjusted)) + adjustments[i] + mid);
+                    values[i] = number.FromLatentOrdered(latent);
+                }
+
+                break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The float an integer latent stands for, <c>int_float_from_latent</c>, as its bits: the
+    /// latent's distance from the midpoint as a float, exactly below 2^(mantissa + 1) and counted in
+    /// representable steps above it, negative below the midpoint.
+    /// </summary>
+    /// <param name="latent">The latent, no wider than the number.</param>
+    /// <param name="number">The float type.</param>
+    internal static ulong IntFloat(ulong latent, PcoNumber number)
+    {
+        unchecked
+        {
+            ulong mid = number.Mid;
+            bool negative = latent < mid;
+            ulong magnitude = negative ? mid - 1 - latent : latent - mid;
+            int digits = number.PrecisionBits + 1;
+            ulong exact = 1UL << digits;
+            ulong bits;
+            if (magnitude < exact)
+            {
+                bits = number.LatentBits switch
+                {
+                    64 => BitConverter.DoubleToUInt64Bits(magnitude),
+                    32 => BitConverter.SingleToUInt32Bits(magnitude),
+                    _ => BitConverter.HalfToUInt16Bits((Half)(float)magnitude),
+                };
+            }
+            else
+            {
+                // The float 2^digits, then one step of its precision per unit past it: its biased
+                // exponent is the bias plus the digits, which is the midpoint's bits minus one past.
+                ulong bias = (mid >> (number.PrecisionBits + 1)) - 1;
+                ulong exactBits = (bias + (ulong)digits) << number.PrecisionBits;
+                bits = (exactBits + (magnitude - exact)) & number.Mask;
+            }
+
+            return negative ? bits ^ mid : bits;
+        }
+    }
+
+    /// <summary>
+    /// A FloatQuant batch, <c>float_quant::join_latents</c>: the primary is the ordered latent's top
+    /// bits, the secondary its lowest <paramref name="k"/>, flipped for a negative float so that an
+    /// exactly quantized one has a secondary of zero either way.
+    /// </summary>
+    private static void FloatQuant(Span<ulong> values, ReadOnlySpan<ulong> lowest, PcoNumber number, int k)
+    {
+        ulong mask = number.Mask;
+        ulong signCutoff = number.Mid >> k;
+        ulong lowestMax = (1UL << k) - 1;
+        lowest = lowest[..values.Length];
+        for (int i = 0; i < values.Length; i++)
+        {
+            ulong y = values[i] & mask;
+            ulong m = lowest[i];
+            ulong low = y >= signCutoff ? m : unchecked(lowestMax - m);
+            values[i] = number.FromLatentOrdered(unchecked((y << k) + low));
+        }
+    }
+
+    /// <summary>A Dict batch: each index replaced by the entry it names, which is already a number.</summary>
+    private static void Lookup(Span<ulong> values, ReadOnlySpan<ulong> dictionary)
+    {
+        for (int i = 0; i < values.Length; i++)
+        {
+            // The indices are u32 latents: what wrapped past 32 bits wraps here as it does upstream.
+            ulong index = values[i] & uint.MaxValue;
+            if (index >= (ulong)dictionary.Length)
+            {
+                CompressedThrow.Format(
+                    $"A pco dictionary index {index} is past the dictionary's {dictionary.Length} entries.");
+            }
+
+            values[i] = dictionary[(int)index];
         }
     }
 
@@ -293,7 +507,7 @@ internal static class PcoPageDecoder
     }
 
     /// <summary>Adds <paramref name="by"/> to every value, one vector add per lane group.</summary>
-    private static void Add(Span<ulong> values, ulong by)
+    internal static void Add(Span<ulong> values, ulong by)
     {
         int i = 0;
         if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
@@ -345,7 +559,7 @@ internal enum PcoBatchShape : byte
     Ramp,
 }
 
-/// <summary>The three per-batch working buffers of a page decode, owned by the caller.</summary>
+/// <summary>The per-batch working buffers of a page decode, owned by the caller.</summary>
 /// <remarks>
 /// <para>
 /// These are written at the top of a batch and consumed before it ends, so nothing in them
@@ -362,27 +576,33 @@ internal enum PcoBatchShape : byte
 /// </remarks>
 internal readonly ref struct PcoBatchScratch
 {
-    /// <summary>Creates a view over three caller-owned buffers, each at least a batch long.</summary>
-    /// <param name="values">The batch's latents.</param>
+    /// <summary>Creates a view over caller-owned buffers, each at least a batch long.</summary>
+    /// <param name="values">The batch's latents of a variable nothing keeps: a lookback's.</param>
     /// <param name="offsetBits">Per-value offset widths.</param>
     /// <param name="offsetCumulative">Per-value offset positions.</param>
     /// <param name="states">
     /// <see cref="PcoPageDecoder.MaxLatentVars"/> reusable latent states, one per variable slot,
     /// built once for the node and reset by each page.
     /// </param>
+    /// <param name="primary">
+    /// The batch's primary latents, joined there, for numbers narrower than 64 bits; empty for
+    /// 64-bit numbers, which are decoded straight into the output.
+    /// </param>
     internal PcoBatchScratch(
         Span<ulong> values,
         Span<int> offsetBits,
         Span<long> offsetCumulative,
-        PcoLatentState[] states)
+        PcoLatentState[] states,
+        Span<ulong> primary = default)
     {
         Values = values;
         OffsetBits = offsetBits;
         OffsetCumulative = offsetCumulative;
         States = states;
+        Primary = primary;
     }
 
-    /// <summary>The batch's latents, before they are copied out.</summary>
+    /// <summary>The batch's latents of a variable nothing keeps.</summary>
     internal Span<ulong> Values { get; }
 
     /// <summary>Each value's offset width, when the variable has more than one bin.</summary>
@@ -393,14 +613,22 @@ internal readonly ref struct PcoBatchScratch
 
     /// <summary>The page's three latent-state slots, reset per page rather than rebuilt.</summary>
     internal PcoLatentState[] States { get; }
+
+    /// <summary>The batch's primary latents, for numbers narrower than 64 bits.</summary>
+    internal Span<ulong> Primary { get; }
 }
 
 /// <summary>One latent variable's decoding state within a page.</summary>
 internal sealed class PcoLatentState
 {
     private PcoAnsTable _table;
+    private PcoChunkMeta _chunk;
     private int _binCount;
-    private int _deltaOrder;
+    private PcoDeltaKind _delta;
+    private int _stateCount;
+    private int _shortfall;
+    private ulong _mask;
+    private ulong _mid;
 
     // Both belong to the state rather than to a batch, because both carry across the batches of
     // one page: the interleaved ANS positions are read-modify-written per value, and a delta
@@ -408,87 +636,172 @@ internal sealed class PcoLatentState
     //
     // Both are sized by the format and reused across pages. Four, because the interleaving is
     // four; seven, because the metadata writes the delta order in three bits, so it can never ask
-    // for more. Only `_deltaOrder` of the moments are live, which is why every reader below slices
+    // for more. Only `_stateCount` of the moments are live, which is why every reader below slices
     // rather than walking the array.
     private readonly int[] _stateIndices = new int[4];
     private readonly ulong[] _deltaMoments = new ulong[PcoPageDecoder.MaxDeltaOrder];
+
+    // A convolution's latents so far: its state, the order before the batch, then the batch.
+    // Built the first time a convolution is met and kept, as the moments are.
+    private ulong[]? _residuals;
+
+    // A lookback's window: the latents it can look back to, then the batch's. Rented per page, as
+    // upstream allocates it per page, since it is as long as the window and a window can be long.
+    private ulong[]? _window;
+    private int _windowLength;
+    private int _windowPosition;
 
     /// <summary>Creates an empty slot; a page fills it with <see cref="Reset"/>.</summary>
     internal PcoLatentState()
     {
         _table = default!;
+        _chunk = default!;
     }
 
-    /// <summary>Refills this slot from one variable's page metadata: delta moments and ANS states.</summary>
+    /// <summary>Refills this slot from one variable's page metadata: delta state and ANS states.</summary>
     /// <param name="reader">The page reader, positioned at this variable's metadata.</param>
     /// <param name="variable">The chunk-level table for this variable.</param>
-    /// <param name="deltaOrder">Delta moments stored for this variable.</param>
+    /// <param name="chunk">The chunk, whose delta encoding this variable's is.</param>
+    /// <param name="delta">The delta encoding this variable takes.</param>
+    /// <param name="stateCount">Latents of delta state the page stores for this variable.</param>
+    /// <param name="shortfall">
+    /// How far short of a page's values this variable's wire values stop: its own state's count,
+    /// or, for a lookback's own latents, the primary's.
+    /// </param>
     /// <returns>This slot, refilled, so a caller can assign it in one expression.</returns>
     internal PcoLatentState Reset(
-        ref PcoBitReader reader, PcoLatentVar variable, int deltaOrder)
+        ref PcoBitReader reader, PcoLatentVar variable, PcoChunkMeta chunk, PcoDeltaKind delta, int stateCount, int shortfall)
     {
         _table = variable.Table;
+        _chunk = chunk;
         _binCount = variable.Bins.Length;
-        _deltaOrder = deltaOrder;
-        for (int i = 0; i < deltaOrder; i++)
+        _delta = delta;
+        _stateCount = stateCount;
+        _shortfall = shortfall;
+        int bits = variable.LatentBits;
+        _mask = bits == 64 ? ulong.MaxValue : (1UL << bits) - 1;
+        _mid = 1UL << (bits - 1);
+        switch (delta)
         {
-            _deltaMoments[i] = reader.ReadUInt(64);
-        }
+            case PcoDeltaKind.Consecutive:
+                for (int i = 0; i < stateCount; i++)
+                {
+                    _deltaMoments[i] = reader.ReadUInt(bits);
+                }
 
-        PcoLatentState state = this;
+                break;
+            case PcoDeltaKind.Lookback:
+                OpenWindow(ref reader, bits, 1 << chunk.LookbackWindowLog, stateCount);
+                break;
+            case PcoDeltaKind.Conv1:
+                _residuals ??= new ulong[PcoChunkMeta.MaxConv1Order + PcoPageDecoder.BatchSize];
+                for (int i = 0; i < stateCount; i++)
+                {
+                    _residuals[i] = reader.ReadUInt(bits);
+                }
+
+                break;
+            default:
+                break;
+        }
 
         for (int i = 0; i < 4; i++)
         {
-            state._stateIndices[i] = (int)reader.ReadUInt(variable.AnsSizeLog);
+            _stateIndices[i] = (int)reader.ReadUInt(variable.AnsSizeLog);
         }
 
-        return state;
+        return this;
+    }
+
+    /// <summary>Gives back what the page rented; the slot is then empty until the next <see cref="Reset"/>.</summary>
+    internal void EndPage()
+    {
+        if (_window is { } window)
+        {
+            _window = null;
+            ArrayPool<ulong>.Shared.Return(window);
+        }
+    }
+
+    /// <summary>
+    /// A lookback's own latents for the batch: how far back each of the primary's values looks,
+    /// in the batch buffer, written out even when the batch reads as one value.
+    /// </summary>
+    internal ReadOnlySpan<ulong> ReadLookbacks(scoped ref PcoBitReader reader, int remaining, int batch, in PcoBatchScratch scratchBuffers)
+    {
+        Span<ulong> lookbacks = scratchBuffers.Values[..batch];
+        int count = Math.Min(batch, Math.Max(0, remaining - _shortfall));
+        if (ReadPreDelta(ref reader, count, lookbacks, in scratchBuffers, out ulong lower))
+        {
+            lookbacks[..count].Fill(lower);
+        }
+
+        // u32 latents: what wrapped past 32 bits wraps here as it does upstream.
+        for (int i = 0; i < count; i++)
+        {
+            lookbacks[i] &= uint.MaxValue;
+        }
+
+        return lookbacks[..count];
     }
 
     /// <summary>Decodes one batch into <paramref name="destination"/>, or describes it.</summary>
     /// <param name="reader">The page reader.</param>
     /// <param name="remaining">Values left in the page before this batch.</param>
     /// <param name="batch">Values this batch produces.</param>
-    /// <param name="destination">Where to put them; empty for a delta variable.</param>
+    /// <param name="destination">Where to put them.</param>
+    /// <param name="lookbacks">The batch's lookbacks, for a lookback delta; empty otherwise.</param>
     /// <param name="scratchBuffers">The decode's working buffers; see <see cref="PcoBatchScratch"/>.</param>
     /// <param name="first">The one value, or the ramp's first, when the batch is not written.</param>
     /// <param name="step">The ramp's step, when the batch is a ramp.</param>
     /// <returns>
-    /// How the batch is given: written into <paramref name="destination"/> (the batch buffer when
-    /// that is empty), or, not written, as one value <paramref name="first"/>, or as the ramp from
-    /// <paramref name="first"/> by <paramref name="step"/> that a first-order delta makes of one.
+    /// How the batch is given: written into <paramref name="destination"/>, or, not written, as one
+    /// value <paramref name="first"/>, or as the ramp from <paramref name="first"/> by
+    /// <paramref name="step"/> that a first-order delta makes of one.
     /// </returns>
     internal PcoBatchShape ReadBatch(
-        ref PcoBitReader reader, int remaining, int batch, Span<ulong> destination,
+        ref PcoBitReader reader, int remaining, int batch, Span<ulong> destination, scoped ReadOnlySpan<ulong> lookbacks,
         in PcoBatchScratch scratchBuffers, out ulong first, out ulong step)
     {
-        // A variable whose values are kept is decoded straight into them; the batch buffer takes
-        // the values of one nothing keeps.
-        Span<ulong> values = destination.IsEmpty ? scratchBuffers.Values[..batch] : destination[..batch];
+        Span<ulong> values = destination[..batch];
 
-        // The values that come from the delta moments are not on the wire, so the symbol pass is
-        // shorter than the batch by the delta order - but only at the end of the page.
-        int preDelta = Math.Min(batch, Math.Max(0, remaining - _deltaOrder));
+        // The values that come from the delta state are not on the wire, so the symbol pass is
+        // shorter than the batch by the state's count - but only at the end of the page.
+        int preDelta = Math.Min(batch, Math.Max(0, remaining - _shortfall));
         bool constant = ReadPreDelta(ref reader, preDelta, values, in scratchBuffers, out ulong lower);
         first = lower;
         step = 0;
 
-        if (_deltaOrder == 0)
+        switch (_delta)
         {
-            return constant ? PcoBatchShape.Constant : PcoBatchShape.Written;
-        }
+            case PcoDeltaKind.NoOp:
+                return constant ? PcoBatchShape.Constant : PcoBatchShape.Written;
+            case PcoDeltaKind.Consecutive when constant && _stateCount == 1:
+                // The prefix sum of one value, recentred, from the moment: see `UndoConsecutiveDelta`.
+                step = unchecked(lower + _mid);
+                first = _deltaMoments[0];
+                _deltaMoments[0] = unchecked(first + ((ulong)batch * step));
+                return PcoBatchShape.Ramp;
+            case PcoDeltaKind.Consecutive:
+                UndoConsecutiveDelta(values, constant, lower);
+                return PcoBatchShape.Written;
+            case PcoDeltaKind.Lookback:
+                if (constant)
+                {
+                    values[..preDelta].Fill(lower);
+                }
 
-        if (constant && _deltaOrder == 1)
-        {
-            // The prefix sum of one value, biased, from the moment: see `UndoConsecutiveDelta`.
-            step = unchecked(lower + (1UL << 63));
-            first = _deltaMoments[0];
-            _deltaMoments[0] = unchecked(first + ((ulong)batch * step));
-            return PcoBatchShape.Ramp;
-        }
+                UndoLookback(values, preDelta, lookbacks);
+                return PcoBatchShape.Written;
+            default:
+                if (constant)
+                {
+                    values[..preDelta].Fill(lower);
+                }
 
-        UndoConsecutiveDelta(values, constant, lower);
-        return PcoBatchShape.Written;
+                UndoConv1(values, preDelta);
+                return PcoBatchShape.Written;
+        }
     }
 
     /// <summary>
@@ -594,11 +907,11 @@ internal sealed class PcoLatentState
     /// </remarks>
     private void UndoConsecutiveDelta(Span<ulong> values, bool constant, ulong lower)
     {
-        int order = _deltaOrder - 1;
+        int order = _stateCount - 1;
         if (constant)
         {
-            // The 2^63 bias of the ordered form, on the one value.
-            ulong step = unchecked(lower + (1UL << 63));
+            // The recentring of the delta, on the one value.
+            ulong step = unchecked(lower + _mid);
             ulong moment = _deltaMoments[order];
             PcoPageDecoder.Ramp(values, moment, step);
             _deltaMoments[order] = unchecked(moment + ((ulong)values.Length * step));
@@ -606,22 +919,8 @@ internal sealed class PcoLatentState
         }
         else
         {
-            // The 2^63 bias is pointwise and contiguous, so it is one vector add per lane group.
-            int biased = 0;
-            if (Vector.IsHardwareAccelerated && values.Length >= Vector<ulong>.Count)
-            {
-                Vector<ulong> bias = new Vector<ulong>(1UL << 63);
-                int lanes = Vector<ulong>.Count;
-                for (; biased <= values.Length - lanes; biased += lanes)
-                {
-                    (Vector.LoadUnsafe(in values[biased]) + bias).StoreUnsafe(ref values[biased]);
-                }
-            }
-
-            for (; biased < values.Length; biased++)
-            {
-                values[biased] = unchecked(values[biased] + (1UL << 63));
-            }
+            // The recentring is pointwise and contiguous, so it is one vector add per lane group.
+            PcoPageDecoder.Add(values, _mid);
         }
 
         for (; order >= 0; order--)
@@ -636,5 +935,107 @@ internal sealed class PcoLatentState
 
             _deltaMoments[order] = moment;
         }
+    }
+
+    /// <summary>
+    /// A page's lookback window opened: zeros where nothing was yet, then the page's state, the
+    /// first values it gives, ending where the window does.
+    /// </summary>
+    private void OpenWindow(ref PcoBitReader reader, int bits, int windowLength, int stateCount)
+    {
+        // Upstream's buffer: twice the window or twice a batch, whichever is longer, so that a
+        // batch always fits past the window before it has to be moved back.
+        int length = Math.Max(windowLength, PcoPageDecoder.BatchSize) * 2;
+        ulong[] window = ArrayPool<ulong>.Shared.Rent(length);
+        _window = window;
+
+        // All of it, not only what comes before the state: a lookback that points before the page
+        // reads zeros, as upstream's zero-filled buffer gives, and never an earlier file's values.
+        window.AsSpan(0, length).Clear();
+        for (int i = windowLength - stateCount; i < windowLength; i++)
+        {
+            window[i] = reader.ReadUInt(bits);
+        }
+
+        _windowLength = windowLength;
+        _windowPosition = windowLength;
+    }
+
+    /// <summary>
+    /// Undoes a lookback delta over the batch, <c>lookback::decode_in_place</c>: each latent is its
+    /// residual plus the latent its lookback points to, and the batch gives the window's latents
+    /// the state's count behind, so a page's first values are its state.
+    /// </summary>
+    /// <param name="values">The batch, read before the delta, the first <paramref name="count"/> of them from the wire; the values, after.</param>
+    /// <param name="count">Values read from the wire; the rest of a page's last batch comes from the window.</param>
+    /// <param name="lookbacks">How far back each value looks.</param>
+    private void UndoLookback(Span<ulong> values, int count, scoped ReadOnlySpan<ulong> lookbacks)
+    {
+        ulong[] window = _window!;
+        int windowLength = _windowLength;
+        int start = _windowPosition;
+        if (start + values.Length > window.Length)
+        {
+            window.AsSpan(start - windowLength, windowLength).CopyTo(window);
+            start = windowLength;
+        }
+
+        lookbacks = lookbacks[..count];
+        for (int i = 0; i < count; i++)
+        {
+            ulong lookback = lookbacks[i];
+            if (lookback > (ulong)windowLength)
+            {
+                CompressedThrow.Format($"A pco lookback of {lookback} exceeds its window of {windowLength}.");
+            }
+
+            int at = start + i;
+            window[at] = unchecked(values[i] + _mid + window[at - (int)lookback]);
+        }
+
+        // The values past the wire at a page's end are never looked back to: nothing follows them.
+        window.AsSpan(start - _stateCount, values.Length).CopyTo(values);
+        _windowPosition = start + values.Length;
+    }
+
+    /// <summary>
+    /// Undoes a convolution delta over the batch, <c>conv1::decode_in_place</c>: each latent is its
+    /// residual plus the prediction the order latents before it make, the bias plus each weighed,
+    /// clamped at zero and shifted down by the quantization; the batch gives the latents the order
+    /// behind, so a page's first values are its state.
+    /// </summary>
+    /// <param name="values">The batch, read before the delta, the first <paramref name="count"/> of them from the wire; the values, after.</param>
+    /// <param name="count">Values read from the wire.</param>
+    /// <remarks>
+    /// The prediction is summed in 64 bits: the chunk's check bounds it inside the signed type
+    /// twice the latent's width, i32 for 16-bit latents and i64 for 32-bit ones, so no sum
+    /// overflows either and each is what upstream's is. The latents are held to their width as
+    /// they are made, since each one is weighed in the next predictions.
+    /// </remarks>
+    private void UndoConv1(Span<ulong> values, int count)
+    {
+        ulong[] residuals = _residuals!;
+        ReadOnlySpan<long> weights = _chunk.Conv1Weights;
+        int order = weights.Length;
+        long bias = _chunk.Conv1Bias;
+        int quantization = _chunk.Conv1Quantization;
+        ulong mask = _mask;
+        for (int i = 0; i < count; i++)
+        {
+            long sum = bias;
+            for (int j = 0; j < order; j++)
+            {
+                sum += weights[j] * (long)residuals[i + j];
+            }
+
+            ulong prediction = (ulong)(Math.Max(sum, 0) >> quantization);
+            residuals[order + i] = unchecked(values[i] + _mid + prediction) & mask;
+        }
+
+        residuals.AsSpan(0, values.Length).CopyTo(values);
+
+        // The next batch's state: the order latents past this batch's. At a page's end they are
+        // not all made, and nothing follows to read them.
+        residuals.AsSpan(values.Length, order).CopyTo(residuals);
     }
 }

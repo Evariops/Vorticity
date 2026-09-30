@@ -261,6 +261,44 @@ internal readonly struct Int256 : IEquatable<Int256>, IComparable<Int256>
     /// <exception cref="OverflowException"><paramref name="value"/> is <see cref="MinValue"/>.</exception>
     public static Int256 operator -(Int256 value) => Negate(value);
 
+    /// <summary>The four 64-bit limbs, least significant first, as <see cref="FromLimbs"/> takes them.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void GetLimbs(out ulong l0, out ulong l1, out ulong l2, out ulong l3)
+    {
+        l0 = _l0;
+        l1 = _l1;
+        l2 = _l2;
+        l3 = _l3;
+    }
+
+    /// <summary>
+    /// The sum of two values, and whether it fits: the one addition a decimal sum needs, which spills
+    /// into a wider total rather than wrap.
+    /// </summary>
+    /// <param name="a">One addend.</param>
+    /// <param name="b">The other.</param>
+    /// <param name="sum">The sum, unspecified when it does not fit.</param>
+    /// <returns><see langword="false"/> when the sum overflows 256 bits of two's complement.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static bool TryAdd(Int256 a, Int256 b, out Int256 sum)
+    {
+        ulong s0 = a._l0 + b._l0;
+        ulong carry = s0 < a._l0 ? 1UL : 0UL;
+        ulong t1 = a._l1 + b._l1;
+        ulong c1 = t1 < a._l1 ? 1UL : 0UL;
+        ulong s1 = t1 + carry;
+        carry = c1 | (s1 < t1 ? 1UL : 0UL);
+        ulong t2 = a._l2 + b._l2;
+        ulong c2 = t2 < a._l2 ? 1UL : 0UL;
+        ulong s2 = t2 + carry;
+        carry = c2 | (s2 < t2 ? 1UL : 0UL);
+        ulong s3 = a._l3 + b._l3 + carry;
+        sum = new Int256(s0, s1, s2, s3);
+
+        // Overflow when both addends share a sign the sum does not.
+        return ((a._l3 ^ s3) & (b._l3 ^ s3) & SignBit) == 0;
+    }
+
     /// <summary>Orders two values as signed 256-bit integers.</summary>
     /// <param name="other">The value to compare against.</param>
     /// <returns>Negative, zero or positive.</returns>

@@ -596,6 +596,13 @@ internal static class ColumnStores
                 return new ListStore(dtype, Create(dtype.ElementType, pool), pool);
             case DTypeKind.FixedSizeList:
                 return new FixedListStore(dtype, Create(dtype.ElementType, pool), pool);
+            case DTypeKind.Map:
+            {
+                // A map is its list of entries, each a non-nullable {key, value}: the shape the
+                // decoder reads a map back as, so the node this builds is the one a read delivers.
+                DType entries = dtype.Arena.Struct(["key", "value"], [dtype.KeyType, dtype.ValueType], Nullability.NonNullable);
+                return new ListStore(dtype, Create(entries, pool), pool);
+            }
             case DTypeKind.Extension:
             {
                 ColumnStore storage = Create(dtype.StorageType, pool);

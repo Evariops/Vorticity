@@ -12,20 +12,26 @@ What a record member and a `Column<T>` may be, and what the column exposes:
 | `Null` | none | — | the schema shows it; no `T` reads it |
 | `Bool` | `bool` | `Bits` as `ReadOnlySpan<ulong>`, an indexer | zero-copy |
 | `Primitive` i8…i64, u8…u64 | `sbyte`…`long`, `byte`…`ulong` | `Values` as `ReadOnlySpan<T>`, an indexer | zero-copy |
+| `Primitive` u16 | `char` too | the same | the UTF-16 code unit, lone surrogates included |
+| `Primitive` i64, u64 | `nint`, `nuint` too, on a 64-bit host | the same | refused on a 32-bit host, whose native integer is narrower |
+| `Primitive` i64 | `TimeSpan` too | an indexer, `CopyTo`, `Storage()` | 100 ns ticks: exact over the whole range |
 | `Primitive` f16, f32, f64 | `Half`, `float`, `double` | the same | exact: `Half` is IEEE binary16 |
 | `Decimal(p, s)` | `decimal` within §2's bounds, `VortexDecimal` always | an indexer, `Storage<TStorage>()`, `Scale` | never lossy: a column too wide for `decimal` is refused when it binds |
+| `Decimal(p, 0)` | `Int128`, `UInt128` for `p ≤ 39`; `BigInteger` always | an indexer, `CopyTo`; `Values` zero-copy over 128-bit storage | §2.1 |
 | `Utf8` | `string` | a UTF-8 span per value; `GetString(i)` on request | §4 |
-| `Binary` | `ReadOnlyMemory<byte>` | a span per value | |
+| `Binary` | `ReadOnlyMemory<byte>`, `Memory<byte>`, `byte[]` | a span per value | |
 | `Struct` | a nested `[VortexRecord]` type | `Columns<TNested>` | |
-| `List`, `FixedSizeList` | `ReadOnlyMemory<T>` | a `Range` per row, `Elements` as `Column<T>` | reading rows allocates one array per list |
+| `List`, `FixedSizeList` | `ReadOnlyMemory<T>`, `Memory<T>`, `T[]`, `List<T>`, `ImmutableArray<T>`, an interface an array implements | a `Range` per row, `Elements` as `Column<T>` | reading rows allocates one array, or one `List<T>`, per list |
+| `List` of `Struct` | any of the above over a `[VortexRecord]` type | `ListOf<TNested>()`: a `Range` per row, `Elements` as `Columns<TNested>` | the elements read in one pass, then cut per row |
+| `Map` | `Dictionary<TKey, TValue>`, `IDictionary`, `IReadOnlyDictionary` | `MapOf<TKey, TValue>()`: a `Range` per row, `Keys` and `Values` | scalar keys and values; a key is never null |
 | `vortex.date` | `DateOnly` | an indexer, `Storage<int>()` or `Storage<long>()` | |
 | `vortex.time` | `TimeOnly` | an indexer, `Storage<TStorage>()`, `Unit` | |
 | `vortex.timestamp` | `DateTime` when naive or UTC, `DateTimeOffset` with a zone | an indexer, `Storage<long>()`, `Unit`, `TimeZone` | §3 |
 | `vortex.uuid` | `Guid` | an indexer | the byte order is converted explicitly, never implied |
 | an extension registered on the session | the registered type | an indexer, `Storage<TStorage>()` | [14-public-api.md](14-public-api.md) §2 |
 
-`Map`, `Union` and `Variant` columns appear in a schema but no `T` maps to them. An `enum` member
-maps to its underlying integer; a `char` is refused, since it is no dtype.
+`Union` and `Variant` columns appear in a schema but no `T` maps to them. An `enum` member maps to
+its underlying integer.
 
 **Nullability is carried by `T`**: `Column<double?>` is a nullable column and `Column<double>` is
 not, and a non-nullable value type over a nullable column is refused when it binds
@@ -74,6 +80,27 @@ text. It is correctness insurance, not a hot path: precision ≤ 38 is what file
 
 The row encoder's narrower table (up to `i128`, no `Decimal256`) is `vortex-row`'s own limit, not
 the format's ([06-row-encoding.md](06-row-encoding.md) §6).
+
+### 2.1 Integers wider than 64 bits
+
+No primitive dtype is wider than 64 bits, so an `Int128`, a `UInt128` or a `BigInteger` is a
+decimal of scale 0: the unscaled value is the integer. The default width is the choice that matters:
+
+* **`Int128` and `UInt128` declare `Decimal(38, 0)`**, stored in 128 bits. Every reader of a
+  128-bit decimal reads it, Arrow's `Decimal128` among them, and `Values` is the stored buffer with
+  no copy. Thirty-eight digits are not every value of either type, whose extremes have 39, so a
+  value past them is refused when it is written -- never wrapped, never rounded -- with the way
+  out in the message: `[VortexColumn(Precision = 39)]`, stored in 256 bits.
+* **`BigInteger` declares `Decimal(76, 0)`**, as far as a decimal goes; a value past it is refused.
+
+Reading, `Int128` and `UInt128` bind to a decimal of scale 0 and at most 39 digits, whatever width
+stores it. Thirty-eight digits always fit; a 39th can hold a value past the type, which is refused
+as it is read, as a timestamp past `DateTime` is (§3), and a negative value is refused by a
+`UInt128`. `BigInteger` binds to any decimal of scale 0 and reads every value.
+
+The aggregates follow: a sum over such a column is exact in 320 bits whatever its row count, and
+converts to the type asked for, `OverflowException` when it does not fit; a sum as `BigInteger`
+never throws.
 
 ## 3. Temporal extensions: one resolution, at binding
 

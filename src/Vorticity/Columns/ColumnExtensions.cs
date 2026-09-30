@@ -300,6 +300,124 @@ public static class ColumnExtensions
         public void CopyTo(Span<Guid?> destination) => ColumnData.CopyGuids(column.Arena, column.Node, destination);
     }
 
+    extension(Column<Int128> column)
+    {
+        /// <summary>The unscaled values as stored, contiguous and with no copy: a column stored in 128 bits only.</summary>
+        /// <exception cref="InvalidOperationException">The column is stored in another width; <c>CopyTo</c> converts it.</exception>
+        public ReadOnlySpan<Int128> Values => ColumnData.Values128<Int128>(column.Arena, column.Node);
+
+        /// <summary>The value of row <paramref name="index"/>.</summary>
+        public Int128 this[int index] => ColumnData.Integer128(column.Arena, column.Node, index);
+
+        /// <summary>Copies the values into <paramref name="destination"/>, from whatever width the column is stored in.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<Int128> destination) => ColumnData.CopyIntegers128(column.Arena, column.Node, destination);
+
+        /// <summary>The unscaled values as stored, of the storage's width: <c>sbyte</c> to <c>Int128</c>, or 32 bytes.</summary>
+        /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
+        /// <returns>The storage column.</returns>
+        public Column<TStorage> Storage<TStorage>()
+            where TStorage : unmanaged => StorageOf<Int128, TStorage>(column);
+    }
+
+    extension(Column<Int128?> column)
+    {
+        /// <summary>The raw values as stored in 128 bits; undefined where the validity bit is 0.</summary>
+        /// <exception cref="InvalidOperationException">The column is stored in another width; <c>CopyTo</c> converts it.</exception>
+        public ReadOnlySpan<Int128> Values => ColumnData.Values128<Int128>(column.Arena, column.Node);
+
+        /// <summary>The value of row <paramref name="index"/>, or null.</summary>
+        public Int128? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? ColumnData.Integer128(column.Arena, column.Node, index) : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<Int128?> destination) => ColumnData.CopyIntegers128(column.Arena, column.Node, destination);
+    }
+
+    extension(Column<UInt128> column)
+    {
+        /// <summary>The unscaled values as stored, contiguous and with no copy: a column stored in 128 bits only, read as unsigned.</summary>
+        /// <exception cref="InvalidOperationException">The column is stored in another width; <c>CopyTo</c> converts it.</exception>
+        public ReadOnlySpan<UInt128> Values => ColumnData.Values128<UInt128>(column.Arena, column.Node);
+
+        /// <summary>The value of row <paramref name="index"/>; a negative value is refused.</summary>
+        public UInt128 this[int index] => ColumnData.UInteger128(column.Arena, column.Node, index);
+
+        /// <summary>Copies the values into <paramref name="destination"/>, from whatever width the column is stored in.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<UInt128> destination) => ColumnData.CopyUIntegers128(column.Arena, column.Node, destination);
+    }
+
+    extension(Column<UInt128?> column)
+    {
+        /// <summary>The raw values as stored in 128 bits; undefined where the validity bit is 0.</summary>
+        /// <exception cref="InvalidOperationException">The column is stored in another width; <c>CopyTo</c> converts it.</exception>
+        public ReadOnlySpan<UInt128> Values => ColumnData.Values128<UInt128>(column.Arena, column.Node);
+
+        /// <summary>The value of row <paramref name="index"/>, or null.</summary>
+        public UInt128? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? ColumnData.UInteger128(column.Arena, column.Node, index) : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<UInt128?> destination) => ColumnData.CopyUIntegers128(column.Arena, column.Node, destination);
+    }
+
+    extension(Column<BigInteger> column)
+    {
+        /// <summary>The value of row <paramref name="index"/>.</summary>
+        public BigInteger this[int index] => ColumnData.Big(column.Arena, column.Node, index);
+
+        /// <summary>Copies the values into <paramref name="destination"/>.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<BigInteger> destination) => ColumnData.CopyBigs(column.Arena, column.Node, destination);
+
+        /// <summary>The unscaled values as stored, of the storage's width.</summary>
+        /// <typeparam name="TStorage">The storage's .NET type.</typeparam>
+        /// <returns>The storage column.</returns>
+        public Column<TStorage> Storage<TStorage>()
+            where TStorage : unmanaged => StorageOf<BigInteger, TStorage>(column);
+    }
+
+    extension(Column<BigInteger?> column)
+    {
+        /// <summary>The value of row <paramref name="index"/>, or null.</summary>
+        public BigInteger? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index) ? ColumnData.Big(column.Arena, column.Node, index) : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<BigInteger?> destination) => ColumnData.CopyBigs(column.Arena, column.Node, destination);
+    }
+
+    extension(Column<TimeSpan> column)
+    {
+        /// <summary>The value of row <paramref name="index"/>, from its ticks.</summary>
+        public TimeSpan this[int index] => new TimeSpan(ColumnData.Values<long>(column.Arena, column.Node)[index]);
+
+        /// <summary>Copies the values into <paramref name="destination"/>.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<TimeSpan> destination) => ColumnData.CopySpans(column.Arena, column.Node, destination);
+
+        /// <summary>The stored values: 100 ns ticks.</summary>
+        /// <returns>The storage column.</returns>
+        public Column<long> Storage() => StorageOf<TimeSpan, long>(column);
+    }
+
+    extension(Column<TimeSpan?> column)
+    {
+        /// <summary>The value of row <paramref name="index"/>, or null.</summary>
+        public TimeSpan? this[int index] => ArenaWords.IsValid(column.Arena, column.Node, index)
+            ? new TimeSpan(ColumnData.Values<long>(column.Arena, column.Node)[index])
+            : null;
+
+        /// <summary>Copies the values into <paramref name="destination"/>, a null for a null row.</summary>
+        /// <param name="destination">At least <c>Length</c> elements.</param>
+        public void CopyTo(Span<TimeSpan?> destination) => ColumnData.CopySpans(column.Arena, column.Node, destination);
+
+        /// <summary>The stored values: 100 ns ticks.</summary>
+        /// <returns>The storage column.</returns>
+        public Column<long?> Storage() => StorageOf<TimeSpan?, long?>(column);
+    }
+
     extension<T>(Column<ReadOnlyMemory<T>> column)
     {
         /// <summary>The elements of row <paramref name="index"/>, as a range of <c>Elements</c>.</summary>

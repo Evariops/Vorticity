@@ -3,8 +3,10 @@
 // This is the first test in the port that can be wrong in an interesting way: everything before it
 // checked a parse, and a parse either matches the reference's or does not. Here a single misplaced
 // bit gives a sequence of plausible numbers, which is why the vectors deliberately include a 20-bin
-// entropy-coded case, a second-order delta, and a chunk split across five pages.
+// entropy-coded case, a second-order delta, a chunk split across five pages, and then every type,
+// mode and delta pco has -- compared bit for bit, a float's sign of zero included.
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 
 using Vorticity.Arrays.Decoders.Compressed.Pco;
@@ -30,9 +32,11 @@ public sealed class PcoPageDecoderTests
     public void EveryVectorDecodesValueForValue(string name)
     {
         PcoVectorTests.Vector vector = Array.Find(PcoVectorTests.Load(), v => v.Name == name)!;
-        PcoChunkMeta chunk = PcoChunkMeta.Read(vector.Header, vector.Meta, latentBits: 64);
+        PcoNumber number = vector.Number;
+        PcoChunkMeta chunk = PcoChunkMeta.Read(vector.Header, vector.Meta, number);
+        int width = number.LatentBits / 8;
 
-        List<long> decoded = [];
+        List<ulong> decoded = [];
         PcoLatentState[] states = new PcoLatentState[PcoPageDecoder.MaxLatentVars];
         for (int i = 0; i < states.Length; i++)
         {
@@ -43,27 +47,30 @@ public sealed class PcoPageDecoderTests
             new ulong[PcoPageDecoder.BatchSize],
             new int[PcoPageDecoder.BatchSize],
             new long[PcoPageDecoder.BatchSize],
-            states);
+            states,
+            new ulong[PcoPageDecoder.BatchSize]);
         ulong[] secondary = new ulong[PcoPageDecoder.BatchSize];
         for (int page = 0; page < vector.Pages.Length; page++)
         {
-            ulong[] latents = new ulong[vector.PerPage[page]];
-            PcoPageDecoder.DecodeJoined(
-                chunk, vector.Pages[page], vector.PerPage[page], secondary, in scratch, latents, shift: 0);
-            foreach (ulong latent in latents)
+            byte[] numbers = new byte[vector.PerPage[page] * width];
+            PcoPageDecoder.DecodeJoined(chunk, vector.Pages[page], vector.PerPage[page], secondary, in scratch, numbers);
+            for (int i = 0; i < vector.PerPage[page]; i++)
             {
-                // i64's ordered latent form: the unsigned value shifted so that long.MinValue is 0.
-                decoded.Add(unchecked((long)latent + long.MinValue));
+                decoded.Add(width switch
+                {
+                    2 => BinaryPrimitives.ReadUInt16LittleEndian(numbers.AsSpan(i * 2)),
+                    4 => BinaryPrimitives.ReadUInt32LittleEndian(numbers.AsSpan(i * 4)),
+                    _ => BinaryPrimitives.ReadUInt64LittleEndian(numbers.AsSpan(i * 8)),
+                });
             }
         }
 
-        Assert.Equal(vector.Values.Length, decoded.Count);
+        Assert.Equal(vector.Bits.Length, decoded.Count);
         for (int i = 0; i < decoded.Count; i++)
         {
-            if (decoded[i] != vector.Values[i])
+            if (decoded[i] != vector.Bits[i])
             {
-                Assert.Fail(
-                    $"{name}: value {i} decoded to {decoded[i]}, expected {vector.Values[i]}");
+                Assert.Fail($"{name}: value {i} decoded to bits {decoded[i]:x}, expected {vector.Bits[i]:x}");
             }
         }
     }

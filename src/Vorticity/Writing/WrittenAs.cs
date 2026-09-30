@@ -156,6 +156,12 @@ internal static class WrittenAs
         "vortex.alprd" => nameof(EncodingHint.AlpRd),
         "vortex.sequence" => nameof(EncodingHint.Sequence),
         "vortex.zstd" => nameof(EncodingHint.Zstd),
+        "vortex.decimal_byte_parts" => nameof(EncodingHint.DecimalByteParts),
+        "vortex.constant" => nameof(EncodingHint.Constant),
+        "vortex.datetimeparts" => nameof(EncodingHint.DateTimeParts),
+        "vortex.sparse" => nameof(EncodingHint.Sparse),
+        "vortex.onpair" => nameof(EncodingHint.OnPair),
+        "vortex.pco" => nameof(EncodingHint.Pco),
         "vortex.null" or "vortex.bool" or "vortex.primitive" or "vortex.decimal" or "vortex.varbinview" or "vortex.varbin"
             or "vortex.struct" or "vortex.listview" or "vortex.list" or "vortex.fixed_size_list" or "vortex.ext" or "vortex.map"
             or "vortex.parquet.variant" => Canonical,

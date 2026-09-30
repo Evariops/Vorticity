@@ -213,6 +213,35 @@ public readonly ref struct Columns<TRecord>
         return new Columns<TNested>(Batch, Arena, child, nested, StartRow, _selection, _selected, _projected);
     }
 
+    /// <summary>The lists of records held by member <paramref name="index"/>.</summary>
+    /// <typeparam name="TNested">The record the lists hold.</typeparam>
+    /// <param name="index">The member's position in the record.</param>
+    /// <returns>The lists: each row's range, and the elements as the columns of <typeparamref name="TNested"/>.</returns>
+    /// <exception cref="VortexSchemaException">The member is not a list of <typeparamref name="TNested"/>.</exception>
+    public ListColumns<TNested> ListOf<TNested>(int index)
+        where TNested : IVortexRecord<TNested>
+    {
+        RecordBinding elements = Binding.ElementsFor<TNested>(index);
+        return new ListColumns<TNested>(Batch, Arena, Arena.GetNode(StructNode()).GetFieldIndex(Slot(index)), elements);
+    }
+
+    /// <summary>The maps held by member <paramref name="index"/>.</summary>
+    /// <typeparam name="TKey">The keys' .NET type.</typeparam>
+    /// <typeparam name="TValue">The values' .NET type.</typeparam>
+    /// <param name="index">The member's position in the record.</param>
+    /// <returns>The maps: each row's range, and the keys and values as two columns.</returns>
+    /// <exception cref="VortexSchemaException">The member is not a map, or its keys or values do not map to the types asked for.</exception>
+    public MapColumns<TKey, TValue> MapOf<TKey, TValue>(int index)
+    {
+        VortexType type = Binding.TypeOf(index);
+        if (type.Kind != VortexTypeKind.Map)
+        {
+            throw new VortexSchemaException($"Member '{Binding.Record[index].Name}' of {Binding.RecordType.Name} is a column of {type}, not a map.");
+        }
+
+        return new MapColumns<TKey, TValue>(Arena, Arena.GetNode(StructNode()).GetFieldIndex(Slot(index)), type, Binding.Extensions);
+    }
+
     /// <summary>
     /// Where member <paramref name="index"/> sits in the batch's struct: its rank among the read
     /// columns in a batch the scan projected, its file index in one delivered whole.

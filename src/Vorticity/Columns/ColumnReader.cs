@@ -38,7 +38,25 @@ internal static class ColumnReader
             case ClrKind.Signed:
             case ClrKind.Unsigned:
             case ClrKind.Float:
-                return Numeric(shape.PType, ColumnData.Values(arena, node), index);
+            {
+                // A char, a nint and a nuint read as the storage they share with a ushort, a long and
+                // a ulong, which a box of the storage does not unbox to.
+                object stored = Numeric(shape.PType, ColumnData.Values(arena, node), index);
+                Type core = shape.Core;
+                return core == typeof(char) ? (char)(ushort)stored
+                    : core == typeof(nint) ? (nint)(long)stored
+                    : core == typeof(nuint) ? (nuint)(ulong)stored
+                    : stored;
+            }
+
+            case ClrKind.TimeSpan:
+                return new TimeSpan(ColumnData.Values<long>(arena, node)[index]);
+            case ClrKind.Integer128:
+                return ColumnData.Integer128(arena, node, index);
+            case ClrKind.UInteger128:
+                return ColumnData.UInteger128(arena, node, index);
+            case ClrKind.BigInteger:
+                return ColumnData.Big(arena, node, index);
             case ClrKind.String:
                 return ColumnData.String(arena, node, index)!;
             case ClrKind.Binary:

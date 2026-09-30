@@ -16,6 +16,7 @@
     <ProjectReference Include="../../src/Vorticity/Vorticity.csproj" />
     <ProjectReference Include="../../src/Vorticity.RowEncoding/Vorticity.RowEncoding.csproj" />
     <ProjectReference Include="../../src/Vorticity.Dataset/Vorticity.Dataset.csproj" />
+    <ProjectReference Include="../../src/Vorticity.Generators/Vorticity.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

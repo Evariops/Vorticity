@@ -100,22 +100,50 @@ table then runs for the next chunk if the dictionary won.
 
 In order, per column chunk:
 
-1. **Degenerate cases**, from the statistics alone: an all-null chunk; an integer progression, a
-   constant included, as `vortex.sequence`, about thirty bytes whatever the rows; a constant of
-   another type as one run.
-2. **Exact candidates**, each priced by a formula that is what its encoder will write: the plain
+1. **Degenerate cases**, from the statistics alone: a chunk of one value, or of nulls only, of any
+   dtype -- a struct's and a list's included, whose validity would otherwise be a bitmap of zeros
+   -- as `vortex.constant`, a scalar and the length; an integer progression as `vortex.sequence`,
+   about thirty bytes whatever the rows. The constant comes first, integers included: a sequence
+   of step zero decodes to its rows, where a constant stays one value through a scan.
+2. **Nulls on nine rows in ten or more**, as `vortex.sparse` with a null fill: the valid rows'
+   positions and values, and no validity, priced as a frame of reference packs them against the
+   runs the nulls make. It comes before run-end's rule below, which would take every such chunk as
+   runs, and before a decimal's parts. A **decimal** whose values fit 64 bits is then written as
+   `vortex.decimal_byte_parts` over the integers, which the integer schemes price in turn.
+3. **Exact candidates**, each priced by a formula that is what its encoder will write: the plain
    form (for text, `vortex.varbin` or views, whichever is smaller), run-end (which wins outright
    inside a quarter as many runs as rows), bit-packing in the raw, zigzag or frame-of-reference
-   domain with the cheapest width and its patches, and the dictionary, priced by its own layer at
-   the codes' width plus its values child.
-3. **Trials**, only when no exact verdict won, each carrying its encoded result so that a winner is
+   domain with the cheapest width and its patches, a **timestamp's** instants split into days,
+   seconds and subseconds (`vortex.datetimeparts`), priced by each part's packed width and taken
+   when it comes a tenth under the best so far, and the dictionary, priced by its own layer at the
+   codes' width plus its values child. A 256-row sample bounds the timestamp split from below, so
+   instants at full resolution are refused without the pass that splits them.
+4. **Trials**, only when no exact verdict won, each carrying its encoded result so that a winner is
    never encoded twice: for floats, ALP, then ALP-RD against a zstd frame; for text, a zstd frame
    priced first, then FSST, which must save a tenth on the plain form and not lose to the frame by
-   more than a tenth. Zstd is tried only on chunks of at least 16 KiB.
+   more than a tenth, then OnPair, which must also come a tenth under FSST: a dictionary of up to
+   4 096 tokens trained on a random sixth of the chunk's bytes, whose own codes on that sample
+   decide before the pass over every row. Zstd is tried only on chunks of at least 16 KiB.
 
 `CompressionProfile` changes the arithmetic, not the pass: `Auto` weighs bytes and decode speed as
-above; `Smallest` prices every candidate by its bytes alone and tries every trial under the best
-exact plan; `Fastest` writes the cheapest encodings and no index; `None` writes every column plain.
+above; `Smallest` prices every candidate by its bytes alone and tries every trial under the bytes
+the best exact plan writes, pco among them for numbers of 16 bits and more, on the column and on
+every array a scheme makes of it, as the reference's compact compressor cascades; `Fastest` writes
+the cheapest encodings and no index; `None` writes every column plain.
+
+**pco under `Smallest`.** A numeric chunk is compressed as pco does it at its default level: the
+latents in chunks of up to 2^18 and pages of 8 192 as Vortex's compact compressor pages them, an
+integer's common divisor found by pco's own test on pco's own sample (`IntMult`), the consecutive
+delta order a sample prices best, then equal-count bins merged by pco's bit-cost dynamic program
+and entropy-coded by its four-way tANS. What upstream's automatic choice also tries and this one
+does not is the lookback delta and the float modes, whose values ALP and ALP-RD already take. The
+bytes match upstream's own within the framing on every shape measured -- event times, a random
+walk, multiples of a hundred, skewed counts, doubles in full -- and the plan is priced with the
+framing its pages bring, a buffer and a count each, since a column that compresses to little has
+as much there as in the pages. Before the pass that bins and writes a chunk, the sample that chose
+its delta prices it: a chunk a quarter over the bytes it must beat is refused unwritten. The trial
+costs what pco costs, a partition of the latents into bins rather than a sort, and a count in their
+place where their range is narrower than their number, which is what deltas leave.
 
 **Plan memory.** A column keeps its last plan, the bytes the formulas predicted for it and the bytes
 its encoder produced. The next chunk re-prices only the remembered plan, from its own statistics,
@@ -127,9 +155,11 @@ table is still trained per chunk (sharing one costs 4.3 % of the output); what i
 the decision.
 
 **Hints.** `VortexWriteOptions.Hints` pins a column's scheme by path (`EncodingHint`: `Canonical`,
-`RunEnd`, `Dictionary`, `BitPacked`, `Fsst`, `Alp`, `AlpRd`, `Sequence`, `Zstd`): plan memory with an
-infinite tolerance, priced on every chunk and written when it applies, under every profile; only a
-progression, which costs nothing per row, is written before it. A chunk the scheme cannot describe
+`RunEnd`, `Dictionary`, `BitPacked`, `Fsst`, `Alp`, `AlpRd`, `Sequence`, `Zstd`, `DecimalByteParts`,
+`Constant`, `DateTimeParts`, `Sparse`, `OnPair`, `Pco`): plan memory with an infinite tolerance, priced on every
+chunk and written when it applies, under every profile; only a constant and a progression, which
+cost nothing per row, are written before it. `Sequence` and `Constant` pin nothing the writer would
+not do anyway; they name what a report says a chunk was written as. A chunk the scheme cannot describe
 is priced in full, and the next chunk is offered the hint again. A hint on a path the schema does
 not have throws at `CreateWriter`.
 
@@ -137,7 +167,9 @@ not have throws at `CreateWriter`.
 in `[0, entries)` and packed at their width; run-end ends are strictly increasing; offsets and sizes
 are monotone or bounded, and a list of fixed-width rows has offsets that are an exact progression
 and sizes that are constant, so both cost nothing. A dictionary's or a run's values are a column
-like any other, chosen in full on a small input.
+like any other, chosen in full on a small input. A timestamp's storage knows its unit, which is
+what lets it price its split; a part of one value -- the subseconds of instants to the second --
+is handed on as a constant rather than discovered by a walk.
 
 ### 3.5 Encode once
 
@@ -354,6 +386,8 @@ produces and its determinism, and is not done.
 | approach | why not |
 |---|---|
 | pricing from a sample, as BtrBlocks does | it prices what exact formulas price for free, and costs determinism; plan memory takes most of what it would save on drifting text |
+| `fastlanes.rle` | its per-row indices need `fastlanes.delta`, which no edition carries, to come under run-end's ends; without it run-end is smaller at every run length |
+| a sparse fill other than null | a dominant value that is the chunk's minimum is already a bit-packing of width zero with patches, and one that is not makes runs; finding it would take a frequency count on every chunk |
 | emitting a chunk at every batch | a chunk edge inside a block saves no I/O on a pruned zone; a caller who wants no transit writes in multiples of `BlockRows` |
 | choosing and writing encodings on several threads | the summaries and zstd frames are parallel; the choice and emission stay ordered on one thread, which keeps the bytes independent of the degree |
 | rewriting without decoding, passing encoded arrays through | a separate feature: an order of magnitude on rewrites and compactions, nothing on first writes |

@@ -106,6 +106,19 @@ internal sealed class RecordBinding
         return typed;
     }
 
+    /// <summary>The binding of the records member <paramref name="member"/>'s lists hold, <typeparamref name="TNested"/>.</summary>
+    internal RecordBinding ElementsFor<TNested>(int member)
+        where TNested : IVortexRecord<TNested>
+    {
+        VortexType type = (uint)member < (uint)Record.Count ? Record[member].Type.NonNullable : default!;
+        if (type is null || type.Kind is not (VortexTypeKind.List or VortexTypeKind.FixedSizeList))
+        {
+            throw new VortexSchemaException($"Member {member} of {RecordType.Name} is not a list of {typeof(TNested).Name}.");
+        }
+
+        return NestedFor<TNested>(member);
+    }
+
     /// <summary>Checks, once per member and type, that <typeparamref name="T"/> reads member <paramref name="member"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void Require<T>(int member)
@@ -160,6 +173,15 @@ internal sealed class RecordBinding
                 RecordBinding inner = Bind(recordType, VortexSchema.Create(member.Type.Fields), storage.Fields.ToArray(), paths[i], indexPaths[i], extensions);
                 nested[i] = inner;
                 IncludeNested(mask, found, inner.Mask);
+            }
+            else if (member.Type.Kind is VortexTypeKind.List or VortexTypeKind.FixedSizeList
+                && member.Type.ElementType!.Kind == VortexTypeKind.Struct
+                && storage.ElementType is { } elements && Unwrap(elements) is { Kind: VortexTypeKind.Struct } element)
+            {
+                // A list of records: its elements bind as a nested record does, and the scan reads
+                // the list whole, since a projection does not reach inside a list's elements.
+                nested[i] = Bind(recordType, VortexSchema.Create(member.Type.ElementType.Fields), element.Fields.ToArray(), paths[i], indexPaths[i], extensions);
+                mask.IncludeField(found);
             }
             else
             {

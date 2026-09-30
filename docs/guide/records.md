@@ -159,6 +159,7 @@ goes on a property, a field or a positional parameter.
 |---|---|---|
 | `[VortexColumn("order_id")]` | any member: the column's name | the member's name |
 | `Precision`, `Scale` | a `decimal` or `VortexDecimal` member | 28 and 10 |
+| `Precision` | an `Int128`, `UInt128` or `BigInteger` member, whose scale is 0 | 38, 38 and 76 |
 | `Unit` | a `DateTime`, `DateTimeOffset` or `TimeOnly` member | `TimeUnit.Microseconds` |
 | `TimeZone` | a `DateTimeOffset` member | `"UTC"` |
 
@@ -172,25 +173,45 @@ a member out of the columns entirely.
 |---|---|
 | `bool` | bool |
 | `sbyte`, `short`, `int`, `long`, `byte`, `ushort`, `uint`, `ulong` | i8 to i64, u8 to u64 |
+| `char` | u16: the UTF-16 code unit, a lone surrogate included |
+| `nint`, `nuint` | i64, u64, on a 64-bit host; refused on another |
 | `Half`, `float`, `double` | f16, f32, f64 |
 | an `enum` | its underlying integer type |
 | `string` | utf8 |
-| `ReadOnlyMemory<byte>` | binary |
+| `ReadOnlyMemory<byte>`, `Memory<byte>`, `byte[]` | binary |
 | `decimal` | decimal of at most 28 digits and a scale of 0 to 28 |
 | `VortexDecimal` | decimal of any precision up to 76 |
+| `Int128`, `UInt128` | decimal of scale 0: 38 digits by default, 39 for every value of the type |
+| `BigInteger` | decimal of scale 0, 76 digits by default |
+| `TimeSpan` | i64, its ticks of 100 ns |
 | `DateOnly` | `vortex.date` |
 | `TimeOnly` | `vortex.time` |
 | `DateTime` | `vortex.timestamp`, naive or UTC |
 | `DateTimeOffset` | `vortex.timestamp` with a zone |
 | `Guid` | `vortex.uuid` |
-| `ReadOnlyMemory<T>`, `T` any of the above but a record | list of `T` |
+| `ReadOnlyMemory<T>`, `Memory<T>`, `T[]`, `List<T>`, `ImmutableArray<T>`, `IReadOnlyList<T>`, `IList<T>`, `ICollection<T>`, `IReadOnlyCollection<T>`, `IEnumerable<T>` | list of `T`, a record included |
+| `Dictionary<TKey, TValue>`, `IDictionary<TKey, TValue>`, `IReadOnlyDictionary<TKey, TValue>` | map, of scalar keys and values |
 | another `[VortexRecord]` type | struct |
 | a type implementing `IVortexExtension<T>` | the extension it registers |
 | `T?` or `string?` of any of these, but an extension | the nullable column |
 
-A `char`, an array, a `List<T>`, a `Memory<T>` and a list of records have no column: the generator
-refuses them with VX1005 and says what to declare instead. The whole contract, and where a naive
-mapping would lose data, is in [07-dotnet-mapping.md](../design/07-dotnet-mapping.md).
+A list read back is the container the member declares: an array for an array and for an
+interface an array implements, a `List<T>` filled in place, an `ImmutableArray<T>` over the array
+it was read into, with no copy. A dictionary is read back as a `Dictionary<TKey, TValue>`. A list
+of records is read and written through `ListOf<TNested>`, a map through `MapOf<TKey, TValue>`; a
+filter compares neither.
+
+An integer of 128 bits is a decimal of scale 0, because no dtype is 128 bits wide. Thirty-eight
+digits hold every value a 128-bit decimal holds, which every reader of one reads and a column reads
+without a copy; a value past them is refused when it is written, with the way out in the message:
+`[VortexColumn(Precision = 39)]`, which holds every value of the type in 256 bits. Reading, an
+`Int128` binds to a decimal of scale 0 and at most 39 digits, and a value past the type in a
+39-digit column is refused as it is read, as a timestamp past `DateTime` is.
+
+A type with no column -- an array of more than one dimension, a dictionary of lists, a list of
+lists of records, a `Uri` -- is refused by the generator with VX1005, which says what to declare
+instead. The whole contract, and where a naive mapping would lose data, is in
+[07-dotnet-mapping.md](../design/07-dotnet-mapping.md).
 
 ## Binding a record to a file
 
@@ -322,8 +343,14 @@ session's registry is frozen when it returns, and an id in the `vortex.` namespa
   when it was written: `PlacedAt` above lost its `Utc`. Declare the member with
   `TimeZone = "UTC"` to read it back as `Utc`. A `DateTime` member with any other zone is refused
   at compile time: declare it `DateTimeOffset`.
-* A nullable extension member, and a list of records, are refused with VX1005: no builder appends
-  a null to the first, and no typed column reads the second.
+* A nullable extension member, a list of nullable records and a list of lists of records are
+  refused with VX1005: no builder appends a null to the first, and no typed column reads the others.
+* **A `DateTime`, a `DateTimeOffset` or a `TimeOnly` is stored in its column's unit**, microseconds
+  unless `Unit` says otherwise: the tenth of a microsecond a tick adds is floored away. Declare
+  `Unit = TimeUnit.Nanoseconds` to keep it, within the years 1677 to 2262 a nanosecond count holds.
+* **Vortex Rust reads no instant after 9999-12-30T22:00Z**, which leaves room for any offset: a
+  `DateTime.MaxValue` written as a sentinel is a value this library reads back and the reference
+  refuses to hand out as a scalar.
 * A member called `Schema`, `ReadRows`, `WriteRows` or `ColumnNames` does not stop the generator:
   it implements the interface explicitly instead, and leaves `ColumnNames` out when that name is
   taken.
@@ -334,8 +361,8 @@ session's registry is frozen when it returns, and an id in the `vortex.` namespa
 
 `ReadRows` and `WriteRows` move one column at a time, so the loop over a column is a loop over a
 span. What rows cost on top of the columns is the rows themselves: `ToRecordsAsync` copies every
-field, and allocates per row for a `string`, a list (`ReadOnlyMemory<T>` members are read into a
-new array) and a nested record that is a class. `WriteRows` transcodes each `string` once, and
+field, and allocates per row for a `string`, a list (read into a new array, or straight into a new
+`List<T>`), a dictionary, a `BigInteger` and a nested record that is a class. `WriteRows` transcodes each `string` once, and
 fills primitive columns through `GetSpan`, in place. When the columns are what you want, read the
 columns: see [scan-a-table.md](scan-a-table.md) and [read-rows.md](read-rows.md).
 

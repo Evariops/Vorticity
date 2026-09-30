@@ -22,11 +22,11 @@ await using (VortexFileWriter writer = session.CreateWriter<Reading>(path, optio
 ```
 
 ```
-Day: RunEnd x16, Sequence
+Day: RunEnd x16, Constant
 Celsius: Zstd x16, Alp
 City: RunEnd x17
 metadata keys producer; producer = acme/1.4
-identity 0199f0c4-7d2a-7c3e-9a51-3f6b2c1d4e5f, edition core2026.08.0, 564052 bytes
+identity 0199f0c4-7d2a-7c3e-9a51-3f6b2c1d4e5f, edition core2026.08.0, 564148 bytes
 written again with the same identity: the same bytes; without one: different bytes
 ```
 
@@ -57,16 +57,17 @@ column of every batch to its plain form with `Canonical()`:
 
 | profile | bytes | written in | decoded in | encodings |
 |---|---|---|---|---|
-| `Auto` | 1 508 212 | 34 ms | 1 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
-| `Fastest` | 1 508 212 | 33 ms | 1 ms | the same |
-| `Smallest` | 247 124 | 66 ms | 2 ms | `Day` runs, `Celsius` and `City` zstd |
-| `None` | 20 929 820 | 28 ms | 4 ms | every column `Canonical`, the plain form |
+| `Auto` | 1 508 316 | 34 ms | 1 ms | `Day` runs, `Celsius` a dictionary, `City` runs |
+| `Fastest` | 1 508 316 | 33 ms | 1 ms | the same |
+| `Smallest` | 243 028 | 66 ms | 2 ms | `Day` runs, `Celsius` and `City` zstd, pco on a chunk of `Day` and on `Celsius`'s tail |
+| `None` | 20 929 828 | 28 ms | 4 ms | every column `Canonical`, the plain form |
 
 Encoding is what makes the file fourteen times smaller than its plain form. `Auto` prices each
 column's size and decode speed together; `Fastest` spends less time choosing and builds no index,
-and on this data chose the same encodings; `Smallest` prices bytes alone, tries zstd, FSST, ALP and
-ALP-RD on every chunk and keeps the smallest: zstd for `Celsius` and `City`, a file six times
-smaller than `Auto`'s, which a full decode pays for with a millisecond more.
+and on this data chose the same encodings; `Smallest` prices bytes alone, tries zstd, pco, FSST,
+ALP and ALP-RD on every chunk -- and on every array an encoding makes of it, an ALP's integers or
+a run's values -- and keeps the smallest: zstd for `Celsius` and `City`, a file six times smaller
+than `Auto`'s, which a full decode pays for with a millisecond more.
 [choose-encodings.md](choose-encodings.md) measures what each choice costs on ten million rows of
 other shapes, and where it turns.
 
@@ -77,22 +78,37 @@ at a time, the rest left to the chooser:
 
 | hint | bytes | written as |
 |---|---|---|
-| none | 1 508 212 | `Celsius` a dictionary, `City` runs |
-| `City` as `Dictionary` | 1 551 604 | a dictionary |
-| `City` as `Zstd` | 1 191 380 | zstd (runs on the 576-row tail) |
-| `City` as `Fsst` | 7 393 428 | FSST |
-| `City` as `Canonical` | 9 958 964 | `Canonical`, the plain form |
-| `Celsius` as `Alp` | 1 611 636 | ALP |
-| `Celsius` as `Zstd` | 563 988 | zstd (ALP on the 576-row tail) |
-| `Celsius` as `BitPacked` | 1 508 212 | a dictionary: bit-packing does not apply to floats |
-| `Celsius` as `Canonical` | 8 483 996 | `Canonical`, the plain form |
-| `Celsius` as `Canonical`, under `Smallest` | 8 167 092 | `Canonical`; `Day` and `City` as `Smallest` writes them |
+| none | 1 508 316 | `Celsius` a dictionary, `City` runs |
+| `City` as `Dictionary` | 1 551 708 | a dictionary |
+| `City` as `Zstd` | 1 191 484 | zstd (runs on the 576-row tail) |
+| `City` as `Fsst` | 4 919 828 | FSST |
+| `City` as `Canonical` | 9 959 068 | `Canonical`, the plain form |
+| `Celsius` as `Alp` | 1 611 740 | ALP |
+| `Celsius` as `Zstd` | 564 092 | zstd (ALP on the 576-row tail) |
+| `Celsius` as `BitPacked` | 1 508 316 | a dictionary: bit-packing does not apply to floats |
+| `Celsius` as `Canonical` | 8 484 100 | `Canonical`, the plain form |
+| `Celsius` as `Canonical`, under `Smallest` | 8 164 052 | `Canonical`; `Day` and `City` as `Smallest` writes them |
 
 A hint is a preference, and the report is where you find out whether it held:
 
-* **A column that is a progression is written as one whatever the hint says**: nothing costs less
-  per row. Runs are not: a hint comes before them, since runs cost to decode, and the bitmap of a
-  column one percent true reads twelve times faster than its runs.
+* **A column that is a progression is written as one whatever the hint says**, and so is a chunk
+  of one value, or of nulls only, written as a constant: nothing costs less per row. Runs are not:
+  a hint comes before them, since runs cost to decode, and the bitmap of a column one percent true
+  reads twelve times faster than its runs.
+* **Some shapes need no hint.** A decimal whose values fit 64 bits is written as those integers
+  (`DecimalByteParts`), which then take the integer schemes; a timestamp coarser than its unit --
+  instants to the second in microseconds, dates at midnight -- as its days, seconds and subseconds
+  (`DateTimeParts`); a column nine rows in ten null as its valid rows at their positions
+  (`Sparse`). A hint for another scheme still holds such a column, as the caller asked.
+* **`OnPair` is the hint for text a dictionary of repeated substrings spells** -- URLs, paths,
+  log lines -- decoded as fast as FSST and, on such text, a fifth to two fifths smaller. `Auto`
+  takes it where it comes a tenth under FSST and under zstd.
+* **`Pco` is the hint for numbers of sixteen bits or more** that bit-packing leaves wide:
+  timestamps with jitter, counters, skewed amounts, multiples of a common unit. Its bins
+  entropy-code what a frame of reference packs to one width, after a delta or a divisor where one
+  pays: two million event times in milliseconds take 1.7 MB as pco against 5.7 MB bit-packed and
+  2.6 MB as zstd. `Smallest` tries it on every such chunk; `Auto` never does, as the reference's
+  default compressor never does, since it decodes slower than bit-packing.
 * **A hint that does not apply falls back** to what `Auto` would have chosen, as bit-packing on
   floating-point values does.
 * **`AlpRd` is the hint for floats with no short decimal form**, measurements or ratios that `Alp`
@@ -114,9 +130,9 @@ that text filters prune by block. On the same rows with the cities in eight runs
 
 | `StringBoundBytes` | bytes | zone maps | `City == "Nice"` reads |
 |---|---|---|---|
-| 0 | 1 173 236 | 6 440 | 123 of 123 blocks |
-| 16 | 1 175 612 | 8 752 | 20 of 123 blocks |
-| 32 | 1 175 612 | 8 752 | 20 of 123 blocks |
+| 0 | 1 172 060 | 6 440 | 123 of 123 blocks |
+| 16 | 1 174 436 | 8 752 | 20 of 123 blocks |
+| 32 | 1 174 436 | 8 752 | 20 of 123 blocks |
 
 Bounds cost 2 376 bytes here and cut the scan six times. 32 bytes changed nothing because no city
 name is longer than 16; longer bounds matter for values that share a long prefix, such as URLs.
@@ -125,7 +141,7 @@ block holds all of them and no bound can rule one out.
 
 ## Statistics, metadata, identity
 
-* **`Statistics = false`** saved 224 bytes of 1 508 212, and `file.Statistics.Count` is then 0: a
+* **`Statistics = false`** saved 224 bytes of 1 508 316, and `file.Statistics.Count` is then 0: a
   question the statistics would answer at open, such as a minimum or a sum, reads the zone maps or
   the data instead. The zone maps are kept, so `Day > 2000` still reads 0 of 123 blocks.
 * **`Metadata`** holds at most 14 entries, with keys of at most 64 UTF-8 bytes, besides the library's
@@ -137,7 +153,7 @@ block holds all of them and no bound can rule one out.
   twice, and a write without it gave different bytes. Each write draws a fresh identity otherwise,
   appends included.
 * **`TargetEdition`** decides which readers can open the file, and which structures the writer may
-  use: under `core2025.05.0` this file is 1 544 292 bytes and carries no zone maps. [editions.md](editions.md)
+  use: under `core2025.05.0` this file is 1 544 268 bytes and carries no zone maps. [editions.md](editions.md)
   is that subject.
 
 ## The options that are not the writer's

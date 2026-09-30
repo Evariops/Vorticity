@@ -150,6 +150,7 @@ internal sealed class DateTimePartsDecoder : ArrayDecoder
         int index = selective
             ? context.DecodeChildSelected(in node, childIndex, childType, length, wanted)
             : context.DecodeChild(in node, childIndex, childType, length);
+        index = CanonicalSupport.ExpandIfConstant(context, index);
         CanonicalNode child = context.Canonical.GetNode(index);
         int produced = selective ? wanted.Length : length;
 

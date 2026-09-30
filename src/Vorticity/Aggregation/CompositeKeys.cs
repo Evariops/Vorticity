@@ -2,6 +2,7 @@ using System;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
+using Vorticity.Types.Numerics;
 
 namespace Vorticity.Aggregating;
 
@@ -15,6 +16,7 @@ internal sealed class CompositeKeys : GroupKeys
     private readonly ColumnShape[] _parts;
     private readonly ByteKeyTable _table = new ByteKeyTable();
     private readonly Int128[][] _decimals;
+    private readonly Int256[][] _wides;
     private readonly ulong[][] _bits;
     private readonly ulong[][] _validity;
     private byte[] _key = new byte[64];
@@ -23,11 +25,13 @@ internal sealed class CompositeKeys : GroupKeys
     {
         _parts = parts;
         _decimals = new Int128[parts.Length][];
+        _wides = new Int256[parts.Length][];
         _bits = new ulong[parts.Length][];
         _validity = new ulong[parts.Length][];
         for (int i = 0; i < parts.Length; i++)
         {
             _decimals[i] = [];
+            _wides[i] = [];
             _bits[i] = [];
             _validity[i] = [];
         }
@@ -153,6 +157,12 @@ internal sealed class CompositeKeys : GroupKeys
             {
                 ReadOnlySpan<Int128> values = FixedReader.Values(arena, node, StorageKind.Decimal, ref _decimals[index], out ReadOnlySpan<ulong> validity);
                 return new Part(StorageKind.Decimal, validity) { Fixed = MemoryMarshal.AsBytes(values), Width = 16 };
+            }
+
+            case StorageKind.Decimal256:
+            {
+                ReadOnlySpan<Int256> values = FixedReader.Values(arena, node, StorageKind.Decimal256, ref _wides[index], out ReadOnlySpan<ulong> validity);
+                return new Part(StorageKind.Decimal256, validity) { Fixed = MemoryMarshal.AsBytes(values), Width = Int256.ByteCount };
             }
 
             case StorageKind.Uuid:
