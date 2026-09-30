@@ -51,6 +51,9 @@ internal sealed class TerminalScan
     private readonly TerminalTiers _tiers;
     private readonly ScanMetrics? _metrics;
 
+    /// <summary>The rows a count leaves out whatever the filter says; null for none. Never with a take.</summary>
+    private readonly IRowExclusion? _excluded;
+
     internal TerminalScan(
         VortexFile file,
         LayoutTree tree,
@@ -63,8 +66,10 @@ internal sealed class TerminalScan
         bool prune,
         TerminalTiers tiers,
         ScanMetrics? metrics,
-        bool indexes = true)
+        bool indexes = true,
+        IRowExclusion? excluded = null)
     {
+        _excluded = excluded;
         _indexes = indexes;
         _file = file;
         _tree = tree;
@@ -95,8 +100,8 @@ internal sealed class TerminalScan
         if (_filter is null)
         {
             // Without a filter the count is arithmetic: the rows, or the taken rows, which Take
-            // already checked against the file and collapsed.
-            return _take is not null ? _take.Count : _rows.Length;
+            // already checked against the file and collapsed, less the rows left out.
+            return _take is not null ? _take.Count : _rows.Length - ExcludedIn(_rows);
         }
 
         if (_rows.IsEmpty)
@@ -198,11 +203,18 @@ internal sealed class TerminalScan
         long[]? rows;
         try
         {
-            if (_wholeFile)
+            if (_excluded is not null && cover.KeptCount(_excluded, _rows) is long kept)
+            {
+                return kept;
+            }
+
+            if (_wholeFile && _excluded is null)
             {
                 return cover.Count;
             }
 
+            // An index's ranks are not rows, so which of its rows are left out takes its rows: a
+            // batch of them at most, past which the zone maps and the decode answer instead.
             rows = await cover
                 .RowsAsync(_rows, SplitPlan.NaturalBatchRows(_tree), cancellationToken)
                 .ConfigureAwait(false);
@@ -215,6 +227,17 @@ internal sealed class TerminalScan
         if (rows is null)
         {
             return null;
+        }
+
+        if (_excluded is not null)
+        {
+            long live = 0;
+            foreach (long row in rows)
+            {
+                live += _excluded.Excludes(row) ? 0 : 1;
+            }
+
+            return live;
         }
 
         if (_take is null)
@@ -238,15 +261,18 @@ internal sealed class TerminalScan
     /// </summary>
     private bool TryProve(ZonePruner zones, RowRange split, out long count)
     {
-        if (_take is null)
+        long excluded = ExcludedIn(split);
+        if (_take is null && excluded == 0)
         {
             return zones.TryCount(split, out count);
         }
 
+        // Rows left out are the same as a take: the maps say how many rows match, not which ones
+        // are left out, so only a whole answer serves.
         RangeVerdict verdict = zones.Verdict(split);
         if (verdict.IsAllTrue)
         {
-            count = _take.CountIn(split);
+            count = _take is not null ? _take.CountIn(split) : split.Length - excluded;
             return true;
         }
 
@@ -261,7 +287,7 @@ internal sealed class TerminalScan
         try
         {
             int root = await ReadAndExecuteAsync(context, decodes, split, cancellationToken).ConfigureAwait(false);
-            return CountTrue(context, root, states);
+            return CountTrue(context, root, states, split.Start);
         }
         finally
         {
@@ -332,7 +358,8 @@ internal sealed class TerminalScan
         internal BlockTally Pruned = new BlockTally(blockRows);
     }
 
-    private long CountTrue(ScanContext context, int root, byte[] states)
+    /// <summary>The rows of a decoded split the filter keeps; without a take, row <c>i</c> of the split is file row <paramref name="start"/> + <c>i</c>.</summary>
+    private long CountTrue(ScanContext context, int root, byte[] states, long start)
     {
         int rows = context.Canonical.GetNode(root).Length;
         if (rows == 0)
@@ -347,6 +374,16 @@ internal sealed class TerminalScan
         {
             Span<byte> window = buffer.AsSpan(0, rows);
             _evaluator!.Evaluate(context.Canonical, root, rows, window);
+            if (_excluded is { } excluded)
+            {
+                for (int run = excluded.FirstEndingAfter(start); run < excluded.Runs && excluded.StartOf(run) < start + rows; run++)
+                {
+                    int from = (int)(Math.Max(excluded.StartOf(run), start) - start);
+                    int to = (int)(Math.Min(excluded.EndOf(run), start + rows) - start);
+                    window[from..to].Fill(Trilean.False);
+                }
+            }
+
             return Trilean.CountTrue(window);
         }
         finally
@@ -357,6 +394,10 @@ internal sealed class TerminalScan
             }
         }
     }
+
+    /// <summary>How many rows of <paramref name="range"/> the count leaves out.</summary>
+    private long ExcludedIn(RowRange range) =>
+        _excluded is null || range.IsEmpty ? 0 : _excluded.ExcludedBefore(range.End) - _excluded.ExcludedBefore(range.Start);
 
     // ------------------------------------------------------------------------------ extremes
 

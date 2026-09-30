@@ -18,6 +18,9 @@ internal sealed class SortedColumnWalker : KeySource
 
     internal SortedColumnWalker(SortedColumnSource source) => _source = source;
 
+    /// <summary>The file row of the first entry: the column's entries are the rows from here on.</summary>
+    internal long FirstRow => _source.RowOf(0);
+
     internal override FilterLiteralKind KeyKind => _source.KeyKind;
 
     internal override long? EntryCount => _source.EntryCount;
