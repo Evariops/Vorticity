@@ -66,6 +66,9 @@ internal sealed record ObjectEntry(
     /// <summary>Whether a delete took rows out of the object without rewriting it.</summary>
     public bool HasDeletions => DeletedRows > 0;
 
+    /// <summary>The bytes <see cref="Deletions"/> takes in the entry, known without decoding it.</summary>
+    public int VectorBytes => !HasDeletions ? 0 : _deletions is null ? _encoded.Length : _deletions.EncodedBytes;
+
     /// <summary>
     /// Whether two entries take the same rows out, by their canonical bytes while neither is
     /// decoded: one vector has one encoding.
@@ -335,16 +338,17 @@ internal sealed record ObjectEntry(
     }
 
     /// <summary>
-    /// The bytes, the deleted rows and the fragment count an entry's bytes carry, read in place as
-    /// <see cref="SummaryOf"/> reads the summaries: what a page's tally sums, without an allocation.
+    /// The bytes, the live and the deleted rows, the fragment count and the deletion vector's size an
+    /// entry's bytes carry, read in place as <see cref="SummaryOf"/> reads the summaries: what a page's
+    /// tally folds, without an allocation.
     /// </summary>
     /// <exception cref="CommitFormatException">The bytes are not an entry.</exception>
-    public static (long Bytes, long DeletedRows, long Fragments) TallyOf(ReadOnlySpan<byte> value)
+    public static (long Bytes, long Rows, long DeletedRows, long Fragments, long VectorBytes) TallyOf(ReadOnlySpan<byte> value)
     {
         int at = 0;
         Skip(value, ref at, (long)Read(value, ref at));
         Skip(value, ref at, 16);
-        Read(value, ref at);
+        long rows = (long)Read(value, ref at);
         long bytes = (long)Read(value, ref at);
         Skip(value, ref at, 16);
         ulong listed = Read(value, ref at);
@@ -357,9 +361,10 @@ internal sealed record ObjectEntry(
         Skip(value, ref at, fragments * PageReference.Bytes);
         Skip(value, ref at, (long)Read(value, ref at));
         long deleted = at < value.Length ? (long)Read(value, ref at) : 0;
-        return bytes < 0 || deleted < 0
-            ? throw new CommitFormatException("An object entry counts its bytes or its deleted rows past a long.")
-            : (bytes, deleted, fragments);
+        long vector = at < value.Length ? (long)Read(value, ref at) : 0;
+        return bytes < 0 || rows < 0 || deleted < 0 || vector < 0
+            ? throw new CommitFormatException("An object entry counts its bytes or its rows past a long.")
+            : (bytes, rows, deleted, fragments, vector);
     }
 
     /// <summary>

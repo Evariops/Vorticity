@@ -37,6 +37,12 @@ public enum CompactionTrigger
 
     /// <summary>An object carries more index fragments than the options allow.</summary>
     Fragments = 3,
+
+    /// <summary>
+    /// An object's deleted rows reach half of what a delete marks before it rewrites the object
+    /// instead: the object is rewritten alone, in its level, without them.
+    /// </summary>
+    Marks = 4,
 }
 
 /// <summary>
@@ -91,6 +97,9 @@ public sealed record CompactionOptions
 
     /// <summary>Leveled, tiered, or whichever the clustering key implies.</summary>
     public CompactionStyle Style { get; init; } = CompactionStyle.Auto;
+
+    /// <summary>Whether an object whose marks reach half a delete's bounds is rewritten without them; true by default.</summary>
+    internal bool PurgeMarks { get; init; } = true;
 
     /// <summary>How many levels the dataset keeps, level 0 included; 0, the default, for no cap.</summary>
     /// <remarks>

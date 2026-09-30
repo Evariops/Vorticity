@@ -122,6 +122,13 @@ internal static class CompactionPolicy
             }
         }
 
+        // An object whose marks are due next: rewriting it alone costs its bytes, so the one with the
+        // most marked goes first.
+        if (settings.PurgeMarks && MostMarked(levels, Marking.Of(dataset.Options)) is { } marked)
+        {
+            return Purge(marked, settings, style, style == CompactionStyle.Leveled ? 0 : FirstRow(dataset, levels, [marked]));
+        }
+
         // Fragments last: this rewrites no row, and a trigger that moves data would drop the
         // object's fragments with the object anyway.
         List<CompactionInput> fragmented = [];
@@ -407,6 +414,12 @@ internal static class CompactionPolicy
             }
         }
 
+        if (job is null && settings.PurgeMarks
+            && await MostMarkedAsync(dataset, tallies, Marking.Of(dataset.Options), cancellationToken).ConfigureAwait(false) is { } marked)
+        {
+            job = Purge(marked, settings, CompactionStyle.Leveled, 0);
+        }
+
         if (job is null && fragmented.Count > 0)
         {
             job = new CompactionJob(
@@ -533,6 +546,104 @@ internal static class CompactionPolicy
         }
 
         return found;
+    }
+
+    /// <summary>
+    /// The job that rewrites one object alone, in its own level, without the rows marked in it: its
+    /// keys lie inside its old range, so a level stays key-disjoint, and it is written as one object
+    /// whatever its level's target, so that a purge of level 0 does not put it over its ceiling.
+    /// </summary>
+    private static CompactionJob Purge(CompactionInput marked, CompactionOptions settings, CompactionStyle style, long firstRow) =>
+        new CompactionJob(
+            marked.Level,
+            marked.Level,
+            style,
+            CompactionTrigger.Marks,
+            [marked],
+            Math.Max(settings.TargetBytes(marked.Level), marked.Entry.Bytes),
+            firstRow);
+
+    /// <summary>The object whose marks are the most due, the first of equals in level and key order; null when none is due.</summary>
+    private static CompactionInput? MostMarked(List<List<CompactionInput>> levels, Marking marking)
+    {
+        CompactionInput? best = null;
+        double most = 0;
+        foreach (List<CompactionInput> level in levels)
+        {
+            foreach (CompactionInput input in level)
+            {
+                double load = marking.Load(input.Entry);
+                if (load >= 1 && load > most)
+                {
+                    most = load;
+                    best = input;
+                }
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// <see cref="MostMarked(List{List{CompactionInput}}, Marking)"/> by walks that enter only the
+    /// subtrees whose tally says an object under them may be due.
+    /// </summary>
+    private static async ValueTask<CompactionInput?> MostMarkedAsync(
+        VortexDataset dataset, ObjectTally[] tallies, Marking marking, CancellationToken cancellationToken)
+    {
+        CompactionInput? best = null;
+        double most = 0;
+        for (int level = 0; level < tallies.Length; level++)
+        {
+            if (!marking.MayBeDue(tallies[level]))
+            {
+                continue;
+            }
+
+            await foreach (PositionedEntry held in dataset.Levels[level]
+                .WalkAsync(dataset.Pages, 0, long.MaxValue, node => marking.MayBeDue(TallyOf(node)), cancellationToken)
+                .ConfigureAwait(false))
+            {
+                ObjectEntry entry = ObjectEntry.FromBytes(held.Entry.Value);
+                double load = marking.Load(entry);
+                if (load >= 1 && load > most)
+                {
+                    most = load;
+                    best = new CompactionInput(level, held.Entry.Key, entry);
+                }
+            }
+        }
+
+        return best;
+    }
+
+    /// <summary>
+    /// When an object's marks are due for a purge: at half the share of its rows, or half the bytes of
+    /// vector, past which a delete rewrites the object itself.
+    /// </summary>
+    /// <param name="Share">The divisor of a delete's share, <see cref="DatasetOptions.MarkedShare"/>.</param>
+    /// <param name="VectorBytes">A delete's bound on a vector, <see cref="DatasetOptions.MarkedVectorBytes"/>.</param>
+    private readonly record struct Marking(int Share, int VectorBytes)
+    {
+        public static Marking Of(DatasetOptions options) =>
+            new Marking(Math.Max(options.MarkedShare, 1), Math.Max(options.MarkedVectorBytes, 1));
+
+        /// <summary>
+        /// How due an object's marks are: its share of marked rows, or its vector's bytes, over half of
+        /// a delete's bound, whichever is further; due from 1.
+        /// </summary>
+        public double Load(ObjectEntry entry) => !entry.HasDeletions
+            ? 0
+            : Math.Max(
+                (double)entry.DeletedRows * 2 * Share / entry.PhysicalRows,
+                (double)entry.VectorBytes * 2 / VectorBytes);
+
+        /// <summary>
+        /// Whether an object under a tally may be due: a share rounded down past the due share rounded
+        /// down, or a vector at half the bound. A tally never rules out an object that is due.
+        /// </summary>
+        public bool MayBeDue(ObjectTally tally) =>
+            tally.MostMarked >= ObjectTally.Whole / (2L * Share) || tally.LargestVector * 2 >= VectorBytes;
     }
 
     /// <summary>

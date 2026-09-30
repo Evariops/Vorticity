@@ -136,8 +136,18 @@ one of the 31 objects of level 4, and those objects' entries share one leaf page
 23 KiB while the vectors are empty. With vectors capped at 1 KiB, the default, the fullest objects
 start being rewritten after 15 000 commits, and a commit writes 63 to 101 KiB from there on. At a
 4 KiB cap no object has been rewritten after 30 000 commits, and a commit writes 116 KiB and still
-growing. A purge that keeps the vectors well under their cap keeps that page, and every header,
-near its size without marks.
+growing. A purge that keeps the vectors under their cap keeps that page, and every header, smaller
+than the cap would let them grow.
+
+**Built** (`CompactionTrigger.Marks`), at half a delete's bounds, and ranked by how due an object is:
+its marked share or its vector, over half its bound, whichever is further. The tallies carry the
+largest share and the largest vector under every page, so the plan walks only to objects that may be
+due. On the churn the purges move the rewrites more than they remove them. Once the vectors have
+filled, a commit writes about 56 KiB rather than 77, compaction about 83 KiB rather than 65, and the
+two together the same 140; the reads and the store are the same. What they buy is where a rewrite
+happens: in compaction rather than inside a user's delete, which a background driver (§2) takes off
+the write path altogether, and the fold the top level lacked. A commit's bytes are still mostly the
+leaf page the header carries, which only the two options below remove.
 
 **Or out of the header.** The header could leave out a leaf page whose entries carry marks. A mark
 would then cost only the commits that change its own level. A reader that opens the version would
@@ -218,8 +228,9 @@ subject destroyed in place of the rows. It belongs to the store library or to th
 1. **Planning in the depth of the tree** (§3). Built for the leveled style: a tally in every page's
    summary, one descent to the largest object, and walks that skip what the bounds and tallies rule
    out. A pointer per level and a tiered plan by descent are left.
-2. **Purge jobs** (§4): a trigger `Marks` beside `LevelZeroCeiling`, `LevelSize` and `Fragments`,
-   with a threshold at half the delete's. The churn measures a commit's bytes with and without it.
+2. **Purge jobs** (§4). Built: a trigger `Marks` after the levels' bounds and before the fragments,
+   at half a delete's bounds. The churn measures a commit's bytes with and without it: the purges
+   move a fifth of them into compaction and leave the total as it was.
 3. **The background driver** (§2), with a byte budget and one job at a time, coordinated by
    deterministic choice. A lease only if deployments run loops they cannot count.
 4. **Inline level-0 compaction** (§2), bounded by a byte budget, as an option off by default.

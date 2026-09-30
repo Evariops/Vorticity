@@ -299,6 +299,66 @@ public sealed class DatasetDeletionVectorTests
         Assert.True((await marked.VerifyAsync(cancellationToken: ct)).Holds);
     }
 
+    /// <summary>
+    /// An object whose marks reach half a delete's bounds is rewritten by compaction, alone and in its
+    /// level, before a delete has to: by the share of its rows marked, which one range takes, or by the
+    /// bytes of its vector, which scattered rows take.
+    /// </summary>
+    [Theory]
+    [InlineData("share")]
+    [InlineData("vector")]
+    public async Task AnObjectWhoseMarksAreDueIsRewrittenAloneInItsLevel(string due)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore markedStore = new MemoryObjectStore();
+        await using MemoryObjectStore rewrittenStore = new MemoryObjectStore();
+        await using VortexDataset marked = await CreateAsync(markedStore, Options(clustered: true, marking: true), ct);
+        await using VortexDataset rewritten = await CreateAsync(rewrittenStore, Options(clustered: true, marking: false), ct);
+        await DrainAsync(marked, ct);
+        await DrainAsync(rewritten, ct);
+        DataObject before = Assert.Single(await marked.ObjectsAsync(ct).ToListAsync(ct));
+
+        // Half the rows in one run; or every other row of three hundred, in two deletes, each of which
+        // a delete still marks, whose vector passes half a kilobyte.
+        List<VortexExpr> deletes = due == "share"
+            ? [Expr.Lt(Expr.Field("Key"), Expr.Literal(FilterLiteral.From(2_100L)))]
+            : [Keys(0, 200), Keys(200, 300)];
+        foreach (VortexExpr delete in deletes)
+        {
+            Assert.Equal(1, (await marked.DeleteAsync(delete, ct)).ObjectsMarked);
+            await rewritten.DeleteAsync(delete, ct);
+        }
+
+        DataObject held = Assert.Single(await marked.ObjectsAsync(ct).ToListAsync(ct));
+        Assert.True(due == "share" ? held.DeletedRows * 2 >= held.Rows + held.DeletedRows : held.Entry!.VectorBytes * 2 >= 1 << 10);
+
+        CompactionPlan plan = await marked.PlanCompactionAsync(null, ct);
+        CompactionJob job = Assert.IsType<CompactionJob>(plan.Job);
+        Assert.Equal((CompactionTrigger.Marks, before.Level, before.Level), (job.Trigger, job.FromLevel, job.ToLevel));
+        Assert.Equal([held.Key], job.Objects);
+
+        CompactionResult purged = Assert.IsType<CompactionResult>(await marked.CompactAsync(null, ct));
+        Assert.Equal((OperationOutcome.Applied, CompactionTrigger.Marks, 1L, 1L, held.Rows), (purged.Outcome, purged.Trigger, purged.ObjectsIn, purged.ObjectsOut, purged.Rows));
+        DataObject after = Assert.Single(await marked.ObjectsAsync(ct).ToListAsync(ct));
+        Assert.Equal((before.Level, 0L, held.Rows), (after.Level, after.DeletedRows, after.Rows));
+        Assert.Null((await marked.PlanCompactionAsync(null, ct)).Job);
+
+        await AgreeAsync(marked, rewritten, clustered: true, ct);
+        Assert.True((await marked.VerifyAsync(cancellationToken: ct)).Holds);
+    }
+
+    /// <summary>The filter taking every other key of the dataset's sorted keys, from the <paramref name="from"/>-th pair to the <paramref name="to"/>-th.</summary>
+    private static VortexExpr Keys(int from, int to)
+    {
+        List<FilterLiteral> keys = [];
+        for (int i = from; i < to; i++)
+        {
+            keys.Add(FilterLiteral.From((i / 100 * 1_000L) + (2L * (i % 100))));
+        }
+
+        return Expr.In(Expr.Field("Key"), [.. keys]);
+    }
+
     [Fact]
     public async Task MarksRunUpToTheirBoundAndTheDeleteThatWouldPassItRewrites()
     {
