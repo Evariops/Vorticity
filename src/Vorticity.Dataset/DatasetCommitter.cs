@@ -21,9 +21,19 @@ internal sealed record CommitOptions
 
     /// <summary>
     /// A version the writer has seen, from which the latest is found by asking for the ones after
-    /// it; 0 lists the commits instead.
+    /// it while <see cref="KnownAt"/> is recent enough; 0 lists the commits instead.
     /// </summary>
     public ulong Known { get; init; }
+
+    /// <summary>When the writer last knew <see cref="Known"/> to be the latest version, by <see cref="TimeProvider"/>.</summary>
+    public DateTimeOffset KnownAt { get; init; } = DateTimeOffset.MinValue;
+
+    /// <summary>
+    /// How long after <see cref="KnownAt"/> every version after <see cref="Known"/> is surely still in
+    /// the store: half the retention window, since vacuum takes a commit only a window after the next
+    /// one superseded it. Past it the commits are listed. Zero never trusts.
+    /// </summary>
+    public TimeSpan TrustSpan { get; init; }
 
     /// <summary>The boundary rule, or null for the prolly rule at this dataset's seed.</summary>
     public IBoundaryRule? Rule { get; init; }
@@ -55,6 +65,7 @@ internal sealed record CommitOptions
 /// The commit object of <paramref name="Version"/> as the writer holds it: the one it placed, or the
 /// one it opened when nothing applied.
 /// </param>
+/// <param name="KnownAt">When the writer knew <paramref name="Version"/> to be the latest, by its clock.</param>
 internal sealed record CommitResult(
     ulong Version,
     string Key,
@@ -62,7 +73,8 @@ internal sealed record CommitResult(
     IReadOnlyList<OperationOutcome> Outcomes,
     int Attempts,
     IPageSource Pages,
-    CommitObject Commit)
+    CommitObject Commit,
+    DateTimeOffset KnownAt)
 {
     /// <summary>Level 0's tree, where appends land.</summary>
     public DatasetTree Tree => Levels[0];
@@ -89,14 +101,18 @@ internal static class DatasetCommitter
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaxAttempts);
 
         ulong known = options.Known;
+        DateTimeOffset knownAt = options.KnownAt;
         for (int attempt = 1; attempt <= options.MaxAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
             // 1. The latest version: asked for from the one the writer last saw, which a lost
-            // attempt moves up to the one it built on.
-            (ulong parent, CommitObject? commit) = await LatestAsync(store, known, cancellationToken).ConfigureAwait(false);
+            // attempt moves up to the one it built on, and which was the latest when it was asked.
+            DateTimeOffset asked = options.TimeProvider.GetUtcNow();
+            bool trusted = known > 0 && asked - knownAt < options.TrustSpan;
+            (ulong parent, CommitObject? commit) = await LatestAsync(store, known, trusted, cancellationToken).ConfigureAwait(false);
             known = parent;
+            knownAt = asked;
             CommitPageSource pages = new CommitPageSource(store, options.PageCache);
             DatasetLevels levels = DatasetLevels.Empty;
             CommitHeader template = options.Template ?? new CommitHeader { Version = 1 };
@@ -153,7 +169,7 @@ internal static class DatasetCommitter
             // number; it publishes nothing, and names the version it was decided against.
             if (operations.Count > 0 && commit is not null && !outcomes.Contains(OperationOutcome.Applied))
             {
-                return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages, commit);
+                return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages, commit, asked);
             }
 
             (IReadOnlyList<CommitLevel> recorded, IReadOnlyList<PagesStart> starts) = LevelsOf(next, builder, pages);
@@ -170,14 +186,15 @@ internal static class DatasetCommitter
             };
             header = WithoutHeld(header);
 
-            // 3. One conditional creation.
+            // 3. One conditional creation. Once it is in, nothing after it can exist yet.
             string key = CommitKey.For(version);
             byte[] bytes = builder.Build(header);
+            DateTimeOffset put = options.TimeProvider.GetUtcNow();
             if (await store.PutIfAbsentAsync(key, bytes, cancellationToken).ConfigureAwait(false)
                 == PutOutcome.Created)
             {
                 pages.Placed(bytes);
-                return new CommitResult(version, key, next, outcomes, attempt, pages, CommitObject.Placed(header, bytes));
+                return new CommitResult(version, key, next, outcomes, attempt, pages, CommitObject.Placed(header, bytes), put);
             }
         }
 
@@ -188,13 +205,16 @@ internal static class DatasetCommitter
 
     /// <summary>
     /// The latest version and its commit object; (0, null) when the dataset has none. From
-    /// <paramref name="known"/>, a version the caller has seen, the versions after it are asked
-    /// for; from 0, or when the answer is gone by the time it is read, the commits are listed.
+    /// <paramref name="known"/>, a version the caller knew to be the latest recently enough that
+    /// every version after it is still in the store (<paramref name="trusted"/>), those versions are
+    /// asked for. Otherwise, or when the answer is gone by the time it is read, the commits are listed:
+    /// vacuum keeps an old commit object whose pages a retained version still names and takes the
+    /// ones after it, so above a version learned too long ago a missing one does not end the run.
     /// </summary>
     public static async ValueTask<(ulong Version, CommitObject? Commit)> LatestAsync(
-        IObjectStore store, ulong known, CancellationToken cancellationToken)
+        IObjectStore store, ulong known, bool trusted, CancellationToken cancellationToken)
     {
-        if (known > 0)
+        if (known > 0 && trusted)
         {
             ulong newest = await NewestFromAsync(store, known, cancellationToken).ConfigureAwait(false);
             try
@@ -216,9 +236,10 @@ internal static class DatasetCommitter
 
     /// <summary>
     /// The newest version from <paramref name="known"/> on: the versions after it asked for in
-    /// doubling steps, then bisected. The commits a dataset keeps run without a gap above any that
-    /// is still there, since vacuum takes the oldest first, so a version that is missing ends the
-    /// run; a single request answers when nothing is newer.
+    /// doubling steps, then bisected. Every version after one the caller knew to be the latest less
+    /// than half a retention window ago is still in the store, since each was created after that and
+    /// vacuum takes a commit only a window after the next one superseded it: a version that is
+    /// missing ends the run, and a single request answers when nothing is newer.
     /// </summary>
     private static async ValueTask<ulong> NewestFromAsync(IObjectStore store, ulong known, CancellationToken cancellationToken)
     {

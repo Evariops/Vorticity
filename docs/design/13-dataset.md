@@ -424,7 +424,16 @@ coordinator, in the exception's own words.
 Commit keys sort newest first, so the first key a listing of `commit/` yields is the whole discovery,
 and the listing stops after one page. That needs a strongly consistent listing, which S3 has had since
 2020 and which §11 requires of any store. A reader that wants to read its own writes is handed the
-version by its writer. There is no hint object and no probe loop.
+version by its writer. There is no hint object.
+
+A handle that knows its version was the latest less than half a retention window ago asks for the
+versions after it instead, a head request each: every one of them was created after that moment, and
+vacuum takes a commit only a window after the next one superseded it, so they are all still there
+and the first missing one ends the run. Past that half window the handle lists. Below the window the
+commits do not run without a gap: vacuum keeps an old commit object whose pages a retained version
+still names and takes the unnamed ones after it, so a handle that took the gap above its own version
+for the end would read it as the latest, and commit on it. The handle's clock must therefore agree
+with the store's to within the other half window, as a vacuum's already must.
 
 ## 9. The read-path budget
 
