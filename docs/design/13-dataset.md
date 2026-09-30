@@ -182,13 +182,20 @@ index compaction of everything it touches.
 
 **Level 0 is not sorted, and nobody sorts it.** An append arrives in any order and the writer streams
 with bounded memory ([11-write-strategy.md](11-write-strategy.md)). So the write policy **requires a
-sorted run on the clustering key** in every object ([10-indexes.md](10-indexes.md) §6), and the
-compaction reads each input **in key order through that run**
-([12-index-reads.md](12-index-reads.md) §5): the merge's inputs are ordered, its outputs are sorted by
-construction, and the writer never learns to sort. The run is the object's structure rather than a
-hint, so the index budget spares it: on a narrow table it is as large as the column it orders, and a
-budget of a tenth of the data would refuse it on every object past a mebibyte, the merge's outputs
-included.
+sorted run on the clustering key** in every object whose rows may be out of order
+([10-indexes.md](10-indexes.md) §6), and the compaction reads each input **in key order through that
+run** ([12-index-reads.md](12-index-reads.md) §5): the merge's inputs are ordered, its outputs are
+sorted by construction, and the writer never learns to sort. The run is the object's structure rather
+than a hint, so the index budget spares it: on a narrow table it is as large as the column it orders,
+and a budget of a tenth of the data would refuse it on every object past a mebibyte, the merge's
+outputs included.
+
+**An object whose rows come in key order carries no run** when the key is one integer column that
+holds no null: a merge's output, or the rewrite of one (§12). Its statistics say the column is
+sorted, and a sorted column is the source a key cursor and a key-ordered read take before any run,
+its zone map as the index, so a run beside it is bytes nobody reads. The seal checks that a key cursor
+opens on the column alone, so that an object whose order was lost is refused rather than read as one
+without the key.
 
 The merge emits **windows, not rows**: at each step the input holding the smallest key emits every
 row at or below the smallest key the others hold, a contiguous window of its current batch, so the

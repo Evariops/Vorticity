@@ -26,6 +26,7 @@ using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Indexes;
 using Vorticity.IO;
+using Vorticity.Keys;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
 using Vorticity.Types;
@@ -58,6 +59,9 @@ public sealed class DatasetCompactionTests
             await dataset.AppendAsync(Batches(types, schema, residue), ct);
         }
 
+        // An append comes in any order, so it carries the run a merge reads it through.
+        Assert.True(await HasRunAsync(store, (await ObjectsAsync(dataset))[0], ct), "an append carries its run (§5.3)");
+
         CompactionOptions options = Options(target: 1 << 20);
         CompactionPlan plan = await dataset.PlanCompactionAsync(options, ct);
         Assert.Equal(CompactionTrigger.LevelZeroCeiling, plan.Job!.Trigger);
@@ -89,6 +93,15 @@ public sealed class DatasetCompactionTests
         await using ObjectSegmentSource bytes = new ObjectSegmentSource(store, compacted.Key);
         await using VortexFile output = await VortexFile.OpenAsync(bytes, new VortexOpenOptions(), ct);
         Assert.True(IsSorted(output, "key"), "a merge writes its output sorted by construction (§5.3)");
+
+        // On a key of integers that holds no null, the sorted column is the key source a cursor
+        // takes before any run, so the output carries none.
+        Assert.False(await HasRunAsync(store, compacted, ct), "an object written in key order carries no run on an integer key (§5.3)");
+        await using (KeyCursor cursor = Assert.IsType<KeyCursor>(await output.Keys("key").OpenAsync(ct)))
+        {
+            Assert.True(await cursor.SeekFirstAsync(ct));
+            Assert.Equal(0, cursor.Key.SignedValue);
+        }
 
         Console.Out.Write(FormattableString.Invariant(
             $"DATASET COMPACTION: {result.ObjectsIn} interleaved objects of level 0 merged into {result.ObjectsOut} sorted object at level 1, {result.Rows} rows, {result.BytesIn} bytes read and {result.BytesOut} written.\n"));

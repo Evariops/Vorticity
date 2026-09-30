@@ -251,21 +251,27 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>
     /// Starts a data object under <paramref name="schema"/>: what a rewrite uses, whose rows are read
-    /// as the schema of the version it read, whatever the handle has moved to since.
+    /// as the schema of the version it read, whatever the handle has moved to since. A caller whose
+    /// rows come in key order says so with <paramref name="inKeyOrder"/>, and a key whose column then
+    /// orders the object by itself takes no run.
     /// </summary>
-    internal ObjectDraft StartObjectUnder(DatasetSchema schema)
+    internal ObjectDraft StartObjectUnder(DatasetSchema schema, bool inKeyOrder = false)
     {
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
         ObjectSegmentSink sink = new ObjectSegmentSink(_store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool);
         VortexWriteOptions write = _options.Write.WithIdentity(identity);
-        if (schema.Key is { } clustering)
+        bool bySortedColumn = inKeyOrder && schema.Key is { OrdersBySortedColumn: true };
+        if (schema.Key is { } clustering && !bySortedColumn)
         {
             // The mandatory sorted run on the clustering key, added to the caller's own policy.
             write = clustering.Applied(write);
         }
 
-        return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write));
+        return new ObjectDraft(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write))
+        {
+            BySortedColumn = bySortedColumn,
+        };
     }
 
     /// <summary>
@@ -804,7 +810,7 @@ public sealed class VortexDataset : IAsyncDisposable
         // Read out of the chunks the sink still holds, before the put: the entry's bounds and the
         // smallest key its leaf is ordered by then cost no request at all.
         (ObjectSummaries summaries, byte[] prefix) =
-            await DescribeAsync(draft.Sink.Content(), firstRow, cancellationToken).ConfigureAwait(false);
+            await DescribeAsync(draft.Sink.Content(), firstRow, draft.BySortedColumn, cancellationToken).ConfigureAwait(false);
         if (await draft.Sink.CommitAsync(cancellationToken).ConfigureAwait(false) != PutOutcome.Created)
         {
             throw new ObjectStoreException($"'{draft.Key}' was taken, which a fresh uid cannot be.");
@@ -954,17 +960,41 @@ public sealed class VortexDataset : IAsyncDisposable
     /// open and the first key ask for are read, where they lie.
     /// </summary>
     private async ValueTask<(ObjectSummaries Summaries, byte[] Prefix)> DescribeAsync(
-        ISegmentSource bytes, long firstRow, CancellationToken cancellationToken)
+        ISegmentSource bytes, long firstRow, bool bySortedColumn, CancellationToken cancellationToken)
     {
         SourceReader source = new SourceReader(bytes, ownsSource: true, _options.Session.Options.EnginePool);
         VortexFile file = await VortexFile
             .OpenAsync(source, ObjectCache.OpenOptions, cancellationToken).ConfigureAwait(false);
         await using (file.ConfigureAwait(false))
         {
+            if (bySortedColumn)
+            {
+                await CheckSortedAsync(file, cancellationToken).ConfigureAwait(false);
+            }
+
             ObjectSummaries summaries = Summaries(file);
             return (summaries, await PrefixAsync(file, summaries, firstRow, cancellationToken)
                 .ConfigureAwait(false));
         }
+    }
+
+    /// <summary>
+    /// Refuses an object written without a run whose key column does not walk by itself: its rows
+    /// were to come in key order, and a key cursor that found no source in it would take it for an
+    /// object without the key, whose rows no walk delivers.
+    /// </summary>
+    private async ValueTask CheckSortedAsync(VortexFile file, CancellationToken cancellationToken)
+    {
+        ClusteringKey clustering = Key!;
+        Keys.KeyCursor? cursor = await clustering.TryOpenAsync(file, indexes: false, cancellationToken).ConfigureAwait(false);
+        if (cursor is null)
+        {
+            throw new InvalidOperationException(
+                $"An object written in key order carries no run on '{clustering.Paths[0]}', and its statistics do not say " +
+                "the column is sorted: a rewrite that loses the order of its rows is the one thing it must not do.");
+        }
+
+        await cursor.DisposeAsync().ConfigureAwait(false);
     }
 
     /// <summary>What orders an object's leaf: its smallest key, or its position.</summary>
