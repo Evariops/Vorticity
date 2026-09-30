@@ -1,4 +1,5 @@
-// The pages a handle keeps from one version it reads to the next.
+// The pages a handle keeps from one version it reads to the next, and the version its own commit
+// created, which it reads as it wrote it.
 //
 // A PAGE IS IMMUTABLE AND OUTLIVES ITS VERSION: every version names the pages its commit did not
 // rewrite by the references an earlier version gave them, so what a handle read at one version it
@@ -228,6 +229,72 @@ public sealed class DatasetPageCacheTests
         Assert.InRange(store.Requests, first - 1, first + 1);
     }
 
+    [Fact]
+    public async Task AHandleReadsTheVersionItCommittedWithoutAskingTheStoreForIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions(), 3, ct);
+
+        store.Reset();
+        CommitResult result = await dataset.CommitAsync([Add(1)], ct);
+
+        // The commit's own requests and none after: the probe for a version after the handle's, the
+        // read of the handle's, the creation. The handle reads what it wrote as it wrote it.
+        Assert.Equal(result.Version, dataset.Version);
+        Assert.Equal((1, 1, 1), (store.CountOf(ObjectOperation.Head), store.CountOf(ObjectOperation.GetRange), store.CountOf(ObjectOperation.PutIfAbsent)));
+        store.Reset();
+        Assert.Equal(4, await CountAsync(dataset, ct));
+        Assert.Equal(0, store.Requests);
+    }
+
+    [Fact]
+    public async Task AHandleWhoseCommitFindsNothingToDoReadsTheVersionItFound()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions(), 3, ct);
+        ulong held = dataset.Version;
+
+        // Another writer adds the very object this handle is about to add.
+        await AddAsync(store, 0, ct);
+        store.Reset();
+        CommitResult result = await dataset.CommitAsync([Add(1)], ct);
+
+        // The probes that find the other writer's version, its read, and nothing after: the handle
+        // reads the version its commit was decided on.
+        Assert.Equal(OperationOutcome.AlreadyThere, result.Outcomes[0]);
+        Assert.Equal((held + 1, held + 1), (result.Version, dataset.Version));
+        Assert.Equal((3, 1, 0), (store.CountOf(ObjectOperation.Head), store.CountOf(ObjectOperation.GetRange), store.CountOf(ObjectOperation.PutIfAbsent)));
+        Assert.Equal(4, await CountAsync(dataset, ct));
+    }
+
+    [Fact]
+    public async Task AHandleNeverGoesBackToAVersionOlderThanTheOneItReads()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using HeldStore store = new HeldStore(inner);
+        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions(), 3, ct);
+        ulong held = dataset.Version;
+
+        // The first commit creates the next version and is not told yet; a second one on the same
+        // handle rebases onto it, creates the one after, and moves the handle there.
+        store.Holding = CommitKey.For(held + 1);
+        Task<CommitResult> first = dataset.CommitAsync([Add(1)], ct).AsTask();
+        await store.Reached.Task.WaitAsync(ct);
+        CommitResult second = await dataset.CommitAsync([Add(3)], ct);
+        Assert.Equal((held + 2, held + 2), (second.Version, dataset.Version));
+
+        // Told at last, the first moves nothing: the handle already reads past the version it made.
+        store.Release.SetResult();
+        Assert.Equal(held + 1, (await first).Version);
+        Assert.Equal(held + 2, dataset.Version);
+        Assert.Equal(5, await CountAsync(dataset, ct));
+    }
+
     /// <summary>A page of <paramref name="length"/> bytes and the reference that names it.</summary>
     private static (PageReference Reference, byte[] Bytes) Page(int seed, int length)
     {
@@ -249,7 +316,11 @@ public sealed class DatasetPageCacheTests
     }
 
     /// <summary>A clustered dataset whose level 1 holds <see cref="Objects"/> entries, and a handle on it.</summary>
-    private static async Task<VortexDataset> CreateAsync(IObjectStore store, DatasetOptions options, CancellationToken ct)
+    private static Task<VortexDataset> CreateAsync(IObjectStore store, DatasetOptions options, CancellationToken ct) =>
+        CreateAsync(store, options, Objects, ct);
+
+    /// <summary>A clustered dataset whose level 1 holds <paramref name="objects"/> entries, at even keys, and a handle on it.</summary>
+    private static async Task<VortexDataset> CreateAsync(IObjectStore store, DatasetOptions options, int objects, CancellationToken ct)
     {
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -262,7 +333,7 @@ public sealed class DatasetPageCacheTests
         {
         }
 
-        List<DatasetOperation> operations = [.. Enumerable.Range(0, Objects).Select(i => Add(2L * i))];
+        List<DatasetOperation> operations = [.. Enumerable.Range(0, objects).Select(i => Add(2L * i))];
         await DatasetCommitter.CommitAsync(store, operations, new CommitOptions { Seed = Seed }, ct);
         return await VortexDataset.OpenAsync(store, options, ct);
     }
@@ -291,5 +362,44 @@ public sealed class DatasetPageCacheTests
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(8), (ulong)(uid >> 64));
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(16), (ulong)uid);
         return new DatasetOperation.AddObject(key, entry) { Level = 1 };
+    }
+
+    /// <summary>A store that holds back the answer to one put, once the object is in: a writer not told yet.</summary>
+    private sealed class HeldStore(IObjectStore inner) : IObjectStore
+    {
+        /// <summary>The key whose put is held; null holds none.</summary>
+        internal string? Holding { get; set; }
+
+        /// <summary>Set once the held put has created its object.</summary>
+        internal TaskCompletionSource Reached { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Set by the test to answer the held put.</summary>
+        internal TaskCompletionSource Release { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken) =>
+            inner.GetRangeAsync(key, offset, length, cancellationToken);
+
+        public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
+            inner.HeadAsync(key, cancellationToken);
+
+        public async ValueTask<PutOutcome> PutIfAbsentAsync(string key, System.IO.Pipelines.PipeReader content, long length, CancellationToken cancellationToken)
+        {
+            PutOutcome outcome = await inner.PutIfAbsentAsync(key, content, length, cancellationToken);
+            if (key == Holding)
+            {
+                Reached.SetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+
+            return outcome;
+        }
+
+        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
+            inner.DeleteAsync(keys, cancellationToken);
+
+        public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
+            inner.ListAsync(prefix, startAfter, cancellationToken);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

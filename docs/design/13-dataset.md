@@ -380,7 +380,10 @@ then creates `commit/<inverted N+1>` — header, pages and fragments in one obje
 **put-if-absent**, streamed from a pipe whose length is given up front, so the store chooses between
 one request and a multipart upload. Put-if-absent linearizes commits: no lease, no lock, no external
 service. Uncontended, a commit is **three dependent requests**: the listing, the read of `N`'s header,
-the creation; the data objects cost the commit nothing more.
+the creation; the data objects cost the commit nothing more. A handle commits from the version it
+holds, probing for the one after it instead of listing, and then reads the version it created as it
+wrote it: nothing is read back, and a handle whose commit found nothing to change reads the version
+that commit was decided on.
 
 ### 8.2 Rebase by re-applying operations
 

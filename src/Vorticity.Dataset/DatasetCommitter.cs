@@ -51,13 +51,18 @@ internal sealed record CommitOptions
 /// <param name="Outcomes">What each operation decided, in the caller's order.</param>
 /// <param name="Attempts">How many times the writer had to rebase, 1 when it won first time.</param>
 /// <param name="Pages">A source that can read the new version's pages, new and old.</param>
+/// <param name="Commit">
+/// The commit object of <paramref name="Version"/> as the writer holds it: the one it placed, or the
+/// one it opened when nothing applied.
+/// </param>
 internal sealed record CommitResult(
     ulong Version,
     string Key,
     DatasetLevels Levels,
     IReadOnlyList<OperationOutcome> Outcomes,
     int Attempts,
-    IPageSource Pages)
+    IPageSource Pages,
+    CommitObject Commit)
 {
     /// <summary>Level 0's tree, where appends land.</summary>
     public DatasetTree Tree => Levels[0];
@@ -148,7 +153,7 @@ internal static class DatasetCommitter
             // number; it publishes nothing, and names the version it was decided against.
             if (operations.Count > 0 && commit is not null && !outcomes.Contains(OperationOutcome.Applied))
             {
-                return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages);
+                return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages, commit);
             }
 
             CommitHeader header = template with
@@ -170,7 +175,7 @@ internal static class DatasetCommitter
                 == PutOutcome.Created)
             {
                 pages.Placed(bytes);
-                return new CommitResult(version, key, next, outcomes, attempt, pages);
+                return new CommitResult(version, key, next, outcomes, attempt, pages, CommitObject.Placed(header, bytes));
             }
         }
 
