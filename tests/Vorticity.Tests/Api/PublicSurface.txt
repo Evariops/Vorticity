@@ -2017,6 +2017,23 @@ Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property OperationOutcome Outcome { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.RowChangeResult : IEquatable<RowChangeResult>
+Vorticity.Dataset:     ctor RowChangeResult()
+Vorticity.Dataset:     method RowChangeResult <Clone>$()
+Vorticity.Dataset:     method bool Equals(RowChangeResult)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(RowChangeResult, RowChangeResult)
+Vorticity.Dataset:     method bool op_Inequality(RowChangeResult, RowChangeResult)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property OperationOutcome Outcome { get; init; }
+Vorticity.Dataset:     property int Attempts { get; init; }
+Vorticity.Dataset:     property long BytesIn { get; init; }
+Vorticity.Dataset:     property long BytesOut { get; init; }
+Vorticity.Dataset:     property long ObjectsIn { get; init; }
+Vorticity.Dataset:     property long ObjectsOut { get; init; }
+Vorticity.Dataset:     property long Rows { get; init; }
+Vorticity.Dataset:     property ulong Version { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.TornCommitException : VortexException
 Vorticity.Dataset:     ctor TornCommitException()
 Vorticity.Dataset:     ctor TornCommitException(string)
@@ -2061,6 +2078,9 @@ Vorticity.Dataset:     method ValueTask<DatasetVerification> VerifyAsync(Nullabl
 Vorticity.Dataset:     method ValueTask<Nullable<ulong>> RemoveTornCommitAsync(IObjectStore, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> RemoveAsync(IReadOnlyList<DataObject>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> ReplaceAsync(IReadOnlyList<DataObject>, IReadOnlyList<ObjectDraft>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync(VortexExpr, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync<TRecord>(Func<Probe<TRecord>, Predicate>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> UpdateAsync<TRecord>(Func<Probe<TRecord>, Predicate>, Func<TRecord, TRecord>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VacuumResult> VacuumAsync(VacuumOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> CreateAsync(IObjectStore, VortexSchema, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(IObjectStore, DatasetOptions = default, CancellationToken = default)

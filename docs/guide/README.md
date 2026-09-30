@@ -94,7 +94,7 @@ VX0002 for the row encoding, which a project acknowledges before it builds.
 
 | page | what you get |
 |---|---|
-| [datasets.md](datasets.md) | a versioned dataset over an object store: create, append, import, scan, commit |
+| [datasets.md](datasets.md) | a versioned dataset over an object store: create, append, import, scan, commit, delete and update rows |
 | [dataset-maintenance.md](dataset-maintenance.md) | compact, vacuum and verify, and what each costs in requests |
 | [object-store.md](object-store.md) | implement the store seam for the service you use, and open a single file out of one |
 | [row-keys.md](row-keys.md) | encode a tuple into bytes whose `memcmp` order is the tuple's order |

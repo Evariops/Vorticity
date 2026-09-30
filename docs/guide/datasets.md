@@ -144,10 +144,45 @@ versions that name them, until vacuum deletes them. Removing an object the versi
 holds is `Abandoned`: no version is created, the result names the latest one, and the objects a
 replace would have added are left for vacuum.
 
+## Deleting and updating rows
+
+```csharp
+RowChangeResult deleted = await dataset.DeleteAsync<Reading>(r => r.Day < 10);
+
+RowChangeResult updated = await dataset.UpdateAsync<Reading>(
+    r => r.City == "Nice" & r.Day >= 60,
+    r => r with { Celsius = r.Celsius + 1.0 });
+```
+
+```
+deleted days 0 to 9: version 8, 9800 rows, 1 object(s) rewritten into 1, 99200 rows left
+warmed Nice from day 60: version 9, 6251 rows changed, 2 object(s) in, 3 out
+```
+
+`DeleteAsync` removes the rows its filter is true for, in one commit. A row the filter is false or
+unknown for, a null compared, stays. Each object that holds a matching row is rewritten without it,
+in its own level and, without a clustering key, at its own place in the order; one left with no row
+is removed whole, and one whose summaries refute the filter is not opened. `UpdateAsync` reads the
+matching rows as records, passes each through the lambda, and writes the results into new objects
+of level 0, as an append would, since a change may move a row's key: an update is a delete and an
+insert, applied together. Its record must have a member for every column. `DeleteAsync(VortexExpr)`
+is the delete for a caller without a record type.
+
+It is copy on write: reading pays nothing and every statistic stays exact, and the price is the
+rewrite of every object a row is taken from, however few rows that is. A delete of one row in a
+256 MiB object rewrites the object. `BytesIn` and `BytesOut` say what a change rewrote.
+
+A reader sees the change whole or not at all. Rows appended by another writer while the change is
+worked out are not touched; if another writer rewrites an object the change read, a compaction for
+instance, the change is worked out again on the version that won, and `Attempts` counts how many
+times.
+
 ## Watch out
 
 * **Experimental, and this repository's own format.** Pin the package version, and do not expect
   another Vortex implementation to read the tree.
+* **A delete or an update rewrites whole objects.** Batch the rows you change into few calls: two
+  deletes of one row each in one object rewrite it twice.
 * **The store must create objects atomically and list them consistently**: see
   [object-store.md](object-store.md). A store that cannot promise `PutIfAbsent` cannot host a
   dataset safely.

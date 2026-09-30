@@ -93,7 +93,7 @@ probabilistic B-tree of Noms and Dolt. Once a commit is a sorted batch of change
 tree and a B+tree with path copying are one algorithm — load the touched leaves, merge the changes,
 re-emit them, rebuild the nodes above up to the top — and only the rule that places page boundaries
 differs. From the prolly rule alone follow history independence, deduplication across writers and
-the strongest test oracle there is (§12).
+the strongest test oracle there is (§13).
 
 **The boundary rule.** A boundary is decided per entry from the XXH3-64 of the entry's key alone,
 seeded with sixteen random bytes the dataset draws once, so values never move a boundary and an
@@ -341,6 +341,8 @@ merges two trees. Each operation carries its own answer to a moved ground:
 | indexer, compaction of that object | the object is gone; the fragment is dropped and never written |
 | compaction, compaction on overlapping inputs | the second finds an input missing and abandons; its outputs are garbage |
 | vacuum, anything | vacuum deletes only what no retained version references and what is older than the window (§10) |
+| delete or update, append | the appended object is not among those the change read: it stays, and its rows are not touched |
+| delete or update, anything that rewrites an object it read | an input is gone: the replacement is abandoned, and the change is worked out again on the version that won (§12) |
 | reader, anything | the reader holds a version; everything it references is immutable |
 
 An object's key ends with its uid, which makes it unique and a function of the object: two appenders
@@ -436,7 +438,38 @@ latency, failures and crashes after a put; and `CountingObjectStore`, a decorato
 bytes and the **dependent steps** of the critical path. The contract is a test suite,
 `ObjectStoreContractTests`, which an S3 library runs against its own store.
 
-## 12. Alternatives weighed
+## 12. Deleting and updating rows
+
+**Copy on write.** A delete takes the rows its filter is true for — a row it is false or unknown for
+stays, as a scan would not return it — by rewriting every object that holds one: the rows left go into
+an object that takes the old one's place in its level, and an object left with none is removed from
+the tree without being read. An update is a delete and an insert applied together: the rows it takes
+are read as records, passed through the caller's function and written into new objects of level 0,
+where appended rows go, because a changed row may carry another key. One `ReplaceObjects` commits the
+whole change, so a reader sees all of it or none.
+
+**Why not a mask of deleted rows.** A deletion vector per object would make a delete cost a few bytes
+rather than an object, and every read pay for it: each scan would apply the masks; the statistics and
+summaries would stop being exact, so a count, a minimum or a mean answered from them would count the
+deleted rows; and the zone maps and indexes would answer for rows that are gone. The read path is the
+one this design bounds (§1) and the write path the one it makes pay (§2), so a delete rewrites. What it
+costs is an object per object touched, whatever the number of rows; a filter on the clustering key
+touches at most the 8 + L objects a lookup does.
+
+**What keeps the invariants.** The rows an object keeps are a subset of its rows, so its keys lie inside
+its old range: a level above 0 stays key-disjoint and the tree's order holds; without a clustering key
+the rewritten object keeps the old one's position. An object the summaries refute is not opened, one
+whose own count finds no row is not rewritten, and one every row of which goes is removed unread. The
+rows are judged by the scan's own evaluator, so a delete and a scan with the same filter agree on
+every row, nulls included, and the rewrite checks that it kept exactly the rows the count left.
+
+**Concurrent writers.** The change is worked out on the version the handle holds. An append that lands
+first adds objects the change never read, whose rows it does not touch; a commit that removes or
+rewrites an object the change read — a compaction, another delete — abandons the replacement (§8.2),
+and the change is worked out again on the version that won, up to `MaxAttempts` times. What a lost
+attempt wrote is left for vacuum.
+
+## 13. Alternatives weighed
 
 | question | chosen | rejected, and why |
 |---|---|---|
@@ -450,12 +483,12 @@ bytes and the **dependent steps** of the critical path. The contract is a test s
 | metadata objects | one commit object per version | an object per page or per pack (sequential reads, orphans after a crash, two creations per commit) |
 | Iceberg or Delta as the table layer | — | their data formats are Parquet, ORC and Avro; a Vortex data file would make the table unreadable to every engine that reads them, which is the only reason to adopt them |
 
-**Not in this design:** deleting or updating rows, which an LSM on a key makes natural and the design
-leaves room for; a clustering key picked automatically, since it decides the write amplification and
-is the user's to state; schema evolution, where the header records one schema and an object with
-another is refused.
+**Not in this design:** a clustering key picked automatically, since it decides the write amplification
+and is the user's to state; deleting rows by a mask of positions, which moves the cost of a delete onto
+every read (§12); schema evolution, where the header records one schema and an object with another is
+refused.
 
-## 13. How it is tested
+## 14. How it is tested
 
 - **The counting matrix** of §9.2.
 - **An interleaving fuzzer** over the in-memory store: readers, writers, indexers, compactions and
@@ -470,6 +503,9 @@ another is refused.
 - **Order**: key-ordered reads across levels equal a sort of the rows, in both directions, with and
   without summaries; a key cursor's walk down is its walk up reversed, a step against its direction
   lands next to the entry before it, and its seeks below a key land where one sorted file's would.
+- **Deletes and updates**: the rows left equal the rows written filtered in C# under three-valued
+  logic, across levels and without a clustering key, and a delete that loses its objects to a
+  compaction is worked out again.
 - **Tampering**: an object replaced at equal size, a page, a root and a fragment torn at every byte, a
   fragment of another object: readers answer exactly, and verify names each.
 - **Rust**: compaction outputs are among the files the cross-check hands to Rust 0.86.1.

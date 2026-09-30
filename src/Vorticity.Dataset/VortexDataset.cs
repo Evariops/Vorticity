@@ -446,6 +446,100 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
+    /// Deletes the rows <paramref name="filter"/> is true for, in one commit: every object that holds
+    /// one is rewritten without them, and one left with no row is removed.
+    /// </summary>
+    /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
+    /// <param name="filter">A lambda over the record's columns. A row it is false or unknown for stays.</param>
+    /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
+    /// <returns>The version created and the rows deleted; <see cref="OperationOutcome.AlreadyThere"/> and the version the handle held when no row matched.</returns>
+    /// <remarks>
+    /// Copy on write: the read path pays nothing, and the price is the rewrite of every object a row
+    /// is taken from, whatever the number of rows. An object whose summaries refute the filter is not
+    /// opened, and one whose own count finds no row is not rewritten. The rows appended by a writer
+    /// that commits in the meantime are not deleted; if one rewrites an object this delete read, the
+    /// delete is worked out again on its version.
+    /// </remarks>
+    /// <exception cref="VortexSchemaException">A literal or a column of the filter does not fit the dataset.</exception>
+    /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this delete read on every attempt.</exception>
+    public ValueTask<RowChangeResult> DeleteAsync<TRecord>(
+        Func<Probe<TRecord>, Predicate> filter, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        Predicate predicate = filter(new Probe<TRecord>(RecordBinding.For<TRecord>(Schema, Session.Options.Extensions)));
+        return predicate.IsNone
+            ? ValueTask.FromResult(Unchanged())
+            : DatasetRowChanges.RunAsync(this, Checked(predicate.Node), null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Deletes the rows <paramref name="filter"/> is true for, in one commit, for a caller without a
+    /// record type; see <see cref="DeleteAsync{TRecord}(Func{Probe{TRecord}, Predicate}, CancellationToken)"/>.
+    /// </summary>
+    /// <param name="filter">The filter, from <see cref="VortexExpr.Parse"/> or combined with operators.</param>
+    /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
+    /// <returns>The version created and the rows deleted.</returns>
+    /// <exception cref="VortexSchemaException">The filter names a column the dataset does not have, or compares one with a literal of a type it cannot compare to.</exception>
+    /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this delete read on every attempt.</exception>
+    public ValueTask<RowChangeResult> DeleteAsync(VortexExpr filter, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        return DatasetRowChanges.RunAsync(this, Checked(ToolPaths.Check(Schema, filter)), null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Changes the rows <paramref name="filter"/> is true for, in one commit: each is read as a
+    /// record, passed through <paramref name="update"/>, and written again, while the objects it
+    /// came from are rewritten without it.
+    /// </summary>
+    /// <typeparam name="TRecord">The record the rows are read and written as; it has a member for every column of the dataset.</typeparam>
+    /// <param name="filter">A lambda over the record's columns. A row it is false or unknown for is left as it is.</param>
+    /// <param name="update">The change, called once per row with the row as it is, returning the row as it is to be.</param>
+    /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
+    /// <returns>The version created and the rows changed; <see cref="OperationOutcome.AlreadyThere"/> and the version the handle held when no row matched.</returns>
+    /// <remarks>
+    /// A delete and an insert, applied together: the changed rows land in new objects of level 0, as
+    /// appended rows do, since a change may move a row's key, and without a clustering key they come
+    /// after every other row. Everything <see cref="DeleteAsync{TRecord}(Func{Probe{TRecord}, Predicate}, CancellationToken)"/>
+    /// says of its cost and of concurrent writers holds here too; <paramref name="update"/> may be
+    /// called again for a row when the change is worked out again.
+    /// </remarks>
+    /// <exception cref="ArgumentException"><typeparamref name="TRecord"/> has no member for a column of the dataset.</exception>
+    /// <exception cref="VortexSchemaException">A literal or a column of the filter does not fit the dataset.</exception>
+    /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this update read on every attempt.</exception>
+    public ValueTask<RowChangeResult> UpdateAsync<TRecord>(
+        Func<Probe<TRecord>, Predicate> filter, Func<TRecord, TRecord> update, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        ArgumentNullException.ThrowIfNull(update);
+        RecordBinding binding = RecordBinding.For<TRecord>(Schema, Session.Options.Extensions);
+        bool[] covered = new bool[Schema.Count];
+        foreach (int column in binding.FileIndex)
+        {
+            covered[column] = true;
+        }
+
+        int missing = Array.IndexOf(covered, false);
+        if (missing >= 0)
+        {
+            throw new ArgumentException(
+                $"An update writes whole rows, and {typeof(TRecord).Name} has no member for the column '{Schema[missing].Name}'.",
+                nameof(update));
+        }
+
+        Predicate predicate = filter(new Probe<TRecord>(binding));
+        return predicate.IsNone
+            ? ValueTask.FromResult(Unchanged())
+            : DatasetRowChanges.RunAsync(
+                this,
+                Checked(predicate.Node),
+                end => new ChangedRecords<TRecord>(this, update, binding, end),
+                cancellationToken);
+    }
+
+    /// <summary>
     /// What compaction is due on this version and what it would cost, read from the leaf entries
     /// alone; the plan's job is null when nothing is over its bound.
     /// </summary>
@@ -688,6 +782,23 @@ public sealed class VortexDataset : IAsyncDisposable
         }
 
         return end;
+    }
+
+    /// <summary>What a change reports when its filter can match no row: nothing read, nothing committed.</summary>
+    private RowChangeResult Unchanged() => new RowChangeResult { Version = Version, Outcome = OperationOutcome.AlreadyThere };
+
+    /// <summary>
+    /// A change's filter, its literals checked against the schema before any object is read; null,
+    /// which takes every row, as it is.
+    /// </summary>
+    private VortexExpr? Checked(VortexExpr? filter)
+    {
+        if (filter is not null)
+        {
+            FilterTypeCheck.Check(DType, filter, nameof(filter));
+        }
+
+        return filter;
     }
 
     /// <summary>A file's identity, or zero when it has none.</summary>

@@ -108,6 +108,14 @@ internal static class Datasets
 
         ReplaceResult again = await dataset.RemoveAsync([importedObject]);
         Console.WriteLine($"removing it again: {again.Outcome}, version {again.Version}");
+
+        RowChangeResult deleted = await dataset.DeleteAsync<Reading>(r => r.Day < 10);
+        Console.WriteLine($"deleted days 0 to 9: version {deleted.Version}, {deleted.Rows} rows, {deleted.ObjectsIn} object(s) rewritten into {deleted.ObjectsOut}, {dataset.RowCount} rows left");
+
+        RowChangeResult updated = await dataset.UpdateAsync<Reading>(
+            r => r.City == "Nice" & r.Day >= 60,
+            r => r with { Celsius = r.Celsius + 1.0 });
+        Console.WriteLine($"warmed Nice from day 60: version {updated.Version}, {updated.Rows} rows changed, {updated.ObjectsIn} object(s) in, {updated.ObjectsOut} out");
     }
 
     private static Reading[] Days(int firstDay, int days)
