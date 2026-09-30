@@ -56,9 +56,12 @@ internal sealed class ClusteringKey
     public VortexWriteOptions Applied(VortexWriteOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        // Required rather than budgeted: on a narrow table the index budget would drop the run, and
-        // a dataset whose objects have no run cannot be walked in key order at all.
+        // Required rather than budgeted, and spared by the budget: on a narrow table the run is as
+        // large as the column it orders, so the budget would refuse it on every object past a
+        // mebibyte, compaction outputs included, and a dataset whose objects have no run cannot be
+        // walked in key order at all.
         IndexSpec run = IndexSpec.SortedRuns.AsRequired();
+        options = options with { BudgetSparesRequired = true };
         if (!IsComposite)
         {
             return options.WithIndexes(options.WritePolicy.For(_paths[0], run));

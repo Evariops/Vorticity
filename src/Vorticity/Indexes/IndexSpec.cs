@@ -104,13 +104,12 @@ internal readonly struct IndexSpec : IEquatable<IndexSpec>
     /// </summary>
     /// <remarks>
     /// The budget guards against <see cref="Auto"/>, and this is how a caller says the index is not
-    /// a suggestion. The share of the data an index may take is the right question for a filter
-    /// nobody asked for and the wrong one for an index a structure depends on: a dataset's
-    /// clustering run is mandatory, and on a narrow table a run over one column is intrinsically
-    /// comparable in size to that column, so no object is ever big enough to bring it under the
-    /// budget. A required index still counts toward the budget — it has first claim on it, not
-    /// immunity from arithmetic — so the optional ones around it are abandoned first and, if it
-    /// alone is over, it survives and the report says what it cost.
+    /// a suggestion. A required index still counts toward the budget — it has first claim on it, not
+    /// immunity from arithmetic — so the optional ones around it are abandoned first; if the required
+    /// ones alone are over it, <c>CompleteAsync</c> throws and names them rather than write a file
+    /// without them. A dataset's clustering run is the exception: on a narrow table a run over one
+    /// column is as large as that column, so no object is ever big enough to bring it under the
+    /// budget, and the dataset writes it kept whatever the budget says.
     /// </remarks>
     public bool Required { get; }
 

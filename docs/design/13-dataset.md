@@ -185,8 +185,10 @@ with bounded memory ([11-write-strategy.md](11-write-strategy.md)). So the write
 sorted run on the clustering key** in every object ([10-indexes.md](10-indexes.md) §6), and the
 compaction reads each input **in key order through that run**
 ([12-index-reads.md](12-index-reads.md) §5): the merge's inputs are ordered, its outputs are sorted by
-construction, and the writer never learns to sort. An append whose run the budget would refuse is
-refused as an append.
+construction, and the writer never learns to sort. The run is the object's structure rather than a
+hint, so the index budget spares it: on a narrow table it is as large as the column it orders, and a
+budget of a tenth of the data would refuse it on every object past a mebibyte, the merge's outputs
+included.
 
 The merge emits **windows, not rows**: at each step the input holding the smallest key emits every
 row at or below the smallest key the others hold, a contiguous window of its current batch, so the

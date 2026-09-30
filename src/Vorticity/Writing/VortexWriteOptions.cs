@@ -251,6 +251,15 @@ public sealed record VortexWriteOptions
     /// <summary>When a locating run's segment table goes to fence pages, and how large they are.</summary>
     internal FenceShape Fences { get; init; } = FenceShape.Default;
 
+    /// <summary>
+    /// Whether the budget spares the required indexes when they alone are over it: they keep
+    /// their first claim on it and are written, and the report says what they cost, where the
+    /// write would otherwise fail. What an index a structure cannot be read without asks for: a
+    /// dataset's run on its clustering key is as large as the column it orders on a narrow table,
+    /// so no object of one is ever big enough to bring it under a share of the data.
+    /// </summary>
+    internal bool BudgetSparesRequired { get; init; }
+
     /// <summary>Whether the chooser reads a list's elements from their ingest blocks.</summary>
     internal bool ElementStatistics { get; init; } = true;
 

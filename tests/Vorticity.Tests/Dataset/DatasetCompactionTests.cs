@@ -24,6 +24,7 @@ using Vorticity.Dataset;
 using Vorticity.Diagnostics;
 using Vorticity.Expressions;
 using Vorticity.File;
+using Vorticity.Indexes;
 using Vorticity.IO;
 using Vorticity.Scanning;
 using Vorticity.Tests.Scan;
@@ -455,6 +456,31 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
+    public async Task ARunOnANarrowTableIsKeptPastAMebibyte()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // On a narrow table a run on one column is as large as the column, so a budget of a tenth
+        // of the data would refuse it on every object past a mebibyte, and an object out of key
+        // order has no other way to be walked by key. The dataset keeps it whatever the budget says.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        const int Keys = 150_000;
+        await dataset.AppendAsync(Shuffled(types, schema, 0, Keys, 11), ct);
+
+        ObjectEntry appended = Assert.Single(await ObjectsAsync(dataset));
+        Assert.True(appended.Bytes > 1 << 20, $"the object must pass the budget's floor of a mebibyte; it holds {appended.Bytes} bytes");
+        Assert.True(await HasRunAsync(store, appended, ct), "the run is kept past the budget");
+
+        List<long> walked = await KeysAsync(dataset.ScanBuilder().InKeyOrder("key"));
+        Assert.Equal(Enumerable.Range(0, Keys).Select(key => (long)key), walked);
+    }
+
+    [Fact]
     public async Task APlanReadsEntriesAndChangesNothing()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -740,6 +766,15 @@ public sealed class DatasetCompactionTests
             && file.HasFileStatistics
             && file.FileStatistics.GetField(index).TryGetIsSorted(out bool sorted)
             && sorted;
+    }
+
+    /// <summary>Whether an object carries a sorted run, read from its own index directory.</summary>
+    private static async Task<bool> HasRunAsync(IObjectStore store, ObjectEntry entry, CancellationToken ct)
+    {
+        await using ObjectSegmentSource bytes = new ObjectSegmentSource(store, entry.Key);
+        await using VortexFile file = await VortexFile.OpenAsync(bytes, new VortexOpenOptions(), ct);
+        IndexDirectory? directory = await file.ReadIndexDirectoryAsync(ct);
+        return directory is not null && directory.Entries.Any(index => index.Kind == IndexKinds.SortedRuns);
     }
 
     private static async Task<List<ObjectEntry>> ObjectsAsync(VortexDataset dataset)
