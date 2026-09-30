@@ -280,8 +280,9 @@ that has one.
 
 - **`Vorticity.Dataset`**: `VortexDataset.Scan<TRecord>()` returns the same `Scan<TRecord>` as a
   file, over every object of the version the handle read, which a later commit does not move; a
-  batch's `StartRow` and a cursor's `Row` are positions in the dataset. The store seam, the
-  maintenance calls and what they cost are [13-dataset.md](13-dataset.md).
+  batch's `StartRow` and a cursor's `Row` are positions in the dataset, and a cursor walks both ways
+  as a file's does. The store seam, the maintenance calls and what they cost are
+  [13-dataset.md](13-dataset.md).
 - **`Vorticity.RowEncoding`**: `RowEncoder`, `RowSortField`, `RowKeys` and `RowKeyEncoder`
   ([06-row-encoding.md](06-row-encoding.md)). `[Experimental]` is set on the assembly of both
   experimental packages, so every type reports its diagnostic to a caller, and the packages' own code

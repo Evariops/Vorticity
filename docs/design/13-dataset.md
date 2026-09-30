@@ -282,6 +282,16 @@ objects open before the first row, and an object whose first row lies below the 
 by raises `VortexFormatException` rather than deliver a wrong order. Ties between objects follow the
 dataset's order, so a descending read is the exact reverse of an ascending one.
 
+**A key cursor walks both ways.** Walking down is the same merge with a max-heap. The objects of a
+level above 0 are key-disjoint, so the minimum of the next object of the level is a strict upper
+bound on an object's keys, and the object opens only once the walk passes below it; level 0's
+objects, which nothing but their summaries bounds from above, open at the seek, at most eight and the
+lag. A step against the walk's direction seeks every object again just past the current entry, whose
+place in the order is its key and then its row in the dataset: an object before it in the dataset's
+order lands at or before the key, one after it strictly before, and its own object steps. That is the
+flip every merging iterator pays ([12-index-reads.md](12-index-reads.md) §3.2), and the walk down is
+the walk up reversed, ties included.
+
 Any other order costs, at best, one cursor per object the summaries cannot refute: `ORDER BY x LIMIT
 k` prunes by the summaries, which is good in practice and output-sensitive, never bounded. A second
 bounded order is a second copy of the data clustered by that key, a dataset of its own; a global
@@ -458,7 +468,8 @@ another is refused.
 - **The tree's oracles**: incremental edits equal a rebuild from scratch, byte for byte, and the same
   operations in two orders give one root hash.
 - **Order**: key-ordered reads across levels equal a sort of the rows, in both directions, with and
-  without summaries.
+  without summaries; a key cursor's walk down is its walk up reversed, a step against its direction
+  lands next to the entry before it, and its seeks below a key land where one sorted file's would.
 - **Tampering**: an object replaced at equal size, a page, a root and a fragment torn at every byte, a
   fragment of another object: readers answer exactly, and verify names each.
 - **Rust**: compaction outputs are among the files the cross-check hands to Rust 0.86.1.

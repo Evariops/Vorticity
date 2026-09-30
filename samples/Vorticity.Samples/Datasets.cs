@@ -72,6 +72,11 @@ internal static class Datasets
         {
             bool found = await cursor.SeekAsync(75, SeekOp.AtOrAfter);
             Console.WriteLine($"key cursor: seek 75 found {found}, key {cursor.Key} at row {cursor.Row}; {await cursor.KeyCountAsync()} entries");
+
+            await cursor.SeekLastAsync();
+            (int last, long lastRow) = (cursor.Key, cursor.Row);
+            await cursor.PrevKeyAsync();
+            Console.WriteLine($"walking down: last key {last} at row {lastRow}; the key before it {cursor.Key}, its last entry at row {cursor.Row}");
         }
 
         await using VortexDataset reader = await VortexDataset.OpenAsync(store);

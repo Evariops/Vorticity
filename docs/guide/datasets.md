@@ -19,7 +19,7 @@ await using (ObjectDraft draft = dataset.StartObject())
 
 ```
 created: version 1, 0 rows, clustered by Day
-appended data/4960f1bc51154336b9c12abaa641c39b.vortex: version 2, 50000 rows
+appended data/7f4f12630bb346098a7d785a6bed85bb.vortex: version 2, 50000 rows
 ```
 
 This is `Vorticity.Dataset`, a separate package, and it is **experimental**: the assembly is
@@ -67,9 +67,9 @@ ulong imported = await dataset.ImportAsync("imports/days-100-119.vortex");
 
 ```
 imported: version 4, 120000 rows, 3 objects, lag 0
-  data/4960f1bc51154336b9c12abaa641c39b.vortex: level 0, rows 0 to 50000, 82371 bytes
-  data/8f1d43cdfb9d4d4ab7a10cc02baf54cb.vortex: level 0, rows 50000 to 100000, 82371 bytes
-  imports/days-100-119.vortex: level 0, rows 100000 to 120000, 37828 bytes
+  data/7f4f12630bb346098a7d785a6bed85bb.vortex: level 0, rows 0 to 50000, 82457 bytes
+  data/6fd130088886482683ebdd6485d5530d.vortex: level 0, rows 50000 to 100000, 82457 bytes
+  imports/days-100-119.vortex: level 0, rows 100000 to 120000, 37836 bytes
 ```
 
 `ImportAsync` takes a key in the store, not a path on disk: putting the bytes there is yours to
@@ -91,6 +91,7 @@ Day >= 100: 20000 rows; plan: 3 of 16 blocks, object summaries pruned 13; zone m
 may Day be 500? False; may Day be 75? True
 the first batch of day 110 starts at dataset row 108192
 key cursor: seek 75 found True, key 75 at row 75000; 1000 entries
+walking down: last key 119 at row 119999; the key before it 118, its last entry at row 118999
 ```
 
 The plan's first pruning step is the objects' summaries: the two objects whose days end before 100
@@ -99,7 +100,11 @@ summaries the version's header already carries, so it reads nothing, and `false`
 Positions are the dataset's: a batch's `StartRow`, `Rows(…)` and a key cursor's `Row` count the
 version's rows, object after object, in the order a scan delivers them. A key cursor over the
 clustering key merges the objects' cursors; its `KeyCountAsync` is the number of entries under the
-current key, here the thousand rows of day 75. See [keys-in-order.md](keys-in-order.md).
+current key, here the thousand rows of day 75. It walks both ways, as a file's does: `SeekLastAsync`,
+`PrevAsync`, `PrevKeyAsync`, `AtOrBefore` and `Before`, and a step against the direction of the
+last one seeks every object again at the current entry. Walking down, an object of a level above 0
+opens only once the walk could reach its keys, and level 0's all open at the seek, since nothing
+bounds them from above. See [keys-in-order.md](keys-in-order.md).
 
 ## Versions
 
@@ -127,7 +132,7 @@ await using (ObjectDraft rewritten = dataset.StartObject())
 ```
 
 ```
-replaced data/4960f1bc51154336b9c12abaa641c39b.vortex by the rows with a temperature: version 6, Applied, 129000 rows
+replaced data/7f4f12630bb346098a7d785a6bed85bb.vortex by the rows with a temperature: version 6, Applied, 129000 rows
 removed the import: version 7, Applied, 109000 rows, 3 objects
 removing it again: Abandoned, version 7
 ```

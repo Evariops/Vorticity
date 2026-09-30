@@ -15,12 +15,14 @@ namespace Vorticity.Dataset;
 /// logarithm of the cursors open rather than a pass over every object.
 /// </summary>
 /// <remarks>
-/// On the clustering key an object's cursor opens only once it could hold the next key, since its
-/// tree key is an exact lower bound on its keys and the levels above 0 are key-disjoint; on any
-/// other column every object's cursor opens at the first seek. The objects of a level wait in the
-/// order of their bounds, so the next to open is the first waiting one of some level. The merge
-/// walks forward: a backward step or seek is refused, and <see cref="SeekLastAsync"/> ends a walk
-/// rather than starting one.
+/// On the clustering key an object's cursor opens only once it could hold the next key. Walking
+/// up, its tree key is an exact lower bound on its keys. Walking down, the levels above 0 are
+/// key-disjoint, so the tree key of the next object of its level is a strict upper bound on them;
+/// level 0's objects, which nothing bounds from above, open at the seek. On any other column every
+/// object's cursor opens at the first seek. The heap is a min-heap walking up and a max-heap
+/// walking down, and a step against its direction re-seeks every object at the current entry, as
+/// the core's merge of runs does: the entries are ordered by key, then by the dataset's row, so the
+/// entry just past the current one is known whatever the objects' cursors did before.
 /// </remarks>
 internal sealed class DatasetKeyCursor : IKeyWalker
 {
@@ -32,27 +34,38 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     private readonly Slot[] _slots;
     private readonly List<int>[] _levels;
 
-    // The slots whose cursor is on an entry, a binary min-heap by key, a tie going to the earlier
-    // object, so that the walk's entry is the top's.
+    // The slots whose cursor is on an entry, a binary heap by key in the walk's direction, a tie
+    // going to the earlier object walking up and to the later one walking down, so that the
+    // walk's entry is the top's.
     private readonly int[] _heap;
     private int _live;
 
-    // Per level, the place in its order of the first object the walk has not positioned yet.
+    // +1 while the walk goes up and the heap is a min-heap, -1 while it goes down and is a max-heap.
+    private int _direction = 1;
+
+    // Per level, where the walk stands in its order of bounds. Walking up, the place of the first
+    // object not positioned yet. Walking down, how many objects still wait below, the next to open
+    // being the one just before that place.
     private readonly int[] _next;
 
     // The slots a distinct step moves past the current key, gathered before any of them moves.
     private readonly int[] _moved;
 
-    // The smallest open key, row-encoded, which a single column's bounds are compared with.
-    private byte[] _smallest = [];
+    // The top's key, row-encoded, which the bounds of the objects still waiting are compared with.
+    private byte[] _topKey = [];
 
     // Per object, its part in a selection, rented by the first selection and returned when the walk
     // is disposed: a walk that never selects holds none. It may be longer than the objects.
     private Window[]? _windows;
 
+    // How the walk positions an object it opens: on its first or last entry, or relative to the
+    // target, the objects before the pivot by one operator and the others by another. The pivot is
+    // the object a step against the heap's direction starts from; it steps rather than seeks.
+    private Anchor _anchor;
     private FilterLiteral _target;
-    private SeekOp _op;
-    private bool _first;
+    private SeekOp _beforePivot;
+    private SeekOp _fromPivot;
+    private int _pivot = -1;
     private int _current = -1;
     private bool _disposed;
 
@@ -69,6 +82,19 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         _heap = new int[slots.Length];
         _moved = new int[slots.Length];
         _next = new int[levels.Length];
+    }
+
+    /// <summary>Where the objects a walk opens are positioned.</summary>
+    private enum Anchor : byte
+    {
+        /// <summary>On their first entry.</summary>
+        First,
+
+        /// <summary>On their last entry.</summary>
+        Last,
+
+        /// <summary>Relative to the walk's target key.</summary>
+        Target,
     }
 
     /// <summary>
@@ -188,98 +214,42 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     public async ValueTask<bool> SeekFirstAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        _first = true;
-        Restart();
-        Array.Clear(_next);
+        Begin(1, Anchor.First, null, inclusive: true);
         await ResolveAsync(cancellationToken).ConfigureAwait(false);
         return Choose();
     }
 
     /// <summary>
-    /// Positions on the largest key's last entry, which ends the walk: the merge does not step
-    /// backwards, so the next <see cref="NextAsync"/> answers false.
+    /// Positions on the largest key's last entry, walking down from it; on a distinct walk, on that
+    /// key's first entry.
     /// </summary>
     public async ValueTask<bool> SeekLastAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        Restart();
-        for (int level = 0; level < _levels.Length; level++)
-        {
-            _next[level] = _levels[level].Count;
-        }
-
-        // On the clustering key the largest key is in level 0 or in the last object of a level
-        // above it; anywhere else it may be in any object.
-        List<int> candidates = [];
-        for (int level = 0; level < _levels.Length; level++)
-        {
-            List<int> ordered = _levels[level];
-            if (!_bounded || level == 0)
-            {
-                candidates.AddRange(ordered);
-            }
-            else if (ordered.Count > 0)
-            {
-                candidates.Add(ordered[^1]);
-            }
-        }
-
-        int last = -1;
-        foreach (int candidate in candidates)
-        {
-            Slot slot = _slots[candidate];
-            KeyCursor cursor = await CursorOfAsync(slot, cancellationToken).ConfigureAwait(false);
-            slot.Walked = true;
-            if (await cursor.SeekLastAsync(cancellationToken).ConfigureAwait(false)
-                && (last < 0 || KeyCursor.Compare(cursor.Key, _slots[last].Cursor!.Key) >= 0))
-            {
-                last = candidate;
-            }
-        }
-
-        if (last < 0)
-        {
-            return false;
-        }
-
-        _slots[last].Live = true;
-        Push(last);
-        return Choose();
+        Begin(-1, Anchor.Last, null, inclusive: true);
+        await ResolveAsync(cancellationToken).ConfigureAwait(false);
+        return Choose() && (!_distinct || await FirstOfKeyAsync(cancellationToken).ConfigureAwait(false));
     }
 
     /// <summary>
     /// Positions relative to a key, given in the key's domain: the row encoding of the tuple for a
-    /// composite key. Forward operations only, since this merge walks one way and a backward seek
-    /// would leave the cursors where <see cref="NextAsync"/> could not merge them.
+    /// composite key. <see cref="SeekOp.AtOrBefore"/> and <see cref="SeekOp.Before"/> walk down from
+    /// where they land, and on a distinct walk land on that key's first entry.
     /// </summary>
-    /// <exception cref="NotSupportedException"><paramref name="op"/> looks backwards.</exception>
     public async ValueTask<bool> SeekAsync(
         FilterLiteral key, SeekOp op = SeekOp.AtOrAfter, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (op is not (SeekOp.AtOrAfter or SeekOp.After or SeekOp.Exact))
+        if (op is SeekOp.AtOrBefore or SeekOp.Before)
         {
-            throw new NotSupportedException(
-                $"A cursor over a dataset walks forward and cannot seek {op}; seek to a lower bound and walk.");
+            return await SeekDownAsync(key, op, cancellationToken).ConfigureAwait(false)
+                && (!_distinct || await FirstOfKeyAsync(cancellationToken).ConfigureAwait(false));
         }
 
         // Every cursor goes to the lower bound even for an exact seek, exactness being decided on
         // the winner afterwards: seeking each one exactly would invalidate the cursors whose object
         // does not hold the key, and truncate their rows out of the rest of the merge.
-        _first = false;
-        _target = key;
-        _op = op == SeekOp.Exact ? SeekOp.AtOrAfter : op;
-        byte[]? sought = _bounded ? Encoded(key) : null;
-        Restart();
-        for (int level = 0; level < _levels.Length; level++)
-        {
-            // Above level 0 the objects are disjoint on the clustering key, so everything before the
-            // last one whose minimum is at or below the sought key holds only smaller keys.
-            _next[level] = sought is not null && level > 0 ? LastAtOrBelow(_levels[level], sought) : 0;
-        }
-
-        await ResolveAsync(cancellationToken).ConfigureAwait(false);
-        if (!Choose())
+        if (!await SeekUpAsync(key, op == SeekOp.Exact ? SeekOp.AtOrAfter : op, cancellationToken).ConfigureAwait(false))
         {
             return false;
         }
@@ -341,16 +311,16 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     /// Once the entry is found, the waiting objects whose bounds are at or below its key take part
     /// and the selection runs again, which can only find a smaller key, so none is left that could
     /// come before it. An object whose keys all come after the entry is not opened, as a walk
-    /// would not open it. On any other column every object takes part.
+    /// would not open it. On any other column every object takes part. The walk goes up from the
+    /// entry it lands on.
     /// </remarks>
     internal async ValueTask<bool> SelectAsync(long rank, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         _windows ??= ArrayPool<Window>.Shared.Rent(_slots.Length);
-        Restart();
-        Array.Clear(_next);
+        Begin(1, Anchor.First, null, inclusive: true);
         long held = 0;
-        for (int next = FirstWaiting(out int level); next >= 0 && (held <= rank || !_bounded); next = FirstWaiting(out level))
+        for (int next = Waiting(out int level); next >= 0 && (held <= rank || !_bounded); next = Waiting(out level))
         {
             held += await JoinAsync(next, level, cancellationToken).ConfigureAwait(false);
         }
@@ -359,7 +329,7 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         {
             await PlaceAsync(cancellationToken).ConfigureAwait(false);
             bool joined = false;
-            for (int next = FirstWaiting(out int level); next >= 0 && MayHoldSmallest(next); next = FirstWaiting(out level))
+            for (int next = Waiting(out int level); next >= 0 && MayHoldNext(next, level); next = Waiting(out level))
             {
                 await JoinAsync(next, level, cancellationToken).ConfigureAwait(false);
                 joined = true;
@@ -546,7 +516,7 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     {
         Window[] windows = _windows!;
         _live = 0;
-        _first = true;
+        _anchor = Anchor.First;
         for (int s = 0; s < _slots.Length; s++)
         {
             Slot slot = _slots[s];
@@ -561,52 +531,72 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     }
 
     /// <summary>Moves to the next entry in key order; on a distinct walk, to the next key.</summary>
-    public ValueTask<bool> NextAsync(CancellationToken cancellationToken = default) =>
-        _distinct ? NextKeyAsync(cancellationToken) : StepAsync(cancellationToken);
-
-    /// <summary>Refused: the merge walks forward.</summary>
-    /// <exception cref="NotSupportedException">Always.</exception>
-    public ValueTask<bool> PrevAsync(CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("A cursor over a dataset walks forward; seek to a lower bound and walk instead.");
-
-    /// <summary>
-    /// Moves to the first entry of the next distinct key: every object positioned on the current
-    /// key steps past it, and the others stay where they are.
-    /// </summary>
-    public async ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken = default)
+    public ValueTask<bool> NextAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_current < 0)
         {
-            return false;
+            return new ValueTask<bool>(false);
         }
 
-        // Every open cursor on the current key leaves the heap before any of them moves, the first
-        // one's key standing for the current key until then.
-        int moved = 0;
-        while (_live > 0 && (moved == 0 || CompareKeys(_heap[0], _moved[0]) == 0))
+        if (_distinct)
         {
-            _moved[moved++] = PopTop();
+            return NextKeyAsync(cancellationToken);
         }
 
-        for (int i = 0; i < moved; i++)
-        {
-            Slot slot = _slots[_moved[i]];
-            slot.Live = await slot.Cursor!.NextKeyAsync(cancellationToken).ConfigureAwait(false);
-            if (slot.Live)
-            {
-                Push(_moved[i]);
-            }
-        }
-
-        await ResolveAsync(cancellationToken).ConfigureAwait(false);
-        return Choose();
+        return _direction > 0 ? StepAsync(cancellationToken) : TurnAsync(cancellationToken);
     }
 
-    /// <summary>Refused: the merge walks forward.</summary>
-    /// <exception cref="NotSupportedException">Always.</exception>
-    public ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken = default) =>
-        throw new NotSupportedException("A cursor over a dataset walks forward; seek to a lower bound and walk instead.");
+    /// <summary>
+    /// Moves to the previous entry in key order; on a distinct walk, to the previous key's first
+    /// entry.
+    /// </summary>
+    public ValueTask<bool> PrevAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_current < 0)
+        {
+            return new ValueTask<bool>(false);
+        }
+
+        if (_distinct)
+        {
+            return PrevDistinctAsync(cancellationToken);
+        }
+
+        return _direction < 0 ? StepAsync(cancellationToken) : TurnAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Moves to the first entry of the next distinct key: walking up, every object positioned on
+    /// the current key steps past it, and the others stay where they are; walking down, the walk
+    /// turns and seeks past it.
+    /// </summary>
+    public ValueTask<bool> NextKeyAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_current < 0)
+        {
+            return new ValueTask<bool>(false);
+        }
+
+        return _direction > 0 ? PastKeyAsync(cancellationToken) : SeekUpAsync(Key, SeekOp.After, cancellationToken);
+    }
+
+    /// <summary>
+    /// Moves to the last entry of the previous distinct key: walking down, every object positioned
+    /// on the current key steps past it; walking up, the walk turns and seeks before it.
+    /// </summary>
+    public ValueTask<bool> PrevKeyAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_current < 0)
+        {
+            return new ValueTask<bool>(false);
+        }
+
+        return _direction < 0 ? PastKeyAsync(cancellationToken) : SeekDownAsync(Key, SeekOp.Before, cancellationToken);
+    }
 
     /// <summary>
     /// How many entries across the objects have a key below <paramref name="key"/>; an object whose
@@ -633,8 +623,10 @@ internal sealed class DatasetKeyCursor : IKeyWalker
 
     /// <summary>
     /// How many entries across the objects share the current key. An object positioned on it counts
-    /// its own; one that has stepped past it counts the entries between it and its position, which
-    /// are all that key; one not walked holds none.
+    /// its own. Walking up, one that has stepped past it counts the entries between it and its
+    /// position, which are all that key; walking down, one that is not on it counts the entries at
+    /// or below the key that are not below it. One the walk has not positioned holds none, since it
+    /// would have opened before the walk reached a key it could hold.
     /// </summary>
     /// <exception cref="InvalidOperationException">The cursor is not positioned.</exception>
     public async ValueTask<long> KeyCountAsync(CancellationToken cancellationToken = default)
@@ -648,15 +640,21 @@ internal sealed class DatasetKeyCursor : IKeyWalker
                 continue;
             }
 
-            if (slot.Live)
+            if (slot.Live && KeyCursor.Compare(cursor.Key, key) == 0)
             {
-                int order = KeyCursor.Compare(cursor.Key, key);
-                count += order == 0
-                    ? await cursor.KeyCountAsync(cancellationToken).ConfigureAwait(false)
-                    : order > 0
-                        ? await cursor.RankAsync(cursor.Key, cancellationToken).ConfigureAwait(false)
-                            - await cursor.RankAsync(key, cancellationToken).ConfigureAwait(false)
-                        : 0;
+                count += await cursor.KeyCountAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else if (_direction < 0)
+            {
+                count += await cursor.UpperRankAsync(key, cancellationToken).ConfigureAwait(false)
+                    - await cursor.RankAsync(key, cancellationToken).ConfigureAwait(false);
+            }
+            else if (slot.Live)
+            {
+                count += KeyCursor.Compare(cursor.Key, key) > 0
+                    ? await cursor.RankAsync(cursor.Key, cancellationToken).ConfigureAwait(false)
+                        - await cursor.RankAsync(key, cancellationToken).ConfigureAwait(false)
+                    : 0;
             }
             else if (cursor.EntryCount is { } total)
             {
@@ -728,7 +726,10 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         return new DatasetKeyCursor(version, key, bounded, distinct, indexes, all, [.. levels]);
     }
 
-    /// <summary>One step of the merge: the object that was chosen moves on, the others keep their entry.</summary>
+    /// <summary>
+    /// One step of the merge in the heap's direction: the object that was chosen moves on, the
+    /// others keep their entry.
+    /// </summary>
     private async ValueTask<bool> StepAsync(CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -739,7 +740,9 @@ internal sealed class DatasetKeyCursor : IKeyWalker
 
         // The current entry is the top's: its cursor moves on and sinks to its place, or leaves.
         Slot slot = _slots[_current];
-        slot.Live = await slot.Cursor!.NextAsync(cancellationToken).ConfigureAwait(false);
+        slot.Live = _direction > 0
+            ? await slot.Cursor!.NextAsync(cancellationToken).ConfigureAwait(false)
+            : await slot.Cursor!.PrevAsync(cancellationToken).ConfigureAwait(false);
         if (slot.Live)
         {
             SiftDown(0);
@@ -753,28 +756,153 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         return Choose();
     }
 
+    /// <summary>
+    /// Steps against the heap's direction: every object is sought again just past the current
+    /// entry, the other way. Entries are ordered by key, then by object, so an earlier object's
+    /// entries of the current key lie below it and a later one's above it, and the current object
+    /// steps from where it is.
+    /// </summary>
+    private async ValueTask<bool> TurnAsync(CancellationToken cancellationToken)
+    {
+        FilterLiteral key = Key;
+        _pivot = _current;
+        _target = key;
+        byte[]? sought = _bounded ? Encoded(key) : null;
+        if (_direction > 0)
+        {
+            _beforePivot = SeekOp.AtOrBefore;
+            _fromPivot = SeekOp.Before;
+            Begin(-1, Anchor.Target, sought, inclusive: true);
+        }
+        else
+        {
+            _beforePivot = SeekOp.After;
+            _fromPivot = SeekOp.AtOrAfter;
+            Begin(1, Anchor.Target, sought, inclusive: true);
+        }
+
+        await ResolveAsync(cancellationToken).ConfigureAwait(false);
+        return Choose();
+    }
+
+    /// <summary>Positions every object at or after <paramref name="key"/> by <paramref name="op"/>, walking up.</summary>
+    private async ValueTask<bool> SeekUpAsync(FilterLiteral key, SeekOp op, CancellationToken cancellationToken)
+    {
+        _target = key;
+        _fromPivot = op;
+        _pivot = -1;
+        Begin(1, Anchor.Target, _bounded ? Encoded(key) : null, inclusive: true);
+        await ResolveAsync(cancellationToken).ConfigureAwait(false);
+        return Choose();
+    }
+
+    /// <summary>Positions every object at or before <paramref name="key"/> by <paramref name="op"/>, walking down.</summary>
+    private async ValueTask<bool> SeekDownAsync(FilterLiteral key, SeekOp op, CancellationToken cancellationToken)
+    {
+        _target = key;
+        _fromPivot = op;
+        _pivot = -1;
+        Begin(-1, Anchor.Target, _bounded ? Encoded(key) : null, inclusive: op != SeekOp.Before);
+        await ResolveAsync(cancellationToken).ConfigureAwait(false);
+        return Choose();
+    }
+
+    /// <summary>A distinct walk's step down: the previous key's last entry, then that key's first.</summary>
+    private async ValueTask<bool> PrevDistinctAsync(CancellationToken cancellationToken) =>
+        await PrevKeyAsync(cancellationToken).ConfigureAwait(false)
+        && await FirstOfKeyAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// A distinct walk's landing below a key, moved to that key's first entry: a walk down lands on
+    /// a key's last entry, and a distinct entry is the key's first.
+    /// </summary>
+    private ValueTask<bool> FirstOfKeyAsync(CancellationToken cancellationToken) =>
+        SeekUpAsync(Key, SeekOp.AtOrAfter, cancellationToken);
+
+    /// <summary>
+    /// Moves every object on the current key past it in the heap's direction: each leaves the heap
+    /// before any of them moves, the first one's key standing for the current key until then, and
+    /// the others stay where they are.
+    /// </summary>
+    private async ValueTask<bool> PastKeyAsync(CancellationToken cancellationToken)
+    {
+        int moved = 0;
+        while (_live > 0 && (moved == 0 || CompareKeys(_heap[0], _moved[0]) == 0))
+        {
+            _moved[moved++] = PopTop();
+        }
+
+        for (int i = 0; i < moved; i++)
+        {
+            Slot slot = _slots[_moved[i]];
+            slot.Live = _direction > 0
+                ? await slot.Cursor!.NextKeyAsync(cancellationToken).ConfigureAwait(false)
+                : await slot.Cursor!.PrevKeyAsync(cancellationToken).ConfigureAwait(false);
+            if (slot.Live)
+            {
+                Push(_moved[i]);
+            }
+        }
+
+        await ResolveAsync(cancellationToken).ConfigureAwait(false);
+        return Choose();
+    }
+
     /// <summary>The key as the bounds encode it: the tuple's row encoding for a composite key.</summary>
     private byte[] Encoded(FilterLiteral key) => _key.IsComposite ? key.BytesValue.ToArray() : _key.Encode([key]);
 
-    /// <summary>Opens and positions every waiting object whose minimum is at or below the smallest
-    /// key an open cursor holds, so none that could hold the next key stays closed.</summary>
+    /// <summary>
+    /// Starts a walk in <paramref name="direction"/>: every object unpositioned, and per level the
+    /// objects that may hold an entry on the walk's side of <paramref name="sought"/> waiting, all
+    /// of them when there is no key to seek.
+    /// </summary>
+    /// <param name="direction">+1 to walk up, -1 to walk down.</param>
+    /// <param name="anchor">Where the objects the walk opens are positioned.</param>
+    /// <param name="sought">The encoded key the walk starts from, or null.</param>
+    /// <param name="inclusive">Walking down, whether an object whose minimum is the key itself may hold an entry the walk wants.</param>
+    private void Begin(int direction, Anchor anchor, byte[]? sought, bool inclusive)
+    {
+        Restart();
+        _direction = direction;
+        _anchor = anchor;
+        for (int level = 0; level < _levels.Length; level++)
+        {
+            List<int> ordered = _levels[level];
+            if (direction > 0)
+            {
+                // Above level 0 the objects are disjoint on the clustering key, so everything before
+                // the last one whose minimum is at or below the sought key holds only smaller keys.
+                _next[level] = sought is not null && level > 0 ? Math.Max(Below(ordered, sought, inclusive: true) - 1, 0) : 0;
+            }
+            else
+            {
+                // An object whose minimum lies past the sought key holds nothing at or before it,
+                // whatever its level.
+                _next[level] = sought is null ? ordered.Count : Below(ordered, sought, inclusive);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens and positions every waiting object that may hold the walk's next key: walking up, one
+    /// whose minimum is at or below the smallest key an open cursor holds; walking down, one whose
+    /// limit lies above the largest. None that could hold the next key stays closed.
+    /// </summary>
     private async ValueTask ResolveAsync(CancellationToken cancellationToken)
     {
         while (true)
         {
-            int next = FirstWaiting(out int nextLevel);
-            if (next < 0 || (_bounded && _live > 0 && !MayHoldSmallest(next)))
+            int next = Waiting(out int level);
+            if (next < 0 || (_bounded && _live > 0 && !MayHoldNext(next, level)))
             {
                 return;
             }
 
-            _next[nextLevel]++;
+            _next[level] += _direction;
             Slot slot = _slots[next];
             slot.Walked = true;
             KeyCursor cursor = await CursorOfAsync(slot, cancellationToken).ConfigureAwait(false);
-            slot.Live = _first
-                ? await cursor.SeekFirstAsync(cancellationToken).ConfigureAwait(false)
-                : await cursor.SeekAsync(_target, _op, cancellationToken).ConfigureAwait(false);
+            slot.Live = await PositionAsync(next, cursor, cancellationToken).ConfigureAwait(false);
             if (slot.Live)
             {
                 Push(next);
@@ -782,21 +910,39 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         }
     }
 
+    /// <summary>Positions an object's cursor as the walk's anchor says.</summary>
+    private ValueTask<bool> PositionAsync(int slot, KeyCursor cursor, CancellationToken cancellationToken) => _anchor switch
+    {
+        Anchor.First => cursor.SeekFirstAsync(cancellationToken),
+        Anchor.Last => cursor.SeekLastAsync(cancellationToken),
+        _ when slot == _pivot => _direction > 0 ? cursor.NextAsync(cancellationToken) : cursor.PrevAsync(cancellationToken),
+        _ => cursor.SeekAsync(_target, slot < _pivot ? _beforePivot : _fromPivot, cancellationToken),
+    };
+
     /// <summary>
-    /// The first waiting object of every level, by bound then as the version lists them, and its
-    /// level; -1 when none waits. The objects of a level wait in the order of their bounds, so the
-    /// first waiting one of each level is the only one of it that can be next.
+    /// The object the walk would open next, and its level; -1 when none waits. The objects of a
+    /// level wait in the order of their bounds, so walking up the next is the first waiting one of
+    /// some level, by bound then as the version lists them; walking down, the last waiting one of
+    /// the level whose limit is the highest, level 0's, which nothing bounds, first.
     /// </summary>
-    private int FirstWaiting(out int level)
+    private int Waiting(out int level)
     {
         int next = -1;
         level = -1;
         for (int l = 0; l < _levels.Length; l++)
         {
             List<int> ordered = _levels[l];
-            if (_next[l] < ordered.Count && (next < 0 || Before(ordered[_next[l]], next)))
+            if (_direction > 0)
             {
-                next = ordered[_next[l]];
+                if (_next[l] < ordered.Count && (next < 0 || Before(ordered[_next[l]], next)))
+                {
+                    next = ordered[_next[l]];
+                    level = l;
+                }
+            }
+            else if (_next[l] > 0 && (next < 0 || Higher(l, level)))
+            {
+                next = ordered[_next[l] - 1];
                 level = l;
             }
         }
@@ -805,44 +951,73 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     }
 
     /// <summary>
-    /// Whether the object of <paramref name="slot"/> may hold a key at or below the smallest key an
-    /// open cursor holds, which the heap's top holds: its bound against that key, encoded as the
-    /// bounds are, into a buffer the walk keeps.
+    /// Whether the object of <paramref name="slot"/>, the next of <paramref name="level"/>, may hold
+    /// the walk's next key, against the key the heap's top holds, encoded as the bounds are into a
+    /// buffer the walk keeps. Walking up, its bound must be at or below that key; walking down, its
+    /// limit must be above it.
     /// </summary>
-    private bool MayHoldSmallest(int slot)
+    private bool MayHoldNext(int slot, int level)
     {
+        if (_direction < 0 && Limit(level) is null)
+        {
+            return true;
+        }
+
         KeyCursor top = _slots[_heap[0]].Cursor!;
-        ReadOnlySpan<byte> smallest;
+        ReadOnlySpan<byte> key;
         if (_key.IsComposite)
         {
-            smallest = top.KeyBytes;
+            key = top.KeyBytes;
         }
         else
         {
             // The length first: the encoding may replace the buffer with a larger one.
-            int length = _key.EncodeCurrent(top, ref _smallest);
-            smallest = _smallest.AsSpan(0, length);
+            int length = _key.EncodeCurrent(top, ref _topKey);
+            key = _topKey.AsSpan(0, length);
         }
 
-        return _slots[slot].Bound.AsSpan().SequenceCompareTo(smallest) <= 0;
+        return _direction > 0
+            ? _slots[slot].Bound.AsSpan().SequenceCompareTo(key) <= 0
+            : key.SequenceCompareTo(Limit(level)) < 0;
     }
 
-    /// <summary>Whether a waiting object opens before another: by bound, then as the version lists them.</summary>
+    /// <summary>
+    /// Walking down, a strict upper bound on the keys of the next object of a level to open: the
+    /// bound of the object above it, since the levels above 0 are key-disjoint; null when nothing
+    /// bounds them, in level 0, for the last object of a level, and off the clustering key.
+    /// </summary>
+    private byte[]? Limit(int level)
+    {
+        List<int> ordered = _levels[level];
+        int above = _next[level];
+        return _bounded && level > 0 && above < ordered.Count ? _slots[ordered[above]].Bound : null;
+    }
+
+    /// <summary>Whether level <paramref name="left"/>'s next object has a higher limit than level <paramref name="right"/>'s.</summary>
+    private bool Higher(int left, int right)
+    {
+        byte[]? a = Limit(left);
+        byte[]? b = Limit(right);
+        return b is not null && (a is null || a.AsSpan().SequenceCompareTo(b) > 0);
+    }
+
+    /// <summary>Whether a waiting object opens before another walking up: by bound, then as the version lists them.</summary>
     private bool Before(int left, int right)
     {
         int order = _slots[left].Bound.AsSpan().SequenceCompareTo(_slots[right].Bound);
         return order < 0 || (order == 0 && left < right);
     }
 
-    /// <summary>The place of the last object of a level whose minimum is at or below <paramref name="sought"/>, or 0.</summary>
-    private int LastAtOrBelow(List<int> ordered, byte[] sought)
+    /// <summary>How many objects of a level have a minimum below <paramref name="sought"/>, or at it when <paramref name="inclusive"/>.</summary>
+    private int Below(List<int> ordered, byte[] sought, bool inclusive)
     {
         int low = 0;
         int high = ordered.Count;
         while (low < high)
         {
             int middle = (int)((uint)(low + high) >> 1);
-            if (_slots[ordered[middle]].Bound.AsSpan().SequenceCompareTo(sought) <= 0)
+            int order = _slots[ordered[middle]].Bound.AsSpan().SequenceCompareTo(sought);
+            if (order < 0 || (order == 0 && inclusive))
             {
                 low = middle + 1;
             }
@@ -852,7 +1027,7 @@ internal sealed class DatasetKeyCursor : IKeyWalker
             }
         }
 
-        return Math.Max(low - 1, 0);
+        return low;
     }
 
     /// <summary>Unpositions every object for a new walk.</summary>
@@ -881,11 +1056,19 @@ internal sealed class DatasetKeyCursor : IKeyWalker
             : KeyCursor.Compare(a.Key, b.Key);
     }
 
-    /// <summary>Whether an open cursor comes before another: by key, a tie to the earlier object.</summary>
+    /// <summary>
+    /// Whether an open cursor comes before another in the walk's direction: by key, then by object,
+    /// since the objects are listed in the order of their rows.
+    /// </summary>
     private bool Less(int left, int right)
     {
         int order = CompareKeys(left, right);
-        return order < 0 || (order == 0 && left < right);
+        if (order == 0)
+        {
+            order = left - right;
+        }
+
+        return _direction > 0 ? order < 0 : order > 0;
     }
 
     private void Push(int slot)
@@ -967,8 +1150,8 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         return slot.Cursor;
     }
 
-    /// <summary>The live cursor holding the smallest key, the heap's top; ties go to the earlier
-    /// object, so that a walk is a function of the version and not of a race.</summary>
+    /// <summary>The live cursor whose key comes first in the walk's direction, the heap's top; ties
+    /// go by object, so that a walk is a function of the version and not of a race.</summary>
     private bool Choose()
     {
         _current = _live > 0 ? _heap[0] : -1;
