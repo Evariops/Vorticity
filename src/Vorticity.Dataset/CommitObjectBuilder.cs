@@ -159,6 +159,9 @@ internal sealed class CommitObjectBuilder : IPageSink
         return bytes;
     }
 
+    /// <summary>The bytes <paramref name="header"/> takes in an object.</summary>
+    public static int HeaderLength(CommitHeader header) => Serialize(header).Length;
+
     private static byte[] Serialize(CommitHeader header)
     {
         ProtoWriter writer = new ProtoWriter();

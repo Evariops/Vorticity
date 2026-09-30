@@ -95,8 +95,7 @@ internal static class DatasetCommitter
             if (commit is not null)
             {
                 template = commit.Header;
-                pages.Inline(commit.Header);
-                pages.Know(parent, commit.HeaderEnd);
+                pages.Open(parent, commit);
                 levels = DatasetLevels.Of(commit.Header);
             }
 
@@ -159,6 +158,7 @@ internal static class DatasetCommitter
                 Schema = schema.Schema,
                 Retired = schema.Retired,
             };
+            header = WithoutHeld(header);
 
             // 3. One conditional creation.
             string key = CommitKey.For(version);
@@ -355,6 +355,63 @@ internal static class DatasetCommitter
     /// <summary>What the inlined pages may take, leaving room under the header's size cap for
     /// everything else it carries.</summary>
     private const int InlineBudget = 192 << 10;
+
+    /// <summary>
+    /// The header without the pages this commit wrote that the object's open read brings back
+    /// anyway: its pages region follows the header, and a page of it that ends within the first
+    /// <see cref="CommitFormat.OpenBytes"/> costs a reader nothing more, where inlined as well it would
+    /// be written twice. Every such page is left out, then those the header left over would push past
+    /// the read are taken back, the last written first, until the header that holds the rest leaves
+    /// every page it omits inside the read: a header only grows as pages go back into it, so the pages
+    /// it omits only get fewer, and the last header tried is the one written.
+    /// </summary>
+    private static CommitHeader WithoutHeld(CommitHeader header)
+    {
+        HashSet<PageReference> omitted = [];
+        foreach (CommitLevel level in header.Levels)
+        {
+            foreach (InlinedPage page in level.Inlined)
+            {
+                if (page.Reference.Version == header.Version)
+                {
+                    omitted.Add(page.Reference);
+                }
+            }
+        }
+
+        while (omitted.Count > 0)
+        {
+            CommitHeader trial = Without(header, omitted);
+            long pagesStart = CommitFormat.PreambleBytes + CommitObjectBuilder.HeaderLength(trial);
+            if (omitted.RemoveWhere(reference => pagesStart + reference.Offset + reference.Length > CommitFormat.OpenBytes) == 0)
+            {
+                return trial;
+            }
+        }
+
+        return header;
+    }
+
+    /// <summary>The header with the inlined pages of <paramref name="omitted"/> left out.</summary>
+    private static CommitHeader Without(CommitHeader header, HashSet<PageReference> omitted)
+    {
+        List<CommitLevel> levels = new List<CommitLevel>(header.Levels.Count);
+        foreach (CommitLevel level in header.Levels)
+        {
+            List<InlinedPage> kept = new List<InlinedPage>(level.Inlined.Count);
+            foreach (InlinedPage page in level.Inlined)
+            {
+                if (!omitted.Contains(page.Reference))
+                {
+                    kept.Add(page);
+                }
+            }
+
+            levels.Add(level with { Inlined = kept });
+        }
+
+        return header with { Levels = levels };
+    }
 
     /// <summary>The tree a header names at level 0, where appends land; empty when it names
     /// none.</summary>

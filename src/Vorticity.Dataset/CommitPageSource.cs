@@ -19,6 +19,10 @@ internal sealed class CommitPageSource : IPageSource
     private readonly ConcurrentDictionary<PageReference, ReadOnlyMemory<byte>> _known = [];
 
     private readonly ConcurrentDictionary<ulong, long> _starts = [];
+
+    // The pages regions open reads brought back, by version: the pages a commit wrote and left out of
+    // its header lie there when they fit the read.
+    private readonly ConcurrentDictionary<ulong, ReadOnlyMemory<byte>> _held = [];
     private long _reads;
     private CommitObjectBuilder? _builder;
     private ulong _building;
@@ -41,8 +45,50 @@ internal sealed class CommitPageSource : IPageSource
     public ulong Reading { get; init; }
 
     /// <summary>The bytes of a page this source already holds, without any request.</summary>
-    public bool TryGetKnown(PageReference reference, out ReadOnlyMemory<byte> page) =>
-        _known.TryGetValue(reference, out page);
+    /// <exception cref="TornCommitException">A page the open read holds does not hash to its reference.</exception>
+    public bool TryGetKnown(PageReference reference, out ReadOnlyMemory<byte> page)
+    {
+        if (_known.TryGetValue(reference, out page))
+        {
+            return true;
+        }
+
+        if (_held.TryGetValue(reference.Version, out ReadOnlyMemory<byte> region)
+            && reference.Offset >= 0 && reference.Offset + reference.Length <= region.Length)
+        {
+            try
+            {
+                page = Check(reference, region.Slice((int)reference.Offset, reference.Length));
+            }
+            catch (CommitFormatException torn)
+            {
+                // Held once, as any page a header does not inline: a byte torn in it is refused by its
+                // hash, never read as another page.
+                throw TornCommitException.Of(reference.Version, torn);
+            }
+
+            _known[reference] = page;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Takes what the open read of a version's commit object holds, which costs no further request:
+    /// the pages its header inlines, where its pages region starts, and the start of that region,
+    /// where the pages the version wrote without inlining them lie.
+    /// </summary>
+    public void Open(ulong version, CommitObject commit)
+    {
+        ArgumentNullException.ThrowIfNull(commit);
+        Inline(commit.Header);
+        Know(version, commit.HeaderEnd);
+        if (!commit.Held.IsEmpty)
+        {
+            _held[version] = commit.Held;
+        }
+    }
 
     /// <summary>Records where a version's pages region starts, learned without a request.</summary>
     public void Know(ulong version, long pagesStart) => _starts[version] = pagesStart;
@@ -82,7 +128,7 @@ internal sealed class CommitPageSource : IPageSource
     public async ValueTask<ReadOnlyMemory<byte>> ReadPageAsync(
         PageReference reference, CancellationToken cancellationToken)
     {
-        if (_known.TryGetValue(reference, out ReadOnlyMemory<byte> inlined))
+        if (TryGetKnown(reference, out ReadOnlyMemory<byte> inlined))
         {
             return inlined;
         }

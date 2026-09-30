@@ -553,8 +553,7 @@ public sealed class DatasetFuzzTests
 
             CommitObject commit = await CommitObject.OpenAsync(store, key, default);
             CommitPageSource pages = new CommitPageSource(store);
-            pages.Inline(commit.Header);
-            pages.Know(version, commit.HeaderEnd);
+            pages.Open(version, commit);
             DatasetTree tree = DatasetCommitter.TreeOf(commit.Header);
             await foreach (TreeEntry entry in tree.EnumerateAsync(pages, default))
             {
@@ -576,8 +575,7 @@ public sealed class DatasetFuzzTests
         }
 
         CommitPageSource pages = new CommitPageSource(store);
-        pages.Inline(commit.Header);
-        pages.Know(version, commit.HeaderEnd);
+        pages.Open(version, commit);
         return (DatasetCommitter.TreeOf(commit.Header), pages, version);
     }
 

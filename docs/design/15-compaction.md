@@ -149,9 +149,19 @@ happens: in compaction rather than inside a user's delete, which a background dr
 the write path altogether, and the fold the top level lacked. A commit's bytes are still mostly the
 leaf page the header carries, which only the two options below remove.
 
-**Or out of the header.** The header could leave out a leaf page whose entries carry marks. A mark
-would then cost only the commits that change its own level. A reader that opens the version would
-read that page when it walks the level: one ranged read more, cached with the version.
+**A second copy, removed.** Every commit wrote the pages it changed twice: in its pages region, and
+inlined in its header so that the read opening the commit would hold them. The region follows the
+header, so a page that ends inside that read needs no copy: the reader keeps the part of the region
+the read brought back. On the churn this took 39 % off a commit object, 26.6 KiB to 16.2 on average
+over the first 15 000 commits, and costs a reader nothing. What a header still carries is pages
+other commits wrote: every level's that fits, the leaf page with the vectors among them.
+
+**Or out of the header.** The header could leave out a leaf page whose entries carry marks when this
+commit did not write it. A mark would then cost only the commits that change its own level. A reader
+that opens the version would read that page when it walks the level: one ranged read more, cached with
+the version. A handle opens a fresh page source on each version, so it would pay that read after each
+commit it does not write itself, unless it kept pages across versions: a page is immutable, and its
+reference names it in every version that shares it.
 
 **Out of line, the alternative.** A vector could be written once into the commit object that made
 it, as an index fragment is (13-dataset.md §6.4), and the entry would name it by reference. Pages

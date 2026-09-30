@@ -20,6 +20,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -108,8 +109,7 @@ public sealed class DatasetBudgetTests
         (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, ct);
         CommitObject found = Assert.IsType<CommitObject>(commit);
         CommitPageSource pages = new CommitPageSource(store);
-        pages.Inline(found.Header);
-        pages.Know(version, found.HeaderEnd);
+        pages.Open(version, found);
         DatasetTree tree = DatasetCommitter.TreeOf(found.Header);
 
         TreeEntry? hit = await tree.FindAsync(Key(objects / 2), pages, ct);
@@ -121,6 +121,14 @@ public sealed class DatasetBudgetTests
         long bytes = store.BytesRead;
         Console.Out.Write(FormattableString.Invariant(
             $"DATASET BUDGET: {objects} objects, depth {tree.Depth}: a cold point lookup cost {requests} requests in {steps} dependent steps and {bytes} bytes, {pages.Reads} page read(s).\n"));
+
+        // A commit object the read that opens it holds whole inlines none of the pages it wrote:
+        // they lie in that read already, and the descent asks the store for none of them.
+        if (found.Trailer is not null)
+        {
+            Assert.DoesNotContain(found.Header.Levels, level => level.Inlined.Any(page => page.Reference.Version == version));
+            Assert.Equal(0, pages.Reads);
+        }
 
         // THE CONSTANT: the list, the header, and at most two pages below what the header inlined
         // (0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million). Four is the
@@ -210,8 +218,7 @@ public sealed class DatasetBudgetTests
         (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, ct);
         CommitObject found = Assert.IsType<CommitObject>(commit);
         CommitPageSource pages = new CommitPageSource(store);
-        pages.Inline(found.Header);
-        pages.Know(version, found.HeaderEnd);
+        pages.Open(version, found);
         DatasetTree tree = DatasetCommitter.TreeOf(found.Header);
         Assert.NotNull(await tree.FindAsync(Key(1_000), pages, ct));
         clock.Stop();
