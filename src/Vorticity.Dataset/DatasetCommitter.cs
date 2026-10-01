@@ -659,7 +659,10 @@ internal static class DatasetCommitter
         // that touches a key another already touched sees the pending value, so two fragments on
         // one object both land. One batch per level, because one tree per level.
         Dictionary<int, SortedDictionary<byte[], TreeChange>> changes = [];
-        Dictionary<string, ObjectEntry?> pending = new Dictionary<string, ObjectEntry?>(StringComparer.Ordinal);
+        // A key is unique inside a level and a compaction moves one object from one level to
+        // another, so the entries pending are kept per level: the same key at two levels is two
+        // objects. Looked up by the key's bytes, which needs no copy of them.
+        Dictionary<int, Dictionary<byte[], ObjectEntry?>> pending = [];
         List<OperationOutcome> outcomes = new List<OperationOutcome>(operations.Count);
 
         foreach (DatasetOperation operation in operations)
@@ -773,7 +776,7 @@ internal static class DatasetCommitter
                             // The entry as this commit leaves it: its own change when an earlier
                             // operation made one, else the leaf the walk holds, which is the tree's
                             // and is read in place until it names a fragment to move.
-                            ObjectEntry? held = pending.Count > 0 && pending.TryGetValue(Named(level, leaf.Key), out ObjectEntry? change)
+                            ObjectEntry? held = pending.Count > 0 && TryPending(level, leaf.Key.Span, out ObjectEntry? change)
                                 ? change
                                 : null;
                             if (held is null ? !ObjectEntry.NamesAny(leaf.Value.Span, repack.Versions) : !held.NamesAny(repack.Versions))
@@ -848,8 +851,7 @@ internal static class DatasetCommitter
 
         async ValueTask<ObjectEntry?> CurrentAsync(int level, ReadOnlyMemory<byte> key)
         {
-            string text = Named(level, key);
-            if (pending.TryGetValue(text, out ObjectEntry? held))
+            if (TryPending(level, key.Span, out ObjectEntry? held))
             {
                 return held;
             }
@@ -870,14 +872,16 @@ internal static class DatasetCommitter
                 pages.Keep(entry.VectorAt, vector);
             }
 
-            Batch(level)[key.ToArray()] = TreeChange.Put(key, entry.ToBytes(), entry.Rows);
-            pending[Named(level, key)] = entry;
+            byte[] stored = Stored(level, key.Span);
+            Batch(level)[stored] = TreeChange.Put(stored, entry.ToBytes(), entry.Rows);
+            Pending(level)[stored] = entry;
         }
 
         void Remove(int level, ReadOnlyMemory<byte> key)
         {
-            Batch(level)[key.ToArray()] = TreeChange.Remove(key);
-            pending[Named(level, key)] = null;
+            byte[] stored = Stored(level, key.Span);
+            Batch(level)[stored] = TreeChange.Remove(stored);
+            Pending(level)[stored] = null;
         }
 
         SortedDictionary<byte[], TreeChange> Batch(int level)
@@ -891,10 +895,28 @@ internal static class DatasetCommitter
             return batch;
         }
 
-        // A key is unique inside a level and a compaction moves one object from one level to
-        // another, so the pending map is keyed by both: the same key at two levels is two objects.
-        static string Named(int level, ReadOnlyMemory<byte> key) =>
-            level.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + Convert.ToHexString(key.Span);
+        Dictionary<byte[], ObjectEntry?> Pending(int level)
+        {
+            if (!pending.TryGetValue(level, out Dictionary<byte[], ObjectEntry?>? entries))
+            {
+                entries = new Dictionary<byte[], ObjectEntry?>(KeyBytes.Instance);
+                pending[level] = entries;
+            }
+
+            return entries;
+        }
+
+        bool TryPending(int level, ReadOnlySpan<byte> key, out ObjectEntry? entry)
+        {
+            entry = null;
+            return pending.TryGetValue(level, out Dictionary<byte[], ObjectEntry?>? entries)
+                && entries.GetAlternateLookup<ReadOnlySpan<byte>>().TryGetValue(key, out entry);
+        }
+
+        // The array a key already changed in this commit is held under, or a copy of it: one per key
+        // whatever the operations that touch it.
+        byte[] Stored(int level, ReadOnlySpan<byte> key) =>
+            Pending(level).GetAlternateLookup<ReadOnlySpan<byte>>().TryGetValue(key, out byte[]? held, out _) ? held : key.ToArray();
     }
 
     /// <summary>
@@ -993,5 +1015,26 @@ internal static class DatasetCommitter
         internal static KeyOrder Instance { get; } = new KeyOrder();
 
         public int Compare(byte[]? x, byte[]? y) => TreePage.Compare(x, y);
+    }
+
+    /// <summary>Keys equal by their bytes, looked up by a span of them as well as by an array.</summary>
+    private sealed class KeyBytes : IEqualityComparer<byte[]>, IAlternateEqualityComparer<ReadOnlySpan<byte>, byte[]>
+    {
+        internal static KeyBytes Instance { get; } = new KeyBytes();
+
+        public bool Equals(byte[]? x, byte[]? y) => x.AsSpan().SequenceEqual(y);
+
+        public int GetHashCode(byte[] obj) => GetHashCode((ReadOnlySpan<byte>)obj);
+
+        public bool Equals(ReadOnlySpan<byte> alternate, byte[] other) => alternate.SequenceEqual(other);
+
+        public int GetHashCode(ReadOnlySpan<byte> alternate)
+        {
+            HashCode hash = default;
+            hash.AddBytes(alternate);
+            return hash.ToHashCode();
+        }
+
+        public byte[] Create(ReadOnlySpan<byte> alternate) => alternate.ToArray();
     }
 }
