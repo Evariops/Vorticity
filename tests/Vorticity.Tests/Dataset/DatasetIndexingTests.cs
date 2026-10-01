@@ -263,6 +263,38 @@ public sealed class DatasetIndexingTests
     }
 
     [Fact]
+    public async Task ADeleteThatMarksAnObjectKeepsTheFragmentAttachedSinceItRead()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // A fragment changes no row, so a delete that read the object before one was attached still
+        // marks its rows; the entry it leaves carries the fragment, which the indexer was told landed.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        DatasetOptions options = Clustered() with { MarkedObjectBytes = 0, MarkedShare = 1 };
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset deleter = await VortexDataset.CreateAsync(store, schema, options, ct);
+        await deleter.AppendAsync(ObjectRows(types, schema, 0), ct);
+        await using VortexDataset indexer = await VortexDataset.OpenAsync(store, options, ct);
+        PositionedObject target = Assert.Single(await ObjectsAsync(indexer));
+        Assert.Equal(OperationOutcome.Applied, (await DatasetIndexer.IndexAsync(indexer, target, Policy, options: Build, cancellationToken: ct)).Outcome);
+
+        VortexExpr low = Expr.Lt(Expr.Field("key"), Expr.Literal(FilterLiteral.From(10L)));
+        RowChangeResult deleted = await deleter.DeleteAsync(low, ct);
+        Assert.Equal((10L, 1L), (deleted.Rows, deleted.ObjectsMarked));
+
+        PositionedObject marked = Assert.Single(await ObjectsAsync(deleter));
+        Assert.Equal(10, marked.Entry.DeletedRows);
+        Assert.Single(marked.Entry.Fragments);
+
+        // The rows a lookup through the fragment finds are the live ones.
+        VortexExpr byId = Expr.Eq(Expr.Field("id"), Expr.Literal(FilterLiteral.From(Id(5))));
+        Assert.Equal(0, await deleter.ScanBuilder().Where(byId).CountAsync(ct));
+        Assert.Equal(PerObject - 10, await deleter.ScanBuilder().CountAsync(ct));
+    }
+
+    [Fact]
     public async Task AFragmentOfAnObjectACompactionReplacedIsDropped()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

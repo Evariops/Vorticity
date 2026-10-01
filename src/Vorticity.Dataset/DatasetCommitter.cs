@@ -678,11 +678,13 @@ internal static class DatasetCommitter
 
                 case DatasetOperation.ReplaceObjects replace:
                 {
+                    ObjectEntry?[] currents = new ObjectEntry?[replace.Inputs.Count];
                     bool complete = true;
                     for (int i = 0; i < replace.Inputs.Count; i++)
                     {
                         (int level, ReadOnlyMemory<byte> input) = replace.Inputs[i];
                         ObjectEntry? current = await CurrentAsync(level, input).ConfigureAwait(false);
+                        currents[i] = current;
                         complete &= current is not null
                             && (replace.Expected is not { } expected || SameRows(current, expected[i]));
                     }
@@ -701,7 +703,7 @@ internal static class DatasetCommitter
 
                     foreach ((int level, ReadOnlyMemory<byte> key, ObjectEntry entry) in replace.Outputs)
                     {
-                        Put(level, key, entry);
+                        Put(level, key, WithCurrentFragments(entry, level, key, replace.Inputs, currents));
                     }
 
                     outcomes.Add(OperationOutcome.Applied);
@@ -844,6 +846,51 @@ internal static class DatasetCommitter
         // another, so the pending map is keyed by both: the same key at two levels is two objects.
         static string Named(int level, ReadOnlyMemory<byte> key) =>
             level.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + Convert.ToHexString(key.Span);
+    }
+
+    /// <summary>
+    /// An output that is one of the inputs under its own key, the same file with more rows marked, as
+    /// a delete leaves it, with the fragments the input carries now: the output was made from the entry
+    /// the delete read, and a fragment attached to the object or dropped from it since changes no row,
+    /// so the replacement goes ahead, and must neither drop the one nor bring back the other.
+    /// </summary>
+    private static ObjectEntry WithCurrentFragments(
+        ObjectEntry output,
+        int level,
+        ReadOnlyMemory<byte> key,
+        IReadOnlyList<(int Level, ReadOnlyMemory<byte> Key)> inputs,
+        ObjectEntry?[] currents)
+    {
+        for (int i = 0; i < inputs.Count; i++)
+        {
+            if (currents[i] is { } current
+                && current.Uid == output.Uid
+                && inputs[i].Level == level
+                && inputs[i].Key.Span.SequenceEqual(key.Span))
+            {
+                return SameFragments(current, output) ? output : output.WithFragments(current.Fragments);
+            }
+        }
+
+        return output;
+    }
+
+    private static bool SameFragments(ObjectEntry left, ObjectEntry right)
+    {
+        if (left.Fragments.Count != right.Fragments.Count)
+        {
+            return false;
+        }
+
+        for (int i = 0; i < left.Fragments.Count; i++)
+        {
+            if (left.Fragments[i] != right.Fragments[i])
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
