@@ -354,14 +354,15 @@ internal sealed class DeletionVector : IRowExclusion, IEquatable<DeletionVector>
             ulong length = TreePage.ReadVarint(value, ref at, "A deletion vector");
 
             // A gap of zero after the first run would be two runs that meet, which the encoding
-            // never writes: a vector has one encoding, or pages holding it are not content.
-            if ((gap == 0 && run > 0) || gap > long.MaxValue / 2 || length > long.MaxValue / 2)
+            // never writes: a vector has one encoding, or pages holding it are not content. Rows
+            // past a long are no rows of an object.
+            if ((gap == 0 && run > 0) || gap > (ulong)(long.MaxValue - end) || length >= (ulong)(long.MaxValue - end - (long)gap))
             {
-                throw new CommitFormatException("A deletion vector's runs are not disjoint, ascending and apart.");
+                throw new CommitFormatException("A deletion vector's runs are not disjoint, ascending and apart, or run past a long.");
             }
 
-            starts[run] = checked(end + (long)gap);
-            ends[run] = checked(starts[run] + (long)length + 1);
+            starts[run] = end + (long)gap;
+            ends[run] = starts[run] + (long)length + 1;
             end = ends[run];
         }
 

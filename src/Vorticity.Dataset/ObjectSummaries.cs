@@ -257,11 +257,11 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
         }
 
         int at = 0;
-        int count = checked((int)ReadVarint(value, ref at));
+        int count = Length(ReadVarint(value, ref at), value.Length);
         ColumnSummary[] columns = new ColumnSummary[count];
         for (int i = 0; i < count; i++)
         {
-            int length = checked((int)ReadVarint(value, ref at));
+            int length = Length(ReadVarint(value, ref at), value.Length);
             if (at + length > value.Length)
             {
                 throw new CommitFormatException("A summarised column's path runs past its bytes.");
@@ -284,7 +284,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
 
             FilterLiteral min = (flags & HasMinFlag) != 0 ? ReadLiteral(value, ref at) : default;
             FilterLiteral max = (flags & HasMaxFlag) != 0 ? ReadLiteral(value, ref at) : default;
-            long nulls = (flags & HasNullsFlag) != 0 ? (long)ReadVarint(value, ref at) : 0;
+            long nulls = (flags & HasNullsFlag) != 0 ? NullCount(ReadVarint(value, ref at)) : 0;
             columns[i] = new ColumnSummary(
                 path,
                 min,
@@ -308,6 +308,14 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
 
         return count == 0 ? None : new ObjectSummaries(columns);
     }
+
+    /// <summary>A length or a count a varint states, which no summaries of <paramref name="bytes"/> bytes hold more of.</summary>
+    private static int Length(ulong value, int bytes) =>
+        value > (ulong)bytes ? throw new CommitFormatException("A node's summaries count more than their bytes hold.") : (int)value;
+
+    /// <summary>A count of nulls a varint states, which is not one past a long.</summary>
+    private static long NullCount(ulong value) =>
+        value > long.MaxValue ? throw new CommitFormatException("A summarised column counts its nulls past a long.") : (long)value;
 
     /// <summary>
     /// Whether two sets of summaries say the same thing about the same columns. By value, because
@@ -459,7 +467,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
 
                 return FilterLiteral.From(value[at++] != 0);
             case FilterLiteralKind.Bytes:
-                int length = checked((int)ReadVarint(value, ref at));
+                int length = Length(ReadVarint(value, ref at), value.Length);
                 if (at + length > value.Length)
                 {
                     throw new CommitFormatException("A byte bound runs past its bytes.");

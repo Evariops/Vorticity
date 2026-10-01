@@ -28,7 +28,7 @@ internal readonly record struct ObjectTally(
     public static ObjectTally Of(ReadOnlySpan<byte> entry)
     {
         (long bytes, long rows, long deleted, long fragments, long vector) = ObjectEntry.TallyOf(entry);
-        return new ObjectTally(bytes, bytes, deleted, fragments, ShareOf(deleted, rows + deleted), vector);
+        return new ObjectTally(bytes, bytes, deleted, fragments, ShareOf(deleted, Sum(rows, deleted)), vector);
     }
 
     /// <summary>
@@ -40,10 +40,11 @@ internal readonly record struct ObjectTally(
         physical <= 0 ? 0 : (long)(((UInt128)(ulong)deleted * (ulong)Whole) / (ulong)physical);
 
     /// <summary>The tally of this subtree and <paramref name="other"/> together.</summary>
+    /// <exception cref="CommitFormatException">The two count past a long, which no objects do.</exception>
     public ObjectTally With(ObjectTally other) => new ObjectTally(
-        checked(Bytes + other.Bytes),
+        Sum(Bytes, other.Bytes),
         Math.Max(Largest, other.Largest),
-        checked(DeletedRows + other.DeletedRows),
+        Sum(DeletedRows, other.DeletedRows),
         Math.Max(MostFragments, other.MostFragments),
         Math.Max(MostMarked, other.MostMarked),
         Math.Max(LargestVector, other.LargestVector));
@@ -77,6 +78,12 @@ internal readonly record struct ObjectTally(
             ? tally
             : throw new CommitFormatException("A page's tally holds an object larger than every object under it, or more than all its rows marked.");
     }
+
+    /// <summary>Two counts read from pages, added: past a long, the pages are not ones a writer wrote.</summary>
+    private static long Sum(long left, long right) =>
+        right > long.MaxValue - left
+            ? throw new CommitFormatException("A page's tally counts past a long.")
+            : left + right;
 
     private static long Long(ReadOnlySpan<byte> value, ref int at)
     {
