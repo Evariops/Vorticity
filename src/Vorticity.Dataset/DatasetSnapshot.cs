@@ -16,6 +16,7 @@ internal sealed class DatasetSnapshot
 {
     private readonly ObjectCache _objects;
     private long _knownAt;
+    private KeyedObjects? _keyed;
 
     internal DatasetSnapshot(
         CommitObject commit, CommitPageSource pages, ObjectCache objects, DateTimeOffset knownAt, DatasetSchema? previous = null)
@@ -110,6 +111,28 @@ internal sealed class DatasetSnapshot
 
             yield return new PositionedObject(entry, firstRow) { Level = level, TreeKey = held.Key };
         }
+    }
+
+    /// <summary>
+    /// The version's objects as a walk in key order ranges over them, read from the trees the first
+    /// time a walk asks and kept: every walk of the version shares them, and opens and positions only
+    /// the objects it reaches.
+    /// </summary>
+    internal async ValueTask<KeyedObjects> KeyedAsync(CancellationToken cancellationToken)
+    {
+        if (Volatile.Read(ref _keyed) is { } known)
+        {
+            return known;
+        }
+
+        KeyedObjects.Builder builder = new KeyedObjects.Builder();
+        await foreach (PositionedObject held in WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
+        {
+            builder.Add(held.Entry, held.FirstRow, held.Level, VortexDataset.OrderOf(held.TreeKey).Span);
+        }
+
+        KeyedObjects built = builder.Build();
+        return Interlocked.CompareExchange(ref _keyed, built, null) ?? built;
     }
 
     /// <summary>
