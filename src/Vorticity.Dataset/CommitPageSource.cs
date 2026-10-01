@@ -159,7 +159,11 @@ internal sealed class CommitPageSource : IPageSource
         _built = null;
     }
 
-    /// <summary>Takes the bytes the builder produced, so the new version's pages can be read back.</summary>
+    /// <summary>
+    /// Takes the bytes the builder produced, so the new version's pages can be read back; and hands
+    /// the handle's cache the pages that lie past what the read opening the version brings back,
+    /// which a walk of the version would otherwise ask the store for, though this writer holds them.
+    /// </summary>
     public void Placed(byte[] bytes)
     {
         ArgumentNullException.ThrowIfNull(bytes);
@@ -167,6 +171,17 @@ internal sealed class CommitPageSource : IPageSource
         _builtStart = CommitFormat.PreambleBytes
             + System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(12));
         Know(_building, _builtStart);
+        if (_cache is not null && _builder is { } builder && bytes.Length > CommitFormat.OpenBytes)
+        {
+            for (int i = 0; i < builder.PageCount; i++)
+            {
+                (PageReference reference, byte[] page) = builder.PageAt(i);
+                if (_builtStart + reference.Offset + reference.Length > CommitFormat.OpenBytes)
+                {
+                    _cache.Add(reference, page);
+                }
+            }
+        }
     }
 
     /// <inheritdoc/>

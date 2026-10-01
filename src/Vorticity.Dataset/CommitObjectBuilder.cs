@@ -50,6 +50,9 @@ internal sealed class CommitObjectBuilder : IPageSink
 
     PageReference IPageSink.WritePage(ReadOnlySpan<byte> page) => AddPage(page);
 
+    /// <summary>The <paramref name="index"/>-th page added, and the reference that names it.</summary>
+    public (PageReference Reference, byte[] Page) PageAt(int index) => (_pageReferences[index], _pages[index]);
+
     /// <summary>
     /// The bytes of a page this builder wrote, for a caller that wants to inline it or a walk over
     /// the tree this commit is writing. Every reference it handed out names its version, and the

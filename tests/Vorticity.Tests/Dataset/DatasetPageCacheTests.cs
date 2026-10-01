@@ -338,6 +338,23 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
+    public async Task AHandleReadsThePagesItsCommitWrotePastItsOpenReadWithoutAskingTheStore()
+    {
+        // A commit of many objects writes more pages than the read opening its object brings back:
+        // the writer held them all, and its handle keeps those the read leaves out.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions(), 3, ct);
+        CommitResult result = await dataset.CommitAsync([.. Enumerable.Range(0, Objects).Select(i => Add((2L * i) + 1))], ct);
+        Assert.True(result.Commit.Length > CommitFormat.OpenBytes, $"the commit object is {result.Commit.Length} bytes");
+
+        store.Reset();
+        Assert.Equal(Objects + 3, await CountAsync(dataset, ct));
+        Assert.Equal(0, store.Requests);
+    }
+
+    [Fact]
     public async Task ABatchThatFindsNothingToDoAsksOnlyWhetherItsVersionIsStillTheLatest()
     {
         // Built on the version held, the batch finds nothing to do and asks whether a later one
