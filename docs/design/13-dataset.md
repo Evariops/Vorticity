@@ -68,7 +68,10 @@ truncation into a stated error rather than a shorter object. The **header** hold
 parent, the schema and the names its columns gave up (§13), the clustering key, the write policy,
 the tree's chunking parameters and seed,
 the compaction and retention settings, and per level its top page **inlined**, with the pages below
-it while the header stays under 256 KiB. One ranged read of the first 256 KiB opens a commit.
+it while the header stays under 256 KiB. One ranged read of the first 256 KiB opens a commit. The
+pages region follows the header, so a page the commit wrote itself that ends inside those 256 KiB is
+not inlined: the read that opens the commit brings it back once, where inlined it would be written
+twice.
 
 **A page reference** is a fixed 36 bytes: the version that wrote the page, its offset relative to that
 object's pages region, its length, and its XXH3-128. A commit references every page it did not change
@@ -539,9 +542,10 @@ vector — and is abandoned when one of them changed (§8.2).
 
 **What it costs.** Measured by the churn (§15) on ten million rows and thirty thousand commits of ten
 rows at random keys: an update takes 2.0 to 3.5 ms and a delete 1.1 to 2.0 ms, where rewriting the
-4 MiB objects that hold the rows takes 19 and 14 ms. A commit writes 23 KiB at first and 40 to 75 KiB
-once the vectors have filled, most of it the leaf page the header carries, where a rewrite writes
-3.3 MiB; compaction, merges and purges together, writes 61 to 111 KiB a commit. After a thousand commits the store holds 137 MiB rather than 449 MiB, since the retention
+4 MiB objects that hold the rows takes 19 and 14 ms. A commit writes 16 KiB at first and 31 to 63 KiB
+once the vectors have filled, where a rewrite writes 3.3 MiB: the rows' own objects, and a commit
+object of 12 KiB at first and 14 to 20 KiB then, most of it the leaf page the header carries.
+Compaction, merges and purges together, writes 61 to 111 KiB a commit. After a thousand commits the store holds 137 MiB rather than 449 MiB, since the retention
 window keeps every object a rewrite replaced (§10). The reads cost what they cost on the rewritten
 dataset: a filter over every object makes the same 220 requests, and a point lookup, a seek, a count
 under a key range and the largest key stay where they were. What the marks keep is space: up to an
@@ -648,7 +652,7 @@ by widening a number or making it nullable (§13).
   ten rows — appends, updates and deletes at random keys — with compaction drained and vacuum run
   between them. Every cost stays flat, or levels off once the marks have filled: an append 0.8 to
   1.2 ms, an update 2.0 to 3.5 ms, a delete 1.1 to 2.0 ms, compaction about a millisecond a commit, a
-  commit's bytes 23 KiB and then 40 to 75 KiB; a point lookup 0.6 to 0.8 ms in two to three requests, a
+  commit's bytes 16 KiB and then 31 to 63 KiB; a point lookup 0.6 to 0.8 ms in two to three requests, a
   seek and ten steps either way 0.2 to 0.6 ms, a hundred rows by position 0.2 ms, a scan of every
   row 27 ms; the heap between 60 and 80 MiB. Rewriting instead of marking, an update takes 19 ms and
   a commit writes 3.3 MiB. Before the level-0 destination, the cap on an object and the chunked buffer,

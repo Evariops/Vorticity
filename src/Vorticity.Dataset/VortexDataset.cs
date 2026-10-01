@@ -879,8 +879,7 @@ public sealed class VortexDataset : IAsyncDisposable
     private static CommitPageSource PagesOf(IObjectStore store, ulong version, CommitObject commit)
     {
         CommitPageSource pages = new CommitPageSource(store) { Reading = version };
-        pages.Inline(commit.Header);
-        pages.Know(version, commit.HeaderEnd);
+        pages.Open(version, commit);
         return pages;
     }
 

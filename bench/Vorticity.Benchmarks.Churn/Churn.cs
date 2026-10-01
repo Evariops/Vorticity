@@ -29,11 +29,11 @@ internal static class Churn
     {
         string root = options.Directory ?? Path.Combine(Path.GetTempPath(), "vorticity-churn-" + Guid.NewGuid().ToString("N"));
         bool owned = options.Directory is null && !options.Memory;
-        IObjectStore inner = options.Memory ? new MemoryObjectStore() : new FileObjectStore(root);
-        CountingObjectStore store = new CountingObjectStore(inner, ownsInner: true);
+        CommitBytesStore commits = new CommitBytesStore(options.Memory ? new MemoryObjectStore() : new FileObjectStore(root));
+        CountingObjectStore store = new CountingObjectStore(commits, ownsInner: true);
         try
         {
-            await RunAsync(options, store, options.Memory ? null : root).ConfigureAwait(false);
+            await RunAsync(options, store, commits, options.Memory ? null : root).ConfigureAwait(false);
         }
         finally
         {
@@ -45,7 +45,7 @@ internal static class Churn
         }
     }
 
-    private static async Task RunAsync(ChurnOptions options, CountingObjectStore store, string? root)
+    private static async Task RunAsync(ChurnOptions options, CountingObjectStore store, CommitBytesStore commits, string? root)
     {
         DatasetOptions datasetOptions = new DatasetOptions
         {
@@ -68,7 +68,7 @@ internal static class Churn
         await using (dataset.ConfigureAwait(false))
         {
             await LoadAsync(options, dataset, store).ConfigureAwait(false);
-            await OperateAsync(options, dataset, store, root).ConfigureAwait(false);
+            await OperateAsync(options, dataset, store, commits, root).ConfigureAwait(false);
         }
     }
 
@@ -109,7 +109,7 @@ internal static class Churn
             $"{Shape(plan)}; {store.BytesWritten / (1024.0 * 1024.0):F1} MiB written"));
     }
 
-    private static async Task OperateAsync(ChurnOptions options, VortexDataset dataset, CountingObjectStore store, string? root)
+    private static async Task OperateAsync(ChurnOptions options, VortexDataset dataset, CountingObjectStore store, CommitBytesStore commits, string? root)
     {
         Random random = new Random(options.Seed);
         long keySpace = 2 * Math.Max(options.Rows, 1);
@@ -134,6 +134,7 @@ internal static class Churn
             int kind = pick < options.Appends ? 0 : pick < options.Appends + options.Updates ? 1 : 2;
             long requests = store.Requests;
             long written = store.BytesWritten;
+            long committed = commits.Bytes;
             long allocated = GC.GetTotalAllocatedBytes(precise: false);
             long stamp = op;
             long touched;
@@ -181,6 +182,7 @@ internal static class Churn
                 Stopwatch.GetElapsedTime(started).TotalMilliseconds,
                 store.Requests - requests,
                 store.BytesWritten - written,
+                commits.Bytes - committed,
                 GC.GetTotalAllocatedBytes(precise: false) - allocated,
                 touched);
 
@@ -511,11 +513,12 @@ internal static class Churn
     private sealed class Window
     {
         internal const string Header =
-            "     ops |  append ms mean   p99    max |  update ms mean   p99    max |  delete ms mean   p99    max | req/op | KiB written/op | alloc KiB/op | compactions ms/op KiB/op | vacuum ms | shape";
+            "     ops |  append ms mean   p99    max |  update ms mean   p99    max |  delete ms mean   p99    max | req/op | KiB written/op  of commits | alloc KiB/op | compactions ms/op KiB/op | vacuum ms | shape";
 
         private readonly List<double>[] _times = [[], [], []];
         private readonly long[] _requests = new long[KindCount];
         private readonly long[] _written = new long[KindCount];
+        private readonly long[] _committed = new long[KindCount];
         private readonly long[] _allocated = new long[KindCount];
         private readonly long[] _rows = new long[KindCount];
 
@@ -531,11 +534,12 @@ internal static class Churn
 
         internal int Vacuumed { get; set; }
 
-        internal void Add(int kind, double ms, long requests, long written, long allocated, long rows)
+        internal void Add(int kind, double ms, long requests, long written, long committed, long allocated, long rows)
         {
             _times[kind].Add(ms);
             _requests[kind] += requests;
             _written[kind] += written;
+            _committed[kind] += committed;
             _allocated[kind] += allocated;
             _rows[kind] += rows;
         }
@@ -546,6 +550,7 @@ internal static class Churn
             int ops = 0;
             long requests = 0;
             long written = 0;
+            long committed = 0;
             long allocated = 0;
             for (int kind = 0; kind < KindCount; kind++)
             {
@@ -553,6 +558,7 @@ internal static class Churn
                 ops += times.Count;
                 requests += _requests[kind];
                 written += _written[kind];
+                committed += _committed[kind];
                 allocated += _allocated[kind];
                 if (times.Count == 0)
                 {
@@ -566,7 +572,7 @@ internal static class Churn
             }
 
             ops = Math.Max(ops, 1);
-            line.Append(CultureInfo.InvariantCulture, $" {(double)requests / ops,6:F1} | {written / 1024.0 / ops,14:F1} | {allocated / 1024.0 / ops,12:F0} |");
+            line.Append(CultureInfo.InvariantCulture, $" {(double)requests / ops,6:F1} | {written / 1024.0 / ops,14:F1} {committed / 1024.0 / ops,11:F1} | {allocated / 1024.0 / ops,12:F0} |");
             line.Append(CultureInfo.InvariantCulture, $" {Compactions,11} {CompactMs / ops,5:F1} {CompactWritten / 1024.0 / ops,6:F0} | {VacuumMs,9:F0} | {shape}");
             return line.ToString();
         }

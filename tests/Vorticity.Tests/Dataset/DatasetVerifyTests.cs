@@ -107,17 +107,19 @@ public sealed class DatasetVerifyTests
     }
 
     [Fact]
-    public async Task ARootTornAtEveryByteIsInvisibleToReadersAndNamedByVerify()
+    public async Task ARootTornAtEveryByteIsRefusedByReadersAndNamedByVerify()
     {
-        // The root lies in the latest commit object AND in its header, inlined; a reader takes the
-        // inlined copy, which the header's checksum covers, and never meets the stored one.
+        // The root lies once, in the latest commit object's pages region, inside the read that opens
+        // the commit, so its header does not inline it again. A reader takes it from that read and
+        // checks it against its reference: every torn byte is refused, naming the commit, and none is
+        // answered.
         (MemoryObjectStore store, VortexDataset dataset) = await BuildAsync(indexed: false);
         await using (store)
         await using (dataset)
         {
             PageReference root = dataset.Levels[0].Root;
             Assert.Equal(dataset.Version, root.Version);
-            Assert.Equal(0, await TearEveryByteAsync(store, dataset, root, "the page of version"));
+            Assert.Equal(root.Length, await TearEveryByteAsync(store, dataset, root, "the page of version"));
         }
     }
 

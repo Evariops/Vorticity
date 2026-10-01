@@ -120,8 +120,7 @@ internal static class DatasetVacuum
             CommitObject commit = version == latest
                 ? head
                 : await CommitObject.OpenAsync(store, CommitKey.For(version), cancellationToken).ConfigureAwait(false);
-            pages.Inline(commit.Header);
-            pages.Know(version, commit.HeaderEnd);
+            pages.Open(version, commit);
             foreach ((int _, DatasetTree tree) in DatasetLevels.Of(commit.Header).Occupied())
             {
                 await MarkAsync(tree.Root, tree.Depth).ConfigureAwait(false);

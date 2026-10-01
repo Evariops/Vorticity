@@ -45,6 +45,13 @@ internal sealed class CommitObject
     public long HeaderEnd { get; }
 
     /// <summary>
+    /// The start of the pages region that the open read brought back past the header: where the
+    /// pages this version wrote and did not inline lie, when they lie inside the read. Empty for an
+    /// object opened from bytes a caller already held.
+    /// </summary>
+    public ReadOnlyMemory<byte> Held { get; private init; }
+
+    /// <summary>
     /// Opens a commit object from its first bytes, at least <see cref="CommitFormat.MinimumBytes"/>
     /// of them. <paramref name="objectLength"/> is what the store says the object measures, or
     /// negative when the caller does not know; it decides whether these bytes are the whole object,
@@ -142,7 +149,14 @@ internal sealed class CommitObject
 
         // The read is the whole object exactly when it came back short of what was asked for.
         long length = range.Length < CommitFormat.OpenBytes ? range.Length : -1;
-        return Open(range.Contiguous().Span, length);
+        ReadOnlySpan<byte> bytes = range.Contiguous().Span;
+        CommitObject opened = Open(bytes, length);
+        return opened.HeaderEnd < bytes.Length
+            ? new CommitObject(opened.Header, opened.Table, opened.Trailer, opened.Length, opened.HeaderEnd)
+            {
+                Held = bytes[(int)opened.HeaderEnd..].ToArray(),
+            }
+            : opened;
     }
 
     /// <summary>

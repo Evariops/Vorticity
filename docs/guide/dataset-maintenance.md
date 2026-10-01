@@ -50,7 +50,7 @@ CompactionResult? compacted = await dataset.CompactAsync();
 
 ```
 compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128862 bytes in and 79036 out, 50000 rows
-  cost: 28 requests (12 get, 14 head, 2 put, 0 delete, 0 list), 28 dependent steps, 133120 bytes read, 79649 written
+  cost: 28 requests (12 get, 14 head, 2 put, 0 delete, 0 list), 28 dependent steps, 131163 bytes read, 79429 written
 now: 1 objects, lag 0; again: nothing to do
 ```
 
@@ -88,8 +88,8 @@ DatasetVerification since = await dataset.VerifyAsync(since: checkedAt);
 ```
 
 ```
-verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 9 requests (6 get, 3 head, 0 put, 0 delete, 0 list), 9 dependent steps, 146049 bytes read, 0 written
-verify since 12: holds True, 1 objects, 1 pages; cost: 12 requests (9 get, 3 head, 0 put, 0 delete, 0 list), 12 dependent steps, 28830 bytes read, 0 written
+verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 9 requests (6 get, 3 head, 0 put, 0 delete, 0 list), 9 dependent steps, 145609 bytes read, 0 written
+verify since 12: holds True, 1 objects, 1 pages; cost: 12 requests (9 get, 3 head, 0 put, 0 delete, 0 list), 12 dependent steps, 28178 bytes read, 0 written
 ```
 
 `VerifyAsync` checks the version's tree pages, objects and index fragments against what their
@@ -113,9 +113,9 @@ VacuumResult done = await dataset.VacuumAsync(later with { DryRun = false });
 ```
 
 ```
-vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 29 requests (13 get, 13 head, 0 put, 0 delete, 3 list), 29 dependent steps, 22850 bytes read, 0 written
-vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 28 requests (2 get, 23 head, 0 put, 0 delete, 3 list), 28 dependent steps, 888 bytes read, 0 written
-vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 30 requests (2 get, 23 head, 0 put, 2 delete, 3 list), 30 dependent steps, 888 bytes read, 0 written
+vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 29 requests (13 get, 13 head, 0 put, 0 delete, 3 list), 29 dependent steps, 12649 bytes read, 0 written
+vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 28 requests (2 get, 23 head, 0 put, 0 delete, 3 list), 28 dependent steps, 672 bytes read, 0 written
+vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 30 requests (2 get, 23 head, 0 put, 2 delete, 3 list), 30 dependent steps, 672 bytes read, 0 written
 and the data: 55000 rows, 2 objects
 ```
 
