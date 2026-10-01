@@ -154,7 +154,7 @@ internal sealed record ChurnOptions
             {
                 "--rows" => options with { Rows = Long(flag, value) },
                 "--ops" => options with { Ops = Int(flag, value) },
-                "--batch" => options with { Batch = Int(flag, value) },
+                "--batch" => options with { Batch = Positive(flag, value) },
                 "--mix" => Mix(options, value),
                 "--keys" => options with { Keys = value == "tail" ? KeyPlacement.Tail : value == "random" ? KeyPlacement.Random : throw new ArgumentException($"--keys takes random or tail, not '{value}'.") },
                 "--compact" => options with
@@ -174,8 +174,8 @@ internal sealed record ChurnOptions
                 "--store" => options with { Memory = value == "memory" ? true : value == "file" ? false : throw new ArgumentException($"--store takes file or memory, not '{value}'.") },
                 "--dir" => options with { Directory = value },
                 "--seed" => options with { Seed = Int(flag, value) },
-                "--minutes" => options with { Minutes = double.Parse(value, CultureInfo.InvariantCulture) },
-                "--load-chunk" => options with { LoadChunk = Int(flag, value) },
+                "--minutes" => options with { Minutes = MinutesOf(value) },
+                "--load-chunk" => options with { LoadChunk = Positive(flag, value) },
                 "--index-budget" => options with { IndexBudget = Int(flag, value) },
                 "--max-object" => options with { MaxObjectMiB = Int(flag, value) },
                 "--level-one" => options with { LevelOneKiB = Int(flag, value) },
@@ -227,13 +227,28 @@ internal sealed record ChurnOptions
             throw new ArgumentException($"--mix takes three weights, appends:updates:deletes, not '{value}'.");
         }
 
-        return options with { Appends = Int("--mix", parts[0]), Updates = Int("--mix", parts[1]), Deletes = Int("--mix", parts[2]) };
+        ChurnOptions mixed = options with { Appends = Int("--mix", parts[0]), Updates = Int("--mix", parts[1]), Deletes = Int("--mix", parts[2]) };
+        long weights = (long)mixed.Appends + mixed.Updates + mixed.Deletes;
+        return weights is > 0 and <= int.MaxValue
+            ? mixed
+            : throw new ArgumentException($"--mix takes weights that add up to between 1 and {int.MaxValue}, not '{value}'.");
     }
 
     private static int Int(string flag, string value) =>
         int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed) && parsed >= 0
             ? parsed
             : throw new ArgumentException($"{flag} takes a count, not '{value}'.");
+
+    /// <summary>A count of at least one, for a knob that a zero would turn into a loop that never ends.</summary>
+    private static int Positive(string flag, string value) =>
+        int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed) && parsed > 0
+            ? parsed
+            : throw new ArgumentException($"{flag} takes a count of at least one, not '{value}'.");
+
+    private static double MinutesOf(string value) =>
+        double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed) && parsed >= 0 && double.IsFinite(parsed)
+            ? parsed
+            : throw new ArgumentException($"--minutes takes a number of minutes, not '{value}'.");
 
     private static long Long(string flag, string value) =>
         long.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsed) && parsed >= 0

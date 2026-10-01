@@ -116,10 +116,6 @@ internal static class Churn
         long keySpace = 2 * Math.Max(options.Rows, 1);
         long tail = keySpace;
         int weights = options.Appends + options.Updates + options.Deletes;
-        if (weights == 0)
-        {
-            throw new ArgumentException("--mix gives every kind a weight of zero.");
-        }
 
         Window window = new Window();
         Stopwatch run = Stopwatch.StartNew();
