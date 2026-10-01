@@ -237,6 +237,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// Whether the version this handle holds may hold a row <paramref name="filter"/> is true for,
     /// from the object and subtree summaries of the pages it holds without a request, those its
     /// header carries and those it kept from the versions before: false is a proof, true is not.
+    /// It asks the store nothing: a page not in hand, or one in hand that does not hash to its
+    /// reference, is one it cannot see past, and answers true for, leaving the read that comes to
+    /// it to say what is wrong.
     /// </summary>
     /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
     /// <param name="filter">A lambda over the record's columns.</param>

@@ -199,9 +199,22 @@ internal sealed class DatasetSnapshot
         }
     }
 
+    /// <summary>
+    /// Whether a row the pruner keeps may lie under the page <paramref name="reference"/> names, from
+    /// the pages in hand alone. A page that is not, or that an open read holds torn, is one the answer
+    /// cannot see past: it may match, and the read that comes to it says what is wrong with it.
+    /// </summary>
     private bool MayMatch(PageReference reference, int depth, SummaryPruner pruner)
     {
-        if (!Pages.TryGetInHand(reference, out ReadOnlyMemory<byte> page))
+        ReadOnlyMemory<byte> page;
+        try
+        {
+            if (!Pages.TryGetInHand(reference, out page))
+            {
+                return true;
+            }
+        }
+        catch (TornCommitException)
         {
             return true;
         }
