@@ -355,6 +355,25 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
+    public async Task AVersionKeepsWhatItReadWithinTheHandlesBudgetAndNoMore()
+    {
+        // The pages a walk reads go to the handle's cache, which lets the least recently used go;
+        // the version does not hold them besides, so a second walk of a tree larger than the budget
+        // reads again what the budget let go.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions { PageCacheBytes = 256 << 10 }, ct);
+
+        store.Reset();
+        Assert.Equal(Objects, await CountAsync(dataset, ct));
+        long first = store.Requests;
+        store.Reset();
+        Assert.Equal(Objects, await CountAsync(dataset, ct));
+        Assert.InRange(store.Requests, 1, first);
+    }
+
+    [Fact]
     public async Task ABatchThatFindsNothingToDoAsksOnlyWhetherItsVersionIsStillTheLatest()
     {
         // Built on the version held, the batch finds nothing to do and asks whether a later one

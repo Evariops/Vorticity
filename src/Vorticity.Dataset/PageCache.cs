@@ -94,20 +94,20 @@ internal sealed class PageCache
 
     /// <summary>
     /// Keeps a page read from the store and checked against <paramref name="reference"/>, evicting the
-    /// least recently used to make room.
+    /// least recently used to make room; false when the page is one the budget cannot hold.
     /// </summary>
-    public void Add(PageReference reference, ReadOnlyMemory<byte> page)
+    public bool Add(PageReference reference, ReadOnlyMemory<byte> page)
     {
         if (page.Length > Capacity || page.IsEmpty)
         {
-            return;
+            return false;
         }
 
         lock (_gate)
         {
             if (_pages.ContainsKey(reference))
             {
-                return;
+                return true;
             }
 
             while (_size + page.Length > Capacity && _oldest is { } last)
@@ -121,6 +121,7 @@ internal sealed class PageCache
             _pages[reference] = entry;
             LinkNewest(entry);
             _size += page.Length;
+            return true;
         }
     }
 

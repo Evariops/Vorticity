@@ -20,8 +20,10 @@ internal sealed class CommitPageSource : IPageSource
     // next finds there.
     private readonly PageCache? _cache;
 
-    // Concurrent because a walk reads a window of siblings at once; two reads of one page race to
-    // the same bytes, and either may keep them.
+    // The pages this source holds itself: those its header inlines, those it took from a region an
+    // open read brought back, and those read from the store or found in the handle's cache when it
+    // keeps its reads, or the cache could not take them. Concurrent because a walk reads a window of
+    // siblings at once; two reads of one page race to the same bytes, and either may keep them.
     private readonly ConcurrentDictionary<PageReference, ReadOnlyMemory<byte>> _known = [];
 
     private readonly ConcurrentDictionary<ulong, long> _starts = [];
@@ -45,6 +47,14 @@ internal sealed class CommitPageSource : IPageSource
 
     /// <summary>How many pages were read through the store rather than found in hand.</summary>
     public long Reads => Interlocked.Read(ref _reads);
+
+    /// <summary>
+    /// Whether the pages read through this source stay in hand for as long as it lives, besides the
+    /// handle's cache: a commit's, which reads the same pages twice and carries in its header the
+    /// pages it has in hand. A version's source, which lives as long as the version is read, leaves
+    /// them to the cache, whose budget then bounds what the version holds.
+    /// </summary>
+    public bool KeepsReads { get; init; }
 
     /// <summary>
     /// The version this source reads for, which a missing commit object is reported against; 0 when
@@ -75,21 +85,8 @@ internal sealed class CommitPageSource : IPageSource
     /// kept from an earlier version.
     /// </summary>
     /// <exception cref="TornCommitException">A page an open read holds does not hash to its reference.</exception>
-    public bool TryGetInHand(PageReference reference, out ReadOnlyMemory<byte> page)
-    {
-        if (TryGetKnown(reference, out page))
-        {
-            return true;
-        }
-
-        if (!TryGetKept(reference, out page))
-        {
-            return false;
-        }
-
-        _known[reference] = page;
-        return true;
-    }
+    public bool TryGetInHand(PageReference reference, out ReadOnlyMemory<byte> page) =>
+        TryGetKnown(reference, out page) || TryGetKept(reference, out page);
 
     /// <summary>
     /// Takes what the open read of a version's commit object holds, which costs no further request:
@@ -125,11 +122,7 @@ internal sealed class CommitPageSource : IPageSource
     /// handle's later versions: a reference names its bytes by their hash, so bytes kept for a commit
     /// that then loses name nothing another writer's commit holds under other bytes.
     /// </summary>
-    public void Keep(PageReference reference, ReadOnlyMemory<byte> bytes)
-    {
-        _known[reference] = bytes;
-        _cache?.Add(reference, bytes);
-    }
+    public void Keep(PageReference reference, ReadOnlyMemory<byte> bytes) => Hold(reference, bytes);
 
     /// <summary>Records where a version's pages region starts, learned without a request.</summary>
     public void Know(ulong version, long pagesStart)
@@ -206,7 +199,11 @@ internal sealed class CommitPageSource : IPageSource
 
         if (TryGetKept(reference, out ReadOnlyMemory<byte> kept))
         {
-            _known[reference] = kept;
+            if (KeepsReads)
+            {
+                _known[reference] = kept;
+            }
+
             return kept;
         }
 
@@ -222,9 +219,21 @@ internal sealed class CommitPageSource : IPageSource
 
         // Kept because a page is immutable and a commit reads the same ones twice by construction:
         // the descent that looks a key up and the merge that rewrites its leaf are the same page.
-        _known[reference] = page;
-        _cache?.Add(reference, page);
+        Hold(reference, page);
         return page;
+    }
+
+    /// <summary>
+    /// Keeps a page in the handle's cache, and in this source too when it keeps its reads or the
+    /// cache could not take the page.
+    /// </summary>
+    private void Hold(PageReference reference, ReadOnlyMemory<byte> page)
+    {
+        bool cached = _cache is not null && _cache.Add(reference, page);
+        if (KeepsReads || !cached)
+        {
+            _known[reference] = page;
+        }
     }
 
     /// <summary>
@@ -311,7 +320,8 @@ internal sealed class CommitPageSource : IPageSource
 
     /// <summary>
     /// A page the handle kept from an earlier version: read from the store then, or lying in the
-    /// region the read opening its own version brought back, checked as it is taken from there.
+    /// region the read opening its own version brought back, checked as it is taken from there and
+    /// held by this source from then on, so that it is checked once.
     /// </summary>
     private bool TryGetKept(PageReference reference, out ReadOnlyMemory<byte> page)
     {
@@ -334,6 +344,7 @@ internal sealed class CommitPageSource : IPageSource
         page = region.Slice((int)reference.Offset, reference.Length);
         if (XxHash128.HashToUInt128(page.Span) == reference.Hash)
         {
+            _known[reference] = page;
             return true;
         }
 

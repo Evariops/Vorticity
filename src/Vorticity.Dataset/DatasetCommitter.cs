@@ -138,7 +138,7 @@ internal static class DatasetCommitter
             }
 
             known = parent;
-            CommitPageSource pages = new CommitPageSource(store, options.PageCache);
+            CommitPageSource pages = new CommitPageSource(store, options.PageCache) { KeepsReads = true };
             DatasetLevels levels = DatasetLevels.Empty;
             CommitHeader template = options.Template ?? new CommitHeader { Version = 1 };
             if (commit is not null)
