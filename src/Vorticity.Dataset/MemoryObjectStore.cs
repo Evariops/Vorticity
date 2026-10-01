@@ -21,7 +21,9 @@ public sealed class MemoryObjectStore : IObjectStore
     private long _tokens;
     private bool _disposed;
 
-    private readonly record struct Entry(byte[] Bytes, string Token, DateTimeOffset Created);
+    private readonly HashSet<string> _holds = new HashSet<string>(StringComparer.Ordinal);
+
+    private readonly record struct Entry(byte[] Bytes, string Token, DateTimeOffset Created, DateTimeOffset? RetainUntil);
 
     /// <summary>
     /// The store's clock, which stamps every object it creates
@@ -47,6 +49,35 @@ public sealed class MemoryObjectStore : IObjectStore
     /// call throws anyway, so the object exists and its writer never learned it.
     /// </summary>
     public Func<string, bool>? CrashesAfterPut { get; set; }
+
+    /// <summary>
+    /// How long the store keeps each object it creates under a retention lock, as a bucket under S3
+    /// Object Lock in compliance mode does: a head reports the date, and a delete of the object before
+    /// it is refused; null, the default, locks nothing.
+    /// </summary>
+    public TimeSpan? RetainFor { get; set; }
+
+    /// <summary>
+    /// Puts the object at <paramref name="key"/> under a legal hold, or lifts it: a head reports it, and
+    /// a delete of the object is refused while it holds.
+    /// </summary>
+    /// <param name="key">The object's key.</param>
+    /// <param name="held">Whether the hold is placed or lifted.</param>
+    public void Hold(string key, bool held)
+    {
+        ObjectKey.Check(key);
+        lock (_gate)
+        {
+            if (held)
+            {
+                _holds.Add(key);
+            }
+            else
+            {
+                _holds.Remove(key);
+            }
+        }
+    }
 
     /// <summary>The objects currently stored.</summary>
     public int Count
@@ -118,7 +149,7 @@ public sealed class MemoryObjectStore : IObjectStore
         lock (_gate)
         {
             return _objects.TryGetValue(key, out Entry entry)
-                ? new ObjectHead(entry.Bytes.Length, entry.Token, entry.Created)
+                ? new ObjectHead(entry.Bytes.Length, entry.Token, entry.Created) { RetainUntil = entry.RetainUntil, LegalHold = _holds.Contains(key) }
                 : null;
         }
     }
@@ -150,7 +181,8 @@ public sealed class MemoryObjectStore : IObjectStore
             }
             else
             {
-                _objects[key] = new Entry(bytes, Token(), TimeProvider.GetUtcNow());
+                DateTimeOffset created = TimeProvider.GetUtcNow();
+                _objects[key] = new Entry(bytes, Token(), created, RetainFor is { } term ? created + term : null);
                 outcome = PutOutcome.Created;
             }
         }
@@ -181,6 +213,18 @@ public sealed class MemoryObjectStore : IObjectStore
 
         lock (_gate)
         {
+            // All or nothing, as a locked store refuses: one locked object keeps every key of the batch.
+            DateTimeOffset now = TimeProvider.GetUtcNow();
+            foreach (string key in keys)
+            {
+                if (_objects.TryGetValue(key, out Entry entry) && (_holds.Contains(key) || entry.RetainUntil > now))
+                {
+                    throw new ObjectStoreException(_holds.Contains(key)
+                        ? $"'{key}' is under a legal hold, and the store refuses to delete it."
+                        : $"'{key}' is locked until {entry.RetainUntil:O}, and the store refuses to delete it.");
+                }
+            }
+
             foreach (string key in keys)
             {
                 _objects.Remove(key);

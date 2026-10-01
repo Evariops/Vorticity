@@ -481,7 +481,8 @@ store library.
   seven days by default (`DatasetOptions.RetentionWindow`), keeping the latest version always. What
   ages is the moment a version was superseded, by the store's own clock. An unreferenced object
   younger than the window is a writer in flight and is kept: **a writer must commit within the
-  window**. Only `commit/` and `data/` are swept; an imported file is its owner's. A reader that
+  window**. Only `commit/`, `data/` and the compaction loops' `leases/` are swept; an imported file
+  is its owner's. A reader that
   outlives the window gets an `ObjectNotFoundException` naming the version it was reading, never a
   partial answer. A dry run reports without deleting.
 - **Repack**: a commit object kept alive by a few live pages among dead ones is reported as sparse, and
@@ -503,7 +504,7 @@ store library.
 | operation | used by |
 |---|---|
 | `GetRangeAsync(key, offset, length)` → bytes and the object's token, in one answer | every read; a data object's segment source plans its reads with the core's coalescer and issues them together |
-| `HeadAsync(key)` → size, token, the store's creation time | opening; vacuum's ages |
+| `HeadAsync(key)` → size, token, the store's creation time, and the retention date and legal hold of a store under a lock | opening; vacuum's ages, and what a lock still keeps |
 | `PutIfAbsentAsync(key, pipe, length)` → created or exists | every write, streamed |
 | `DeleteAsync(keys)` | vacuum, a batch at a time; an absent key is not an error |
 | `ListAsync(prefix, startAfter)` | the latest version, one page (§8.3); vacuum |

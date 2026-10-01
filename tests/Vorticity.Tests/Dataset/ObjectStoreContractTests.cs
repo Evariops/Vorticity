@@ -185,6 +185,61 @@ public sealed class ObjectStoreContractTests : IDisposable
 
     [Theory]
     [MemberData(nameof(Stores))]
+    public async Task AStoreThatLocksNothingSaysSo(string kind)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using IObjectStore store = Open(kind);
+        await store.PutIfAbsentAsync("data/free", Bytes("free"), ct);
+        ObjectHead head = (await store.HeadAsync("data/free", ct))!.Value;
+        Assert.Equal((null, false), (head.RetainUntil, head.LegalHold));
+        Assert.False(head.IsLockedAt(DateTimeOffset.MaxValue));
+        await store.DeleteAsync(["data/free"], ct);
+        Assert.Null(await store.HeadAsync("data/free", ct));
+    }
+
+    [Fact]
+    public async Task AStoreUnderALockRefusesToDeleteBeforeTheDateAndAHeadSaysWhen()
+    {
+        // A bucket under S3 Object Lock in compliance mode, as the memory store plays it: every
+        // object it creates is kept for the term, and a batch holding one is refused whole.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero));
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock, RetainFor = TimeSpan.FromDays(30) };
+        await store.PutIfAbsentAsync("data/kept", Bytes("kept"), ct);
+        store.RetainFor = null;
+        await store.PutIfAbsentAsync("data/free", Bytes("free"), ct);
+
+        ObjectHead kept = (await store.HeadAsync("data/kept", ct))!.Value;
+        Assert.Equal(clock.Now + TimeSpan.FromDays(30), kept.RetainUntil);
+        Assert.True(kept.IsLockedAt(clock.Now));
+        await Assert.ThrowsAsync<ObjectStoreException>(async () => await store.DeleteAsync(["data/free", "data/kept"], ct));
+        Assert.NotNull(await store.HeadAsync("data/free", ct));
+
+        clock.Advance(TimeSpan.FromDays(31));
+        Assert.False((await store.HeadAsync("data/kept", ct))!.Value.IsLockedAt(clock.Now));
+        await store.DeleteAsync(["data/free", "data/kept"], ct);
+        Assert.Equal(0, store.Count);
+    }
+
+    [Fact]
+    public async Task AnObjectUnderALegalHoldStaysUntilTheHoldIsLifted()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await store.PutIfAbsentAsync("data/held", Bytes("held"), ct);
+        store.Hold("data/held", held: true);
+        ObjectHead head = (await store.HeadAsync("data/held", ct))!.Value;
+        Assert.Equal((null, true), (head.RetainUntil, head.LegalHold));
+        Assert.True(head.IsLockedAt(DateTimeOffset.MaxValue));
+        await Assert.ThrowsAsync<ObjectStoreException>(async () => await store.DeleteAsync(["data/held"], ct));
+
+        store.Hold("data/held", held: false);
+        await store.DeleteAsync(["data/held"], ct);
+        Assert.Null(await store.HeadAsync("data/held", ct));
+    }
+
+    [Theory]
+    [MemberData(nameof(Stores))]
     public async Task ListingIsOrdinalAndPagesByItsLastKey(string kind)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

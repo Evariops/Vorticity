@@ -49,7 +49,7 @@ public interface IObjectStore : IAsyncDisposable
 |---|---|
 | `PutIfAbsentAsync` | **the one that must be exact.** `Created` when the key was free and now holds the bytes, `Exists` when it was taken, and never `Created` for two racing callers: this is what makes a commit atomic. The content is a `PipeReader` of announced `length`, read as it is sent, so an object never has to fit in memory and a store can choose a multipart upload by the length; content that ends early or runs past it is refused and nothing is created. A cancelled put leaves the key created or absent, never half written |
 | `GetRangeAsync` | the bytes of a range and the object's token **in one answer**, because a token read in a separate call proves nothing about the bytes. The length is clamped to the object, which is how a reader opens a file by its tail without knowing its length; a missing key throws `ObjectNotFoundException` |
-| `HeadAsync` | length, token and creation time, or `null` for a missing key, not an exception |
+| `HeadAsync` | length, token and creation time, or `null` for a missing key, not an exception; and, on a store that keeps the object under a retention lock, the date before which it refuses to delete it (`RetainUntil`) and whether a legal hold keeps it (`LegalHold`) |
 | `ListAsync` | the keys under a prefix, in ordinal order, after `startAfter`. The implementation fetches pages as the enumeration advances, so a caller that stops early pays for one page |
 | `DeleteAsync` | a batch of keys, in any order; an absent key is not an error, and a store whose service caps a batch splits it. It reports nothing, since a store cannot say which keys existed |
 
@@ -58,6 +58,10 @@ which for immutable objects means the key was deleted and created again. Impleme
 thread-safe and list with strong consistency. S3, Azure Blob Storage and Google Cloud Storage all
 offer the conditional put `PutIfAbsentAsync` needs; a store that cannot promise it cannot host a
 dataset, because two writers would both believe they committed.
+
+A store under a retention lock, S3 Object Lock, Azure immutable blob storage or a GCS bucket lock,
+reports each object's lock in its head and refuses a delete before the date;
+`MemoryObjectStore.RetainFor` and `Hold` play such a store in tests.
 
 `ObjectRange` holds its bytes as a `SegmentLease`, so a store can hand back a pooled buffer, memory
 it keeps, or a response that arrived in pieces, and gets it back when the caller disposes the
