@@ -57,12 +57,12 @@ public class LatestVersionBenchmarks
     /// <summary>From the latest version: nothing newer.</summary>
     [Benchmark]
     public ulong Known() =>
-        DatasetCommitter.LatestAsync(_store, (ulong)Commits, trusted: true, CancellationToken.None).AsTask().GetAwaiter().GetResult().Version;
+        DatasetCommitter.LatestAsync(_store, (ulong)Commits, trusted: true, held: null, CancellationToken.None).AsTask().GetAwaiter().GetResult().Version;
 
     /// <summary>From ten versions behind.</summary>
     [Benchmark]
     public ulong Behind() =>
-        DatasetCommitter.LatestAsync(_store, (ulong)Commits - 10, trusted: true, CancellationToken.None).AsTask().GetAwaiter().GetResult().Version;
+        DatasetCommitter.LatestAsync(_store, (ulong)Commits - 10, trusted: true, held: null, CancellationToken.None).AsTask().GetAwaiter().GetResult().Version;
 
     private async Task BuildAsync()
     {

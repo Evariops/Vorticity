@@ -258,15 +258,8 @@ internal static class DatasetCommitter
     /// asked for. Otherwise, or when the answer is gone by the time it is read, the commits are listed:
     /// vacuum keeps an old commit object whose pages a retained version still names and takes the
     /// ones after it, so above a version learned too long ago a missing one does not end the run.
-    /// </summary>
-    public static async ValueTask<(ulong Version, CommitObject? Commit)> LatestAsync(
-        IObjectStore store, ulong known, bool trusted, CancellationToken cancellationToken) =>
-        await LatestAsync(store, known, trusted, null, cancellationToken).ConfigureAwait(false);
-
-    /// <summary>
-    /// As <see cref="LatestAsync(IObjectStore, ulong, bool, CancellationToken)"/>, handing back
-    /// <paramref name="held"/>, the caller's commit object of <paramref name="known"/>, when nothing
-    /// follows it rather than reading it again.
+    /// <paramref name="held"/>, the caller's commit object of <paramref name="known"/> or null, is
+    /// handed back when nothing follows it rather than read again.
     /// </summary>
     public static async ValueTask<(ulong Version, CommitObject? Commit)> LatestAsync(
         IObjectStore store, ulong known, bool trusted, CommitObject? held, CancellationToken cancellationToken)
