@@ -1921,6 +1921,7 @@ Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan RetentionWindow { get; init; }
 Vorticity.Dataset:     property VortexSession Session { get; init; }
 Vorticity.Dataset:     property VortexWriteOptions Write { get; init; }
+Vorticity.Dataset:     property bool LockedStore { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
 Vorticity.Dataset:     property int RetainedVersions { get; init; }
@@ -2089,8 +2090,10 @@ Vorticity.Dataset:     method bool op_Inequality(VacuumResult, VacuumResult)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property ImmutableArray<string> Deleted { get; init; }
+Vorticity.Dataset:     property ImmutableArray<string> Locked { get; init; }
 Vorticity.Dataset:     property ImmutableArray<string> Young { get; init; }
 Vorticity.Dataset:     property ImmutableArray<ulong> Retained { get; init; }
+Vorticity.Dataset:     property Nullable<DateTimeOffset> NextUnlock { get; init; }
 Vorticity.Dataset:     property TimeSpan Window { get; init; }
 Vorticity.Dataset:     property long PagesRead { get; init; }
 Vorticity.Dataset:     property ulong Latest { get; init; }

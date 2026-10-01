@@ -60,8 +60,10 @@ offer the conditional put `PutIfAbsentAsync` needs; a store that cannot promise 
 dataset, because two writers would both believe they committed.
 
 A store under a retention lock, S3 Object Lock, Azure immutable blob storage or a GCS bucket lock,
-reports each object's lock in its head and refuses a delete before the date;
-`MemoryObjectStore.RetainFor` and `Hold` play such a store in tests.
+reports each object's lock in its head and refuses a delete before the date. A dataset on such a store
+says so once, `DatasetOptions.LockedStore` at creation, and then writes as few bytes as it can and
+vacuums only what the lock has let go; `MemoryObjectStore.RetainFor` and `Hold` play such a store in
+tests.
 
 `ObjectRange` holds its bytes as a `SegmentLease`, so a store can hand back a pooled buffer, memory
 it keeps, or a response that arrived in pieces, and gets it back when the caller disposes the

@@ -101,6 +101,20 @@ public sealed record DatasetOptions
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
     /// <summary>
+    /// Whether the dataset lives on a store that keeps every object under a retention lock, S3 Object
+    /// Lock, Azure immutable blob storage, a GCS bucket lock, so that nothing it writes can be deleted
+    /// before the lock's date; fixed when the dataset is created and carried by every commit.
+    /// </summary>
+    /// <remarks>
+    /// Such a store keeps every byte written for the lock's term, so the dataset writes as few as it
+    /// can: a delete marks rows whatever the object's size or the share they take, its vectors up to a
+    /// page's bound, since a rewrite would add bytes and free none; compaction holds the read bounds
+    /// only, purging no marks and merging the levels at a fan-out of 100 unless the dataset states one;
+    /// and vacuum deletes nothing a lock or a legal hold still keeps, reporting it instead.
+    /// </remarks>
+    public bool LockedStore { get; init; }
+
+    /// <summary>
     /// The smallest object whose deleted rows are marked in its entry rather than rewritten out of
     /// it; 1 MiB by default, below which a rewrite costs a few milliseconds and keeps reads plain.
     /// </summary>
@@ -139,4 +153,23 @@ public sealed record DatasetOptions
 
     /// <summary>What vacuum keeps, as a header records it.</summary>
     internal RetentionSettings Retention => new RetentionSettings(RetainedVersions, (long)RetentionWindow.TotalSeconds);
+
+    /// <summary>The fan-out a dataset on a locked store merges its levels at, unless it states one: each merge's bytes are kept for the lock's term.</summary>
+    internal const int LockedFanout = 100;
+
+    /// <summary>
+    /// These options as a handle on a dataset of <paramref name="header"/> applies them: on a locked
+    /// store, every delete marks, whatever the object's size or the share of its rows, its vector up to
+    /// the bound of a page.
+    /// </summary>
+    internal DatasetOptions For(CommitHeader header) => !header.LockedStore
+        ? this with { Seed = header.Seed, LockedStore = false }
+        : this with
+        {
+            Seed = header.Seed,
+            LockedStore = true,
+            MarkedObjectBytes = 0,
+            MarkedShare = 1,
+            MarkedVectorBytes = header.Chunker.MaxBytes > 0 ? header.Chunker.MaxBytes : ProllyBoundaryRule.DefaultMaxBytes,
+        };
 }

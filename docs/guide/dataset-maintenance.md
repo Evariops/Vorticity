@@ -131,7 +131,9 @@ loop may have left (below); each lease's key says when it ended, so none costs a
 
 **Run a dry run first.** `Deleted` lists what would go, commit objects first, `Young` the
 unreferenced objects kept because they may belong to a writer still in flight, and `Retained` the
-versions kept.
+versions kept. On a store under a retention lock, `Locked` lists what is past the window but still
+under the store's lock or a legal hold, and `NextUnlock` says when the first of it may go: the next
+vacuum after that date takes it.
 
 ## In the background
 

@@ -247,6 +247,17 @@ is for. A lock is the store keeping its promise longer.
   fan-out, or tiered compaction without a clustering key, since each merge is paid for the term;
 - vacuum aware of the retention date.
 
+**Built.** `ObjectHead` carries `RetainUntil` and `LegalHold`, which a store under a lock reports,
+and vacuum deletes only what is past both its window and the lock: the rest is `Locked`, with the
+date the first of it may go, `NextUnlock`. `DatasetOptions.LockedStore`, fixed at creation and
+carried by every header, is the profile: every handle on the dataset marks whatever an object's size
+or the share of its rows, its vectors up to the page's bound; plans purge nothing; the levels merge
+at a fan-out of 100 unless the dataset states one; and vacuum asks the head of each lease it would
+delete, since only there does it learn a lease's lock. `MemoryObjectStore.RetainFor` and `Hold` play
+a locked store, refusing a whole batch of deletes when one key in it is locked, as such a store does.
+The checksum a locked bucket asks of every put, and the conditional put on a versioned bucket, stay
+the store library's to prove in its contract tests.
+
 **The right to erasure.** A mark takes a row out of every read at once. Its bytes stay in the object,
 and in every object a rewrite replaced, until the lock expires: a store in compliance mode refuses
 to destroy them before, by design. Physical erasure under such a lock is impossible for any layout,
@@ -266,7 +277,8 @@ subject destroyed in place of the rows. It belongs to the store library or to th
    that cannot count one another.
 4. **Inline level-0 compaction** (§2). Built: `DatasetOptions.InlineCompactionBytes`, off by
    default, bounded by its byte budget.
-5. **The locked-store profile** (§5), and the retention date on the seam.
+5. **The locked-store profile** (§5), and the retention date on the seam. Built:
+   `DatasetOptions.LockedStore`, and `ObjectHead.RetainUntil` and `LegalHold`.
 6. **Marked pages out of the header** (§4). Built, over a handle that keeps its pages across
    versions: a commit object is 30 % smaller on the churn. **Vectors out of line** are left, for
    deletes that scatter rows over many objects, each commit then changing many vectors.

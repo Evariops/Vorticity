@@ -482,7 +482,9 @@ store library.
   ages is the moment a version was superseded, by the store's own clock. An unreferenced object
   younger than the window is a writer in flight and is kept: **a writer must commit within the
   window**. Only `commit/`, `data/` and the compaction loops' `leases/` are swept; an imported file
-  is its owner's. A reader that
+  is its owner's. On a store under a retention lock, what the lock or a legal hold still keeps is left
+  and reported with the date the first of it may go (`DatasetOptions.LockedStore`,
+  [15-compaction.md](15-compaction.md) §5). A reader that
   outlives the window gets an `ObjectNotFoundException` naming the version it was reading, never a
   partial answer. A dry run reports without deleting.
 - **Repack**: a commit object kept alive by a few live pages among dead ones is reported as sparse, and

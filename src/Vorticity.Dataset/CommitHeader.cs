@@ -98,6 +98,13 @@ internal sealed record CommitHeader
     /// </summary>
     public IReadOnlyList<PagesStart> Starts { get; init; } = [];
 
+    /// <summary>
+    /// Whether the dataset lives on a store that keeps every object under a retention lock, fixed at
+    /// creation: every writer then deletes by marks, compacts to the read bounds only, and every
+    /// vacuum leaves what a lock still keeps.
+    /// </summary>
+    public bool LockedStore { get; init; }
+
     internal static class Field
     {
         internal const int Version = 1;
@@ -113,6 +120,7 @@ internal sealed record CommitHeader
         internal const int Levels = 11;
         internal const int Retired = 12;
         internal const int Starts = 13;
+        internal const int LockedStore = 14;
     }
 
     internal static class StartField
@@ -184,6 +192,11 @@ internal sealed record CommitHeader
         foreach (PagesStart start in Starts)
         {
             WriteStart(ref writer, start);
+        }
+
+        if (LockedStore)
+        {
+            writer.WriteUInt64(Field.LockedStore, 1);
         }
     }
 
@@ -334,6 +347,7 @@ internal sealed record CommitHeader
         List<CommitLevel> levels = [];
         List<RetiredColumn> retired = [];
         List<PagesStart> starts = [];
+        bool locked = false;
 
         try
         {
@@ -381,6 +395,9 @@ internal sealed record CommitHeader
                     case (Field.Starts, ProtoWireType.LengthDelimited):
                         starts.Add(ReadStart(reader.ReadLengthDelimited()));
                         break;
+                    case (Field.LockedStore, ProtoWireType.Varint):
+                        locked = reader.ReadVarint() != 0;
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -414,6 +431,7 @@ internal sealed record CommitHeader
             Levels = levels,
             Retired = retired,
             Starts = starts,
+            LockedStore = locked,
         };
     }
 
