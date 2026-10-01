@@ -116,6 +116,7 @@ internal static class DatasetCommitter
         ulong known = options.Known;
         DateTimeOffset knownAt = options.KnownAt;
         CommitObject? held = options.Held is { } given && given.Header.Version == known ? given : null;
+        bool askFirst = false;
         for (int attempt = 1; attempt <= options.MaxAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -123,10 +124,11 @@ internal static class DatasetCommitter
             // 1. The latest version: the one the writer holds, taken as it is while every version
             // after it is surely in the store, since the creation tells a writer that another went
             // first; otherwise asked for from the one the writer last saw, which a lost attempt moves
-            // past the one it built on, and which was the latest when it was asked.
+            // past the one it built on, and which was the latest when it was asked. Held, its commit
+            // object is not read again when it turns out to be the latest still.
             DateTimeOffset asked = options.TimeProvider.GetUtcNow();
             bool trusted = known > 0 && asked - knownAt < options.TrustSpan;
-            bool outright = trusted && held is not null;
+            bool outright = trusted && held is not null && !askFirst;
             (ulong parent, CommitObject? commit) = outright
                 ? (known, held)
                 : await LatestAsync(store, known, trusted, held, cancellationToken).ConfigureAwait(false);
@@ -206,7 +208,7 @@ internal static class DatasetCommitter
                 if (outright)
                 {
                     // The same attempt again, on the version the store says is the latest.
-                    held = null;
+                    askFirst = true;
                     attempt--;
                     continue;
                 }

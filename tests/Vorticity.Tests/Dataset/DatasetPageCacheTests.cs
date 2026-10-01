@@ -286,6 +286,24 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
+    public async Task ABatchThatFindsNothingToDoAsksOnlyWhetherItsVersionIsStillTheLatest()
+    {
+        // Built on the version held, the batch finds nothing to do and asks whether a later one
+        // exists; none does, and the commit object it holds is the latest's, which it reads again
+        // for nothing.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions(), 3, ct);
+        ulong held = dataset.Version;
+
+        store.Reset();
+        CommitResult result = await dataset.CommitAsync([Add(2)], ct);
+        Assert.Equal((OperationOutcome.AlreadyThere, held), (result.Outcomes[0], result.Version));
+        Assert.Equal((1, 1), (store.Requests, store.CountOf(ObjectOperation.Head)));
+    }
+
+    [Fact]
     public async Task AHandleThatLearnedItsVersionLongAgoListsBeforeItBuildsOnIt()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
