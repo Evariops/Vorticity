@@ -197,11 +197,37 @@ internal sealed class ExcludingKeySource : KeySource
 
     public override ValueTask DisposeAsync() => _inner.DisposeAsync();
 
-    /// <summary>Steps on in the direction past the entries left out; false when the walk runs out.</summary>
+    /// <summary>
+    /// Steps on in the direction past the entries left out; false when the walk runs out. When ranks
+    /// are rows, the run of rows an entry left out lies in is passed in one seek, to the rank past its
+    /// end or before its start; a few steps cost less than a seek, and a short run is stepped over.
+    /// </summary>
     private async ValueTask<bool> KeptAsync(bool forward, CancellationToken cancellationToken)
     {
         while (_inner.IsValid && _rows.Excludes(_inner.Row))
         {
+            if (ByRow)
+            {
+                int run = _rows.FirstEndingAfter(_inner.Row);
+                long past = forward ? _rows.EndOf(run) : _rows.StartOf(run) - 1;
+                if (Math.Abs(past - _inner.Row) > SteppedRun)
+                {
+                    long rank = past - _offset;
+                    if (rank < 0 || rank >= _inner.EntryCount)
+                    {
+                        _inner.Invalidate();
+                        return false;
+                    }
+
+                    if (!await _inner.SeekRankAsync(rank, cancellationToken).ConfigureAwait(false))
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+            }
+
             if (!(forward
                 ? await _inner.NextAsync(cancellationToken).ConfigureAwait(false)
                 : await _inner.PrevAsync(cancellationToken).ConfigureAwait(false)))
@@ -212,6 +238,9 @@ internal sealed class ExcludingKeySource : KeySource
 
         return _inner.IsValid;
     }
+
+    /// <summary>The longest run of rows left out that a walk steps over rather than seeks past.</summary>
+    private const int SteppedRun = 16;
 
     /// <summary>The entries left out below an entry rank, when ranks are rows.</summary>
     private long ExcludedBelowRank(long rank) => _rows.ExcludedBefore(_offset + rank) - _rows.ExcludedBefore(_offset);
