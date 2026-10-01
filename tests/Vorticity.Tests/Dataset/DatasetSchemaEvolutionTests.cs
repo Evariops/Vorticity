@@ -187,6 +187,42 @@ public sealed class DatasetSchemaEvolutionTests
         }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TheMarkedRowsOfObjectsOfEitherSchemaAreInNoExtremeAndNoCount(bool clustered)
+    {
+        // An object's own extreme answers only while a live row holds it, whatever schema it was
+        // written under: of a widened column, of a renamed one, under no filter, under one its own
+        // scan takes and under one evaluated on its reshaped batches.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        (VortexDataset dataset, List<MeterV2> expected) = await EvolvedAsync(store, clustered, ct, marking: true);
+        await using (dataset)
+        {
+            // The largest readings and the smallest keys of every object go, the earlier objects' and the later ones'.
+            RowChangeResult deleted = await dataset.DeleteAsync<MeterV2>(r => r.Reading > 2_000L | r.Key < 30L, ct);
+            Assert.Equal(5, deleted.ObjectsMarked);
+            expected.RemoveAll(row => row.Reading > 2_000 || row.Key < 30);
+
+            Assert.Equal(expected.Max(row => row.Reading), await dataset.Scan<MeterV2>().MaxAsync(r => r.Reading, ct));
+            Assert.Equal(expected.Min(row => row.Key), await dataset.Scan<MeterV2>().MinAsync(r => r.Key, ct));
+            Assert.Equal(
+                expected.Where(row => row.Place is not null).Select(row => row.Place).Max(StringComparer.Ordinal),
+                await dataset.Scan<MeterV2>().MaxAsync(r => r.Place, ct));
+            Assert.Equal(
+                expected.Where(row => row.Place == "Nice").Max(row => row.Reading),
+                await dataset.Scan<MeterV2>().Where(r => r.Place == "Nice").MaxAsync(r => r.Reading, ct));
+            Assert.Equal(
+                expected.Where(row => Not(Gt(row.Temperature, 5.0)) == true).Min(row => row.Key),
+                await dataset.Scan<MeterV2>().Where(r => !(r.Temperature > 5.0)).MinAsync(r => r.Key, ct));
+
+            await AssertCountAsync(dataset, expected, r => r.Reading < 900L, row => row.Reading < 900, ct);
+            await AssertCountAsync(dataset, expected, r => r.Place == "Lyon", row => row.Place == "Lyon", ct);
+            await AssertCountAsync(dataset, expected, r => !(r.Temperature > 5.0), row => Not(Gt(row.Temperature, 5.0)) == true, ct);
+        }
+    }
+
     [Fact]
     public async Task ADroppedColumnIsReadByNothingAndItsNameIsNeverUsedAgain()
     {
@@ -485,10 +521,11 @@ public sealed class DatasetSchemaEvolutionTests
     /// rows as the second schema reads them.
     /// </summary>
     private static async Task<(VortexDataset Dataset, List<MeterV2> Expected)> EvolvedAsync(
-        IObjectStore store, bool clustered, CancellationToken ct)
+        IObjectStore store, bool clustered, CancellationToken ct, bool marking = false)
     {
         Decoders.EnsureRegistered();
-        VortexDataset dataset = await VortexDataset.CreateAsync(store, MeterV1.Schema, Options(clustered), ct);
+        DatasetOptions options = marking ? Options(clustered) with { MarkedObjectBytes = 0, MarkedShare = 1 } : Options(clustered);
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, MeterV1.Schema, options, ct);
         List<MeterV2> expected = [];
         for (int part = 0; part < 3; part++)
         {

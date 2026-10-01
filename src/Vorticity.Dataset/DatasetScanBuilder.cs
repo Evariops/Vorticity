@@ -285,7 +285,7 @@ internal sealed class DatasetScanBuilder
                     continue;
                 }
 
-                if (BatchesOfAsync(lease.File, held, columns, _filter, _mask, held.FirstRow, _options.Compact, cancellationToken) is { } batches)
+                if (BatchesOfAsync(lease.File, held, PartOf(columns, _mask), held.FirstRow, _options.Compact, cancellationToken) is { } batches)
                 {
                     await foreach (RecordBatch batch in batches.ConfigureAwait(false))
                     {
@@ -326,9 +326,8 @@ internal sealed class DatasetScanBuilder
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
-                rows += ColumnsOf(lease, held.Entry) is { } columns
-                    ? await CountAsync(lease.File, held, columns, cancellationToken).ConfigureAwait(false)
-                    : await LiveCountAsync(lease.File, held, _filter, cancellationToken).ConfigureAwait(false);
+                rows += await CountOfAsync(lease.File, held, PartOf(ColumnsOf(lease, held.Entry), FieldMask.Empty), stopAtOne: false, cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
 
@@ -359,12 +358,8 @@ internal sealed class DatasetScanBuilder
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
-                bool any = ColumnsOf(lease, held.Entry) is { } columns
-                    ? await CountAsync(lease.File, held, columns, cancellationToken, stopAtOne: true).ConfigureAwait(false) > 0
-                    : held.Entry.HasDeletions
-                        ? await LiveAnyAsync(lease.File, held, _filter, cancellationToken).ConfigureAwait(false)
-                        : await Of(lease.File, held).AnyAsync(cancellationToken).ConfigureAwait(false);
-                if (any)
+                if (await CountOfAsync(lease.File, held, PartOf(ColumnsOf(lease, held.Entry), FieldMask.Empty), stopAtOne: true, cancellationToken)
+                    .ConfigureAwait(false) > 0)
                 {
                     return true;
                 }
@@ -480,25 +475,19 @@ internal sealed class DatasetScanBuilder
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
-                ScanBuilder scan;
-                if (ColumnsOf(lease, held.Entry) is { } columns)
-                {
-                    // An object of another schema is planned as its own scan reads it: the filter
-                    // it takes, or none when it is evaluated on the reshaped batches.
-                    ObjectRead read = columns.Read(_filter, _mask ?? FieldMask.All);
-                    if (read.Fate == FilterFate.None)
-                    {
-                        continue;
-                    }
 
-                    evaluated = read.Fate == FilterFate.Reshaped;
-                    scan = Of(lease.File, held, read.Pushed, read.Shape.Source, canonical: true);
-                }
-                else
+                // An object is planned as its own scan reads it: the filter it takes, or none when the
+                // filter is evaluated on its reshaped batches.
+                ObjectPart part = PartOf(ColumnsOf(lease, held.Entry), _mask);
+                if (part.Fate == FilterFate.None)
                 {
-                    scan = _orderPaths is { } paths ? OrderedOf(lease.File, paths, withKey: false) : Of(lease.File, held);
+                    continue;
                 }
 
+                evaluated = part.Fate == FilterFate.Reshaped;
+                ScanBuilder scan = _orderPaths is { } paths && part.Mapped is null
+                    ? OrderedOf(lease.File, paths, withKey: false)
+                    : ScanOf(lease.File, held, part);
                 plan = await scan.ExplainAsync(cancellationToken).ConfigureAwait(false);
             }
 
@@ -604,6 +593,7 @@ internal sealed class DatasetScanBuilder
         string path, bool wantMin, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(path);
+        FieldMask projection = new FieldMaskBuilder().Include(ToolPaths.Resolve(_version.Schema.Columns, path)).Build();
         FilterLiteral best = FilterLiteral.Null;
         await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -637,23 +627,8 @@ internal sealed class DatasetScanBuilder
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
-                FilterLiteral candidate;
-                if (ColumnsOf(lease, held.Entry) is { } columns)
-                {
-                    candidate = await ExtremeAsync(lease.File, held, columns, path, wantMin, cancellationToken).ConfigureAwait(false);
-                }
-                else if (held.Entry.HasDeletions)
-                {
-                    candidate = await LiveExtremeAsync(lease.File, held, path, wantMin, cancellationToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    ScanBuilder scan = Of(lease.File, held);
-                    candidate = wantMin
-                        ? await scan.MinAsync(path, cancellationToken).ConfigureAwait(false)
-                        : await scan.MaxAsync(path, cancellationToken).ConfigureAwait(false);
-                }
-
+                FilterLiteral candidate = await ObjectExtremeAsync(lease.File, held, ColumnsOf(lease, held.Entry), path, projection, wantMin, cancellationToken)
+                    .ConfigureAwait(false);
                 if (candidate.Kind != FilterLiteralKind.Null && Beats(candidate, best, wantMin))
                 {
                     best = candidate;
@@ -1111,24 +1086,45 @@ internal sealed class DatasetScanBuilder
     private ObjectColumns? ColumnsOf(ObjectLease lease, ObjectEntry entry) => _version.Schema.ColumnsOf(lease.File.DType, entry.Key);
 
     /// <summary>
-    /// The batches of an object that its own scan alone does not read as the version's rows, one of an
-    /// earlier schema or one with rows marked, under <paramref name="filter"/> and
-    /// <paramref name="mask"/> over the version's columns and counted from <paramref name="baseRow"/>;
-    /// null when the filter can keep no row of it. The one place where the steps compose, in this order
-    /// whatever reads the batches: the object's scan, its marked rows taken out or deselected, the
-    /// batches reshaped to the version's columns, and the filter evaluated on them where it could not
-    /// go to the scan.
+    /// An object's part of this read of the columns <paramref name="mask"/> names: what the filter is
+    /// for it, from <paramref name="columns"/> for an object of an earlier schema, and for one of the
+    /// version's own the filter whole, which its scan takes as it is. What an object was written under
+    /// is settled here, once, and every terminal goes by the filter's fate alone.
     /// </summary>
-    private IAsyncEnumerable<RecordBatch>? BatchesOfAsync(
-        VortexFile file, PositionedObject held, ObjectColumns? columns, VortexExpr? filter, FieldMask? mask, long baseRow, bool compact, CancellationToken cancellationToken)
+    private ObjectPart PartOf(ObjectColumns? columns, FieldMask? mask)
     {
         if (columns is null)
         {
-            return LiveAsync(file, held, filter, mask, baseRow, compact, reshaped: false, cancellationToken);
+            return new ObjectPart(_filter is null ? FilterFate.Every : FilterFate.Pushed, _filter, mask, null);
         }
 
-        ObjectRead read = columns.Read(filter, mask ?? FieldMask.All);
-        return read.Fate == FilterFate.None ? null : ReshapedAsync(file, held, read, baseRow, compact, cancellationToken);
+        ObjectRead read = columns.Read(_filter, mask ?? FieldMask.All);
+        return new ObjectPart(read.Fate, read.Pushed, read.Shape.Source, read);
+    }
+
+    /// <summary>The object's own scan for its part of the read: the filter it takes and the fields it reads, decoded whole when its batches are to be reshaped.</summary>
+    private ScanBuilder ScanOf(VortexFile file, PositionedObject held, in ObjectPart part) =>
+        Of(file, held, part.Pushed, part.Source, canonical: part.Mapped is not null);
+
+    /// <summary>
+    /// The batches of an object that its own scan alone does not read as the version's rows, one of an
+    /// earlier schema or one with rows marked, counted from <paramref name="baseRow"/>; null when the
+    /// filter can keep no row of it. The one place where the steps compose, in this order whatever
+    /// reads the batches: the object's scan, its marked rows taken out or deselected, the batches
+    /// reshaped to the version's columns, and the filter evaluated on them where it could not go to
+    /// the scan.
+    /// </summary>
+    private IAsyncEnumerable<RecordBatch>? BatchesOfAsync(
+        VortexFile file, PositionedObject held, in ObjectPart part, long baseRow, bool compact, CancellationToken cancellationToken)
+    {
+        if (part.Fate == FilterFate.None)
+        {
+            return null;
+        }
+
+        return part.Mapped is { } read
+            ? ReshapedAsync(file, held, read, baseRow, compact, cancellationToken)
+            : LiveAsync(file, held, part.Pushed, part.Source, baseRow, compact, reshaped: false, cancellationToken);
     }
 
     /// <summary>An object of another schema read as the version's: its own scan, each batch reshaped and counted from <paramref name="baseRow"/>.</summary>
@@ -1145,34 +1141,27 @@ internal sealed class DatasetScanBuilder
             cancellationToken);
 
     /// <summary>
-    /// The rows an object of another schema keeps: counted by its own scan when the filter could go
-    /// to it, and on its reshaped batches when not; with <paramref name="stopAtOne"/>, at the first.
+    /// The rows of an object its part of the read keeps; with <paramref name="stopAtOne"/>, 1 at the
+    /// first. None when the filter keeps none, every row the scan covers when it keeps all, the
+    /// object's own count when the filter goes to its scan, which leaves its marked rows out in the
+    /// same pass, and the rows selected on its reshaped batches otherwise.
     /// </summary>
-    private async ValueTask<long> CountAsync(
-        VortexFile file, PositionedObject held, ObjectColumns columns, CancellationToken cancellationToken, bool stopAtOne = false)
+    private async ValueTask<long> CountOfAsync(
+        VortexFile file, PositionedObject held, ObjectPart part, bool stopAtOne, CancellationToken cancellationToken)
     {
-        ObjectRead read = columns.Read(_filter, FieldMask.Empty);
-        switch (read.Fate)
+        switch (part.Fate)
         {
             case FilterFate.None:
                 return 0;
             case FilterFate.Every:
-                return Covered(held);
+                return stopAtOne ? Math.Min(Covered(held), 1) : Covered(held);
             case FilterFate.Pushed:
-                if (held.Entry.HasDeletions)
-                {
-                    return stopAtOne
-                        ? await LiveAnyAsync(file, held, read.Pushed, cancellationToken).ConfigureAwait(false) ? 1 : 0
-                        : await LiveCountAsync(file, held, read.Pushed, cancellationToken).ConfigureAwait(false);
-                }
-
-                ScanBuilder scan = Of(file, held, read.Pushed, null, canonical: true);
                 return stopAtOne
-                    ? await scan.AnyAsync(cancellationToken).ConfigureAwait(false) ? 1 : 0
-                    : await scan.CountAsync(cancellationToken).ConfigureAwait(false);
+                    ? await LiveAnyAsync(file, held, part.Pushed!, cancellationToken).ConfigureAwait(false) ? 1 : 0
+                    : await LiveCountAsync(file, held, part.Pushed!, cancellationToken).ConfigureAwait(false);
             default:
                 long rows = 0;
-                await foreach (RecordBatch batch in BatchesOfAsync(file, held, columns, _filter, FieldMask.Empty, 0, compact: false, cancellationToken)!.ConfigureAwait(false))
+                await foreach (RecordBatch batch in BatchesOfAsync(file, held, part, 0, compact: false, cancellationToken)!.ConfigureAwait(false))
                 {
                     rows += batch.SelectedRows;
                     if (stopAtOne && rows > 0)
@@ -1186,38 +1175,46 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
-    /// The extreme of a column among the rows an object of another schema keeps: none when it lacks
-    /// the column, from its own scan under the column's name there when the filter could go to it,
-    /// and from its reshaped batches when not.
+    /// The extreme of a column among the rows an object keeps: none when it lacks the column; the
+    /// object's own extreme, under the column's name there, when the filter goes to its scan and no
+    /// row is marked; its live extreme when rows are; and the extreme of its reshaped batches when
+    /// the filter is evaluated on them.
     /// </summary>
-    private async ValueTask<FilterLiteral> ExtremeAsync(
-        VortexFile file, PositionedObject held, ObjectColumns columns, string path, bool wantMin, CancellationToken cancellationToken)
+    private async ValueTask<FilterLiteral> ObjectExtremeAsync(
+        VortexFile file, PositionedObject held, ObjectColumns? columns, string path, FieldMask projection, bool wantMin, CancellationToken cancellationToken)
     {
-        if (columns.SourcePath(path) is not { } named)
+        string? named = columns is null ? path : columns.SourcePath(path);
+        ObjectPart part = PartOf(columns, projection);
+        if (named is null || part.Fate == FilterFate.None)
         {
             return FilterLiteral.Null;
         }
 
-        FieldMask projection = new FieldMaskBuilder().Include(ToolPaths.Resolve(_version.Schema.Columns, path)).Build();
-        ObjectRead read = columns.Read(_filter, projection);
-        if (read.Fate == FilterFate.None)
+        if (part.Fate == FilterFate.Reshaped)
         {
-            return FilterLiteral.Null;
+            return await ExtremeOfAsync(BatchesOfAsync(file, held, part, 0, compact: true, cancellationToken)!, path, wantMin).ConfigureAwait(false);
         }
 
-        if (read.Fate != FilterFate.Reshaped && !held.Entry.HasDeletions)
+        if (held.Entry.HasDeletions)
         {
-            ScanBuilder scan = Of(file, held, read.Pushed, null, canonical: true);
-            return wantMin
-                ? await scan.MinAsync(named, cancellationToken).ConfigureAwait(false)
-                : await scan.MaxAsync(named, cancellationToken).ConfigureAwait(false);
+            return await LiveExtremeAsync(file, held, part, named, path, wantMin, cancellationToken).ConfigureAwait(false);
         }
 
-        return await ExtremeOfAsync(BatchesOfAsync(file, held, columns, _filter, projection, 0, compact: true, cancellationToken)!, path, wantMin).ConfigureAwait(false);
+        ScanBuilder scan = Of(file, held, part.Pushed, null, canonical: false);
+        return wantMin
+            ? await scan.MinAsync(named, cancellationToken).ConfigureAwait(false)
+            : await scan.MaxAsync(named, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>The file's own scan, carrying this builder's filter, projection, options and the rows that fall in this object.</summary>
     private ScanBuilder Of(VortexFile file, PositionedObject held) => Of(file, held, _filter, _mask, canonical: false);
+
+    /// <summary>
+    /// An object's part of a read, whatever schema it was written under: what the filter is for it,
+    /// the filter its own scan takes, the fields that scan reads, and how its batches become the
+    /// version's rows; none for an object of the version's own columns, whose batches already are.
+    /// </summary>
+    private readonly record struct ObjectPart(FilterFate Fate, VortexExpr? Pushed, FieldMask? Source, ObjectRead? Mapped);
 
     /// <summary>
     /// The file's own scan under <paramref name="filter"/> and <paramref name="mask"/>, with this
@@ -1294,13 +1291,8 @@ internal sealed class DatasetScanBuilder
     /// count with them left out, cheapest proof first, in one pass. A take of the dataset's rows
     /// names live rows only.
     /// </summary>
-    private async ValueTask<long> LiveCountAsync(VortexFile file, PositionedObject held, VortexExpr? filter, CancellationToken cancellationToken)
+    private async ValueTask<long> LiveCountAsync(VortexFile file, PositionedObject held, VortexExpr filter, CancellationToken cancellationToken)
     {
-        if (filter is null)
-        {
-            return Covered(held);
-        }
-
         ScanBuilder scan = Of(file, held, filter, null, canonical: false);
         return _take is null && held.Entry.HasDeletions
             ? await scan.CountExcludingAsync(held.Entry.Deletions, cancellationToken).ConfigureAwait(false)
@@ -1308,13 +1300,8 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>Whether <paramref name="filter"/> keeps a live row of an object, the first one found answering.</summary>
-    private async ValueTask<bool> LiveAnyAsync(VortexFile file, PositionedObject held, VortexExpr? filter, CancellationToken cancellationToken)
+    private async ValueTask<bool> LiveAnyAsync(VortexFile file, PositionedObject held, VortexExpr filter, CancellationToken cancellationToken)
     {
-        if (filter is null)
-        {
-            return Covered(held) > 0;
-        }
-
         ScanBuilder scan = Of(file, held, filter, null, canonical: false);
         return _take is null && held.Entry.HasDeletions
             ? await scan.AnyExcludingAsync(held.Entry.Deletions, cancellationToken).ConfigureAwait(false)
@@ -1322,17 +1309,19 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>
-    /// The extreme of a column among an object's live rows. A column the object's statistics say is
-    /// sorted and holds no null nor NaN has it at its first or its last live row: the object's own
-    /// extreme while that row is the column's end, and that row's value, one row read, once a delete
-    /// took the end. Otherwise the object's own extreme is the answer when a live row holds it, which
-    /// a count of the rows equal to it settles; when every row holding it is gone, or the column is a
-    /// float whose equality a count cannot settle, its live rows are read for it.
+    /// The extreme of a column among an object's live rows, under the filter its part of the read
+    /// gives its scan, the column <paramref name="named"/> as the object names it. A column the
+    /// object's statistics say is sorted and holds no null nor NaN has it at its first or its last
+    /// live row, when every row is kept: the object's own extreme while that row is the column's end,
+    /// and that row's value, one row read, once a delete took the end. Otherwise the object's own
+    /// extreme is the answer when a live row holds it, which a count of the rows equal to it settles;
+    /// when every row holding it is gone, or the column is a float whose equality a count cannot
+    /// settle, its live rows are read for it, as the version's columns, under <paramref name="path"/>.
     /// </summary>
     private async ValueTask<FilterLiteral> LiveExtremeAsync(
-        VortexFile file, PositionedObject held, string path, bool wantMin, CancellationToken cancellationToken)
+        VortexFile file, PositionedObject held, ObjectPart part, string named, string path, bool wantMin, CancellationToken cancellationToken)
     {
-        if (_filter is null && Whole(held) && SortedWithoutGaps(file, path))
+        if (part.Fate == FilterFate.Every && Whole(held) && SortedWithoutGaps(file, named))
         {
             ObjectEntry entry = held.Entry;
             long end = wantMin ? 0 : entry.PhysicalRows - 1;
@@ -1344,33 +1333,31 @@ internal sealed class DatasetScanBuilder
             }
 
             return wantMin
-                ? await ends.MinAsync(path, cancellationToken).ConfigureAwait(false)
-                : await ends.MaxAsync(path, cancellationToken).ConfigureAwait(false);
+                ? await ends.MinAsync(named, cancellationToken).ConfigureAwait(false)
+                : await ends.MaxAsync(named, cancellationToken).ConfigureAwait(false);
         }
 
-        DType column = ClusteringKey.Resolve(_version.Schema.DType, path);
+        DType column = ClusteringKey.Resolve(file.DType, named);
         if (column.Kind is DTypeKind.Utf8 or DTypeKind.Binary or DTypeKind.Bool or DTypeKind.Decimal
             || (column.Kind == DTypeKind.Primitive && !column.PType.IsFloat()))
         {
-            ScanBuilder scan = Of(file, held);
+            ScanBuilder scan = Of(file, held, part.Pushed, null, canonical: false);
             FilterLiteral found = wantMin
-                ? await scan.MinAsync(path, cancellationToken).ConfigureAwait(false)
-                : await scan.MaxAsync(path, cancellationToken).ConfigureAwait(false);
+                ? await scan.MinAsync(named, cancellationToken).ConfigureAwait(false)
+                : await scan.MaxAsync(named, cancellationToken).ConfigureAwait(false);
             if (found.Kind == FilterLiteralKind.Null)
             {
                 return found;
             }
 
-            VortexExpr equal = Expr.Eq(Expr.Field(path), Expr.Literal(found));
-            if (await LiveCountAsync(file, held, _filter is null ? equal : Expr.And(_filter, equal), cancellationToken).ConfigureAwait(false) > 0)
+            VortexExpr equal = Expr.Eq(Expr.Field(named), Expr.Literal(found));
+            if (await LiveCountAsync(file, held, part.Pushed is null ? equal : Expr.And(part.Pushed, equal), cancellationToken).ConfigureAwait(false) > 0)
             {
                 return found;
             }
         }
 
-        FieldMask projection = new FieldMaskBuilder().Include(ToolPaths.Resolve(_version.Schema.Columns, path)).Build();
-        return await ExtremeOfAsync(BatchesOfAsync(file, held, null, _filter, projection, 0, compact: true, cancellationToken)!, path, wantMin)
-            .ConfigureAwait(false);
+        return await ExtremeOfAsync(BatchesOfAsync(file, held, part, 0, compact: true, cancellationToken)!, path, wantMin).ConfigureAwait(false);
     }
 
     /// <summary>Whether a file's statistics say a top-level column is sorted, and holds no null and no NaN.</summary>
