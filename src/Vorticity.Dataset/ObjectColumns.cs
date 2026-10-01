@@ -324,6 +324,8 @@ internal sealed class ObjectColumns
                     }
                 }
 
+                // A gather leaves fewer rows than the batch's selection describes, and the view of
+                // it selects them all.
                 view?.Dispose();
                 view = batch.Reshaped(root, baseRow + batch.StartRow, view);
                 if (selected >= 0)

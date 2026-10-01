@@ -402,6 +402,29 @@ public sealed class DatasetSchemaEvolutionTests
     }
 
     [Fact]
+    public async Task ATakeOfMarkedRowsInAnEarlierObjectSelectsWhatTheReshapedFilterKept()
+    {
+        // A membership test does not go to a widened column: it is evaluated on the reshaped
+        // batches, whose gather leaves fewer rows than the take's selection described.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = Options(clustered: false) with { MarkedObjectBytes = 0, MarkedShare = 1 };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, MeterV1.Schema, options, ct);
+        await AppendAsync(dataset, Meters(0, 1), ct);
+        await dataset.EvolveSchemaAsync(MeterV2.Schema, new Dictionary<string, string> { ["Place"] = "Site" }, ct);
+        RowChangeResult deleted = await dataset.DeleteAsync<MeterV2>(r => r.Key < 20L, ct);
+        Assert.Equal(1, deleted.ObjectsMarked);
+
+        // The live rows are keys 20 to 199, at places 0 to 179, and each reading is three times its key.
+        List<MeterV2> taken = await dataset.Scan<MeterV2>()
+            .Where(r => r.Reading.In(75L, 90L, 93L, 300L, 450L))
+            .Rows(5, 10, 11, 80, 130, 170)
+            .ToRecordsAsync(ct).ToListAsync(ct);
+        Assert.Equal([25L, 30, 31, 100, 150], taken.Select(row => row.Key));
+    }
+
+    [Fact]
     public void TheRetiredNamesTravelInTheHeader()
     {
         CommitHeader header = new CommitHeader

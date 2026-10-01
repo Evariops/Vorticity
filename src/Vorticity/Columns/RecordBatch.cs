@@ -543,8 +543,11 @@ public sealed class RecordBatch : IDisposable
     /// The same rows and selection under another root built in this batch's arena, counted from
     /// <paramref name="startRow"/>: the struct of a reader that shows the columns under another
     /// schema, bound into <paramref name="spare"/>, the previous view of a stream of them, disposed.
+    /// A root of another row count, a gather of some rows, selects every row it holds: this batch's
+    /// selection describes rows that are no longer where it says, and the caller that gathered
+    /// selects among the new ones itself.
     /// </summary>
-    /// <param name="root">The new root, in this batch's arena, of this batch's row count.</param>
+    /// <param name="root">The new root, in this batch's arena.</param>
     /// <param name="startRow">The row of the whole that row 0 of the view is.</param>
     /// <param name="spare">The previous view, disposed, or null for a new one.</param>
     /// <returns>A view in this batch's arena, valid as long as this batch; disposing it releases nothing.</returns>
@@ -564,7 +567,11 @@ public sealed class RecordBatch : IDisposable
             view = spare;
         }
 
-        view.Select(_selection, _selected);
+        if (view._rowCount == _rowCount)
+        {
+            view.Select(_selection, _selected);
+        }
+
         return view;
     }
 
