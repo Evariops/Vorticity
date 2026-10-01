@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
@@ -67,26 +68,69 @@ internal sealed class DeletionVector : IRowExclusion, IEquatable<DeletionVector>
             return this;
         }
 
-        List<long> starts = new List<long>(_starts.Length + 1);
-        List<long> ends = new List<long>(_starts.Length + 1);
+        List<long> starts = [];
+        List<long> ends = [];
+        long previous = -1;
+        foreach (long row in rows)
+        {
+            if (row <= previous || row < 0)
+            {
+                throw new ArgumentException("The rows deleted are ascending, distinct and not negative.", nameof(rows));
+            }
+
+            if (ends.Count > 0 && ends[^1] == row)
+            {
+                ends[^1] = row + 1;
+            }
+            else
+            {
+                starts.Add(row);
+                ends.Add(row + 1);
+            }
+
+            previous = row;
+        }
+
+        return WithRuns(CollectionsMarshal.AsSpan(starts), CollectionsMarshal.AsSpan(ends));
+    }
+
+    /// <summary>
+    /// This vector with the rows of the runs <c>[starts[i], ends[i])</c> deleted too: ascending, apart
+    /// or meeting, none of their rows deleted already. What a delete marks comes as runs, the rows a
+    /// range takes as one, so no row is listed on its own.
+    /// </summary>
+    /// <exception cref="ArgumentException">The runs are not ascending and disjoint, one is empty or negative, or one holds a row deleted already.</exception>
+    public DeletionVector WithRuns(ReadOnlySpan<long> starts, ReadOnlySpan<long> ends)
+    {
+        if (starts.Length != ends.Length)
+        {
+            throw new ArgumentException("A run has a start and an end.", nameof(ends));
+        }
+
+        if (starts.IsEmpty)
+        {
+            return this;
+        }
+
+        List<long> mergedStarts = new List<long>(_starts.Length + starts.Length);
+        List<long> mergedEnds = new List<long>(_starts.Length + starts.Length);
         int run = 0;
         int at = 0;
         long previous = -1;
-        while (run < _starts.Length || at < rows.Length)
+        while (run < _starts.Length || at < starts.Length)
         {
             long start;
             long end;
-            if (at < rows.Length && (run >= _starts.Length || rows[at] < _starts[run]))
+            if (at < starts.Length && (run >= _starts.Length || starts[at] < _starts[run]))
             {
-                long row = rows[at++];
-                if (row <= previous || row < 0)
+                start = starts[at];
+                end = ends[at++];
+                if (start < 0 || end <= start || start < previous)
                 {
-                    throw new ArgumentException("The rows deleted are ascending, distinct and not negative.", nameof(rows));
+                    throw new ArgumentException("The runs deleted are ascending, disjoint, not empty and not negative.", nameof(starts));
                 }
 
-                previous = row;
-                start = row;
-                end = row + 1;
+                previous = end;
             }
             else
             {
@@ -94,23 +138,68 @@ internal sealed class DeletionVector : IRowExclusion, IEquatable<DeletionVector>
                 end = _ends[run++];
             }
 
-            if (starts.Count > 0 && start < ends[^1])
+            if (mergedStarts.Count > 0 && start < mergedEnds[^1])
             {
-                throw new ArgumentException($"Row {start} is deleted already.", nameof(rows));
+                throw new ArgumentException($"Row {start} is deleted already.", nameof(starts));
             }
 
-            if (starts.Count > 0 && start == ends[^1])
+            if (mergedStarts.Count > 0 && start == mergedEnds[^1])
             {
-                ends[^1] = end;
+                mergedEnds[^1] = end;
             }
             else
             {
-                starts.Add(start);
-                ends.Add(end);
+                mergedStarts.Add(start);
+                mergedEnds.Add(end);
             }
         }
 
-        return new DeletionVector([.. starts], [.. ends]);
+        return new DeletionVector([.. mergedStarts], [.. mergedEnds]);
+    }
+
+    /// <summary>
+    /// A bit per row of <c>[start, start + rows)</c> into <paramref name="bits"/>, set for the live
+    /// ones: every word set, then each run that meets the window cleared a word at a time.
+    /// </summary>
+    public void Live(long start, int rows, Span<ulong> bits)
+    {
+        int words = (rows + 63) >> 6;
+        Span<ulong> window = bits[..words];
+        window.Fill(ulong.MaxValue);
+        int tail = rows & 63;
+        if (tail != 0)
+        {
+            window[^1] = (1UL << tail) - 1;
+        }
+
+        long end = start + rows;
+        for (int run = FirstEndingAfter(start); run < _starts.Length && _starts[run] < end; run++)
+        {
+            Clear(window, (int)(Math.Max(_starts[run], start) - start), (int)(Math.Min(_ends[run], end) - start));
+        }
+    }
+
+    /// <summary>Clears the bits of <c>[from, to)</c>: the words between whole, the two at the ends in part.</summary>
+    private static void Clear(Span<ulong> bits, int from, int to)
+    {
+        if (from >= to)
+        {
+            return;
+        }
+
+        int first = from >> 6;
+        int last = (to - 1) >> 6;
+        ulong head = ulong.MaxValue << (from & 63);
+        ulong tail = ulong.MaxValue >> (63 - ((to - 1) & 63));
+        if (first == last)
+        {
+            bits[first] &= ~(head & tail);
+            return;
+        }
+
+        bits[first] &= ~head;
+        bits[(first + 1)..last].Clear();
+        bits[last] &= ~tail;
     }
 
     /// <inheritdoc/>

@@ -68,7 +68,7 @@ internal static class LiveRows
 
                 // The rows kept: the live ones, and of those the selected ones when compacting.
                 Span<ulong> kept = mask.AsSpan(0, words);
-                Live(deletions, start, rows, kept);
+                deletions.Live(start, rows, kept);
                 if (compact && !selection.IsEmpty)
                 {
                     for (int word = 0; word < words; word++)
@@ -150,7 +150,7 @@ internal static class LiveRows
                 int words = (rows + 63) >> 6;
                 VortexBuffer buffer = batch.Arena.AllocateUninitialized(words * sizeof(ulong), 64, out Span<byte> raw);
                 Span<ulong> kept = MemoryMarshal.Cast<byte, ulong>(raw);
-                Live(deletions, start, rows, kept);
+                deletions.Live(start, rows, kept);
                 ReadOnlySpan<ulong> selection = batch.SelectionWords;
                 int selected = 0;
                 for (int word = 0; word < words; word++)
@@ -334,28 +334,6 @@ internal static class LiveRows
         List<long> rows = new List<long>((int)Math.Min(deletions.DeletedIn(start, end), int.MaxValue));
         deletions.Collect(start, end, rows);
         return [.. rows];
-    }
-
-    /// <summary>A bit per row of <c>[start, start + rows)</c>, set for the live ones.</summary>
-    private static void Live(DeletionVector deletions, long start, int rows, Span<ulong> bits)
-    {
-        bits.Fill(ulong.MaxValue);
-        int tail = rows & 63;
-        if (tail != 0)
-        {
-            bits[^1] = (1UL << tail) - 1;
-        }
-
-        long end = start + rows;
-        for (int run = deletions.FirstEndingAfter(start); run < deletions.Runs && deletions.StartOf(run) < end; run++)
-        {
-            int from = (int)(Math.Max(deletions.StartOf(run), start) - start);
-            int to = (int)(Math.Min(deletions.EndOf(run), end) - start);
-            for (int row = from; row < to; row++)
-            {
-                bits[row >> 6] &= ~(1UL << (row & 63));
-            }
-        }
     }
 
     /// <summary>The rows whose bit is set, ascending, into <paramref name="indices"/>; how many.</summary>

@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -311,11 +312,17 @@ internal static class DatasetRowChanges
     /// The object's deletion vector with its matching live rows added, found by the object's own
     /// scan under the filter and read at their positions; the matching rows go to the sink too.
     /// </summary>
+    /// <remarks>
+    /// A batch's matching rows are its selection less the rows deleted already, both taken a word at
+    /// a time, and are added as the runs they form, which carry on from one batch to the next: the
+    /// cost is the batches' words and the runs, not the rows.
+    /// </remarks>
     private static async ValueTask<DeletionVector> MarkAsync(
         VortexFile file, PositionedObject held, ObjectColumns? columns, VortexExpr? filter, ChangedRows? changed, CancellationToken cancellationToken)
     {
         DeletionVector deletions = held.Entry.Deletions;
-        List<long> rows = [];
+        List<long> starts = [];
+        List<long> ends = [];
         ulong[] live = [];
         try
         {
@@ -328,36 +335,32 @@ internal static class DatasetRowChanges
                     continue;
                 }
 
+                // The rows the filter kept that no earlier delete took.
                 int words = (count + 63) >> 6;
-                if (live.Length < words)
-                {
-                    if (live.Length > 0)
-                    {
-                        ArrayPool<ulong>.Shared.Return(live);
-                    }
-
-                    live = ArrayPool<ulong>.Shared.Rent(words);
-                }
-
-                // The rows the filter kept that no earlier delete took: their bits, and their places.
+                Pooled.Grow(ref live, words);
                 Span<ulong> taken = live.AsSpan(0, words);
+                deletions.Live(batch.StartRow, count, taken);
                 ReadOnlySpan<ulong> selection = batch.SelectionWords;
-                long start = batch.StartRow;
                 int matching = 0;
-                taken.Clear();
-                for (int row = 0; row < count; row++)
+                for (int word = 0; word < words; word++)
                 {
-                    if ((selection.IsEmpty || (selection[row >> 6] & (1UL << (row & 63))) != 0) && !deletions.Contains(start + row))
+                    if (!selection.IsEmpty)
                     {
-                        taken[row >> 6] |= 1UL << (row & 63);
-                        rows.Add(start + row);
-                        matching++;
+                        taken[word] &= selection[word];
                     }
+
+                    matching += BitOperations.PopCount(taken[word]);
                 }
 
-                if (matching > 0 && changed is not null)
+                if (matching == 0)
                 {
-                    VortexBuffer buffer = batch.Arena.AllocateUninitialized(Math.Max(words, 1) * sizeof(ulong), 64, out Span<byte> raw);
+                    continue;
+                }
+
+                Runs(taken, count, batch.StartRow, starts, ends);
+                if (changed is not null)
+                {
+                    VortexBuffer buffer = batch.Arena.AllocateUninitialized(words * sizeof(ulong), 64, out Span<byte> raw);
                     taken.CopyTo(MemoryMarshal.Cast<byte, ulong>(raw));
                     batch.Select(buffer, matching);
                     await changed.TakeAsync(batch, cancellationToken).ConfigureAwait(false);
@@ -366,13 +369,56 @@ internal static class DatasetRowChanges
         }
         finally
         {
-            if (live.Length > 0)
+            Pooled.Return(live);
+        }
+
+        return deletions.WithRuns(CollectionsMarshal.AsSpan(starts), CollectionsMarshal.AsSpan(ends));
+    }
+
+    /// <summary>
+    /// The runs of set bits among the first <paramref name="rows"/> of <paramref name="bits"/>, as
+    /// rows from <paramref name="start"/>, added to <paramref name="starts"/> and
+    /// <paramref name="ends"/>: one that starts where the last added ends extends it.
+    /// </summary>
+    private static void Runs(ReadOnlySpan<ulong> bits, int rows, long start, List<long> starts, List<long> ends)
+    {
+        int row = 0;
+        while (row < rows)
+        {
+            int first = NextBit(bits, row, set: true, rows);
+            if (first >= rows)
             {
-                ArrayPool<ulong>.Shared.Return(live);
+                return;
+            }
+
+            int past = NextBit(bits, first, set: false, rows);
+            if (ends.Count > 0 && ends[^1] == start + first)
+            {
+                ends[^1] = start + past;
+            }
+            else
+            {
+                starts.Add(start + first);
+                ends.Add(start + past);
+            }
+
+            row = past;
+        }
+    }
+
+    /// <summary>The first bit at or after <paramref name="from"/> that is set, or clear without <paramref name="set"/>; <paramref name="rows"/> when none is.</summary>
+    private static int NextBit(ReadOnlySpan<ulong> bits, int from, bool set, int rows)
+    {
+        for (int word = from >> 6; word < bits.Length; word++)
+        {
+            ulong value = (set ? bits[word] : ~bits[word]) & (word == from >> 6 ? ulong.MaxValue << (from & 63) : ulong.MaxValue);
+            if (value != 0)
+            {
+                return Math.Min((word << 6) + BitOperations.TrailingZeroCount(value), rows);
             }
         }
 
-        return deletions.With(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(rows));
+        return rows;
     }
 
     /// <summary>
