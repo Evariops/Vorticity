@@ -812,8 +812,10 @@ internal static class DatasetCommitter
                     {
                         outcomes.Add(OperationOutcome.AlreadyThere);
                     }
-                    else if (Same(schema.Schema, schema.Retired, change.From, schema.Retired) && change.From.Length > 0)
+                    else if (change.From.Length > 0 && schema.Schema.Span.SequenceEqual(change.From.Span))
                     {
+                        // The schema the change was checked against is still the dataset's: its
+                        // retired names change only with it, so the bytes say it all.
                         schema.Schema = change.To;
                         schema.Retired = change.Retired;
                         outcomes.Add(OperationOutcome.Applied);
