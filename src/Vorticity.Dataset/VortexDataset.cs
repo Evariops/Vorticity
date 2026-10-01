@@ -44,6 +44,10 @@ public sealed class VortexDataset : IAsyncDisposable
     private DatasetSnapshot _snapshot;
     private Exception? _inlineFailure;
 
+    // 1 while a compaction run after a commit is under way on this handle: another commit's finds it
+    // has nothing to add, since the running one takes the same job.
+    private int _compactingInline;
+
     private VortexDataset(IObjectStore store, DatasetOptions options, ulong version, CommitObject commit, DateTimeOffset knownAt)
     {
         _store = store;
@@ -774,7 +778,7 @@ public sealed class VortexDataset : IAsyncDisposable
     internal async ValueTask CompactInlineAsync(CancellationToken cancellationToken)
     {
         long budget = _options.InlineCompactionBytes;
-        if (budget <= 0 || Lag == 0)
+        if (budget <= 0 || Lag == 0 || Interlocked.CompareExchange(ref _compactingInline, 1, 0) != 0)
         {
             return;
         }
@@ -797,6 +801,10 @@ public sealed class VortexDataset : IAsyncDisposable
             // caller is told: level 0 stays as it is, for the next commit or another driver, which
             // meets the same failure again if it is not a passing one. The handle says what it was.
             Volatile.Write(ref _inlineFailure, failed);
+        }
+        finally
+        {
+            Volatile.Write(ref _compactingInline, 0);
         }
     }
 

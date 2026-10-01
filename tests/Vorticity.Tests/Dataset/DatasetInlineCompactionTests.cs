@@ -5,6 +5,7 @@
 // otherwise; and the commit stands whatever befalls that merge. The tests hold it to both halves,
 // the second with a store that refuses to read a data object once the commit is in.
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -117,6 +118,71 @@ public sealed class DatasetInlineCompactionTests
         store.Fails = null;
         Assert.NotNull(await dataset.CompactAsync(null, ct));
         Assert.Equal((DatasetLevels.DefaultLevelZeroCeiling + 1) * 50, await RowsAsync(dataset, ct));
+    }
+
+    [Fact]
+    public async Task ACommitWhileTheHandleCompactsAfterAnotherLeavesTheJobToIt()
+    {
+        // The first commit's compaction is held reading its inputs; a second commit takes level 0
+        // past its ceiling too, and leaves the job to the compaction under way rather than writing
+        // the same merge, of which one would then be abandoned.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using HeldReads store = new HeldReads(inner);
+        await using VortexDataset dataset = await CreateAsync(store, Options() with { InlineCompactionBytes = 1 << 20 }, ct);
+        for (int append = 0; append < DatasetLevels.DefaultLevelZeroCeiling; append++)
+        {
+            await AppendAsync(dataset, append, ct);
+        }
+
+        int before = (await inner.ListAllAsync(CommitKey.DataPrefix, ct)).Count;
+        store.Holding = true;
+        Task<ulong> first = AppendAsync(dataset, DatasetLevels.DefaultLevelZeroCeiling, ct);
+        await store.Reached.Task.WaitAsync(ct);
+        await AppendAsync(dataset, DatasetLevels.DefaultLevelZeroCeiling + 1, ct).WaitAsync(TimeSpan.FromSeconds(30), ct);
+        store.Release.SetResult();
+        await first;
+
+        // Two appended objects and one merge's output.
+        Assert.Equal(before + 3, (await inner.ListAllAsync(CommitKey.DataPrefix, ct)).Count);
+        Assert.Null(dataset.LastInlineCompactionFailure);
+        Assert.Equal((DatasetLevels.DefaultLevelZeroCeiling + 2) * 50, await RowsAsync(dataset, ct));
+    }
+
+    /// <summary>A store whose first read of a data object, once asked to, waits until the test releases it.</summary>
+    private sealed class HeldReads(IObjectStore inner) : IObjectStore
+    {
+        internal bool Holding { get; set; }
+
+        internal TaskCompletionSource Reached { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal TaskCompletionSource Release { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken)
+        {
+            if (Holding && key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal))
+            {
+                Holding = false;
+                Reached.SetResult();
+                await Release.Task.WaitAsync(cancellationToken);
+            }
+
+            return await inner.GetRangeAsync(key, offset, length, cancellationToken);
+        }
+
+        public ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken) =>
+            inner.HeadAsync(key, cancellationToken);
+
+        public ValueTask<PutOutcome> PutIfAbsentAsync(string key, System.IO.Pipelines.PipeReader content, long length, CancellationToken cancellationToken) =>
+            inner.PutIfAbsentAsync(key, content, length, cancellationToken);
+
+        public ValueTask DeleteAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken) =>
+            inner.DeleteAsync(keys, cancellationToken);
+
+        public IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken) =>
+            inner.ListAsync(prefix, startAfter, cancellationToken);
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private static DatasetOptions Options() => new DatasetOptions
