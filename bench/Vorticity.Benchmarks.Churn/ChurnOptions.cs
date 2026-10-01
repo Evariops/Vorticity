@@ -21,6 +21,12 @@ internal enum CompactionCadence
 
     /// <summary>Every due compaction, after every <see cref="ChurnOptions.CompactEvery"/> operations.</summary>
     Drain,
+
+    /// <summary>
+    /// Level 0 compacted by the commit that takes it past its ceiling, inside the operation's time,
+    /// and the rest drained as <see cref="Drain"/> does.
+    /// </summary>
+    Inline,
 }
 
 /// <summary>One run: the load, the operations, and what the caller does between them.</summary>
@@ -28,7 +34,7 @@ internal sealed record ChurnOptions
 {
     internal const string Usage =
         "usage: Vorticity.Benchmarks.Churn [--rows N] [--ops N] [--batch N] [--mix A:U:D] [--keys random|tail]\n" +
-        "         [--compact none|drain] [--compact-every N] [--vacuum-every N] [--probe-every N] [--report-every N]\n" +
+        "         [--compact none|drain|inline] [--compact-every N] [--vacuum-every N] [--probe-every N] [--report-every N]\n" +
         "         [--store file|memory] [--dir PATH] [--seed N] [--minutes N] [--load-chunk N] [--index-budget PERMILLE]\n" +
         "         [--max-object MiB] [--level-one KiB] [--open-objects N] [--marks on|off] [--mark-bytes KiB] [--purge on|off] [--probe-rounds N]";
 
@@ -146,7 +152,16 @@ internal sealed record ChurnOptions
                 "--batch" => options with { Batch = Int(flag, value) },
                 "--mix" => Mix(options, value),
                 "--keys" => options with { Keys = value == "tail" ? KeyPlacement.Tail : value == "random" ? KeyPlacement.Random : throw new ArgumentException($"--keys takes random or tail, not '{value}'.") },
-                "--compact" => options with { Compact = value == "none" ? CompactionCadence.None : value == "drain" ? CompactionCadence.Drain : throw new ArgumentException($"--compact takes none or drain, not '{value}'.") },
+                "--compact" => options with
+                {
+                    Compact = value switch
+                    {
+                        "none" => CompactionCadence.None,
+                        "drain" => CompactionCadence.Drain,
+                        "inline" => CompactionCadence.Inline,
+                        _ => throw new ArgumentException($"--compact takes none, drain or inline, not '{value}'."),
+                    },
+                },
                 "--compact-every" => options with { CompactEvery = Int(flag, value) },
                 "--vacuum-every" => options with { VacuumEvery = Int(flag, value) },
                 "--probe-every" => options with { ProbeEvery = Int(flag, value) },
@@ -174,9 +189,12 @@ internal sealed record ChurnOptions
     /// <inheritdoc/>
     public override string ToString()
     {
-        string cadence = Compact == CompactionCadence.Drain
-            ? string.Create(CultureInfo.InvariantCulture, $"drain every {CompactEvery}")
-            : "none";
+        string cadence = Compact switch
+        {
+            CompactionCadence.Drain => string.Create(CultureInfo.InvariantCulture, $"drain every {CompactEvery}"),
+            CompactionCadence.Inline => string.Create(CultureInfo.InvariantCulture, $"level 0 inline, the rest drained every {CompactEvery}"),
+            _ => "none",
+        };
         return string.Create(
             CultureInfo.InvariantCulture,
             $"{Rows} rows, {Ops} ops of {Batch} rows, mix {Appends}:{Updates}:{Deletes} (append:update:delete), " +

@@ -1925,6 +1925,7 @@ Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
 Vorticity.Dataset:     property int RetainedVersions { get; init; }
 Vorticity.Dataset:     property int SummaryColumnLimit { get; init; }
+Vorticity.Dataset:     property long InlineCompactionBytes { get; init; }
 Vorticity.Dataset:     property long MaxObjectBytes { get; init; }
 Vorticity.Dataset:     property long PageCacheBytes { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.DatasetVerification : IEquatable<DatasetVerification>

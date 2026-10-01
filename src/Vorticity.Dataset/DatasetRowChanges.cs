@@ -167,6 +167,11 @@ internal static class DatasetRowChanges
                 .ConfigureAwait(false);
             if (commit.Outcomes[0] == OperationOutcome.Applied)
             {
+                if (outputs.Count > marked)
+                {
+                    await dataset.CompactInlineAsync(cancellationToken).ConfigureAwait(false);
+                }
+
                 return new RowChangeResult
                 {
                     Version = commit.Version,

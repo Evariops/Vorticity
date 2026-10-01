@@ -285,7 +285,11 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     /// <param name="draft">The object; its writer is completed here if the caller did not.</param>
     /// <param name="cancellationToken">Cancels the put and the commit.</param>
-    /// <returns>The version the commit created, which this handle now reads; the current one when the object holds no row and nothing was committed.</returns>
+    /// <returns>
+    /// The version the commit created, which this handle now reads, or a later one when it compacted
+    /// level 0 after it (<see cref="DatasetOptions.InlineCompactionBytes"/>); the current one when the
+    /// object holds no row and nothing was committed.
+    /// </returns>
     /// <remarks>
     /// The object is created before the commit, so a crash between the two leaves an object no
     /// commit references, which vacuum collects. Without a clustering key its rows follow every
@@ -307,7 +311,10 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     /// <param name="batches">The rows, with the dataset's schema.</param>
     /// <param name="cancellationToken">Cancels the writes, the put and the commit.</param>
-    /// <returns>The version the commit created, which this handle now reads; the current one when there was no row.</returns>
+    /// <returns>
+    /// The version the commit created, which this handle now reads, or a later one when it compacted
+    /// level 0 after it; the current one when there was no row.
+    /// </returns>
     public async ValueTask<ulong> AppendAsync(
         IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken = default)
     {
@@ -335,7 +342,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     /// <param name="objectKey">The file's key in the store.</param>
     /// <param name="cancellationToken">Cancels the reads and the commit.</param>
-    /// <returns>The version the commit created, which this handle now reads.</returns>
+    /// <returns>The version the commit created, which this handle now reads, or a later one when it compacted level 0 after it.</returns>
     /// <remarks>
     /// The file is opened to learn what its entry must say and its bytes are never rewritten. A file
     /// this library did not write has no identity: it is scanned like any other object, and cannot be
@@ -467,6 +474,11 @@ public sealed class VortexDataset : IAsyncDisposable
 
         CommitResult commit = await CommitAsync([new DatasetOperation.ReplaceObjects(inputs, outputs) { Expected = expected }], cancellationToken)
             .ConfigureAwait(false);
+        if (outputs.Count > 0 && commit.Outcomes[0] == OperationOutcome.Applied)
+        {
+            await CompactInlineAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         return new ReplaceResult { Version = commit.Version, Outcome = commit.Outcomes[0] };
     }
 
@@ -733,8 +745,41 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>Applies operations, moves this handle to the version they created, and returns it.</summary>
     internal async ValueTask<ulong> ApplyAsync(
-        IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken = default) =>
-        (await CommitAsync(operations, cancellationToken).ConfigureAwait(false)).Version;
+        IReadOnlyList<DatasetOperation> operations, CancellationToken cancellationToken = default)
+    {
+        CommitResult result = await CommitAsync(operations, cancellationToken).ConfigureAwait(false);
+        await CompactInlineAsync(cancellationToken).ConfigureAwait(false);
+        return result.Version;
+    }
+
+    /// <summary>
+    /// The compaction a commit that added to level 0 runs before it returns when the dataset asks for
+    /// one (<see cref="DatasetOptions.InlineCompactionBytes"/>): level 0, once past its ceiling, merged
+    /// into the level above when the job reads no more than the budget.
+    /// </summary>
+    internal async ValueTask CompactInlineAsync(CancellationToken cancellationToken)
+    {
+        long budget = _options.InlineCompactionBytes;
+        if (budget <= 0 || Lag == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            CompactionPlan plan = await PlanCompactionAsync(null, cancellationToken).ConfigureAwait(false);
+            if (plan.Job is { Trigger: CompactionTrigger.LevelZeroCeiling } job && job.Bytes <= budget)
+            {
+                await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        catch (Exception failed) when (failed is not OutOfMemoryException)
+        {
+            // The commit stands whatever befalls the compaction after it, and its outcome is what the
+            // caller is told: level 0 stays as it is, for the next commit or another driver, which
+            // meets the same failure again if it is not a passing one.
+        }
+    }
 
     /// <summary>
     /// Applies operations, reports what the commit made of each of them, and moves this handle to the

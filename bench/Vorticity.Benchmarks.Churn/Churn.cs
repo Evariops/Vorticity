@@ -62,6 +62,7 @@ internal static class Churn
             // Vacuum then takes what the latest version does not reference as soon as it is a
             // second old, which is what keeps a long run's store from holding every rewrite.
             RetentionWindow = TimeSpan.FromSeconds(1),
+            InlineCompactionBytes = options.Compact == CompactionCadence.Inline ? 64L << 20 : 0,
         };
 
         VortexDataset dataset = await VortexDataset.CreateAsync(store, ChurnRow.Schema, datasetOptions).ConfigureAwait(false);
@@ -186,7 +187,7 @@ internal static class Churn
                 GC.GetTotalAllocatedBytes(precise: false) - allocated,
                 touched);
 
-            if (options.Compact == CompactionCadence.Drain && op % Math.Max(options.CompactEvery, 1) == 0)
+            if (options.Compact != CompactionCadence.None && op % Math.Max(options.CompactEvery, 1) == 0)
             {
                 written = store.BytesWritten;
                 started = Stopwatch.GetTimestamp();

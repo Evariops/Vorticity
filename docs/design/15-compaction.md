@@ -62,6 +62,14 @@ bounded to level 0, and to inputs under a byte budget: past it, the job is left 
 and the writer returns at once. Inline mode suits a dataset with one writer and no process to spare.
 The writer is the one party that knows level 0 just grew.
 
+**Built** (`DatasetOptions.InlineCompactionBytes`, 0 by default): an append, an import, a
+replacement or a change that adds to level 0 runs the level-0 job before it returns, when the job
+reads no more than the budget. The commit stands whatever befalls the job: one that fails, or that
+the caller cancels, leaves level 0 for the next commit or another driver, and the caller is told the
+commit's outcome. On the churn the same bytes are written either way; inline, the merges move into
+the writers' commits, and an append takes 0.9 to 1.1 ms on average rather than 0.5 to 0.7, its 99th
+percentile 6 to 9 ms rather than 3.
+
 **On demand.** The model today. `PlanCompactionAsync` says what is due and what it costs, and
 `CompactAsync` runs one job. The application loops, from a scheduled task or after a batch of
 commits. It is the right default for a library, because the library never starts a thread of its own.
@@ -256,7 +264,8 @@ subject destroyed in place of the rows. It belongs to the store library or to th
 3. **The background driver** (§2). Built: `RunCompactionAsync`, with a byte budget and one job at
    a time, loops that know one another spread by the rank of independent jobs, and leases for those
    that cannot count one another.
-4. **Inline level-0 compaction** (§2), bounded by a byte budget, as an option off by default.
+4. **Inline level-0 compaction** (§2). Built: `DatasetOptions.InlineCompactionBytes`, off by
+   default, bounded by its byte budget.
 5. **The locked-store profile** (§5), and the retention date on the seam.
 6. **Marked pages out of the header** (§4). Built, over a handle that keeps its pages across
    versions: a commit object is 30 % smaller on the churn. **Vectors out of line** are left, for

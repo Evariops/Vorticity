@@ -76,6 +76,20 @@ public sealed record DatasetOptions
     public long PageCacheBytes { get; init; } = 32L << 20;
 
     /// <summary>
+    /// The most bytes a commit that takes level 0 past its ceiling compacts before it returns; 0, the
+    /// default, compacts nothing inline. Past the ceiling, level 0 is merged into the level above when
+    /// the job reads no more than this, so a writer with no process to spare holds the read bound
+    /// itself, at the price of the merge's latency in the commit that crosses it; a larger job is left
+    /// to another driver, and the commit returns at once.
+    /// </summary>
+    /// <remarks>
+    /// The commit stands whatever befalls the compaction after it, and its outcome is what the caller
+    /// is told: a compaction that fails, or that the caller cancels, leaves level 0 as it was for the
+    /// next commit or another driver. The compaction commits a version of its own, after the caller's.
+    /// </remarks>
+    public long InlineCompactionBytes { get; init; }
+
+    /// <summary>
     /// The clock a commit's creation time is read from, and that dates when the handle last knew its
     /// version to be the latest; the system's by default.
     /// </summary>

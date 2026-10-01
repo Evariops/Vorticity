@@ -165,6 +165,14 @@ put-if-absent, holds them until the end of the current `LeaseSpan`, a minute by 
 to the next job when another loop holds one. Nothing releases a lease, so a store that refuses
 deletes still works; vacuum deletes the leases that ended a window ago.
 
+## In the writer's commit
+
+A dataset with one writer and no process to spare can have the writer hold level 0 itself:
+`DatasetOptions.InlineCompactionBytes` makes a commit that takes level 0 past its ceiling merge it
+into the level above before it returns, when the job reads no more than that many bytes. The merge's
+latency lands in that one commit, and a larger job is left to another driver. The commit stands
+whatever befalls the merge, which, failed or cancelled, leaves level 0 for the next commit.
+
 ## What each costs
 
 Measured above with `CountingObjectStore`, on a dataset of one object after compaction:
