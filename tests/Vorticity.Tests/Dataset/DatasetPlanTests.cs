@@ -30,6 +30,7 @@ public sealed class DatasetPlanTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         Dictionary<CompactionTrigger, int> met = [];
+        int ranks = 0;
         for (int seed = 0; seed < 200; seed++)
         {
             Random random = new Random(seed);
@@ -49,11 +50,56 @@ public sealed class DatasetPlanTests
             Same(read, descended, seed);
             CompactionTrigger trigger = read.Job?.Trigger ?? CompactionTrigger.None;
             met[trigger] = met.GetValueOrDefault(trigger) + 1;
+
+            // Ranked, the same jobs in the same order, and no two of them on one level.
+            CompactionPlan readRanked = await CompactionPolicy.PlanByReadingEveryLeafAsync(dataset, options, ct, jobs: 4);
+            CompactionPlan descendedRanked = await CompactionPolicy.PlanAsync(dataset, options, 4, ct);
+            Assert.Equal(readRanked.Jobs.Length, descendedRanked.Jobs.Length);
+            HashSet<int> taken = [];
+            for (int rank = 0; rank < readRanked.Jobs.Length; rank++)
+            {
+                Same(readRanked with { Job = readRanked.Jobs[rank] }, descendedRanked with { Job = descendedRanked.Jobs[rank] }, seed);
+                HashSet<int> levels = [readRanked.Jobs[rank].FromLevel, readRanked.Jobs[rank].ToLevel, .. readRanked.Jobs[rank].Inputs.Select(input => input.Level)];
+                Assert.False(taken.Overlaps(levels), $"seed {seed}: job {rank} touches a level a job ranked before it took");
+                taken.UnionWith(levels);
+                ranks = Math.Max(ranks, rank + 1);
+            }
         }
 
         foreach (CompactionTrigger trigger in Enum.GetValues<CompactionTrigger>())
         {
             Assert.True(met.GetValueOrDefault(trigger) > 0, $"no shape met {trigger}, so the test proves nothing of it");
+        }
+
+        Assert.True(ranks >= 3, $"no shape ranked more than {ranks} jobs, so the ranking is untested past them");
+    }
+
+    [Fact]
+    public async Task AJobOverTheFragmentsOfTwoLevelsIsRankedOnceAndTakesThemBoth()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+
+        // Nothing due but objects over their fragments, in levels 1 and 2: one job takes them all,
+        // and no job ranked after it may take any of them again.
+        List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> objects =
+        [
+            Entry(1, 0, 10, 1_000, 3, 0, keyed: true),
+            Entry(1, 20, 30, 1_000, 0, 0, keyed: true),
+            Entry(2, 0, 10, 1_000, 3, 0, keyed: true),
+            Entry(2, 40, 50, 1_000, 3, 0, keyed: true),
+        ];
+        await using VortexDataset dataset = await CreateAsync(store, null, objects, ct);
+        CompactionOptions options = new CompactionOptions { MaxFragments = 1 };
+        foreach (CompactionPlan plan in (CompactionPlan[])
+            [
+                await CompactionPolicy.PlanAsync(dataset, options, 4, ct),
+                await CompactionPolicy.PlanByReadingEveryLeafAsync(dataset, options, ct, jobs: 4),
+            ])
+        {
+            CompactionJob job = Assert.Single(plan.Jobs);
+            Assert.Equal(CompactionTrigger.Fragments, job.Trigger);
+            Assert.Equal([1, 2, 2], job.Inputs.Select(input => input.Level));
         }
     }
 
