@@ -1,9 +1,9 @@
 # Compaction: when it runs, and what a store that cannot delete does to it
 
-**Status: a proposal, whose first step is built.** What exists is [13-dataset.md](13-dataset.md) §5:
-one planner, one job per `CompactAsync` call, run when the application calls it, and since the first
-step (§3) a leveled plan that descends the trees rather than reading them. This document weighs the
-other ways to drive the same work: inline in a writer's commit, on demand, or in the background. It
+**Status: a proposal, built step by step (§6).** What exists is [13-dataset.md](13-dataset.md) §5:
+one planner, one job per `CompactAsync` call or per turn of a background loop, a leveled plan that
+descends the trees rather than reading them (§3), and purges of marks (§4). This document weighs the
+ways to drive the same work: inline in a writer's commit, on demand, or in the background. It
 also weighs what a store under a retention lock changes, when it refuses to delete or overwrite an
 object before a date: S3 Object Lock, Azure immutable blob storage, a GCS bucket lock. Nothing here
 changes the commit protocol or a read; the tallies of §3 are the one change to a page's format, and a
@@ -68,11 +68,12 @@ commits. It is the right default for a library, because the library never starts
 It stays the primitive the other two drivers are made of.
 
 **In the background.** A long-running call, `RunCompactionAsync(schedule, cancellationToken)`, that
-any host runs: a hosted service, a worker, a console. It asks for the latest version, which is one
-listing (13-dataset.md §8.3). It plans, runs the job, and sleeps when nothing is due. Two limits
-shape it: a budget of bytes written per second, so that compaction never takes the store's
-bandwidth from the writers, and one job at a time per dataset. A hosting integration, such as
-`IHostedService`, belongs in a separate package, since the dataset package takes no dependency.
+any host runs: a hosted service, a worker, a console. It asks for the latest version, one head
+request for a handle that knows its own is recent (13-dataset.md §8.3). It plans, runs the job, and
+sleeps when nothing is due. Two limits shape it: a budget of bytes written per second, so that
+compaction never takes the store's bandwidth from the writers, and one job at a time per loop. A
+hosting integration, such as `IHostedService`, belongs in a separate package, since the dataset
+package takes no dependency.
 
 **Two loops on one dataset** are safe and wasteful: both plan the same job, and one commit loses.
 The waste is avoided without any object that coordinates:
@@ -84,8 +85,18 @@ The waste is avoided without any object that coordinates:
   releases a lease: the next bucket replaces it. That matters under a retention lock (§5), which
   would refuse a lease's delete.
 
-The first costs nothing and needs the number of loops. The second costs one request a job and needs
-nothing.
+The first costs nothing and needs the number of loops. The second costs one request per level a job
+touches, and needs nothing.
+
+**Built.** `RunCompactionAsync` takes a `CompactionSchedule`: the options it plans against,
+`BytesPerSecond`, the `Idle` sleep, and `Loops` and `Loop` for loops that know one another. The
+planner ranks the due jobs so that no two read or write one level (a job on levels that share
+nothing never takes another's input), and a loop takes the one ranked at its index; a descent and a
+read of every leaf rank the same jobs. `Leases` turns on the lease instead, one per level a job
+touches, `leases/<level>/<end of the span>`, tried job by job in rank order; the key dates the lease,
+so vacuum deletes the ones that ended a window ago without a head request each. A job still running
+when its lease ends may meet another loop's, which one commit then abandons, so a `LeaseSpan` of a
+minute outlasts most jobs.
 
 ## 3. Planning in the depth of the tree
 
@@ -242,8 +253,9 @@ subject destroyed in place of the rows. It belongs to the store library or to th
 2. **Purge jobs** (§4). Built: a trigger `Marks` after the levels' bounds and before the fragments,
    at half a delete's bounds. The churn measures a commit's bytes with and without it: the purges
    move a fifth of them into compaction and leave the total as it was.
-3. **The background driver** (§2), with a byte budget and one job at a time, coordinated by
-   deterministic choice. A lease only if deployments run loops they cannot count.
+3. **The background driver** (§2). Built: `RunCompactionAsync`, with a byte budget and one job at
+   a time, loops that know one another spread by the rank of independent jobs, and leases for those
+   that cannot count one another.
 4. **Inline level-0 compaction** (§2), bounded by a byte budget, as an option off by default.
 5. **The locked-store profile** (§5), and the retention date on the seam.
 6. **Marked pages out of the header** (§4). Built, over a handle that keeps its pages across

@@ -323,6 +323,12 @@ public sealed record CompactionPlan
     public CompactionJob? Job { get; init; }
 
     /// <summary>
+    /// The compactions due that the plan was asked to rank, most urgent first, no two of which read or
+    /// write one level; <see cref="Job"/> is the first.
+    /// </summary>
+    internal ImmutableArray<CompactionJob> Jobs { get; init; } = [];
+
+    /// <summary>
     /// The objects carrying more index fragments than <see cref="CompactionOptions.MaxFragments"/>;
     /// compacting those reads index bytes only, and is planned once no compaction that moves rows is due.
     /// </summary>

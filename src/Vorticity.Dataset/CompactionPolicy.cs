@@ -30,21 +30,34 @@ internal static class CompactionPolicy
     /// Plans the compaction due on a dataset's current version; the plan's job is null when nothing
     /// is over its bound. Null options take the defaults.
     /// </summary>
-    public static async ValueTask<CompactionPlan> PlanAsync(
+    public static ValueTask<CompactionPlan> PlanAsync(
         VortexDataset dataset,
         CompactionOptions? options = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        PlanAsync(dataset, options, 1, cancellationToken);
+
+    /// <summary>
+    /// Plans up to <paramref name="jobs"/> compactions due on a dataset's current version, most
+    /// urgent first, no two of which read or write one level: the first is the plan's job, and loops
+    /// sharing the dataset spread over the rest, since jobs on distinct levels never take one input.
+    /// </summary>
+    internal static async ValueTask<CompactionPlan> PlanAsync(
+        VortexDataset dataset,
+        CompactionOptions? options,
+        int jobs,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(dataset);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(jobs);
         CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
         CompactionStyle style = settings.StyleFor(dataset.Key is not null);
         if (style == CompactionStyle.Leveled && dataset.Key is not null
             && await TalliesAsync(dataset, cancellationToken).ConfigureAwait(false) is { } tallies)
         {
-            return await DescendAsync(dataset, settings, tallies, cancellationToken).ConfigureAwait(false);
+            return await DescendAsync(dataset, settings, tallies, jobs, cancellationToken).ConfigureAwait(false);
         }
 
-        return await ReadEveryLeafAsync(dataset, settings, style, cancellationToken).ConfigureAwait(false);
+        return await ReadEveryLeafAsync(dataset, settings, style, jobs, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -52,16 +65,16 @@ internal static class CompactionPolicy
     /// before tallies, and the one a descent is held to.
     /// </summary>
     internal static async ValueTask<CompactionPlan> PlanByReadingEveryLeafAsync(
-        VortexDataset dataset, CompactionOptions? options, CancellationToken cancellationToken)
+        VortexDataset dataset, CompactionOptions? options, CancellationToken cancellationToken, int jobs = 1)
     {
         ArgumentNullException.ThrowIfNull(dataset);
         CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
-        return await ReadEveryLeafAsync(dataset, settings, settings.StyleFor(dataset.Key is not null), cancellationToken)
+        return await ReadEveryLeafAsync(dataset, settings, settings.StyleFor(dataset.Key is not null), jobs, cancellationToken)
             .ConfigureAwait(false);
     }
 
     private static async ValueTask<CompactionPlan> ReadEveryLeafAsync(
-        VortexDataset dataset, CompactionOptions settings, CompactionStyle style, CancellationToken cancellationToken)
+        VortexDataset dataset, CompactionOptions settings, CompactionStyle style, int count, CancellationToken cancellationToken)
     {
         bool clustered = dataset.Key is not null;
         List<List<CompactionInput>> levels = await ReadAsync(dataset, cancellationToken).ConfigureAwait(false);
@@ -82,7 +95,14 @@ internal static class CompactionPolicy
             }
         }
 
-        CompactionJob? job = Choose(dataset, levels, objects, bytes, settings, style);
+        List<CompactionJob> jobs = [];
+        HashSet<int> taken = [];
+        while (jobs.Count < count && Choose(dataset, levels, objects, bytes, settings, style, taken) is { } job)
+        {
+            Take(job, taken);
+            jobs.Add(job);
+        }
+
         return new CompactionPlan
         {
             Version = dataset.Version,
@@ -91,23 +111,38 @@ internal static class CompactionPolicy
             Lag = dataset.Lag,
             IsClustered = clustered,
             Style = style,
-            Job = job,
+            Job = jobs.Count > 0 ? jobs[0] : null,
+            Jobs = [.. jobs],
             FragmentedObjects = fragmented,
         };
     }
 
-    /// <summary>The first trigger that fires, in order of priority.</summary>
+    /// <summary>Marks every level a job reads or writes as taken, so that no job ranked after it touches one.</summary>
+    private static void Take(CompactionJob job, HashSet<int> taken)
+    {
+        taken.Add(job.FromLevel);
+        taken.Add(job.ToLevel);
+        foreach (CompactionInput input in job.Inputs)
+        {
+            taken.Add(input.Level);
+        }
+    }
+
+    /// <summary>The first trigger that fires on the levels no job ranked before took, in order of priority.</summary>
     private static CompactionJob? Choose(
         VortexDataset dataset,
         List<List<CompactionInput>> levels,
         long[] objects,
         long[] bytes,
         CompactionOptions settings,
-        CompactionStyle style)
+        CompactionStyle style,
+        HashSet<int> taken)
     {
-        if (levels.Count > 0 && objects[0] > settings.LevelZeroCeiling)
+        if (levels.Count > 0 && objects[0] > settings.LevelZeroCeiling && !taken.Contains(0)
+            && Build(dataset, levels, 0, settings, style, CompactionTrigger.LevelZeroCeiling) is { } drained
+            && !taken.Contains(drained.ToLevel))
         {
-            return Build(dataset, levels, 0, settings, style, CompactionTrigger.LevelZeroCeiling);
+            return drained;
         }
 
         // The lowest level over its size first: compacting it feeds the one above. A level of one
@@ -116,15 +151,17 @@ internal static class CompactionPolicy
         // no size bound at all.
         for (int level = 1; level < levels.Count; level++)
         {
-            if (!settings.IsTop(level) && objects[level] > 1 && bytes[level] > settings.CapacityBytes(level))
+            if (!taken.Contains(level) && !taken.Contains(level + 1)
+                && !settings.IsTop(level) && objects[level] > 1 && bytes[level] > settings.CapacityBytes(level)
+                && Build(dataset, levels, level, settings, style, CompactionTrigger.LevelSize) is { } grown)
             {
-                return Build(dataset, levels, level, settings, style, CompactionTrigger.LevelSize);
+                return grown;
             }
         }
 
         // An object whose marks are due next: rewriting it alone costs its bytes, so the one with the
         // most marked goes first.
-        if (settings.PurgeMarks && MostMarked(levels, Marking.Of(dataset.Options)) is { } marked)
+        if (settings.PurgeMarks && MostMarked(levels, Marking.Of(dataset.Options), taken) is { } marked)
         {
             return Purge(marked, settings, style, style == CompactionStyle.Leveled ? 0 : FirstRow(dataset, levels, [marked]));
         }
@@ -136,7 +173,7 @@ internal static class CompactionPolicy
         {
             foreach (CompactionInput input in level)
             {
-                if (input.Entry.Fragments.Count > settings.MaxFragments)
+                if (input.Entry.Fragments.Count > settings.MaxFragments && !taken.Contains(input.Level))
                 {
                     fragmented.Add(input);
                 }
@@ -378,12 +415,12 @@ internal static class CompactionPolicy
     /// summaries rule out.
     /// </summary>
     private static async ValueTask<CompactionPlan> DescendAsync(
-        VortexDataset dataset, CompactionOptions settings, ObjectTally[] tallies, CancellationToken cancellationToken)
+        VortexDataset dataset, CompactionOptions settings, ObjectTally[] tallies, int count, CancellationToken cancellationToken)
     {
-        int count = dataset.Levels.Count;
-        long[] objects = new long[count];
-        long[] bytes = new long[count];
-        for (int level = 0; level < count; level++)
+        int levels = dataset.Levels.Count;
+        long[] objects = new long[levels];
+        long[] bytes = new long[levels];
+        for (int level = 0; level < levels; level++)
         {
             objects[level] = dataset.Levels[level].Entries;
             bytes[level] = tallies[level].Bytes;
@@ -391,39 +428,13 @@ internal static class CompactionPolicy
 
         List<CompactionInput> fragmented = await FragmentedAsync(dataset, tallies, settings.MaxFragments, cancellationToken)
             .ConfigureAwait(false);
-        CompactionJob? job = null;
-        if (count > 0 && objects[0] > settings.LevelZeroCeiling)
+        List<CompactionJob> jobs = [];
+        HashSet<int> taken = [];
+        while (jobs.Count < count
+            && await ChooseAsync(dataset, settings, tallies, objects, bytes, fragmented, taken, cancellationToken).ConfigureAwait(false) is { } job)
         {
-            List<CompactionInput> sources = [];
-            await foreach (TreeEntry entry in dataset.Levels[0].EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
-            {
-                sources.Add(new CompactionInput(0, entry.Key, ObjectEntry.FromBytes(entry.Value)));
-            }
-
-            job = await LeveledAsync(dataset, sources, 0, settings.LevelZeroDestination(bytes[0]), settings, CompactionTrigger.LevelZeroCeiling, cancellationToken)
-                .ConfigureAwait(false);
-        }
-
-        for (int level = 1; job is null && level < count; level++)
-        {
-            if (!settings.IsTop(level) && objects[level] > 1 && bytes[level] > settings.CapacityBytes(level))
-            {
-                CompactionInput largest = await LargestAsync(dataset, level, cancellationToken).ConfigureAwait(false);
-                job = await LeveledAsync(dataset, [largest], level, level + 1, settings, CompactionTrigger.LevelSize, cancellationToken)
-                    .ConfigureAwait(false);
-            }
-        }
-
-        if (job is null && settings.PurgeMarks
-            && await MostMarkedAsync(dataset, tallies, Marking.Of(dataset.Options), cancellationToken).ConfigureAwait(false) is { } marked)
-        {
-            job = Purge(marked, settings, CompactionStyle.Leveled, 0);
-        }
-
-        if (job is null && fragmented.Count > 0)
-        {
-            job = new CompactionJob(
-                fragmented[0].Level, fragmented[0].Level, CompactionStyle.Leveled, CompactionTrigger.Fragments, fragmented, 0, 0);
+            Take(job, taken);
+            jobs.Add(job);
         }
 
         return new CompactionPlan
@@ -434,9 +445,61 @@ internal static class CompactionPolicy
             Lag = dataset.Lag,
             IsClustered = true,
             Style = CompactionStyle.Leveled,
-            Job = job,
+            Job = jobs.Count > 0 ? jobs[0] : null,
+            Jobs = [.. jobs],
             FragmentedObjects = fragmented.Count,
         };
+    }
+
+    /// <summary>
+    /// <see cref="Choose"/> by descent: the first trigger that fires on the levels no job ranked
+    /// before took, found without reading a level's leaves.
+    /// </summary>
+    private static async ValueTask<CompactionJob?> ChooseAsync(
+        VortexDataset dataset,
+        CompactionOptions settings,
+        ObjectTally[] tallies,
+        long[] objects,
+        long[] bytes,
+        List<CompactionInput> fragmented,
+        HashSet<int> taken,
+        CancellationToken cancellationToken)
+    {
+        int levels = objects.Length;
+        if (levels > 0 && objects[0] > settings.LevelZeroCeiling && !taken.Contains(0)
+            && settings.LevelZeroDestination(bytes[0]) is var destination && !taken.Contains(destination))
+        {
+            List<CompactionInput> sources = [];
+            await foreach (TreeEntry entry in dataset.Levels[0].EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
+            {
+                sources.Add(new CompactionInput(0, entry.Key, ObjectEntry.FromBytes(entry.Value)));
+            }
+
+            return await LeveledAsync(dataset, sources, 0, destination, settings, CompactionTrigger.LevelZeroCeiling, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        for (int level = 1; level < levels; level++)
+        {
+            if (!taken.Contains(level) && !taken.Contains(level + 1)
+                && !settings.IsTop(level) && objects[level] > 1 && bytes[level] > settings.CapacityBytes(level))
+            {
+                CompactionInput largest = await LargestAsync(dataset, level, cancellationToken).ConfigureAwait(false);
+                return await LeveledAsync(dataset, [largest], level, level + 1, settings, CompactionTrigger.LevelSize, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        if (settings.PurgeMarks
+            && await MostMarkedAsync(dataset, tallies, Marking.Of(dataset.Options), taken, cancellationToken).ConfigureAwait(false) is { } marked)
+        {
+            return Purge(marked, settings, CompactionStyle.Leveled, 0);
+        }
+
+        List<CompactionInput> untaken = fragmented.FindAll(input => !taken.Contains(input.Level));
+        return untaken.Count == 0
+            ? null
+            : new CompactionJob(untaken[0].Level, untaken[0].Level, CompactionStyle.Leveled, CompactionTrigger.Fragments, untaken, 0, 0);
     }
 
     /// <summary>
@@ -563,14 +626,22 @@ internal static class CompactionPolicy
             Math.Max(settings.TargetBytes(marked.Level), marked.Entry.Bytes),
             firstRow);
 
-    /// <summary>The object whose marks are the most due, the first of equals in level and key order; null when none is due.</summary>
-    private static CompactionInput? MostMarked(List<List<CompactionInput>> levels, Marking marking)
+    /// <summary>
+    /// The object whose marks are the most due outside the levels <paramref name="taken"/>, the first
+    /// of equals in level and key order; null when none is due.
+    /// </summary>
+    private static CompactionInput? MostMarked(List<List<CompactionInput>> levels, Marking marking, HashSet<int> taken)
     {
         CompactionInput? best = null;
         double most = 0;
-        foreach (List<CompactionInput> level in levels)
+        for (int at = 0; at < levels.Count; at++)
         {
-            foreach (CompactionInput input in level)
+            if (taken.Contains(at))
+            {
+                continue;
+            }
+
+            foreach (CompactionInput input in levels[at])
             {
                 double load = marking.Load(input.Entry);
                 if (load >= 1 && load > most)
@@ -585,17 +656,17 @@ internal static class CompactionPolicy
     }
 
     /// <summary>
-    /// <see cref="MostMarked(List{List{CompactionInput}}, Marking)"/> by walks that enter only the
-    /// subtrees whose tally says an object under them may be due.
+    /// <see cref="MostMarked(List{List{CompactionInput}}, Marking, HashSet{int})"/> by walks that enter
+    /// only the subtrees whose tally says an object under them may be due.
     /// </summary>
     private static async ValueTask<CompactionInput?> MostMarkedAsync(
-        VortexDataset dataset, ObjectTally[] tallies, Marking marking, CancellationToken cancellationToken)
+        VortexDataset dataset, ObjectTally[] tallies, Marking marking, HashSet<int> taken, CancellationToken cancellationToken)
     {
         CompactionInput? best = null;
         double most = 0;
         for (int level = 0; level < tallies.Length; level++)
         {
-            if (!marking.MayBeDue(tallies[level]))
+            if (taken.Contains(level) || !marking.MayBeDue(tallies[level]))
             {
                 continue;
             }

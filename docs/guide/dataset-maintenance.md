@@ -113,9 +113,9 @@ VacuumResult done = await dataset.VacuumAsync(later with { DryRun = false });
 ```
 
 ```
-vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 29 requests (13 get, 13 head, 0 put, 0 delete, 3 list), 29 dependent steps, 12649 bytes read, 0 written
-vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 28 requests (2 get, 23 head, 0 put, 0 delete, 3 list), 28 dependent steps, 672 bytes read, 0 written
-vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 30 requests (2 get, 23 head, 0 put, 2 delete, 3 list), 30 dependent steps, 672 bytes read, 0 written
+vacuum today, dry run: 0 would go, 0 too young, 13 versions retained, window 7.00:00:00; cost: 30 requests (13 get, 13 head, 0 put, 0 delete, 4 list), 30 dependent steps, 12649 bytes read, 0 written
+vacuum in eight days, dry run: 21 would go, 1 retained, 2 pages read; cost: 29 requests (2 get, 23 head, 0 put, 0 delete, 4 list), 29 dependent steps, 672 bytes read, 0 written
+vacuum in eight days: 21 deleted (11 commit objects), latest version 13; cost: 31 requests (2 get, 23 head, 0 put, 2 delete, 4 list), 31 dependent steps, 672 bytes read, 0 written
 and the data: 55000 rows, 2 objects
 ```
 
@@ -126,11 +126,44 @@ version is kept, and 21 objects go: the ten data objects compaction replaced, an
 twelve superseded commit objects, the twelfth still holding pages the latest version reads. `VacuumOptions.TimeProvider` is the clock vacuum measures ages against, which is
 how the sample crosses the window and how you test your own retention; it must agree with the
 store's clock, because the ages it compares are the store's timestamps. The deletes go out in
-batches, two requests for twenty-one keys here.
+batches, two requests for twenty-one keys here. The fourth listing is of the leases a compaction
+loop may have left (below); each lease's key says when it ended, so none costs a head request.
 
 **Run a dry run first.** `Deleted` lists what would go, commit objects first, `Young` the
 unreferenced objects kept because they may belong to a writer still in flight, and `Retained` the
 versions kept.
+
+## In the background
+
+A loop that compacts until it is cancelled, which any host runs: a hosted service, a worker, a
+console. The library starts no thread of its own.
+
+```csharp
+using CancellationTokenSource stop = new CancellationTokenSource();
+Task loop = dataset.RunCompactionAsync(
+    new CompactionSchedule { Idle = TimeSpan.FromMilliseconds(10), Progress = new Counting(() => Interlocked.Increment(ref ran)) },
+    stop.Token);
+```
+
+```
+10 more appends: 12 objects, lag 3
+stopped: 1 compactions, 2 objects, lag 0
+```
+
+Each turn refreshes the handle, one head request, plans, and runs the job due for it; when nothing
+is due it sleeps for `Idle`, a minute by default, and asks again. `BytesPerSecond` paces it: after a
+job it waits until what the job wrote fits the rate, so that compaction leaves the store's bandwidth
+to the writers. The task ends with `OperationCanceledException` once the token is cancelled, or with
+the exception a job raised, which a host catches before running the loop again.
+
+A job is the one `CompactAsync` runs, so a loop is safe against every writer and every other loop;
+what several loops on one dataset can waste is a job two of them run, which a commit then abandons.
+Loops that know one another say so with `Loops` and `Loop`: each takes the due job ranked at its
+index, and no two ranked jobs read or write one level. Loops that cannot count one another set
+`Leases`: before a job a loop creates `leases/<level>/<end>` for each of its levels by
+put-if-absent, holds them until the end of the current `LeaseSpan`, a minute by default, and moves
+to the next job when another loop holds one. Nothing releases a lease, so a store that refuses
+deletes still works; vacuum deletes the leases that ended a window ago.
 
 ## What each costs
 
@@ -142,7 +175,7 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 | `CompactAsync` | 22 | every input object read, one object written, one commit |
 | `VerifyAsync` | 9 | every object hashed, every page read |
 | `VerifyAsync(since)` | 12 | what the earlier version does not share |
-| `VacuumAsync` | 28 to 30 | a listing, a head per commit object, the retained trees, the deletes in batches |
+| `VacuumAsync` | 29 to 31 | a listing, a head per commit object, the retained trees, the leases' listing, the deletes in batches |
 
 `DependentSteps` is the number that decides latency: the round trips that waited for the one
 before. On a store where a request costs 30 ms, it is what a job takes. See
