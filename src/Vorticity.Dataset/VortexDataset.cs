@@ -305,9 +305,10 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="draft">The object; its writer is completed here if the caller did not.</param>
     /// <param name="cancellationToken">Cancels the put and the commit.</param>
     /// <returns>
-    /// The version the commit created, which this handle now reads, or a later one when it compacted
-    /// level 0 after it (<see cref="DatasetOptions.InlineCompactionBytes"/>); the current one when the
-    /// object holds no row and nothing was committed.
+    /// The version the commit created; the current one when the object holds no row and nothing was
+    /// committed. The handle reads that version, or the later one a compaction of level 0 run after
+    /// the commit created (<see cref="DatasetOptions.InlineCompactionBytes"/>), which
+    /// <see cref="Version"/> then says.
     /// </returns>
     /// <remarks>
     /// The object is created before the commit, so a crash between the two leaves an object no
@@ -331,8 +332,8 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="batches">The rows, with the dataset's schema.</param>
     /// <param name="cancellationToken">Cancels the writes, the put and the commit.</param>
     /// <returns>
-    /// The version the commit created, which this handle now reads, or a later one when it compacted
-    /// level 0 after it; the current one when there was no row.
+    /// The version the commit created; the current one when there was no row. The handle reads that
+    /// version, or the later one a compaction of level 0 run after the commit created.
     /// </returns>
     public async ValueTask<ulong> AppendAsync(
         IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken = default)
@@ -361,7 +362,10 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     /// <param name="objectKey">The file's key in the store.</param>
     /// <param name="cancellationToken">Cancels the reads and the commit.</param>
-    /// <returns>The version the commit created, which this handle now reads, or a later one when it compacted level 0 after it.</returns>
+    /// <returns>
+    /// The version the commit created. The handle reads that version, or the later one a compaction
+    /// of level 0 run after the commit created.
+    /// </returns>
     /// <remarks>
     /// The file is opened to learn what its entry must say and its bytes are never rewritten. A file
     /// this library did not write has no identity: it is scanned like any other object, and cannot be
@@ -502,19 +506,31 @@ public sealed class VortexDataset : IAsyncDisposable
     }
 
     /// <summary>
-    /// Deletes the rows <paramref name="filter"/> is true for, in one commit: every object that holds
-    /// one is rewritten without them, and one left with no row is removed.
+    /// Deletes the rows <paramref name="filter"/> is true for, in one commit: each object that holds
+    /// one has them marked in its entry, or is rewritten without them, and one left with no row is
+    /// removed.
     /// </summary>
     /// <typeparam name="TRecord">The record the filter is written against.</typeparam>
     /// <param name="filter">A lambda over the record's columns. A row it is false or unknown for stays.</param>
     /// <param name="cancellationToken">Cancels the reads, the writes and the commit.</param>
     /// <returns>The version created and the rows deleted; <see cref="OperationOutcome.AlreadyThere"/> and the version the handle held when no row matched.</returns>
     /// <remarks>
-    /// Copy on write: the read path pays nothing, and the price is the rewrite of every object a row
-    /// is taken from, whatever the number of rows. An object whose summaries refute the filter is not
-    /// opened, and one whose own count finds no row is not rewritten. The rows appended by a writer
-    /// that commits in the meantime are not deleted; if one rewrites an object this delete read, the
-    /// delete is worked out again on its version.
+    /// <para>
+    /// A mark costs the rows' positions, a few bytes in the object's entry, whatever the object's size:
+    /// its file is not touched, and every read leaves the marked rows out until a compaction rewrites
+    /// the object. A small object, one whose marked rows would pass an eighth of its rows, or one
+    /// whose marks would outgrow the bytes an entry gives them, is rewritten instead, which costs the
+    /// object; on a store that locks what it keeps, every object is marked. Reads of a marked object
+    /// pay for its marks: a
+    /// key-ordered walk of an object of level 0 reads the keys of its deleted rows, and a step can
+    /// cross a run of them.
+    /// </para>
+    /// <para>
+    /// An object whose summaries refute the filter is not opened, and one whose own count finds no
+    /// row is not touched. The rows appended by a writer that commits in the meantime are not
+    /// deleted; if one rewrites an object this delete read, or marks rows in it, the delete is worked
+    /// out again on its version, while an index fragment attached to the object meanwhile stays.
+    /// </para>
     /// </remarks>
     /// <exception cref="VortexSchemaException">A literal or a column of the filter does not fit the dataset.</exception>
     /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this delete read on every attempt.</exception>

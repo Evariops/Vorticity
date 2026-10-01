@@ -174,7 +174,10 @@ record type.
 A delete marks the rows it takes in the objects that hold them rather than rewriting those objects:
 each object's entry in the dataset records their positions, and every read steps over them, so a
 delete of ten rows in a 4 MiB object writes a few kilobytes of metadata and no data. Counts stay
-exact and reads cost what they would on a rewritten object. An object is rewritten without the rows
+exact, and a scan or a count of a marked object reads what it would of a rewritten one; a walk in
+key order pays a little for the marks, since a cursor over an object of level 0 reads the keys of
+its deleted rows once to rank around them, and a step that lands in a run of them steps past it.
+An object is rewritten without the rows
 instead when it is under a mebibyte, where a rewrite costs little and keeps the object exact, and
 when the rows marked in it would pass an eighth of its rows or a kilobyte of positions; an object left with no row is removed
 whole, and one whose summaries refute the filter is not opened. `ObjectsMarked` counts the objects a
