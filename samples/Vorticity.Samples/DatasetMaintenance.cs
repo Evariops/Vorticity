@@ -97,9 +97,10 @@ internal static class DatasetMaintenance
         Task loop = dataset.RunCompactionAsync(
             new CompactionSchedule { Idle = TimeSpan.FromMilliseconds(10), Progress = new Counting(() => Interlocked.Increment(ref ran)) },
             stop.Token);
-        while ((await dataset.PlanCompactionAsync()).HasWork)
+        // Waited on beside the loop, whose failure ends the wait and is raised below.
+        while (!loop.IsCompleted && (await dataset.PlanCompactionAsync()).HasWork)
         {
-            await Task.Delay(10);
+            await Task.WhenAny(loop, Task.Delay(10));
         }
 
         await stop.CancelAsync();
