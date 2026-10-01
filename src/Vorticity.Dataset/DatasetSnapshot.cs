@@ -85,24 +85,12 @@ internal sealed class DatasetSnapshot
         DatasetScanMetrics? metrics,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        Func<InternalEntry, bool>? descend = pruner is null ? null : node =>
-        {
-            if (node.Summary.IsEmpty
-                || ObjectSummaries.FromBytes(ObjectSummaryFold.SummariesOf(node.Summary.Span, out _)).MayMatch(pruner, node.Rows))
-            {
-                return true;
-            }
-
-            if (metrics is { } counters)
-            {
-                counters.SubtreesSkipped++;
-            }
-
-            return false;
-        };
+        Func<InternalEntry, bool>? mayMatch = pruner is null ? null : node =>
+            node.Summary.IsEmpty
+            || ObjectSummaries.FromBytes(ObjectSummaryFold.SummariesOf(node.Summary.Span, out _)).MayMatch(pruner, node.Rows);
 
         await foreach ((TreeEntry held, long firstRow, int level) in
-            EntriesAsync(from, to, descend, cancellationToken).ConfigureAwait(false))
+            EntriesAsync(from, to, mayMatch, metrics, cancellationToken).ConfigureAwait(false))
         {
             ObjectEntry entry = ObjectEntry.FromBytes(held.Value);
             if (metrics is { } counters)
@@ -223,15 +211,22 @@ internal sealed class DatasetSnapshot
     }
 
     /// <summary>
-    /// Every level's entries, merged into one key order, each with its first row in the dataset. A
-    /// single level takes its own walk, which tests a subtree's row sum before descending into it;
-    /// across levels the row offsets are not known until the merge has produced them, so the range
-    /// is applied per entry instead and the cost is the objects rather than the rows.
+    /// Every level's entries, merged into one key order, each with its first row in the dataset,
+    /// past the subtrees <paramref name="mayMatch"/> rules out. A single level takes its own walk,
+    /// which places a subtree ruled out by its parent's row sum without reading it.
     /// </summary>
+    /// <remarks>
+    /// Across levels a row's place depends on the entries of every level below it in key order, those
+    /// of a subtree ruled out included: each level is walked with the subtrees it rules out standing
+    /// as single steps, whose rows are counted whole when no step of another level falls inside their
+    /// key span, and which are read after all when one does, since their rows then interleave with
+    /// that level's. Only the parts of a level that interleave with another are read for nothing.
+    /// </remarks>
     private async IAsyncEnumerable<(TreeEntry Entry, long FirstRow, int Level)> EntriesAsync(
         long from,
         long to,
-        Func<InternalEntry, bool>? descend,
+        Func<InternalEntry, bool>? mayMatch,
+        DatasetScanMetrics? metrics,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         List<DatasetTree> trees = [];
@@ -246,6 +241,21 @@ internal sealed class DatasetSnapshot
         {
             DatasetTree only = trees.Count == 1 ? trees[0] : DatasetTree.Empty;
             int level = trees.Count == 1 ? levels[0] : 0;
+            Func<InternalEntry, bool>? descend = mayMatch is null ? null : node =>
+            {
+                if (mayMatch(node))
+                {
+                    return true;
+                }
+
+                if (metrics is { } counters)
+                {
+                    counters.SubtreesSkipped++;
+                }
+
+                return false;
+            };
+
             await foreach (PositionedEntry positioned in
                 only.WalkAsync(Pages, from, to, descend, cancellationToken).ConfigureAwait(false))
             {
@@ -255,28 +265,24 @@ internal sealed class DatasetSnapshot
             yield break;
         }
 
-        IAsyncEnumerator<PositionedEntry>[] walks = new IAsyncEnumerator<PositionedEntry>[trees.Count];
+        TreeWalk[] walks = new TreeWalk[trees.Count];
         bool[] live = new bool[trees.Count];
         try
         {
             for (int i = 0; i < trees.Count; i++)
             {
-                walks[i] = trees[i]
-                    .WalkAsync(Pages, 0, long.MaxValue, descend, cancellationToken)
-                    .GetAsyncEnumerator(cancellationToken);
+                walks[i] = new TreeWalk(trees[i], Pages, mayMatch, cancellationToken);
                 live[i] = await walks[i].MoveNextAsync().ConfigureAwait(false);
             }
 
             long row = 0;
-            while (true)
+            while (row < to)
             {
+                // Ties go to the lower level, which is the order the merge gives every key.
                 int smallest = -1;
                 for (int i = 0; i < walks.Length; i++)
                 {
-                    if (live[i]
-                        && (smallest < 0
-                            || TreePage.Compare(
-                                walks[i].Current.Entry.Key.Span, walks[smallest].Current.Entry.Key.Span) < 0))
+                    if (live[i] && (smallest < 0 || TreePage.Compare(walks[i].Key, walks[smallest].Key) < 0))
                     {
                         smallest = i;
                     }
@@ -287,19 +293,33 @@ internal sealed class DatasetSnapshot
                     yield break;
                 }
 
-                TreeEntry entry = walks[smallest].Current.Entry;
-                if (row < to && row + entry.Rows > from)
+                TreeWalk walk = walks[smallest];
+                if (walk.IsRuledOut)
                 {
-                    yield return (entry, row, levels[smallest]);
+                    if (Interleaves(walks, live, smallest))
+                    {
+                        walk.Expand();
+                        live[smallest] = await walk.MoveNextAsync().ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (metrics is { } counters)
+                    {
+                        counters.SubtreesSkipped++;
+                    }
+                }
+                else if (row + walk.Entry.Rows > from)
+                {
+                    yield return (walk.Entry, row, levels[smallest]);
                 }
 
-                row += entry.Rows;
-                live[smallest] = await walks[smallest].MoveNextAsync().ConfigureAwait(false);
+                row += walk.Rows;
+                live[smallest] = await walk.MoveNextAsync().ConfigureAwait(false);
             }
         }
         finally
         {
-            foreach (IAsyncEnumerator<PositionedEntry>? walk in walks)
+            foreach (TreeWalk? walk in walks)
             {
                 if (walk is not null)
                 {
@@ -307,5 +327,30 @@ internal sealed class DatasetSnapshot
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Whether a step of another level falls inside the key span of the subtree level
+    /// <paramref name="ruledOut"/> stands at, which is the smallest step: its rows and that step's then
+    /// interleave in the merge. A step at the subtree's largest key comes before it from a lower level only.
+    /// </summary>
+    private static bool Interleaves(TreeWalk[] walks, bool[] live, int ruledOut)
+    {
+        ReadOnlySpan<byte> largest = walks[ruledOut].Subtree.MaxKey.Span;
+        for (int i = 0; i < walks.Length; i++)
+        {
+            if (i == ruledOut || !live[i])
+            {
+                continue;
+            }
+
+            int order = TreePage.Compare(walks[i].Key, largest);
+            if (order < 0 || (order == 0 && i < ruledOut))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }
