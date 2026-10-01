@@ -27,6 +27,15 @@ internal sealed class DatasetLevels
     /// <summary>A dataset with nothing in it.</summary>
     public static DatasetLevels Empty => None;
 
+    /// <summary>
+    /// Whether a level of a dataset with a clustering key holds objects each written in the key's
+    /// order, null keys last, whose keys no other object of the level overlaps, in the order of their
+    /// entries: every level above 0, which only a leveled compaction writes into, a merge on the key,
+    /// since a plan refuses tiered levels for such a dataset. Level 0 holds what appends wrote, in any
+    /// order and overlapping. Off the key, a level's objects are in no order of it.
+    /// </summary>
+    public static bool InKeyOrder(int level) => level > 0;
+
     /// <summary>How many levels the version names; level numbers run from 0 to this minus one.</summary>
     public int Count => _levels.Length;
 

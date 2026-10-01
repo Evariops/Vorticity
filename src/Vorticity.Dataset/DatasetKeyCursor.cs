@@ -889,7 +889,7 @@ internal sealed class DatasetKeyCursor : IKeyWalker
             {
                 // Above level 0 the objects are disjoint on the clustering key, so everything before
                 // the last one whose minimum is at or below the sought key holds only smaller keys.
-                _next[level] = sought is not null && level > 0 ? Math.Max(Below(ordered, sought, inclusive: true) - 1, 0) : 0;
+                _next[level] = sought is not null && DatasetLevels.InKeyOrder(level) ? Math.Max(Below(ordered, sought, inclusive: true) - 1, 0) : 0;
             }
             else
             {
@@ -1007,7 +1007,7 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     {
         List<int> ordered = _levels[level];
         int above = _next[level];
-        return _bounded && level > 0 && above < ordered.Count ? _slots[ordered[above]].Bound : null;
+        return _bounded && DatasetLevels.InKeyOrder(level) && above < ordered.Count ? _slots[ordered[above]].Bound : null;
     }
 
     /// <summary>Whether level <paramref name="left"/>'s next object has a higher limit than level <paramref name="right"/>'s.</summary>
@@ -1182,7 +1182,7 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         // An object above level 0 is a merge's, its rows in the clustering key's order with null keys
         // last, so on that key an entry's rank is its row and a deleted row's rank needs no read.
         slot.Cursor = await _key.TryOpenAsync(
-                slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded && slot.Level > 0, cancellationToken)
+                slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded && DatasetLevels.InKeyOrder(slot.Level), cancellationToken)
             .ConfigureAwait(false)
             ?? throw new VortexUnsupportedException(
                 slot.Entry.Key,

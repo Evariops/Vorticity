@@ -64,13 +64,13 @@ public sealed class DatasetPlanTests
         for (int seed = 0; seed < 300; seed++)
         {
             // Datasets ordered by arrival, whose levels interleave as compactions and rewrites leave
-            // them, and clustered ones merged in tiers, whose levels overlap.
+            // them, a third of them small enough that only their fragments may be due; a clustered
+            // dataset is never tiered.
             Random random = new Random(seed);
-            bool clustered = seed % 3 == 0;
             await using MemoryObjectStore store = new MemoryObjectStore();
             IBoundaryRule rule = new ProllyBoundaryRule(Seed, minBytes: 256, targetBytes: 512, maxBytes: 1_024);
-            List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> shape = clustered ? Shape(random) : Arrivals(random);
-            await using VortexDataset dataset = await PointAsync(store, rule, await CreateAsync(store, rule, shape, ct, clustered), shape, random, clustered, ct);
+            List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> shape = Arrivals(random, most: seed % 3 == 0 ? 16 : 140);
+            await using VortexDataset dataset = await PointAsync(store, rule, await CreateAsync(store, rule, shape, ct, clustered: false), shape, random, clustered: false, ct);
             CompactionOptions options = new CompactionOptions
             {
                 LevelZeroCeiling = random.Next(2, 9),
@@ -507,11 +507,11 @@ public sealed class DatasetPlanTests
     /// one level, so that levels interleave as rewrites and compactions leave them; sizes,
     /// fragments and marks drawn as <see cref="Shape"/> draws them.
     /// </summary>
-    private static List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Arrivals(Random random)
+    private static List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Arrivals(Random random, int most = 140)
     {
         List<(int, ReadOnlyMemory<byte>, ObjectEntry)> objects = [];
         int levels = random.Next(1, 6);
-        int count = random.Next(0, 140);
+        int count = random.Next(0, most);
         long position = random.Next(0, 50);
         while (objects.Count < count)
         {

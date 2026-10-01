@@ -80,8 +80,19 @@ internal static class CompactionPolicy
     /// The options a plan works to: the caller's, under whatever the dataset's header states, and on a
     /// store that locks what it keeps no purge, which would add bytes for the lock's term and free none.
     /// </summary>
+    /// <exception cref="ArgumentException">The options ask for tiered levels on a dataset with a clustering key.</exception>
     private static CompactionOptions SettingsFor(VortexDataset dataset, CompactionOptions? options)
     {
+        if (options is { Style: CompactionStyle.Tiered } && dataset.Key is not null)
+        {
+            // The style is not written in the dataset, so two writers could compact it under two;
+            // refusing the one that breaks the key's invariant keeps every level above 0 a merge's.
+            throw new ArgumentException(
+                "A dataset with a clustering key compacts leveled: its key cursor, its deletes and its ranks take every level " +
+                "above 0 to hold sorted objects whose keys do not overlap, and tiered levels hold objects that do.",
+                nameof(options));
+        }
+
         CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
         return dataset.LockedStore ? settings with { PurgeMarks = false } : settings;
     }

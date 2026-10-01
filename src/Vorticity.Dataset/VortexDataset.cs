@@ -636,6 +636,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="options">The sizes and bounds to plan against; null for the defaults, and the dataset's own settings win where it states them.</param>
     /// <param name="cancellationToken">Cancels the reads of the tree.</param>
     /// <returns>The plan.</returns>
+    /// <exception cref="ArgumentException">The options ask for <see cref="CompactionStyle.Tiered"/> on a dataset with a clustering key.</exception>
     public ValueTask<CompactionPlan> PlanCompactionAsync(
         CompactionOptions? options = null, CancellationToken cancellationToken = default) =>
         CompactionPolicy.PlanAsync(this, options, cancellationToken);
@@ -647,6 +648,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="options">The sizes and bounds to plan against; null for the defaults.</param>
     /// <param name="cancellationToken">Cancels the rewrite and the commit.</param>
     /// <returns>What the compaction did, or null when nothing was due.</returns>
+    /// <exception cref="ArgumentException">The options ask for <see cref="CompactionStyle.Tiered"/> on a dataset with a clustering key.</exception>
     public async ValueTask<CompactionResult?> CompactAsync(
         CompactionOptions? options = null, CancellationToken cancellationToken = default)
     {

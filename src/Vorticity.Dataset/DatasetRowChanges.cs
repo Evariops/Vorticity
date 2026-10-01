@@ -245,7 +245,7 @@ internal static class DatasetRowChanges
             // Written in the version's schema, which an object of an earlier one is read as. The rows
             // kept are the object's own in its own order, and an object above level 0 is a
             // compaction's, whose rows come in key order.
-            ObjectDraft? draft = matched < held.Entry.Rows ? dataset.StartObjectUnder(version.Schema, inKeyOrder: held.Level > 0) : null;
+            ObjectDraft? draft = matched < held.Entry.Rows ? dataset.StartObjectUnder(version.Schema, inKeyOrder: DatasetLevels.InKeyOrder(held.Level)) : null;
             try
             {
                 long kept = await SplitAsync(file, held.Entry, columns, filter, draft?.Writer, changed, cancellationToken).ConfigureAwait(false);

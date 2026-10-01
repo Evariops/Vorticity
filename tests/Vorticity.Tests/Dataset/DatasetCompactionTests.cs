@@ -399,6 +399,33 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
+    public async Task AClusteredDatasetRefusesTieredLevels()
+    {
+        // Tiered levels hold objects whose keys overlap, where the key cursor, a delete and a rank
+        // take every level above 0 to be key-disjoint: the plan refuses before anything is written.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Clustered(), ct);
+        foreach (int residue in (int[])[3, 1, 0, 2])
+        {
+            await dataset.AppendAsync(Batches(types, schema, residue), ct);
+        }
+
+        ulong version = dataset.Version;
+        CompactionOptions tiered = Options(target: 1 << 20) with { Style = CompactionStyle.Tiered };
+        Assert.Equal("options", (await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.PlanCompactionAsync(tiered, ct))).ParamName);
+        await Assert.ThrowsAsync<ArgumentException>(async () => await dataset.CompactAsync(tiered, ct));
+        Assert.Equal(version, dataset.Version);
+
+        // Left to choose, or asked for leveled, the same dataset merges on its key.
+        Assert.Equal(CompactionStyle.Leveled, (await dataset.PlanCompactionAsync(Options(target: 1 << 20), ct)).Style);
+    }
+
+    [Fact]
     public async Task ATieredRunPastTheFirstRowsTakesItsPlaceInTheOrder()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

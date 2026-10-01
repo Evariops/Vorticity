@@ -18,7 +18,9 @@ public enum CompactionStyle
 
     /// <summary>
     /// Size tiers: a level holds up to <c>F</c> objects of its size and they may overlap. Rewrites
-    /// each row about once per level, and a lookup is output-sensitive rather than bounded.
+    /// each row about once per level, and a lookup is output-sensitive rather than bounded. Refused
+    /// for a dataset with a clustering key, whose reads by key take every level above 0 to be
+    /// key-disjoint.
     /// </summary>
     Tiered = 2,
 }
@@ -119,7 +121,10 @@ public sealed record CompactionOptions
     /// <summary>The index fragments an object may carry before a fragment compaction is due; 4 by default.</summary>
     public int MaxFragments { get; init; } = DefaultMaxFragments;
 
-    /// <summary>Leveled, tiered, or whichever the clustering key implies.</summary>
+    /// <summary>
+    /// Leveled, tiered, or whichever the clustering key implies. A plan refuses tiered for a dataset
+    /// with a clustering key, which compacts leveled only.
+    /// </summary>
     public CompactionStyle Style { get; init; } = CompactionStyle.Auto;
 
     /// <summary>Which objects a job takes from a level over its size, or whichever the style implies.</summary>
@@ -240,12 +245,15 @@ public sealed record CompactionOptions
         _ => style == CompactionStyle.Tiered ? CompactionPick.RoundRobin : CompactionPick.Largest,
     };
 
-    /// <summary>The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>.</summary>
+    /// <summary>
+    /// The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>: leveled with a
+    /// clustering key, whatever was asked, since a plan refuses tiered there first.
+    /// </summary>
     internal CompactionStyle StyleFor(bool clustered) => Style switch
     {
+        _ when clustered => CompactionStyle.Leveled,
         CompactionStyle.Leveled => CompactionStyle.Leveled,
-        CompactionStyle.Tiered => CompactionStyle.Tiered,
-        _ => clustered ? CompactionStyle.Leveled : CompactionStyle.Tiered,
+        _ => CompactionStyle.Tiered,
     };
 
     /// <summary>
