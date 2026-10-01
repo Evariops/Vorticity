@@ -1,11 +1,13 @@
 # Compaction: when it runs, and what a store that cannot delete does to it
 
-**Status: a proposal.** What exists is [13-dataset.md](13-dataset.md) §5: one planner, one job per
-`CompactAsync` call, run when the application calls it. This document weighs the other ways to drive
-the same work: inline in a writer's commit, on demand, or in the background. It also weighs what a
-store under a retention lock changes, when it refuses to delete or overwrite an object before a
-date: S3 Object Lock, Azure immutable blob storage, a GCS bucket lock. Nothing here changes the
-format, the commit protocol or a read.
+**Status: a proposal, whose first step is built.** What exists is [13-dataset.md](13-dataset.md) §5:
+one planner, one job per `CompactAsync` call, run when the application calls it, and since the first
+step (§3) a leveled plan that descends the trees rather than reading them. This document weighs the
+other ways to drive the same work: inline in a writer's commit, on demand, or in the background. It
+also weighs what a store under a retention lock changes, when it refuses to delete or overwrite an
+object before a date: S3 Object Lock, Azure immutable blob storage, a GCS bucket lock. Nothing here
+changes the commit protocol or a read; the tallies of §3 are the one change to a page's format, and a
+page written before them still reads.
 
 ## 1. What compaction buys, and what it costs
 
@@ -28,10 +30,10 @@ Three costs are left over, and this document is about them:
 
 1. **Who pays, and when.** Today it is whoever calls `CompactAsync`, when they do. Until then a
    dataset reports its lag, and lookups touch the extra objects.
-2. **Planning reads every leaf.** `PlanCompactionAsync` walks every level's tree, since the bytes of
-   a level are not recorded anywhere else. At the 40 objects of the churn that is nothing. At a
+2. **Planning read every leaf.** `PlanCompactionAsync` walked every level's tree, since the bytes of
+   a level were recorded nowhere else. At the 40 objects of the churn that is nothing. At a
    tebibyte of 4 MiB objects it is 262 144 entries of a few hundred bytes each: about a thousand
-   pages and a hundred megabytes, on every plan.
+   pages and a hundred megabytes, on every plan. A leveled plan now descends instead (§3).
 3. **Marks in levels no merge reaches.** Level 4 of a ten-million-row dataset is rewritten only when
    level 3 overflows into it, and the top level never is. The marks there last until a delete would
    pass an object's share or its vector's cap, and that delete then rewrites the object itself.
@@ -87,21 +89,30 @@ nothing.
 
 ## 3. Planning in the depth of the tree
 
-The planner needs three things, and each can be kept where a commit already writes:
+**Built, for the leveled style.** Each thing the planner needs now comes from where a commit
+already writes:
 
-| what the plan needs | where it comes from today | where it can come from |
+| what the plan needs | read before | read now |
 |---|---|---|
-| a level's bytes, against its capacity | the sum of every leaf's bytes | the header's level record, which already carries the level's objects and rows, and a commit updates from the entries it changes |
+| a level's bytes, against its capacity | the sum of every leaf's bytes | the tallies on its top page, which the header carries: every page's summary carries the tally of what lies under it, folded by a commit as it folds the bounds |
 | the objects a level-0 job takes | level 0's leaves | the same, since level 0 holds at most eight |
-| which objects of a full level go down | every leaf of the level, then a choice by key | a **compaction pointer** per level in the header, the key the last job of that level stopped at, as LevelDB keeps one: the next job takes the objects from there, found by one descent |
-| which objects hold the most marks | nothing | the **sum of marked rows** per subtree in every internal entry, beside its rows, and the descent follows the largest |
+| which object of a full level goes down | every leaf of the level, then the largest | one descent along the largest tally, which finds the same object |
+| the objects of the next level a job meets | every leaf of that level | a walk that skips each subtree whose bounds lie outside the job's range |
+| the objects over their fragments | every leaf | a walk into the subtrees whose tally holds one |
+| which objects hold the most marks | nothing | the sum of marked rows in every tally, for the purge of §4 |
 
-With these, a plan reads the header and one path per level: `O(L · depth)` pages, three or four at a
-tebibyte, where it reads today every leaf. The sums follow the same rule as the rows already
-summed up the tree: each commit rewrites the path above an entry it changes, so a sum costs no
-page the commit does not already write. What does not survive is a planner free to choose any
-object of a level. It takes the next ones after the pointer, which is also what spreads the rewrites
-evenly over the keys.
+A plan now reads the header, one path per full level and the job's own objects. A cold plan over
+125 000 objects asks the store for two pages, where reading every leaf asks for 124. The tallies
+follow the rule the rows summed up the tree already follow: each commit rewrites the path above an
+entry it changes, so a tally costs no page the commit does not already write. A page written before
+tallies carries none, and a level holding one is planned by its leaves until a commit rewrites it.
+
+**Not built.** First, a compaction pointer per level: the key the last job of a level stopped at, as
+LevelDB keeps one. It would spread the rewrites evenly over the keys, where the largest object lies
+wherever it happens to be. Second, a tiered plan by descent. A tiered job concatenates the longest
+run of one level's objects that nothing else sits between, and only the order of every level says
+where the runs are. A policy that took the run at a pointer instead would need one descent per level
+for each object of the run.
 
 ## 4. Folding marks where no merge goes
 
@@ -204,9 +215,9 @@ subject destroyed in place of the rows. It belongs to the store library or to th
 
 ## 6. What to build, in order
 
-1. **Planning in the depth of the tree** (§3): the level's bytes in the header, the marked rows
-   summed in the internal entries, and a pointer per level. Every driver needs it before a dataset
-   is large, and it changes no read.
+1. **Planning in the depth of the tree** (§3). Built for the leveled style: a tally in every page's
+   summary, one descent to the largest object, and walks that skip what the bounds and tallies rule
+   out. A pointer per level and a tiered plan by descent are left.
 2. **Purge jobs** (§4): a trigger `Marks` beside `LevelZeroCeiling`, `LevelSize` and `Fragments`,
    with a threshold at half the delete's. The churn measures a commit's bytes with and without it.
 3. **The background driver** (§2), with a byte budget and one job at a time, coordinated by

@@ -293,7 +293,7 @@ public sealed class DatasetTreeTests
     {
         public ReadOnlyMemory<byte> OfLeaf(TreeEntry entry) => entry.Value.Length % 2 == 0 ? entry.Key : default;
 
-        public ReadOnlyMemory<byte> Union(IReadOnlyList<ReadOnlyMemory<byte>> parts)
+        public ReadOnlyMemory<byte> Union(IReadOnlyList<ReadOnlyMemory<byte>> parts, bool leaves)
         {
             byte[] joined = [.. parts[0].Span, .. parts[^1].Span];
             return joined.AsMemory(0, Math.Min(joined.Length, 24));
