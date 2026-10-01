@@ -116,7 +116,7 @@ public sealed record DataObject
         Level = held.Level,
         FirstRow = held.FirstRow,
         Rows = held.Entry.Rows,
-        DeletedRows = held.Entry.Deletions.Count,
+        DeletedRows = held.Entry.DeletedRows,
         Bytes = held.Entry.Bytes,
         TreeKey = Convert.ToHexString(held.TreeKey.Span),
         Entry = held.Entry,

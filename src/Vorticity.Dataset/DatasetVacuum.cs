@@ -245,6 +245,16 @@ internal static class DatasetVacuum
                             live[fragment.Version] = live.GetValueOrDefault(fragment.Version) + fragment.Length;
                         }
                     }
+
+                    // A vector out of line keeps the commit object it lies in, as a fragment does.
+                    if (entry.VectorAt is { Exists: true } vector)
+                    {
+                        markedCommits.Add(vector.Version);
+                        if (fragmentsSeen.Add(vector))
+                        {
+                            live[vector.Version] = live.GetValueOrDefault(vector.Version) + vector.Length;
+                        }
+                    }
                 }
 
                 return;

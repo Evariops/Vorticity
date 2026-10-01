@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Vorticity.Dataset;
 
@@ -36,6 +38,12 @@ internal sealed record ObjectEntry(
     /// <summary>The vector's bytes as the entry's page holds them, until they are decoded.</summary>
     private ReadOnlyMemory<byte> _encoded;
 
+    /// <summary>Where the vector lies when it is out of line, in the commit object that wrote it; none when it is in the entry.</summary>
+    private PageReference _vectorAt;
+
+    /// <summary>The bytes of an out-of-line vector, once read from where it lies.</summary>
+    private Fetched? _fetched;
+
     /// <summary>
     /// The rows a delete took out of the object without rewriting it, by their positions in the
     /// object; empty for an object whose rows are all live, which every object is until then.
@@ -46,6 +54,7 @@ internal sealed record ObjectEntry(
     /// passes, and needs of a vector only the count the entry carries beside it.
     /// </remarks>
     /// <exception cref="CommitFormatException">The vector's bytes are not a vector of the object's rows.</exception>
+    /// <exception cref="InvalidOperationException">The vector lies out of line and was not read yet: see <see cref="ResolveAsync"/>.</exception>
     public DeletionVector Deletions
     {
         get => _deletions ??= Decode();
@@ -53,9 +62,21 @@ internal sealed record ObjectEntry(
         {
             _deletions = value;
             _encoded = default;
+            _vectorAt = PageReference.None;
+            _fetched = null;
             DeletedRows = value.Count;
         }
     }
+
+    /// <summary>
+    /// Where the vector lies when it is out of line: in the commit object that wrote it, as an index
+    /// fragment does, rather than in the entry and so in every page that holds the entry. None when
+    /// the vector is in the entry, or there is none.
+    /// </summary>
+    public PageReference VectorAt => _vectorAt;
+
+    /// <summary>Whether <see cref="Deletions"/> can be read without a request: the vector is in the entry, or was read from where it lies.</summary>
+    public bool IsResolved => !_vectorAt.Exists || _deletions is not null || Volatile.Read(ref _fetched) is not null;
 
     /// <summary>How many rows <see cref="Deletions"/> names, known without decoding it.</summary>
     public long DeletedRows { get; private init; }
@@ -66,25 +87,69 @@ internal sealed record ObjectEntry(
     /// <summary>Whether a delete took rows out of the object without rewriting it.</summary>
     public bool HasDeletions => DeletedRows > 0;
 
-    /// <summary>The bytes <see cref="Deletions"/> takes in the entry, known without decoding it.</summary>
-    public int VectorBytes => !HasDeletions ? 0 : _deletions is null ? _encoded.Length : _deletions.EncodedBytes;
+    /// <summary>The bytes <see cref="Deletions"/> takes encoded, in the entry or where it lies, known without decoding it.</summary>
+    public int VectorBytes => !HasDeletions ? 0
+        : _vectorAt.Exists ? _vectorAt.Length
+        : _deletions is null ? _encoded.Length
+        : _deletions.EncodedBytes;
+
+    /// <summary>The bytes the vector takes inside the entry: 0 when it lies out of line, or there is none.</summary>
+    public int InlineVectorBytes => _vectorAt.Exists ? 0 : VectorBytes;
 
     /// <summary>
-    /// Whether two entries take the same rows out, by their canonical bytes while neither is
-    /// decoded: one vector has one encoding.
+    /// Whether two entries take the same rows out: one vector has one encoding, so the same length
+    /// and hash of its bytes, wherever they lie, and without reading one that lies out of line.
     /// </summary>
     public bool SameDeletions(ObjectEntry other)
     {
         ArgumentNullException.ThrowIfNull(other);
-        if (DeletedRows != other.DeletedRows)
+        return DeletedRows == other.DeletedRows && (DeletedRows == 0 || VectorIdentity() == other.VectorIdentity());
+    }
+
+    /// <summary>The length and the XXH3-128 of the vector's bytes, which a reference to them carries.</summary>
+    private (int Length, UInt128 Hash) VectorIdentity()
+    {
+        if (_vectorAt.Exists)
         {
-            return false;
+            return (_vectorAt.Length, _vectorAt.Hash);
         }
 
-        return DeletedRows == 0
-            || (_deletions is null && other._deletions is null
-                ? _encoded.Span.SequenceEqual(other._encoded.Span)
-                : Deletions.Equals(other.Deletions));
+        ReadOnlyMemory<byte> bytes = _deletions is null ? _encoded : _deletions.ToBytes();
+        return (bytes.Length, System.IO.Hashing.XxHash128.HashToUInt128(bytes.Span));
+    }
+
+    /// <summary>The vector's bytes, encoded as the entry or where it lies holds them.</summary>
+    /// <exception cref="InvalidOperationException">The vector lies out of line and was not read yet.</exception>
+    public ReadOnlyMemory<byte> EncodedDeletions =>
+        !HasDeletions ? default
+        : _deletions is not null ? _deletions.ToBytes()
+        : _vectorAt.Exists ? (Volatile.Read(ref _fetched) ?? throw Unresolved()).Bytes
+        : _encoded;
+
+    /// <summary>
+    /// The entry with its vector out of line, at <paramref name="at"/>, where the commit writing it put
+    /// the vector's bytes; the vector itself, decoded or not, stays at hand.
+    /// </summary>
+    public ObjectEntry WithVectorAt(PageReference at)
+    {
+        ReadOnlyMemory<byte> bytes = EncodedDeletions;
+        return this with { _vectorAt = at, _fetched = new Fetched(bytes), _encoded = default };
+    }
+
+    /// <summary>
+    /// Reads the vector from where it lies, when it lies out of line and was not read yet, through the
+    /// version's pages: in the region the read opening its commit holds, in the handle's cache, or one
+    /// ranged read. The reference checks the bytes; the entry keeps them, whoever else holds it.
+    /// </summary>
+    internal async ValueTask ResolveAsync(IPageSource pages, CancellationToken cancellationToken)
+    {
+        if (IsResolved)
+        {
+            return;
+        }
+
+        ReadOnlyMemory<byte> bytes = await pages.ReadPageAsync(_vectorAt, cancellationToken).ConfigureAwait(false);
+        Volatile.Write(ref _fetched, new Fetched(bytes));
     }
 
     /// <summary>An entry with no fragment yet; null summaries means none.</summary>
@@ -165,6 +230,10 @@ internal sealed record ObjectEntry(
     public ObjectEntry WithDeletions(DeletionVector deletions) =>
         this with { Rows = PhysicalRows - deletions.Count, Deletions = deletions, Summaries = Summaries.Loosened() };
 
+    private static InvalidOperationException Unresolved() =>
+        new InvalidOperationException(
+            "The entry's deletion vector lies in a commit object and was not read: resolve it before asking for its rows.");
+
     /// <summary>The entry with <paramref name="fragment"/> attached.</summary>
     public ObjectEntry With(PageReference fragment) =>
         this with { Fragments = [.. Fragments, fragment] };
@@ -216,7 +285,7 @@ internal sealed record ObjectEntry(
             }
         }
 
-        return false;
+        return _vectorAt.Exists && versions.Contains(_vectorAt.Version);
     }
 
     /// <summary>
@@ -248,6 +317,19 @@ internal sealed record ObjectEntry(
             }
         }
 
+        // Past the fragments and the summaries, a vector out of line ends the entry: its reference's
+        // version is its first eight bytes.
+        Skip(value, ref at, references.Length);
+        Skip(value, ref at, (long)Read(value, ref at));
+        if (at < value.Length)
+        {
+            Read(value, ref at);
+            if (Read(value, ref at) == 0 && value.Length - at == PageReference.Bytes)
+            {
+                return versions.Contains(System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(value[at..]));
+            }
+        }
+
         return false;
     }
 
@@ -274,14 +356,20 @@ internal sealed record ObjectEntry(
     {
         byte[] key = Encoding.UTF8.GetBytes(Key);
         byte[] summaries = Summaries.ToBytes();
-        ReadOnlyMemory<byte> deletions = !HasDeletions ? default : _deletions is null ? _encoded : _deletions.ToBytes();
+
+        // Out of line, the vector's place stands where its bytes would: a length of zero, which no
+        // vector in the entry has, then the reference.
+        bool outOfLine = HasDeletions && _vectorAt.Exists;
+        ReadOnlyMemory<byte> deletions = !HasDeletions || outOfLine ? default : _deletions is null ? _encoded : _deletions.ToBytes();
         int bytes = TreePage.VarintBytes((ulong)key.Length) + key.Length
             + 16 + TreePage.VarintBytes((ulong)Rows) + TreePage.VarintBytes((ulong)Bytes) + 16
             + TreePage.VarintBytes((ulong)Fragments.Count) + (Fragments.Count * PageReference.Bytes)
             + TreePage.VarintBytes((ulong)summaries.Length) + summaries.Length
-            + (HasDeletions
-                ? TreePage.VarintBytes((ulong)DeletedRows) + TreePage.VarintBytes((ulong)deletions.Length) + deletions.Length
-                : 0);
+            + (outOfLine
+                ? TreePage.VarintBytes((ulong)DeletedRows) + 1 + PageReference.Bytes
+                : HasDeletions
+                    ? TreePage.VarintBytes((ulong)DeletedRows) + TreePage.VarintBytes((ulong)deletions.Length) + deletions.Length
+                    : 0);
         byte[] value = new byte[bytes];
         Span<byte> at = value;
         at = Write(at, (ulong)key.Length);
@@ -305,7 +393,14 @@ internal sealed record ObjectEntry(
         // Last, and only when there are any, so that the entry of an object whose rows are all
         // live is the bytes it always was, and a reader that knows no deletions refuses one that has.
         // Their count comes first, so that a walk knows the object's rows without the vector.
-        if (HasDeletions)
+        if (outOfLine)
+        {
+            at = Write(at, (ulong)DeletedRows);
+            at = Write(at, 0);
+            _vectorAt.Write(at);
+            at = at[PageReference.Bytes..];
+        }
+        else if (HasDeletions)
         {
             at = Write(at, (ulong)DeletedRows);
             at = Write(at, (ulong)deletions.Length);
@@ -362,6 +457,12 @@ internal sealed record ObjectEntry(
         Skip(value, ref at, (long)Read(value, ref at));
         long deleted = at < value.Length ? (long)Read(value, ref at) : 0;
         long vector = at < value.Length ? (long)Read(value, ref at) : 0;
+        if (deleted > 0 && vector == 0 && value.Length - at == PageReference.Bytes)
+        {
+            // Out of line: the vector's bytes are what its reference says it holds.
+            vector = PageReference.Read(value[at..]).Length;
+        }
+
         return bytes < 0 || rows < 0 || deleted < 0 || vector < 0
             ? throw new CommitFormatException("An object entry counts its bytes or its rows past a long.")
             : (bytes, rows, deleted, fragments, vector);
@@ -390,7 +491,7 @@ internal sealed record ObjectEntry(
     public static ObjectEntry FromBytes(ReadOnlyMemory<byte> value)
     {
         ObjectEntry entry = Parse(value.Span, out int start, out int length);
-        return length == 0 ? entry : entry with { _encoded = value.Slice(start, length), _deletions = null };
+        return length == 0 || entry._vectorAt.Exists ? entry : entry with { _encoded = value.Slice(start, length), _deletions = null };
     }
 
     /// <summary>Reads an entry written by <see cref="ToBytes"/>, copying the bytes of its deletion vector.</summary>
@@ -398,16 +499,17 @@ internal sealed record ObjectEntry(
     public static ObjectEntry FromBytes(ReadOnlySpan<byte> value)
     {
         ObjectEntry entry = Parse(value, out int start, out int length);
-        return length == 0 ? entry : entry with { _encoded = value.Slice(start, length).ToArray(), _deletions = null };
+        return length == 0 || entry._vectorAt.Exists ? entry : entry with { _encoded = value.Slice(start, length).ToArray(), _deletions = null };
     }
 
     /// <summary>
-    /// The vector the entry's bytes hold, checked against the rows it names: each is one of the
-    /// object's own, and as many as the entry says.
+    /// The vector the entry's bytes hold, or the bytes read from where it lies, checked against the
+    /// rows it names: each is one of the object's own, and as many as the entry says.
     /// </summary>
     private DeletionVector Decode()
     {
-        DeletionVector deletions = DeletionVector.FromBytes(_encoded.Span);
+        ReadOnlySpan<byte> bytes = _vectorAt.Exists ? (Volatile.Read(ref _fetched) ?? throw Unresolved()).Bytes.Span : _encoded.Span;
+        DeletionVector deletions = DeletionVector.FromBytes(bytes);
         if (deletions.Count != DeletedRows || deletions.EndOf(deletions.Runs - 1) > PhysicalRows)
         {
             throw new CommitFormatException("An object entry deletes other rows than it counts, or a row past the object's own.");
@@ -463,9 +565,33 @@ internal sealed record ObjectEntry(
         {
             long deleted = (long)Read(value, ref at);
             int encoded = checked((int)Read(value, ref at));
-            if (deleted <= 0 || deleted > long.MaxValue - rows || at + encoded != value.Length || encoded == 0)
+            if (deleted <= 0 || deleted > long.MaxValue - rows)
             {
-                throw new CommitFormatException("An object entry's deleted rows are none, or do not end where it does.");
+                throw new CommitFormatException("An object entry's deleted rows are none, or more than a long holds.");
+            }
+
+            if (encoded == 0)
+            {
+                // A vector out of line: its reference, to the entry's end.
+                if (value.Length - at != PageReference.Bytes)
+                {
+                    throw new CommitFormatException("An object entry's vector out of line is not one reference to its end.");
+                }
+
+                PageReference lies = PageReference.Read(value[at..]);
+                if (!lies.Exists || lies.Length == 0)
+                {
+                    throw new CommitFormatException("An object entry's vector out of line names no bytes.");
+                }
+
+                start = at;
+                vector = PageReference.Bytes;
+                return entry with { DeletedRows = deleted, _vectorAt = lies, _deletions = null };
+            }
+
+            if (at + encoded != value.Length)
+            {
+                throw new CommitFormatException("An object entry's deleted rows do not end where it does.");
             }
 
             start = at;
@@ -474,6 +600,12 @@ internal sealed record ObjectEntry(
         }
 
         return entry;
+    }
+
+    /// <summary>The bytes of a vector read from where it lies, shared by every holder of the entry.</summary>
+    private sealed class Fetched(ReadOnlyMemory<byte> bytes)
+    {
+        internal ReadOnlyMemory<byte> Bytes { get; } = bytes;
     }
 
     private static Span<byte> Write(Span<byte> destination, ulong value)

@@ -154,7 +154,33 @@ internal sealed class DatasetSnapshot
     {
         try
         {
-            return await _objects.RentAsync(entry, Pages, cancellationToken).ConfigureAwait(false);
+            if (entry.IsResolved)
+            {
+                return await _objects.RentAsync(entry, Pages, cancellationToken).ConfigureAwait(false);
+            }
+
+            // A vector out of line is read beside the object's open, which does not wait on it.
+            Task<ObjectLease> renting = _objects.RentAsync(entry, Pages, cancellationToken).AsTask();
+            try
+            {
+                await entry.ResolveAsync(Pages, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The lease the rent hands back goes back at once; a rent that failed as well has
+                // nothing to return, and the failure already raised says more.
+                try
+                {
+                    await (await renting.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception) when (renting.IsFaulted || renting.IsCanceled)
+                {
+                }
+
+                throw;
+            }
+
+            return await renting.ConfigureAwait(false);
         }
         catch (ObjectNotFoundException missing) when (missing.Version == 0)
         {

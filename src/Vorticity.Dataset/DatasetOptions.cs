@@ -134,6 +134,15 @@ public sealed record DatasetOptions
     /// </summary>
     internal int MarkedVectorBytes { get; init; } = 1 << 10;
 
+    /// <summary>
+    /// The most bytes a vector takes inside its entry; past them a commit writes it once into its own
+    /// commit object, as an index fragment is, and the entry names it by reference: 256 by default. In
+    /// the entry it rides in every page that holds the entry; out of line it costs a read beside the
+    /// object's open, once per handle. A run a delete on the key takes is a few bytes; rows scattered
+    /// over an object make vectors past this.
+    /// </summary>
+    internal int InlineVectorBytes { get; init; } = 256;
+
     /// <summary>The chunking seed, drawn once at creation and carried by every header.</summary>
     internal ulong Seed { get; init; } = (ulong)Random.Shared.NextInt64();
 

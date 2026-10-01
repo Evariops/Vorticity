@@ -386,16 +386,27 @@ internal static class DatasetVerifier
                             : Invariant($"'{entry.Key}' holds {file.RowCount} rows and its entry says {entry.Rows}"));
                     }
 
-                    // A read decodes the vector when it opens the object; verify decodes every one.
+                    // A read decodes the vector when it opens the object; verify decodes every one,
+                    // reading one out of line from the commit object it lies in, checked by its hash.
                     if (entry.HasDeletions)
                     {
+                        if (entry.VectorAt.Exists)
+                        {
+                            _commits.Add(entry.VectorAt.Version);
+                        }
+
                         try
                         {
+                            await entry.ResolveAsync(_pages, cancellationToken).ConfigureAwait(false);
                             _ = entry.Deletions;
                         }
                         catch (CommitFormatException malformed)
                         {
                             Problems.Add($"'{entry.Key}': its deleted rows are not a vector of its own rows: {malformed.Message}");
+                        }
+                        catch (Exception unreadable) when (unreadable is TornCommitException or ObjectNotFoundException or ArgumentOutOfRangeException)
+                        {
+                            Problems.Add(Invariant($"'{entry.Key}': its vector in version {entry.VectorAt.Version} at {entry.VectorAt.Offset}+{entry.VectorAt.Length}: {(unreadable is TornCommitException { InnerException: { } cause } ? cause : unreadable).Message}"));
                         }
                     }
 

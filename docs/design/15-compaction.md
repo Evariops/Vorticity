@@ -193,6 +193,18 @@ past its inline size, and how Iceberg stores every one, in a Puffin file. It is 
 scatters single rows over many objects, each commit then changing many vectors. A delete on the
 clustering key writes a run of a few bytes, which an inline vector already handles well.
 
+**Out of line, built**, for a vector past 256 bytes. The commit that writes the entry puts the
+vector's bytes into its own commit object and the entry carries a reference in their place, its
+length of zero, which no vector in an entry has, telling a reader that knows only vectors in line to
+refuse the entry. The entry keeps its count of marked rows, so a plan, a tally and a count without a
+filter still need no read. A rent reads the vector beside the object's open, through the version's
+pages: the region the read opening the commit holds, the handle's cache, where the writer leaves
+what it wrote, or one ranged read checked by the reference's hash. Vacuum keeps the commit object a
+vector lies in, a repack moves the vector as it moves a fragment, and verify reads every vector.
+On the churn a commit object stays flat once the vectors have grown, 7.5 to 10 KiB a commit where it
+grew to 15, at the same requests: the leaf page an object's marks rewrite carries a reference of
+37 bytes for each, where it carried up to a kilobyte.
+
 ## 5. Stores that cannot delete
 
 A store under a **retention lock** accepts a new object and refuses, until the object's retention
@@ -279,9 +291,9 @@ subject destroyed in place of the rows. It belongs to the store library or to th
    default, bounded by its byte budget.
 5. **The locked-store profile** (§5), and the retention date on the seam. Built:
    `DatasetOptions.LockedStore`, and `ObjectHead.RetainUntil` and `LegalHold`.
-6. **Marked pages out of the header** (§4). Built, over a handle that keeps its pages across
-   versions: a commit object is 30 % smaller on the churn. **Vectors out of line** are left, for
-   deletes that scatter rows over many objects, each commit then changing many vectors.
+6. **Marked pages out of the header, and vectors out of line** (§4). Built: over a handle that keeps
+   its pages across versions, a header leaves out a marked leaf its commit did not write, and a
+   vector past 256 bytes lies in the commit object that wrote it.
 
 Each step is measured the way the churn measures the dataset today, from the first commit to the
 ten-thousandth ([13-dataset.md](13-dataset.md) §15): a step that does not keep every cost flat is
