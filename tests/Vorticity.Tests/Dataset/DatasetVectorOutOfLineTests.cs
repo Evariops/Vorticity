@@ -37,6 +37,9 @@ public sealed class DatasetVectorOutOfLineTests
         Assert.Equal((at, false, 60L, encoded.Length, 0), (read.VectorAt, read.IsResolved, read.DeletedRows, read.VectorBytes, read.InlineVectorBytes));
         Assert.Throws<InvalidOperationException>(() => read.Deletions);
         Assert.True(read.SameDeletions(inline));
+
+        // What an entry prints reads nothing: a message or a debugger naming one needs no vector.
+        Assert.Contains(CommitKey.ForData("0000000a"), read.ToString(), StringComparison.Ordinal);
         Assert.Equal(inline.ToBytes().Length - encoded.Length + PageReference.Bytes - TreePage.VarintBytes((ulong)encoded.Length) + 1, bytes.Length);
 
         // Read in place, as a page's tally and a repack read it.
@@ -47,6 +50,27 @@ public sealed class DatasetVectorOutOfLineTests
 
         // A length of zero is a reference, to the entry's end, or the entry is refused.
         Assert.Throws<CommitFormatException>(() => ObjectEntry.FromBytes(bytes.AsMemory(0, bytes.Length - 1)));
+    }
+
+    [Fact]
+    public async Task AnEntryMadeFromAnotherBeforeItsVectorIsReadSharesTheRead()
+    {
+        // A fragment attached to an entry whose vector lies out of line makes another entry naming
+        // the same vector: whichever reads it, both have it, and it is read once.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        ObjectEntry inline = new ObjectEntry(CommitKey.ForData("0000000b"), 8, 200, 4_096, 3)
+            .WithDeletions(DeletionVector.Of([.. Enumerable.Range(0, 60).Select(row => (long)row * 3)]));
+        MemoryPageStore pages = new MemoryPageStore(9);
+        PageReference at = pages.WritePage(inline.EncodedDeletions.Span);
+        ObjectEntry read = ObjectEntry.FromBytes(inline.WithVectorAt(at).ToBytes().AsMemory());
+        ObjectEntry attached = read.With(new PageReference(9, 4_096, 64, 5));
+        Assert.False(attached.IsResolved);
+
+        await read.ResolveAsync(pages, ct);
+        await attached.ResolveAsync(pages, ct);
+        Assert.True(attached.IsResolved);
+        Assert.Equal(1, pages.Reads);
+        Assert.Equal(inline.Deletions, attached.Deletions);
     }
 
     [Fact]

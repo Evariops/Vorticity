@@ -616,7 +616,7 @@ public sealed class DatasetFuzzTests
             contents.Add(new PageReference(0, 0, fragment.Length, fragment.Hash));
         }
 
-        return entry with { Fragments = contents };
+        return entry.WithFragments(contents);
     }
 
     private static async Task<List<long>> KeysAsync(DatasetScanBuilder scan)
@@ -744,7 +744,7 @@ public sealed class DatasetFuzzTests
                             }
                         }
 
-                        _entries[key] = held with { Fragments = kept };
+                        _entries[key] = held.WithFragments(kept);
                     }
 
                     break;

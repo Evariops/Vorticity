@@ -744,7 +744,7 @@ internal static class DatasetCommitter
                             }
 
                             // A vector out of line moves as a fragment does, its bytes unchanged.
-                            entry = entry with { Fragments = fragments };
+                            entry = entry.WithFragments(fragments);
                             if (entry.VectorAt.Exists && repack.Versions.Contains(entry.VectorAt.Version))
                             {
                                 await entry.ResolveAsync(pages, cancellationToken).ConfigureAwait(false);

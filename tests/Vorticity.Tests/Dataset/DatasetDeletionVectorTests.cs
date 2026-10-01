@@ -528,7 +528,7 @@ public sealed class DatasetDeletionVectorTests
         Assert.False(marked.Summaries.TryGet("Note", out _));
 
         // Everything before the marks is the entry it was, and the marks run to its end.
-        ObjectEntry sameSummaries = plain with { Rows = 96, Summaries = marked.Summaries };
+        ObjectEntry sameSummaries = new ObjectEntry(plain.Key, plain.Uid, 96, plain.Bytes, plain.Hash, plain.Fragments, marked.Summaries);
         Assert.Equal(sameSummaries.ToBytes(), marked.ToBytes().AsSpan(0, sameSummaries.ToBytes().Length).ToArray());
 
         // An entry read from a page counts its marks without decoding them, is written back as it
@@ -544,7 +544,8 @@ public sealed class DatasetDeletionVectorTests
 
         // A vector of rows the object does not hold is refused when it is decoded, which a read of
         // the object and a verify do.
-        ObjectEntry beyond = ObjectEntry.FromBytes((plain with { Rows = 2 }).WithDeletions(DeletionVector.Of([50])).ToBytes());
+        ObjectEntry two = new ObjectEntry(plain.Key, plain.Uid, 2, plain.Bytes, plain.Hash, plain.Summaries);
+        ObjectEntry beyond = ObjectEntry.FromBytes(two.WithDeletions(DeletionVector.Of([50])).ToBytes());
         Assert.Equal(1, beyond.DeletedRows);
         Assert.Throws<CommitFormatException>(() => beyond.Deletions);
     }

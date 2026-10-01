@@ -113,7 +113,7 @@ internal static class DatasetIndexer
         // attached would only cost their reads.
         IndexFragment fragment;
         ObjectLease lease = await dataset
-            .RentAsync(entry with { Fragments = [] }, cancellationToken).ConfigureAwait(false);
+            .RentAsync(entry.WithFragments([]), cancellationToken).ConfigureAwait(false);
         await using (lease.ConfigureAwait(false))
         {
             VortexFile file = lease.File;
