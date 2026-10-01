@@ -42,6 +42,7 @@ public sealed class VortexDataset : IAsyncDisposable
     private readonly ObjectCache _objects;
     private readonly PageCache _pageCache;
     private DatasetSnapshot _snapshot;
+    private Exception? _inlineFailure;
 
     private VortexDataset(IObjectStore store, DatasetOptions options, ulong version, CommitObject commit, DateTimeOffset knownAt)
     {
@@ -78,6 +79,14 @@ public sealed class VortexDataset : IAsyncDisposable
 
     /// <summary>The columns the dataset is ordered by, empty when objects are kept in the order they arrived.</summary>
     public IReadOnlyList<string> ClusteringKeyPaths => Snapshot.Header.ClusteringKey;
+
+    /// <summary>
+    /// What the latest compaction run after a commit to fail on this handle raised
+    /// (<see cref="DatasetOptions.InlineCompactionBytes"/>), or null while none has. The commit
+    /// stood and its caller was told so; level 0 stays as it was, and a failure that is not a
+    /// passing one meets every later commit, which this says.
+    /// </summary>
+    public Exception? LastInlineCompactionFailure => Volatile.Read(ref _inlineFailure);
 
     /// <summary>The dataset's schema as the engine holds it.</summary>
     internal DType DType => Snapshot.Schema.DType;
@@ -778,11 +787,16 @@ public sealed class VortexDataset : IAsyncDisposable
                 await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false);
             }
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Cancelled by the caller, whose commit stands.
+        }
         catch (Exception failed) when (failed is not OutOfMemoryException)
         {
             // The commit stands whatever befalls the compaction after it, and its outcome is what the
             // caller is told: level 0 stays as it is, for the next commit or another driver, which
-            // meets the same failure again if it is not a passing one.
+            // meets the same failure again if it is not a passing one. The handle says what it was.
+            Volatile.Write(ref _inlineFailure, failed);
         }
     }
 

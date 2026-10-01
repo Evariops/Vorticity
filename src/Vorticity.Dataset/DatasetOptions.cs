@@ -87,7 +87,9 @@ public sealed record DatasetOptions
     /// <remarks>
     /// The commit stands whatever befalls the compaction after it, and its outcome is what the caller
     /// is told: a compaction that fails, or that the caller cancels, leaves level 0 as it was for the
-    /// next commit or another driver. The compaction commits a version of its own, after the caller's.
+    /// next commit or another driver, and <see cref="VortexDataset.LastInlineCompactionFailure"/>
+    /// says what a failed one raised. The compaction commits a version of its own, after the
+    /// caller's.
     /// </remarks>
     public long InlineCompactionBytes { get; init; }
 

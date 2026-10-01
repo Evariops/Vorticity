@@ -105,9 +105,13 @@ public sealed class DatasetInlineCompactionTests
         }
 
         // Writing and committing read no data object; the merge after the commit reads them all.
+        Assert.Null(dataset.LastInlineCompactionFailure);
         store.Fails = (operation, key) => operation == ObjectOperation.GetRange && key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal);
         ulong appended = await AppendAsync(dataset, DatasetLevels.DefaultLevelZeroCeiling, ct);
         Assert.Equal((appended, 1L), (dataset.Version, dataset.Lag));
+
+        // The caller is told the commit's version, and the handle what the compaction raised.
+        Assert.NotNull(dataset.LastInlineCompactionFailure);
 
         // The next commit, or another driver, takes the job up again.
         store.Fails = null;

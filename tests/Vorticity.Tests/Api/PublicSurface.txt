@@ -2128,6 +2128,7 @@ Vorticity.Dataset:     method ValueTask<ulong> EvolveSchemaAsync(VortexSchema, I
 Vorticity.Dataset:     method ValueTask<ulong> ImportAsync(string, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> RefreshAsync(CancellationToken = default)
 Vorticity.Dataset:     method bool MayMatch<TRecord>(Func<Probe<TRecord>, Predicate>)
+Vorticity.Dataset:     property Exception LastInlineCompactionFailure { get; }
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKeyPaths { get; }
 Vorticity.Dataset:     property VortexSchema Schema { get; }
 Vorticity.Dataset:     property VortexSession Session { get; }
