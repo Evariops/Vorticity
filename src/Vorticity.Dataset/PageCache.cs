@@ -189,7 +189,11 @@ internal sealed class PageCache
         }
     }
 
-    /// <summary>Remembers where the pages region of <paramref name="version"/> starts, the latest learned winning.</summary>
+    /// <summary>
+    /// Remembers where the pages region of <paramref name="version"/> starts, the latest learned
+    /// winning: a start read from the preamble of an object written again under its version, after
+    /// one was removed as torn, replaces the one learned of the object before.
+    /// </summary>
     public void AddStart(ulong version, long start)
     {
         lock (_gate)

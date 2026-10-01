@@ -231,10 +231,36 @@ internal sealed class CommitPageSource : IPageSource
         string key = CommitKey.For(reference.Version);
         try
         {
-            long start = await StartAsync(reference.Version, key, cancellationToken).ConfigureAwait(false);
+            if (!TryGetLearnedStart(reference.Version, out long start))
+            {
+                start = await ReadStartAsync(reference.Version, key, cancellationToken).ConfigureAwait(false);
+                Interlocked.Increment(ref _reads);
+                return await CommitObject
+                    .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
+            }
+
             Interlocked.Increment(ref _reads);
-            return await CommitObject
-                .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return await CommitObject
+                    .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
+            }
+            catch (CommitFormatException)
+            {
+                // A start learned before, from a header or an open, is where the region of the object
+                // there then started: one removed as torn and written again under its version may
+                // start elsewhere. Its preamble says where it starts now, and the page is read again
+                // only when that moved; a page that does not hash where the object says is torn.
+                long now = await ReadStartAsync(reference.Version, key, cancellationToken).ConfigureAwait(false);
+                if (now == start)
+                {
+                    throw;
+                }
+
+                Interlocked.Increment(ref _reads);
+                return await CommitObject
+                    .ReadPageAsync(_store, key, reference, now, cancellationToken).ConfigureAwait(false);
+            }
         }
         catch (ObjectNotFoundException missing) when (Reading != 0 && missing.Version == 0)
         {
@@ -242,22 +268,28 @@ internal sealed class CommitPageSource : IPageSource
         }
     }
 
-    /// <summary>Where a version's body starts: one small read per version, remembered by the handle.</summary>
-    private async ValueTask<long> StartAsync(ulong version, string key, CancellationToken cancellationToken)
+    /// <summary>Where a version's body starts, as this source or the handle learned it without asking.</summary>
+    private bool TryGetLearnedStart(ulong version, out long start)
     {
-        if (_starts.TryGetValue(version, out long start))
+        if (_starts.TryGetValue(version, out start))
         {
-            return start;
+            return true;
         }
 
         if (_cache is not null && _cache.TryGetStart(version, out start))
         {
             _starts[version] = start;
-            return start;
+            return true;
         }
 
+        return false;
+    }
+
+    /// <summary>Where a version's body starts, read from its preamble: one small read, remembered by the handle.</summary>
+    private async ValueTask<long> ReadStartAsync(ulong version, string key, CancellationToken cancellationToken)
+    {
         Interlocked.Increment(ref _reads);
-        start = await CommitObject.PagesStartAsync(_store, key, cancellationToken).ConfigureAwait(false);
+        long start = await CommitObject.PagesStartAsync(_store, key, cancellationToken).ConfigureAwait(false);
         Know(version, start);
         return start;
     }

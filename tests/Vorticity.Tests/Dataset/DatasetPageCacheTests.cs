@@ -206,6 +206,34 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
+    public async Task AStartLearnedOfAnObjectSinceWrittenAgainIsReadAgainFromItsPreamble()
+    {
+        // A version's object removed as torn and written again may start its pages elsewhere: the
+        // page read where the start learned before says does not hash, the preamble is read, and
+        // the page is read where the object starts now, which the handle keeps from then on.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await DatasetCommitter.CommitAsync(store, [.. Enumerable.Range(0, Objects).Select(i => Add(2L * i))], new CommitOptions { Seed = Seed }, ct);
+        (ulong version, CommitObject? commit) = await DatasetCommitter.LatestAsync(store, ct);
+        CommitObject opened = Assert.IsType<CommitObject>(commit);
+        PageCache cache = new PageCache(0);
+        CommitPageSource first = new CommitPageSource(store, cache);
+        first.Open(version, opened);
+        Assert.True(first.TryGetKnown(DatasetLevels.Of(opened.Header)[1].Root, out ReadOnlyMemory<byte> top));
+        PageReference last = TreePage.ReadInternal(top)[^1].Child;
+
+        cache.AddStart(version, opened.HeaderEnd + 8);
+        CommitPageSource later = new CommitPageSource(store, cache);
+        store.Reset();
+        ReadOnlyMemory<byte> page = await later.ReadPageAsync(last, ct);
+        Assert.Equal(TreePageKind.Leaf, TreePage.KindOf(page.Span));
+        Assert.Equal(3, store.Requests);
+        Assert.True(cache.TryGetStart(version, out long start));
+        Assert.Equal(opened.HeaderEnd, start);
+    }
+
+    [Fact]
     public async Task AHeaderSaysWhereThePagesItNamesPastItsRoomStart()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
