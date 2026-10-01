@@ -86,20 +86,22 @@ internal sealed class DatasetSnapshot
         DatasetScanMetrics? metrics,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        // Each node and each entry is asked about the pruner's columns alone, decoded out of its
+        // summaries in place; an entry is parsed whole only once it is kept.
+        SummaryColumns? wanted = pruner is null ? null : new SummaryColumns(pruner.Paths);
         Func<InternalEntry, bool>? mayMatch = pruner is null ? null : node =>
             node.Summary.IsEmpty
-            || ObjectSummaries.FromBytes(ObjectSummaryFold.SummariesOf(node.Summary.Span, out _)).MayMatch(pruner, node.Rows);
+            || ObjectSummaries.Of(ObjectSummaryFold.SummariesOf(node.Summary.Span, out _), wanted!).MayMatch(pruner, node.Rows);
 
         await foreach ((TreeEntry held, long firstRow, int level) in
             EntriesAsync(from, to, mayMatch, metrics, cancellationToken).ConfigureAwait(false))
         {
-            ObjectEntry entry = ObjectEntry.FromBytes(held.Value);
             if (metrics is { } counters)
             {
                 counters.ObjectsConsidered++;
             }
 
-            if (pruner is not null && !entry.Summaries.MayMatch(pruner, entry.Rows))
+            if (pruner is not null && !ObjectSummaries.Of(ObjectEntry.SummaryOf(held.Value).Span, wanted!).MayMatch(pruner, held.Rows))
             {
                 if (metrics is { } skipped)
                 {
@@ -109,7 +111,7 @@ internal sealed class DatasetSnapshot
                 continue;
             }
 
-            yield return new PositionedObject(entry, firstRow) { Level = level, TreeKey = held.Key };
+            yield return new PositionedObject(ObjectEntry.FromBytes(held.Value), firstRow) { Level = level, TreeKey = held.Key };
         }
     }
 
@@ -143,9 +145,10 @@ internal sealed class DatasetSnapshot
     internal bool MayMatch(VortexExpr filter)
     {
         SummaryPruner pruner = new SummaryPruner(filter);
+        SummaryColumns wanted = new SummaryColumns(pruner.Paths);
         foreach ((int _, DatasetTree tree) in Levels.Occupied())
         {
-            if (MayMatch(tree.Root, tree.Depth, pruner))
+            if (MayMatch(tree.Root, tree.Depth, pruner, wanted))
             {
                 return true;
             }
@@ -204,7 +207,7 @@ internal sealed class DatasetSnapshot
     /// the pages in hand alone. A page that is not, or that an open read holds torn, is one the answer
     /// cannot see past: it may match, and the read that comes to it says what is wrong with it.
     /// </summary>
-    private bool MayMatch(PageReference reference, int depth, SummaryPruner pruner)
+    private bool MayMatch(PageReference reference, int depth, SummaryPruner pruner, SummaryColumns wanted)
     {
         ReadOnlyMemory<byte> page;
         try
@@ -223,8 +226,7 @@ internal sealed class DatasetSnapshot
         {
             foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
             {
-                ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value);
-                if (entry.Summaries.MayMatch(pruner, entry.Rows))
+                if (ObjectSummaries.Of(ObjectEntry.SummaryOf(leaf.Value).Span, wanted).MayMatch(pruner, leaf.Rows))
                 {
                     return true;
                 }
@@ -236,8 +238,8 @@ internal sealed class DatasetSnapshot
         foreach (InternalEntry child in TreePage.ReadInternal(page))
         {
             bool refuted = !child.Summary.IsEmpty
-                && !ObjectSummaries.FromBytes(ObjectSummaryFold.SummariesOf(child.Summary.Span, out _)).MayMatch(pruner, child.Rows);
-            if (!refuted && MayMatch(child.Child, depth - 1, pruner))
+                && !ObjectSummaries.Of(ObjectSummaryFold.SummariesOf(child.Summary.Span, out _), wanted).MayMatch(pruner, child.Rows);
+            if (!refuted && MayMatch(child.Child, depth - 1, pruner, wanted))
             {
                 return true;
             }

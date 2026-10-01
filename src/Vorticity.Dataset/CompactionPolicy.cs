@@ -681,8 +681,9 @@ internal static class CompactionPolicy
         {
             ClusteringKey key = dataset.Key!;
             (FilterLiteral low, bool hasLow, FilterLiteral high, bool hasHigh) = Range(sources, key);
+            SummaryColumns leading = new SummaryColumns([key.Paths[0]]);
             await foreach (PositionedEntry held in dataset.Levels[to]
-                .WalkAsync(dataset.Pages, 0, long.MaxValue, node => MayOverlap(node, key, low, hasLow, high, hasHigh), cancellationToken)
+                .WalkAsync(dataset.Pages, 0, long.MaxValue, node => MayOverlap(node, leading, low, hasLow, high, hasHigh), cancellationToken)
                 .ConfigureAwait(false))
             {
                 CompactionInput candidate = new CompactionInput(to, held.Entry.Key, ObjectEntry.FromBytes(held.Entry.Value));
@@ -934,7 +935,7 @@ internal static class CompactionPolicy
     /// summary is put to, asked of the union of its summaries, whose bounds hold every object's under it.
     /// </summary>
     private static bool MayOverlap(
-        InternalEntry node, ClusteringKey key, FilterLiteral low, bool hasLow, FilterLiteral high, bool hasHigh)
+        InternalEntry node, SummaryColumns leading, FilterLiteral low, bool hasLow, FilterLiteral high, bool hasHigh)
     {
         if (!hasLow || !hasHigh)
         {
@@ -942,7 +943,7 @@ internal static class CompactionPolicy
         }
 
         ReadOnlySpan<byte> summaries = ObjectSummaryFold.SummariesOf(node.Summary.Span, out _);
-        if (summaries.IsEmpty || !ObjectSummaries.FromBytes(summaries).TryGet(key.Paths[0], out ColumnSummary column))
+        if (summaries.IsEmpty || !ObjectSummaries.Of(summaries, leading).TryGet(leading.PathAt(0), out ColumnSummary column))
         {
             return true;
         }
