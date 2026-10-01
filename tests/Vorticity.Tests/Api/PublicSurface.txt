@@ -1847,6 +1847,24 @@ Vorticity.Dataset:     property long ObjectsIn { get; init; }
 Vorticity.Dataset:     property long ObjectsOut { get; init; }
 Vorticity.Dataset:     property long Rows { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.CompactionSchedule : IEquatable<CompactionSchedule>
+Vorticity.Dataset:     ctor CompactionSchedule()
+Vorticity.Dataset:     method CompactionSchedule <Clone>$()
+Vorticity.Dataset:     method bool Equals(CompactionSchedule)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(CompactionSchedule, CompactionSchedule)
+Vorticity.Dataset:     method bool op_Inequality(CompactionSchedule, CompactionSchedule)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property CompactionOptions Compaction { get; init; }
+Vorticity.Dataset:     property IProgress<CompactionResult> Progress { get; init; }
+Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
+Vorticity.Dataset:     property TimeSpan Idle { get; init; }
+Vorticity.Dataset:     property TimeSpan LeaseSpan { get; init; }
+Vorticity.Dataset:     property bool Leases { get; init; }
+Vorticity.Dataset:     property int Loop { get; init; }
+Vorticity.Dataset:     property int Loops { get; init; }
+Vorticity.Dataset:     property long BytesPerSecond { get; init; }
 Vorticity.Dataset: enum Vorticity.Dataset.CompactionStyle
 Vorticity.Dataset:     const CompactionStyle Auto = 0
 Vorticity.Dataset:     const CompactionStyle Leveled = 1
@@ -2075,6 +2093,7 @@ Vorticity.Dataset:     method IAsyncEnumerable<DataObject> ObjectsAsync(Cancella
 Vorticity.Dataset:     method ObjectDraft StartObject()
 Vorticity.Dataset:     method Scan Scan(ReadOnlySpan<string>)
 Vorticity.Dataset:     method Scan<TRecord> Scan<TRecord>()
+Vorticity.Dataset:     method Task RunCompactionAsync(CompactionSchedule = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     method ValueTask<CompactionPlan> PlanCompactionAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<CompactionResult> CompactAsync(CompactionOptions = default, CancellationToken = default)

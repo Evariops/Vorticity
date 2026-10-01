@@ -155,6 +155,19 @@ internal static class DatasetVacuum
 
         await DeleteAsync().ConfigureAwait(false);
 
+        // A compaction loop's leases, each named by when it ended: the key dates it, and one that
+        // ended a window ago holds nothing.
+        foreach (string key in await store.ListAllAsync(CompactionLoop.LeasePrefix, cancellationToken).ConfigureAwait(false))
+        {
+            if (CompactionLoop.TryParseEnd(key, out long end) && now - DateTimeOffset.FromUnixTimeSeconds(end) >= window)
+            {
+                batch.Add(key);
+                deleted.Add(key);
+            }
+        }
+
+        await DeleteAsync().ConfigureAwait(false);
+
         // The ratio is over the body, past the header: a header inlines copies of the pages it has
         // in hand, so taken over the whole object every superseded commit would look half dead
         // and each repack would make the next one due.

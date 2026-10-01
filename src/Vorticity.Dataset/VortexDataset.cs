@@ -88,6 +88,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The options it was opened with.</summary>
     internal DatasetOptions Options => _options;
 
+    /// <summary>The store it reads and writes.</summary>
+    internal IObjectStore Store => _store;
+
     /// <summary>Its levels, where level 0 is the one an append lands in.</summary>
     internal DatasetLevels Levels => Snapshot.Levels;
 
@@ -637,6 +640,29 @@ public sealed class VortexDataset : IAsyncDisposable
             ? await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false)
             : null;
     }
+
+    /// <summary>
+    /// Runs compaction in the background until <paramref name="cancellationToken"/> is cancelled:
+    /// refreshes, plans, runs the job due for this loop, paces what it wrote, and sleeps when nothing
+    /// is due. Any host runs it, a hosted service, a worker, a console; the library starts no thread
+    /// of its own.
+    /// </summary>
+    /// <param name="schedule">The options it plans against, its pace, and the loops it shares the dataset with; null for one loop, unpaced, asking again every minute.</param>
+    /// <param name="cancellationToken">Stops the loop, between jobs or inside one.</param>
+    /// <returns>
+    /// A task that ends with <see cref="OperationCanceledException"/> once the token is cancelled, or
+    /// with the exception a refresh, a plan or a job raised: a host that wants it to go on catches
+    /// that and runs it again.
+    /// </returns>
+    /// <remarks>
+    /// A job is the one <see cref="CompactAsync"/> runs, so a loop is safe against every writer and
+    /// every other loop. Loops that know one another spread over the due jobs by
+    /// <see cref="CompactionSchedule.Loops"/>; loops that cannot count one another lease a job's
+    /// levels (<see cref="CompactionSchedule.Leases"/>).
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException">The schedule's loop index, rate, sleep or lease span is out of range.</exception>
+    public Task RunCompactionAsync(CompactionSchedule? schedule = null, CancellationToken cancellationToken = default) =>
+        CompactionLoop.RunAsync(this, schedule ?? new CompactionSchedule(), cancellationToken);
 
     /// <summary>
     /// Deletes what no version inside the retention window references. It marks from the store's

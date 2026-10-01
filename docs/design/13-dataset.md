@@ -268,9 +268,11 @@ default is leveled when a clustering key is declared and tiered otherwise. A dat
 1 TiB a day, leveled, writes about 25 TiB a day in compaction: the honest cost of the
 one-object-per-level read bound, which every LSM store pays.
 
-Who pays it, and when, is the caller's today: compaction runs when `CompactAsync` is called.
-[15-compaction.md](15-compaction.md) weighs the other drivers — inline in a commit, in the
-background — planning in the depth of the tree, and what a store that cannot delete does to the price.
+Who pays it, and when, is the caller's: compaction runs when `CompactAsync` is called, or in a loop
+any host runs, `RunCompactionAsync`, which plans, runs the job due for it at a rate it is given, and
+sleeps when nothing is due. [15-compaction.md](15-compaction.md) weighs the drivers — inline in a
+commit, on demand, in the background — planning in the depth of the tree, and what a store that
+cannot delete does to the price.
 
 ## 6. Indexes at scale
 

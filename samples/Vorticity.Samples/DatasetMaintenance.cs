@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
 
@@ -81,6 +82,35 @@ internal static class DatasetMaintenance
             $"latest version {done.Latest}; cost: {Cost(store)}");
 
         Console.WriteLine($"and the data: {await dataset.Scan<Reading>().CountAsync()} rows, {dataset.ObjectCount} objects");
+
+        // In the background: a loop any host runs, which drains what is due, then sleeps and asks again.
+        for (int i = 0; i < Appends; i++)
+        {
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Reading>(Rows(55_000 + (i * 5_000), 5_000));
+            await dataset.AppendAsync(draft);
+        }
+
+        Console.WriteLine($"{Appends} more appends: {dataset.ObjectCount} objects, lag {dataset.Lag}");
+        int ran = 0;
+        using CancellationTokenSource stop = new CancellationTokenSource();
+        Task loop = dataset.RunCompactionAsync(
+            new CompactionSchedule { Idle = TimeSpan.FromMilliseconds(10), Progress = new Counting(() => Interlocked.Increment(ref ran)) },
+            stop.Token);
+        while ((await dataset.PlanCompactionAsync()).HasWork)
+        {
+            await Task.Delay(10);
+        }
+
+        await stop.CancelAsync();
+        try
+        {
+            await loop;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine($"stopped: {ran} compactions, {dataset.ObjectCount} objects, lag {dataset.Lag}");
+        }
     }
 
     private static string Cost(CountingObjectStore store) =>
@@ -98,6 +128,12 @@ internal static class DatasetMaintenance
         }
 
         return rows;
+    }
+
+    /// <summary>Counts what a loop reports, on the thread that reports it.</summary>
+    private sealed class Counting(Action counted) : IProgress<CompactionResult>
+    {
+        public void Report(CompactionResult value) => counted();
     }
 
     /// <summary>A clock a fixed distance ahead, to cross a retention window.</summary>
