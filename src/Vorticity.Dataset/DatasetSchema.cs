@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 using Vorticity.Types;
 using Vorticity.Types.Serialization;
 
@@ -29,6 +30,10 @@ internal sealed class DatasetSchema
     private readonly Dictionary<string, string> _renamed;
     private readonly HashSet<string> _retired;
     private readonly int _hash;
+
+    // What ColumnsOf found for each file's dtype: a file's dtype lives in an arena of its own for as
+    // long as the file is open, and an object every scan of a version reads is asked about each time.
+    private readonly ConditionalWeakTable<DTypeArena, Mapped> _mapped = new ConditionalWeakTable<DTypeArena, Mapped>();
 
     private DatasetSchema(ReadOnlyMemory<byte> bytes, IReadOnlyList<RetiredColumn> retired, IReadOnlyList<string> clustering)
     {
@@ -76,11 +81,29 @@ internal sealed class DatasetSchema
 
     /// <summary>
     /// How an object of this dtype answers for these columns: null when it holds exactly them, the
-    /// case of every object written since the schema last changed.
+    /// case of every object written since the schema last changed. Worked out once for each open
+    /// file: the comparison walks every column of a schema it matches, and the mapping of an object
+    /// of an earlier schema allocates.
     /// </summary>
     /// <exception cref="VortexSchemaException">The object's columns do not read as these.</exception>
-    internal ObjectColumns? ColumnsOf(DType file, string objectKey) =>
-        file.GetHashCode() == _hash && file == DType ? null : ObjectColumns.Map(this, file, objectKey, strict: false);
+    internal ObjectColumns? ColumnsOf(DType file, string objectKey)
+    {
+        DTypeArena arena = file.Arena;
+        if (_mapped.TryGetValue(arena, out Mapped? known)
+            && known.Index == file.NodeIndex
+            && known.Generation == arena.Generation
+            && string.Equals(known.Key, objectKey, StringComparison.Ordinal))
+        {
+            return known.Columns;
+        }
+
+        ObjectColumns? columns = file.GetHashCode() == _hash && file == DType ? null : ObjectColumns.Map(this, file, objectKey, strict: false);
+        _mapped.AddOrUpdate(arena, new Mapped(file.NodeIndex, arena.Generation, objectKey, columns));
+        return columns;
+    }
+
+    /// <summary>What <see cref="ColumnsOf"/> found for one file's dtype, at its place in its arena.</summary>
+    private sealed record Mapped(int Index, int Generation, string Key, ObjectColumns? Columns);
 
     /// <summary>
     /// The current name of the column an object holds under <paramref name="name"/>: the name
