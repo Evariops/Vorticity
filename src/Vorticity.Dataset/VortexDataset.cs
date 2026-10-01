@@ -1158,6 +1158,7 @@ public sealed class VortexDataset : IAsyncDisposable
             MaxAttempts = options.MaxAttempts,
             Rule = options.Rule ?? RuleOf(template.Chunker, seed),
             TimeProvider = options.TimeProvider,
+            InlineVectorBytes = options.InlineVectorBytes,
         };
     }
 

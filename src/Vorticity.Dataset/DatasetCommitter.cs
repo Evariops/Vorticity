@@ -54,6 +54,12 @@ internal sealed record CommitOptions
     /// <summary>The pages the writer's handle keeps across versions, which its commits read through; null for none.</summary>
     public PageCache? PageCache { get; init; }
 
+    /// <summary>
+    /// The most bytes a deletion vector takes inside its entry; a longer one is written into the
+    /// commit object and named by reference. 0 keeps every vector in its entry.
+    /// </summary>
+    public int InlineVectorBytes { get; init; }
+
     /// <summary>A rule in its starting state.</summary>
     public IBoundaryRule NewRule() => Rule?.Fresh() ?? new ProllyBoundaryRule(Seed);
 
@@ -147,7 +153,7 @@ internal static class DatasetCommitter
             CommitObjectBuilder builder = new CommitObjectBuilder(version);
             SchemaEdit schema = new SchemaEdit(template.Schema, template.Retired);
             (Dictionary<int, List<TreeChange>> changes, List<OperationOutcome> outcomes, Relocation repack) =
-                await ApplyAsync(levels, operations, pages, builder, schema, cancellationToken).ConfigureAwait(false);
+                await ApplyAsync(levels, operations, pages, builder, schema, options.InlineVectorBytes, cancellationToken).ConfigureAwait(false);
 
             pages.Writing(builder, version);
             DatasetLevels next = levels;
@@ -585,6 +591,7 @@ internal static class DatasetCommitter
             CommitPageSource pages,
             CommitObjectBuilder builder,
             SchemaEdit schema,
+            int inlineVectorBytes,
             CancellationToken cancellationToken)
     {
         Relocation repack = new Relocation();
@@ -725,7 +732,16 @@ internal static class DatasetCommitter
                                 }
                             }
 
-                            Put(level, leaf.Key, entry with { Fragments = fragments });
+                            // A vector out of line moves as a fragment does, its bytes unchanged.
+                            entry = entry with { Fragments = fragments };
+                            if (entry.VectorAt.Exists && repack.Versions.Contains(entry.VectorAt.Version))
+                            {
+                                await entry.ResolveAsync(pages, cancellationToken).ConfigureAwait(false);
+                                entry = entry.WithVectorAt(builder.AddFragment(entry.EncodedDeletions.Span));
+                                repack.Moved++;
+                            }
+
+                            Put(level, leaf.Key, entry);
                         }
                     }
 
@@ -782,6 +798,16 @@ internal static class DatasetCommitter
 
         void Put(int level, ReadOnlyMemory<byte> key, ObjectEntry entry)
         {
+            // A vector too long for its entry goes into this commit object, once, and the entry, in
+            // every page that will hold it, carries its reference instead.
+            if (inlineVectorBytes > 0 && entry.InlineVectorBytes > inlineVectorBytes)
+            {
+                // Kept by the writer, whose next reads of the object then ask the store for nothing.
+                ReadOnlyMemory<byte> vector = entry.EncodedDeletions;
+                entry = entry.WithVectorAt(builder.AddFragment(vector.Span));
+                pages.Keep(entry.VectorAt, vector);
+            }
+
             Batch(level)[key.ToArray()] = TreeChange.Put(key, entry.ToBytes(), entry.Rows);
             pending[Named(level, key)] = entry;
         }

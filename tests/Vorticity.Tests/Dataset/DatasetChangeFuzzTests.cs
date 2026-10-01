@@ -25,15 +25,19 @@ public sealed class DatasetChangeFuzzTests
     private static readonly string[] Sites = ["Paris", "Lyon", "Nice", "Lille"];
 
     [Theory]
-    [InlineData(7, false)]
-    [InlineData(19, false)]
-    [InlineData(31, false)]
-    [InlineData(43, false)]
-    [InlineData(7, true)]
-    [InlineData(19, true)]
-    [InlineData(31, true)]
-    [InlineData(43, true)]
-    public async Task AScheduleOfChangesAnswersAsTheModel(int seed, bool marked)
+    [InlineData(7, false, false)]
+    [InlineData(19, false, false)]
+    [InlineData(31, false, false)]
+    [InlineData(43, false, false)]
+    [InlineData(7, true, false)]
+    [InlineData(19, true, false)]
+    [InlineData(31, true, false)]
+    [InlineData(43, true, false)]
+    [InlineData(7, true, true)]
+    [InlineData(19, true, true)]
+    [InlineData(31, true, true)]
+    [InlineData(43, true, true)]
+    public async Task AScheduleOfChangesAnswersAsTheModel(int seed, bool marked, bool outOfLine)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         Decoders.EnsureRegistered();
@@ -45,6 +49,7 @@ public sealed class DatasetChangeFuzzTests
             Write = new VortexWriteOptions { RowBlockSize = 64, DataBlockTargetBytes = 2 << 10 },
             MarkedObjectBytes = marked ? 0 : long.MaxValue,
             MarkedShare = 1,
+            InlineVectorBytes = outOfLine ? 1 : 256,
         };
         await using VortexDataset reader = await VortexDataset.CreateAsync(store, MeterV1.Schema, options, ct);
         await using VortexDataset first = await VortexDataset.OpenAsync(store, options, ct);

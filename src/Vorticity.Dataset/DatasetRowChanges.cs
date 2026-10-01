@@ -303,7 +303,7 @@ internal static class DatasetRowChanges
     private static bool FitsAtWorst(DatasetOptions options, ObjectEntry entry, long matched)
     {
         int varint = TreePage.VarintBytes((ulong)entry.PhysicalRows);
-        long held = entry.HasDeletions ? entry.Deletions.EncodedBytes : 0;
+        long held = entry.VectorBytes;
         return held + (matched * 2 * varint) <= options.MarkedVectorBytes;
     }
 

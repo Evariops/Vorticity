@@ -120,6 +120,17 @@ internal sealed class CommitPageSource : IPageSource
     /// </summary>
     public bool TryGetStart(ulong version, out long start) => _starts.TryGetValue(version, out start);
 
+    /// <summary>
+    /// Keeps bytes this source's writer put at <paramref name="reference"/>, for itself and for the
+    /// handle's later versions: a reference names its bytes by their hash, so bytes kept for a commit
+    /// that then loses name nothing another writer's commit holds under other bytes.
+    /// </summary>
+    public void Keep(PageReference reference, ReadOnlyMemory<byte> bytes)
+    {
+        _known[reference] = bytes;
+        _cache?.Add(reference, bytes);
+    }
+
     /// <summary>Records where a version's pages region starts, learned without a request.</summary>
     public void Know(ulong version, long pagesStart)
     {

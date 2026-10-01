@@ -26,15 +26,19 @@ public sealed class DatasetDeletionVectorTests
     private static readonly string[] Cities = ["Paris", "Lyon", "Nice", "Lille"];
 
     [Theory]
-    [InlineData(true, false)]
-    [InlineData(true, true)]
-    [InlineData(false, false)]
-    public async Task MarkedRowsReadAsARewriteWouldLeaveThem(bool clustered, bool compacted)
+    [InlineData(true, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, true)]
+    [InlineData(false, false, true)]
+    public async Task MarkedRowsReadAsARewriteWouldLeaveThem(bool clustered, bool compacted, bool outOfLine)
     {
+        // Out of line, every vector lies in the commit object that wrote it and each read fetches it.
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore markedStore = new MemoryObjectStore();
         await using MemoryObjectStore rewrittenStore = new MemoryObjectStore();
-        await using VortexDataset marked = await CreateAsync(markedStore, Options(clustered, marking: true), ct);
+        await using VortexDataset marked = await CreateAsync(markedStore, Options(clustered, marking: true) with { InlineVectorBytes = outOfLine ? 1 : 256 }, ct);
         await using VortexDataset rewritten = await CreateAsync(rewrittenStore, Options(clustered, marking: false), ct);
         if (compacted)
         {
@@ -60,8 +64,17 @@ public sealed class DatasetDeletionVectorTests
         }
 
         Assert.True((await marked.ObjectsAsync(ct).ToListAsync(ct)).Exists(held => held.DeletedRows > 0));
+        Assert.All(
+            (await marked.ObjectsAsync(ct).ToListAsync(ct)).Where(held => held.DeletedRows > 0),
+            held => Assert.Equal(outOfLine || held.Entry!.VectorBytes > 256, held.Entry!.VectorAt.Exists));
         await AgreeAsync(marked, rewritten, clustered, ct);
         Assert.True((await marked.VerifyAsync(cancellationToken: ct)).Holds);
+
+        // A handle that never read the vectors reads them where they lie.
+        await using (VortexDataset cold = await VortexDataset.OpenAsync(markedStore, Options(clustered, marking: true), ct))
+        {
+            await AgreeAsync(cold, rewritten, clustered, ct);
+        }
 
         // An update marks the rows it changes where they were, and appends them changed.
         RowChangeResult update = await marked.UpdateAsync<ChangeRow>(r => r.Key >= 2_000 & r.Key < 2_150, row => row with { Measure = -1.0 }, ct);

@@ -545,7 +545,11 @@ at a run a row when that already fits, and otherwise from the rows' places, read
 written, since the rows a range takes are one run whatever their number. The vector lives in a leaf page: a commit that
 marks a row in any object of a page writes the page again, so the bound weighs the rewrites the marks
 save against the bytes they add to each of those commits; a commit that does not change the page
-leaves it out of its header (§3). The rows a rewritten object keeps are a subset of
+leaves it out of its header (§3). A vector past 256 bytes lies out of line instead: written once into
+the commit object that made it, as a fragment is (§6.4), and named by its entry by a reference, so
+the page carries 37 bytes for it whatever the marks. A rent of the object reads it beside the
+object's open, where the version's pages lie or the handle kept it; vacuum keeps the commit object it
+lies in, and a repack moves it. The rows a rewritten object keeps are a subset of
 its rows, so its keys lie inside its old range: a level above 0 stays key-disjoint and the tree's order
 holds; without a clustering key the rewritten object keeps the old one's position. Either way the rows
 are judged by the scan's own evaluator, so a delete and a scan with the same filter agree on every row,
@@ -575,11 +579,10 @@ rows in it would bring those rows back: its `ReplaceObjects` names the entries i
 vector — and is abandoned when one of them changed (§8.2).
 
 **What it costs.** Measured by the churn (§15) on ten million rows and thirty thousand commits of ten
-rows at random keys: an update takes 1.9 to 3.0 ms and a delete 0.9 to 1.7 ms, where rewriting the
-4 MiB objects that hold the rows takes 19 and 14 ms. A commit writes 12 KiB at first and 29 to 57 KiB
+rows at random keys: an update takes 1.9 to 2.9 ms and a delete 0.9 to 1.6 ms, where rewriting the
+4 MiB objects that hold the rows takes 19 and 14 ms. A commit writes 12 KiB at first and 16 to 55 KiB
 once the vectors have filled, where a rewrite writes 3.3 MiB: the rows' own objects, and a commit
-object of 8 KiB at first and 10 to 14 KiB then, most of it the leaf page a commit that marks rows
-writes again.
+object of 8 to 10 KiB throughout, whose leaf page carries a reference for each vector past 256 bytes.
 Compaction, merges and purges together, writes 61 to 111 KiB a commit. After a thousand commits the store holds 137 MiB rather than 449 MiB, since the retention
 window keeps every object a rewrite replaced (§10). The reads cost what they cost on the rewritten
 dataset: a filter over every object makes the same 220 requests, and a point lookup, a seek, a count
@@ -685,11 +688,12 @@ by widening a number or making it nullable (§13).
 - **Rust**: compaction outputs are among the files the cross-check hands to Rust 0.86.1.
 - **The churn** (`bench/Vorticity.Benchmarks.Churn`): ten million rows, then thirty thousand commits of
   ten rows — appends, updates and deletes at random keys — with compaction drained and vacuum run
-  between them. Every cost stays flat, or levels off once the marks have filled: an append 0.6 to
-  0.8 ms, an update 1.9 to 3.0 ms, a delete 0.9 to 1.7 ms, five to six requests an operation with
-  its commit's one among them, compaction about a millisecond a commit, a commit's bytes 12 KiB and then 29 to 57 KiB; a point
-  lookup 0.8 to 1.2 ms in three to four requests, a seek and ten steps either way 0.3 to 0.8 ms, a
-  hundred rows by position 0.2 to 0.4 ms, a scan of every row 28 ms; the heap between 64 and 87 MiB. Rewriting instead of marking, an update takes 19 ms and
+  between them. Every cost stays flat, or levels off once the marks have filled: an append 0.5 to
+  0.7 ms, an update 1.9 to 2.9 ms, a delete 0.9 to 1.6 ms, five to six requests an operation with
+  its commit's one among them, compaction about a millisecond a commit, a commit's bytes 12 KiB and
+  then 16 to 55 KiB, of which its commit object is 8 to 10 KiB; a point lookup 0.7 to 1.0 ms in three
+  to four requests, a seek and ten steps either way 0.3 to 0.7 ms, a hundred rows by position 0.2 to
+  0.4 ms, a scan of every row 30 ms; the heap between 60 and 92 MiB. Rewriting instead of marking, an update takes 19 ms and
   a commit writes 3.3 MiB. Before the level-0 destination, the cap on an object and the chunked buffer,
   an update cost 820 ms, compaction 100 ms a commit and the heap grew to 2.2 GiB over the first 150
   commits.
