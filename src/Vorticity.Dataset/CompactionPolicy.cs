@@ -49,7 +49,7 @@ internal static class CompactionPolicy
     {
         ArgumentNullException.ThrowIfNull(dataset);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(jobs);
-        CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
+        CompactionOptions settings = SettingsFor(dataset, options);
         CompactionStyle style = settings.StyleFor(dataset.Key is not null);
         if (style == CompactionStyle.Leveled && dataset.Key is not null
             && await TalliesAsync(dataset, cancellationToken).ConfigureAwait(false) is { } tallies)
@@ -68,9 +68,19 @@ internal static class CompactionPolicy
         VortexDataset dataset, CompactionOptions? options, CancellationToken cancellationToken, int jobs = 1)
     {
         ArgumentNullException.ThrowIfNull(dataset);
-        CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
+        CompactionOptions settings = SettingsFor(dataset, options);
         return await ReadEveryLeafAsync(dataset, settings, settings.StyleFor(dataset.Key is not null), jobs, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The options a plan works to: the caller's, under whatever the dataset's header states, and on a
+    /// store that locks what it keeps no purge, which would add bytes for the lock's term and free none.
+    /// </summary>
+    private static CompactionOptions SettingsFor(VortexDataset dataset, CompactionOptions? options)
+    {
+        CompactionOptions settings = (options ?? new CompactionOptions()).From(dataset.Compaction);
+        return dataset.LockedStore ? settings with { PurgeMarks = false } : settings;
     }
 
     private static async ValueTask<CompactionPlan> ReadEveryLeafAsync(

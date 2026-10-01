@@ -1921,6 +1921,7 @@ Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan RetentionWindow { get; init; }
 Vorticity.Dataset:     property VortexSession Session { get; init; }
 Vorticity.Dataset:     property VortexWriteOptions Write { get; init; }
+Vorticity.Dataset:     property bool LockedStore { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
 Vorticity.Dataset:     property int RetainedVersions { get; init; }
@@ -1970,8 +1971,10 @@ Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, CancellationToken)
 Vorticity.Dataset:     method ValueTask<ObjectRange> GetRangeAsync(string, long, int, CancellationToken)
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutIfAbsentAsync(string, PipeReader, long, CancellationToken)
+Vorticity.Dataset:     method void Hold(string, bool)
 Vorticity.Dataset:     property Func<ObjectOperation, string, bool> Fails { get; set; }
 Vorticity.Dataset:     property Func<string, bool> CrashesAfterPut { get; set; }
+Vorticity.Dataset:     property Nullable<TimeSpan> RetainFor { get; set; }
 Vorticity.Dataset:     property TimeProvider TimeProvider { get; set; }
 Vorticity.Dataset:     property TimeSpan Latency { get; set; }
 Vorticity.Dataset:     property int Count { get; }
@@ -1984,12 +1987,15 @@ Vorticity.Dataset: struct Vorticity.Dataset.ObjectHead : IEquatable<ObjectHead>
 Vorticity.Dataset:     ctor ObjectHead(long, string, DateTimeOffset)
 Vorticity.Dataset:     method bool Equals(ObjectHead)
 Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool IsLockedAt(DateTimeOffset)
 Vorticity.Dataset:     method bool op_Equality(ObjectHead, ObjectHead)
 Vorticity.Dataset:     method bool op_Inequality(ObjectHead, ObjectHead)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     method void Deconstruct(out long, out string, out DateTimeOffset)
 Vorticity.Dataset:     property DateTimeOffset LastModified { get; init; }
+Vorticity.Dataset:     property Nullable<DateTimeOffset> RetainUntil { get; init; }
+Vorticity.Dataset:     property bool LegalHold { get; init; }
 Vorticity.Dataset:     property long Length { get; init; }
 Vorticity.Dataset:     property string Token { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.ObjectNotFoundException : VortexException
@@ -2084,8 +2090,10 @@ Vorticity.Dataset:     method bool op_Inequality(VacuumResult, VacuumResult)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property ImmutableArray<string> Deleted { get; init; }
+Vorticity.Dataset:     property ImmutableArray<string> Locked { get; init; }
 Vorticity.Dataset:     property ImmutableArray<string> Young { get; init; }
 Vorticity.Dataset:     property ImmutableArray<ulong> Retained { get; init; }
+Vorticity.Dataset:     property Nullable<DateTimeOffset> NextUnlock { get; init; }
 Vorticity.Dataset:     property TimeSpan Window { get; init; }
 Vorticity.Dataset:     property long PagesRead { get; init; }
 Vorticity.Dataset:     property ulong Latest { get; init; }

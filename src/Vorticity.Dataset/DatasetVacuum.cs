@@ -47,6 +47,15 @@ public sealed record VacuumResult
     public ImmutableArray<string> Young { get; init; } = [];
 
     /// <summary>
+    /// The objects past the window that the store still keeps under a retention lock or a legal hold,
+    /// which vacuum leaves for a later run: a store under a lock refuses to delete them before.
+    /// </summary>
+    public ImmutableArray<string> Locked { get; init; } = [];
+
+    /// <summary>When the first of <see cref="Locked"/> may go, by the store's clock: the earliest of their retention dates; null when none has one.</summary>
+    public DateTimeOffset? NextUnlock { get; init; }
+
+    /// <summary>
     /// The commit objects kept alive only by references into them, whose live pages and fragments are
     /// under <see cref="VacuumOptions.RepackBelow"/> of their body: what a repack would free at the
     /// next vacuum past the window.
@@ -89,14 +98,14 @@ internal static class DatasetVacuum
         TimeSpan window = WindowOf(retention);
 
         // A commit newer than the one marked from is not this vacuum's to judge.
-        List<(ulong Version, string Key, DateTimeOffset Created)> commits = [];
+        List<(ulong Version, string Key, ObjectHead Head)> commits = [];
         Dictionary<ulong, long> lengths = [];
         foreach (string key in await store.ListAllAsync(CommitKey.Prefix, cancellationToken).ConfigureAwait(false))
         {
             if (CommitKey.TryParse(key, out ulong version) && version <= latest
                 && await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) is { } found)
             {
-                commits.Add((version, key, found.LastModified));
+                commits.Add((version, key, found));
                 lengths[version] = found.Length;
             }
         }
@@ -105,7 +114,7 @@ internal static class DatasetVacuum
         for (int i = 1; i < commits.Count; i++)
         {
             // Superseded when the next commit that survives was created.
-            DateTimeOffset superseded = commits[i - 1].Created;
+            DateTimeOffset superseded = commits[i - 1].Head.LastModified;
             if (i <= retention.Versions || now - superseded < window)
             {
                 retained.Add(commits[i].Version);
@@ -133,13 +142,15 @@ internal static class DatasetVacuum
 
         List<string> deleted = [];
         List<string> young = [];
+        List<string> locked = [];
+        DateTimeOffset? unlock = null;
         List<string> batch = [];
         for (int i = commits.Count - 1; i >= 0; i--)
         {
-            (ulong version, string key, DateTimeOffset created) = commits[i];
+            (ulong version, string key, ObjectHead found) = commits[i];
             if (!markedCommits.Contains(version))
             {
-                Sweep(key, created);
+                Sweep(key, found);
             }
         }
 
@@ -149,20 +160,30 @@ internal static class DatasetVacuum
             if (!markedData.Contains(key)
                 && await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) is { } found)
             {
-                Sweep(key, found.LastModified);
+                Sweep(key, found);
             }
         }
 
         await DeleteAsync().ConfigureAwait(false);
 
         // A compaction loop's leases, each named by when it ended: the key dates it, and one that
-        // ended a window ago holds nothing.
+        // ended a window ago holds nothing. Only a store that locks what it keeps is asked for the
+        // lock of each, which the head says.
         foreach (string key in await store.ListAllAsync(CompactionLoop.LeasePrefix, cancellationToken).ConfigureAwait(false))
         {
-            if (CompactionLoop.TryParseEnd(key, out long end) && now - DateTimeOffset.FromUnixTimeSeconds(end) >= window)
+            if (!CompactionLoop.TryParseEnd(key, out long end) || now - DateTimeOffset.FromUnixTimeSeconds(end) < window)
+            {
+                continue;
+            }
+
+            if (!head.Header.LockedStore)
             {
                 batch.Add(key);
                 deleted.Add(key);
+            }
+            else if (await store.HeadAsync(key, cancellationToken).ConfigureAwait(false) is { } found)
+            {
+                Sweep(key, found);
             }
         }
 
@@ -195,6 +216,8 @@ internal static class DatasetVacuum
             PagesRead = seen.Count,
             Deleted = [.. deleted],
             Young = [.. young],
+            Locked = [.. locked],
+            NextUnlock = unlock,
             Sparse = sparse,
         };
 
@@ -233,11 +256,23 @@ internal static class DatasetVacuum
             }
         }
 
-        void Sweep(string key, DateTimeOffset created)
+        void Sweep(string key, ObjectHead found)
         {
-            if (now - created < window)
+            if (now - found.LastModified < window)
             {
                 young.Add(key);
+                return;
+            }
+
+            // Past the window and still under the store's lock: the next vacuum after the date takes it.
+            if (found.IsLockedAt(now))
+            {
+                locked.Add(key);
+                if (!found.LegalHold && found.RetainUntil is { } until && (unlock is not { } first || until < first))
+                {
+                    unlock = until;
+                }
+
                 return;
             }
 

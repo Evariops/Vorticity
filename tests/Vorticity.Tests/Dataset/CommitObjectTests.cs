@@ -65,6 +65,7 @@ public sealed class CommitObjectTests
 
             // Where the foreign reference's version keeps its pages, so that reading it is one request.
             Starts = [new PagesStart(3, 18_000), new PagesStart(5, 700)],
+            LockedStore = true,
         };
 
         return (builder.Build(header), header, first, second, fragment, foreign);
@@ -106,6 +107,7 @@ public sealed class CommitObjectTests
         // The foreign reference passed through untouched, and where its version's pages start.
         Assert.Equal(foreign, commit.Header.Levels[2].Top);
         Assert.Equal(written.Starts, commit.Header.Starts);
+        Assert.True(commit.Header.LockedStore);
 
         // The inlined page is the header's own copy, and it is the same page.
         InlinedPage inlined = Assert.Single(commit.Header.Levels[0].Inlined);

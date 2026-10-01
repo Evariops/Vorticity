@@ -109,6 +109,9 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>What vacuum keeps, as the header carries it.</summary>
     internal RetentionSettings Retention => Snapshot.Header.Retention;
 
+    /// <summary>Whether the dataset lives on a store that locks what it keeps, as the header carries it.</summary>
+    internal bool LockedStore => Snapshot.Header.LockedStore;
+
     /// <summary>Its clustering key, or null when it is ordered by arrival.</summary>
     internal ClusteringKey? Key => Snapshot.Schema.Key;
 
@@ -154,7 +157,7 @@ public sealed class VortexDataset : IAsyncDisposable
             throw ObjectNotFoundException.For(CommitKey.Prefix);
         }
 
-        return new VortexDataset(store, options with { Seed = commit.Header.Seed }, version, commit, asked);
+        return new VortexDataset(store, options.For(commit.Header), version, commit, asked);
     }
 
     /// <summary>Moves this handle to the latest version.</summary>
@@ -732,7 +735,10 @@ public sealed class VortexDataset : IAsyncDisposable
             Schema = DTypeProtobuf.Serialize(schema),
             ClusteringKey = [.. options.ClusteringKey ?? []],
             Retention = options.Retention,
-            Compaction = options.Compaction,
+            Compaction = options.LockedStore && options.Compaction.Fanout == 0
+                ? options.Compaction with { Fanout = DatasetOptions.LockedFanout }
+                : options.Compaction,
+            LockedStore = options.LockedStore,
             Chunker = new ChunkerSettings(
                 ProllyBoundaryRule.DefaultMinBytes,
                 ProllyBoundaryRule.DefaultTargetBytes,
