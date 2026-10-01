@@ -45,6 +45,13 @@ internal sealed class CommitObject
     public long HeaderEnd { get; }
 
     /// <summary>
+    /// The start of the pages region that the open read brought back past the header: where the
+    /// pages this version wrote and did not inline lie, when they lie inside the read. Empty for an
+    /// object opened from bytes a caller already held.
+    /// </summary>
+    public ReadOnlyMemory<byte> Held { get; private init; }
+
+    /// <summary>
     /// Opens a commit object from its first bytes, at least <see cref="CommitFormat.MinimumBytes"/>
     /// of them. <paramref name="objectLength"/> is what the store says the object measures, or
     /// negative when the caller does not know; it decides whether these bytes are the whole object,
@@ -64,10 +71,10 @@ internal sealed class CommitObject
         }
 
         uint format = BinaryPrimitives.ReadUInt32LittleEndian(bytes[8..]);
-        if (format != CommitFormat.Version)
+        if (format < CommitFormat.OldestRead || format > CommitFormat.Version)
         {
             throw new CommitFormatException(
-                $"This library reads commit format {CommitFormat.Version} and the object is format {format}.");
+                $"This library reads commit formats {CommitFormat.OldestRead} to {CommitFormat.Version} and the object is format {format}.");
         }
 
         uint headerLength = BinaryPrimitives.ReadUInt32LittleEndian(bytes[12..]);
@@ -142,7 +149,32 @@ internal sealed class CommitObject
 
         // The read is the whole object exactly when it came back short of what was asked for.
         long length = range.Length < CommitFormat.OpenBytes ? range.Length : -1;
-        return Open(range.Contiguous().Span, length);
+        ReadOnlySpan<byte> bytes = range.Contiguous().Span;
+        CommitObject opened = Open(bytes, length);
+        return opened.HeaderEnd < bytes.Length
+            ? new CommitObject(opened.Header, opened.Table, opened.Trailer, opened.Length, opened.HeaderEnd)
+            {
+                Held = bytes[(int)opened.HeaderEnd..].ToArray(),
+            }
+            : opened;
+    }
+
+    /// <summary>
+    /// The commit object its writer has just placed, as an open would find it without reading it: the
+    /// header it wrote, where its pages region starts, and what of that region the open's read would
+    /// bring back. Its table and trailer stay the writer's; no reader needs them.
+    /// </summary>
+    public static CommitObject Placed(CommitHeader header, byte[] bytes)
+    {
+        ArgumentNullException.ThrowIfNull(header);
+        ArgumentNullException.ThrowIfNull(bytes);
+        int headerEnd = CommitFormat.PreambleBytes + (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(12));
+
+        // An object past the read is copied out of, since a slice of it would keep all of it.
+        ReadOnlyMemory<byte> held = bytes.Length <= CommitFormat.OpenBytes
+            ? bytes.AsMemory(headerEnd)
+            : bytes.AsSpan(headerEnd, Math.Max(CommitFormat.OpenBytes - headerEnd, 0)).ToArray();
+        return new CommitObject(header, CommitTable.Empty, null, bytes.Length, headerEnd) { Held = held };
     }
 
     /// <summary>

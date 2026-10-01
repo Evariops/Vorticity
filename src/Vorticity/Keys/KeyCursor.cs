@@ -257,6 +257,21 @@ internal sealed class KeyCursor : IKeyWalker
         return _source.RankAsync(key, cancellationToken);
     }
 
+    /// <summary>How many entries have a key at or below <paramref name="key"/>.</summary>
+    /// <param name="key">The key to rank, in the column's domain.</param>
+    /// <param name="cancellationToken">Cancels the reads this makes.</param>
+    /// <returns>The rank, between zero and <see cref="EntryCount"/>.</returns>
+    /// <remarks>The cursor's position does not move.</remarks>
+    /// <exception cref="ArgumentException">The key is of the wrong domain, or is null.</exception>
+    /// <exception cref="InvalidOperationException">The source has no rows (<see cref="HasRows"/>), so no entry count to rank in.</exception>
+    internal ValueTask<long> UpperRankAsync(FilterLiteral key, CancellationToken cancellationToken = default)
+    {
+        RequireKey(key);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        RequireRows(nameof(UpperRankAsync));
+        return _source.UpperRankAsync(key, cancellationToken);
+    }
+
     /// <summary>
     /// How many entries have a key below the key <paramref name="other"/> is on, or at or below it
     /// with <paramref name="upper"/>.

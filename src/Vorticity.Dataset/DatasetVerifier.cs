@@ -100,6 +100,7 @@ internal static class DatasetVerifier
         }
 
         run.CheckInlined(target);
+        await run.CheckStartsAsync(target).ConfigureAwait(false);
         CommitHeader? since = options.Since is { } older and not 0
             ? (await CommitObject.OpenAsync(store, CommitKey.For(older), cancellationToken).ConfigureAwait(false)).Header
             : null;
@@ -160,6 +161,33 @@ internal static class DatasetVerifier
                     {
                         Problems.Add(Invariant($"the header inlines a page of version {page.Reference.Version} at {page.Reference.Offset} whose bytes do not hash to its reference"));
                     }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Every place the header says an earlier version's pages start, against that version's own
+        /// preamble: a reader reads the pages there without asking, and a wrong one would make every
+        /// such page unreadable through this version while each verified whole.
+        /// </summary>
+        internal async ValueTask CheckStartsAsync(CommitHeader header)
+        {
+            foreach (PagesStart start in header.Starts)
+            {
+                long actual;
+                try
+                {
+                    actual = await CommitObject.PagesStartAsync(store, CommitKey.For(start.Version), cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception unreadable) when (unreadable is CommitFormatException or ObjectNotFoundException)
+                {
+                    Problems.Add(Invariant($"the header says where version {start.Version}'s pages start, and that version does not say: {unreadable.Message}"));
+                    continue;
+                }
+
+                if (actual != start.Offset)
+                {
+                    Problems.Add(Invariant($"the header says version {start.Version}'s pages start at {start.Offset}, and they start at {actual}"));
                 }
             }
         }
@@ -249,7 +277,7 @@ internal static class DatasetVerifier
                 }
                 else
                 {
-                    entries!.Add(ObjectEntry.FromBytes(leaf.Value.Span));
+                    entries!.Add(ObjectEntry.FromBytes(leaf.Value));
                 }
             }
         }
@@ -350,9 +378,36 @@ internal static class DatasetVerifier
 
                 await using (file.ConfigureAwait(false))
                 {
-                    if (file.RowCount != entry.Rows)
+                    // The file holds its deleted rows too, which the entry counts apart.
+                    if (file.RowCount != entry.PhysicalRows)
                     {
-                        Problems.Add(Invariant($"'{entry.Key}' holds {file.RowCount} rows and its entry says {entry.Rows}"));
+                        Problems.Add(entry.HasDeletions
+                            ? Invariant($"'{entry.Key}' holds {file.RowCount} rows and its entry says {entry.Rows} and {entry.DeletedRows} deleted")
+                            : Invariant($"'{entry.Key}' holds {file.RowCount} rows and its entry says {entry.Rows}"));
+                    }
+
+                    // A read decodes the vector when it opens the object; verify decodes every one,
+                    // reading one out of line from the commit object it lies in, checked by its hash.
+                    if (entry.HasDeletions)
+                    {
+                        if (entry.VectorAt.Exists)
+                        {
+                            _commits.Add(entry.VectorAt.Version);
+                        }
+
+                        try
+                        {
+                            await entry.ResolveAsync(_pages, cancellationToken).ConfigureAwait(false);
+                            _ = entry.Deletions;
+                        }
+                        catch (CommitFormatException malformed)
+                        {
+                            Problems.Add($"'{entry.Key}': its deleted rows are not a vector of its own rows: {malformed.Message}");
+                        }
+                        catch (Exception unreadable) when (unreadable is TornCommitException or ObjectNotFoundException or ArgumentOutOfRangeException)
+                        {
+                            Problems.Add(Invariant($"'{entry.Key}': its vector in version {entry.VectorAt.Version} at {entry.VectorAt.Offset}+{entry.VectorAt.Length}: {(unreadable is TornCommitException { InnerException: { } cause } ? cause : unreadable).Message}"));
+                        }
                     }
 
                     if (entry.Uid != UInt128.Zero && VortexDataset.Identity(file) != entry.Uid)

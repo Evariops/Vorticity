@@ -102,7 +102,7 @@ public class KeyOrderedMergeBenchmarks
         long rows = 0;
         KeyOrderedMerge merge = new KeyOrderedMerge(
             _dataset.Snapshot, ObjectsAsync(), Paths, descending: false, rankedTies: true,
-            file => file.ScanBuilder().InKeyOrder(Paths, false), null, CancellationToken.None);
+            (lease, _) => lease.File.ScanBuilder().InKeyOrder(Paths, false).ExecuteAsync(), null, CancellationToken.None);
         await using (merge.ConfigureAwait(false))
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))

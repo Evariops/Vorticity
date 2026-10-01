@@ -381,7 +381,8 @@ internal static class AggregationEngine
 
     /// <summary>
     /// The spec of the pass: the columns it reads, their encoded forms kept and counted as decoded
-    /// only when an aggregate expands them, whole blocks with their selection, no key order.
+    /// only when an aggregate expands them, whole blocks with their selection, no key order, and no
+    /// row's place read.
     /// </summary>
     internal static ScanSpec PassSpec(ScanSpec spec, ColumnShape[] columns)
     {
@@ -396,6 +397,7 @@ internal static class AggregationEngine
             Projection = mask.Build(),
             KeepEncodings = true,
             SinkDecodes = true,
+            PositionsUnread = true,
             OrderPath = null,
             Descending = false,
             Options = spec.Options with { Compact = false },

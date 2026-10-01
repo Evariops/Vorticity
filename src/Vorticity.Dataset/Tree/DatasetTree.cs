@@ -256,6 +256,65 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         return null;
     }
 
+    /// <summary>
+    /// The first entry whose key is past <paramref name="key"/>, or with <paramref name="wrap"/> the
+    /// first of all when none is; null when the tree is empty, or nothing is past the key and the
+    /// search does not wrap. One path down: a page's entry bounds the keys of its subtree, so the
+    /// first child whose largest key is past this one holds the entry.
+    /// </summary>
+    public async ValueTask<TreeEntry?> NextAsync(
+        ReadOnlyMemory<byte> key, bool wrap, IPageSource source, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (IsEmpty)
+        {
+            return null;
+        }
+
+        PageReference reference = Root;
+        bool wrapped = false;
+        for (int level = Depth; level > 1; level--)
+        {
+            IReadOnlyList<InternalEntry> page = TreePage.ReadInternal(
+                await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false));
+            int child = 0;
+            while (!wrapped && child < page.Count && TreePage.Compare(page[child].MaxKey.Span, key.Span) <= 0)
+            {
+                child++;
+            }
+
+            if (child == page.Count)
+            {
+                // Only the top page can hold no child past the key: one below was entered for
+                // holding a larger one.
+                if (!wrap)
+                {
+                    return null;
+                }
+
+                wrapped = true;
+                child = 0;
+            }
+
+            reference = page[child].Child;
+        }
+
+        IReadOnlyList<TreeEntry> leaf = TreePage.ReadLeaf(
+            await source.ReadPageAsync(reference, cancellationToken).ConfigureAwait(false));
+        if (!wrapped)
+        {
+            foreach (TreeEntry entry in leaf)
+            {
+                if (TreePage.Compare(entry.Key.Span, key.Span) > 0)
+                {
+                    return entry;
+                }
+            }
+        }
+
+        return wrap ? leaf[0] : null;
+    }
+
     /// <summary>Every entry, in key order.</summary>
     public async IAsyncEnumerable<TreeEntry> EnumerateAsync(
         IPageSource source,
@@ -667,7 +726,7 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
 
         private void Cut()
         {
-            ReadOnlyMemory<byte> summary = _fold.Union(_summaries);
+            ReadOnlyMemory<byte> summary = _fold.Union(_summaries, _leaf);
             if (_leaf)
             {
                 long rows = 0;

@@ -920,9 +920,10 @@ internal sealed class IndexWriter : IDisposable
         }
 
         // What is left over the budget once every other index has given way is the required ones':
-        // they are not kept past it, they fail the write, and dropped here their payloads never go out.
+        // they are not kept past it, they fail the write, and dropped here their payloads never go
+        // out -- unless the writer was told they are the file's structure, which they then are.
         long required = RequiredBytes;
-        if (dataBytes >= BudgetFloor && required * 1000 > dataBytes * _budgetPerMille)
+        if (!BudgetSparesRequired && dataBytes >= BudgetFloor && required * 1000 > dataBytes * _budgetPerMille)
         {
             for (int field = 0; field < _builders.Length; field++)
             {
@@ -1349,6 +1350,9 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>When a run's table goes to fence pages; lowered only by the tests that page a short run.</summary>
     internal FenceShape Fences { get; init; } = FenceShape.Default;
+
+    /// <summary>Whether the required indexes are written even when they alone are over the budget; see <see cref="VortexWriteOptions.BudgetSparesRequired"/>.</summary>
+    internal bool BudgetSparesRequired { get; init; }
 
     /// <summary>The runs whose tables go to pages, in the order the pages are written.</summary>
     private List<PagedRun>? _paged;

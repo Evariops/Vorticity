@@ -28,7 +28,10 @@ public interface IObjectStore : IAsyncDisposable
     /// <exception cref="ArgumentOutOfRangeException">The range starts past the object's end.</exception>
     ValueTask<ObjectRange> GetRangeAsync(string key, long offset, int length, CancellationToken cancellationToken);
 
-    /// <summary>The object's size, token and creation time, without its bytes.</summary>
+    /// <summary>
+    /// The object's size, token and creation time, and the lock the store keeps it under, without its
+    /// bytes.
+    /// </summary>
     /// <param name="key">The object's key.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns>The head, or <see langword="null"/> when no object has that key.</returns>
@@ -70,7 +73,7 @@ public interface IObjectStore : IAsyncDisposable
     IAsyncEnumerable<string> ListAsync(string prefix, string? startAfter, CancellationToken cancellationToken);
 }
 
-/// <summary>An object's size, token and creation time.</summary>
+/// <summary>An object's size, token and creation time, and the lock the store keeps it under.</summary>
 /// <param name="Length">Its bytes.</param>
 /// <param name="Token">
 /// A value that changes whenever the bytes under the key change; since objects are immutable, that
@@ -80,7 +83,23 @@ public interface IObjectStore : IAsyncDisposable
 /// When the store created it, by the store's clock: two writers' clocks need not agree, and vacuum
 /// dates an object's age against the shared one.
 /// </param>
-public readonly record struct ObjectHead(long Length, string Token, DateTimeOffset LastModified);
+public readonly record struct ObjectHead(long Length, string Token, DateTimeOffset LastModified)
+{
+    /// <summary>
+    /// The date before which the store refuses to delete or overwrite the object, when it keeps it under
+    /// a retention lock: S3 Object Lock, Azure immutable blob storage, a GCS retention policy; null when
+    /// it keeps none.
+    /// </summary>
+    public DateTimeOffset? RetainUntil { get; init; }
+
+    /// <summary>Whether the object is under a legal hold, which no date lifts: the store refuses to delete it until the hold is released.</summary>
+    public bool LegalHold { get; init; }
+
+    /// <summary>Whether the store would refuse to delete the object at <paramref name="now"/>, by the store's clock.</summary>
+    /// <param name="now">The moment asked about.</param>
+    /// <returns>True under a legal hold, or before the retention date.</returns>
+    public bool IsLockedAt(DateTimeOffset now) => LegalHold || RetainUntil > now;
+}
 
 /// <summary>What <see cref="IObjectStore.PutIfAbsentAsync"/> did.</summary>
 public enum PutOutcome

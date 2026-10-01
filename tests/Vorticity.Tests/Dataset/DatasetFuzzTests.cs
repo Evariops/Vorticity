@@ -378,6 +378,7 @@ public sealed class DatasetFuzzTests
             ClusteringKey = ["key"],
             RetentionWindow = TimeSpan.FromSeconds(3_600),
             Write = new VortexWriteOptions { RowBlockSize = 128, DataBlockTargetBytes = 8 << 10 },
+            TimeProvider = clock,
         };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
         await using VortexDataset second = await VortexDataset.OpenAsync(store, options, ct);
@@ -553,8 +554,7 @@ public sealed class DatasetFuzzTests
 
             CommitObject commit = await CommitObject.OpenAsync(store, key, default);
             CommitPageSource pages = new CommitPageSource(store);
-            pages.Inline(commit.Header);
-            pages.Know(version, commit.HeaderEnd);
+            pages.Open(version, commit);
             DatasetTree tree = DatasetCommitter.TreeOf(commit.Header);
             await foreach (TreeEntry entry in tree.EnumerateAsync(pages, default))
             {
@@ -576,8 +576,7 @@ public sealed class DatasetFuzzTests
         }
 
         CommitPageSource pages = new CommitPageSource(store);
-        pages.Inline(commit.Header);
-        pages.Know(version, commit.HeaderEnd);
+        pages.Open(version, commit);
         return (DatasetCommitter.TreeOf(commit.Header), pages, version);
     }
 
@@ -617,7 +616,7 @@ public sealed class DatasetFuzzTests
             contents.Add(new PageReference(0, 0, fragment.Length, fragment.Hash));
         }
 
-        return entry with { Fragments = contents };
+        return entry.WithFragments(contents);
     }
 
     private static async Task<List<long>> KeysAsync(DatasetScanBuilder scan)
@@ -745,7 +744,7 @@ public sealed class DatasetFuzzTests
                             }
                         }
 
-                        _entries[key] = held with { Fragments = kept };
+                        _entries[key] = held.WithFragments(kept);
                     }
 
                     break;

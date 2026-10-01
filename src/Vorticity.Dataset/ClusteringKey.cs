@@ -20,10 +20,11 @@ internal sealed class ClusteringKey
     private readonly DType[] _dtypes;
     private readonly RowSortField[] _fields;
 
-    private ClusteringKey(string[] paths, DType[] dtypes)
+    private ClusteringKey(string[] paths, DType[] dtypes, bool mayHoldNull)
     {
         _paths = paths;
         _dtypes = dtypes;
+        MayHoldNull = mayHoldNull;
         _fields = new RowSortField[paths.Length];
         Array.Fill(_fields, RowSortField.Ascending);
     }
@@ -38,13 +39,38 @@ internal sealed class ClusteringKey
 
         string[] kept = [.. paths];
         DType[] dtypes = new DType[kept.Length];
+        bool mayHoldNull = false;
         for (int i = 0; i < kept.Length; i++)
         {
             dtypes[i] = Resolve(schema, kept[i]);
+            mayHoldNull |= ColumnPath.MayBeNull(schema, kept[i]);
         }
 
-        return new ClusteringKey(kept, dtypes);
+        return new ClusteringKey(kept, dtypes, mayHoldNull);
     }
+
+    /// <summary>
+    /// The key a new dataset declares, which may not be a tuple over a column that holds nulls: a
+    /// composite key's run holds no tuple with a null, so no merge could keep such a row, and every
+    /// compaction of an object holding one would be refused.
+    /// </summary>
+    /// <exception cref="ArgumentException">A path names no column, or the key is a tuple over one that may hold a null.</exception>
+    public static ClusteringKey? Declared(IReadOnlyList<string>? paths, DType schema)
+    {
+        ClusteringKey? key = For(paths, schema);
+        if (key is { IsComposite: true, MayHoldNull: true })
+        {
+            throw new ArgumentException(
+                $"The clustering key ({string.Join(", ", key.Paths)}) is a tuple over a column that may hold a null, and a " +
+                "tuple's run holds none: its rows could never be compacted. Declare a composite key on non-nullable columns.",
+                nameof(paths));
+        }
+
+        return key;
+    }
+
+    /// <summary>Whether a column of the key, or a struct on its path, is nullable.</summary>
+    public bool MayHoldNull { get; }
 
     /// <summary>The key's columns, in key order.</summary>
     public IReadOnlyList<string> Paths => _paths;
@@ -52,13 +78,29 @@ internal sealed class ClusteringKey
     /// <summary>Whether the key is a tuple rather than one column.</summary>
     public bool IsComposite => _paths.Length > 1;
 
+    /// <summary>
+    /// Whether an object whose rows come in key order needs no run to be walked by key: one
+    /// top-level column of integers that holds no null. Its file statistics then say the column is
+    /// sorted, and a sorted column is the source a key cursor and a key-ordered read take before any
+    /// run, with the zone map as its index, so a run beside it is bytes nobody reads.
+    /// </summary>
+    public bool OrdersBySortedColumn =>
+        !IsComposite
+        && !_paths[0].Contains('.', StringComparison.Ordinal)
+        && _dtypes[0].Kind == DTypeKind.Primitive
+        && _dtypes[0].PType.IsInteger()
+        && !_dtypes[0].IsNullable;
+
     /// <summary>The caller's write options, with the mandatory sorted run on the key added.</summary>
     public VortexWriteOptions Applied(VortexWriteOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        // Required rather than budgeted: on a narrow table the index budget would drop the run, and
-        // a dataset whose objects have no run cannot be walked in key order at all.
+        // Required rather than budgeted, and spared by the budget: on a narrow table the run is as
+        // large as the column it orders, so the budget would refuse it on every object past a
+        // mebibyte, compaction outputs included, and a dataset whose objects have no run cannot be
+        // walked in key order at all.
         IndexSpec run = IndexSpec.SortedRuns.AsRequired();
+        options = options with { BudgetSparesRequired = true };
         if (!IsComposite)
         {
             return options.WithIndexes(options.WritePolicy.For(_paths[0], run));
@@ -128,12 +170,36 @@ internal sealed class ClusteringKey
     /// <see cref="TryOpenAsync(VortexFile, CancellationToken)"/>, from the file's key indexes or,
     /// without <paramref name="indexes"/>, from a column its statistics say is sorted only.
     /// </summary>
-    public async ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, bool indexes, CancellationToken cancellationToken)
+    public ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, bool indexes, CancellationToken cancellationToken) =>
+        TryOpenAsync(file, _paths, indexes, cancellationToken);
+
+    /// <summary>
+    /// <see cref="TryOpenAsync(VortexFile, bool, CancellationToken)"/> over the key's columns as the
+    /// object names them: an object written under an earlier schema may hold a column under the name
+    /// it had then.
+    /// </summary>
+    public ValueTask<KeyCursor?> TryOpenAsync(VortexFile file, IReadOnlyList<string> paths, bool indexes, CancellationToken cancellationToken) =>
+        TryOpenAsync(file, paths, indexes, DeletionVector.Empty, ranksAreRows: false, cancellationToken);
+
+    /// <summary>
+    /// <see cref="TryOpenAsync(VortexFile, IReadOnlyList{string}, bool, CancellationToken)"/> without
+    /// the entries of the rows <paramref name="deletions"/> names: no step lands on one and no rank
+    /// counts one. With <paramref name="ranksAreRows"/> the file's rows are in this key's order, null
+    /// keys last, and the ranks follow from the rows alone; otherwise the deleted rows' keys are read
+    /// when the source needs them.
+    /// </summary>
+    public async ValueTask<KeyCursor?> TryOpenAsync(
+        VortexFile file, IReadOnlyList<string> paths, bool indexes, DeletionVector deletions, bool ranksAreRows, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(file);
         try
         {
-            KeyCursorBuilder keys = file.Keys(_paths);
+            KeyCursorBuilder keys = file.Keys(paths as string[] ?? [.. paths]);
+            if (!deletions.IsEmpty)
+            {
+                keys.Excluding(deletions, ranksAreRows, token => LiveRows.ExcludedKeysAsync(file, deletions, paths, this, token));
+            }
+
             return await (indexes ? keys : keys.WithSource(KeySourceKind.SortedColumn))
                 .OpenAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -193,7 +259,8 @@ internal sealed class ClusteringKey
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         DType at = schema;
-        foreach (string segment in path.Split('.'))
+        ReadOnlySpan<char> rest = path;
+        foreach (Range segment in rest.Split('.'))
         {
             if (at.Kind != DTypeKind.Struct)
             {
@@ -201,7 +268,7 @@ internal sealed class ClusteringKey
                     $"'{path}' descends into a {at.Kind}, which has no fields.", nameof(path));
             }
 
-            int index = at.IndexOfField(segment);
+            int index = ColumnPath.IndexOf(at, rest[segment]);
             if (index < 0)
             {
                 throw new ArgumentException($"'{path}' names no column of the schema.", nameof(path));

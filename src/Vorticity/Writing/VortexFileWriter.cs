@@ -282,7 +282,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ISegmentSink sink, DType schema, bool compress, VortexEdition target, int rowBlock,
         long blockBytes, bool fileStatistics, WritePolicy indexes, int indexBudgetPerMille, IKeyEncoder? keyEncoder,
         int stringBoundBytes, Guid? identity, string? scratchDirectory, long scratchMemoryBytes, long wideRowsAbove,
-        FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints)
+        FenceShape fences, bool elementStatistics, IReadOnlyDictionary<string, EncodingHint>? hints, bool budgetSparesRequired)
     {
         VortexRuntimeChecks.Require();
         _sink = sink;
@@ -332,6 +332,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 scratchDirectory, scratchMemoryBytes, wideRowsAbove)
             {
                 Fences = fences,
+                BudgetSparesRequired = budgetSparesRequired,
             }
             : null;
     }
@@ -548,7 +549,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
             options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
-            options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints)
+            options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired)
         {
             _sizeFirst = options.Compression == CompressionProfile.Smallest,
             _metadata = UserMetadata.Ordered(options.Metadata),

@@ -50,6 +50,9 @@ internal sealed class CommitObjectBuilder : IPageSink
 
     PageReference IPageSink.WritePage(ReadOnlySpan<byte> page) => AddPage(page);
 
+    /// <summary>The <paramref name="index"/>-th page added, and the reference that names it.</summary>
+    public (PageReference Reference, byte[] Page) PageAt(int index) => (_pageReferences[index], _pages[index]);
+
     /// <summary>
     /// The bytes of a page this builder wrote, for a caller that wants to inline it or a walk over
     /// the tree this commit is writing. Every reference it handed out names its version, and the
@@ -122,50 +125,67 @@ internal sealed class CommitObjectBuilder : IPageSink
                 $"The header commits version {header.Version} and the builder version {_version}.");
         }
 
-        byte[] headerBytes = Serialize(header);
-        int headerLength = headerBytes.Length;
-        long pagesStart = CommitFormat.PreambleBytes + headerLength;
-        byte[] table = BuildTable();
-        long tableOffset = pagesStart + _bodyBytes;
-        long length = tableOffset + table.Length + CommitFormat.TrailerBytes;
-        if (length > int.MaxValue)
+        // The header and the table are serialized into pooled buffers and copied once, into the
+        // object: a header near the open read's size would otherwise be copied twice on the large
+        // object heap.
+        ProtoWriter headerWriter = new ProtoWriter();
+        ProtoWriter tableWriter = new ProtoWriter();
+        try
         {
-            throw new CommitFormatException($"A commit object of {length} bytes is past this builder's reach.");
+            header.Write(ref headerWriter);
+            WriteTable(ref tableWriter);
+            ReadOnlySpan<byte> headerBytes = headerWriter.WrittenSpan;
+            ReadOnlySpan<byte> table = tableWriter.WrittenSpan;
+            int headerLength = headerBytes.Length;
+            long pagesStart = CommitFormat.PreambleBytes + headerLength;
+            long tableOffset = pagesStart + _bodyBytes;
+            long length = tableOffset + table.Length + CommitFormat.TrailerBytes;
+            if (length > int.MaxValue)
+            {
+                throw new CommitFormatException($"A commit object of {length} bytes is past this builder's reach.");
+            }
+
+            byte[] bytes = new byte[length];
+            Span<byte> destination = bytes;
+            CommitFormat.WritePreamble(destination, headerLength);
+            headerBytes.CopyTo(destination[CommitFormat.PreambleBytes..]);
+
+            int at = (int)pagesStart;
+            foreach (byte[] held in _body)
+            {
+                held.CopyTo(destination[at..]);
+                at += held.Length;
+            }
+
+            table.CopyTo(destination[at..]);
+
+            XxHash3 checksum = new XxHash3();
+            checksum.Append(headerBytes);
+            checksum.Append(table);
+            CommitFormat.WriteTrailer(
+                destination[(int)(length - CommitFormat.TrailerBytes)..],
+                tableOffset,
+                table.Length,
+                length,
+                checksum.GetCurrentHashAsUInt64());
+            return bytes;
         }
-
-        byte[] bytes = new byte[length];
-        Span<byte> destination = bytes;
-        CommitFormat.WritePreamble(destination, headerLength);
-        headerBytes.CopyTo(destination[CommitFormat.PreambleBytes..]);
-
-        int at = (int)pagesStart;
-        foreach (byte[] held in _body)
+        finally
         {
-            held.CopyTo(destination[at..]);
-            at += held.Length;
+            headerWriter.Dispose();
+            tableWriter.Dispose();
         }
-
-        table.CopyTo(destination[at..]);
-
-        XxHash3 checksum = new XxHash3();
-        checksum.Append(headerBytes);
-        checksum.Append(table);
-        CommitFormat.WriteTrailer(
-            destination[(int)(length - CommitFormat.TrailerBytes)..],
-            tableOffset,
-            table.Length,
-            length,
-            checksum.GetCurrentHashAsUInt64());
-        return bytes;
     }
 
-    private static byte[] Serialize(CommitHeader header)
+    /// <summary>The bytes <paramref name="header"/> takes in an object, serialized into a pooled buffer and not copied.</summary>
+    public static int HeaderLength(CommitHeader header)
     {
+        ArgumentNullException.ThrowIfNull(header);
         ProtoWriter writer = new ProtoWriter();
         try
         {
             header.Write(ref writer);
-            return writer.WrittenSpan.ToArray();
+            return writer.Length;
         }
         finally
         {
@@ -174,26 +194,16 @@ internal sealed class CommitObjectBuilder : IPageSink
     }
 
     /// <summary>What this object holds, pages then fragments, at offsets relative to the body.</summary>
-    private byte[] BuildTable()
+    private void WriteTable(ref ProtoWriter writer)
     {
-        ProtoWriter writer = new ProtoWriter();
-        try
+        foreach (PageReference reference in _pageReferences)
         {
-            foreach (PageReference reference in _pageReferences)
-            {
-                WriteEntry(ref writer, CommitTable.Field.Page, reference);
-            }
-
-            foreach (PageReference reference in _fragmentReferences)
-            {
-                WriteEntry(ref writer, CommitTable.Field.Fragment, reference);
-            }
-
-            return writer.WrittenSpan.ToArray();
+            WriteEntry(ref writer, CommitTable.Field.Page, reference);
         }
-        finally
+
+        foreach (PageReference reference in _fragmentReferences)
         {
-            writer.Dispose();
+            WriteEntry(ref writer, CommitTable.Field.Fragment, reference);
         }
     }
 

@@ -82,6 +82,9 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         _nulls = nulls;
     }
 
+    /// <summary>The rows the walk leaves out whatever the filter says, or null for none.</summary>
+    internal IRowExclusion? Excluded { get; init; }
+
     public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
         new Enumerator(this, cancellationToken);
 
@@ -372,7 +375,8 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                         $"The key source of '{_owner._path}' names row {row} of a {rowCount}-row file.");
                 }
 
-                if (_live is null || _live.IsLive((int)(row / _live.BlockRows)))
+                if ((_live is null || _live.IsLive((int)(row / _live.BlockRows)))
+                    && (_owner.Excluded is not { } excluded || !excluded.Excludes(row)))
                 {
                     _rows[count++] = row;
                 }

@@ -122,6 +122,34 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
     }
 
     /// <summary>
+    /// These summaries as bounds only: the same minima and maxima, no longer exact, and a count of
+    /// nulls only where it is zero. What an object's summaries become once rows are deleted from it
+    /// without a rewrite: a bound over every row is a bound over the live ones, while an exact
+    /// extreme or a positive count of nulls may belong to a row that is gone. A column left with
+    /// nothing to say, one whose rows were all null, is no longer summarised.
+    /// </summary>
+    public ObjectSummaries Loosened()
+    {
+        if (_columns.Length == 0)
+        {
+            return this;
+        }
+
+        List<ColumnSummary> loose = new List<ColumnSummary>(_columns.Length);
+        foreach (ColumnSummary held in _columns)
+        {
+            bool noNulls = held.HasNullCount && held.NullCount == 0;
+            ColumnSummary bounded = held with { IsExact = false, HasNullCount = noNulls, NullCount = 0 };
+            if (!bounded.IsEmpty)
+            {
+                loose.Add(bounded);
+            }
+        }
+
+        return loose.Count == 0 ? None : new ObjectSummaries([.. loose]);
+    }
+
+    /// <summary>
     /// Whether a row the predicate selects can lie under this node; false only when these summaries
     /// prove no row can match.
     /// </summary>
@@ -229,11 +257,11 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
         }
 
         int at = 0;
-        int count = checked((int)ReadVarint(value, ref at));
+        int count = Length(ReadVarint(value, ref at), value.Length);
         ColumnSummary[] columns = new ColumnSummary[count];
         for (int i = 0; i < count; i++)
         {
-            int length = checked((int)ReadVarint(value, ref at));
+            int length = Length(ReadVarint(value, ref at), value.Length);
             if (at + length > value.Length)
             {
                 throw new CommitFormatException("A summarised column's path runs past its bytes.");
@@ -256,7 +284,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
 
             FilterLiteral min = (flags & HasMinFlag) != 0 ? ReadLiteral(value, ref at) : default;
             FilterLiteral max = (flags & HasMaxFlag) != 0 ? ReadLiteral(value, ref at) : default;
-            long nulls = (flags & HasNullsFlag) != 0 ? (long)ReadVarint(value, ref at) : 0;
+            long nulls = (flags & HasNullsFlag) != 0 ? NullCount(ReadVarint(value, ref at)) : 0;
             columns[i] = new ColumnSummary(
                 path,
                 min,
@@ -280,6 +308,128 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
 
         return count == 0 ? None : new ObjectSummaries(columns);
     }
+
+    /// <summary>
+    /// The summaries of the columns <paramref name="wanted"/> names, out of encoded ones: every other
+    /// column is skipped where it lies, its path compared as bytes and nothing of it decoded. What a
+    /// walk asks of each node it passes is a pruner's few columns, and a node may summarise many.
+    /// The order of the columns is left to <see cref="FromBytes"/> to check.
+    /// </summary>
+    /// <exception cref="CommitFormatException">The bytes are not a node's summaries.</exception>
+    public static ObjectSummaries Of(ReadOnlySpan<byte> value, SummaryColumns wanted)
+    {
+        ArgumentNullException.ThrowIfNull(wanted);
+        if (value.IsEmpty || wanted.Count == 0)
+        {
+            return None;
+        }
+
+        int at = 0;
+        int count = Length(ReadVarint(value, ref at), value.Length);
+        ColumnSummary[]? found = null;
+        int kept = 0;
+        for (int i = 0; i < count; i++)
+        {
+            int length = Length(ReadVarint(value, ref at), value.Length);
+            if (at + length >= value.Length)
+            {
+                throw new CommitFormatException("A summarised column's path runs past its bytes, or ends before its flags.");
+            }
+
+            int match = wanted.IndexOf(value.Slice(at, length));
+            at += length;
+            byte flags = value[at++];
+            if ((flags & (HasMinFlag | HasMaxFlag | HasNullsFlag)) == 0)
+            {
+                throw new CommitFormatException("A summarised column has no bound and no count.");
+            }
+
+            if (match < 0)
+            {
+                SkipLiteral(value, ref at, flags, HasMinFlag);
+                SkipLiteral(value, ref at, flags, HasMaxFlag);
+                if ((flags & HasNullsFlag) != 0)
+                {
+                    ReadVarint(value, ref at);
+                }
+
+                continue;
+            }
+
+            FilterLiteral min = (flags & HasMinFlag) != 0 ? ReadLiteral(value, ref at) : default;
+            FilterLiteral max = (flags & HasMaxFlag) != 0 ? ReadLiteral(value, ref at) : default;
+            long nulls = (flags & HasNullsFlag) != 0 ? NullCount(ReadVarint(value, ref at)) : 0;
+            found ??= new ColumnSummary[Math.Min(count, wanted.Count)];
+            if (kept == found.Length)
+            {
+                throw new CommitFormatException("A node summarises one column twice.");
+            }
+
+            found[kept++] = new ColumnSummary(
+                wanted.PathAt(match),
+                min,
+                (flags & HasMinFlag) != 0,
+                max,
+                (flags & HasMaxFlag) != 0,
+                (flags & ExactFlag) != 0,
+                nulls,
+                (flags & HasNullsFlag) != 0);
+        }
+
+        if (at != value.Length)
+        {
+            throw new CommitFormatException($"A node's summaries have {value.Length - at} bytes left over.");
+        }
+
+        if (found is null)
+        {
+            return None;
+        }
+
+        if (kept < found.Length)
+        {
+            Array.Resize(ref found, kept);
+        }
+
+        return new ObjectSummaries(found);
+    }
+
+    /// <summary>Moves past a bound the flags say is there.</summary>
+    private static void SkipLiteral(ReadOnlySpan<byte> value, ref int at, byte flags, byte which)
+    {
+        if ((flags & which) == 0)
+        {
+            return;
+        }
+
+        if (at >= value.Length)
+        {
+            throw new CommitFormatException("A summarised bound ends before its kind.");
+        }
+
+        int skip = (FilterLiteralKind)value[at++] switch
+        {
+            FilterLiteralKind.Null => 0,
+            FilterLiteralKind.Bool => 1,
+            FilterLiteralKind.Bytes => Length(ReadVarint(value, ref at), value.Length),
+            FilterLiteralKind.Signed or FilterLiteralKind.Unsigned or FilterLiteralKind.Float => sizeof(ulong),
+            _ => throw new CommitFormatException($"A bound of kind {value[at - 1]} is not a bound."),
+        };
+        if (at + skip > value.Length)
+        {
+            throw new CommitFormatException("A summarised bound is cut short.");
+        }
+
+        at += skip;
+    }
+
+    /// <summary>A length or a count a varint states, which no summaries of <paramref name="bytes"/> bytes hold more of.</summary>
+    private static int Length(ulong value, int bytes) =>
+        value > (ulong)bytes ? throw new CommitFormatException("A node's summaries count more than their bytes hold.") : (int)value;
+
+    /// <summary>A count of nulls a varint states, which is not one past a long.</summary>
+    private static long NullCount(ulong value) =>
+        value > long.MaxValue ? throw new CommitFormatException("A summarised column counts its nulls past a long.") : (long)value;
 
     /// <summary>
     /// Whether two sets of summaries say the same thing about the same columns. By value, because
@@ -431,7 +581,7 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
 
                 return FilterLiteral.From(value[at++] != 0);
             case FilterLiteralKind.Bytes:
-                int length = checked((int)ReadVarint(value, ref at));
+                int length = Length(ReadVarint(value, ref at), value.Length);
                 if (at + length > value.Length)
                 {
                     throw new CommitFormatException("A byte bound runs past its bytes.");
@@ -464,4 +614,56 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
     private static Span<byte> WriteVarint(Span<byte> destination, ulong value) => TreePage.WriteVarint(destination, value);
 
     private static ulong ReadVarint(ReadOnlySpan<byte> value, ref int at) => TreePage.ReadVarint(value, ref at, "A node's summary");
+}
+
+/// <summary>
+/// The columns a pruner reads, by their paths and the UTF-8 bytes a node's summaries carry them as:
+/// encoded once for a walk, so that each node it passes is matched against them without decoding
+/// a path.
+/// </summary>
+internal sealed class SummaryColumns
+{
+    private readonly string[] _paths;
+    private readonly byte[][] _utf8;
+
+    /// <summary>The columns <paramref name="paths"/> names, each once.</summary>
+    internal SummaryColumns(IReadOnlyList<string> paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        List<string> distinct = new List<string>(paths.Count);
+        foreach (string path in paths)
+        {
+            if (!distinct.Contains(path))
+            {
+                distinct.Add(path);
+            }
+        }
+
+        _paths = [.. distinct];
+        _utf8 = new byte[_paths.Length][];
+        for (int i = 0; i < _paths.Length; i++)
+        {
+            _utf8[i] = Encoding.UTF8.GetBytes(_paths[i]);
+        }
+    }
+
+    /// <summary>How many columns it names.</summary>
+    internal int Count => _paths.Length;
+
+    /// <summary>The path of the <paramref name="index"/>-th column.</summary>
+    internal string PathAt(int index) => _paths[index];
+
+    /// <summary>Which column a path's UTF-8 bytes name, or -1 for none of them.</summary>
+    internal int IndexOf(ReadOnlySpan<byte> path)
+    {
+        for (int i = 0; i < _utf8.Length; i++)
+        {
+            if (path.SequenceEqual(_utf8[i]))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
 }

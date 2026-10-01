@@ -105,7 +105,7 @@ public sealed class DatasetVacuumTests
         await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Options(), ct);
         await dataset.AppendAsync(Of(types, schema, 0, PerObject), ct);
-        await using VortexDataset stale = await VortexDataset.OpenAsync(store, cancellationToken: ct);
+        await using VortexDataset stale = await VortexDataset.OpenAsync(store, Options() with { TimeProvider = clock }, ct);
         ulong staleVersion = stale.Version;
         for (int i = 1; i < Objects; i++)
         {
@@ -113,7 +113,8 @@ public sealed class DatasetVacuumTests
         }
 
         // Two hours on, the sweep takes every commit but the latest, the stale handle's with them,
-        // and the versions right after it: nothing is left above it to be asked for.
+        // and the versions right after it: nothing is left above it to be asked for, and the handle,
+        // on the store's clock, knows its version too old to take the gap for the end.
         clock.Advance(TimeSpan.FromHours(2));
         VacuumResult swept = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
         Assert.Contains(CommitKey.For(staleVersion), swept.Deleted);
@@ -125,6 +126,51 @@ public sealed class DatasetVacuumTests
         Assert.Equal(
             Enumerable.Range(0, (Objects + 1) * PerObject).Select(i => (long)i),
             (await KeysAsync(stale.ScanBuilder())).Order());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task AHandleOnAVersionKeptForItsPagesAloneCommitsOnTheLatest(bool refreshing)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+        ManualClock clock = new ManualClock(new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.Zero));
+        await using MemoryObjectStore store = new MemoryObjectStore { TimeProvider = clock };
+        DatasetOptions options = Options() with { TimeProvider = clock };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
+        await dataset.AppendAsync(Of(types, schema, 0, PerObject), ct);
+
+        // The compaction writes level 1's page, which every later version names: its commit object
+        // outlives its version, where the appends after it, whose level-0 pages the next rewrites, go.
+        Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0, TargetBytesAtLevelOne = 1 << 20 }, ct));
+        await using VortexDataset stale = await VortexDataset.OpenAsync(store, options, ct);
+        ulong kept = stale.Version;
+        for (int i = 1; i < Objects; i++)
+        {
+            await dataset.AppendAsync(Of(types, schema, i * PerObject, PerObject), ct);
+        }
+
+        clock.Advance(TimeSpan.FromHours(2));
+        VacuumResult swept = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
+        Assert.DoesNotContain(CommitKey.For(kept), swept.Deleted);
+        Assert.Contains(CommitKey.For(kept + 1), swept.Deleted);
+
+        // Nothing follows the stale handle's version in the store, and it is not the latest: the handle
+        // learned it too long ago to take the gap for the end, whether it refreshes or commits.
+        if (refreshing)
+        {
+            Assert.Equal(dataset.Version, await stale.RefreshAsync(ct));
+        }
+
+        await stale.AppendAsync(Of(types, schema, Objects * PerObject, PerObject), ct);
+        Assert.Equal(dataset.Version + 1, stale.Version);
+        await using VortexDataset fresh = await VortexDataset.OpenAsync(store, options, ct);
+        Assert.Equal(
+            Enumerable.Range(0, (Objects + 1) * PerObject).Select(i => (long)i),
+            (await KeysAsync(fresh.ScanBuilder())).Order());
     }
 
     [Fact]

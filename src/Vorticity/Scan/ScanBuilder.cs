@@ -49,6 +49,17 @@ internal sealed class ScanBuilder
     private bool _descending;
     private int _prefetch;
     private bool _compact = true;
+    private bool _reverse;
+
+    /// <summary>
+    /// Reads the splits last one first, each still in file order, on one lane: what a caller that
+    /// wants the rows in the reverse of file order reverses a batch at a time.
+    /// </summary>
+    internal ScanBuilder InReverse()
+    {
+        _reverse = true;
+        return this;
+    }
 
     /// <summary>Decodes <paramref name="batches"/> ahead of the consumer, so the decode overlaps the caller's work.</summary>
     internal ScanBuilder WithPrefetch(int batches)
@@ -511,7 +522,25 @@ internal sealed class ScanBuilder
     /// is immutable after parsing and therefore safe for concurrent scans.
     /// </remarks>
     /// <exception cref="VortexFormatException">The file's layout tree is malformed.</exception>
-    public IAsyncEnumerable<RecordBatch> ExecuteAsync()
+    public IAsyncEnumerable<RecordBatch> ExecuteAsync() => BatchesAsync(excluded: null);
+
+    /// <summary>
+    /// The batches of a key-ordered scan without <paramref name="rows"/>, whose entries it skips as
+    /// it walks its key source. The rows whose key is null, which no source holds and a key-ordered
+    /// scan otherwise delivers last, are then the caller's to deliver, since only the caller knows
+    /// which of them are gone: the rows a dataset deleted from the file without rewriting it.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The scan has no key order.</exception>
+    internal IAsyncEnumerable<RecordBatch> ExecuteExcludingAsync(IRowExclusion rows)
+    {
+        ArgumentNullException.ThrowIfNull(rows);
+        return _orderPath is not null
+            ? BatchesAsync(rows)
+            : throw new InvalidOperationException(
+                "Only a key-ordered scan leaves rows out by itself; a scan in file order delivers every row it reads, and its caller filters them.");
+    }
+
+    private IAsyncEnumerable<RecordBatch> BatchesAsync(IRowExclusion? excluded)
     {
         // Parsed at most once per open file rather than once per scan: the tree is a function of
         // the file's bytes and nothing else.
@@ -525,22 +554,25 @@ internal sealed class ScanBuilder
         SplitPlan plan = SplitPlan.Compute(tree, rows, read.RootMask, cap, _windowRows);
 
         BatchAsyncEnumerable batches = new BatchAsyncEnumerable(
-            _file, tree, read, keep, plan, _degree, _filter, _take, _metrics)
+            _file, tree, read, keep, plan, _reverse ? 1 : _degree, _filter, _take, _metrics, _reverse && _orderPath is null)
         {
             Prefetch = _prefetch,
             Compact = _compact,
             KeepEncodings = _keepEncodings,
             SinkDecodes = _sinkDecodes,
-            WidenRows = _orderPath is null ? (int)Capped(WindowBatch(natural)) : 0,
+            WidenRows = _orderPath is null && !_reverse ? (int)Capped(WindowBatch(natural)) : 0,
         };
 
         if (_orderPath is not null)
         {
-            IAsyncEnumerable<RecordBatch>? nulls = _orderComposite is null && MayBeNull(_orderPath)
+            IAsyncEnumerable<RecordBatch>? nulls = excluded is null && _orderComposite is null && MayBeNull(_orderPath)
                 ? NullKeysAsync(tree, rows, keep, cap)
                 : null;
             return new KeyOrderedBatches(
-                batches, _filter, _orderPath, _orderComposite, _descending, _prune, _indexes, (int)cap, nulls);
+                batches, _filter, _orderPath, _orderComposite, _descending, _prune, _indexes, (int)cap, nulls)
+            {
+                Excluded = excluded,
+            };
         }
 
         // Only a filtered scan pays for the skip-empty wrapper, so an unfiltered one keeps the
@@ -913,6 +945,16 @@ internal sealed class ScanBuilder
         Terminal().CountAsync(cancellationToken);
 
     /// <summary>
+    /// <see cref="CountAsync"/> without <paramref name="rows"/>, whatever the filter says of them,
+    /// taken out tier by tier in the same pass: arithmetic without a filter or on a sorted column's
+    /// slices, a whole verdict of the zone maps on a split that holds some, a decode with them cleared.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The scan takes rows, which it would take by their own places.</exception>
+    internal System.Threading.Tasks.ValueTask<long> CountExcludingAsync(
+        IRowExclusion rows, System.Threading.CancellationToken cancellationToken) =>
+        Terminal(excluded: rows ?? throw new ArgumentNullException(nameof(rows))).CountAsync(cancellationToken);
+
+    /// <summary>
     /// Whether the scan would return at least one row.
     /// </summary>
     /// <param name="cancellationToken">Cancels the reads.</param>
@@ -926,6 +968,12 @@ internal sealed class ScanBuilder
     public System.Threading.Tasks.ValueTask<bool> AnyAsync(
         System.Threading.CancellationToken cancellationToken = default) =>
         Terminal().AnyAsync(cancellationToken);
+
+    /// <summary><see cref="AnyAsync"/> without <paramref name="rows"/>, as <see cref="CountExcludingAsync"/> leaves them out.</summary>
+    /// <exception cref="InvalidOperationException">The scan takes rows.</exception>
+    internal System.Threading.Tasks.ValueTask<bool> AnyExcludingAsync(
+        IRowExclusion rows, System.Threading.CancellationToken cancellationToken) =>
+        Terminal(excluded: rows ?? throw new ArgumentNullException(nameof(rows))).AnyAsync(cancellationToken);
 
     /// <summary>
     /// The smallest non-null value of <paramref name="path"/> among the rows the scan would
@@ -1031,7 +1079,8 @@ internal sealed class ScanBuilder
     /// asked of, and nothing else, since it has no batch to fill.
     /// </summary>
     /// <param name="extraPath">The column a <c>Min</c> or <c>Max</c> reads, or null for a count.</param>
-    private TerminalScan Terminal(string? extraPath = null)
+    /// <param name="excluded">The rows a count or an any leaves out, or null for none.</param>
+    private TerminalScan Terminal(string? extraPath = null, IRowExclusion? excluded = null)
     {
         LayoutTree tree = _file.LayoutTree;
         Projection read = _filter is null && extraPath is null
@@ -1039,8 +1088,14 @@ internal sealed class ScanBuilder
             : Only(_filterPaths, extraPath);
         (RowRange rows, _, long cap) = Frame(tree);
         bool wholeFile = !_rowsSet && _take is null;
+        if (excluded is not null && _take is not null)
+        {
+            throw new InvalidOperationException(
+                "Rows left out serve a count of the file's rows, never of rows taken by their places: the caller maps a take past them.");
+        }
+
         return new TerminalScan(
-            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes);
+            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded);
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>

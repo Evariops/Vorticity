@@ -29,6 +29,7 @@ library's**: another library implements the store seam (§11), and this one neve
 | entries of a run | two fence pages to 10¹² entries | fence pages ([10-indexes.md](10-indexes.md) §3) |
 | fragments | one ranged read each, inside the commit object that wrote it | §6.4 |
 | distinct keys, on a Bloom filter | the structure is chosen by cardinality | §6.5 |
+| rows deleted since compaction | a binary search over at most 1 KiB of runs per batch or step, and at most an eighth of an object's rows stepped over | a deletion vector per leaf entry, folded by compaction (§12) |
 
 ## 2. Principles
 
@@ -64,16 +65,31 @@ format version, the header's length, the header (Protobuf), then pages and fragm
 they were added, the table, and a 32-byte trailer — the table's offset and length, **the object's own
 length**, an XXH3-64 over the header and the table, and magic `VXCT`. Recording the length turns any
 truncation into a stated error rather than a shorter object. The **header** holds the version, its
-parent, the schema, the clustering key, the write policy, the tree's chunking parameters and seed,
-the compaction and retention settings, and per level its top page **inlined**, with the pages below
-it while the header stays under 256 KiB. One ranged read of the first 256 KiB opens a commit.
+parent, the schema and the names its columns gave up (§13), the clustering key, the write policy,
+the tree's chunking parameters and seed,
+the compaction and retention settings, and per level where its last round-robin compaction stopped
+and its top page **inlined**, with the pages below it while the header stays under 256 KiB. One ranged read of the first 256 KiB opens a commit. The
+pages region follows the header, so a page the commit wrote itself that ends inside those 256 KiB is
+not inlined: the read that opens the commit brings it back once, where inlined it would be written
+twice. Nor is a leaf that holds an object with marked rows (§12), unless this commit wrote it: its
+bytes grow with every mark, and carried by every header they would cost each commit what only those
+that change its level have to pay. For every page it names without carrying it — a level's top, or
+a child of a page it carries — the header records where that page's version keeps its pages, as far
+as the writer knows it, so a reader reads such a page in one request rather than two.
 
 **A page reference** is a fixed 36 bytes: the version that wrote the page, its offset relative to that
 object's pages region, its length, and its XXH3-128. A commit references every page it did not change
 where it already lies, in an older commit object, and checks the hash on read; fixed-width,
 relative references are what let a header name offsets that depend on its own length, and what make
 two identical trees identical page for page. There is no separate page object, no orphan page after
-a crash, and one conditional creation per commit.
+a crash, and one conditional creation per commit. A reference names its page in every version that
+shares it, so a handle keeps what it has from one version to the next: the pages it read from the
+store, least recently used first out within `DatasetOptions.PageCacheBytes` (32 MiB by default); what
+the reads opening its last sixteen versions brought back of their pages regions; and where each
+version's pages start. A refresh or a commit asks the store again only for the pages that changed.
+Pages are kept page by page only when read from the store, and by version when a read brought them
+back with their commit: most of what a version wrote, the next one rewrites, and a budget in bytes
+would fill with those.
 
 **`<inverted version>`** is `10²⁰ − 1 − version` in twenty digits, so the **newest commit sorts
 first** and the first key of a listing of `commit/` is the latest version (§8.3). There is no mutable
@@ -93,7 +109,7 @@ probabilistic B-tree of Noms and Dolt. Once a commit is a sorted batch of change
 tree and a B+tree with path copying are one algorithm — load the touched leaves, merge the changes,
 re-emit them, rebuild the nodes above up to the top — and only the rule that places page boundaries
 differs. From the prolly rule alone follow history independence, deduplication across writers and
-the strongest test oracle there is (§12).
+the strongest test oracle there is (§14).
 
 **The boundary rule.** A boundary is decided per entry from the XXH3-64 of the entry's key alone,
 seeded with sixteen random bytes the dataset draws once, so values never move a boundary and an
@@ -107,7 +123,8 @@ seam, whose other implementation, a B+tree's fill factor, is measured on the sam
 
 With entries of about 180 bytes the fan-out is about 680. The header inlines a level's top page and,
 while it fits, the pages below, so a lookup reads **0 dependent pages** up to about 650 objects,
-**1** up to about 400 000, **2** up to about 280 million.
+**1** up to about 400 000, **2** up to about 280 million; a leaf with marked rows that another commit
+wrote is one more, once (§3).
 
 ### 4.2 What a node carries
 
@@ -122,10 +139,18 @@ A **leaf entry** describes one data object:
   own file statistics before its put, so they cost the append no request. The first 32 top-level
   columns are summarized by default (`DatasetOptions.SummaryColumns`), and the clustering key's
   always;
-- its index descriptor: embedded in the object, or per entry the fragments that cover it (§6.4).
+- its index descriptor: embedded in the object, or per entry the fragments that cover it (§6.4);
+- **its deletion vector**, when a delete marked rows in it: their positions as sorted runs, after
+  everything else the entry holds, so that an entry without one is the bytes it always was. Its row
+  count is then the live rows, and its summaries bounds only (§12). A vector takes at most 1 KiB,
+  which the fan-out of the page holding it pays until the object is next rewritten: a page of
+  entries all at the cap holds about a hundred.
 
-An **internal entry** holds a page reference to a child, the sum of its rows, and the **union** of its
-children's summaries. The union is intersection-shaped, which is the one thing about it a reader must
+An **internal entry** holds a page reference to a child, the sum of its rows, the **union** of its
+children's summaries, and the **tally** of the objects under it: their bytes, the largest of them, the
+rows marked deleted in them, the most index fragments one of them carries, and the most any one of
+them has marked, as a share of its rows and as the bytes of its vector, which a compaction plans by
+(§5.3). The union is intersection-shaped, which is the one thing about it a reader must
 get right: a column travels up only when every child carries it, and a bound only when every child
 has one, since keeping a bound because another child was silent would prune a subtree that holds the
 answer. One inexact child makes the union inexact.
@@ -160,9 +185,12 @@ refused: compaction is the caller's background job, and **a library never stalls
 - **Level 0** holds appended objects as they came, overlapping in key: at most **8**.
 - **Levels 1 to L**, when the dataset declares a clustering key, hold objects with **disjoint key
   ranges** within a level, so a lookup by key touches at most one object per level: **8 + L** in all.
-  This is leveled compaction as RocksDB does it, with Vortex files as the sorted tables. An object
-  written into level `i` targets `256 MiB × F^(i−1)`, `F` = 10, capped at 4 GiB, and a level holds `F`
-  of them; a level holding a single object is never over its size.
+  This is leveled compaction as RocksDB does it, with Vortex files as the sorted tables. Level `i`
+  holds `128 KiB × F^i`, `F` = 10, and an object written into it targets `128 KiB × F^(i−1)`, **capped
+  at 4 MiB**: the cap is what a delete rewrites (§12), and the capacities keep growing past it, so
+  that a level holds `F` times the one below whatever the size of its objects and a dataset of `N`
+  bytes spans about `log_F(N / 128 KiB)` levels. A level holding a single object is never over its
+  size.
 - Without a clustering key, levels are **size tiers**: a lookup touches every object the summaries do
   not refute, which is output-sensitive rather than bounded, and the plan says so.
 - **Inside every object, at most K = 4 runs per index entry**, the same rule as a single file
@@ -181,11 +209,27 @@ index compaction of everything it touches.
 
 **Level 0 is not sorted, and nobody sorts it.** An append arrives in any order and the writer streams
 with bounded memory ([11-write-strategy.md](11-write-strategy.md)). So the write policy **requires a
-sorted run on the clustering key** in every object ([10-indexes.md](10-indexes.md) §6), and the
-compaction reads each input **in key order through that run**
-([12-index-reads.md](12-index-reads.md) §5): the merge's inputs are ordered, its outputs are sorted by
-construction, and the writer never learns to sort. An append whose run the budget would refuse is
-refused as an append.
+sorted run on the clustering key** in every object whose rows may be out of order
+([10-indexes.md](10-indexes.md) §6), and the compaction reads each input **in key order through that
+run** ([12-index-reads.md](12-index-reads.md) §5): the merge's inputs are ordered, its outputs are
+sorted by construction, and the writer never learns to sort. The run is the object's structure rather
+than a hint, so the index budget spares it: on a narrow table it is as large as the column it orders,
+and a budget of a tenth of the data would refuse it on every object past a mebibyte, the merge's
+outputs included.
+
+**An object whose rows come in key order carries no run** when the key is one integer column that
+holds no null: a merge's output, or the rewrite of one (§12). Its statistics say the column is
+sorted, and a sorted column is the source a key cursor and a key-ordered read take before any run,
+its zone map as the index, so a run beside it is bytes nobody reads. The seal checks that a key cursor
+opens on the column alone, so that an object whose order was lost is refused rather than read as one
+without the key.
+
+**Level 0 empties into the first level whose capacity holds it**, not always into level 1. A few
+small commits, a few kilobytes, merge into level 1, rewriting a level a few times their size rather
+than the levels that hold the dataset; a load of gigabytes goes past the levels it would only
+overflow, and is written once rather than once per level on its way up. Nothing orders the levels
+among themselves but their sizes: a row in any level is a row of the dataset, and each level above 0
+only has to stay key-disjoint.
 
 The merge emits **windows, not rows**: at each step the input holding the smallest key emits every
 row at or below the smallest key the others hold, a contiguous window of its current batch, so the
@@ -198,18 +242,43 @@ The rows written are checked against the inputs' count: a rewrite that loses row
 it must not have. Measured on four interleaved level-0 objects: 42 808 bytes in, one sorted object of
 16 596 out.
 
-Triggers: level 0 above its ceiling, a level above its size, then an entry above K fragments, a
-compaction of index bytes only (§6.4). When many processes append, one coordinator batching their
+Triggers: level 0 above its ceiling, a level above its size, an object whose marks are due (§12),
+then an entry above K fragments, a compaction of index bytes only (§6.4).
+
+**A plan descends the trees rather than reading them.** A level's bytes are the sum of the
+tallies its top page carries, and the header carries that page, or the handle keeps it when it is a
+leaf with marks (§3). The object a job pushes down from a level over its size is at the end of one
+descent: the largest, a leveled dataset's default, following the largest tally at each page, or
+under a round robin (`CompactionOptions.Pick`) the first past the key the level's last job stopped
+at, which the header records with the level, following the keys. The objects of the level below
+that the job's key range meets, the objects over their fragments and the one whose marks are the
+most due are found by walks that skip every subtree whose summary or tally rules it out. A cold plan
+over 125 000 objects asks the store for two pages, where reading every leaf asks for 124. A tiered
+job concatenates a run of one level's objects that nothing else sits between. Under a round robin,
+a tiered dataset's default, it takes the run that starts past the level's pointer, which ends
+before the first object another level holds past that start, one descent per level: a plan over
+100 000 objects by arrival asks for one page, where reading every leaf asks for 71. The longest run
+(`CompactionPick.Largest`) is a fact of every level's order in full, and a plan that takes it still
+reads every leaf. So does a plan over a level whose pages were written before tallies, until a
+commit rewrites them. Both choose the job the other would. When many processes append, one coordinator batching their
 rows into one commit answers the contention; without it the protocol of §8 stays correct, only
 slower.
 
 ### 5.4 The price
 
 Leveled compaction with `F` = 10 rewrites each row about `F/2` times per level it crosses: about
-**20 to 25×** the appended bytes over four levels. Tiered rewrites each row about once per level,
-about **L×**. The default is leveled when a clustering key is declared and tiered otherwise. A dataset
-that appends 1 TiB a day, leveled, writes about 25 TiB a day in compaction: the honest cost of the
+**20 to 25×** the appended bytes over four levels. A small commit crosses every level, a load only
+those above the one it lands in. Tiered rewrites each row about once per level, about **L×**. The
+default is leveled when a clustering key is declared and tiered otherwise. A dataset that appends
+1 TiB a day, leveled, writes about 25 TiB a day in compaction: the honest cost of the
 one-object-per-level read bound, which every LSM store pays.
+
+Who pays it, and when, is the caller's: compaction runs when `CompactAsync` is called, in a loop
+any host runs, `RunCompactionAsync`, which plans, runs the job due for it at a rate it is given, and
+sleeps when nothing is due, or, for level 0 under a byte budget, in the writer's own commit
+(`DatasetOptions.InlineCompactionBytes`). [15-compaction.md](15-compaction.md) weighs the drivers — inline in a
+commit, on demand, in the background — planning in the depth of the tree, and what a store that
+cannot delete does to the price.
 
 ## 6. Indexes at scale
 
@@ -282,6 +351,24 @@ objects open before the first row, and an object whose first row lies below the 
 by raises `VortexFormatException` rather than deliver a wrong order. Ties between objects follow the
 dataset's order, so a descending read is the exact reverse of an ascending one.
 
+**A key cursor walks both ways.** Walking down is the same merge with a max-heap. The objects of a
+level above 0 are key-disjoint, so the minimum of the next object of the level is a strict upper
+bound on an object's keys, and the object opens only once the walk passes below it; level 0's
+objects, which nothing but their summaries bounds from above, open at the seek, at most eight and the
+lag. A step against the walk's direction seeks every object again just past the current entry, whose
+place in the order is its key and then its row in the dataset: an object before it in the dataset's
+order lands at or before the key, one after it strictly before, and its own object steps. That is the
+flip every merging iterator pays ([12-index-reads.md](12-index-reads.md) §3.2), and the walk down is
+the walk up reversed, ties included.
+
+**A key cursor reads the trees only where it walks.** In each level the walk stands between two
+objects, a place found by one path down the level's tree and moved an object at a time, a page read
+only when the walk crosses into it; the pages read, and the objects' entries in them, are parsed once
+per version and shared by its cursors. An object's first row is counted when the walk first takes one
+of its entries: the rows of every level's objects before its tree key, along one path of each. A seek
+on a handle that holds nothing yet so reads the depth of each level, whatever the number of objects:
+over 20 000 objects in one level, one page, where a listing of the objects read every leaf, 23.
+
 Any other order costs, at best, one cursor per object the summaries cannot refute: `ORDER BY x LIMIT
 k` prunes by the summaries, which is good in practice and output-sensitive, never bounded. A second
 bounded order is a second copy of the data clustered by that key, a dataset of its own; a global
@@ -315,7 +402,13 @@ then creates `commit/<inverted N+1>` — header, pages and fragments in one obje
 **put-if-absent**, streamed from a pipe whose length is given up front, so the store chooses between
 one request and a multipart upload. Put-if-absent linearizes commits: no lease, no lock, no external
 service. Uncontended, a commit is **three dependent requests**: the listing, the read of `N`'s header,
-the creation; the data objects cost the commit nothing more.
+the creation; the data objects cost the commit nothing more. A handle that knows its version was
+the latest less than half a retention window ago (§8.3) builds on it as it holds it, so its commit is
+**one request**, the creation: a refusal is what tells it another writer went first, and it then asks
+for the versions after the number it lost and rebases. Past that half window it lists first. Either
+way it reads the version it created as it wrote it, with nothing read back. A handle whose commit
+found nothing to change reads the version that commit was decided on, which is asked for first when
+the batch was decided on the version held, since a no-op names the latest version.
 
 ### 8.2 Rebase by re-applying operations
 
@@ -331,6 +424,11 @@ merges two trees. Each operation carries its own answer to a moved ground:
 | indexer, compaction of that object | the object is gone; the fragment is dropped and never written |
 | compaction, compaction on overlapping inputs | the second finds an input missing and abandons; its outputs are garbage |
 | vacuum, anything | vacuum deletes only what no retained version references and what is older than the window (§10) |
+| delete or update, append | the appended object is not among those the change read: it stays, and its rows are not touched |
+| delete or update, anything that rewrites or marks an object it read | an input is gone or its entry changed: the replacement is abandoned, and the change is worked out again on the version that won (§12) |
+| compaction, delete or update that marks one of its inputs | the entry the compaction read changed: it abandons, since its outputs would bring the marked rows back, and they are garbage |
+| schema change, schema change | the second finds another schema than the one it was checked against, and is dropped (§13) |
+| append, schema change | the object lands as it was written, and reads as the new schema like any earlier one (§13) |
 | reader, anything | the reader holds a version; everything it references is immutable |
 
 An object's key ends with its uid, which makes it unique and a function of the object: two appenders
@@ -345,7 +443,16 @@ coordinator, in the exception's own words.
 Commit keys sort newest first, so the first key a listing of `commit/` yields is the whole discovery,
 and the listing stops after one page. That needs a strongly consistent listing, which S3 has had since
 2020 and which §11 requires of any store. A reader that wants to read its own writes is handed the
-version by its writer. There is no hint object and no probe loop.
+version by its writer. There is no hint object.
+
+A handle that knows its version was the latest less than half a retention window ago asks for the
+versions after it instead, a head request each: every one of them was created after that moment, and
+vacuum takes a commit only a window after the next one superseded it, so they are all still there
+and the first missing one ends the run. Past that half window the handle lists. Below the window the
+commits do not run without a gap: vacuum keeps an old commit object whose pages a retained version
+still names and takes the unnamed ones after it, so a handle that took the gap above its own version
+for the end would read it as the latest, and commit on it. The handle's clock must therefore agree
+with the store's to within the other half window, as a vacuum's already must.
 
 ## 9. The read-path budget
 
@@ -357,7 +464,7 @@ On an object store a request costs 10 to 100 ms whatever its size below a megaby
 | step | dependent requests | cached by |
 |---|---|---|
 | list the latest commit, read its header | 2 | version |
-| descend a level's tree | 0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million | page, forever: pages are immutable |
+| descend a level's tree | 0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million | page, across versions: pages are immutable |
 | open the object's tail | 1, in parallel across the ≤ 8 + L objects touched | object |
 | its fences, then the two payload segments | 1 + 1 | run |
 | the data segments | 1, coalesced | — |
@@ -387,7 +494,10 @@ store library.
   seven days by default (`DatasetOptions.RetentionWindow`), keeping the latest version always. What
   ages is the moment a version was superseded, by the store's own clock. An unreferenced object
   younger than the window is a writer in flight and is kept: **a writer must commit within the
-  window**. Only `commit/` and `data/` are swept; an imported file is its owner's. A reader that
+  window**. Only `commit/`, `data/` and the compaction loops' `leases/` are swept; an imported file
+  is its owner's. On a store under a retention lock, what the lock or a legal hold still keeps is left
+  and reported with the date the first of it may go (`DatasetOptions.LockedStore`,
+  [15-compaction.md](15-compaction.md) §5). A reader that
   outlives the window gets an `ObjectNotFoundException` naming the version it was reading, never a
   partial answer. A dry run reports without deleting.
 - **Repack**: a commit object kept alive by a few live pages among dead ones is reported as sparse, and
@@ -409,7 +519,7 @@ store library.
 | operation | used by |
 |---|---|
 | `GetRangeAsync(key, offset, length)` → bytes and the object's token, in one answer | every read; a data object's segment source plans its reads with the core's coalescer and issues them together |
-| `HeadAsync(key)` → size, token, the store's creation time | opening; vacuum's ages |
+| `HeadAsync(key)` → size, token, the store's creation time, and the retention date and legal hold of a store under a lock | opening; vacuum's ages, and what a lock still keeps |
 | `PutIfAbsentAsync(key, pipe, length)` → created or exists | every write, streamed |
 | `DeleteAsync(keys)` | vacuum, a batch at a time; an absent key is not an error |
 | `ListAsync(prefix, startAfter)` | the latest version, one page (§8.3); vacuum |
@@ -426,7 +536,117 @@ latency, failures and crashes after a put; and `CountingObjectStore`, a decorato
 bytes and the **dependent steps** of the critical path. The contract is a test suite,
 `ObjectStoreContractTests`, which an S3 library runs against its own store.
 
-## 12. Alternatives weighed
+## 12. Deleting and updating rows
+
+**A delete marks rows, and rewrites no object it can mark.** A delete takes the rows its filter is
+true for — a row it is false or unknown for stays, as a scan would not return it — and records them in
+the leaf entry of each object that holds one: a **deletion vector**, the sorted runs of the object's
+own row positions it takes, two varints a run, after everything else the entry holds (§4.2). The
+object's bytes do not change, so the commit writes the pages on the path to the entries it changed and
+no data object. An object every row of which goes is removed from the tree without being read, and one
+whose summaries refute the filter is not opened. An update is a delete and an insert applied together:
+the rows it takes are marked where they were, read as records, passed through the caller's function
+and written into new objects of level 0, where appended rows go, because a changed row may carry
+another key. One `ReplaceObjects` commits the whole change, so a reader sees all of it or none.
+
+**When a delete rewrites instead.** An object is rewritten without the rows, rather than marked, when
+the marks would cost its reads more than they save the write: under `MarkedObjectBytes`, a mebibyte,
+where a rewrite is a few requests and leaves the object exact; when the rows marked in it would pass an
+eighth of its rows (`MarkedShare`), since every read of it steps over them; and when its vector would
+pass 1 KiB (`MarkedVectorBytes`), a few hundred runs. The vector is counted as the runs it will form:
+at a run a row when that already fits, and otherwise from the rows' places, read before anything is
+written, since the rows a range takes are one run whatever their number. The vector lives in a leaf page: a commit that
+marks a row in any object of a page writes the page again, so the bound weighs the rewrites the marks
+save against the bytes they add to each of those commits; a commit that does not change the page
+leaves it out of its header (§3). A vector past 256 bytes lies out of line instead: written once into
+the commit object that made it, as a fragment is (§6.4), and named by its entry by a reference, so
+the page carries 37 bytes for it whatever the marks. A rent of the object reads it beside the
+object's open, where the version's pages lie or the handle kept it; vacuum keeps the commit object it
+lies in, and a repack moves it. The rows a rewritten object keeps are a subset of
+its rows, so its keys lie inside its old range: a level above 0 stays key-disjoint and the tree's order
+holds; without a clustering key the rewritten object keeps the old one's position. Either way the rows
+are judged by the scan's own evaluator, so a delete and a scan with the same filter agree on every row,
+nulls included, and a rewrite checks that it kept exactly the rows the count left.
+
+**What a read does with a vector.** An entry's row count is its live rows, so a count without a filter
+and every position stay arithmetic: a position maps to the object's own through the runs before it.
+The rest is the object's own read with its marked rows left out, for a binary search over the runs per
+batch or per step:
+
+| read | with marked rows |
+|---|---|
+| a filtered count, an any | the object's count with the rows left out, tier by tier, in one pass: on a sorted column's slices, arithmetic; on an index's rows, a test of each; on a zone the maps decide whole, its rows less the marked ones; on a decode, the marked rows cleared before the count |
+| rows in file order | a batch without a marked row as it came, renumbered; one with some, gathered without them; an aggregation's batches whole, the marked rows deselected, their columns still encoded |
+| rows in key order, a key cursor | the key source steps over the marked rows' entries as it walks, and a rank takes away the entries marked below it: arithmetic when the ranks are rows, a sorted column's or the clustering run of a level above 0, and otherwise against the marked rows' keys, read by one take when the cursor opens |
+| a minimum, a maximum | on a column the object's statistics say is sorted and holds no null, its first or last live row: the statistic while that row is the column's end, one row read once a delete took it; otherwise the object's extreme when a count finds a live row holding it, and its live rows read when none does |
+| the summaries | an entry with marks keeps its bounds, which its live rows still lie inside, and drops what they no longer prove: exactness, a null count other than zero, a column left with no bound. They prune; they no longer answer |
+
+**Compaction folds the marks.** It reads each input's live rows and writes objects without marks, so
+a vector lasts until its object is next compacted. A level no merge reaches, the top one above all, is
+purged instead. An object whose marks reach half a delete's bounds, a sixteenth of its rows or half a
+kilobyte of vector, is rewritten alone, in its level and inside its range, by a job of its own
+(`CompactionTrigger.Marks`), the most marked first; the plan finds it by descending the shares and
+vectors the tallies carry (§5.3). A delete that would pass the bounds rewrites the object itself only
+when compaction lags. A compaction that read an object before a delete marked
+rows in it would bring those rows back: its `ReplaceObjects` names the entries it read — uid, key and
+vector — and is abandoned when one of them changed (§8.2).
+
+**What it costs.** Measured by the churn (§15) on ten million rows and thirty thousand commits of ten
+rows at random keys: an update takes 1.9 to 2.9 ms and a delete 0.9 to 1.6 ms, where rewriting the
+4 MiB objects that hold the rows takes 19 and 14 ms. A commit writes 12 KiB at first and 16 to 55 KiB
+once the vectors have filled, where a rewrite writes 3.3 MiB: the rows' own objects, and a commit
+object of 8 to 10 KiB throughout, whose leaf page carries a reference for each vector past 256 bytes.
+Compaction, merges and purges together, writes 61 to 111 KiB a commit. After a thousand commits the store holds 137 MiB rather than 449 MiB, since the retention
+window keeps every object a rewrite replaced (§10). The reads cost what they cost on the rewritten
+dataset: a filter over every object makes the same 220 requests, and a point lookup, a seek, a count
+under a key range and the largest key stay where they were. What the marks keep is space: up to an
+eighth of an object's rows, until its compaction.
+
+**Concurrent writers.** The change is worked out on the version the handle holds. An append that lands
+first adds objects the change never read, whose rows it does not touch; a commit that removes, rewrites
+or marks an object the change read — a compaction, another delete — abandons the replacement (§8.2),
+and the change is worked out again on the version that won, up to `MaxAttempts` times. What a lost
+attempt wrote is left for vacuum.
+
+## 13. Schema evolution
+
+A change of schema is a commit that changes the header's schema and rewrites no object. Per top-level
+column, a change is one of: added, nullable; dropped, unless the clustering key holds it; renamed;
+widened within its kind, a signed integer to a wider signed one, an unsigned to a wider unsigned, a
+float to a wider float; made nullable. Each keeps every value already written readable, and anything
+else is refused before the commit. The clustering key's columns keep their names and types in every
+object: they order the objects and the trees.
+
+**Names are identities.** An object's field belongs to the column of its name, or to the column a
+rename moved that name to. The header records every name a column gave up, with the column carrying it
+now, or none when it was dropped, and no column takes one of them again. That is what makes names
+enough: an object written while a name was in use never lends its values to another column, and the
+summaries its entry carries, keyed by the names it had, never describe another column. A summary under
+a former name prunes nothing for the new one, which is conservative and ends at the next rewrite.
+
+**Reading an object of an earlier schema.** When an object's dtype is the version's — every object
+written since the last change — its read is its own scan, as before, after one comparison of dtypes
+whose hashes are cached. Otherwise its columns are mapped when it opens, and each batch its own scan
+delivers is reshaped in the batch's arena: a struct over its fields in the dataset's order, a missing
+column filled with nulls, a column written non-nullable declared nullable over the same buffers,
+narrower numbers widened into a buffer of the arena. The filter goes down to the object in its own
+terms: renamed, and each predicate over a column the object lacks folded to what a null makes it, a
+comparison unknown and `IS NULL` true, so that a filter over an added column refutes every earlier
+object without a read. Under a negation an unknown is not false; a predicate that cannot be stated
+over the object's columns there is evaluated on the reshaped batches instead. Key cursors, key-ordered
+reads, compaction, deletes and updates read through the same mapping, and an object that lacks a
+cursor's column holds no entry.
+
+**Compaction folds the change into the data**, as it folds indexes (§2): every object it writes is in
+the current schema. Until then, reading an earlier object costs the reshaping — records per batch, and
+a copy for a widened column — and reading any other costs nothing more.
+
+**Concurrent changes.** The operation carries the schema it was checked against. A rebase onto a
+version whose schema is another drops it, since what it checked no longer holds, and the caller is told
+to refresh; one that finds its own schema already there is done. An append prepared under the earlier
+schema lands after the change, its object read as the new schema like any other.
+
+## 14. Alternatives weighed
 
 | question | chosen | rejected, and why |
 |---|---|---|
@@ -436,16 +656,16 @@ bytes and the **dependent steps** of the critical path. The contract is a test s
 | concurrency | put-if-absent, rebase by operations | leases and lock files; three-way merges of trees |
 | data across objects | leveled on a clustering key, tiered without | no compaction (O(appends)); a global secondary index (rewritten at every compaction) |
 | index placement | in the file, external fragments transient | in-file only (adding an index rewrites data); external only (the index no longer travels with the file) |
+| deleting rows | a deletion vector in the leaf entry, bounded, folded by compaction | copy on write of every object a row is taken from (an object per delete, 3 MiB a commit of ten rows, each kept through the retention window); positional delete files, as Iceberg (a read joins them, and they pile up until a rewrite); equality deletes (a read evaluates each of them against every row) |
 | binding | uid and store token; the writer's content hash for verify | a content hash on the read path (reads the data) |
 | metadata objects | one commit object per version | an object per page or per pack (sequential reads, orphans after a crash, two creations per commit) |
 | Iceberg or Delta as the table layer | — | their data formats are Parquet, ORC and Avro; a Vortex data file would make the table unreadable to every engine that reads them, which is the only reason to adopt them |
 
-**Not in this design:** deleting or updating rows, which an LSM on a key makes natural and the design
-leaves room for; a clustering key picked automatically, since it decides the write amplification and
-is the user's to state; schema evolution, where the header records one schema and an object with
-another is refused.
+**Not in this design:** a clustering key picked automatically, since it decides the write amplification
+and is the user's to state; evolving the fields of a nested struct, or a column's type otherwise than
+by widening a number or making it nullable (§13).
 
-## 13. How it is tested
+## 15. How it is tested
 
 - **The counting matrix** of §9.2.
 - **An interleaving fuzzer** over the in-memory store: readers, writers, indexers, compactions and
@@ -458,7 +678,35 @@ another is refused.
 - **The tree's oracles**: incremental edits equal a rebuild from scratch, byte for byte, and the same
   operations in two orders give one root hash.
 - **Order**: key-ordered reads across levels equal a sort of the rows, in both directions, with and
-  without summaries.
+  without summaries; a key cursor's walk down is its walk up reversed, a step against its direction
+  lands next to the entry before it, and its seeks below a key land where one sorted file's would.
+- **Deletes and updates**: the rows left equal the rows written filtered in C# under three-valued
+  logic, across levels and without a clustering key, and a delete that loses its objects to a
+  compaction is worked out again.
+- **The plan**: a descent chooses the job a read of every leaf chooses, on random shapes and options
+  that meet every trigger; every page's tally is the one its leaves add up to; a cold plan asks for
+  the same one or two pages over 3 000, 31 000 and 125 000 objects.
+- **Marks**: a dataset that marks reads as a second one taking the same changes by rewrites, through
+  every read — rows by position, rows in key order both ways with null keys around the marks, key
+  cursors, their ranks and seeks, counts, extremes, aggregates — under a seeded fuzzer of deletes and
+  updates; a compaction that read an object before rows were marked in it is abandoned; a count told
+  to leave rows out counts none of them on any tier, each switched off in turn; an object whose marks
+  are due by share or by vector is purged alone in its level; a range too long for a vector's worst
+  case is marked as the run it is, an update's rows written once.
+- **Schema evolution**: objects of each earlier schema read as the current one through scans, counts,
+  extremes, key order, key cursors, deletes, updates and compaction, filters over added columns
+  included; every change that would lose a value is refused.
 - **Tampering**: an object replaced at equal size, a page, a root and a fragment torn at every byte, a
   fragment of another object: readers answer exactly, and verify names each.
 - **Rust**: compaction outputs are among the files the cross-check hands to Rust 0.86.1.
+- **The churn** (`bench/Vorticity.Benchmarks.Churn`): ten million rows, then thirty thousand commits of
+  ten rows — appends, updates and deletes at random keys — with compaction drained and vacuum run
+  between them. Every cost stays flat, or levels off once the marks have filled: an append 0.5 to
+  0.7 ms, an update 1.9 to 2.9 ms, a delete 0.9 to 1.6 ms, five to six requests an operation with
+  its commit's one among them, compaction about a millisecond a commit, a commit's bytes 12 KiB and
+  then 16 to 55 KiB, of which its commit object is 8 to 10 KiB; a point lookup 0.7 to 1.0 ms in three
+  to four requests, a seek and ten steps either way 0.3 to 0.7 ms, a hundred rows by position 0.2 to
+  0.4 ms, a scan of every row 30 ms; the heap between 60 and 92 MiB. Rewriting instead of marking, an update takes 19 ms and
+  a commit writes 3.3 MiB. Before the level-0 destination, the cap on an object and the chunked buffer,
+  an update cost 820 ms, compaction 100 ms a commit and the heap grew to 2.2 GiB over the first 150
+  commits.

@@ -69,4 +69,45 @@ public sealed class DatasetRankSeekAllocationTests
 
         Assert.True(floor == 0, $"{Ranks} selections allocated {floor} bytes on each of {Passes} passes");
     }
+
+    [Fact]
+    public async Task ACursorOpensWithoutReadingAPageOfItsTrees()
+    {
+        // A walk finds its objects in the levels' trees as it reaches them: opening the cursor reads
+        // nothing and holds nothing per object, whatever their number.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        const int Objects = 20_000;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        DTypeArena types = new DTypeArena();
+        DType schema = types.Struct(
+            ["key", "measure"],
+            [types.Primitive(PType.I64, Nullability.NonNullable), types.Primitive(PType.F64, Nullability.NonNullable)],
+            Nullability.NonNullable);
+        DatasetOptions options = new DatasetOptions { Seed = 0xC0_45E5, ClusteringKey = ["key"] };
+        await using (VortexDataset created = await VortexDataset.CreateAsync(store, schema, options, ct))
+        {
+        }
+
+        DatasetOperation[] adds = new DatasetOperation[Objects];
+        for (int i = 0; i < adds.Length; i++)
+        {
+            UInt128 uid = (UInt128)(ulong)i + 1;
+            byte[] key = new byte[24];
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key, (ulong)(2L * i) ^ (1UL << 63));
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(16), (ulong)uid);
+            adds[i] = new DatasetOperation.AddObject(key, new ObjectEntry(CommitKey.ForData($"{i:x16}"), uid, 1_000, 1 << 20, uid)) { Level = 1 };
+        }
+
+        await DatasetCommitter.CommitAsync(store, adds, new CommitOptions { Seed = options.Seed }, ct);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options, ct);
+        store.Reset();
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        ValueTask<DatasetKeyCursor> opening = DatasetKeyCursor.OpenAsync(dataset, ct);
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.True(opening.IsCompletedSuccessfully);
+        await using DatasetKeyCursor cursor = await opening;
+        Assert.Equal(0, store.Requests);
+        Assert.True(allocated < 1_024, $"a cursor opened over {Objects} objects allocated {allocated} bytes");
+    }
 }

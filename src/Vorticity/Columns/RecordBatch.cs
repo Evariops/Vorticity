@@ -539,6 +539,42 @@ public sealed class RecordBatch : IDisposable
         return view;
     }
 
+    /// <summary>
+    /// The same rows and selection under another root built in this batch's arena, counted from
+    /// <paramref name="startRow"/>: the struct of a reader that shows the columns under another
+    /// schema, bound into <paramref name="spare"/>, the previous view of a stream of them, disposed.
+    /// A root of another row count, a gather of some rows, selects every row it holds: this batch's
+    /// selection describes rows that are no longer where it says, and the caller that gathered
+    /// selects among the new ones itself.
+    /// </summary>
+    /// <param name="root">The new root, in this batch's arena.</param>
+    /// <param name="startRow">The row of the whole that row 0 of the view is.</param>
+    /// <param name="spare">The previous view, disposed, or null for a new one.</param>
+    /// <returns>A view in this batch's arena, valid as long as this batch; disposing it releases nothing.</returns>
+    /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
+    /// <exception cref="InvalidOperationException"><paramref name="spare"/> is live, or owns its storage.</exception>
+    internal RecordBatch Reshaped(int root, long startRow, RecordBatch? spare)
+    {
+        ThrowIfDisposed();
+        RecordBatch view;
+        if (spare is null)
+        {
+            view = new RecordBatch(_arena, root, startRow) { Session = Session };
+        }
+        else
+        {
+            spare.BindAgain(_arena, root, startRow, null);
+            view = spare;
+        }
+
+        if (view._rowCount == _rowCount)
+        {
+            view.Select(_selection, _selected);
+        }
+
+        return view;
+    }
+
     /// <summary>A batch over the same rows holding only the columns <paramref name="projection"/> names.</summary>
     /// <param name="projection">
     /// The columns, compiled against <em>this batch's</em> schema with <see cref="Projection.Parse"/>.

@@ -189,6 +189,98 @@ public sealed class DatasetSummaryTests
     }
 
     [Fact]
+    public async Task AFilteredRangeOverSeveralLevelsIsTheSameRowsOfOneFile()
+    {
+        // Across levels a row's place counts every row before it in key order, those of a subtree
+        // the summaries rule out included: the walk counts them from the subtree's parent, without
+        // reading it, because no object of level 0 falls inside its keys.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, schema, Options() with { Rule = new FillBoundaryRule(400) }, ct);
+        const int objects = 16;
+        const int rows = 100;
+        await LevelsAsync(dataset, types, schema, objects, rows, step: 1, levelZero: [(objects * rows, rows), ((objects + 1) * rows, rows)], ct);
+
+        byte[] single = await OneFileAsync(types, schema, (objects + 2) * rows);
+        await using MemorySegmentSource source = new MemorySegmentSource(single);
+        await using VortexFile file = await VortexFile.OpenAsync(source, new VortexOpenOptions(), ct);
+        VortexExpr filter = Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(1_300L)));
+        foreach ((long from, long to) in ((long, long)[])[(1_350, 1_430), (1_250, 1_750), (0, 1_800), (1_650, 1_700)])
+        {
+            Assert.Equal(
+                await KeysAsync(file.ScanBuilder().Where(filter).Rows(new RowRange(from, to))),
+                await KeysAsync(dataset.ScanBuilder().Where(filter).Rows(from, to)));
+        }
+
+        // And the point: the subtrees below the filter were counted, not read.
+        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        Assert.Equal(80, (await KeysAsync(dataset.ScanBuilder().Where(filter).Rows(1_350, 1_430).WithMetrics(metrics))).Count);
+        Assert.True(metrics.SubtreesSkipped > 0, "a node's summaries should have refuted the predicate");
+    }
+
+    [Fact]
+    public async Task AFilteredRangeOverLevelsThatInterleaveReadsTheSubtreesItMustPlace()
+    {
+        // Level 0's keys fall inside the spans of level 1's subtrees: the rows of a subtree ruled
+        // out then interleave with level 0's in key order, and only that subtree is read to place
+        // them. The rows are those the same range gives with the summaries off.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(
+            store, schema, Options() with { Rule = new FillBoundaryRule(400), ClusteringKey = ["key"] }, ct);
+        const int objects = 16;
+        const int rows = 100;
+        await LevelsAsync(dataset, types, schema, objects, rows, step: 2, levelZero: [(401, 20), (2_601, 20)], ct);
+
+        VortexExpr filter = Expr.Ge(Expr.Field("key"), Expr.Literal(FilterLiteral.From(2_400L)));
+        foreach ((long from, long to) in ((long, long)[])[(0, 2_000), (1_200, 1_300), (1_230, 1_260), (1_500, 1_700)])
+        {
+            List<long> pruned = await KeysAsync(dataset.ScanBuilder().Where(filter).Rows(from, to));
+            Assert.Equal(await KeysAsync(dataset.ScanBuilder().Where(filter).WithSummaries(false).Rows(from, to)), pruned);
+        }
+
+        DatasetScanMetrics metrics = new DatasetScanMetrics();
+        Assert.NotEmpty(await KeysAsync(dataset.ScanBuilder().Where(filter).Rows(1_200, 1_300).WithMetrics(metrics)));
+        Assert.True(metrics.SubtreesSkipped > 0, "the subtrees no object of level 0 falls in should not be read");
+    }
+
+    /// <summary>
+    /// <paramref name="objects"/> objects of <paramref name="rows"/> keys <paramref name="step"/>
+    /// apart compacted into level 1, deep enough for internal pages, then the objects
+    /// <paramref name="levelZero"/> names, by first key and rows, left in level 0.
+    /// </summary>
+    private static async Task LevelsAsync(
+        VortexDataset dataset, DTypeArena types, DType schema, int objects, int rows, int step, (long First, int Rows)[] levelZero, CancellationToken ct)
+    {
+        for (int i = 0; i < objects; i++)
+        {
+            await dataset.AppendAsync(Batches(types, schema, (long)i * rows * step, rows, step), ct);
+        }
+
+        CompactionOptions compaction = new CompactionOptions { LevelZeroCeiling = 1, TargetBytesAtLevelOne = 1, MaxLevels = 2 };
+        while (await dataset.CompactAsync(compaction, ct) is not null)
+        {
+        }
+
+        foreach ((long first, int count) in levelZero)
+        {
+            await dataset.AppendAsync(Batches(types, schema, first, count, step), ct);
+        }
+
+        Assert.Equal(levelZero.Length, dataset.Levels[0].Entries);
+        Assert.True(dataset.Levels[1].Depth >= 2, $"level 1 should have internal pages; its depth is {dataset.Levels[1].Depth}");
+    }
+
+    [Fact]
     public async Task AnObjectOpenedOnceStaysOpen()
     {
         // A data object is immutable, so the second scan's opens are pure waste and the cache
@@ -400,8 +492,12 @@ public sealed class DatasetSummaryTests
         return stream.ToArray();
     }
 
+    private static IAsyncEnumerable<RecordBatch> Batches(DTypeArena types, DType schema, long from, int rows) =>
+        Batches(types, schema, from, rows, step: 1);
+
+    /// <summary>Rows whose keys run from <paramref name="from"/>, <paramref name="step"/> apart.</summary>
     private static async IAsyncEnumerable<RecordBatch> Batches(
-        DTypeArena types, DType schema, long from, int rows)
+        DTypeArena types, DType schema, long from, int rows, int step)
     {
         const int size = 500;
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
@@ -416,8 +512,8 @@ public sealed class DatasetSummaryTests
             Span<double> measureValues = MemoryMarshal.Cast<byte, double>(measureBytes);
             for (int row = 0; row < count; row++)
             {
-                keyValues[row] = from + start + row;
-                measureValues[row] = (from + start + row) / 4.0;
+                keyValues[row] = from + ((long)(start + row) * step);
+                measureValues[row] = keyValues[row] / 4.0;
             }
 
             int keyNode = arena.AddPrimitive(i64, count, Validity.NonNullable, PType.I64, keys);

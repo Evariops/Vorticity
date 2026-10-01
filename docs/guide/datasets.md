@@ -19,7 +19,7 @@ await using (ObjectDraft draft = dataset.StartObject())
 
 ```
 created: version 1, 0 rows, clustered by Day
-appended data/4960f1bc51154336b9c12abaa641c39b.vortex: version 2, 50000 rows
+appended data/7f4f12630bb346098a7d785a6bed85bb.vortex: version 2, 50000 rows
 ```
 
 This is `Vorticity.Dataset`, a separate package, and it is **experimental**: the assembly is
@@ -28,7 +28,10 @@ uses one of its types, until you opt in. Opt in once for the project, with
 `<NoWarn>$(NoWarn);VX0001</NoWarn>`, or mark your own assembly or type `[Experimental]`, which
 makes its uses of experimental code legal and passes the warning on to its callers; the samples do
 the latter. The diagnostic says what the attribute means: the dataset's commit format and API may
-change between releases. The files inside a dataset are ordinary Vortex files; the tree of commits
+change between releases. A release reads the formats of the releases before it, and a release
+before a format refuses a dataset written in it rather than read it wrongly: version 0.2.0 reads
+format 1, and refuses the format 2 this one writes. The files inside a dataset are ordinary Vortex
+files; the tree of commits
 over them is this repository's own format, which no other Vortex implementation reads. A single
 file needs none of this.
 
@@ -67,14 +70,15 @@ ulong imported = await dataset.ImportAsync("imports/days-100-119.vortex");
 
 ```
 imported: version 4, 120000 rows, 3 objects, lag 0
-  data/4960f1bc51154336b9c12abaa641c39b.vortex: level 0, rows 0 to 50000, 82371 bytes
-  data/8f1d43cdfb9d4d4ab7a10cc02baf54cb.vortex: level 0, rows 50000 to 100000, 82371 bytes
-  imports/days-100-119.vortex: level 0, rows 100000 to 120000, 37828 bytes
+  data/7f4f12630bb346098a7d785a6bed85bb.vortex: level 0, rows 0 to 50000, 82457 bytes
+  data/6fd130088886482683ebdd6485d5530d.vortex: level 0, rows 50000 to 100000, 82457 bytes
+  imports/days-100-119.vortex: level 0, rows 100000 to 120000, 37836 bytes
 ```
 
 `ImportAsync` takes a key in the store, not a path on disk: putting the bytes there is yours to
-do, and the file's schema must be the dataset's. `ObjectsAsync()` lists the objects of the version,
-reading the tree and never an object.
+do, and the file's columns must read as the dataset's: the same ones, or those of an earlier schema
+of the dataset ([Changing the schema](#changing-the-schema)). `ObjectsAsync()` lists the objects of
+the version, reading the tree and never an object.
 
 ## Reading
 
@@ -91,15 +95,21 @@ Day >= 100: 20000 rows; plan: 3 of 16 blocks, object summaries pruned 13; zone m
 may Day be 500? False; may Day be 75? True
 the first batch of day 110 starts at dataset row 108192
 key cursor: seek 75 found True, key 75 at row 75000; 1000 entries
+walking down: last key 119 at row 119999; the key before it 118, its last entry at row 118999
 ```
 
 The plan's first pruning step is the objects' summaries: the two objects whose days end before 100
 are not opened, and their 13 blocks are pruned without a read. `MayMatch` answers from the
-summaries the version's header already carries, so it reads nothing, and `false` is a proof.
+summaries the handle already holds, the version's header and the pages it kept from earlier
+versions, so it reads nothing, and `false` is a proof.
 Positions are the dataset's: a batch's `StartRow`, `Rows(…)` and a key cursor's `Row` count the
 version's rows, object after object, in the order a scan delivers them. A key cursor over the
 clustering key merges the objects' cursors; its `KeyCountAsync` is the number of entries under the
-current key, here the thousand rows of day 75. See [keys-in-order.md](keys-in-order.md).
+current key, here the thousand rows of day 75. It walks both ways, as a file's does: `SeekLastAsync`,
+`PrevAsync`, `PrevKeyAsync`, `AtOrBefore` and `Before`, and a step against the direction of the
+last one seeks every object again at the current entry. Walking down, an object of a level above 0
+opens only once the walk could reach its keys, and level 0's all open at the seek, since nothing
+bounds them from above. See [keys-in-order.md](keys-in-order.md).
 
 ## Versions
 
@@ -127,7 +137,7 @@ await using (ObjectDraft rewritten = dataset.StartObject())
 ```
 
 ```
-replaced data/4960f1bc51154336b9c12abaa641c39b.vortex by the rows with a temperature: version 6, Applied, 129000 rows
+replaced data/7f4f12630bb346098a7d785a6bed85bb.vortex by the rows with a temperature: version 6, Applied, 129000 rows
 removed the import: version 7, Applied, 109000 rows, 3 objects
 removing it again: Abandoned, version 7
 ```
@@ -139,10 +149,95 @@ versions that name them, until vacuum deletes them. Removing an object the versi
 holds is `Abandoned`: no version is created, the result names the latest one, and the objects a
 replace would have added are left for vacuum.
 
+## Deleting and updating rows
+
+```csharp
+RowChangeResult deleted = await dataset.DeleteAsync<Reading>(r => r.Day < 10);
+
+RowChangeResult updated = await dataset.UpdateAsync<Reading>(
+    r => r.City == "Nice" & r.Day >= 60,
+    r => r with { Celsius = r.Celsius + 1.0 });
+```
+
+```
+deleted days 0 to 9: version 8, 9800 rows, 1 object(s) rewritten into 1, 0 marked, 99200 rows left
+warmed Nice from day 60: version 9, 6251 rows changed, 2 object(s) in, 3 out
+```
+
+`DeleteAsync` removes the rows its filter is true for, in one commit. A row the filter is false or
+unknown for, a null compared, stays. `UpdateAsync` reads the matching rows as records, passes each
+through the lambda, and writes the results into new objects of level 0, as an append would, since a
+change may move a row's key: an update is a delete and an insert, applied together. Its record must
+have a member for every column. `DeleteAsync(VortexExpr)` is the delete for a caller without a
+record type.
+
+A delete marks the rows it takes in the objects that hold them rather than rewriting those objects:
+each object's entry in the dataset records their positions, and every read steps over them, so a
+delete of ten rows in a 4 MiB object writes a few kilobytes of metadata and no data. Counts stay
+exact, and a scan or a count of a marked object reads what it would of a rewritten one; a walk in
+key order pays a little for the marks, since a cursor over an object of level 0 reads the keys of
+its deleted rows once to rank around them, and a step that lands in a run of them steps past it.
+An object is rewritten without the rows
+instead when it is under a mebibyte, where a rewrite costs little and keeps the object exact, and
+when the rows marked in it would pass an eighth of its rows or a kilobyte of positions; an object left with no row is removed
+whole, and one whose summaries refute the filter is not opened. `ObjectsMarked` counts the objects a
+change marked, `ObjectsIn` and `ObjectsOut` those it rewrote, and `BytesIn` and `BytesOut` what the
+rewrites read and wrote. `DataObject.DeletedRows` says how many rows an object holds marked, which
+compaction drops when it next rewrites the object: in a merge, or alone once its marks reach half of
+those bounds.
+
+A reader sees the change whole or not at all. Rows appended by another writer while the change is
+worked out are not touched; if another writer rewrites an object the change read, a compaction for
+instance, the change is worked out again on the version that won, and `Attempts` counts how many
+times.
+
+## Changing the schema
+
+```csharp
+[VortexRecord]
+public partial record struct Observation(int Day, double? Celsius, string Town, double? Humidity);
+
+ulong evolved = await dataset.EvolveSchemaAsync(Observation.Schema, new Dictionary<string, string> { ["Town"] = "City" });
+await using (ObjectDraft draft = dataset.StartObject())
+{
+    await draft.Writer.WriteAsync<Observation>(Observations(140, 10));
+    await dataset.AppendAsync(draft);
+}
+
+long humid = await dataset.Scan<Observation>().Where(r => r.Humidity > 50.0).CountAsync();
+long unknown = await dataset.Scan<Observation>().Where(r => r.Humidity.IsNull).CountAsync();
+```
+
+```
+evolved: version 10, columns Day, Celsius, Town, Humidity
+  humidity above 50: 4900 rows; unknown, in every row written before: 99200 rows
+  a row written before: Observation { Day = 10, Celsius = 10.1, Town = Nice, Humidity =  }
+```
+
+`EvolveSchemaAsync` gives the dataset new columns in one commit that rewrites no object. A column is
+added, nullable, under a name no column ever had; dropped, unless the clustering key holds it;
+renamed, the new name mapped to the old one; its numbers widened within their kind, `int` to `long`,
+`uint` to `ulong`, `float` to `double`; or made nullable. Anything else would lose a value already
+written, and is refused before anything is committed, with the column and the reason.
+
+The objects written before read as the new schema: a column they lack as nulls, a renamed one
+through the name it had, a widened one converted batch by batch. A filter is pushed down to such an
+object in its own terms, and one over a column it lacks is settled without reading it: `Humidity >
+50.0` skips every earlier object, `Humidity.IsNull` takes them whole. Compaction writes each object
+it rewrites in the current schema, so the conversion lasts until an object's level is next
+compacted. A dropped or renamed name is never used again, so an object written with it cannot lend
+its values to another column.
+
 ## Watch out
 
 * **Experimental, and this repository's own format.** Pin the package version, and do not expect
   another Vortex implementation to read the tree.
+* **Marked rows keep their bytes until compaction.** A delete that marks rows frees no space: the
+  object holds them, up to an eighth of its rows, until compaction rewrites it or a delete would pass
+  that share. An object under a mebibyte is rewritten by every delete that touches it, so batch the
+  rows you change into few calls: two deletes of one row each in a small object rewrite it twice.
+* **Two writers changing the schema at once do not both succeed**: the second is refused with
+  `InvalidOperationException` and changes the schema the dataset has once it has refreshed.
 * **The store must create objects atomically and list them consistently**: see
   [object-store.md](object-store.md). A store that cannot promise `PutIfAbsent` cannot host a
   dataset safely.

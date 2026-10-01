@@ -252,7 +252,10 @@ dead bytes.
 be built — its builder gave it up, or the required indexes alone exceed the budget —
 `CompleteAsync` throws a `VortexException` naming it and the reason before the file's tail is
 written. The flag is stored in the directory, so an append that reuses the policy keeps it. A
-dataset's clustering key is such an index ([13-dataset.md](13-dataset.md) §5.3).
+dataset's clustering key is such an index ([13-dataset.md](13-dataset.md) §5.3), which the dataset
+writes spared by the budget: kept when it alone is over it, and reported with what it cost, since a
+run on a narrow table is as large as the column it orders and no object is big enough to bring it
+under a share of the data.
 
 The `WriteReport` names every index built, with its bytes, and every index abandoned, with its
 reason.

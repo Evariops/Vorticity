@@ -15,17 +15,38 @@ namespace Vorticity.Dataset;
 internal sealed class DatasetSnapshot
 {
     private readonly ObjectCache _objects;
+    private long _knownAt;
 
-    internal DatasetSnapshot(CommitHeader header, CommitPageSource pages, ObjectCache objects)
+    // Per level, the root of its tree as the key walks of the version parsed it.
+    private ParsedPage?[]? _roots;
+
+    internal DatasetSnapshot(
+        CommitObject commit, CommitPageSource pages, ObjectCache objects, DateTimeOffset knownAt, DatasetSchema? previous = null)
     {
-        Header = header;
-        Levels = DatasetLevels.Of(header);
+        Commit = commit;
+        Header = commit.Header;
+        Levels = DatasetLevels.Of(Header);
         Pages = pages;
+        Schema = DatasetSchema.Of(Header, previous);
         _objects = objects;
+        _knownAt = knownAt.UtcTicks;
     }
+
+    /// <summary>The version's commit object, as the handle read it or wrote it.</summary>
+    internal CommitObject Commit { get; }
 
     /// <summary>The version's header.</summary>
     internal CommitHeader Header { get; }
+
+    /// <summary>
+    /// The last time the handle knew this version to be the latest, by its own clock. A version after
+    /// it was created later, and vacuum takes a commit only a retention window after the next one
+    /// superseded it: until then every version after this one is still in the store.
+    /// </summary>
+    internal DateTimeOffset KnownAt => new DateTimeOffset(Interlocked.Read(ref _knownAt), TimeSpan.Zero);
+
+    /// <summary>The version's schema, which every object it holds reads as.</summary>
+    internal DatasetSchema Schema { get; }
 
     /// <summary>The version.</summary>
     internal ulong Version => Header.Version;
@@ -39,6 +60,23 @@ internal sealed class DatasetSnapshot
     /// <summary>The rows of every object it holds.</summary>
     internal long RowCount => Levels.Rows;
 
+    /// <summary>Records that the handle found, at <paramref name="at"/>, that this version was still the latest.</summary>
+    internal void Confirm(DateTimeOffset at)
+    {
+        long ticks = at.UtcTicks;
+        long seen = Interlocked.Read(ref _knownAt);
+        while (ticks > seen)
+        {
+            long found = Interlocked.CompareExchange(ref _knownAt, ticks, seen);
+            if (found == seen)
+            {
+                return;
+            }
+
+            seen = found;
+        }
+    }
+
     /// <summary>
     /// The objects inside <c>[from, to)</c> whose summaries, and their ancestors', do not refute
     /// the pruner, in key order. A null pruner keeps every object.
@@ -50,32 +88,22 @@ internal sealed class DatasetSnapshot
         DatasetScanMetrics? metrics,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        Func<InternalEntry, bool>? descend = pruner is null ? null : node =>
-        {
-            if (node.Summary.IsEmpty
-                || ObjectSummaries.FromBytes(node.Summary.Span).MayMatch(pruner, node.Rows))
-            {
-                return true;
-            }
-
-            if (metrics is { } counters)
-            {
-                counters.SubtreesSkipped++;
-            }
-
-            return false;
-        };
+        // Each node and each entry is asked about the pruner's columns alone, decoded out of its
+        // summaries in place; an entry is parsed whole only once it is kept.
+        SummaryColumns? wanted = pruner is null ? null : new SummaryColumns(pruner.Paths);
+        Func<InternalEntry, bool>? mayMatch = pruner is null ? null : node =>
+            node.Summary.IsEmpty
+            || ObjectSummaries.Of(ObjectSummaryFold.SummariesOf(node.Summary.Span, out _), wanted!).MayMatch(pruner, node.Rows);
 
         await foreach ((TreeEntry held, long firstRow, int level) in
-            EntriesAsync(from, to, descend, cancellationToken).ConfigureAwait(false))
+            EntriesAsync(from, to, mayMatch, metrics, cancellationToken).ConfigureAwait(false))
         {
-            ObjectEntry entry = ObjectEntry.FromBytes(held.Value.Span);
             if (metrics is { } counters)
             {
                 counters.ObjectsConsidered++;
             }
 
-            if (pruner is not null && !entry.Summaries.MayMatch(pruner, entry.Rows))
+            if (pruner is not null && !ObjectSummaries.Of(ObjectEntry.SummaryOf(held.Value).Span, wanted!).MayMatch(pruner, held.Rows))
             {
                 if (metrics is { } skipped)
                 {
@@ -85,21 +113,38 @@ internal sealed class DatasetSnapshot
                 continue;
             }
 
-            yield return new PositionedObject(entry, firstRow) { Level = level, TreeKey = held.Key };
+            yield return new PositionedObject(ObjectEntry.FromBytes(held.Value), firstRow) { Level = level, TreeKey = held.Key };
         }
     }
 
     /// <summary>
+    /// The root of <paramref name="level"/>'s tree as the key walks of the version share it, read the
+    /// first time one asks; null for an empty level.
+    /// </summary>
+    internal ValueTask<ParsedPage?> RootAsync(int level, CancellationToken cancellationToken)
+    {
+        ParsedPage?[] roots = Volatile.Read(ref _roots) ?? Roots();
+        if (Volatile.Read(ref roots[level]) is { } known)
+        {
+            return new ValueTask<ParsedPage?>(known);
+        }
+
+        DatasetTree tree = Levels[level];
+        return tree.IsEmpty ? default : ReadRootAsync(roots, level, tree, cancellationToken);
+    }
+
+    /// <summary>
     /// Whether a row <paramref name="filter"/> selects may lie in this version, from the summaries
-    /// of the pages already in hand: false is a proof, and a page that would have to be read makes
-    /// the answer true.
+    /// of the pages already in hand, its header's and those the handle kept: false is a proof, and a
+    /// page that would have to be read makes the answer true.
     /// </summary>
     internal bool MayMatch(VortexExpr filter)
     {
         SummaryPruner pruner = new SummaryPruner(filter);
+        SummaryColumns wanted = new SummaryColumns(pruner.Paths);
         foreach ((int _, DatasetTree tree) in Levels.Occupied())
         {
-            if (MayMatch(tree.Root, tree.Depth, pruner))
+            if (MayMatch(tree.Root, tree.Depth, pruner, wanted))
             {
                 return true;
             }
@@ -119,7 +164,33 @@ internal sealed class DatasetSnapshot
     {
         try
         {
-            return await _objects.RentAsync(entry, Pages, cancellationToken).ConfigureAwait(false);
+            if (entry.IsResolved)
+            {
+                return await _objects.RentAsync(entry, Pages, cancellationToken).ConfigureAwait(false);
+            }
+
+            // A vector out of line is read beside the object's open, which does not wait on it.
+            Task<ObjectLease> renting = _objects.RentAsync(entry, Pages, cancellationToken).AsTask();
+            try
+            {
+                await entry.ResolveAsync(Pages, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The lease the rent hands back goes back at once; a rent that failed as well has
+                // nothing to return, and the failure already raised says more.
+                try
+                {
+                    await (await renting.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception) when (renting.IsFaulted || renting.IsCanceled)
+                {
+                }
+
+                throw;
+            }
+
+            return await renting.ConfigureAwait(false);
         }
         catch (ObjectNotFoundException missing) when (missing.Version == 0)
         {
@@ -127,9 +198,35 @@ internal sealed class DatasetSnapshot
         }
     }
 
-    private bool MayMatch(PageReference reference, int depth, SummaryPruner pruner)
+    /// <summary>The roots of the levels, none read yet: made once a key walk first asks for one.</summary>
+    private ParsedPage?[] Roots()
     {
-        if (!Pages.TryGetKnown(reference, out ReadOnlyMemory<byte> page))
+        ParsedPage?[] roots = new ParsedPage?[Levels.Count];
+        return Interlocked.CompareExchange(ref _roots, roots, null) ?? roots;
+    }
+
+    private async ValueTask<ParsedPage?> ReadRootAsync(ParsedPage?[] roots, int level, DatasetTree tree, CancellationToken cancellationToken)
+    {
+        ParsedPage root = await ParsedPage.ReadAsync(Pages, tree.Root, cancellationToken).ConfigureAwait(false);
+        return Interlocked.CompareExchange(ref roots[level], root, null) ?? root;
+    }
+
+    /// <summary>
+    /// Whether a row the pruner keeps may lie under the page <paramref name="reference"/> names, from
+    /// the pages in hand alone. A page that is not, or that an open read holds torn, is one the answer
+    /// cannot see past: it may match, and the read that comes to it says what is wrong with it.
+    /// </summary>
+    private bool MayMatch(PageReference reference, int depth, SummaryPruner pruner, SummaryColumns wanted)
+    {
+        ReadOnlyMemory<byte> page;
+        try
+        {
+            if (!Pages.TryGetInHand(reference, out page))
+            {
+                return true;
+            }
+        }
+        catch (TornCommitException)
         {
             return true;
         }
@@ -138,8 +235,7 @@ internal sealed class DatasetSnapshot
         {
             foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
             {
-                ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
-                if (entry.Summaries.MayMatch(pruner, entry.Rows))
+                if (ObjectSummaries.Of(ObjectEntry.SummaryOf(leaf.Value).Span, wanted).MayMatch(pruner, leaf.Rows))
                 {
                     return true;
                 }
@@ -151,8 +247,8 @@ internal sealed class DatasetSnapshot
         foreach (InternalEntry child in TreePage.ReadInternal(page))
         {
             bool refuted = !child.Summary.IsEmpty
-                && !ObjectSummaries.FromBytes(child.Summary.Span).MayMatch(pruner, child.Rows);
-            if (!refuted && MayMatch(child.Child, depth - 1, pruner))
+                && !ObjectSummaries.Of(ObjectSummaryFold.SummariesOf(child.Summary.Span, out _), wanted).MayMatch(pruner, child.Rows);
+            if (!refuted && MayMatch(child.Child, depth - 1, pruner, wanted))
             {
                 return true;
             }
@@ -162,15 +258,22 @@ internal sealed class DatasetSnapshot
     }
 
     /// <summary>
-    /// Every level's entries, merged into one key order, each with its first row in the dataset. A
-    /// single level takes its own walk, which tests a subtree's row sum before descending into it;
-    /// across levels the row offsets are not known until the merge has produced them, so the range
-    /// is applied per entry instead and the cost is the objects rather than the rows.
+    /// Every level's entries, merged into one key order, each with its first row in the dataset,
+    /// past the subtrees <paramref name="mayMatch"/> rules out. A single level takes its own walk,
+    /// which places a subtree ruled out by its parent's row sum without reading it.
     /// </summary>
+    /// <remarks>
+    /// Across levels a row's place depends on the entries of every level below it in key order, those
+    /// of a subtree ruled out included: each level is walked with the subtrees it rules out standing
+    /// as single steps, whose rows are counted whole when no step of another level falls inside their
+    /// key span, and which are read after all when one does, since their rows then interleave with
+    /// that level's. Only the parts of a level that interleave with another are read for nothing.
+    /// </remarks>
     private async IAsyncEnumerable<(TreeEntry Entry, long FirstRow, int Level)> EntriesAsync(
         long from,
         long to,
-        Func<InternalEntry, bool>? descend,
+        Func<InternalEntry, bool>? mayMatch,
+        DatasetScanMetrics? metrics,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         List<DatasetTree> trees = [];
@@ -185,6 +288,21 @@ internal sealed class DatasetSnapshot
         {
             DatasetTree only = trees.Count == 1 ? trees[0] : DatasetTree.Empty;
             int level = trees.Count == 1 ? levels[0] : 0;
+            Func<InternalEntry, bool>? descend = mayMatch is null ? null : node =>
+            {
+                if (mayMatch(node))
+                {
+                    return true;
+                }
+
+                if (metrics is { } counters)
+                {
+                    counters.SubtreesSkipped++;
+                }
+
+                return false;
+            };
+
             await foreach (PositionedEntry positioned in
                 only.WalkAsync(Pages, from, to, descend, cancellationToken).ConfigureAwait(false))
             {
@@ -194,28 +312,24 @@ internal sealed class DatasetSnapshot
             yield break;
         }
 
-        IAsyncEnumerator<PositionedEntry>[] walks = new IAsyncEnumerator<PositionedEntry>[trees.Count];
+        TreeWalk[] walks = new TreeWalk[trees.Count];
         bool[] live = new bool[trees.Count];
         try
         {
             for (int i = 0; i < trees.Count; i++)
             {
-                walks[i] = trees[i]
-                    .WalkAsync(Pages, 0, long.MaxValue, descend, cancellationToken)
-                    .GetAsyncEnumerator(cancellationToken);
+                walks[i] = new TreeWalk(trees[i], Pages, mayMatch, cancellationToken);
                 live[i] = await walks[i].MoveNextAsync().ConfigureAwait(false);
             }
 
             long row = 0;
-            while (true)
+            while (row < to)
             {
+                // Ties go to the lower level, which is the order the merge gives every key.
                 int smallest = -1;
                 for (int i = 0; i < walks.Length; i++)
                 {
-                    if (live[i]
-                        && (smallest < 0
-                            || TreePage.Compare(
-                                walks[i].Current.Entry.Key.Span, walks[smallest].Current.Entry.Key.Span) < 0))
+                    if (live[i] && (smallest < 0 || TreePage.Compare(walks[i].Key, walks[smallest].Key) < 0))
                     {
                         smallest = i;
                     }
@@ -226,19 +340,33 @@ internal sealed class DatasetSnapshot
                     yield break;
                 }
 
-                TreeEntry entry = walks[smallest].Current.Entry;
-                if (row < to && row + entry.Rows > from)
+                TreeWalk walk = walks[smallest];
+                if (walk.IsRuledOut)
                 {
-                    yield return (entry, row, levels[smallest]);
+                    if (Interleaves(walks, live, smallest))
+                    {
+                        walk.Expand();
+                        live[smallest] = await walk.MoveNextAsync().ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (metrics is { } counters)
+                    {
+                        counters.SubtreesSkipped++;
+                    }
+                }
+                else if (row + walk.Entry.Rows > from)
+                {
+                    yield return (walk.Entry, row, levels[smallest]);
                 }
 
-                row += entry.Rows;
-                live[smallest] = await walks[smallest].MoveNextAsync().ConfigureAwait(false);
+                row += walk.Rows;
+                live[smallest] = await walk.MoveNextAsync().ConfigureAwait(false);
             }
         }
         finally
         {
-            foreach (IAsyncEnumerator<PositionedEntry>? walk in walks)
+            foreach (TreeWalk? walk in walks)
             {
                 if (walk is not null)
                 {
@@ -246,5 +374,30 @@ internal sealed class DatasetSnapshot
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// Whether a step of another level falls inside the key span of the subtree level
+    /// <paramref name="ruledOut"/> stands at, which is the smallest step: its rows and that step's then
+    /// interleave in the merge. A step at the subtree's largest key comes before it from a lower level only.
+    /// </summary>
+    private static bool Interleaves(TreeWalk[] walks, bool[] live, int ruledOut)
+    {
+        ReadOnlySpan<byte> largest = walks[ruledOut].Subtree.MaxKey.Span;
+        for (int i = 0; i < walks.Length; i++)
+        {
+            if (i == ruledOut || !live[i])
+            {
+                continue;
+            }
+
+            int order = TreePage.Compare(walks[i].Key, largest);
+            if (order < 0 || (order == 0 && i < ruledOut))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

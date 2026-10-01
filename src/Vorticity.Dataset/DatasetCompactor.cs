@@ -4,6 +4,8 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Columns;
+using Vorticity.File;
+using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Writing;
 
@@ -61,7 +63,7 @@ internal static class DatasetCompactor
     /// The clustering key is composite and one of its columns holds nulls in an input: its run holds
     /// no such tuple, so no permuted read keeps every row.
     /// </exception>
-    /// <exception cref="InvalidOperationException">The outputs do not hold the inputs' rows.</exception>
+    /// <exception cref="DatasetIntegrityException">The outputs do not hold the inputs' rows.</exception>
     public static async ValueTask<CompactionResult> RunAsync(
         VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken = default)
     {
@@ -84,13 +86,16 @@ internal static class DatasetCompactor
             Check(key, job);
         }
 
-        ObjectStream outputs = new ObjectStream(dataset, job.TargetBytes, job.FirstRow);
+        // Every input is read as this schema and every output written in it: a compaction is also
+        // how objects of an earlier schema come to hold the current one.
+        DatasetSchema schema = dataset.Snapshot.Schema;
+        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge);
         long rows;
         try
         {
             rows = merge
-                ? await MergeAsync(dataset, job, key!, outputs, cancellationToken).ConfigureAwait(false)
-                : await ConcatenateAsync(dataset, job, outputs, cancellationToken).ConfigureAwait(false);
+                ? await MergeAsync(dataset, schema, job, key!, outputs, cancellationToken).ConfigureAwait(false)
+                : await ConcatenateAsync(dataset, schema, job, outputs, cancellationToken).ConfigureAwait(false);
             await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
         }
         catch
@@ -101,7 +106,7 @@ internal static class DatasetCompactor
 
         if (rows != job.Rows)
         {
-            throw new InvalidOperationException(
+            throw new DatasetIntegrityException(
                 $"The compaction read {job.Rows} row(s) from {job.Inputs.Count} object(s) and wrote " +
                 $"{rows}: a rewrite that loses rows is the one failure it must not have.");
         }
@@ -118,8 +123,19 @@ internal static class DatasetCompactor
             produced.Add((job.ToLevel, written.Key, written.Entry));
         }
 
-        DatasetOperation.ReplaceObjects replacement =
-            new DatasetOperation.ReplaceObjects(consumed, produced);
+        // What each input was read as: a delete that marked rows in one meanwhile leaves it under its
+        // key, and outputs worked out from the rows before the delete would bring them back.
+        List<ObjectEntry> read = new List<ObjectEntry>(job.Inputs.Count);
+        foreach (CompactionInput input in job.Inputs)
+        {
+            read.Add(input.Entry);
+        }
+
+        DatasetOperation.ReplaceObjects replacement = new DatasetOperation.ReplaceObjects(consumed, produced)
+        {
+            Expected = read,
+            Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
+        };
         CommitResult commit = await dataset
             .CommitAsync([replacement], cancellationToken).ConfigureAwait(false);
 
@@ -151,8 +167,10 @@ internal static class DatasetCompactor
         }
 
         // A single column's null keys are read, last, where the encoding puts them; a composite
-        // key's run holds no tuple with a null, so a merge that went on would drop those rows.
-        if (!key.IsComposite)
+        // key's run holds no tuple with a null, so a merge that went on would drop those rows. A new
+        // dataset declares no such key; one declared before that was refused is merged only where
+        // the summaries say no null is there, which a summary loosened by marks no longer says.
+        if (!key.IsComposite || !key.MayHoldNull)
         {
             return;
         }
@@ -161,16 +179,13 @@ internal static class DatasetCompactor
         {
             foreach (string path in key.Paths)
             {
-                if (input.Entry.Summaries.TryGet(path, out ColumnSummary column)
-                    && column.HasNullCount
-                    && column.NullCount > 0)
+                if (!input.Entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasNullCount || column.NullCount > 0)
                 {
                     throw new VortexUnsupportedException(
                         input.Entry.Key,
                         ComponentKind.Feature,
-                        $"'{path}' holds {column.NullCount} null(s) in this object, and a composite key's " +
-                        "run holds no tuple with a null: the merge would drop those rows. Declare " +
-                        "the composite clustering key on non-nullable columns.");
+                        $"'{path}' may hold a null in this object, and a composite key's run holds no tuple with a null: " +
+                        "the merge would drop those rows. Declare the composite clustering key on non-nullable columns.");
                 }
             }
         }
@@ -231,9 +246,61 @@ internal static class DatasetCompactor
         };
     }
 
+    /// <summary>
+    /// An input's rows, in its own order or in key order along <paramref name="paths"/>, as
+    /// <paramref name="schema"/>'s columns: its own scan, each batch reshaped when it was written
+    /// under another schema.
+    /// </summary>
+    private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
+        ObjectLease lease, ObjectEntry entry, DatasetSchema schema, IReadOnlyList<string>? paths, CancellationToken cancellationToken)
+    {
+        VortexFile file = lease.File;
+        if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
+        {
+            return LiveRowsAsync(file, file.ScanBuilder, entry, paths, cancellationToken);
+        }
+
+        // The clustering key keeps its columns under every schema, so a key-ordered read of an
+        // earlier object names them as the dataset does.
+        ObjectRead read = columns.Read(null, FieldMask.All);
+        return ObjectColumns.ReshapeAsync(
+            LiveRowsAsync(file, () => file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), entry, paths, cancellationToken),
+            read.Shape,
+            null,
+            0,
+            compact: true,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// An input's rows through the scans <paramref name="scan"/> makes, in key order along
+    /// <paramref name="paths"/> or in its own, without the rows it deleted: a compaction is also where
+    /// a deletion vector ends, its outputs holding only the live rows.
+    /// </summary>
+    private static IAsyncEnumerable<RecordBatch> LiveRowsAsync(
+        VortexFile file, Func<ScanBuilder> scan, ObjectEntry entry, IReadOnlyList<string>? paths, CancellationToken cancellationToken)
+    {
+        if (!entry.HasDeletions)
+        {
+            return (paths is null ? scan() : scan().InKeyOrder(paths)).ExecuteAsync();
+        }
+
+        if (paths is null)
+        {
+            return LiveRows.WithoutDeletedAsync(
+                scan().WithCompaction(false).WithEncodings(false, false).ExecuteAsync(), entry.Deletions, compact: true, 0, cancellationToken);
+        }
+
+        ScanBuilder ordered = scan().InKeyOrder(paths);
+        ScanBuilder? nulls = paths.Count == 1 && ColumnPath.MayBeNull(file.DType, paths[0])
+            ? scan().Where(Vorticity.Expressions.Expr.IsNull(Vorticity.Expressions.Expr.Field(paths[0]))).WithEncodings(false, false)
+            : null;
+        return LiveRows.OrderedAsync(ordered, nulls, entry.Deletions, descending: false, cancellationToken);
+    }
+
     /// <summary>Each input's rows, in its own order, one after another.</summary>
     private static async ValueTask<long> ConcatenateAsync(
-        VortexDataset dataset, CompactionJob job, ObjectStream outputs, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, ObjectStream outputs, CancellationToken cancellationToken)
     {
         long rows = 0;
         foreach (CompactionInput input in job.Inputs)
@@ -241,8 +308,8 @@ internal static class DatasetCompactor
             ObjectLease lease = await dataset.RentAsync(input.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in lease.File.ScanBuilder()
-                    .ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
+                await foreach (RecordBatch batch in RowsOfAsync(lease, input.Entry, schema, null, cancellationToken)
+                    .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
                     await outputs.RollIfFullAsync(cancellationToken).ConfigureAwait(false);
                     await outputs.WriteAsync(batch, cancellationToken).ConfigureAwait(false);
@@ -257,6 +324,7 @@ internal static class DatasetCompactor
     /// <summary>The k-way merge, one run of rows at a time.</summary>
     private static async ValueTask<long> MergeAsync(
         VortexDataset dataset,
+        DatasetSchema schema,
         CompactionJob job,
         ClusteringKey key,
         ObjectStream outputs,
@@ -280,7 +348,7 @@ internal static class DatasetCompactor
             key.Paths,
             descending: false,
             rankedTies: false,
-            file => file.ScanBuilder().InKeyOrder(paths),
+            (lease, entry) => RowsOfAsync(lease, entry, schema, paths, cancellationToken),
             opened: null,
             cancellationToken);
         long rows = 0;
@@ -309,6 +377,8 @@ internal static class DatasetCompactor
     private sealed class ObjectStream
     {
         private readonly VortexDataset _dataset;
+        private readonly DatasetSchema _schema;
+        private readonly bool _inKeyOrder;
         private readonly long _target;
         private readonly List<WrittenObject> _written = [];
         private byte[] _lastKey = [];
@@ -317,9 +387,11 @@ internal static class DatasetCompactor
         private long _rows;
         private long _firstRow;
 
-        internal ObjectStream(VortexDataset dataset, long target, long firstRow)
+        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder)
         {
             _dataset = dataset;
+            _schema = schema;
+            _inKeyOrder = inKeyOrder;
             _target = target;
             _firstRow = firstRow;
         }
@@ -362,7 +434,7 @@ internal static class DatasetCompactor
 
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
         {
-            _draft ??= _dataset.StartObject();
+            _draft ??= _dataset.StartObjectUnder(_schema, _inKeyOrder);
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
             _rows += batch.RowCount;
         }

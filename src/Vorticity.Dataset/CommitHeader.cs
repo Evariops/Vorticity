@@ -25,6 +25,9 @@ internal readonly record struct RetentionSettings(int Versions, long Seconds);
 /// <summary>A page carried inside the header as well as at the offset its reference names.</summary>
 internal readonly record struct InlinedPage(PageReference Reference, ReadOnlyMemory<byte> Bytes);
 
+/// <summary>Where the pages region of an earlier version's commit object starts, one past its header.</summary>
+internal readonly record struct PagesStart(ulong Version, long Offset);
+
 /// <summary>
 /// One level of the dataset tree, as the header records it; level 0 is the newest and smallest.
 /// <c>Inlined</c> holds the pages carried in the header, top first.
@@ -46,6 +49,12 @@ internal sealed record CommitLevel(int Level, long Entries, PageReference Top, I
 
     /// <summary>The rows of every object under it.</summary>
     public long Rows { get; init; }
+
+    /// <summary>
+    /// The tree key the level's last job stopped at, which its next job starts past under a round
+    /// robin; empty until a job of the level records one.
+    /// </summary>
+    public ReadOnlyMemory<byte> Pointer { get; init; }
 }
 
 /// <summary>A commit object's header.</summary>
@@ -81,6 +90,27 @@ internal sealed record CommitHeader
     /// <summary>The levels, lowest first.</summary>
     public IReadOnlyList<CommitLevel> Levels { get; init; } = [];
 
+    /// <summary>
+    /// Every name a column gave up when the schema changed, in the order they were given up: the
+    /// objects written before the change hold their columns under them, and no column takes one again.
+    /// </summary>
+    public IReadOnlyList<RetiredColumn> Retired { get; init; } = [];
+
+    /// <summary>
+    /// Where the pages region starts of each earlier version whose pages the header names without
+    /// carrying them, by version: a reader then reads such a page in one request, where it would
+    /// first read that version's preamble to learn it. A header written before these were recorded
+    /// has none, and a reader that does not know the field skips it.
+    /// </summary>
+    public IReadOnlyList<PagesStart> Starts { get; init; } = [];
+
+    /// <summary>
+    /// Whether the dataset lives on a store that keeps every object under a retention lock, fixed at
+    /// creation: every writer then deletes by marks, compacts to the read bounds only, and every
+    /// vacuum leaves what a lock still keeps.
+    /// </summary>
+    public bool LockedStore { get; init; }
+
     internal static class Field
     {
         internal const int Version = 1;
@@ -94,6 +124,21 @@ internal sealed record CommitHeader
         internal const int Retention = 9;
         internal const int CreatedAt = 10;
         internal const int Levels = 11;
+        internal const int Retired = 12;
+        internal const int Starts = 13;
+        internal const int LockedStore = 14;
+    }
+
+    internal static class StartField
+    {
+        internal const int Version = 1;
+        internal const int Offset = 2;
+    }
+
+    internal static class RetiredField
+    {
+        internal const int Name = 1;
+        internal const int Current = 2;
     }
 
     internal static class LevelField
@@ -104,6 +149,7 @@ internal sealed record CommitHeader
         internal const int Inlined = 4;
         internal const int Depth = 5;
         internal const int Rows = 6;
+        internal const int Pointer = 7;
     }
 
     internal static class InlinedField
@@ -143,6 +189,57 @@ internal sealed record CommitHeader
         foreach (CommitLevel level in Levels)
         {
             WriteLevel(ref writer, level);
+        }
+
+        foreach (RetiredColumn column in Retired)
+        {
+            WriteRetired(ref writer, column);
+        }
+
+        foreach (PagesStart start in Starts)
+        {
+            WriteStart(ref writer, start);
+        }
+
+        if (LockedStore)
+        {
+            writer.WriteUInt64(Field.LockedStore, 1);
+        }
+    }
+
+    private static void WriteStart(ref ProtoWriter writer, PagesStart start)
+    {
+        ProtoWriter inner = new ProtoWriter();
+        try
+        {
+            inner.WriteUInt64(StartField.Version, start.Version);
+            inner.WriteInt64(StartField.Offset, start.Offset);
+            writer.WriteBytes(Field.Starts, inner.WrittenSpan);
+        }
+        finally
+        {
+            inner.Dispose();
+        }
+    }
+
+    private static void WriteRetired(ref ProtoWriter writer, RetiredColumn column)
+    {
+        // The name is written even when empty, a column's name may be, so that a retired name is
+        // never left out of the header, and a reader can tell an entry from a torn one.
+        ProtoWriter inner = new ProtoWriter();
+        try
+        {
+            inner.WriteStringAlways(RetiredField.Name, column.Name);
+            if (column.Current.Length > 0)
+            {
+                inner.WriteString(RetiredField.Current, column.Current);
+            }
+
+            writer.WriteBytesAlways(Field.Retired, inner.WrittenSpan);
+        }
+        finally
+        {
+            inner.Dispose();
         }
     }
 
@@ -236,6 +333,11 @@ internal sealed record CommitHeader
                 }
             }
 
+            if (!level.Pointer.IsEmpty)
+            {
+                inner.WriteBytes(LevelField.Pointer, level.Pointer.Span);
+            }
+
             writer.WriteBytes(Field.Levels, inner.WrittenSpan);
         }
         finally
@@ -257,6 +359,9 @@ internal sealed record CommitHeader
         RetentionSettings retention = default;
         long createdAt = 0;
         List<CommitLevel> levels = [];
+        List<RetiredColumn> retired = [];
+        List<PagesStart> starts = [];
+        bool locked = false;
 
         try
         {
@@ -298,6 +403,15 @@ internal sealed record CommitHeader
                     case (Field.Levels, ProtoWireType.LengthDelimited):
                         levels.Add(ReadLevel(reader.ReadLengthDelimited()));
                         break;
+                    case (Field.Retired, ProtoWireType.LengthDelimited):
+                        retired.Add(ReadRetired(reader.ReadLengthDelimited()));
+                        break;
+                    case (Field.Starts, ProtoWireType.LengthDelimited):
+                        starts.Add(ReadStart(reader.ReadLengthDelimited()));
+                        break;
+                    case (Field.LockedStore, ProtoWireType.Varint):
+                        locked = reader.ReadVarint() != 0;
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -329,7 +443,65 @@ internal sealed record CommitHeader
             Retention = retention,
             CreatedAtUnixMilliseconds = createdAt,
             Levels = levels,
+            Retired = retired,
+            Starts = starts,
+            LockedStore = locked,
         };
+    }
+
+    private static PagesStart ReadStart(ReadOnlySpan<byte> bytes)
+    {
+        ulong version = 0;
+        long offset = 0;
+        ProtoReader reader = new ProtoReader(bytes);
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            switch (field, wire)
+            {
+                case (StartField.Version, ProtoWireType.Varint):
+                    version = reader.ReadVarint();
+                    break;
+                case (StartField.Offset, ProtoWireType.Varint):
+                    offset = (long)reader.ReadVarint();
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        if (version == 0 || offset < CommitFormat.PreambleBytes)
+        {
+            throw new CommitFormatException($"The header says version {version}'s pages start at {offset}, which is no version's.");
+        }
+
+        return new PagesStart(version, offset);
+    }
+
+    private static RetiredColumn ReadRetired(ReadOnlySpan<byte> bytes)
+    {
+        string? name = null;
+        string current = string.Empty;
+        ProtoReader reader = new ProtoReader(bytes);
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            switch (field, wire)
+            {
+                case (RetiredField.Name, ProtoWireType.LengthDelimited):
+                    name = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                case (RetiredField.Current, ProtoWireType.LengthDelimited):
+                    current = System.Text.Encoding.UTF8.GetString(reader.ReadLengthDelimited());
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        return name is null
+            ? throw new CommitFormatException("The header retires a column it does not name.")
+            : new RetiredColumn(name, current);
     }
 
     private static ChunkerSettings ReadChunker(ReadOnlySpan<byte> bytes)
@@ -420,6 +592,7 @@ internal sealed record CommitHeader
         long rows = 0;
         PageReference top = PageReference.None;
         List<InlinedPage> inlined = [];
+        byte[] pointer = [];
         ProtoReader reader = new ProtoReader(bytes);
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
@@ -443,13 +616,16 @@ internal sealed record CommitHeader
                 case (LevelField.Inlined, ProtoWireType.LengthDelimited):
                     inlined.Add(ReadInlined(reader.ReadLengthDelimited()));
                     break;
+                case (LevelField.Pointer, ProtoWireType.LengthDelimited):
+                    pointer = reader.ReadLengthDelimited().ToArray();
+                    break;
                 default:
                     reader.SkipField(wire);
                     break;
             }
         }
 
-        return new CommitLevel(level, entries, top, inlined) { Depth = depth, Rows = rows };
+        return new CommitLevel(level, entries, top, inlined) { Depth = depth, Rows = rows, Pointer = pointer };
     }
 
     private static InlinedPage ReadInlined(ReadOnlySpan<byte> bytes)

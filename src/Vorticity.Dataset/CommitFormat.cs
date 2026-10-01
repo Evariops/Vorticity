@@ -17,8 +17,19 @@ internal static class CommitFormat
     /// <summary>The last four bytes of every commit object.</summary>
     public static ReadOnlySpan<byte> TrailerMagic => "VXCT"u8;
 
-    /// <summary>The format this library writes and reads.</summary>
-    public const uint Version = 1;
+    /// <summary>
+    /// The format this library writes. Format 2 headers may retire column names, lock the store and
+    /// say where earlier versions' pages start, and its pages carry tallies and deletion vectors: a
+    /// reader of format 1 would read such a dataset wrongly where it did not fail, a renamed column as
+    /// missing and a locked store as one it may rewrite, and refuses it by this number instead.
+    /// </summary>
+    public const uint Version = 2;
+
+    /// <summary>
+    /// The oldest format this library reads: format 1 holds nothing format 2 does not read the same,
+    /// so a dataset written by a reader of it opens here as it is.
+    /// </summary>
+    public const uint OldestRead = 1;
 
     /// <summary>Bytes before the header: the magic, the format and the header's length.</summary>
     public const int PreambleBytes = 16;

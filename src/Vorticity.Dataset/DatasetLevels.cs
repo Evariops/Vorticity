@@ -11,13 +11,30 @@ namespace Vorticity.Dataset;
 /// </summary>
 internal sealed class DatasetLevels
 {
-    private static readonly DatasetLevels None = new DatasetLevels([]);
+    private static readonly DatasetLevels None = new DatasetLevels([], null);
     private readonly DatasetTree[] _levels;
 
-    private DatasetLevels(DatasetTree[] levels) => _levels = levels;
+    // Where each level's last job stopped, by level; null while no level records one, which is
+    // every version of a dataset compacted by its largest objects.
+    private readonly ReadOnlyMemory<byte>[]? _pointers;
+
+    private DatasetLevels(DatasetTree[] levels, ReadOnlyMemory<byte>[]? pointers)
+    {
+        _levels = levels;
+        _pointers = pointers;
+    }
 
     /// <summary>A dataset with nothing in it.</summary>
     public static DatasetLevels Empty => None;
+
+    /// <summary>
+    /// Whether a level of a dataset with a clustering key holds objects each written in the key's
+    /// order, null keys last, whose keys no other object of the level overlaps, in the order of their
+    /// entries: every level above 0, which only a leveled compaction writes into, a merge on the key,
+    /// since a plan refuses tiered levels for such a dataset. Level 0 holds what appends wrote, in any
+    /// order and overlapping. Off the key, a level's objects are in no order of it.
+    /// </summary>
+    public static bool InKeyOrder(int level) => level > 0;
 
     /// <summary>How many levels the version names; level numbers run from 0 to this minus one.</summary>
     public int Count => _levels.Length;
@@ -87,15 +104,21 @@ internal sealed class DatasetLevels
 
         DatasetTree[] trees = new DatasetTree[highest + 1];
         Array.Fill(trees, DatasetTree.Empty);
+        ReadOnlyMemory<byte>[]? pointers = null;
         foreach (CommitLevel level in header.Levels)
         {
             if (level.Top.Exists)
             {
                 trees[level.Level] = new DatasetTree(level.Top, level.Depth, level.Entries, level.Rows);
+                if (!level.Pointer.IsEmpty)
+                {
+                    pointers ??= new ReadOnlyMemory<byte>[highest + 1];
+                    pointers[level.Level] = level.Pointer;
+                }
             }
         }
 
-        return new DatasetLevels(trees);
+        return new DatasetLevels(trees, pointers);
     }
 
     /// <summary>These levels with one of them replaced.</summary>
@@ -109,7 +132,30 @@ internal sealed class DatasetLevels
         Array.Fill(trees, DatasetTree.Empty);
         _levels.CopyTo(trees, 0);
         trees[level] = tree;
-        return new DatasetLevels(trees);
+        return new DatasetLevels(trees, _pointers);
+    }
+
+    /// <summary>
+    /// The tree key the level's last job stopped at, which its next job starts past under a round
+    /// robin; empty when no job of the level recorded one. A header records it with its level, so a
+    /// level that empties forgets it.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="level"/> is negative.</exception>
+    public ReadOnlyMemory<byte> PointerOf(int level)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(level);
+        return _pointers is { } pointers && level < pointers.Length ? pointers[level] : default;
+    }
+
+    /// <summary>These levels with where one level's last job stopped moved to <paramref name="key"/>.</summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="level"/> is negative.</exception>
+    public DatasetLevels WithPointer(int level, ReadOnlyMemory<byte> key)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(level);
+        ReadOnlyMemory<byte>[] pointers = new ReadOnlyMemory<byte>[Math.Max(_pointers?.Length ?? 0, level + 1)];
+        _pointers?.CopyTo(pointers, 0);
+        pointers[level] = key;
+        return new DatasetLevels(_levels, pointers);
     }
 
     /// <summary>

@@ -1280,6 +1280,32 @@ internal partial class CanonicalArena
     }
 
     /// <summary>
+    /// The node under another dtype of the same physical shape: a column written non-nullable and
+    /// read as nullable. A new record over the same buffers and children; an extension's storage is
+    /// retyped with it, since the extension's nullability is its storage's.
+    /// </summary>
+    /// <param name="nodeIndex">The node.</param>
+    /// <param name="dtype">The dtype the new record declares; the caller has checked it has the node's shape.</param>
+    /// <returns>The new record's index.</returns>
+    internal int Retyped(int nodeIndex, DType dtype)
+    {
+        CanonicalRecord record = RecordRef(nodeIndex);
+        if (record.Kind == CanonicalKind.Extension)
+        {
+            int storage = Retyped(ChildAt(record.ChildStart), dtype.StorageType);
+            return AddExtension(dtype, record.Length, storage);
+        }
+
+        record.DType = dtype;
+        if (record.Validity.Kind == ValidityKind.NonNullable && dtype.Nullability == Nullability.Nullable)
+        {
+            record.Validity = Validity.AllValid;
+        }
+
+        return Commit(ref record);
+    }
+
+    /// <summary>
     /// Adds a node of <paramref name="kind"/> with only the four common fields set. Decoders reach
     /// it through <see cref="ArrayDecodeContext.NewCanonical"/>; prefer the typed builders above,
     /// which validate their buffers.

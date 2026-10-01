@@ -1802,6 +1802,7 @@ Vorticity.Dataset:     method bool op_Equality(CompactionOptions, CompactionOpti
 Vorticity.Dataset:     method bool op_Inequality(CompactionOptions, CompactionOptions)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property CompactionPick Pick { get; init; }
 Vorticity.Dataset:     property CompactionStyle Style { get; init; }
 Vorticity.Dataset:     property int Fanout { get; init; }
 Vorticity.Dataset:     property int LevelZeroCeiling { get; init; }
@@ -1809,6 +1810,11 @@ Vorticity.Dataset:     property int MaxFragments { get; init; }
 Vorticity.Dataset:     property int MaxLevels { get; init; }
 Vorticity.Dataset:     property long MaxObjectBytes { get; init; }
 Vorticity.Dataset:     property long TargetBytesAtLevelOne { get; init; }
+Vorticity.Dataset: enum Vorticity.Dataset.CompactionPick
+Vorticity.Dataset:     const CompactionPick Auto = 0
+Vorticity.Dataset:     const CompactionPick Largest = 1
+Vorticity.Dataset:     const CompactionPick RoundRobin = 2
+Vorticity.Dataset:     field int value__
 Vorticity.Dataset: sealed class Vorticity.Dataset.CompactionPlan : IEquatable<CompactionPlan>
 Vorticity.Dataset:     ctor CompactionPlan()
 Vorticity.Dataset:     method CompactionPlan <Clone>$()
@@ -1847,6 +1853,24 @@ Vorticity.Dataset:     property long ObjectsIn { get; init; }
 Vorticity.Dataset:     property long ObjectsOut { get; init; }
 Vorticity.Dataset:     property long Rows { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.CompactionSchedule : IEquatable<CompactionSchedule>
+Vorticity.Dataset:     ctor CompactionSchedule()
+Vorticity.Dataset:     method CompactionSchedule <Clone>$()
+Vorticity.Dataset:     method bool Equals(CompactionSchedule)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(CompactionSchedule, CompactionSchedule)
+Vorticity.Dataset:     method bool op_Inequality(CompactionSchedule, CompactionSchedule)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property CompactionOptions Compaction { get; init; }
+Vorticity.Dataset:     property IProgress<CompactionResult> Progress { get; init; }
+Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
+Vorticity.Dataset:     property TimeSpan Idle { get; init; }
+Vorticity.Dataset:     property TimeSpan LeaseSpan { get; init; }
+Vorticity.Dataset:     property bool Leases { get; init; }
+Vorticity.Dataset:     property int Loop { get; init; }
+Vorticity.Dataset:     property int Loops { get; init; }
+Vorticity.Dataset:     property long BytesPerSecond { get; init; }
 Vorticity.Dataset: enum Vorticity.Dataset.CompactionStyle
 Vorticity.Dataset:     const CompactionStyle Auto = 0
 Vorticity.Dataset:     const CompactionStyle Leveled = 1
@@ -1856,6 +1880,7 @@ Vorticity.Dataset: enum Vorticity.Dataset.CompactionTrigger
 Vorticity.Dataset:     const CompactionTrigger Fragments = 3
 Vorticity.Dataset:     const CompactionTrigger LevelSize = 2
 Vorticity.Dataset:     const CompactionTrigger LevelZeroCeiling = 1
+Vorticity.Dataset:     const CompactionTrigger Marks = 4
 Vorticity.Dataset:     const CompactionTrigger None = 0
 Vorticity.Dataset:     field int value__
 Vorticity.Dataset: sealed class Vorticity.Dataset.CountingObjectStore : IObjectStore
@@ -1883,9 +1908,14 @@ Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property int Level { get; init; }
 Vorticity.Dataset:     property long Bytes { get; init; }
+Vorticity.Dataset:     property long DeletedRows { get; init; }
 Vorticity.Dataset:     property long FirstRow { get; init; }
 Vorticity.Dataset:     property long Rows { get; init; }
 Vorticity.Dataset:     property string Key { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.DatasetIntegrityException : VortexException
+Vorticity.Dataset:     ctor DatasetIntegrityException()
+Vorticity.Dataset:     ctor DatasetIntegrityException(string)
+Vorticity.Dataset:     ctor DatasetIntegrityException(string, Exception)
 Vorticity.Dataset: sealed class Vorticity.Dataset.DatasetOptions : IEquatable<DatasetOptions>
 Vorticity.Dataset:     ctor DatasetOptions()
 Vorticity.Dataset:     method DatasetOptions <Clone>$()
@@ -1901,11 +1931,14 @@ Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan RetentionWindow { get; init; }
 Vorticity.Dataset:     property VortexSession Session { get; init; }
 Vorticity.Dataset:     property VortexWriteOptions Write { get; init; }
+Vorticity.Dataset:     property bool LockedStore { get; init; }
 Vorticity.Dataset:     property int MaxAttempts { get; init; }
 Vorticity.Dataset:     property int MaxOpenObjects { get; init; }
 Vorticity.Dataset:     property int RetainedVersions { get; init; }
 Vorticity.Dataset:     property int SummaryColumnLimit { get; init; }
+Vorticity.Dataset:     property long InlineCompactionBytes { get; init; }
 Vorticity.Dataset:     property long MaxObjectBytes { get; init; }
+Vorticity.Dataset:     property long PageCacheBytes { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.DatasetVerification : IEquatable<DatasetVerification>
 Vorticity.Dataset:     ctor DatasetVerification()
 Vorticity.Dataset:     method DatasetVerification <Clone>$()
@@ -1948,8 +1981,10 @@ Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     method ValueTask<Nullable<ObjectHead>> HeadAsync(string, CancellationToken)
 Vorticity.Dataset:     method ValueTask<ObjectRange> GetRangeAsync(string, long, int, CancellationToken)
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutIfAbsentAsync(string, PipeReader, long, CancellationToken)
+Vorticity.Dataset:     method void Hold(string, bool)
 Vorticity.Dataset:     property Func<ObjectOperation, string, bool> Fails { get; set; }
 Vorticity.Dataset:     property Func<string, bool> CrashesAfterPut { get; set; }
+Vorticity.Dataset:     property Nullable<TimeSpan> RetainFor { get; set; }
 Vorticity.Dataset:     property TimeProvider TimeProvider { get; set; }
 Vorticity.Dataset:     property TimeSpan Latency { get; set; }
 Vorticity.Dataset:     property int Count { get; }
@@ -1962,12 +1997,15 @@ Vorticity.Dataset: struct Vorticity.Dataset.ObjectHead : IEquatable<ObjectHead>
 Vorticity.Dataset:     ctor ObjectHead(long, string, DateTimeOffset)
 Vorticity.Dataset:     method bool Equals(ObjectHead)
 Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool IsLockedAt(DateTimeOffset)
 Vorticity.Dataset:     method bool op_Equality(ObjectHead, ObjectHead)
 Vorticity.Dataset:     method bool op_Inequality(ObjectHead, ObjectHead)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     method void Deconstruct(out long, out string, out DateTimeOffset)
 Vorticity.Dataset:     property DateTimeOffset LastModified { get; init; }
+Vorticity.Dataset:     property Nullable<DateTimeOffset> RetainUntil { get; init; }
+Vorticity.Dataset:     property bool LegalHold { get; init; }
 Vorticity.Dataset:     property long Length { get; init; }
 Vorticity.Dataset:     property string Token { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.ObjectNotFoundException : VortexException
@@ -2017,6 +2055,24 @@ Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property OperationOutcome Outcome { get; init; }
 Vorticity.Dataset:     property ulong Version { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.RowChangeResult : IEquatable<RowChangeResult>
+Vorticity.Dataset:     ctor RowChangeResult()
+Vorticity.Dataset:     method RowChangeResult <Clone>$()
+Vorticity.Dataset:     method bool Equals(RowChangeResult)
+Vorticity.Dataset:     method bool Equals(object)
+Vorticity.Dataset:     method bool op_Equality(RowChangeResult, RowChangeResult)
+Vorticity.Dataset:     method bool op_Inequality(RowChangeResult, RowChangeResult)
+Vorticity.Dataset:     method int GetHashCode()
+Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property OperationOutcome Outcome { get; init; }
+Vorticity.Dataset:     property int Attempts { get; init; }
+Vorticity.Dataset:     property long BytesIn { get; init; }
+Vorticity.Dataset:     property long BytesOut { get; init; }
+Vorticity.Dataset:     property long ObjectsIn { get; init; }
+Vorticity.Dataset:     property long ObjectsMarked { get; init; }
+Vorticity.Dataset:     property long ObjectsOut { get; init; }
+Vorticity.Dataset:     property long Rows { get; init; }
+Vorticity.Dataset:     property ulong Version { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.TornCommitException : VortexException
 Vorticity.Dataset:     ctor TornCommitException()
 Vorticity.Dataset:     ctor TornCommitException(string)
@@ -2044,8 +2100,10 @@ Vorticity.Dataset:     method bool op_Inequality(VacuumResult, VacuumResult)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property ImmutableArray<string> Deleted { get; init; }
+Vorticity.Dataset:     property ImmutableArray<string> Locked { get; init; }
 Vorticity.Dataset:     property ImmutableArray<string> Young { get; init; }
 Vorticity.Dataset:     property ImmutableArray<ulong> Retained { get; init; }
+Vorticity.Dataset:     property Nullable<DateTimeOffset> NextUnlock { get; init; }
 Vorticity.Dataset:     property TimeSpan Window { get; init; }
 Vorticity.Dataset:     property long PagesRead { get; init; }
 Vorticity.Dataset:     property ulong Latest { get; init; }
@@ -2054,6 +2112,7 @@ Vorticity.Dataset:     method IAsyncEnumerable<DataObject> ObjectsAsync(Cancella
 Vorticity.Dataset:     method ObjectDraft StartObject()
 Vorticity.Dataset:     method Scan Scan(ReadOnlySpan<string>)
 Vorticity.Dataset:     method Scan<TRecord> Scan<TRecord>()
+Vorticity.Dataset:     method Task RunCompactionAsync(CompactionSchedule = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask DisposeAsync()
 Vorticity.Dataset:     method ValueTask<CompactionPlan> PlanCompactionAsync(CompactionOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<CompactionResult> CompactAsync(CompactionOptions = default, CancellationToken = default)
@@ -2061,14 +2120,19 @@ Vorticity.Dataset:     method ValueTask<DatasetVerification> VerifyAsync(Nullabl
 Vorticity.Dataset:     method ValueTask<Nullable<ulong>> RemoveTornCommitAsync(IObjectStore, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> RemoveAsync(IReadOnlyList<DataObject>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ReplaceResult> ReplaceAsync(IReadOnlyList<DataObject>, IReadOnlyList<ObjectDraft>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync(VortexExpr, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> DeleteAsync<TRecord>(Func<Probe<TRecord>, Predicate>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<RowChangeResult> UpdateAsync<TRecord>(Func<Probe<TRecord>, Predicate>, Func<TRecord, TRecord>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VacuumResult> VacuumAsync(VacuumOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> CreateAsync(IObjectStore, VortexSchema, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<VortexDataset> OpenAsync(IObjectStore, DatasetOptions = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(IAsyncEnumerable<RecordBatch>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> AppendAsync(ObjectDraft, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask<ulong> EvolveSchemaAsync(VortexSchema, IReadOnlyDictionary<string, string> = default, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> ImportAsync(string, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask<ulong> RefreshAsync(CancellationToken = default)
 Vorticity.Dataset:     method bool MayMatch<TRecord>(Func<Probe<TRecord>, Predicate>)
+Vorticity.Dataset:     property Exception LastInlineCompactionFailure { get; }
 Vorticity.Dataset:     property IReadOnlyList<string> ClusteringKeyPaths { get; }
 Vorticity.Dataset:     property VortexSchema Schema { get; }
 Vorticity.Dataset:     property VortexSession Session { get; }

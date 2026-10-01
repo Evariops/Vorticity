@@ -29,7 +29,23 @@ internal abstract record DatasetOperation
     /// </remarks>
     public sealed record ReplaceObjects(
         IReadOnlyList<(int Level, ReadOnlyMemory<byte> Key)> Inputs,
-        IReadOnlyList<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Outputs) : DatasetOperation;
+        IReadOnlyList<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Outputs) : DatasetOperation
+    {
+        /// <summary>
+        /// The entries the inputs were read as, in the inputs' order, or null to ask only that each is
+        /// still there. An input whose entry now names other rows -- another file, or rows a
+        /// concurrent delete marked in it -- abandons the whole replacement, since its outputs were
+        /// worked out from rows the input no longer holds.
+        /// </summary>
+        public IReadOnlyList<ObjectEntry>? Expected { get; init; }
+
+        /// <summary>
+        /// Where the job stopped in the level it took its sources from, which that level's next job
+        /// starts past under a round robin; null to leave the level's pointer where it is. It moves
+        /// only with the replacement, so a job abandoned leaves it for the job that took its inputs.
+        /// </summary>
+        public (int Level, ReadOnlyMemory<byte> Key)? Pointer { get; init; }
+    }
 
     /// <summary>Attaches an index fragment to an object.</summary>
     /// <param name="Key">The object's sort key.</param>
@@ -60,6 +76,16 @@ internal abstract record DatasetOperation
     /// changes the entry that names it, and with it the hash.
     /// </remarks>
     public sealed record Repack(IReadOnlyList<ulong> Versions) : DatasetOperation;
+
+    /// <summary>
+    /// Changes the dataset's schema, from the one the change was worked out against: a rebase onto
+    /// a version whose schema is another does not apply it, since what it checked of the columns
+    /// no longer holds.
+    /// </summary>
+    /// <param name="From">The schema the change was checked against, as a header records it.</param>
+    /// <param name="To">The schema the dataset takes.</param>
+    /// <param name="Retired">The names retired once it has, the earlier ones included.</param>
+    public sealed record ChangeSchema(ReadOnlyMemory<byte> From, ReadOnlyMemory<byte> To, IReadOnlyList<RetiredColumn> Retired) : DatasetOperation;
 }
 
 /// <summary>What a commit made of one change, once re-applied to the version it landed on.</summary>

@@ -62,6 +62,10 @@ public sealed class CommitObjectTests
                 new CommitLevel(1, 900, second),
                 new CommitLevel(2, 90_000, foreign),
             ],
+
+            // Where the foreign reference's version keeps its pages, so that reading it is one request.
+            Starts = [new PagesStart(3, 18_000), new PagesStart(5, 700)],
+            LockedStore = true,
         };
 
         return (builder.Build(header), header, first, second, fragment, foreign);
@@ -100,8 +104,10 @@ public sealed class CommitObjectTests
         Assert.Equal(300, below.Offset);
         Assert.Equal(Page(2, 120), commit.Page(bytes, below).ToArray());
 
-        // The foreign reference passed through untouched.
+        // The foreign reference passed through untouched, and where its version's pages start.
         Assert.Equal(foreign, commit.Header.Levels[2].Top);
+        Assert.Equal(written.Starts, commit.Header.Starts);
+        Assert.True(commit.Header.LockedStore);
 
         // The inlined page is the header's own copy, and it is the same page.
         InlinedPage inlined = Assert.Single(commit.Header.Levels[0].Inlined);
@@ -115,6 +121,17 @@ public sealed class CommitObjectTests
         Assert.Equal(fragment.Hash, recorded.Hash);
         Assert.Equal(300 + 120, recorded.Offset);
         Assert.Equal(Page(3, 64), commit.Page(bytes, recorded).ToArray());
+    }
+
+    [Fact]
+    public void AStartNoPagesRegionCouldHaveIsRefused()
+    {
+        foreach (PagesStart wrong in (PagesStart[])[new PagesStart(3, CommitFormat.PreambleBytes - 1), new PagesStart(0, 18_000)])
+        {
+            CommitHeader header = new CommitHeader { Version = 7, Starts = [wrong] };
+            byte[] bytes = new CommitObjectBuilder(7).Build(header);
+            Assert.Throws<CommitFormatException>(() => CommitObject.Open(bytes));
+        }
     }
 
     [Fact]
@@ -251,6 +268,23 @@ public sealed class CommitObjectTests
         CommitFormatException refused = Assert.Throws<CommitFormatException>(
             () => CommitObject.Open(wrongFormat, wrongFormat.Length));
         Assert.Contains("format", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnObjectOfAnEarlierFormatOpensAndOneOfALaterFormatIsRefused()
+    {
+        // A dataset a release before this one wrote opens as it is; one a later release wrote, whose
+        // header may say what this one would not know to heed, is refused rather than read wrongly.
+        (byte[] bytes, CommitHeader header, _, _, _, _) = Build();
+        Assert.Equal(CommitFormat.Version, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8)));
+
+        byte[] earlier = [.. bytes];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(earlier.AsSpan(8), CommitFormat.OldestRead);
+        Assert.Equal(header.Version, CommitObject.Open(earlier, earlier.Length).Header.Version);
+
+        byte[] later = [.. bytes];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(later.AsSpan(8), CommitFormat.Version + 1);
+        Assert.Throws<CommitFormatException>(() => CommitObject.Open(later, later.Length));
     }
 
     [Fact]
