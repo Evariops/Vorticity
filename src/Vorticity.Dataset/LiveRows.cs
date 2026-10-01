@@ -279,11 +279,23 @@ internal static class LiveRows
     /// the row encoding its run holds. A deleted row whose key is null is in no source, and is left
     /// out of these too.
     /// </summary>
+    /// <remarks>
+    /// Read once for each open file, vector and paths: a cursor opened again over the same object
+    /// with the same rows deleted, as every walk of a dataset opens one, finds them read. They go
+    /// with the file when the handle closes it, and are read again for another vector.
+    /// </remarks>
     internal static async ValueTask<ExcludedKey[]> ExcludedKeysAsync(
         VortexFile file, DeletionVector deletions, IReadOnlyList<string> paths, ClusteringKey key, CancellationToken cancellationToken)
     {
-        long[] rows = DeletedIn(deletions, 0, long.MaxValue);
-        List<ExcludedKey> keys = new List<ExcludedKey>(rows.Length);
+        ExcludedRead read = Excluded.GetValue(file, static _ => new ExcludedRead());
+        if (read.TryGet(deletions, paths, out ExcludedKey[] known))
+        {
+            return known;
+        }
+
+        long[] rows = deletions.Rows();
+        ExcludedKey[] keys = rows.Length == 0 ? [] : new ExcludedKey[rows.Length];
+        int count = 0;
         if (rows.Length > 0)
         {
             FilterLiteral[] values = new FilterLiteral[paths.Count];
@@ -308,18 +320,77 @@ internal static class LiveRows
                     if (keyed)
                     {
                         FilterLiteral entry = values.Length == 1 ? values[0] : FilterLiteral.From(key.Encode(values));
-                        keys.Add(new ExcludedKey(entry, rows[at]));
+                        keys[count++] = new ExcludedKey(entry, rows[at]);
                     }
                 }
             }
         }
 
-        keys.Sort(static (left, right) =>
+        // The rows came in row order; a null key left a place at the end, which goes.
+        Array.Sort(keys, 0, count, ExcludedOrder.Instance);
+        if (count < keys.Length)
+        {
+            Array.Resize(ref keys, count);
+        }
+
+        read.Remember(deletions, paths, keys);
+        return keys;
+    }
+
+    /// <summary>The keys of each open file's deleted rows, read once, which the file outlives no longer than it is held.</summary>
+    private static readonly ConditionalWeakTable<VortexFile, ExcludedRead> Excluded = new ConditionalWeakTable<VortexFile, ExcludedRead>();
+
+    /// <summary>The keys last read of one file's deleted rows, with the vector and the paths they were read for.</summary>
+    private sealed class ExcludedRead
+    {
+        private readonly Lock _gate = new Lock();
+        private DeletionVector? _deletions;
+        private string[] _paths = [];
+        private ExcludedKey[] _keys = [];
+
+        internal bool TryGet(DeletionVector deletions, IReadOnlyList<string> paths, out ExcludedKey[] keys)
+        {
+            lock (_gate)
+            {
+                keys = _keys;
+                if (_deletions is null || !_deletions.Equals(deletions) || _paths.Length != paths.Count)
+                {
+                    return false;
+                }
+
+                for (int i = 0; i < _paths.Length; i++)
+                {
+                    if (!string.Equals(_paths[i], paths[i], StringComparison.Ordinal))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        internal void Remember(DeletionVector deletions, IReadOnlyList<string> paths, ExcludedKey[] keys)
+        {
+            lock (_gate)
+            {
+                _deletions = deletions;
+                _paths = [.. paths];
+                _keys = keys;
+            }
+        }
+    }
+
+    /// <summary>The <c>(key, row)</c> order the entries left out are counted against.</summary>
+    private sealed class ExcludedOrder : IComparer<ExcludedKey>
+    {
+        internal static ExcludedOrder Instance { get; } = new ExcludedOrder();
+
+        public int Compare(ExcludedKey left, ExcludedKey right)
         {
             int order = KeyOrder.Total(left.Key, right.Key);
             return order != 0 ? order : left.Row.CompareTo(right.Row);
-        });
-        return [.. keys];
+        }
     }
 
     /// <summary>A row of a column as a key: false for a null, which is no entry.</summary>
@@ -327,14 +398,6 @@ internal static class LiveRows
         arena.GetNode(ComparisonKernels.Unwrap(arena, node)).DType.Kind == DTypeKind.Decimal
             ? LiteralReader.TryReadDecimal(arena, node, row, out value)
             : LiteralReader.TryRead(arena, node, row, out value);
-
-    /// <summary>The deleted rows of <c>[start, end)</c>, the object's own positions, ascending.</summary>
-    internal static long[] DeletedIn(DeletionVector deletions, long start, long end)
-    {
-        List<long> rows = new List<long>((int)Math.Min(deletions.DeletedIn(start, end), int.MaxValue));
-        deletions.Collect(start, end, rows);
-        return [.. rows];
-    }
 
     /// <summary>The rows whose bit is set, ascending, into <paramref name="indices"/>; how many.</summary>
     private static int Indices(ReadOnlySpan<ulong> bits, int rows, Span<int> indices)

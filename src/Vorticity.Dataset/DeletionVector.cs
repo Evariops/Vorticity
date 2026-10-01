@@ -281,20 +281,20 @@ internal sealed class DeletionVector : IRowExclusion, IEquatable<DeletionVector>
     /// <summary>How many deleted rows lie in <c>[start, end)</c>.</summary>
     public long DeletedIn(long start, long end) => end <= start ? 0 : DeletedBefore(end) - DeletedBefore(start);
 
-    /// <summary>The deleted rows of <c>[start, end)</c>, ascending, written into <paramref name="rows"/>; how many.</summary>
-    public int Collect(long start, long end, List<long> rows)
+    /// <summary>Every deleted row, ascending, in one array.</summary>
+    public long[] Rows()
     {
-        int written = 0;
-        for (int run = FirstEndingAfter(start); run < _starts.Length && _starts[run] < end; run++)
+        long[] rows = new long[Count];
+        int at = 0;
+        for (int run = 0; run < _starts.Length; run++)
         {
-            for (long row = Math.Max(_starts[run], start); row < Math.Min(_ends[run], end); row++)
+            for (long row = _starts[run]; row < _ends[run]; row++)
             {
-                rows.Add(row);
-                written++;
+                rows[at++] = row;
             }
         }
 
-        return written;
+        return rows;
     }
 
     /// <summary>
