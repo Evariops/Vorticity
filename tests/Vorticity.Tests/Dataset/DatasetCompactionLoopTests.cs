@@ -110,9 +110,9 @@ public sealed class DatasetCompactionLoopTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         CompactionPlan plan = new CompactionPlan { Jobs = [Job(0, 1), Job(2, 3)] };
 
-        CompactionJob? zero = await CompactionLoop.ChooseAsync(store, new CompactionSchedule { Loops = 2, Loop = 0 }, plan, ct);
-        CompactionJob? one = await CompactionLoop.ChooseAsync(store, new CompactionSchedule { Loops = 2, Loop = 1 }, plan, ct);
-        CompactionJob? two = await CompactionLoop.ChooseAsync(store, new CompactionSchedule { Loops = 3, Loop = 2 }, plan, ct);
+        CompactionJob? zero = await CompactionLoop.ChooseAsync(store, new CompactionSchedule { Loops = 2, Loop = 0 }, plan, new LeaseBook(), ct);
+        CompactionJob? one = await CompactionLoop.ChooseAsync(store, new CompactionSchedule { Loops = 2, Loop = 1 }, plan, new LeaseBook(), ct);
+        CompactionJob? two = await CompactionLoop.ChooseAsync(store, new CompactionSchedule { Loops = 3, Loop = 2 }, plan, new LeaseBook(), ct);
         Assert.Same(plan.Jobs[0], zero);
         Assert.Same(plan.Jobs[1], one);
         Assert.Null(two);
@@ -130,18 +130,23 @@ public sealed class DatasetCompactionLoopTests
 
         // The first loop leases the first job's levels; the second finds level 1 held, skips the job
         // that shares it, and takes the third; a third loop finds nothing it can lease this minute.
-        Assert.Same(plan.Jobs[0], await CompactionLoop.ChooseAsync(store, leasing, plan, ct));
-        Assert.Same(plan.Jobs[2], await CompactionLoop.ChooseAsync(store, leasing, plan, ct));
-        Assert.Null(await CompactionLoop.ChooseAsync(store, leasing, plan, ct));
+        LeaseBook first = new LeaseBook();
+        Assert.Same(plan.Jobs[0], await CompactionLoop.ChooseAsync(store, leasing, plan, first, ct));
+        Assert.Same(plan.Jobs[2], await CompactionLoop.ChooseAsync(store, leasing, plan, new LeaseBook(), ct));
+        Assert.Null(await CompactionLoop.ChooseAsync(store, leasing, plan, new LeaseBook(), ct));
         long end = CompactionLoop.LeaseEnd(clock.Now, leasing.LeaseSpan);
         Assert.Equal(new DateTimeOffset(2026, 9, 18, 12, 1, 0, TimeSpan.Zero).ToUnixTimeSeconds(), end);
         Assert.Equal(
             [CompactionLoop.LeaseKey(0, end), CompactionLoop.LeaseKey(1, end), CompactionLoop.LeaseKey(3, end)],
             (await store.ListAllAsync(CompactionLoop.LeasePrefix, ct)).Order(StringComparer.Ordinal));
 
+        // The first loop holds its levels for the rest of the minute, and runs their next job.
+        Assert.Same(plan.Jobs[0], await CompactionLoop.ChooseAsync(store, leasing, plan, first, ct));
+        Assert.Equal(3, (await store.ListAllAsync(CompactionLoop.LeasePrefix, ct)).Count);
+
         // The next minute, nothing is held.
         clock.Advance(TimeSpan.FromMinutes(1));
-        Assert.Same(plan.Jobs[0], await CompactionLoop.ChooseAsync(store, leasing, plan, ct));
+        Assert.Same(plan.Jobs[0], await CompactionLoop.ChooseAsync(store, leasing, plan, new LeaseBook(), ct));
     }
 
     [Fact]
@@ -153,8 +158,8 @@ public sealed class DatasetCompactionLoopTests
         await using VortexDataset dataset = await CreateAsync(store, 1, ct);
         long old = CompactionLoop.LeaseEnd(clock.Now - TimeSpan.FromHours(3), TimeSpan.FromMinutes(1));
         long current = CompactionLoop.LeaseEnd(clock.Now, TimeSpan.FromMinutes(1));
-        Assert.True(await CompactionLoop.TryLeaseAsync(store, Job(0, 1), old, dataset.Version, ct));
-        Assert.True(await CompactionLoop.TryLeaseAsync(store, Job(0, 1), current, dataset.Version, ct));
+        Assert.True(await CompactionLoop.TryLeaseAsync(store, Job(0, 1), old, dataset.Version, null, ct));
+        Assert.True(await CompactionLoop.TryLeaseAsync(store, Job(0, 1), current, dataset.Version, null, ct));
 
         VacuumResult vacuumed = await dataset.VacuumAsync(new VacuumOptions { TimeProvider = clock }, ct);
         Assert.Equal([CompactionLoop.LeaseKey(0, old), CompactionLoop.LeaseKey(1, old)], vacuumed.Deleted.Where(key => key.StartsWith(CompactionLoop.LeasePrefix, StringComparison.Ordinal)));

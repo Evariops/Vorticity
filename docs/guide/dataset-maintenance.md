@@ -175,8 +175,11 @@ Loops that know one another say so with `Loops` and `Loop`: each takes the due j
 index, and no two ranked jobs read or write one level. Loops that cannot count one another set
 `Leases`: before a job a loop creates `leases/<level>/<end>` for each of its levels by
 put-if-absent, holds them until the end of the current `LeaseSpan`, a minute by default, and moves
-to the next job when another loop holds one. Nothing releases a lease, so a store that refuses
-deletes still works; vacuum deletes the leases that ended a window ago.
+to the next job when another loop holds one. The loop remembers the leases it created, so it runs
+the next job on its levels within the same span without asking the store again; a loop that leased
+some of a job's levels before finding another holding the rest keeps those for the span all the
+same. Nothing releases a lease, so a store that refuses deletes still works; vacuum deletes the
+leases that ended a window ago.
 
 ## In the writer's commit
 

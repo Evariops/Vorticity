@@ -101,7 +101,7 @@ public sealed class DatasetLockedStoreTests
 
         Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 2, TargetBytesAtLevelOne = 1 << 20 }, ct));
         long lease = CompactionLoop.LeaseEnd(clock.Now, TimeSpan.FromMinutes(1));
-        Assert.True(await CompactionLoop.TryLeaseAsync(store, new CompactionJob(0, 1, CompactionStyle.Leveled, CompactionTrigger.LevelSize, [], 0, 0), lease, dataset.Version, ct));
+        Assert.True(await CompactionLoop.TryLeaseAsync(store, new CompactionJob(0, 1, CompactionStyle.Leveled, CompactionTrigger.LevelSize, [], 0, 0), lease, dataset.Version, null, ct));
 
         // Past the window, every superseded object and the lease are garbage, and every one is locked.
         clock.Advance(TimeSpan.FromHours(2));
