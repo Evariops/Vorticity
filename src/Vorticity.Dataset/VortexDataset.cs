@@ -35,7 +35,7 @@ internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<
 public sealed class VortexDataset : IAsyncDisposable
 {
     /// <summary>The bytes of the uid that ends every tree key.</summary>
-    private const int UidBytes = 16;
+    internal const int UidBytes = 16;
 
     private readonly IObjectStore _store;
     private readonly DatasetOptions _options;

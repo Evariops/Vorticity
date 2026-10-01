@@ -361,6 +361,14 @@ order lands at or before the key, one after it strictly before, and its own obje
 flip every merging iterator pays ([12-index-reads.md](12-index-reads.md) §3.2), and the walk down is
 the walk up reversed, ties included.
 
+**A key cursor reads the trees only where it walks.** In each level the walk stands between two
+objects, a place found by one path down the level's tree and moved an object at a time, a page read
+only when the walk crosses into it; the pages read, and the objects' entries in them, are parsed once
+per version and shared by its cursors. An object's first row is counted when the walk first takes one
+of its entries: the rows of every level's objects before its tree key, along one path of each. A seek
+on a handle that holds nothing yet so reads the depth of each level, whatever the number of objects:
+over 20 000 objects in one level, one page, where a listing of the objects read every leaf, 23.
+
 Any other order costs, at best, one cursor per object the summaries cannot refute: `ORDER BY x LIMIT
 k` prunes by the summaries, which is good in practice and output-sensitive, never bounded. A second
 bounded order is a second copy of the data clustered by that key, a dataset of its own; a global

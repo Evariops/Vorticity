@@ -16,7 +16,9 @@ internal sealed class DatasetSnapshot
 {
     private readonly ObjectCache _objects;
     private long _knownAt;
-    private KeyedObjects? _keyed;
+
+    // Per level, the root of its tree as the key walks of the version parsed it.
+    private ParsedPage?[]? _roots;
 
     internal DatasetSnapshot(
         CommitObject commit, CommitPageSource pages, ObjectCache objects, DateTimeOffset knownAt, DatasetSchema? previous = null)
@@ -116,25 +118,19 @@ internal sealed class DatasetSnapshot
     }
 
     /// <summary>
-    /// The version's objects as a walk in key order ranges over them, read from the trees the first
-    /// time a walk asks and kept: every walk of the version shares them, and opens and positions only
-    /// the objects it reaches.
+    /// The root of <paramref name="level"/>'s tree as the key walks of the version share it, read the
+    /// first time one asks; null for an empty level.
     /// </summary>
-    internal async ValueTask<KeyedObjects> KeyedAsync(CancellationToken cancellationToken)
+    internal ValueTask<ParsedPage?> RootAsync(int level, CancellationToken cancellationToken)
     {
-        if (Volatile.Read(ref _keyed) is { } known)
+        ParsedPage?[] roots = Volatile.Read(ref _roots) ?? Roots();
+        if (Volatile.Read(ref roots[level]) is { } known)
         {
-            return known;
+            return new ValueTask<ParsedPage?>(known);
         }
 
-        KeyedObjects.Builder builder = new KeyedObjects.Builder();
-        await foreach (PositionedObject held in WalkAsync(null, 0, long.MaxValue, null, cancellationToken).ConfigureAwait(false))
-        {
-            builder.Add(held.Entry, held.FirstRow, held.Level, VortexDataset.OrderOf(held.TreeKey).Span);
-        }
-
-        KeyedObjects built = builder.Build();
-        return Interlocked.CompareExchange(ref _keyed, built, null) ?? built;
+        DatasetTree tree = Levels[level];
+        return tree.IsEmpty ? default : ReadRootAsync(roots, level, tree, cancellationToken);
     }
 
     /// <summary>
@@ -200,6 +196,19 @@ internal sealed class DatasetSnapshot
         {
             throw ObjectNotFoundException.InVersion(entry.Key, Version, missing);
         }
+    }
+
+    /// <summary>The roots of the levels, none read yet: made once a key walk first asks for one.</summary>
+    private ParsedPage?[] Roots()
+    {
+        ParsedPage?[] roots = new ParsedPage?[Levels.Count];
+        return Interlocked.CompareExchange(ref _roots, roots, null) ?? roots;
+    }
+
+    private async ValueTask<ParsedPage?> ReadRootAsync(ParsedPage?[] roots, int level, DatasetTree tree, CancellationToken cancellationToken)
+    {
+        ParsedPage root = await ParsedPage.ReadAsync(Pages, tree.Root, cancellationToken).ConfigureAwait(false);
+        return Interlocked.CompareExchange(ref roots[level], root, null) ?? root;
     }
 
     /// <summary>

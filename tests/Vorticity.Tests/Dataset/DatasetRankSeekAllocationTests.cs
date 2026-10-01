@@ -71,11 +71,10 @@ public sealed class DatasetRankSeekAllocationTests
     }
 
     [Fact]
-    public async Task ACursorOpenedAgainOnAVersionReadsNoTreeAndParsesNoEntry()
+    public async Task ACursorOpensWithoutReadingAPageOfItsTrees()
     {
-        // The version's objects are read from its trees by the first walk and kept: a walk opened
-        // after it costs no request, and a few bytes per object for its own state, where reading
-        // the trees again would parse every entry.
+        // A walk finds its objects in the levels' trees as it reaches them: opening the cursor reads
+        // nothing and holds nothing per object, whatever their number.
         CancellationToken ct = TestContext.Current.CancellationToken;
         const int Objects = 20_000;
         await using MemoryObjectStore inner = new MemoryObjectStore();
@@ -102,17 +101,13 @@ public sealed class DatasetRankSeekAllocationTests
 
         await DatasetCommitter.CommitAsync(store, adds, new CommitOptions { Seed = options.Seed }, ct);
         await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options, ct);
-        await using (DatasetKeyCursor first = await DatasetKeyCursor.OpenAsync(dataset, ct))
-        {
-        }
-
         store.Reset();
         long before = GC.GetAllocatedBytesForCurrentThread();
         ValueTask<DatasetKeyCursor> opening = DatasetKeyCursor.OpenAsync(dataset, ct);
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.True(opening.IsCompletedSuccessfully);
-        await using DatasetKeyCursor second = await opening;
+        await using DatasetKeyCursor cursor = await opening;
         Assert.Equal(0, store.Requests);
-        Assert.True(allocated < 24L * Objects, $"a cursor opened again over {Objects} objects allocated {allocated} bytes");
+        Assert.True(allocated < 1_024, $"a cursor opened over {Objects} objects allocated {allocated} bytes");
     }
 }
