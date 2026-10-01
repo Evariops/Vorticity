@@ -28,7 +28,10 @@ uses one of its types, until you opt in. Opt in once for the project, with
 `<NoWarn>$(NoWarn);VX0001</NoWarn>`, or mark your own assembly or type `[Experimental]`, which
 makes its uses of experimental code legal and passes the warning on to its callers; the samples do
 the latter. The diagnostic says what the attribute means: the dataset's commit format and API may
-change between releases. The files inside a dataset are ordinary Vortex files; the tree of commits
+change between releases. A release reads the formats of the releases before it, and a release
+before a format refuses a dataset written in it rather than read it wrongly: version 0.2.0 reads
+format 1, and refuses the format 2 this one writes. The files inside a dataset are ordinary Vortex
+files; the tree of commits
 over them is this repository's own format, which no other Vortex implementation reads. A single
 file needs none of this.
 

@@ -271,6 +271,23 @@ public sealed class CommitObjectTests
     }
 
     [Fact]
+    public void AnObjectOfAnEarlierFormatOpensAndOneOfALaterFormatIsRefused()
+    {
+        // A dataset a release before this one wrote opens as it is; one a later release wrote, whose
+        // header may say what this one would not know to heed, is refused rather than read wrongly.
+        (byte[] bytes, CommitHeader header, _, _, _, _) = Build();
+        Assert.Equal(CommitFormat.Version, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(8)));
+
+        byte[] earlier = [.. bytes];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(earlier.AsSpan(8), CommitFormat.OldestRead);
+        Assert.Equal(header.Version, CommitObject.Open(earlier, earlier.Length).Header.Version);
+
+        byte[] later = [.. bytes];
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(later.AsSpan(8), CommitFormat.Version + 1);
+        Assert.Throws<CommitFormatException>(() => CommitObject.Open(later, later.Length));
+    }
+
+    [Fact]
     public void TheBuilderRefusesAHeaderThatCommitsAnotherVersion()
     {
         CommitObjectBuilder builder = new CommitObjectBuilder(4);
