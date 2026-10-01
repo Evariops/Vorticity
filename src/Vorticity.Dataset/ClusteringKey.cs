@@ -20,10 +20,11 @@ internal sealed class ClusteringKey
     private readonly DType[] _dtypes;
     private readonly RowSortField[] _fields;
 
-    private ClusteringKey(string[] paths, DType[] dtypes)
+    private ClusteringKey(string[] paths, DType[] dtypes, bool mayHoldNull)
     {
         _paths = paths;
         _dtypes = dtypes;
+        MayHoldNull = mayHoldNull;
         _fields = new RowSortField[paths.Length];
         Array.Fill(_fields, RowSortField.Ascending);
     }
@@ -38,13 +39,38 @@ internal sealed class ClusteringKey
 
         string[] kept = [.. paths];
         DType[] dtypes = new DType[kept.Length];
+        bool mayHoldNull = false;
         for (int i = 0; i < kept.Length; i++)
         {
             dtypes[i] = Resolve(schema, kept[i]);
+            mayHoldNull |= ColumnPath.MayBeNull(schema, kept[i]);
         }
 
-        return new ClusteringKey(kept, dtypes);
+        return new ClusteringKey(kept, dtypes, mayHoldNull);
     }
+
+    /// <summary>
+    /// The key a new dataset declares, which may not be a tuple over a column that holds nulls: a
+    /// composite key's run holds no tuple with a null, so no merge could keep such a row, and every
+    /// compaction of an object holding one would be refused.
+    /// </summary>
+    /// <exception cref="ArgumentException">A path names no column, or the key is a tuple over one that may hold a null.</exception>
+    public static ClusteringKey? Declared(IReadOnlyList<string>? paths, DType schema)
+    {
+        ClusteringKey? key = For(paths, schema);
+        if (key is { IsComposite: true, MayHoldNull: true })
+        {
+            throw new ArgumentException(
+                $"The clustering key ({string.Join(", ", key.Paths)}) is a tuple over a column that may hold a null, and a " +
+                "tuple's run holds none: its rows could never be compacted. Declare a composite key on non-nullable columns.",
+                nameof(paths));
+        }
+
+        return key;
+    }
+
+    /// <summary>Whether a column of the key, or a struct on its path, is nullable.</summary>
+    public bool MayHoldNull { get; }
 
     /// <summary>The key's columns, in key order.</summary>
     public IReadOnlyList<string> Paths => _paths;

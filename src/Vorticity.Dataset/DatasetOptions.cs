@@ -24,7 +24,9 @@ public sealed record DatasetOptions
     /// The columns the dataset is ordered by, or null for the order objects arrive in. Declaring one
     /// orders the objects by the smallest key they hold, gives every object this handle writes a
     /// sorted run on it so that a lookup inside one object is a seek, and makes compaction keep the
-    /// levels above 0 key-disjoint, so a lookup by key touches a bounded number of objects.
+    /// levels above 0 key-disjoint, so a lookup by key touches a bounded number of objects. A key of
+    /// several columns is declared on non-nullable ones: its run holds no tuple with a null, so a row
+    /// holding one could never be merged.
     /// </summary>
     public IReadOnlyList<string>? ClusteringKey { get; init; }
 

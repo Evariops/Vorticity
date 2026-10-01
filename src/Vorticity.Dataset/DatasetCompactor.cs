@@ -167,8 +167,10 @@ internal static class DatasetCompactor
         }
 
         // A single column's null keys are read, last, where the encoding puts them; a composite
-        // key's run holds no tuple with a null, so a merge that went on would drop those rows.
-        if (!key.IsComposite)
+        // key's run holds no tuple with a null, so a merge that went on would drop those rows. A new
+        // dataset declares no such key; one declared before that was refused is merged only where
+        // the summaries say no null is there, which a summary loosened by marks no longer says.
+        if (!key.IsComposite || !key.MayHoldNull)
         {
             return;
         }
@@ -177,16 +179,13 @@ internal static class DatasetCompactor
         {
             foreach (string path in key.Paths)
             {
-                if (input.Entry.Summaries.TryGet(path, out ColumnSummary column)
-                    && column.HasNullCount
-                    && column.NullCount > 0)
+                if (!input.Entry.Summaries.TryGet(path, out ColumnSummary column) || !column.HasNullCount || column.NullCount > 0)
                 {
                     throw new VortexUnsupportedException(
                         input.Entry.Key,
                         ComponentKind.Feature,
-                        $"'{path}' holds {column.NullCount} null(s) in this object, and a composite key's " +
-                        "run holds no tuple with a null: the merge would drop those rows. Declare " +
-                        "the composite clustering key on non-nullable columns.");
+                        $"'{path}' may hold a null in this object, and a composite key's run holds no tuple with a null: " +
+                        "the merge would drop those rows. Declare the composite clustering key on non-nullable columns.");
                 }
             }
         }

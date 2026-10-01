@@ -124,7 +124,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the requests.</param>
     /// <returns>The handle, on version 1; the caller disposes it.</returns>
     /// <exception cref="ObjectStoreException">The store already holds a dataset.</exception>
-    /// <exception cref="ArgumentException">A clustering key column is not in the schema.</exception>
+    /// <exception cref="ArgumentException">A clustering key column is not in the schema, or a key of several columns names one that may hold a null.</exception>
     public static ValueTask<VortexDataset> CreateAsync(
         IObjectStore store,
         VortexSchema schema,
@@ -725,10 +725,7 @@ public sealed class VortexDataset : IAsyncDisposable
                 $"This store already holds a dataset at version {existing}; open it rather than creating it.");
         }
 
-        if (options.ClusteringKey is { Count: > 0 } clustering)
-        {
-            _ = ClusteringKey.For(clustering, schema);
-        }
+        _ = ClusteringKey.Declared(options.ClusteringKey, schema);
 
         CommitHeader template = new CommitHeader
         {

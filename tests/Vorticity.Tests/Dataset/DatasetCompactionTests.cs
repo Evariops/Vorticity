@@ -714,12 +714,13 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
-    public async Task ACompositeKeyHoldingANullIsRefusedByName()
+    public async Task ACompositeKeyOverANullableColumnIsRefusedWhenTheDatasetIsCreated()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // What stays refused: a composite run holds no tuple with a null, so a merge through it
-        // would drop the row. One column's null keys are read last and merged (the test below,
+        // A composite run holds no tuple with a null, so a merge through it would drop the row, and
+        // every compaction of an object holding one would be refused: such a key is refused before
+        // anything is written. One column's null keys are read last and merged (the test below,
         // `TheNullKeysOfOneColumnAreMergedLast`); a tuple's are not.
         Decoders.EnsureRegistered();
         DTypeArena types = new DTypeArena();
@@ -729,16 +730,10 @@ public sealed class DatasetCompactionTests
             Nullability.NonNullable);
 
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(
-            store, schema, Unclustered() with { ClusteringKey = ["key", "measure"] }, ct);
-        await dataset.AppendAsync(NullableMeasures(types, schema, 0, nullEvery: 5), ct);
-        await dataset.AppendAsync(NullableMeasures(types, schema, 1, nullEvery: 5), ct);
-
-        VortexUnsupportedException refused = await Assert.ThrowsAsync<VortexUnsupportedException>(
-            async () => await dataset.CompactAsync(Options(target: 1 << 20) with { LevelZeroCeiling = 1 }, ct));
-        Assert.Contains("holds no tuple with a null", refused.Message, StringComparison.Ordinal);
-        Assert.Contains("'measure'", refused.Message, StringComparison.Ordinal);
-        Assert.Equal(2, dataset.Levels[0].Entries);
+        ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(
+            async () => await VortexDataset.CreateAsync(store, schema, Unclustered() with { ClusteringKey = ["key", "measure"] }, ct));
+        Assert.Contains("may hold a null", refused.Message, StringComparison.Ordinal);
+        Assert.Equal(0UL, await DatasetCommitter.NewestVersionAsync(store, ct));
     }
 
     [Fact]
