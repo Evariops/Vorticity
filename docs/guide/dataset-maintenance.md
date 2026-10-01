@@ -72,6 +72,17 @@ is written once. A dataset that takes many small commits then pays for each a me
 few times its size, never one into the levels that hold the bulk of its rows. An output object is
 at most `MaxObjectBytes`, 4 MiB by default.
 
+A level above 0 over its size gives up one object, merged into the level above with the objects
+there its keys meet: by default the largest, the one holding the level over its size the most.
+`CompactionOptions.Pick = CompactionPick.RoundRobin` takes instead the object past the one the
+level's last job took, and the first past the end, so that the rewrites go over every key in turn,
+as LevelDB does; each level of a header records where its last job stopped. On ten million rows
+and 30 000 small commits it wrote 6 % more than the largest first, which is why a leveled dataset
+does not default to it. A tiered dataset does: its job concatenates a run of one level's objects
+that nothing else sits between, and the run past the pointer is found by descending the trees, one
+page over 100 000 objects, where the longest run is found only by reading every leaf, 71 pages. A
+dataset ordered by arrival keeps each level's objects together, and the two take the same runs.
+
 Compaction writes the live rows only: the rows a delete marked in an input object end with it, and
 its outputs carry no marks. An object whose marks reach half a delete's bounds, a sixteenth of its
 rows or half a kilobyte of positions, is rewritten alone in its level by a job whose `Trigger` is

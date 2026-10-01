@@ -131,8 +131,11 @@ internal static class DatasetCompactor
             read.Add(input.Entry);
         }
 
-        DatasetOperation.ReplaceObjects replacement =
-            new DatasetOperation.ReplaceObjects(consumed, produced) { Expected = read };
+        DatasetOperation.ReplaceObjects replacement = new DatasetOperation.ReplaceObjects(consumed, produced)
+        {
+            Expected = read,
+            Pointer = job.Stop.IsEmpty ? null : (job.FromLevel, job.Stop),
+        };
         CommitResult commit = await dataset
             .CommitAsync([replacement], cancellationToken).ConfigureAwait(false);
 

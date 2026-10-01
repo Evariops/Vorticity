@@ -1802,6 +1802,7 @@ Vorticity.Dataset:     method bool op_Equality(CompactionOptions, CompactionOpti
 Vorticity.Dataset:     method bool op_Inequality(CompactionOptions, CompactionOptions)
 Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
+Vorticity.Dataset:     property CompactionPick Pick { get; init; }
 Vorticity.Dataset:     property CompactionStyle Style { get; init; }
 Vorticity.Dataset:     property int Fanout { get; init; }
 Vorticity.Dataset:     property int LevelZeroCeiling { get; init; }
@@ -1809,6 +1810,11 @@ Vorticity.Dataset:     property int MaxFragments { get; init; }
 Vorticity.Dataset:     property int MaxLevels { get; init; }
 Vorticity.Dataset:     property long MaxObjectBytes { get; init; }
 Vorticity.Dataset:     property long TargetBytesAtLevelOne { get; init; }
+Vorticity.Dataset: enum Vorticity.Dataset.CompactionPick
+Vorticity.Dataset:     const CompactionPick Auto = 0
+Vorticity.Dataset:     const CompactionPick Largest = 1
+Vorticity.Dataset:     const CompactionPick RoundRobin = 2
+Vorticity.Dataset:     field int value__
 Vorticity.Dataset: sealed class Vorticity.Dataset.CompactionPlan : IEquatable<CompactionPlan>
 Vorticity.Dataset:     ctor CompactionPlan()
 Vorticity.Dataset:     method CompactionPlan <Clone>$()

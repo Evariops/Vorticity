@@ -38,6 +38,13 @@ internal abstract record DatasetOperation
         /// worked out from rows the input no longer holds.
         /// </summary>
         public IReadOnlyList<ObjectEntry>? Expected { get; init; }
+
+        /// <summary>
+        /// Where the job stopped in the level it took its sources from, which that level's next job
+        /// starts past under a round robin; null to leave the level's pointer where it is. It moves
+        /// only with the replacement, so a job abandoned leaves it for the job that took its inputs.
+        /// </summary>
+        public (int Level, ReadOnlyMemory<byte> Key)? Pointer { get; init; }
     }
 
     /// <summary>Attaches an index fragment to an object.</summary>

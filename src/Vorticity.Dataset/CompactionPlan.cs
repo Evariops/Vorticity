@@ -23,6 +23,30 @@ public enum CompactionStyle
     Tiered = 2,
 }
 
+/// <summary>Which objects a job takes from a level over its size.</summary>
+public enum CompactionPick
+{
+    /// <summary>
+    /// <see cref="Largest"/> for a leveled dataset, which writes fewer bytes that way, and
+    /// <see cref="RoundRobin"/> for a tiered one, whose plan then descends the trees: a dataset
+    /// ordered by arrival keeps each level's objects together, and the two take the same runs.
+    /// </summary>
+    Auto = 0,
+
+    /// <summary>
+    /// The largest object of a leveled level, and the longest run of a tiered one that nothing else
+    /// sits between: the most bytes one job moves. A tiered plan reads every leaf to find the run.
+    /// </summary>
+    Largest = 1,
+
+    /// <summary>
+    /// The object past where the level's last job stopped, and back to the first past the end, as
+    /// LevelDB takes them: every key is rewritten in turn, wherever the largest objects lie. A tiered
+    /// job takes the run that starts there, which a plan finds by descending the trees.
+    /// </summary>
+    RoundRobin = 2,
+}
+
 /// <summary>Why a compaction was planned.</summary>
 public enum CompactionTrigger
 {
@@ -97,6 +121,9 @@ public sealed record CompactionOptions
 
     /// <summary>Leveled, tiered, or whichever the clustering key implies.</summary>
     public CompactionStyle Style { get; init; } = CompactionStyle.Auto;
+
+    /// <summary>Which objects a job takes from a level over its size, or whichever the style implies.</summary>
+    public CompactionPick Pick { get; init; } = CompactionPick.Auto;
 
     /// <summary>Whether an object whose marks reach half a delete's bounds is rewritten without them; true by default.</summary>
     internal bool PurgeMarks { get; init; } = true;
@@ -205,6 +232,14 @@ public sealed record CompactionOptions
         return level;
     }
 
+    /// <summary>The pick a plan under <paramref name="style"/> works to, never <see cref="CompactionPick.Auto"/>.</summary>
+    internal CompactionPick PickFor(CompactionStyle style) => Pick switch
+    {
+        CompactionPick.Largest => CompactionPick.Largest,
+        CompactionPick.RoundRobin => CompactionPick.RoundRobin,
+        _ => style == CompactionStyle.Tiered ? CompactionPick.RoundRobin : CompactionPick.Largest,
+    };
+
     /// <summary>The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>.</summary>
     internal CompactionStyle StyleFor(bool clustered) => Style switch
     {
@@ -293,6 +328,12 @@ public sealed record CompactionJob
     /// input's own position, so that they take its place.
     /// </summary>
     internal long FirstRow { get; init; }
+
+    /// <summary>
+    /// The tree key of the last object the job takes from its source level, which that level's next
+    /// job starts past under a round robin; empty for a job that moves no pointer.
+    /// </summary>
+    internal ReadOnlyMemory<byte> Stop { get; init; }
 }
 
 /// <summary>

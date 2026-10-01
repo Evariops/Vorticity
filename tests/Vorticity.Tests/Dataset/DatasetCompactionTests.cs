@@ -399,6 +399,45 @@ public sealed class DatasetCompactionTests
     }
 
     [Fact]
+    public async Task ATieredRunPastTheFirstRowsTakesItsPlaceInTheOrder()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+
+        // The second compaction of level 0 concatenates a run that starts six hundred rows in, past
+        // the object the first one left in level 1: its output goes where the run was, or a scan
+        // would answer its rows first.
+        Decoders.EnsureRegistered();
+        DTypeArena types = new DTypeArena();
+        DType schema = Schema(types);
+
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, Unclustered(), ct);
+        CompactionOptions options = Options(target: 1 << 20) with { LevelZeroCeiling = 3 };
+        for (int round = 0; round < 2; round++)
+        {
+            for (int i = 0; i < 6; i++)
+            {
+                await dataset.AppendAsync(Shuffled(types, schema, (round * 600) + (i * 100), 100, seed: (round * 6) + i + 1), ct);
+            }
+
+            List<long> before = await KeysAsync(dataset.ScanBuilder());
+            CompactionJob job = Assert.IsType<CompactionJob>((await dataset.PlanCompactionAsync(options, ct)).Job);
+            Assert.Equal((CompactionTrigger.LevelZeroCeiling, 6, round * 600L), (job.Trigger, job.Inputs.Count, job.FirstRow));
+            Assert.NotNull(await dataset.CompactAsync(options, ct));
+            Assert.Equal(before, await KeysAsync(dataset.ScanBuilder()));
+            Assert.Equal(before.GetRange(round * 600, 600), await KeysAsync(dataset.ScanBuilder().Rows(round * 600, (round + 1) * 600)));
+        }
+
+        List<long> positions = [];
+        await foreach (TreeEntry entry in dataset.Levels[1].EnumerateAsync(dataset.Pages, ct))
+        {
+            positions.Add(VortexDataset.PositionAt(entry.Key.Span));
+        }
+
+        Assert.Equal([0L, 600L], positions);
+    }
+
+    [Fact]
     public async Task ALevelAboveItsSizeIsCompactedIntoTheOneAbove()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
