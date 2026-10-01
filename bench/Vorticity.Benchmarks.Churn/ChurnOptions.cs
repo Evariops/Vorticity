@@ -38,7 +38,7 @@ internal sealed record ChurnOptions
         "         [--compact none|drain|inline] [--compact-every N] [--vacuum-every N] [--probe-every N] [--report-every N]\n" +
         "         [--store file|memory] [--dir PATH] [--seed N] [--minutes N] [--load-chunk N] [--index-budget PERMILLE]\n" +
         "         [--max-object MiB] [--level-one KiB] [--open-objects N] [--marks on|off] [--mark-bytes KiB] [--purge on|off] [--probe-rounds N]\n" +
-        "         [--pick largest|round-robin]";
+        "         [--pick auto|largest|round-robin]";
 
     /// <summary>The rows loaded before the first operation.</summary>
     public long Rows { get; init; } = 1_000_000;
@@ -119,7 +119,7 @@ internal sealed record ChurnOptions
     public bool Purge { get; init; } = true;
 
     /// <summary>Which objects a job takes from a level over its size.</summary>
-    public CompactionPick Pick { get; init; } = CompactionPick.Largest;
+    public CompactionPick Pick { get; init; } = CompactionPick.Auto;
 
     /// <summary>
     /// How many times each probe's calls are timed at a checkpoint, the fastest round kept: what
@@ -188,9 +188,10 @@ internal sealed record ChurnOptions
                 {
                     Pick = value switch
                     {
+                        "auto" => CompactionPick.Auto,
                         "largest" => CompactionPick.Largest,
                         "round-robin" => CompactionPick.RoundRobin,
-                        _ => throw new ArgumentException($"--pick takes largest or round-robin, not '{value}'."),
+                        _ => throw new ArgumentException($"--pick takes auto, largest or round-robin, not '{value}'."),
                     },
                 },
                 _ => throw new ArgumentException($"Unknown argument '{flag}'."),
@@ -215,7 +216,7 @@ internal sealed record ChurnOptions
             $"keys {Keys.ToString().ToLowerInvariant()}, compaction {cadence}, vacuum every {VacuumEvery}, " +
             $"{(Memory ? "memory" : "file")} store, index budget {(IndexBudget > 0 ? IndexBudget.ToString(CultureInfo.InvariantCulture) + "‰" : "default")}, " +
             $"deletes by {(Marks ? "marks" : "rewrites")}{(Marks && MarkKiB > 0 ? string.Create(CultureInfo.InvariantCulture, $" of at most {MarkKiB} KiB") : "")}" +
-            $"{(Marks && !Purge ? ", never purged" : "")}, {(Pick == CompactionPick.RoundRobin ? "round robin" : "largest first")}, seed {Seed}");
+            $"{(Marks && !Purge ? ", never purged" : "")}, {Pick switch { CompactionPick.RoundRobin => "round robin", CompactionPick.Largest => "largest first", _ => "pick by style" }}, seed {Seed}");
     }
 
     private static ChurnOptions Mix(ChurnOptions options, string value)

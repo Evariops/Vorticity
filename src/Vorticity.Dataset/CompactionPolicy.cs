@@ -11,19 +11,20 @@ namespace Vorticity.Dataset;
 /// <summary>Decides what to compact. The planner reads leaf entries only, never rows.</summary>
 /// <remarks>
 /// <para>
-/// A leveled plan descends the trees rather than reading them. Every page's summary carries the
-/// tally of what lies under it: the bytes, the largest object, the most fragments one object
-/// carries. A level's bytes are then the sum over its top page; the largest object of a full level
-/// is at the end of one descent that follows the largest tally, and the object past a level's
-/// pointer at the end of one that follows the keys; the objects a job overlaps, and the objects
-/// over their fragments, are found by a walk that skips every subtree whose summary rules it out. A
-/// plan reads a level's top page and a path or two below it, and the job's own objects.
+/// A plan descends the trees rather than reading them. Every page's summary carries the tally of
+/// what lies under it: the bytes, the largest object, the most fragments one object carries. A
+/// level's bytes are then the sum over its top page; the largest object of a full level is at the
+/// end of one descent that follows the largest tally, and the object past a level's pointer at the
+/// end of one that follows the keys; the objects a job overlaps, and the objects over their
+/// fragments, are found by a walk that skips every subtree whose summary rules it out. A plan reads
+/// a level's top page and a path or two below it, and the job's own objects.
 /// </para>
 /// <para>
-/// A tiered plan concatenates a run of one level's objects nothing else sits between, the longest
-/// or the one past the level's pointer, which only every level's order in full says; it reads every
-/// leaf, as does a leveled plan over a level whose top page was written before tallies. Both choose
-/// the same job.
+/// A tiered job concatenates a run of one level's objects nothing else sits between. The run that
+/// starts past the level's pointer ends at the first object of another level past its start, one
+/// descent per level; the longest run is a fact of every level's order in full, so a plan that
+/// takes it reads every leaf, as does a plan over a level whose top page was written before
+/// tallies. Both choose the same job.
 /// </para>
 /// </remarks>
 internal static class CompactionPolicy
@@ -53,10 +54,10 @@ internal static class CompactionPolicy
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(jobs);
         CompactionOptions settings = SettingsFor(dataset, options);
         CompactionStyle style = settings.StyleFor(dataset.Key is not null);
-        if (style == CompactionStyle.Leveled && dataset.Key is not null
-            && await TalliesAsync(dataset, cancellationToken).ConfigureAwait(false) is { } tallies)
+        bool descends = style == CompactionStyle.Leveled ? dataset.Key is not null : settings.PickFor(style) == CompactionPick.RoundRobin;
+        if (descends && await TalliesAsync(dataset, cancellationToken).ConfigureAwait(false) is { } tallies)
         {
-            return await DescendAsync(dataset, settings, tallies, jobs, cancellationToken).ConfigureAwait(false);
+            return await DescendAsync(dataset, settings, style, tallies, jobs, cancellationToken).ConfigureAwait(false);
         }
 
         return await ReadEveryLeafAsync(dataset, settings, style, jobs, cancellationToken).ConfigureAwait(false);
@@ -210,7 +211,7 @@ internal static class CompactionPolicy
         CompactionStyle style,
         CompactionTrigger trigger)
     {
-        CompactionPick pick = settings.Pick;
+        CompactionPick pick = settings.PickFor(style);
         ReadOnlySpan<byte> pointer = dataset.Levels.PointerOf(from).Span;
         List<CompactionInput> sources = style == CompactionStyle.Leveled
             ? Leveled(levels[from], from, pick, pointer)
@@ -463,12 +464,12 @@ internal static class CompactionPolicy
         && (!column.HasMax || KeyCursor.Compare(column.Max, low) >= 0);
 
     /// <summary>
-    /// The leveled plan by descent: the same job the full read chooses, found from the levels' top
-    /// pages, one descent to the object a full level gives up, and walks that skip what the summaries
-    /// rule out.
+    /// The plan by descent: the same job the full read chooses, found from the levels' top pages, one
+    /// descent to the object a full level gives up, one per level to where a tiered run ends, and
+    /// walks that skip what the summaries rule out.
     /// </summary>
     private static async ValueTask<CompactionPlan> DescendAsync(
-        VortexDataset dataset, CompactionOptions settings, ObjectTally[] tallies, int count, CancellationToken cancellationToken)
+        VortexDataset dataset, CompactionOptions settings, CompactionStyle style, ObjectTally[] tallies, int count, CancellationToken cancellationToken)
     {
         int levels = dataset.Levels.Count;
         long[] objects = new long[levels];
@@ -484,7 +485,7 @@ internal static class CompactionPolicy
         List<CompactionJob> jobs = [];
         HashSet<int> taken = [];
         while (jobs.Count < count
-            && await ChooseAsync(dataset, settings, tallies, objects, bytes, fragmented, taken, cancellationToken).ConfigureAwait(false) is { } job)
+            && await ChooseAsync(dataset, settings, style, tallies, objects, bytes, fragmented, taken, cancellationToken).ConfigureAwait(false) is { } job)
         {
             Take(job, taken);
             jobs.Add(job);
@@ -496,8 +497,8 @@ internal static class CompactionPolicy
             ObjectsByLevel = [.. objects],
             BytesByLevel = [.. bytes],
             Lag = dataset.Lag,
-            IsClustered = true,
-            Style = CompactionStyle.Leveled,
+            IsClustered = dataset.Key is not null,
+            Style = style,
             Job = jobs.Count > 0 ? jobs[0] : null,
             Jobs = [.. jobs],
             FragmentedObjects = fragmented.Count,
@@ -511,6 +512,7 @@ internal static class CompactionPolicy
     private static async ValueTask<CompactionJob?> ChooseAsync(
         VortexDataset dataset,
         CompactionOptions settings,
+        CompactionStyle style,
         ObjectTally[] tallies,
         long[] objects,
         long[] bytes,
@@ -519,9 +521,15 @@ internal static class CompactionPolicy
         CancellationToken cancellationToken)
     {
         int levels = objects.Length;
+        bool leveled = style == CompactionStyle.Leveled;
         if (levels > 0 && objects[0] > settings.LevelZeroCeiling && !taken.Contains(0)
-            && settings.LevelZeroDestination(bytes[0]) is var destination && !taken.Contains(destination))
+            && (leveled ? settings.LevelZeroDestination(bytes[0]) : 1) is var destination && !taken.Contains(destination))
         {
+            if (!leveled)
+            {
+                return Tiered(dataset, await RunAsync(dataset, 0, cancellationToken).ConfigureAwait(false), 0, settings, CompactionTrigger.LevelZeroCeiling);
+            }
+
             List<CompactionInput> sources = [];
             await foreach (TreeEntry entry in dataset.Levels[0].EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
             {
@@ -537,7 +545,12 @@ internal static class CompactionPolicy
             if (!taken.Contains(level) && !taken.Contains(level + 1)
                 && !settings.IsTop(level) && objects[level] > 1 && bytes[level] > settings.CapacityBytes(level))
             {
-                bool roundRobin = settings.Pick == CompactionPick.RoundRobin;
+                if (!leveled)
+                {
+                    return Tiered(dataset, await RunAsync(dataset, level, cancellationToken).ConfigureAwait(false), level, settings, CompactionTrigger.LevelSize);
+                }
+
+                bool roundRobin = settings.PickFor(style) == CompactionPick.RoundRobin;
                 CompactionInput source = roundRobin
                     ? await NextAsync(dataset, level, cancellationToken).ConfigureAwait(false)
                     : await LargestAsync(dataset, level, cancellationToken).ConfigureAwait(false);
@@ -550,13 +563,78 @@ internal static class CompactionPolicy
         if (settings.PurgeMarks
             && await MostMarkedAsync(dataset, tallies, Marking.Of(dataset.Options), taken, cancellationToken).ConfigureAwait(false) is { } marked)
         {
-            return Purge(marked, settings, CompactionStyle.Leveled, 0);
+            return Purge(marked, settings, style, FirstRow(dataset, marked));
         }
 
         List<CompactionInput> untaken = fragmented.FindAll(input => !taken.Contains(input.Level));
         return untaken.Count == 0
             ? null
-            : new CompactionJob(untaken[0].Level, untaken[0].Level, CompactionStyle.Leveled, CompactionTrigger.Fragments, untaken, 0, 0);
+            : new CompactionJob(untaken[0].Level, untaken[0].Level, style, CompactionTrigger.Fragments, untaken, 0, 0);
+    }
+
+    /// <summary>The tiered job that concatenates <paramref name="run"/> into the level above, and records where it stopped.</summary>
+    private static CompactionJob Tiered(
+        VortexDataset dataset, List<CompactionInput> run, int from, CompactionOptions settings, CompactionTrigger trigger) =>
+        new CompactionJob(from, from + 1, CompactionStyle.Tiered, trigger, run, settings.TargetBytes(from + 1), FirstRow(dataset, run[0]))
+        {
+            Stop = run[^1].Key,
+        };
+
+    /// <summary>
+    /// <see cref="RunFrom"/> by descent: the run starts with the object past the level's pointer and
+    /// ends before the first object another level holds past that start, which one descent per level
+    /// finds, the levels side by side; a walk of the source level between the two reads the run's own
+    /// leaves.
+    /// </summary>
+    private static async ValueTask<List<CompactionInput>> RunAsync(VortexDataset dataset, int from, CancellationToken cancellationToken)
+    {
+        DatasetLevels levels = dataset.Levels;
+        TreeEntry first = await levels[from]
+            .NextAsync(levels.PointerOf(from), wrap: true, dataset.Pages, cancellationToken).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("A level over its bound holds an object.");
+        ReadOnlyMemory<byte> start = first.Key;
+        Task<TreeEntry?>[] nexts = new Task<TreeEntry?>[levels.Count];
+        for (int level = 0; level < levels.Count; level++)
+        {
+            nexts[level] = level == from
+                ? Task.FromResult<TreeEntry?>(null)
+                : levels[level].NextAsync(start, wrap: false, dataset.Pages, cancellationToken).AsTask();
+        }
+
+        await Task.WhenAll(nexts).ConfigureAwait(false);
+        ReadOnlyMemory<byte> stop = default;
+        bool bounded = false;
+        foreach (Task<TreeEntry?> found in nexts)
+        {
+            if (await found.ConfigureAwait(false) is { } next && (!bounded || TreePage.Compare(next.Key.Span, stop.Span) < 0))
+            {
+                stop = next.Key;
+                bounded = true;
+            }
+        }
+
+        List<CompactionInput> run = [];
+        await foreach (PositionedEntry held in levels[from]
+            .WalkAsync(
+                dataset.Pages,
+                0,
+                long.MaxValue,
+                node => TreePage.Compare(node.MaxKey.Span, start.Span) >= 0 && (!bounded || TreePage.Compare(node.MinKey.Span, stop.Span) < 0),
+                cancellationToken)
+            .ConfigureAwait(false))
+        {
+            if (bounded && TreePage.Compare(held.Entry.Key.Span, stop.Span) >= 0)
+            {
+                break;
+            }
+
+            if (TreePage.Compare(held.Entry.Key.Span, start.Span) >= 0)
+            {
+                run.Add(new CompactionInput(from, held.Entry.Key, ObjectEntry.FromBytes(held.Entry.Value)));
+            }
+        }
+
+        return run;
     }
 
     /// <summary>

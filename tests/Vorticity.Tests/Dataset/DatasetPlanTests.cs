@@ -1,12 +1,12 @@
-// The compaction planner, which descends a leveled dataset's trees rather than reading them.
+// The compaction planner, which descends a dataset's trees rather than reading them.
 //
-// A PLAN BY DESCENT IS THE PLAN A FULL READ MAKES, or it is a different policy: the first test holds
+// A PLAN BY DESCENT IS THE PLAN A FULL READ MAKES, or it is a different policy: the first tests hold
 // the two to the same job on random shapes -- levels of every size, objects of equal sizes, key
-// ranges with holes and ranges nobody states, objects over their fragments, marked rows, pointers
-// before, between, on and past a level's objects -- under random options, and counts that every
-// trigger was met. Others hold the descent to what it is for: a plan over 25 000 objects asks the
-// store for a few pages, where a full read asks for every leaf. The objects are entries only, since
-// a plan reads no row.
+// ranges with holes and ranges nobody states, objects over their fragments, marked rows, levels
+// interleaved in the tree's order, pointers before, between, on and past a level's objects -- under
+// random options, and count that every trigger was met. Others hold the descent to what it is for:
+// a plan over 25 000 objects asks the store for a few pages, where a full read asks for every leaf.
+// The objects are entries only, since a plan reads no row.
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -45,13 +45,53 @@ public sealed class DatasetPlanTests
                 Fanout = random.Next(2, 11),
                 TargetBytesAtLevelOne = 256L << random.Next(0, 6),
                 MaxFragments = random.Next(0, 4),
-                Pick = (CompactionPick)random.Next(2),
+                Pick = (CompactionPick)random.Next(3),
             };
 
             ranks = Math.Max(ranks, await HoldAsync(dataset, options, seed, met, ct));
         }
 
         Met(met, ranks);
+    }
+
+    [Fact]
+    public async Task ATieredDescentChoosesTheJobAFullReadChooses()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Dictionary<CompactionTrigger, int> met = [];
+        int ranks = 0;
+        int longest = 0;
+        for (int seed = 0; seed < 300; seed++)
+        {
+            // Datasets ordered by arrival, whose levels interleave as compactions and rewrites leave
+            // them, and clustered ones merged in tiers, whose levels overlap.
+            Random random = new Random(seed);
+            bool clustered = seed % 3 == 0;
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            IBoundaryRule rule = new ProllyBoundaryRule(Seed, minBytes: 256, targetBytes: 512, maxBytes: 1_024);
+            List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> shape = clustered ? Shape(random) : Arrivals(random);
+            await using VortexDataset dataset = await PointAsync(store, rule, await CreateAsync(store, rule, shape, ct, clustered), shape, random, clustered, ct);
+            CompactionOptions options = new CompactionOptions
+            {
+                LevelZeroCeiling = random.Next(2, 9),
+                Fanout = random.Next(2, 11),
+                TargetBytesAtLevelOne = 256L << random.Next(0, 6),
+                MaxFragments = random.Next(0, 4),
+                Style = CompactionStyle.Tiered,
+                Pick = seed % 4 == 1 ? CompactionPick.Largest : seed % 4 == 2 ? CompactionPick.RoundRobin : CompactionPick.Auto,
+            };
+
+            // The longest run is planned by reading every leaf whichever way it is asked for.
+            ranks = Math.Max(ranks, await HoldAsync(dataset, options, seed, met, ct));
+            if (options.Pick != CompactionPick.Largest
+                && (await dataset.PlanCompactionAsync(options, ct)).Job is { Trigger: CompactionTrigger.LevelZeroCeiling or CompactionTrigger.LevelSize } job)
+            {
+                longest = Math.Max(longest, job.Inputs.Count);
+            }
+        }
+
+        Met(met, ranks);
+        Assert.True(longest >= 4, $"no run was longer than {longest} objects, so a run's end is untested");
     }
 
     [Theory]
@@ -103,6 +143,52 @@ public sealed class DatasetPlanTests
             await dataset.RefreshAsync(ct);
             Assert.Equal(Convert.ToHexString(due.Stop.Span), Convert.ToHexString(dataset.Levels.PointerOf(1).Span));
         }
+    }
+
+    [Theory]
+    [InlineData(25_000)]
+    [InlineData(100_000)]
+    public async Task ATieredPlanAsksForTheSameFewPagesWhateverTheObjectsALevelHolds(int deepest)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+
+        // By arrival: level 1 far over its size, each of its objects between two of level 2's, so
+        // that every run is one object long, and a few of level 0 after them all.
+        List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> objects = [];
+        long position = 0;
+        for (int i = 0; i < deepest; i++)
+        {
+            objects.Add(Arrival(i % 2 == 0 ? 2 : 1, position, 100, 1L << 20, 0, 0));
+            position += 100;
+        }
+
+        for (int i = 0; i < 3; i++)
+        {
+            objects.Add(Arrival(0, position, 100, 1L << 20, 0, 0));
+            position += 100;
+        }
+
+        await using (VortexDataset created = await CreateAsync(store, null, objects, ct, clustered: false))
+        {
+        }
+
+        // The defaults: a dataset without a clustering key merges in tiers, by the run past the pointer.
+        (CompactionPlan plan, long asked) = await ColdAsync(store, (dataset, token) => dataset.PlanCompactionAsync(null, token).AsTask(), ct, clustered: false);
+        (CompactionPlan full, long read) = await ColdAsync(
+            store, (dataset, token) => CompactionPolicy.PlanByReadingEveryLeafAsync(dataset, null, token).AsTask(), ct, clustered: false);
+        Same(full, plan, seed: -1);
+        CompactionJob job = Assert.IsType<CompactionJob>(plan.Job);
+        Assert.Equal((CompactionTrigger.LevelSize, CompactionStyle.Tiered, 1, 2, 1), (job.Trigger, job.Style, job.FromLevel, job.ToLevel, job.Inputs.Count));
+
+        Console.Out.Write(FormattableString.Invariant(
+            $"TIERED PLAN: {objects.Count} objects over three levels: a descent asked the store for {asked} pages, a full read for {read}.\n"));
+
+        // THE CONSTANT: the top pages the header inlines, one path in each level to the run's start
+        // and to where it stops, and the run's leaf, whatever the levels hold.
+        Assert.InRange(asked, 0, 8);
+        Assert.True(read > asked, $"a full read asked for {read} pages and a descent for {asked}");
     }
 
     [Fact]
@@ -375,9 +461,9 @@ public sealed class DatasetPlanTests
 
     /// <summary>A plan made on a handle opened afresh, and the reads it asked the store for beyond the open.</summary>
     private static async Task<(CompactionPlan Plan, long Requests)> ColdAsync(
-        CountingObjectStore store, Func<VortexDataset, CancellationToken, Task<CompactionPlan>> plan, CancellationToken ct)
+        CountingObjectStore store, Func<VortexDataset, CancellationToken, Task<CompactionPlan>> plan, CancellationToken ct, bool clustered = true)
     {
-        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options(null), ct);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, Options(null, clustered), ct);
         store.Reset();
         CompactionPlan made = await plan(dataset, ct);
         return (made, store.Requests);
@@ -410,6 +496,32 @@ public sealed class DatasetPlanTests
                     random.Next(10) == 0 ? random.Next(1, 7) : 0,
                     random.Next(8) == 0 ? random.Next(1, 20) : random.Next(30) == 0 ? random.Next(150, 400) : 0,
                     keyed: random.Next(25) != 0));
+            }
+        }
+
+        return objects;
+    }
+
+    /// <summary>
+    /// Random levels of a dataset ordered by arrival: runs of objects one after another, each run in
+    /// one level, so that levels interleave as rewrites and compactions leave them; sizes,
+    /// fragments and marks drawn as <see cref="Shape"/> draws them.
+    /// </summary>
+    private static List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Arrivals(Random random)
+    {
+        List<(int, ReadOnlyMemory<byte>, ObjectEntry)> objects = [];
+        int levels = random.Next(1, 6);
+        int count = random.Next(0, 140);
+        long position = random.Next(0, 50);
+        while (objects.Count < count)
+        {
+            int level = random.Next(levels);
+            for (int run = random.Next(1, 7); run > 0 && objects.Count < count; run--)
+            {
+                int deleted = random.Next(8) == 0 ? random.Next(1, 20) : random.Next(30) == 0 ? random.Next(150, 400) : 0;
+                long rows = Math.Max(random.Next(100, 160), (3L * deleted) + 1);
+                objects.Add(Arrival(level, position, rows, 1_000L * random.Next(1, 5), random.Next(10) == 0 ? random.Next(1, 7) : 0, deleted));
+                position += rows + (random.Next(10) == 0 ? random.Next(1, 500) : 0);
             }
         }
 

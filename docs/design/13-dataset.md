@@ -245,19 +245,22 @@ it must not have. Measured on four interleaved level-0 objects: 42 808 bytes in,
 Triggers: level 0 above its ceiling, a level above its size, an object whose marks are due (§12),
 then an entry above K fragments, a compaction of index bytes only (§6.4).
 
-**A leveled plan descends the trees rather than reading them.** A level's bytes are the sum of the
+**A plan descends the trees rather than reading them.** A level's bytes are the sum of the
 tallies its top page carries, and the header carries that page, or the handle keeps it when it is a
 leaf with marks (§3). The object a job pushes down from a level over its size is at the end of one
-descent: the largest, the default, following the largest tally at each page, or under a round
-robin (`CompactionOptions.Pick`) the first past the key the level's last job stopped at, which the
-header records with the level, following the keys. The objects of the level below that the job's
-key range meets, the objects over their fragments and the one whose marks are the most due are
-found by walks that skip every subtree whose summary or tally rules it out. A cold plan over
-125 000 objects asks the store for two pages, where reading every leaf asks for 124. A tiered plan
-still reads every leaf: its job is the longest run of one level's objects that nothing else sits
-between, or under a round robin the run past the level's pointer, which only the order of every
-level says. So does a plan over a level whose pages were written before tallies, until a commit
-rewrites them. Both choose the job the other would. When many processes append, one coordinator batching their
+descent: the largest, a leveled dataset's default, following the largest tally at each page, or
+under a round robin (`CompactionOptions.Pick`) the first past the key the level's last job stopped
+at, which the header records with the level, following the keys. The objects of the level below
+that the job's key range meets, the objects over their fragments and the one whose marks are the
+most due are found by walks that skip every subtree whose summary or tally rules it out. A cold plan
+over 125 000 objects asks the store for two pages, where reading every leaf asks for 124. A tiered
+job concatenates a run of one level's objects that nothing else sits between. Under a round robin,
+a tiered dataset's default, it takes the run that starts past the level's pointer, which ends
+before the first object another level holds past that start, one descent per level: a plan over
+100 000 objects by arrival asks for one page, where reading every leaf asks for 71. The longest run
+(`CompactionPick.Largest`) is a fact of every level's order in full, and a plan that takes it still
+reads every leaf. So does a plan over a level whose pages were written before tallies, until a
+commit rewrites them. Both choose the job the other would. When many processes append, one coordinator batching their
 rows into one commit answers the contention; without it the protocol of §8 stays correct, only
 slower.
 

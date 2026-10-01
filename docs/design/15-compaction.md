@@ -1,13 +1,17 @@
 # Compaction: when it runs, and what a store that cannot delete does to it
 
-**Status: a proposal, built step by step (§6).** What exists is [13-dataset.md](13-dataset.md) §5:
-one planner, one job per `CompactAsync` call or per turn of a background loop, a leveled plan that
-descends the trees rather than reading them (§3), and purges of marks (§4). This document weighs the
-ways to drive the same work: inline in a writer's commit, on demand, or in the background. It
-also weighs what a store under a retention lock changes, when it refuses to delete or overwrite an
-object before a date: S3 Object Lock, Azure immutable blob storage, a GCS bucket lock. Nothing here
-changes the commit protocol or a read; the tallies of §3 are the one change to a page's format, and a
-page written before them still reads.
+**Status: built (§6).** What exists is [13-dataset.md](13-dataset.md) §5 and what this document
+added to it: one planner, whose jobs run one per `CompactAsync` call, per turn of a background loop,
+or in the commit that takes level 0 past its ceiling (§2); a plan that descends the trees rather
+than reading them (§3); purges of marks, and long vectors out of line (§4); and a profile for a
+store under a retention lock (§5). This document weighs the ways to drive the same work: inline in a
+writer's commit, on demand, or in the background. It also weighs what a store under a retention lock
+changes, when it refuses to delete or overwrite an object before a date: S3 Object Lock, Azure
+immutable blob storage, a GCS bucket lock. Nothing here changes the commit protocol. The format
+gains the tallies in a page's summary and a pointer in each level of a header (§3), a vector's
+reference in an entry (§4) and the locked store in a header (§5). A page written before the tallies
+still reads, and a reader that knows no vector out of line refuses such an entry rather than
+reading it wrong.
 
 ## 1. What compaction buys, and what it costs
 
@@ -33,7 +37,7 @@ Three costs are left over, and this document is about them:
 2. **Planning read every leaf.** `PlanCompactionAsync` walked every level's tree, since the bytes of
    a level were recorded nowhere else. At the 40 objects of the churn that is nothing. At a
    tebibyte of 4 MiB objects it is 262 144 entries of a few hundred bytes each: about a thousand
-   pages and a hundred megabytes, on every plan. A leveled plan now descends instead (§3).
+   pages and a hundred megabytes, on every plan. A plan now descends instead (§3).
 3. **Marks in levels no merge reaches.** Level 4 of a ten-million-row dataset is rewritten only when
    level 3 overflows into it, and the top level never is. The marks there last until a delete would
    pass an object's share or its vector's cap, and that delete then rewrites the object itself.
@@ -108,8 +112,7 @@ minute outlasts most jobs.
 
 ## 3. Planning in the depth of the tree
 
-**Built, for the leveled style.** Each thing the planner needs now comes from where a commit
-already writes:
+**Built.** Each thing the planner needs now comes from where a commit already writes:
 
 | what the plan needs | read before | read now |
 |---|---|---|
@@ -117,6 +120,7 @@ already writes:
 | the objects a level-0 job takes | level 0's leaves | the same, since level 0 holds at most eight |
 | which object of a full level goes down | every leaf of the level, then the largest | one descent along the largest tally, which finds the same object |
 | the object past where the level's last job stopped | nothing | one descent along the keys, past the pointer the header records with the level |
+| where a tiered run ends | every leaf of every level | one descent per other level, to its first object past the run's start |
 | the objects of the next level a job meets | every leaf of that level | a walk that skips each subtree whose bounds lie outside the job's range |
 | the objects over their fragments | every leaf | a walk into the subtrees whose tally holds one |
 | which objects hold the most marks | nothing | the sum of marked rows in every tally, for the purge of §4 |
@@ -139,13 +143,17 @@ two picks cost a plan the same.
 They do not cost the writes the same. The churn on ten million rows, 30 000 commits, takes the same
 jobs either way for its first 15 000 or so. With two seeds of three the round robin then wrote 6 %
 more in compaction, 2 149 and 2 146 MiB against 2 032 and 2 019, and 16 % more in the objects the
-updates and deletes wrote themselves; the third seed took the same jobs throughout. So the largest first stays the default.
+updates and deletes wrote themselves; the third seed took the same jobs throughout. So a leveled dataset keeps the largest first by default (`CompactionPick.Auto`).
 
-**Not built.** A tiered plan by descent. A tiered job concatenates a run of one level's objects
-that nothing else sits between, and where the runs are is a fact of every level's order: the
-longest of them is found only by reading every leaf. The run past the pointer would need much less:
-it ends before the first object another level holds past its start, which one descent per level
-finds.
+A tiered job concatenates a run of one level's objects that nothing else sits between, and where
+the runs are is a fact of every level's order. The longest of them is found only by reading every
+leaf. The run that starts past the pointer needs much less: it ends before the first object another
+level holds past its start, and one descent per level finds that object, not one per level for each
+object of the run. The descents go side by side, and a walk of the source level between the two
+reads the run itself. A plan over 100 000 objects by arrival, levels interleaved object by object,
+asks the store for one page, where reading every leaf asks for 71. A dataset ordered by arrival
+keeps each level's objects together, a run of level 0 going up whole and the next landing past it,
+so the two take the same runs there, and the round robin is a tiered dataset's default.
 
 ## 4. Folding marks where no merge goes
 
@@ -292,9 +300,9 @@ subject destroyed in place of the rows. It belongs to the store library or to th
 
 ## 6. What to build, in order
 
-1. **Planning in the depth of the tree** (§3). Built for the leveled style: a tally in every page's
-   summary, one descent to the largest object or to the one past a level's pointer, and walks that
-   skip what the bounds and tallies rule out. A tiered plan by descent is left.
+1. **Planning in the depth of the tree** (§3). Built: a tally in every page's summary, one descent to
+   the largest object or to the one past a level's pointer, one per level to where a tiered run
+   ends, and walks that skip what the bounds and tallies rule out.
 2. **Purge jobs** (§4). Built: a trigger `Marks` after the levels' bounds and before the fragments,
    at half a delete's bounds. The churn measures a commit's bytes with and without it: the purges
    move a fifth of them into compaction and leave the total as it was.
