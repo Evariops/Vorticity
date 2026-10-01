@@ -224,16 +224,18 @@ internal sealed record CommitHeader
 
     private static void WriteRetired(ref ProtoWriter writer, RetiredColumn column)
     {
+        // The name is written even when empty, a column's name may be, so that a retired name is
+        // never left out of the header, and a reader can tell an entry from a torn one.
         ProtoWriter inner = new ProtoWriter();
         try
         {
-            inner.WriteString(RetiredField.Name, column.Name);
+            inner.WriteStringAlways(RetiredField.Name, column.Name);
             if (column.Current.Length > 0)
             {
                 inner.WriteString(RetiredField.Current, column.Current);
             }
 
-            writer.WriteBytes(Field.Retired, inner.WrittenSpan);
+            writer.WriteBytesAlways(Field.Retired, inner.WrittenSpan);
         }
         finally
         {
@@ -478,7 +480,7 @@ internal sealed record CommitHeader
 
     private static RetiredColumn ReadRetired(ReadOnlySpan<byte> bytes)
     {
-        string name = string.Empty;
+        string? name = null;
         string current = string.Empty;
         ProtoReader reader = new ProtoReader(bytes);
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
@@ -497,7 +499,9 @@ internal sealed record CommitHeader
             }
         }
 
-        return new RetiredColumn(name, current);
+        return name is null
+            ? throw new CommitFormatException("The header retires a column it does not name.")
+            : new RetiredColumn(name, current);
     }
 
     private static ChunkerSettings ReadChunker(ReadOnlySpan<byte> bytes)

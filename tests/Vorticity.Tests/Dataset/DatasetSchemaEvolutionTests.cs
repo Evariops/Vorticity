@@ -446,6 +446,39 @@ public sealed class DatasetSchemaEvolutionTests
         }
     }
 
+    [Fact]
+    public void ARetiredNameTravelsEvenEmptyAndAnEntryNamingNoneIsRefused()
+    {
+        // A column's name may be empty, and a retired one is never used again: the entry is written
+        // whatever its name, and one that names no column is a torn header, not an empty name.
+        CommitHeader header = new CommitHeader
+        {
+            Version = 3,
+            Retired = [new RetiredColumn(string.Empty, string.Empty), new RetiredColumn("Old", "New")],
+        };
+
+        Vorticity.Serialization.Protobuf.ProtoWriter writer = new Vorticity.Serialization.Protobuf.ProtoWriter();
+        Vorticity.Serialization.Protobuf.ProtoWriter nameless = new Vorticity.Serialization.Protobuf.ProtoWriter();
+        Vorticity.Serialization.Protobuf.ProtoWriter torn = new Vorticity.Serialization.Protobuf.ProtoWriter();
+        try
+        {
+            header.Write(ref writer);
+            Assert.Equal(header.Retired, CommitHeader.Read(writer.WrittenSpan).Retired);
+
+            nameless.WriteString(CommitHeader.RetiredField.Current, "New");
+            torn.WriteUInt64(CommitHeader.Field.Version, 3);
+            torn.WriteBytes(CommitHeader.Field.Retired, nameless.WrittenSpan);
+            byte[] bytes = torn.WrittenSpan.ToArray();
+            Assert.Throws<CommitFormatException>(() => CommitHeader.Read(bytes));
+        }
+        finally
+        {
+            writer.Dispose();
+            nameless.Dispose();
+            torn.Dispose();
+        }
+    }
+
     /// <summary>
     /// A dataset created with <see cref="MeterV1"/>, three objects appended, changed to
     /// <see cref="MeterV2"/> with the site renamed to place, and two objects appended in it; and its
