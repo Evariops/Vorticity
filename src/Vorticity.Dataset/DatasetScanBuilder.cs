@@ -271,38 +271,26 @@ internal sealed class DatasetScanBuilder
             await using (lease.ConfigureAwait(false))
             {
                 RecordOpen(lease);
-                if (ColumnsOf(lease, held.Entry) is { } columns)
+                ObjectColumns? columns = ColumnsOf(lease, held.Entry);
+                if (columns is null && !held.Entry.HasDeletions)
                 {
-                    ObjectRead read = columns.Read(_filter, _mask ?? FieldMask.All);
-                    if (read.Fate == FilterFate.None)
+                    // The object's own scan, which every object of the version's schema with no row
+                    // marked is read by, rebased into one view for the whole scan.
+                    await foreach (RecordBatch batch in Of(lease.File, held).ExecuteAsync()
+                        .WithCancellation(cancellationToken).ConfigureAwait(false))
                     {
-                        continue;
-                    }
-
-                    await foreach (RecordBatch batch in ReshapedAsync(lease.File, held, read, held.FirstRow, _options.Compact, cancellationToken)
-                        .ConfigureAwait(false))
-                    {
-                        yield return batch;
+                        yield return InDataset(batch, held.FirstRow, ref view);
                     }
 
                     continue;
                 }
 
-                if (held.Entry.HasDeletions)
+                if (BatchesOfAsync(lease.File, held, columns, _filter, _mask, held.FirstRow, _options.Compact, cancellationToken) is { } batches)
                 {
-                    await foreach (RecordBatch batch in LiveAsync(lease.File, held, _filter, _mask, held.FirstRow, _options.Compact, reshaped: false, cancellationToken)
-                        .ConfigureAwait(false))
+                    await foreach (RecordBatch batch in batches.ConfigureAwait(false))
                     {
                         yield return batch;
                     }
-
-                    continue;
-                }
-
-                await foreach (RecordBatch batch in Of(lease.File, held).ExecuteAsync()
-                    .WithCancellation(cancellationToken).ConfigureAwait(false))
-                {
-                    yield return InDataset(batch, held.FirstRow, ref view);
                 }
             }
         }
@@ -1122,6 +1110,27 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     private ObjectColumns? ColumnsOf(ObjectLease lease, ObjectEntry entry) => _version.Schema.ColumnsOf(lease.File.DType, entry.Key);
 
+    /// <summary>
+    /// The batches of an object that its own scan alone does not read as the version's rows, one of an
+    /// earlier schema or one with rows marked, under <paramref name="filter"/> and
+    /// <paramref name="mask"/> over the version's columns and counted from <paramref name="baseRow"/>;
+    /// null when the filter can keep no row of it. The one place where the steps compose, in this order
+    /// whatever reads the batches: the object's scan, its marked rows taken out or deselected, the
+    /// batches reshaped to the version's columns, and the filter evaluated on them where it could not
+    /// go to the scan.
+    /// </summary>
+    private IAsyncEnumerable<RecordBatch>? BatchesOfAsync(
+        VortexFile file, PositionedObject held, ObjectColumns? columns, VortexExpr? filter, FieldMask? mask, long baseRow, bool compact, CancellationToken cancellationToken)
+    {
+        if (columns is null)
+        {
+            return LiveAsync(file, held, filter, mask, baseRow, compact, reshaped: false, cancellationToken);
+        }
+
+        ObjectRead read = columns.Read(filter, mask ?? FieldMask.All);
+        return read.Fate == FilterFate.None ? null : ReshapedAsync(file, held, read, baseRow, compact, cancellationToken);
+    }
+
     /// <summary>An object of another schema read as the version's: its own scan, each batch reshaped and counted from <paramref name="baseRow"/>.</summary>
     private IAsyncEnumerable<RecordBatch> ReshapedAsync(
         VortexFile file, PositionedObject held, ObjectRead read, long baseRow, bool compact, CancellationToken cancellationToken) =>
@@ -1163,7 +1172,7 @@ internal sealed class DatasetScanBuilder
                     : await scan.CountAsync(cancellationToken).ConfigureAwait(false);
             default:
                 long rows = 0;
-                await foreach (RecordBatch batch in ReshapedAsync(file, held, read, 0, compact: false, cancellationToken).ConfigureAwait(false))
+                await foreach (RecordBatch batch in BatchesOfAsync(file, held, columns, _filter, FieldMask.Empty, 0, compact: false, cancellationToken)!.ConfigureAwait(false))
                 {
                     rows += batch.SelectedRows;
                     if (stopAtOne && rows > 0)
@@ -1204,7 +1213,7 @@ internal sealed class DatasetScanBuilder
                 : await scan.MaxAsync(named, cancellationToken).ConfigureAwait(false);
         }
 
-        return await ExtremeOfAsync(ReshapedAsync(file, held, read, 0, compact: true, cancellationToken), path, wantMin).ConfigureAwait(false);
+        return await ExtremeOfAsync(BatchesOfAsync(file, held, columns, _filter, projection, 0, compact: true, cancellationToken)!, path, wantMin).ConfigureAwait(false);
     }
 
     /// <summary>The file's own scan, carrying this builder's filter, projection, options and the rows that fall in this object.</summary>
@@ -1360,7 +1369,7 @@ internal sealed class DatasetScanBuilder
         }
 
         FieldMask projection = new FieldMaskBuilder().Include(ToolPaths.Resolve(_version.Schema.Columns, path)).Build();
-        return await ExtremeOfAsync(LiveAsync(file, held, _filter, projection, 0, compact: true, reshaped: false, cancellationToken), path, wantMin)
+        return await ExtremeOfAsync(BatchesOfAsync(file, held, null, _filter, projection, 0, compact: true, cancellationToken)!, path, wantMin)
             .ConfigureAwait(false);
     }
 
