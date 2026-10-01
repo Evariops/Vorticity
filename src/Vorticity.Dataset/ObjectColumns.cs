@@ -85,9 +85,6 @@ internal sealed class ObjectColumns
         _changes = changes;
     }
 
-    /// <summary>The object's key, for a message.</summary>
-    internal string Key => _key;
-
     /// <summary>
     /// How an object of dtype <paramref name="file"/> answers for <paramref name="schema"/>'s
     /// columns. With <paramref name="strict"/>, a field no column of the dataset ever had is refused
@@ -231,16 +228,21 @@ internal sealed class ObjectColumns
     /// <summary>A dataset path as the object names it, or null when the object holds no column of it.</summary>
     internal string? SourcePath(string path)
     {
-        int dot = path.IndexOf('.', StringComparison.Ordinal);
-        string top = dot < 0 ? path : path[..dot];
-        int column = _schema.DType.IndexOfField(top);
+        int column = ColumnPath.TopOf(_schema.DType, path);
         if (column < 0 || _sources[column] < 0)
         {
             return null;
         }
 
-        string name = _file.GetFieldName(_sources[column]);
-        return string.Equals(name, top, StringComparison.Ordinal) ? path : dot < 0 ? name : name + path[dot..];
+        int field = _sources[column];
+        if (_file.GetFieldNameUtf8(field).SequenceEqual(_schema.DType.GetFieldNameUtf8(column)))
+        {
+            return path;
+        }
+
+        int dot = path.IndexOf('.', StringComparison.Ordinal);
+        string name = _file.GetFieldName(field);
+        return dot < 0 ? name : name + path[dot..];
     }
 
     /// <summary>
@@ -297,11 +299,7 @@ internal sealed class ObjectColumns
                 int selected = -1;
                 if (evaluator is not null)
                 {
-                    if (states.Length < rows)
-                    {
-                        Return(states);
-                        states = ArrayPool<byte>.Shared.Rent(rows);
-                    }
+                    Pooled.Grow(ref states, rows);
 
                     Span<byte> truths = states.AsSpan(0, rows);
                     evaluator.Evaluate(arena, root, rows, truths);
@@ -315,21 +313,14 @@ internal sealed class ObjectColumns
                     root = shape.Final(arena, root);
                     if (count < rows && compact)
                     {
-                        if (indices.Length < rows)
-                        {
-                            Return(indices);
-                            indices = ArrayPool<int>.Shared.Rent(rows);
-                        }
-
+                        Pooled.Grow(ref indices, rows);
                         CanonicalFilter.Select(truths, indices);
                         root = CanonicalFilter.Apply(arena, root, indices.AsSpan(0, count));
                     }
                     else if (count < rows)
                     {
-                        words = arena.AllocateUninitialized(Math.Max((rows + 63) >> 6, 1) * sizeof(ulong), 64, out Span<byte> raw);
-                        Span<ulong> bits = MemoryMarshal.Cast<byte, ulong>(raw);
-                        bits[0] = 0;
-                        selected = Trilean.ToWords(truths, Trilean.True, equal: true, bits);
+                        words = arena.AllocateUninitialized(((rows + 63) >> 6) * sizeof(ulong), 64, out Span<byte> raw);
+                        selected = Trilean.ToWords(truths, Trilean.True, equal: true, MemoryMarshal.Cast<byte, ulong>(raw));
                     }
                 }
 
@@ -346,8 +337,8 @@ internal sealed class ObjectColumns
         finally
         {
             view?.Dispose();
-            Return(states);
-            Return(indices);
+            Pooled.Return(states);
+            Pooled.Return(indices);
         }
     }
 
@@ -362,28 +353,21 @@ internal sealed class ObjectColumns
             return;
         }
 
-        for (int row = 0; row < truths.Length; row++)
+        int rows = truths.Length;
+        for (int word = 0; word < (rows + 63) >> 6; word++)
         {
-            if ((selection[row >> 6] & (1UL << (row & 63))) == 0)
+            // The bits past the rows are never set in a selection, so only the last word is cut.
+            ulong dropped = ~selection[word];
+            int left = rows - (word << 6);
+            if (left < 64)
             {
-                truths[row] = Trilean.False;
+                dropped &= (1UL << left) - 1;
             }
-        }
-    }
 
-    private static void Return(byte[] rented)
-    {
-        if (rented.Length > 0)
-        {
-            ArrayPool<byte>.Shared.Return(rented);
-        }
-    }
-
-    private static void Return(int[] rented)
-    {
-        if (rented.Length > 0)
-        {
-            ArrayPool<int>.Shared.Return(rented);
+            for (; dropped != 0; dropped &= dropped - 1)
+            {
+                truths[(word << 6) + BitOperations.TrailingZeroCount(dropped)] = Trilean.False;
+            }
         }
     }
 
@@ -412,8 +396,7 @@ internal sealed class ObjectColumns
             evaluated.CollectFields(paths);
             foreach (string path in paths)
             {
-                int dot = path.IndexOf('.', StringComparison.Ordinal);
-                int column = dataset.IndexOfField(dot < 0 ? path : path[..dot]);
+                int column = ColumnPath.TopOf(dataset, path);
                 if (column >= 0)
                 {
                     held[column] = true;
@@ -717,23 +700,20 @@ internal sealed class ObjectColumns
             return null;
         }
 
-        string name = _file.GetFieldName(_sources[column]);
-        string[] segments = field.Segments ?? field.Path.Split('.');
-        if (string.Equals(segments[0], name, StringComparison.Ordinal))
+        if (_file.GetFieldNameUtf8(_sources[column]).SequenceEqual(field.SegmentsUtf8[0]))
         {
             return field;
         }
 
-        string[] renamed = (string[])segments.Clone();
-        renamed[0] = name;
+        string[] renamed = field.Segments is { } segments ? (string[])segments.Clone() : field.Path.Split('.');
+        renamed[0] = _file.GetFieldName(_sources[column]);
         return new FieldExpr(renamed);
     }
 
     /// <summary>The dataset column a path starts from, or null when it names none, which the filter's check has already refused.</summary>
     private int? Column(FieldExpr field)
     {
-        string top = field.Segments is { } segments ? segments[0] : field.Path.Split('.')[0];
-        int column = _schema.DType.IndexOfField(top);
+        int column = _schema.DType.IndexOfField(field.SegmentsUtf8[0]);
         return column < 0 ? null : column;
     }
 }

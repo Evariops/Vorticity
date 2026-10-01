@@ -617,22 +617,10 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable
             int[] columns = new int[paths.Count];
             for (int i = 0; i < paths.Count; i++)
             {
-                DType at = batch.DType;
-                int node = batch.RootIndex;
-                foreach (string segment in paths[i].Split('.'))
-                {
-                    int field = at.IndexOfField(segment);
-                    if (field < 0)
-                    {
-                        throw new ArgumentException(
-                            $"'{paths[i]}' names no column of the batch's schema.", nameof(paths));
-                    }
-
-                    node = batch.Arena.GetNode(node).GetFieldIndex(field);
-                    at = at.GetField(field);
-                }
-
-                columns[i] = node;
+                int node = ColumnPath.NodeOf(batch, paths[i]);
+                columns[i] = node >= 0
+                    ? node
+                    : throw new ArgumentException($"'{paths[i]}' names no column of the batch's schema.", nameof(paths));
             }
 
             return columns;

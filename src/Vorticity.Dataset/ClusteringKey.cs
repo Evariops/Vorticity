@@ -233,7 +233,8 @@ internal sealed class ClusteringKey
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
         DType at = schema;
-        foreach (string segment in path.Split('.'))
+        ReadOnlySpan<char> rest = path;
+        foreach (Range segment in rest.Split('.'))
         {
             if (at.Kind != DTypeKind.Struct)
             {
@@ -241,7 +242,7 @@ internal sealed class ClusteringKey
                     $"'{path}' descends into a {at.Kind}, which has no fields.", nameof(path));
             }
 
-            int index = at.IndexOfField(segment);
+            int index = ColumnPath.IndexOf(at, rest[segment]);
             if (index < 0)
             {
                 throw new ArgumentException($"'{path}' names no column of the schema.", nameof(path));

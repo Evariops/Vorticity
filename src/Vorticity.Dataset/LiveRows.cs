@@ -63,17 +63,8 @@ internal static class LiveRows
                 }
 
                 int words = (rows + 63) >> 6;
-                if (mask.Length < words)
-                {
-                    Return(mask);
-                    mask = ArrayPool<ulong>.Shared.Rent(words);
-                }
-
-                if (indices.Length < rows)
-                {
-                    Return(indices);
-                    indices = ArrayPool<int>.Shared.Rent(rows);
-                }
+                Pooled.Grow(ref mask, words);
+                Pooled.Grow(ref indices, rows);
 
                 // The rows kept: the live ones, and of those the selected ones when compacting.
                 Span<ulong> kept = mask.AsSpan(0, words);
@@ -120,8 +111,8 @@ internal static class LiveRows
         finally
         {
             view?.Dispose();
-            Return(indices);
-            Return(mask);
+            Pooled.Return(indices);
+            Pooled.Return(mask);
         }
     }
 
@@ -228,11 +219,7 @@ internal static class LiveRows
             await foreach (RecordBatch batch in source.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 int rows = batch.RowCount;
-                if (order.Length < rows)
-                {
-                    Return(order);
-                    order = ArrayPool<int>.Shared.Rent(rows);
-                }
+                Pooled.Grow(ref order, rows);
 
                 for (int row = 0; row < rows; row++)
                 {
@@ -249,7 +236,7 @@ internal static class LiveRows
         finally
         {
             view?.Dispose();
-            Return(order);
+            Pooled.Return(order);
         }
     }
 
@@ -307,7 +294,7 @@ internal static class LiveRows
             {
                 for (int column = 0; column < nodes.Length; column++)
                 {
-                    nodes[column] = NodeOf(batch, paths[column]);
+                    nodes[column] = ColumnPath.NodeOf(batch, paths[column]);
                 }
 
                 for (int row = 0; row < batch.RowCount; row++, at++)
@@ -340,43 +327,6 @@ internal static class LiveRows
         arena.GetNode(ComparisonKernels.Unwrap(arena, node)).DType.Kind == DTypeKind.Decimal
             ? LiteralReader.TryReadDecimal(arena, node, row, out value)
             : LiteralReader.TryRead(arena, node, row, out value);
-
-    /// <summary>The node of a <c>.</c>-separated path in a batch, by the names of its struct.</summary>
-    private static int NodeOf(RecordBatch batch, string path)
-    {
-        DType at = batch.DType;
-        int node = batch.RootIndex;
-        foreach (string segment in path.Split('.'))
-        {
-            int field = at.IndexOfField(segment);
-            node = batch.Arena.GetNode(node).GetFieldIndex(field);
-            at = at.GetField(field);
-        }
-
-        return node;
-    }
-
-    /// <summary>Whether a path of a file may hold a null: a field on the way, or the column, is nullable.</summary>
-    internal static bool MayBeNull(DType schema, string path)
-    {
-        DType current = schema;
-        foreach (string segment in path.Split('.'))
-        {
-            int field = current.Kind == DTypeKind.Struct ? current.IndexOfField(segment) : -1;
-            if (field < 0)
-            {
-                return true;
-            }
-
-            current = current.GetField(field);
-            if (current.IsNullable)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
 
     /// <summary>The deleted rows of <c>[start, end)</c>, the object's own positions, ascending.</summary>
     internal static long[] DeletedIn(DeletionVector deletions, long start, long end)
@@ -449,19 +399,4 @@ internal static class LiveRows
         return selected;
     }
 
-    private static void Return(int[] array)
-    {
-        if (array.Length > 0)
-        {
-            ArrayPool<int>.Shared.Return(array);
-        }
-    }
-
-    private static void Return(ulong[] array)
-    {
-        if (array.Length > 0)
-        {
-            ArrayPool<ulong>.Shared.Return(array);
-        }
-    }
 }

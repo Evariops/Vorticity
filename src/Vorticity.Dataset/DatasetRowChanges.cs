@@ -450,15 +450,7 @@ internal static class DatasetRowChanges
                     continue;
                 }
 
-                if (states.Length < rows)
-                {
-                    if (states.Length > 0)
-                    {
-                        ArrayPool<byte>.Shared.Return(states);
-                    }
-
-                    states = ArrayPool<byte>.Shared.Rent(rows);
-                }
+                Pooled.Grow(ref states, rows);
 
                 evaluator.Evaluate(batch.Arena, batch.RootIndex, rows, states.AsSpan(0, rows));
                 (VortexBuffer keptWords, int keeping) = Words(batch.Arena, states.AsSpan(0, rows), matching: false);
@@ -483,10 +475,7 @@ internal static class DatasetRowChanges
         }
         finally
         {
-            if (states.Length > 0)
-            {
-                ArrayPool<byte>.Shared.Return(states);
-            }
+            Pooled.Return(states);
         }
 
         return kept;
@@ -566,11 +555,8 @@ internal static class DatasetRowChanges
     /// </summary>
     private static (VortexBuffer Words, int Count) Words(Arrays.CanonicalArena arena, ReadOnlySpan<byte> states, bool matching)
     {
-        int words = Math.Max((states.Length + 63) >> 6, 1);
-        VortexBuffer buffer = arena.AllocateUninitialized(words * sizeof(ulong), 64, out Span<byte> raw);
-        Span<ulong> bits = MemoryMarshal.Cast<byte, ulong>(raw);
-        bits[0] = 0;
-        int count = Trilean.ToWords(states, Trilean.True, equal: matching, bits);
+        VortexBuffer buffer = arena.AllocateUninitialized(((states.Length + 63) >> 6) * sizeof(ulong), 64, out Span<byte> raw);
+        int count = Trilean.ToWords(states, Trilean.True, equal: matching, MemoryMarshal.Cast<byte, ulong>(raw));
         return (buffer, count);
     }
 }

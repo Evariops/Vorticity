@@ -1000,14 +1000,15 @@ internal sealed class DatasetScanBuilder
     {
         FieldMask at = mask;
         DType type = schema;
-        foreach (string segment in path.Split('.'))
+        ReadOnlySpan<char> rest = path;
+        foreach (Range segment in rest.Split('.'))
         {
             if (at.IsAll)
             {
                 return true;
             }
 
-            int field = type.Kind == DTypeKind.Struct ? type.IndexOfField(segment) : -1;
+            int field = ColumnPath.IndexOf(type, rest[segment]);
             if (field < 0 || !at.Includes(field))
             {
                 return false;
@@ -1203,41 +1204,7 @@ internal sealed class DatasetScanBuilder
                 : await scan.MaxAsync(named, cancellationToken).ConfigureAwait(false);
         }
 
-        FilterLiteral best = FilterLiteral.Null;
-        await foreach (RecordBatch batch in ReshapedAsync(file, held, read, 0, compact: true, cancellationToken).ConfigureAwait(false))
-        {
-            int node = NodeOf(batch, path);
-            if (!Extremes.TryFind(batch.Arena, node, default, listed: false, wantMin, out int row))
-            {
-                continue;
-            }
-
-            bool numeric = batch.Arena.GetNode(ComparisonKernels.Unwrap(batch.Arena, node)).DType.Kind == DTypeKind.Decimal;
-            bool read2 = numeric
-                ? LiteralReader.TryReadDecimal(batch.Arena, node, row, out FilterLiteral value)
-                : LiteralReader.TryRead(batch.Arena, node, row, out value);
-            if (read2 && Beats(value, best, wantMin))
-            {
-                best = value;
-            }
-        }
-
-        return best;
-    }
-
-    /// <summary>The node of a <c>.</c>-separated path in a batch, by the names of its struct.</summary>
-    private static int NodeOf(RecordBatch batch, string path)
-    {
-        DType at = batch.DType;
-        int node = batch.RootIndex;
-        foreach (string segment in path.Split('.'))
-        {
-            int field = at.IndexOfField(segment);
-            node = batch.Arena.GetNode(node).GetFieldIndex(field);
-            at = at.GetField(field);
-        }
-
-        return node;
+        return await ExtremeOfAsync(ReshapedAsync(file, held, read, 0, compact: true, cancellationToken), path, wantMin).ConfigureAwait(false);
     }
 
     /// <summary>The file's own scan, carrying this builder's filter, projection, options and the rows that fall in this object.</summary>
@@ -1418,7 +1385,7 @@ internal sealed class DatasetScanBuilder
         FilterLiteral best = FilterLiteral.Null;
         await foreach (RecordBatch batch in batches.ConfigureAwait(false))
         {
-            int node = NodeOf(batch, path);
+            int node = ColumnPath.NodeOf(batch, path);
             if (!Extremes.TryFind(batch.Arena, node, default, listed: false, wantMin, out int row))
             {
                 continue;
@@ -1469,7 +1436,7 @@ internal sealed class DatasetScanBuilder
     /// </summary>
     private ScanBuilder? NullsOf(VortexFile file, string path, bool composite, VortexExpr? filter, FieldMask? projection)
     {
-        if (composite || !LiveRows.MayBeNull(file.DType, path))
+        if (composite || !ColumnPath.MayBeNull(file.DType, path))
         {
             return null;
         }

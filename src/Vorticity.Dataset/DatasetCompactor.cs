@@ -293,7 +293,7 @@ internal static class DatasetCompactor
         }
 
         ScanBuilder ordered = scan().InKeyOrder(paths);
-        ScanBuilder? nulls = paths.Count == 1 && LiveRows.MayBeNull(file.DType, paths[0])
+        ScanBuilder? nulls = paths.Count == 1 && ColumnPath.MayBeNull(file.DType, paths[0])
             ? scan().Where(Vorticity.Expressions.Expr.IsNull(Vorticity.Expressions.Expr.Field(paths[0]))).WithEncodings(false, false)
             : null;
         return LiveRows.OrderedAsync(ordered, nulls, entry.Deletions, descending: false, cancellationToken);
