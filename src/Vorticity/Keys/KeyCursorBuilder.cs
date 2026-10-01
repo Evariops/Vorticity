@@ -22,6 +22,9 @@ internal sealed class KeyCursorBuilder
     private readonly string[]? _composite;
     private bool _distinct;
     private KeySourceKind _forced;
+    private Scanning.IRowExclusion? _excluded;
+    private Func<CancellationToken, ValueTask<ExcludedKey[]>>? _excludedKeys;
+    private bool _ranksAreRows;
 
     internal KeyCursorBuilder(VortexFile file, string path)
     {
@@ -76,6 +79,23 @@ internal sealed class KeyCursorBuilder
     public KeyCursorBuilder WithSource(KeySourceKind source)
     {
         _forced = source;
+        return this;
+    }
+
+    /// <summary>
+    /// Leaves the entries of <paramref name="rows"/> out of the cursor: a step never lands on one and a
+    /// rank never counts one. The ranks are worked out from the rows alone when the entries are rows in
+    /// rank order -- a sorted column's, or, with <paramref name="ranksAreRows"/>, a key the file's rows
+    /// are sorted by with its null keys last -- and otherwise against the entries left out in
+    /// <c>(key, row)</c> order, which <paramref name="keys"/> reads, and only then. A source of keys
+    /// without rows cannot leave rows out, and is not taken.
+    /// </summary>
+    internal KeyCursorBuilder Excluding(
+        Scanning.IRowExclusion rows, bool ranksAreRows, Func<CancellationToken, ValueTask<ExcludedKey[]>>? keys)
+    {
+        _excluded = rows ?? throw new ArgumentNullException(nameof(rows));
+        _ranksAreRows = ranksAreRows;
+        _excludedKeys = keys;
         return this;
     }
 
@@ -143,7 +163,40 @@ internal sealed class KeyCursorBuilder
                 ", or add it to the written file with VortexFileIndexer.AppendIndexesAsync.");
         }
 
-        return new KeyCursor(choice.Source, _distinct);
+        KeySource source = choice.Source;
+        if (_excluded is { } excluded)
+        {
+            try
+            {
+                source = await ExcludedAsync(source, excluded, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                await source.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+        }
+
+        return new KeyCursor(source, _distinct);
+    }
+
+    /// <summary>The chosen source, without the entries of the rows left out.</summary>
+    private async ValueTask<KeySource> ExcludedAsync(KeySource source, Scanning.IRowExclusion excluded, CancellationToken cancellationToken)
+    {
+        if (source is SortedColumnWalker column)
+        {
+            return new ExcludingKeySource(source, excluded, column.FirstRow);
+        }
+
+        if (_ranksAreRows)
+        {
+            return new ExcludingKeySource(source, excluded, 0);
+        }
+
+        return _excludedKeys is { } keys
+            ? new ExcludingKeySource(source, excluded, await keys(cancellationToken).ConfigureAwait(false))
+            : throw new InvalidOperationException(
+                "A cursor leaving rows out of a source whose ranks are not its rows is handed the keys of those rows.");
     }
 
     /// <summary>
@@ -247,6 +300,14 @@ internal sealed class KeyCursorBuilder
                 rejected.Add(new KeySourceRejection(
                     candidate,
                     "it holds keys without rows, which only a Distinct() cursor takes"));
+                continue;
+            }
+
+            if (_excluded is not null && candidate is KeySourceKind.Postings or KeySourceKind.Dictionary)
+            {
+                rejected.Add(new KeySourceRejection(
+                    candidate,
+                    "it holds keys without rows, and the cursor leaves rows out"));
                 continue;
             }
 

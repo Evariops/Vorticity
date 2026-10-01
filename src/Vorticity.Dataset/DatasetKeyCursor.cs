@@ -124,7 +124,7 @@ internal sealed class DatasetKeyCursor : IKeyWalker
         get
         {
             Slot slot = _slots[Positioned()];
-            return slot.FirstRow + slot.Cursor!.Row;
+            return slot.FirstRow + slot.Entry.Deletions.Logical(slot.Cursor!.Row);
         }
     }
 
@@ -727,7 +727,7 @@ internal sealed class DatasetKeyCursor : IKeyWalker
 
             levels[held.Level].Add(slots.Count);
             byte[] bound = bounded ? VortexDataset.OrderOf(held.TreeKey).ToArray() : [];
-            slots.Add(new Slot(held.Entry, held.FirstRow, bound));
+            slots.Add(new Slot(held.Entry, held.FirstRow, bound) { Level = held.Level });
         }
 
         Slot[] all = [.. slots];
@@ -1179,7 +1179,11 @@ internal sealed class DatasetKeyCursor : IKeyWalker
             paths = named;
         }
 
-        slot.Cursor = await _key.TryOpenAsync(slot.Lease.File, paths, _indexes, cancellationToken).ConfigureAwait(false)
+        // An object above level 0 is a merge's, its rows in the clustering key's order with null keys
+        // last, so on that key an entry's rank is its row and a deleted row's rank needs no read.
+        slot.Cursor = await _key.TryOpenAsync(
+                slot.Lease.File, paths, _indexes, slot.Entry.Deletions, ranksAreRows: _bounded && slot.Level > 0, cancellationToken)
+            .ConfigureAwait(false)
             ?? throw new VortexUnsupportedException(
                 slot.Entry.Key,
                 ComponentKind.Index,
@@ -1211,6 +1215,9 @@ internal sealed class DatasetKeyCursor : IKeyWalker
     private sealed class Slot(ObjectEntry entry, long firstRow, byte[] bound)
     {
         internal ObjectEntry Entry { get; } = entry;
+
+        /// <summary>The level whose tree holds the object.</summary>
+        internal int Level { get; init; }
 
         /// <summary>Where the object's rows start among the dataset's.</summary>
         internal long FirstRow { get; } = firstRow;

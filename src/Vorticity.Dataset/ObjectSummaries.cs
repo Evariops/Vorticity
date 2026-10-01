@@ -122,6 +122,34 @@ internal sealed class ObjectSummaries : IEquatable<ObjectSummaries>
     }
 
     /// <summary>
+    /// These summaries as bounds only: the same minima and maxima, no longer exact, and a count of
+    /// nulls only where it is zero. What an object's summaries become once rows are deleted from it
+    /// without a rewrite: a bound over every row is a bound over the live ones, while an exact
+    /// extreme or a positive count of nulls may belong to a row that is gone. A column left with
+    /// nothing to say, one whose rows were all null, is no longer summarised.
+    /// </summary>
+    public ObjectSummaries Loosened()
+    {
+        if (_columns.Length == 0)
+        {
+            return this;
+        }
+
+        List<ColumnSummary> loose = new List<ColumnSummary>(_columns.Length);
+        foreach (ColumnSummary held in _columns)
+        {
+            bool noNulls = held.HasNullCount && held.NullCount == 0;
+            ColumnSummary bounded = held with { IsExact = false, HasNullCount = noNulls, NullCount = 0 };
+            if (!bounded.IsEmpty)
+            {
+                loose.Add(bounded);
+            }
+        }
+
+        return loose.Count == 0 ? None : new ObjectSummaries([.. loose]);
+    }
+
+    /// <summary>
     /// Whether a row the predicate selects can lie under this node; false only when these summaries
     /// prove no row can match.
     /// </summary>

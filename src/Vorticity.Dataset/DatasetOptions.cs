@@ -64,6 +64,27 @@ public sealed record DatasetOptions
     /// <summary>The clock a commit's creation time is read from; the system's by default.</summary>
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
+    /// <summary>
+    /// The smallest object whose deleted rows are marked in its entry rather than rewritten out of
+    /// it; 1 MiB by default, below which a rewrite costs a few milliseconds and keeps reads plain.
+    /// </summary>
+    internal long MarkedObjectBytes { get; init; } = 1L << 20;
+
+    /// <summary>
+    /// The share of an object's rows its marks may reach, as a divisor: past a
+    /// <c>1/MarkedShare</c>-th of its rows deleted, a delete rewrites the object instead; 8 by default.
+    /// </summary>
+    internal int MarkedShare { get; init; } = 8;
+
+    /// <summary>
+    /// The most bytes an object's marks take in its entry, past which a delete rewrites the object
+    /// instead; 1 KiB by default, a few hundred runs. The entry lives in a leaf page, which every
+    /// commit that marks a row of any object on it writes again, and which a small dataset's header
+    /// carries in every commit: the bound trades the rewrites it saves against the bytes it adds to
+    /// each of those commits.
+    /// </summary>
+    internal int MarkedVectorBytes { get; init; } = 1 << 10;
+
     /// <summary>The chunking seed, drawn once at creation and carried by every header.</summary>
     internal ulong Seed { get; init; } = (ulong)Random.Shared.NextInt64();
 

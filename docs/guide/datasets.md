@@ -156,23 +156,27 @@ RowChangeResult updated = await dataset.UpdateAsync<Reading>(
 ```
 
 ```
-deleted days 0 to 9: version 8, 9800 rows, 1 object(s) rewritten into 1, 99200 rows left
+deleted days 0 to 9: version 8, 9800 rows, 1 object(s) rewritten into 1, 0 marked, 99200 rows left
 warmed Nice from day 60: version 9, 6251 rows changed, 2 object(s) in, 3 out
 ```
 
 `DeleteAsync` removes the rows its filter is true for, in one commit. A row the filter is false or
-unknown for, a null compared, stays. Each object that holds a matching row is rewritten without it,
-in its own level and, without a clustering key, at its own place in the order; one left with no row
-is removed whole, and one whose summaries refute the filter is not opened. `UpdateAsync` reads the
-matching rows as records, passes each through the lambda, and writes the results into new objects
-of level 0, as an append would, since a change may move a row's key: an update is a delete and an
-insert, applied together. Its record must have a member for every column. `DeleteAsync(VortexExpr)`
-is the delete for a caller without a record type.
+unknown for, a null compared, stays. `UpdateAsync` reads the matching rows as records, passes each
+through the lambda, and writes the results into new objects of level 0, as an append would, since a
+change may move a row's key: an update is a delete and an insert, applied together. Its record must
+have a member for every column. `DeleteAsync(VortexExpr)` is the delete for a caller without a
+record type.
 
-It is copy on write: reading pays nothing and every statistic stays exact, and the price is the
-rewrite of every object a row is taken from, however few rows that is. A delete of one row rewrites
-the object that held it, which compaction keeps under `CompactionOptions.MaxObjectBytes`, 4 MiB by
-default, whatever the size of the dataset. `BytesIn` and `BytesOut` say what a change rewrote.
+A delete marks the rows it takes in the objects that hold them rather than rewriting those objects:
+each object's entry in the dataset records their positions, and every read steps over them, so a
+delete of ten rows in a 4 MiB object writes a few kilobytes of metadata and no data. Counts stay
+exact and reads cost what they would on a rewritten object. An object is rewritten without the rows
+instead when it is under a mebibyte, where a rewrite costs little and keeps the object exact, and
+when the rows marked in it would pass an eighth of its rows or a kilobyte of positions; an object left with no row is removed
+whole, and one whose summaries refute the filter is not opened. `ObjectsMarked` counts the objects a
+change marked, `ObjectsIn` and `ObjectsOut` those it rewrote, and `BytesIn` and `BytesOut` what the
+rewrites read and wrote. `DataObject.DeletedRows` says how many rows an object holds marked, which
+compaction drops when it next rewrites the object.
 
 A reader sees the change whole or not at all. Rows appended by another writer while the change is
 worked out are not touched; if another writer rewrites an object the change read, a compaction for
@@ -220,8 +224,10 @@ its values to another column.
 
 * **Experimental, and this repository's own format.** Pin the package version, and do not expect
   another Vortex implementation to read the tree.
-* **A delete or an update rewrites whole objects.** Batch the rows you change into few calls: two
-  deletes of one row each in one object rewrite it twice.
+* **Marked rows keep their bytes until compaction.** A delete that marks rows frees no space: the
+  object holds them, up to an eighth of its rows, until compaction rewrites it or a delete would pass
+  that share. An object under a mebibyte is rewritten by every delete that touches it, so batch the
+  rows you change into few calls: two deletes of one row each in a small object rewrite it twice.
 * **Two writers changing the schema at once do not both succeed**: the second is refused with
   `InvalidOperationException` and changes the schema the dataset has once it has refreshed.
 * **The store must create objects atomically and list them consistently**: see

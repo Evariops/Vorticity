@@ -91,14 +91,23 @@ public sealed record DataObject
     /// <summary>Its first row among the version's, in the order a scan delivers them.</summary>
     public long FirstRow { get; init; }
 
-    /// <summary>Its rows.</summary>
+    /// <summary>Its rows, those a delete took out of it not counted.</summary>
     public long Rows { get; init; }
+
+    /// <summary>
+    /// The rows a delete took out of it without rewriting it: no read returns them, and its file
+    /// holds them until a compaction, or a delete that finds too many, rewrites it without them.
+    /// </summary>
+    public long DeletedRows { get; init; }
 
     /// <summary>Its bytes in the store.</summary>
     public long Bytes { get; init; }
 
     /// <summary>Its key in the level's tree, in hexadecimal: what a removal names it by.</summary>
     internal string TreeKey { get; init; } = string.Empty;
+
+    /// <summary>Its entry as the walk read it: what a replacement checks it still is.</summary>
+    internal ObjectEntry? Entry { get; init; }
 
     /// <summary>The object as a caller sees it.</summary>
     internal static DataObject Of(in PositionedObject held) => new DataObject
@@ -107,8 +116,10 @@ public sealed record DataObject
         Level = held.Level,
         FirstRow = held.FirstRow,
         Rows = held.Entry.Rows,
+        DeletedRows = held.Entry.Deletions.Count,
         Bytes = held.Entry.Bytes,
         TreeKey = Convert.ToHexString(held.TreeKey.Span),
+        Entry = held.Entry,
     };
 }
 

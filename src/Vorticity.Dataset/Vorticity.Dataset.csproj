@@ -24,6 +24,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Vorticity.Tests" />
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />
+    <InternalsVisibleTo Include="Vorticity.Benchmarks.Churn" />
   </ItemGroup>
 
   <!-- Build-time only, as in the core: the package stays dependency-free at runtime. -->

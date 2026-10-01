@@ -56,6 +56,9 @@ internal static class Churn
                 ? new VortexWriteOptions { Indexes = IndexPolicy.Auto.WithBudgetPerMille(options.IndexBudget) }
                 : new VortexWriteOptions(),
             MaxOpenObjects = options.OpenObjects > 0 ? options.OpenObjects : new DatasetOptions().MaxOpenObjects,
+            // Off, every object a delete or an update touches is rewritten, whatever its size.
+            MarkedObjectBytes = options.Marks ? new DatasetOptions().MarkedObjectBytes : long.MaxValue,
+            MarkedVectorBytes = options.MarkKiB > 0 ? options.MarkKiB << 10 : new DatasetOptions().MarkedVectorBytes,
             // Vacuum then takes what the latest version does not reference as soon as it is a
             // second old, which is what keeps a long run's store from holding every rewrite.
             RetentionWindow = TimeSpan.FromSeconds(1),
@@ -260,14 +263,26 @@ internal static class Churn
         {
             // One call first, unmeasured, so that a checkpoint compares warm reads with warm reads.
             _ = await probe(dataset, random).ConfigureAwait(false);
-            requests = store.Requests;
-            started = Stopwatch.GetTimestamp();
-            for (int i = 0; i < calls; i++)
+            double fastest = double.MaxValue;
+            long asked = 0;
+            for (int round = 0; round < options.ProbeRounds; round++)
             {
-                _ = await probe(dataset, random).ConfigureAwait(false);
+                requests = store.Requests;
+                started = Stopwatch.GetTimestamp();
+                for (int i = 0; i < calls; i++)
+                {
+                    _ = await probe(dataset, random).ConfigureAwait(false);
+                }
+
+                double ms = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+                if (ms < fastest)
+                {
+                    fastest = ms;
+                    asked = store.Requests - requests;
+                }
             }
 
-            checkpoint.Add(name, Stopwatch.GetElapsedTime(started).TotalMilliseconds, store.Requests - requests, calls);
+            checkpoint.Add(name, fastest, asked, calls);
         }
 
         long heap = GC.GetTotalMemory(forceFullCollection: true);

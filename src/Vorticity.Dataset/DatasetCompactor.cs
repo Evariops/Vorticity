@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Columns;
+using Vorticity.File;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Writing;
@@ -122,8 +123,16 @@ internal static class DatasetCompactor
             produced.Add((job.ToLevel, written.Key, written.Entry));
         }
 
+        // What each input was read as: a delete that marked rows in one meanwhile leaves it under its
+        // key, and outputs worked out from the rows before the delete would bring them back.
+        List<ObjectEntry> read = new List<ObjectEntry>(job.Inputs.Count);
+        foreach (CompactionInput input in job.Inputs)
+        {
+            read.Add(input.Entry);
+        }
+
         DatasetOperation.ReplaceObjects replacement =
-            new DatasetOperation.ReplaceObjects(consumed, produced);
+            new DatasetOperation.ReplaceObjects(consumed, produced) { Expected = read };
         CommitResult commit = await dataset
             .CommitAsync([replacement], cancellationToken).ConfigureAwait(false);
 
@@ -243,18 +252,48 @@ internal static class DatasetCompactor
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
         ObjectLease lease, ObjectEntry entry, DatasetSchema schema, IReadOnlyList<string>? paths, CancellationToken cancellationToken)
     {
-        ScanBuilder scan = lease.File.ScanBuilder();
-        if (schema.ColumnsOf(lease.File.DType, entry.Key) is not { } columns)
+        VortexFile file = lease.File;
+        if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            return (paths is null ? scan : scan.InKeyOrder(paths)).ExecuteAsync();
+            return LiveRowsAsync(file, file.ScanBuilder, entry, paths, cancellationToken);
         }
 
         // The clustering key keeps its columns under every schema, so a key-ordered read of an
         // earlier object names them as the dataset does.
         ObjectRead read = columns.Read(null, FieldMask.All);
-        scan = scan.ProjectMask(read.Shape.Source).WithEncodings(false, false);
         return ObjectColumns.ReshapeAsync(
-            (paths is null ? scan : scan.InKeyOrder(paths)).ExecuteAsync(), read.Shape, null, 0, compact: true, cancellationToken);
+            LiveRowsAsync(file, () => file.ScanBuilder().ProjectMask(read.Shape.Source).WithEncodings(false, false), entry, paths, cancellationToken),
+            read.Shape,
+            null,
+            0,
+            compact: true,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// An input's rows through the scans <paramref name="scan"/> makes, in key order along
+    /// <paramref name="paths"/> or in its own, without the rows it deleted: a compaction is also where
+    /// a deletion vector ends, its outputs holding only the live rows.
+    /// </summary>
+    private static IAsyncEnumerable<RecordBatch> LiveRowsAsync(
+        VortexFile file, Func<ScanBuilder> scan, ObjectEntry entry, IReadOnlyList<string>? paths, CancellationToken cancellationToken)
+    {
+        if (!entry.HasDeletions)
+        {
+            return (paths is null ? scan() : scan().InKeyOrder(paths)).ExecuteAsync();
+        }
+
+        if (paths is null)
+        {
+            return LiveRows.WithoutDeletedAsync(
+                scan().WithCompaction(false).WithEncodings(false, false).ExecuteAsync(), entry.Deletions, compact: true, 0, cancellationToken);
+        }
+
+        ScanBuilder ordered = scan().InKeyOrder(paths);
+        ScanBuilder? nulls = paths.Count == 1 && LiveRows.MayBeNull(file.DType, paths[0])
+            ? scan().Where(Vorticity.Expressions.Expr.IsNull(Vorticity.Expressions.Expr.Field(paths[0]))).WithEncodings(false, false)
+            : null;
+        return LiveRows.OrderedAsync(ordered, nulls, entry.Deletions, descending: false, cancellationToken);
     }
 
     /// <summary>Each input's rows, in its own order, one after another.</summary>

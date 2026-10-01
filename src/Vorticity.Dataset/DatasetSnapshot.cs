@@ -73,7 +73,7 @@ internal sealed class DatasetSnapshot
         await foreach ((TreeEntry held, long firstRow, int level) in
             EntriesAsync(from, to, descend, cancellationToken).ConfigureAwait(false))
         {
-            ObjectEntry entry = ObjectEntry.FromBytes(held.Value.Span);
+            ObjectEntry entry = ObjectEntry.FromBytes(held.Value);
             if (metrics is { } counters)
             {
                 counters.ObjectsConsidered++;
@@ -142,7 +142,7 @@ internal sealed class DatasetSnapshot
         {
             foreach (TreeEntry leaf in TreePage.ReadLeaf(page))
             {
-                ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value.Span);
+                ObjectEntry entry = ObjectEntry.FromBytes(leaf.Value);
                 if (entry.Summaries.MayMatch(pruner, entry.Rows))
                 {
                     return true;

@@ -114,7 +114,7 @@ internal static class Datasets
         Console.WriteLine($"removing it again: {again.Outcome}, version {again.Version}");
 
         RowChangeResult deleted = await dataset.DeleteAsync<Reading>(r => r.Day < 10);
-        Console.WriteLine($"deleted days 0 to 9: version {deleted.Version}, {deleted.Rows} rows, {deleted.ObjectsIn} object(s) rewritten into {deleted.ObjectsOut}, {dataset.RowCount} rows left");
+        Console.WriteLine($"deleted days 0 to 9: version {deleted.Version}, {deleted.Rows} rows, {deleted.ObjectsIn} object(s) rewritten into {deleted.ObjectsOut}, {deleted.ObjectsMarked} marked, {dataset.RowCount} rows left");
 
         RowChangeResult updated = await dataset.UpdateAsync<Reading>(
             r => r.City == "Nice" & r.Day >= 60,

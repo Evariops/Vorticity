@@ -13,7 +13,7 @@ namespace Vorticity.Dataset;
 /// The identity its postscript carries: a version of the bytes, not of the file. An append mints a
 /// new one, which is how a stale fragment is refused before any length is compared.
 /// </param>
-/// <param name="Rows">Its rows.</param>
+/// <param name="Rows">Its rows, those <see cref="Deletions"/> names left out.</param>
 /// <param name="Bytes">Its bytes in the store.</param>
 /// <param name="Hash">The XXH3-128 its writer computed while writing.</param>
 /// <param name="Fragments">The index fragments attached to it, in the order they were attached.</param>
@@ -30,6 +30,60 @@ internal sealed record ObjectEntry(
     IReadOnlyList<PageReference> Fragments,
     ObjectSummaries Summaries)
 {
+    /// <summary>The vector, once decoded or given; null while only its bytes are held.</summary>
+    private DeletionVector? _deletions = DeletionVector.Empty;
+
+    /// <summary>The vector's bytes as the entry's page holds them, until they are decoded.</summary>
+    private ReadOnlyMemory<byte> _encoded;
+
+    /// <summary>
+    /// The rows a delete took out of the object without rewriting it, by their positions in the
+    /// object; empty for an object whose rows are all live, which every object is until then.
+    /// </summary>
+    /// <remarks>
+    /// An entry read from a page holds the vector's bytes and decodes them the first time they are
+    /// asked for, which is when the object is read: a walk over a page parses every entry it
+    /// passes, and needs of a vector only the count the entry carries beside it.
+    /// </remarks>
+    /// <exception cref="CommitFormatException">The vector's bytes are not a vector of the object's rows.</exception>
+    public DeletionVector Deletions
+    {
+        get => _deletions ??= Decode();
+        init
+        {
+            _deletions = value;
+            _encoded = default;
+            DeletedRows = value.Count;
+        }
+    }
+
+    /// <summary>How many rows <see cref="Deletions"/> names, known without decoding it.</summary>
+    public long DeletedRows { get; private init; }
+
+    /// <summary>The rows the object's file holds, the deleted ones included.</summary>
+    public long PhysicalRows => Rows + DeletedRows;
+
+    /// <summary>Whether a delete took rows out of the object without rewriting it.</summary>
+    public bool HasDeletions => DeletedRows > 0;
+
+    /// <summary>
+    /// Whether two entries take the same rows out, by their canonical bytes while neither is
+    /// decoded: one vector has one encoding.
+    /// </summary>
+    public bool SameDeletions(ObjectEntry other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        if (DeletedRows != other.DeletedRows)
+        {
+            return false;
+        }
+
+        return DeletedRows == 0
+            || (_deletions is null && other._deletions is null
+                ? _encoded.Span.SequenceEqual(other._encoded.Span)
+                : Deletions.Equals(other.Deletions));
+    }
+
     /// <summary>An entry with no fragment yet; null summaries means none.</summary>
     public ObjectEntry(
         string key, UInt128 uid, long rows, long bytes, UInt128 hash, ObjectSummaries? summaries = null)
@@ -63,7 +117,8 @@ internal sealed record ObjectEntry(
             || Bytes != other.Bytes
             || Hash != other.Hash
             || Fragments.Count != other.Fragments.Count
-            || !Summaries.Equals(other.Summaries))
+            || !Summaries.Equals(other.Summaries)
+            || !SameDeletions(other))
         {
             return false;
         }
@@ -95,8 +150,17 @@ internal sealed record ObjectEntry(
         }
 
         hash.Add(Summaries);
+        hash.Add(DeletedRows);
         return hash.ToHashCode();
     }
+
+    /// <summary>
+    /// The entry of the same object with <paramref name="deletions"/> as its deleted rows: its live
+    /// rows counted again, and its summaries loosened into bounds, since a minimum, a maximum or a
+    /// count of nulls taken over every row of the file may describe a row that is gone.
+    /// </summary>
+    public ObjectEntry WithDeletions(DeletionVector deletions) =>
+        this with { Rows = PhysicalRows - deletions.Count, Deletions = deletions, Summaries = Summaries.Loosened() };
 
     /// <summary>The entry with <paramref name="fragment"/> attached.</summary>
     public ObjectEntry With(PageReference fragment) =>
@@ -207,10 +271,14 @@ internal sealed record ObjectEntry(
     {
         byte[] key = Encoding.UTF8.GetBytes(Key);
         byte[] summaries = Summaries.ToBytes();
+        ReadOnlyMemory<byte> deletions = !HasDeletions ? default : _deletions is null ? _encoded : _deletions.ToBytes();
         int bytes = TreePage.VarintBytes((ulong)key.Length) + key.Length
             + 16 + TreePage.VarintBytes((ulong)Rows) + TreePage.VarintBytes((ulong)Bytes) + 16
             + TreePage.VarintBytes((ulong)Fragments.Count) + (Fragments.Count * PageReference.Bytes)
-            + TreePage.VarintBytes((ulong)summaries.Length) + summaries.Length;
+            + TreePage.VarintBytes((ulong)summaries.Length) + summaries.Length
+            + (HasDeletions
+                ? TreePage.VarintBytes((ulong)DeletedRows) + TreePage.VarintBytes((ulong)deletions.Length) + deletions.Length
+                : 0);
         byte[] value = new byte[bytes];
         Span<byte> at = value;
         at = Write(at, (ulong)key.Length);
@@ -230,6 +298,18 @@ internal sealed record ObjectEntry(
         at = Write(at, (ulong)summaries.Length);
         summaries.CopyTo(at);
         at = at[summaries.Length..];
+
+        // Last, and only when there are any, so that the entry of an object whose rows are all
+        // live is the bytes it always was, and a reader that knows no deletions refuses one that has.
+        // Their count comes first, so that a walk knows the object's rows without the vector.
+        if (HasDeletions)
+        {
+            at = Write(at, (ulong)DeletedRows);
+            at = Write(at, (ulong)deletions.Length);
+            deletions.Span.CopyTo(at);
+            at = at[deletions.Length..];
+        }
+
         return at.IsEmpty ? value : throw new CommitFormatException("An object entry was mis-sized.");
     }
 
@@ -269,9 +349,45 @@ internal sealed record ObjectEntry(
         at += (int)bytes;
     }
 
-    /// <summary>Reads an entry written by <see cref="ToBytes"/>.</summary>
+    /// <summary>
+    /// Reads an entry written by <see cref="ToBytes"/>, holding the bytes of its deletion vector as
+    /// a slice of <paramref name="value"/>, which a page never changes, until they are asked for.
+    /// </summary>
+    /// <exception cref="CommitFormatException">The bytes are not an entry.</exception>
+    public static ObjectEntry FromBytes(ReadOnlyMemory<byte> value)
+    {
+        ObjectEntry entry = Parse(value.Span, out int start, out int length);
+        return length == 0 ? entry : entry with { _encoded = value.Slice(start, length), _deletions = null };
+    }
+
+    /// <summary>Reads an entry written by <see cref="ToBytes"/>, copying the bytes of its deletion vector.</summary>
     /// <exception cref="CommitFormatException">The bytes are not an entry.</exception>
     public static ObjectEntry FromBytes(ReadOnlySpan<byte> value)
+    {
+        ObjectEntry entry = Parse(value, out int start, out int length);
+        return length == 0 ? entry : entry with { _encoded = value.Slice(start, length).ToArray(), _deletions = null };
+    }
+
+    /// <summary>
+    /// The vector the entry's bytes hold, checked against the rows it names: each is one of the
+    /// object's own, and as many as the entry says.
+    /// </summary>
+    private DeletionVector Decode()
+    {
+        DeletionVector deletions = DeletionVector.FromBytes(_encoded.Span);
+        if (deletions.Count != DeletedRows || deletions.EndOf(deletions.Runs - 1) > PhysicalRows)
+        {
+            throw new CommitFormatException("An object entry deletes other rows than it counts, or a row past the object's own.");
+        }
+
+        return deletions;
+    }
+
+    /// <summary>
+    /// Everything an entry's bytes hold but its deletion vector, which is at
+    /// <paramref name="start"/> for <paramref name="vector"/> bytes, none when it has no deleted row.
+    /// </summary>
+    private static ObjectEntry Parse(ReadOnlySpan<byte> value, out int start, out int vector)
     {
         int at = 0;
         int length = checked((int)Read(value, ref at));
@@ -307,12 +423,24 @@ internal sealed record ObjectEntry(
 
         ObjectSummaries bounds = ObjectSummaries.FromBytes(value.Slice(at, summaries));
         at += summaries;
-        if (at != value.Length)
+        ObjectEntry entry = new ObjectEntry(key, uid, rows, bytes, hash, references, bounds);
+        start = at;
+        vector = 0;
+        if (at < value.Length)
         {
-            throw new CommitFormatException($"An object entry has {value.Length - at} bytes left over.");
+            long deleted = (long)Read(value, ref at);
+            int encoded = checked((int)Read(value, ref at));
+            if (deleted <= 0 || deleted > long.MaxValue - rows || at + encoded != value.Length || encoded == 0)
+            {
+                throw new CommitFormatException("An object entry's deleted rows are none, or do not end where it does.");
+            }
+
+            start = at;
+            vector = encoded;
+            entry = entry with { DeletedRows = deleted };
         }
 
-        return new ObjectEntry(key, uid, rows, bytes, hash, references, bounds);
+        return entry;
     }
 
     private static Span<byte> Write(Span<byte> destination, ulong value)

@@ -178,6 +178,33 @@ internal sealed class ExactCover : IAsyncDisposable
     }
 
     /// <summary>
+    /// How many selected rows inside <paramref name="bounds"/> are not in <paramref name="excluded"/>,
+    /// when the source's ranks are rows, as a sorted column's are: each slice is then a range of rows,
+    /// and the count arithmetic on the rows left out. Null for any other source.
+    /// </summary>
+    internal long? KeptCount(Scanning.IRowExclusion excluded, RowRange bounds)
+    {
+        if (_source is not SortedColumnWalker walker)
+        {
+            return null;
+        }
+
+        long first = walker.FirstRow;
+        long count = 0;
+        foreach ((long low, long high) in Slices)
+        {
+            long start = Math.Max(first + low, bounds.Start);
+            long end = Math.Min(first + high, bounds.End);
+            if (start < end)
+            {
+                count += end - start - (excluded.ExcludedBefore(end) - excluded.ExcludedBefore(start));
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// The selected rows, in file order, when there are at most <paramref name="cap"/> of them
     /// inside <paramref name="bounds"/>; null past the cap, or when a run the walk reads does not
     /// decode.

@@ -30,7 +30,7 @@ internal sealed record ChurnOptions
         "usage: Vorticity.Benchmarks.Churn [--rows N] [--ops N] [--batch N] [--mix A:U:D] [--keys random|tail]\n" +
         "         [--compact none|drain] [--compact-every N] [--vacuum-every N] [--probe-every N] [--report-every N]\n" +
         "         [--store file|memory] [--dir PATH] [--seed N] [--minutes N] [--load-chunk N] [--index-budget PERMILLE]\n" +
-        "         [--max-object MiB] [--level-one KiB] [--open-objects N]";
+        "         [--max-object MiB] [--level-one KiB] [--open-objects N] [--marks on|off] [--mark-bytes KiB] [--probe-rounds N]";
 
     /// <summary>The rows loaded before the first operation.</summary>
     public long Rows { get; init; } = 1_000_000;
@@ -98,6 +98,21 @@ internal sealed record ChurnOptions
     /// <summary>How many objects a handle keeps open; 0 for the library's default.</summary>
     public int OpenObjects { get; init; }
 
+    /// <summary>
+    /// Whether a delete or an update marks the rows it takes in the objects that hold them, as the
+    /// library does by default, or rewrites every such object, as it does below its thresholds.
+    /// </summary>
+    public bool Marks { get; init; } = true;
+
+    /// <summary>The most an object's marks take before a delete rewrites it, in KiB; 0 for the library's default.</summary>
+    public int MarkKiB { get; init; }
+
+    /// <summary>
+    /// How many times each probe's calls are timed at a checkpoint, the fastest round kept: what
+    /// other work on the machine adds to a round, the fastest one holds the least of.
+    /// </summary>
+    public int ProbeRounds { get; init; } = 1;
+
     /// <summary>Whether the usage was asked for.</summary>
     public bool Help { get; init; }
 
@@ -142,6 +157,9 @@ internal sealed record ChurnOptions
                 "--max-object" => options with { MaxObjectMiB = Int(flag, value) },
                 "--level-one" => options with { LevelOneKiB = Int(flag, value) },
                 "--open-objects" => options with { OpenObjects = Int(flag, value) },
+                "--marks" => options with { Marks = value == "on" ? true : value == "off" ? false : throw new ArgumentException($"--marks takes on or off, not '{value}'.") },
+                "--mark-bytes" => options with { MarkKiB = Int(flag, value) },
+                "--probe-rounds" => options with { ProbeRounds = Math.Max(1, Int(flag, value)) },
                 _ => throw new ArgumentException($"Unknown argument '{flag}'."),
             };
         }
@@ -159,7 +177,8 @@ internal sealed record ChurnOptions
             CultureInfo.InvariantCulture,
             $"{Rows} rows, {Ops} ops of {Batch} rows, mix {Appends}:{Updates}:{Deletes} (append:update:delete), " +
             $"keys {Keys.ToString().ToLowerInvariant()}, compaction {cadence}, vacuum every {VacuumEvery}, " +
-            $"{(Memory ? "memory" : "file")} store, index budget {(IndexBudget > 0 ? IndexBudget.ToString(CultureInfo.InvariantCulture) + "‰" : "default")}, seed {Seed}");
+            $"{(Memory ? "memory" : "file")} store, index budget {(IndexBudget > 0 ? IndexBudget.ToString(CultureInfo.InvariantCulture) + "‰" : "default")}, " +
+            $"deletes by {(Marks ? "marks" : "rewrites")}{(Marks && MarkKiB > 0 ? string.Create(CultureInfo.InvariantCulture, $" of at most {MarkKiB} KiB") : "")}, seed {Seed}");
     }
 
     private static ChurnOptions Mix(ChurnOptions options, string value)

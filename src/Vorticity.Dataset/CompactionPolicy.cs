@@ -341,7 +341,7 @@ internal static class CompactionPolicy
             await foreach (TreeEntry entry in dataset.Levels[level]
                 .EnumerateAsync(dataset.Pages, cancellationToken).ConfigureAwait(false))
             {
-                entries.Add(new CompactionInput(level, entry.Key, ObjectEntry.FromBytes(entry.Value.Span)));
+                entries.Add(new CompactionInput(level, entry.Key, ObjectEntry.FromBytes(entry.Value)));
             }
 
             levels.Add(entries);

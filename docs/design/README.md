@@ -23,6 +23,7 @@ on those two.
 | [12-index-reads.md](12-index-reads.md) | the key cursor, answers without rows, and rows in key order |
 | [13-dataset.md](13-dataset.md) | the versioned dataset over an object store |
 | [14-public-api.md](14-public-api.md) | the rules the public surface follows, and where each part lives |
+| [15-compaction.md](15-compaction.md) | a proposal: compaction inline, on demand or in the background, planned in the depth of the tree, and on a store that cannot delete |
 | [90-registry.md](90-registry.md) | every encoding, layout and dtype: its edition, whether it is read and written, how a take is served |
 | [99-sources.md](99-sources.md) | the primary sources, and how to re-verify them |
 
