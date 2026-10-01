@@ -29,7 +29,10 @@ internal sealed class PageCache
     private readonly Lock _gate = new Lock();
     private readonly Dictionary<PageReference, Entry> _pages = [];
     private readonly Dictionary<ulong, ReadOnlyMemory<byte>> _held = [];
-    private readonly Queue<ulong> _heldOrder = new Queue<ulong>();
+
+    // The versions held, the oldest first: a handful, so one forgotten is taken out where it lies.
+    private readonly List<ulong> _heldOrder = new List<ulong>(HeldVersions + 1);
+
     private readonly Dictionary<ulong, long> _starts = [];
     private readonly Queue<ulong> _startOrder = new Queue<ulong>();
     private Entry? _newest;
@@ -153,10 +156,11 @@ internal sealed class PageCache
             }
 
             _held[version] = region;
-            _heldOrder.Enqueue(version);
-            while (_held.Count > HeldVersions)
+            _heldOrder.Add(version);
+            if (_heldOrder.Count > HeldVersions)
             {
-                _held.Remove(_heldOrder.Dequeue());
+                _held.Remove(_heldOrder[0]);
+                _heldOrder.RemoveAt(0);
             }
         }
     }
@@ -169,7 +173,10 @@ internal sealed class PageCache
     {
         lock (_gate)
         {
-            _held.Remove(version);
+            if (_held.Remove(version))
+            {
+                _heldOrder.Remove(version);
+            }
         }
     }
 

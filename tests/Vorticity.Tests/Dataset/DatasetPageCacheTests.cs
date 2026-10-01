@@ -81,6 +81,30 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
+    public void AVersionHeldAgainAfterItWasLetGoIsAmongTheNewest()
+    {
+        PageCache cache = new PageCache(0);
+        for (ulong version = 1; version <= 5; version++)
+        {
+            cache.Hold(version, new byte[1]);
+        }
+
+        // Let go of as a replaced object is, then held again from a fresh open: the oldest held is
+        // now 2, and it goes first.
+        cache.Forget(1);
+        cache.Hold(1, new byte[2]);
+        for (ulong version = 6; version <= PageCache.HeldVersions + 1; version++)
+        {
+            cache.Hold(version, new byte[1]);
+        }
+
+        Assert.False(cache.TryGetHeld(2, out _));
+        Assert.True(cache.TryGetHeld(1, out ReadOnlyMemory<byte> region));
+        Assert.Equal(2, region.Length);
+        Assert.True(cache.TryGetHeld(3, out _));
+    }
+
+    [Fact]
     public void ACacheRemembersAVersionsStartUntilItHasLearnedAsManyNewerOnes()
     {
         PageCache cache = new PageCache(0);
