@@ -53,6 +53,28 @@ public sealed class DatasetVerifyTests
     }
 
     [Fact]
+    public async Task AWrongPlaceForAVersionsPagesIsNamedByVerify()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        (MemoryObjectStore store, VortexDataset dataset) = await BuildAsync(indexed: false);
+        await using (store)
+        await using (dataset)
+        {
+            // A header that says where version 2's pages start, which is what a reader reads them by.
+            long start = (await CommitObject.OpenAsync(store, CommitKey.For(2), ct)).HeaderEnd;
+            await RewriteHeaderAsync(store, dataset.Version, header => header with { Starts = [new PagesStart(2, start)] });
+            DatasetVerification right = await dataset.VerifyAsync(cancellationToken: ct);
+            Assert.True(right.Holds, string.Join("\n", right.Problems));
+
+            // A byte off: every page of version 2 read through this header would be refused by its hash.
+            await RewriteHeaderAsync(store, dataset.Version, header => header with { Starts = [new PagesStart(2, start + 1)] });
+            DatasetVerification wrong = await dataset.VerifyAsync(cancellationToken: ct);
+            Assert.False(wrong.Holds);
+            Assert.Contains(wrong.Problems, problem => problem.Contains(FormattableString.Invariant($"version 2's pages start at {start + 1}"), StringComparison.Ordinal));
+        }
+    }
+
+    [Fact]
     public async Task AnObjectReplacedAtEqualSizeIsSeenByVerifyAlone()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -293,6 +315,23 @@ public sealed class DatasetVerifyTests
     {
         await store.DeleteAsync(key, default);
         Assert.Equal(PutOutcome.Created, await store.PutIfAbsentAsync(key, bytes, default));
+    }
+
+    /// <summary>A commit object written again with <paramref name="change"/> made to its header, its pages and fragments where they lay.</summary>
+    private static async Task RewriteHeaderAsync(MemoryObjectStore store, ulong version, Func<CommitHeader, CommitHeader> change)
+    {
+        string key = CommitKey.For(version);
+        byte[] bytes = await ReadAllAsync(store, key);
+        CommitObject commit = CommitObject.Open(bytes, bytes.Length);
+        CommitObjectBuilder builder = new CommitObjectBuilder(version);
+        List<(PageReference Reference, bool Page)> body = [.. commit.Table.Pages.Select(page => (page, true)), .. commit.Table.Fragments.Select(fragment => (fragment, false))];
+        foreach ((PageReference reference, bool page) in body.OrderBy(item => item.Reference.Offset))
+        {
+            ReadOnlySpan<byte> held = bytes.AsSpan((int)(commit.HeaderEnd + reference.Offset), reference.Length);
+            Assert.Equal(reference, page ? builder.AddPage(held) : builder.AddFragment(held));
+        }
+
+        await ReplaceAsync(store, key, builder.Build(change(commit.Header)));
     }
 
     private static async Task FlipAsync(MemoryObjectStore store, string key, double where)

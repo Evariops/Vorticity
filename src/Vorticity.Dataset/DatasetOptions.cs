@@ -61,6 +61,20 @@ public sealed record DatasetOptions
     /// </remarks>
     public int MaxOpenObjects { get; init; } = 32;
 
+    /// <summary>
+    /// The bytes of tree pages read from the store that the handle keeps from one version it reads to
+    /// the next, least recently used first out; 32 MiB by default, and 0 keeps none past the version
+    /// that read them. A version names every page its commit did not rewrite by the reference an
+    /// earlier version gave it, so a refresh or a commit asks the store again only for the pages that
+    /// changed, as long as the pages it walks fit here.
+    /// </summary>
+    /// <remarks>
+    /// Beside them the handle keeps, whatever this says, what the reads opening the last sixteen
+    /// versions it read or wrote brought back of their pages: the pages those versions wrote, which a
+    /// later version names until a commit rewrites them.
+    /// </remarks>
+    public long PageCacheBytes { get; init; } = 32L << 20;
+
     /// <summary>The clock a commit's creation time is read from; the system's by default.</summary>
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
@@ -79,9 +93,8 @@ public sealed record DatasetOptions
     /// <summary>
     /// The most bytes an object's marks take in its entry, past which a delete rewrites the object
     /// instead; 1 KiB by default, a few hundred runs. The entry lives in a leaf page, which every
-    /// commit that marks a row of any object on it writes again, and which a small dataset's header
-    /// carries in every commit: the bound trades the rewrites it saves against the bytes it adds to
-    /// each of those commits.
+    /// commit that marks a row of any object on it writes again: the bound trades the rewrites it
+    /// saves against the bytes it adds to each of those commits.
     /// </summary>
     internal int MarkedVectorBytes { get; init; } = 1 << 10;
 

@@ -38,7 +38,7 @@ Like everything in `Vorticity.Dataset`, they are experimental: see [datasets.md]
 Level 0 is where appends land, and it holds eight objects before compaction has work to do. `Lag`
 is how far past that ceiling it is: here ten objects, a lag of 2, and every lookup by key touches
 the two extra objects until compaction catches up. Ask before doing: `PlanCompactionAsync` reads
-the top page of each level, which the version's header carries and the handle already holds, and
+the top page of each level, which the version's header carries or the handle already holds, and
 descends from it only to the objects a job would take: no request at all here, and two over 125 000
 objects. `HasWork`
 is the question; `Job` is the one job it would run: the levels it moves between, what triggered
@@ -50,7 +50,7 @@ CompactionResult? compacted = await dataset.CompactAsync();
 
 ```
 compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128862 bytes in and 79036 out, 50000 rows
-  cost: 28 requests (12 get, 14 head, 2 put, 0 delete, 0 list), 28 dependent steps, 131163 bytes read, 79429 written
+  cost: 24 requests (11 get, 11 head, 2 put, 0 delete, 0 list), 24 dependent steps, 130770 bytes read, 79429 written
 now: 1 objects, lag 0; again: nothing to do
 ```
 
@@ -139,7 +139,7 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 | | requests | what they are |
 |---|---|---|
 | `PlanCompactionAsync` | 0 | the header the handle holds |
-| `CompactAsync` | 28 | every input object read, one object written, one commit |
+| `CompactAsync` | 24 | every input object read, one object written, one commit |
 | `VerifyAsync` | 9 | every object hashed, every page read |
 | `VerifyAsync(since)` | 12 | what the earlier version does not share |
 | `VacuumAsync` | 28 to 30 | a listing, a head per commit object, the retained trees, the deletes in batches |

@@ -95,8 +95,8 @@ internal sealed class DatasetSnapshot
 
     /// <summary>
     /// Whether a row <paramref name="filter"/> selects may lie in this version, from the summaries
-    /// of the pages already in hand: false is a proof, and a page that would have to be read makes
-    /// the answer true.
+    /// of the pages already in hand, its header's and those the handle kept: false is a proof, and a
+    /// page that would have to be read makes the answer true.
     /// </summary>
     internal bool MayMatch(VortexExpr filter)
     {
@@ -133,7 +133,7 @@ internal sealed class DatasetSnapshot
 
     private bool MayMatch(PageReference reference, int depth, SummaryPruner pruner)
     {
-        if (!Pages.TryGetKnown(reference, out ReadOnlyMemory<byte> page))
+        if (!Pages.TryGetInHand(reference, out ReadOnlyMemory<byte> page))
         {
             return true;
         }

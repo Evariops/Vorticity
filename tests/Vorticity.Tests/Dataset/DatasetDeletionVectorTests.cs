@@ -347,6 +347,69 @@ public sealed class DatasetDeletionVectorTests
         Assert.True((await marked.VerifyAsync(cancellationToken: ct)).Holds);
     }
 
+    /// <summary>
+    /// A leaf whose objects carry marks grows with every mark: carried by every header, it would cost
+    /// each commit what only those that change its level have to pay. It rides in the commit that
+    /// wrote it, where the read opening that commit holds it; a later header names it, says where its
+    /// version's pages start, and a reader reads it in one request.
+    /// </summary>
+    [Fact]
+    public async Task AMarkedLeafRidesOnlyInTheCommitsThatWriteIt()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using VortexDataset dataset = await CreateAsync(store, Options(clustered: true, marking: true), ct);
+        await DrainAsync(dataset, ct);
+        int level = Assert.Single(await dataset.ObjectsAsync(ct).ToListAsync(ct)).Level;
+
+        // Unmarked, the leaf rides in the header of a commit that does not change its level.
+        await AppendAsync(dataset, 9_000, ct);
+        Assert.NotEmpty(LevelOf(await LatestAsync(store, dataset, ct), level).Inlined);
+
+        Assert.Equal(1, (await dataset.DeleteAsync<ChangeRow>(r => r.Key >= 1_040 & r.Key < 1_090, ct)).ObjectsMarked);
+        ulong marking = dataset.Version;
+        for (int append = 0; append < 2; append++)
+        {
+            // Twice: the second header learns where the pages start from the first, as every later one does.
+            await AppendAsync(dataset, 9_100 + (append * 100), ct);
+            CommitHeader header = await LatestAsync(store, dataset, ct);
+            CommitLevel carried = LevelOf(header, level);
+            Assert.Equal(marking, carried.Top.Version);
+            Assert.Empty(carried.Inlined);
+            Assert.Contains(header.Starts, start => start.Version == marking);
+        }
+
+        // The writer kept the leaf: its summaries prove a key absent, and a walk reads it, without a
+        // request. A reader opening the version reads it in one, and proves as much once it has it.
+        store.Reset();
+        Assert.False(dataset.MayMatch<ChangeRow>(r => r.Key == 50_000));
+        int objects = (await dataset.ObjectsAsync(ct).ToListAsync(ct)).Count;
+        Assert.Equal(0, store.Requests);
+        await using VortexDataset cold = await VortexDataset.OpenAsync(store, Options(clustered: true, marking: true), ct);
+        store.Reset();
+        Assert.Equal(objects, (await cold.ObjectsAsync(ct).ToListAsync(ct)).Count);
+        Assert.Equal(1, store.Requests);
+        Assert.False(cold.MayMatch<ChangeRow>(r => r.Key == 50_000));
+        Assert.True((await dataset.VerifyAsync(cancellationToken: ct)).Holds);
+    }
+
+    /// <summary>The level a header records, by number.</summary>
+    private static CommitLevel LevelOf(CommitHeader header, int level) => header.Levels.Single(recorded => recorded.Level == level);
+
+    /// <summary>The header of the version the handle reads, as a reader opening it finds it.</summary>
+    private static async Task<CommitHeader> LatestAsync(IObjectStore store, VortexDataset dataset, CancellationToken ct) =>
+        (await CommitObject.OpenAsync(store, CommitKey.For(dataset.Version), ct)).Header;
+
+    /// <summary>Appends ten rows from key <paramref name="from"/>, at level 0.</summary>
+    private static async Task AppendAsync(VortexDataset dataset, long from, CancellationToken ct)
+    {
+        ChangeRow[] rows = [.. Enumerable.Range(0, 10).Select(i => new ChangeRow(from + i, 1.0, Cities[i % Cities.Length]))];
+        await using ObjectDraft draft = dataset.StartObject();
+        await draft.Writer.WriteAsync<ChangeRow>(rows, ct);
+        await dataset.AppendAsync(draft, ct);
+    }
+
     /// <summary>The filter taking every other key of the dataset's sorted keys, from the <paramref name="from"/>-th pair to the <paramref name="to"/>-th.</summary>
     private static VortexExpr Keys(int from, int to)
     {

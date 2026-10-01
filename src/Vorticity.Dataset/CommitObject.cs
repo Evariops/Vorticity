@@ -160,6 +160,24 @@ internal sealed class CommitObject
     }
 
     /// <summary>
+    /// The commit object its writer has just placed, as an open would find it without reading it: the
+    /// header it wrote, where its pages region starts, and what of that region the open's read would
+    /// bring back. Its table and trailer stay the writer's; no reader needs them.
+    /// </summary>
+    public static CommitObject Placed(CommitHeader header, byte[] bytes)
+    {
+        ArgumentNullException.ThrowIfNull(header);
+        ArgumentNullException.ThrowIfNull(bytes);
+        int headerEnd = CommitFormat.PreambleBytes + (int)BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(12));
+
+        // An object past the read is copied out of, since a slice of it would keep all of it.
+        ReadOnlyMemory<byte> held = bytes.Length <= CommitFormat.OpenBytes
+            ? bytes.AsMemory(headerEnd)
+            : bytes.AsSpan(headerEnd, Math.Max(CommitFormat.OpenBytes - headerEnd, 0)).ToArray();
+        return new CommitObject(header, CommitTable.Empty, null, bytes.Length, headerEnd) { Held = held };
+    }
+
+    /// <summary>
     /// The bytes of a page this object holds, taken from a buffer holding the object from offset
     /// zero. The reference must name this object's version, and the page is checked against its
     /// hash.

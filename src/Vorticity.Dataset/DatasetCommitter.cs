@@ -34,6 +34,9 @@ internal sealed record CommitOptions
     /// <summary>The clock a header's creation time is read from.</summary>
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
+    /// <summary>The pages the writer's handle keeps across versions, which its commits read through; null for none.</summary>
+    public PageCache? PageCache { get; init; }
+
     /// <summary>A rule in its starting state.</summary>
     public IBoundaryRule NewRule() => Rule?.Fresh() ?? new ProllyBoundaryRule(Seed);
 
@@ -48,13 +51,18 @@ internal sealed record CommitOptions
 /// <param name="Outcomes">What each operation decided, in the caller's order.</param>
 /// <param name="Attempts">How many times the writer had to rebase, 1 when it won first time.</param>
 /// <param name="Pages">A source that can read the new version's pages, new and old.</param>
+/// <param name="Commit">
+/// The commit object of <paramref name="Version"/> as the writer holds it: the one it placed, or the
+/// one it opened when nothing applied.
+/// </param>
 internal sealed record CommitResult(
     ulong Version,
     string Key,
     DatasetLevels Levels,
     IReadOnlyList<OperationOutcome> Outcomes,
     int Attempts,
-    IPageSource Pages)
+    IPageSource Pages,
+    CommitObject Commit)
 {
     /// <summary>Level 0's tree, where appends land.</summary>
     public DatasetTree Tree => Levels[0];
@@ -89,7 +97,7 @@ internal static class DatasetCommitter
             // attempt moves up to the one it built on.
             (ulong parent, CommitObject? commit) = await LatestAsync(store, known, cancellationToken).ConfigureAwait(false);
             known = parent;
-            CommitPageSource pages = new CommitPageSource(store);
+            CommitPageSource pages = new CommitPageSource(store, options.PageCache);
             DatasetLevels levels = DatasetLevels.Empty;
             CommitHeader template = options.Template ?? new CommitHeader { Version = 1 };
             if (commit is not null)
@@ -145,18 +153,20 @@ internal static class DatasetCommitter
             // number; it publishes nothing, and names the version it was decided against.
             if (operations.Count > 0 && commit is not null && !outcomes.Contains(OperationOutcome.Applied))
             {
-                return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages);
+                return new CommitResult(parent, CommitKey.For(parent), levels, outcomes, attempt, pages, commit);
             }
 
+            (IReadOnlyList<CommitLevel> recorded, IReadOnlyList<PagesStart> starts) = LevelsOf(next, builder, pages);
             CommitHeader header = template with
             {
                 Version = version,
                 Parent = parent,
                 Seed = options.Seed,
                 CreatedAtUnixMilliseconds = options.TimeProvider.GetUtcNow().ToUnixTimeMilliseconds(),
-                Levels = LevelsOf(next, builder, pages),
+                Levels = recorded,
                 Schema = schema.Schema,
                 Retired = schema.Retired,
+                Starts = starts,
             };
             header = WithoutHeld(header);
 
@@ -167,7 +177,7 @@ internal static class DatasetCommitter
                 == PutOutcome.Created)
             {
                 pages.Placed(bytes);
-                return new CommitResult(version, key, next, outcomes, attempt, pages);
+                return new CommitResult(version, key, next, outcomes, attempt, pages, CommitObject.Placed(header, bytes));
             }
         }
 
@@ -314,12 +324,19 @@ internal static class DatasetCommitter
     }
 
     /// <summary>
-    /// The pages a header carries, top first, spending what is left of its inline room. Only pages
-    /// already in hand are inlined: reading one just to inline it would spend a request to save
-    /// bytes, and the rewrite already holds the levels above the leaves.
+    /// The pages a header carries, top first, spending what is left of its inline room, and into
+    /// <paramref name="named"/> those it names without carrying them: its top, or a child of a page
+    /// it carries. Only pages already in hand are inlined: reading one just to inline it would spend
+    /// a request to save bytes, and the rewrite already holds the levels above the leaves.
     /// </summary>
+    /// <remarks>
+    /// Nor is a leaf that holds an object with rows marked in it, unless this commit wrote it. Its
+    /// bytes grow with every mark, and carried in every header they would cost each commit that does
+    /// not touch its level what only the commits that mark or purge an object of it have to pay; a
+    /// reader reads it once, where the header says its version's pages start, and a handle keeps it.
+    /// </remarks>
     private static IReadOnlyList<InlinedPage> Inline(
-        CommitObjectBuilder builder, CommitPageSource pages, DatasetTree tree, ref long budget)
+        CommitObjectBuilder builder, CommitPageSource pages, DatasetTree tree, ref long budget, List<PageReference> named)
     {
         List<InlinedPage> inlined = [];
         Queue<(PageReference Reference, int Level)> queue = new Queue<(PageReference, int)>();
@@ -327,14 +344,21 @@ internal static class DatasetCommitter
         while (queue.Count > 0)
         {
             (PageReference reference, int level) = queue.Dequeue();
-            if (!builder.TryGetPage(reference, out ReadOnlyMemory<byte> page)
-                && !pages.TryGetKnown(reference, out page))
+            if ((!builder.TryGetPage(reference, out ReadOnlyMemory<byte> page) && !pages.TryGetKnown(reference, out page))
+                || (level == 1 && reference.Version != builder.Version && Marks(page)))
             {
+                named.Add(reference);
                 continue;
             }
 
             if (page.Length > budget)
             {
+                named.Add(reference);
+                foreach ((PageReference left, int _) in queue)
+                {
+                    named.Add(left);
+                }
+
                 break;
             }
 
@@ -350,6 +374,44 @@ internal static class DatasetCommitter
         }
 
         return inlined;
+    }
+
+    /// <summary>Whether a leaf holds an object with rows marked in it, read off its entries in place.</summary>
+    private static bool Marks(ReadOnlyMemory<byte> leaf)
+    {
+        foreach (TreeEntry entry in TreePage.ReadLeaf(leaf))
+        {
+            if (ObjectEntry.TallyOf(entry.Value.Span).DeletedRows > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Where the pages of the earlier versions a header names without carrying start, as far as this
+    /// commit learned it: from its parent's header, or by reading one of their pages.
+    /// </summary>
+    private static IReadOnlyList<PagesStart> StartsOf(List<PageReference> named, ulong version, CommitPageSource pages)
+    {
+        SortedDictionary<ulong, long> starts = [];
+        foreach (PageReference reference in named)
+        {
+            if (reference.Version != version && pages.TryGetStart(reference.Version, out long start))
+            {
+                starts[reference.Version] = start;
+            }
+        }
+
+        List<PagesStart> ordered = new List<PagesStart>(starts.Count);
+        foreach ((ulong earlier, long start) in starts)
+        {
+            ordered.Add(new PagesStart(earlier, start));
+        }
+
+        return ordered;
     }
 
     /// <summary>What the inlined pages may take, leaving room under the header's size cap for
@@ -418,18 +480,20 @@ internal static class DatasetCommitter
     public static DatasetTree TreeOf(CommitHeader header) => DatasetLevels.Of(header)[0];
 
     /// <summary>
-    /// What a header records for each occupied level, with the pages it can inline. The levels share
-    /// one inline budget and spend it from level 0 up, since every lookup descends level 0; a level
-    /// whose top does not fit costs one request to read instead.
+    /// What a header records for each occupied level, with the pages it can inline, and where the
+    /// pages it names without carrying start. The levels share one inline budget and spend it from
+    /// level 0 up, since every lookup descends level 0; a level whose top does not fit costs one
+    /// request to read instead.
     /// </summary>
-    private static IReadOnlyList<CommitLevel> LevelsOf(
+    private static (IReadOnlyList<CommitLevel> Levels, IReadOnlyList<PagesStart> Starts) LevelsOf(
         DatasetLevels levels, CommitObjectBuilder builder, CommitPageSource pages)
     {
         List<CommitLevel> recorded = [];
+        List<PageReference> named = [];
         long budget = InlineBudget;
         foreach ((int level, DatasetTree tree) in levels.Occupied())
         {
-            IReadOnlyList<InlinedPage> inlined = Inline(builder, pages, tree, ref budget);
+            IReadOnlyList<InlinedPage> inlined = Inline(builder, pages, tree, ref budget, named);
             recorded.Add(new CommitLevel(level, tree.Entries, tree.Root, inlined)
             {
                 Depth = tree.Depth,
@@ -437,7 +501,7 @@ internal static class DatasetCommitter
             });
         }
 
-        return recorded;
+        return (recorded, StartsOf(named, builder.Version, pages));
     }
 
     /// <summary>Re-applies the operations to the levels as they are now.</summary>

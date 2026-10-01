@@ -97,7 +97,8 @@ walking down: last key 119 at row 119999; the key before it 118, its last entry 
 
 The plan's first pruning step is the objects' summaries: the two objects whose days end before 100
 are not opened, and their 13 blocks are pruned without a read. `MayMatch` answers from the
-summaries the version's header already carries, so it reads nothing, and `false` is a proof.
+summaries the handle already holds, the version's header and the pages it kept from earlier
+versions, so it reads nothing, and `false` is a proof.
 Positions are the dataset's: a batch's `StartRow`, `Rows(…)` and a key cursor's `Row` count the
 version's rows, object after object, in the order a scan delivers them. A key cursor over the
 clustering key merges the objects' cursors; its `KeyCountAsync` is the number of entries under the

@@ -71,14 +71,25 @@ the compaction and retention settings, and per level its top page **inlined**, w
 it while the header stays under 256 KiB. One ranged read of the first 256 KiB opens a commit. The
 pages region follows the header, so a page the commit wrote itself that ends inside those 256 KiB is
 not inlined: the read that opens the commit brings it back once, where inlined it would be written
-twice.
+twice. Nor is a leaf that holds an object with marked rows (§12), unless this commit wrote it: its
+bytes grow with every mark, and carried by every header they would cost each commit what only those
+that change its level have to pay. For every page it names without carrying it — a level's top, or
+a child of a page it carries — the header records where that page's version keeps its pages, as far
+as the writer knows it, so a reader reads such a page in one request rather than two.
 
 **A page reference** is a fixed 36 bytes: the version that wrote the page, its offset relative to that
 object's pages region, its length, and its XXH3-128. A commit references every page it did not change
 where it already lies, in an older commit object, and checks the hash on read; fixed-width,
 relative references are what let a header name offsets that depend on its own length, and what make
 two identical trees identical page for page. There is no separate page object, no orphan page after
-a crash, and one conditional creation per commit.
+a crash, and one conditional creation per commit. A reference names its page in every version that
+shares it, so a handle keeps what it has from one version to the next: the pages it read from the
+store, least recently used first out within `DatasetOptions.PageCacheBytes` (32 MiB by default); what
+the reads opening its last sixteen versions brought back of their pages regions; and where each
+version's pages start. A refresh or a commit asks the store again only for the pages that changed.
+Pages are kept page by page only when read from the store, and by version when a read brought them
+back with their commit: most of what a version wrote, the next one rewrites, and a budget in bytes
+would fill with those.
 
 **`<inverted version>`** is `10²⁰ − 1 − version` in twenty digits, so the **newest commit sorts
 first** and the first key of a listing of `commit/` is the latest version (§8.3). There is no mutable
@@ -112,7 +123,8 @@ seam, whose other implementation, a B+tree's fill factor, is measured on the sam
 
 With entries of about 180 bytes the fan-out is about 680. The header inlines a level's top page and,
 while it fits, the pages below, so a lookup reads **0 dependent pages** up to about 650 objects,
-**1** up to about 400 000, **2** up to about 280 million.
+**1** up to about 400 000, **2** up to about 280 million; a leaf with marked rows that another commit
+wrote is one more, once (§3).
 
 ### 4.2 What a node carries
 
@@ -234,7 +246,8 @@ Triggers: level 0 above its ceiling, a level above its size, an object whose mar
 then an entry above K fragments, a compaction of index bytes only (§6.4).
 
 **A leveled plan descends the trees rather than reading them.** A level's bytes are the sum of the
-tallies its top page carries, and the header carries that page. The largest object of a level over
+tallies its top page carries, and the header carries that page, or the handle keeps it when it is a
+leaf with marks (§3). The largest object of a level over
 its size, the one a job pushes down, is at the end of one descent that follows the largest tally at
 each page. The objects of the level below that the job's key range meets, the objects over their
 fragments and the one whose marks are the most due are found by walks that skip every subtree whose
@@ -373,7 +386,10 @@ then creates `commit/<inverted N+1>` — header, pages and fragments in one obje
 **put-if-absent**, streamed from a pipe whose length is given up front, so the store chooses between
 one request and a multipart upload. Put-if-absent linearizes commits: no lease, no lock, no external
 service. Uncontended, a commit is **three dependent requests**: the listing, the read of `N`'s header,
-the creation; the data objects cost the commit nothing more.
+the creation; the data objects cost the commit nothing more. A handle commits from the version it
+holds, probing for the one after it instead of listing, and then reads the version it created as it
+wrote it: nothing is read back, and a handle whose commit found nothing to change reads the version
+that commit was decided on.
 
 ### 8.2 Rebase by re-applying operations
 
@@ -420,7 +436,7 @@ On an object store a request costs 10 to 100 ms whatever its size below a megaby
 | step | dependent requests | cached by |
 |---|---|---|
 | list the latest commit, read its header | 2 | version |
-| descend a level's tree | 0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million | page, forever: pages are immutable |
+| descend a level's tree | 0 up to ~650 objects, 1 up to ~400 000, 2 up to ~280 million | page, across versions: pages are immutable |
 | open the object's tail | 1, in parallel across the ≤ 8 + L objects touched | object |
 | its fences, then the two payload segments | 1 + 1 | run |
 | the data segments | 1, coalesced | — |
@@ -509,9 +525,9 @@ eighth of its rows (`MarkedShare`), since every read of it steps over them; and 
 pass 1 KiB (`MarkedVectorBytes`), a few hundred runs. The vector is counted as the runs it will form:
 at a run a row when that already fits, and otherwise from the rows' places, read before anything is
 written, since the rows a range takes are one run whatever their number. The vector lives in a leaf page: a commit that
-marks a row in any object of a page writes the page again, and while a level's pages fit the header's
-inline room (§3) every commit carries them, so the bound weighs the rewrites the marks save against
-the bytes they add to each commit. The rows a rewritten object keeps are a subset of
+marks a row in any object of a page writes the page again, so the bound weighs the rewrites the marks
+save against the bytes they add to each of those commits; a commit that does not change the page
+leaves it out of its header (§3). The rows a rewritten object keeps are a subset of
 its rows, so its keys lie inside its old range: a level above 0 stays key-disjoint and the tree's order
 holds; without a clustering key the rewritten object keeps the old one's position. Either way the rows
 are judged by the scan's own evaluator, so a delete and a scan with the same filter agree on every row,
@@ -541,10 +557,11 @@ rows in it would bring those rows back: its `ReplaceObjects` names the entries i
 vector — and is abandoned when one of them changed (§8.2).
 
 **What it costs.** Measured by the churn (§15) on ten million rows and thirty thousand commits of ten
-rows at random keys: an update takes 2.0 to 3.5 ms and a delete 1.1 to 2.0 ms, where rewriting the
-4 MiB objects that hold the rows takes 19 and 14 ms. A commit writes 16 KiB at first and 31 to 63 KiB
+rows at random keys: an update takes 1.9 to 3.0 ms and a delete 0.9 to 1.7 ms, where rewriting the
+4 MiB objects that hold the rows takes 19 and 14 ms. A commit writes 12 KiB at first and 29 to 57 KiB
 once the vectors have filled, where a rewrite writes 3.3 MiB: the rows' own objects, and a commit
-object of 12 KiB at first and 14 to 20 KiB then, most of it the leaf page the header carries.
+object of 8 KiB at first and 10 to 14 KiB then, most of it the leaf page a commit that marks rows
+writes again.
 Compaction, merges and purges together, writes 61 to 111 KiB a commit. After a thousand commits the store holds 137 MiB rather than 449 MiB, since the retention
 window keeps every object a rewrite replaced (§10). The reads cost what they cost on the rewritten
 dataset: a filter over every object makes the same 220 requests, and a point lookup, a seek, a count
@@ -650,11 +667,11 @@ by widening a number or making it nullable (§13).
 - **Rust**: compaction outputs are among the files the cross-check hands to Rust 0.86.1.
 - **The churn** (`bench/Vorticity.Benchmarks.Churn`): ten million rows, then thirty thousand commits of
   ten rows — appends, updates and deletes at random keys — with compaction drained and vacuum run
-  between them. Every cost stays flat, or levels off once the marks have filled: an append 0.8 to
-  1.2 ms, an update 2.0 to 3.5 ms, a delete 1.1 to 2.0 ms, compaction about a millisecond a commit, a
-  commit's bytes 16 KiB and then 31 to 63 KiB; a point lookup 0.6 to 0.8 ms in two to three requests, a
-  seek and ten steps either way 0.2 to 0.6 ms, a hundred rows by position 0.2 ms, a scan of every
-  row 27 ms; the heap between 60 and 80 MiB. Rewriting instead of marking, an update takes 19 ms and
+  between them. Every cost stays flat, or levels off once the marks have filled: an append 0.6 to
+  0.8 ms, an update 1.9 to 3.0 ms, a delete 0.9 to 1.7 ms, seven to eight requests a commit,
+  compaction about a millisecond a commit, a commit's bytes 12 KiB and then 29 to 57 KiB; a point
+  lookup 0.8 to 1.2 ms in three to four requests, a seek and ten steps either way 0.3 to 0.8 ms, a
+  hundred rows by position 0.2 to 0.4 ms, a scan of every row 28 ms; the heap between 64 and 87 MiB. Rewriting instead of marking, an update takes 19 ms and
   a commit writes 3.3 MiB. Before the level-0 destination, the cap on an object and the chunked buffer,
   an update cost 820 ms, compaction 100 ms a commit and the heap grew to 2.2 GiB over the first 150
   commits.

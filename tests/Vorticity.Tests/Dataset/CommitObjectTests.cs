@@ -62,6 +62,9 @@ public sealed class CommitObjectTests
                 new CommitLevel(1, 900, second),
                 new CommitLevel(2, 90_000, foreign),
             ],
+
+            // Where the foreign reference's version keeps its pages, so that reading it is one request.
+            Starts = [new PagesStart(3, 18_000), new PagesStart(5, 700)],
         };
 
         return (builder.Build(header), header, first, second, fragment, foreign);
@@ -100,8 +103,9 @@ public sealed class CommitObjectTests
         Assert.Equal(300, below.Offset);
         Assert.Equal(Page(2, 120), commit.Page(bytes, below).ToArray());
 
-        // The foreign reference passed through untouched.
+        // The foreign reference passed through untouched, and where its version's pages start.
         Assert.Equal(foreign, commit.Header.Levels[2].Top);
+        Assert.Equal(written.Starts, commit.Header.Starts);
 
         // The inlined page is the header's own copy, and it is the same page.
         InlinedPage inlined = Assert.Single(commit.Header.Levels[0].Inlined);
@@ -115,6 +119,17 @@ public sealed class CommitObjectTests
         Assert.Equal(fragment.Hash, recorded.Hash);
         Assert.Equal(300 + 120, recorded.Offset);
         Assert.Equal(Page(3, 64), commit.Page(bytes, recorded).ToArray());
+    }
+
+    [Fact]
+    public void AStartNoPagesRegionCouldHaveIsRefused()
+    {
+        foreach (PagesStart wrong in (PagesStart[])[new PagesStart(3, CommitFormat.PreambleBytes - 1), new PagesStart(0, 18_000)])
+        {
+            CommitHeader header = new CommitHeader { Version = 7, Starts = [wrong] };
+            byte[] bytes = new CommitObjectBuilder(7).Build(header);
+            Assert.Throws<CommitFormatException>(() => CommitObject.Open(bytes));
+        }
     }
 
     [Fact]

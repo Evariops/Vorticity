@@ -25,6 +25,9 @@ internal readonly record struct RetentionSettings(int Versions, long Seconds);
 /// <summary>A page carried inside the header as well as at the offset its reference names.</summary>
 internal readonly record struct InlinedPage(PageReference Reference, ReadOnlyMemory<byte> Bytes);
 
+/// <summary>Where the pages region of an earlier version's commit object starts, one past its header.</summary>
+internal readonly record struct PagesStart(ulong Version, long Offset);
+
 /// <summary>
 /// One level of the dataset tree, as the header records it; level 0 is the newest and smallest.
 /// <c>Inlined</c> holds the pages carried in the header, top first.
@@ -87,6 +90,14 @@ internal sealed record CommitHeader
     /// </summary>
     public IReadOnlyList<RetiredColumn> Retired { get; init; } = [];
 
+    /// <summary>
+    /// Where the pages region starts of each earlier version whose pages the header names without
+    /// carrying them, by version: a reader then reads such a page in one request, where it would
+    /// first read that version's preamble to learn it. A header written before these were recorded
+    /// has none, and a reader that does not know the field skips it.
+    /// </summary>
+    public IReadOnlyList<PagesStart> Starts { get; init; } = [];
+
     internal static class Field
     {
         internal const int Version = 1;
@@ -101,6 +112,13 @@ internal sealed record CommitHeader
         internal const int CreatedAt = 10;
         internal const int Levels = 11;
         internal const int Retired = 12;
+        internal const int Starts = 13;
+    }
+
+    internal static class StartField
+    {
+        internal const int Version = 1;
+        internal const int Offset = 2;
     }
 
     internal static class RetiredField
@@ -161,6 +179,26 @@ internal sealed record CommitHeader
         foreach (RetiredColumn column in Retired)
         {
             WriteRetired(ref writer, column);
+        }
+
+        foreach (PagesStart start in Starts)
+        {
+            WriteStart(ref writer, start);
+        }
+    }
+
+    private static void WriteStart(ref ProtoWriter writer, PagesStart start)
+    {
+        ProtoWriter inner = new ProtoWriter();
+        try
+        {
+            inner.WriteUInt64(StartField.Version, start.Version);
+            inner.WriteInt64(StartField.Offset, start.Offset);
+            writer.WriteBytes(Field.Starts, inner.WrittenSpan);
+        }
+        finally
+        {
+            inner.Dispose();
         }
     }
 
@@ -295,6 +333,7 @@ internal sealed record CommitHeader
         long createdAt = 0;
         List<CommitLevel> levels = [];
         List<RetiredColumn> retired = [];
+        List<PagesStart> starts = [];
 
         try
         {
@@ -339,6 +378,9 @@ internal sealed record CommitHeader
                     case (Field.Retired, ProtoWireType.LengthDelimited):
                         retired.Add(ReadRetired(reader.ReadLengthDelimited()));
                         break;
+                    case (Field.Starts, ProtoWireType.LengthDelimited):
+                        starts.Add(ReadStart(reader.ReadLengthDelimited()));
+                        break;
                     default:
                         // A field this version does not know is skipped, not fatal, so a later one
                         // can add fields without breaking the format.
@@ -371,7 +413,37 @@ internal sealed record CommitHeader
             CreatedAtUnixMilliseconds = createdAt,
             Levels = levels,
             Retired = retired,
+            Starts = starts,
         };
+    }
+
+    private static PagesStart ReadStart(ReadOnlySpan<byte> bytes)
+    {
+        ulong version = 0;
+        long offset = 0;
+        ProtoReader reader = new ProtoReader(bytes);
+        while (reader.TryReadTag(out int field, out ProtoWireType wire))
+        {
+            switch (field, wire)
+            {
+                case (StartField.Version, ProtoWireType.Varint):
+                    version = reader.ReadVarint();
+                    break;
+                case (StartField.Offset, ProtoWireType.Varint):
+                    offset = (long)reader.ReadVarint();
+                    break;
+                default:
+                    reader.SkipField(wire);
+                    break;
+            }
+        }
+
+        if (version == 0 || offset < CommitFormat.PreambleBytes)
+        {
+            throw new CommitFormatException($"The header says version {version}'s pages start at {offset}, which is no version's.");
+        }
+
+        return new PagesStart(version, offset);
     }
 
     private static RetiredColumn ReadRetired(ReadOnlySpan<byte> bytes)
