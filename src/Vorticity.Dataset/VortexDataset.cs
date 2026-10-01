@@ -515,6 +515,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </remarks>
     /// <exception cref="VortexSchemaException">A literal or a column of the filter does not fit the dataset.</exception>
     /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this delete read on every attempt.</exception>
+    /// <exception cref="DatasetIntegrityException">A guard found that the delete would lose or double rows; nothing was committed.</exception>
     public ValueTask<RowChangeResult> DeleteAsync<TRecord>(
         Func<Probe<TRecord>, Predicate> filter, CancellationToken cancellationToken = default)
         where TRecord : IVortexRecord<TRecord>
@@ -535,6 +536,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>The version created and the rows deleted.</returns>
     /// <exception cref="VortexSchemaException">The filter names a column the dataset does not have, or compares one with a literal of a type it cannot compare to.</exception>
     /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this delete read on every attempt.</exception>
+    /// <exception cref="DatasetIntegrityException">A guard found that the delete would lose or double rows; nothing was committed.</exception>
     public ValueTask<RowChangeResult> DeleteAsync(VortexExpr filter, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(filter);
@@ -561,6 +563,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <exception cref="ArgumentException"><typeparamref name="TRecord"/> has no member for a column of the dataset.</exception>
     /// <exception cref="VortexSchemaException">A literal or a column of the filter does not fit the dataset.</exception>
     /// <exception cref="ObjectStoreException">Concurrent commits rewrote an object this update read on every attempt.</exception>
+    /// <exception cref="DatasetIntegrityException">A guard found that the update would lose or double rows; nothing was committed.</exception>
     public ValueTask<RowChangeResult> UpdateAsync<TRecord>(
         Func<Probe<TRecord>, Predicate> filter, Func<TRecord, TRecord> update, CancellationToken cancellationToken = default)
         where TRecord : IVortexRecord<TRecord>
@@ -662,6 +665,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the rewrite and the commit.</param>
     /// <returns>What the compaction did, or null when nothing was due.</returns>
     /// <exception cref="ArgumentException">The options ask for <see cref="CompactionStyle.Tiered"/> on a dataset with a clustering key.</exception>
+    /// <exception cref="DatasetIntegrityException">A guard found that the compaction would lose rows; nothing was committed.</exception>
     public async ValueTask<CompactionResult?> CompactAsync(
         CompactionOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -1147,7 +1151,7 @@ public sealed class VortexDataset : IAsyncDisposable
         Keys.KeyCursor? cursor = await clustering.TryOpenAsync(file, indexes: false, cancellationToken).ConfigureAwait(false);
         if (cursor is null)
         {
-            throw new InvalidOperationException(
+            throw new DatasetIntegrityException(
                 $"An object written in key order carries no run on '{clustering.Paths[0]}', and its statistics do not say " +
                 "the column is sorted: a rewrite that loses the order of its rows is the one thing it must not do.");
         }

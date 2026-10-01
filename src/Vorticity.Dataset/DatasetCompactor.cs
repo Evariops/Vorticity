@@ -63,7 +63,7 @@ internal static class DatasetCompactor
     /// The clustering key is composite and one of its columns holds nulls in an input: its run holds
     /// no such tuple, so no permuted read keeps every row.
     /// </exception>
-    /// <exception cref="InvalidOperationException">The outputs do not hold the inputs' rows.</exception>
+    /// <exception cref="DatasetIntegrityException">The outputs do not hold the inputs' rows.</exception>
     public static async ValueTask<CompactionResult> RunAsync(
         VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken = default)
     {
@@ -106,7 +106,7 @@ internal static class DatasetCompactor
 
         if (rows != job.Rows)
         {
-            throw new InvalidOperationException(
+            throw new DatasetIntegrityException(
                 $"The compaction read {job.Rows} row(s) from {job.Inputs.Count} object(s) and wrote " +
                 $"{rows}: a rewrite that loses rows is the one failure it must not have.");
         }

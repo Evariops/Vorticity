@@ -233,7 +233,7 @@ internal static class DatasetRowChanges
 
                     if (deletions.Count - held.Entry.Deletions.Count != matched)
                     {
-                        throw new InvalidOperationException(
+                        throw new DatasetIntegrityException(
                             $"'{held.Entry.Key}' marked {deletions.Count - held.Entry.Deletions.Count} rows where its count took {matched}: " +
                             "a delete that loses or doubles rows is the one failure it must not have.");
                     }
@@ -256,7 +256,7 @@ internal static class DatasetRowChanges
 
                 if (kept != held.Entry.Rows - matched)
                 {
-                    throw new InvalidOperationException(
+                    throw new DatasetIntegrityException(
                         $"'{held.Entry.Key}' kept {kept} of its {held.Entry.Rows} rows where its count took {matched}: " +
                         "a rewrite that loses or doubles rows is the one failure it must not have.");
                 }

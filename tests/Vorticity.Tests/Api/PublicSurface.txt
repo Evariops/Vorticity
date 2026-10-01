@@ -1912,6 +1912,10 @@ Vorticity.Dataset:     property long DeletedRows { get; init; }
 Vorticity.Dataset:     property long FirstRow { get; init; }
 Vorticity.Dataset:     property long Rows { get; init; }
 Vorticity.Dataset:     property string Key { get; init; }
+Vorticity.Dataset: sealed class Vorticity.Dataset.DatasetIntegrityException : VortexException
+Vorticity.Dataset:     ctor DatasetIntegrityException()
+Vorticity.Dataset:     ctor DatasetIntegrityException(string)
+Vorticity.Dataset:     ctor DatasetIntegrityException(string, Exception)
 Vorticity.Dataset: sealed class Vorticity.Dataset.DatasetOptions : IEquatable<DatasetOptions>
 Vorticity.Dataset:     ctor DatasetOptions()
 Vorticity.Dataset:     method DatasetOptions <Clone>$()
