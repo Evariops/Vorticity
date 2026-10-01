@@ -228,7 +228,7 @@ internal static class DatasetCommitter
                 Retired = schema.Retired,
                 Starts = starts,
             };
-            header = WithoutHeld(header);
+            header = Fitted(WithoutHeld(header));
 
             // 3. One conditional creation. Once it is in, nothing after it can exist yet.
             string key = CommitKey.For(version);
@@ -564,6 +564,53 @@ internal static class DatasetCommitter
         }
 
         return header with { Levels = levels };
+    }
+
+    /// <summary>
+    /// The header with as many of its inlined pages as leave it inside the read that opens its
+    /// object, where a reader must find it whole: past it, every open of the version would fail and
+    /// the object would read as torn, though whole. The pages go from the last inlined, the deepest
+    /// of the highest level, whose readers read them where they lie instead; a header too large
+    /// with none of them is refused before anything is written.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The header does not fit the open read even with no page inlined.</exception>
+    private static CommitHeader Fitted(CommitHeader header)
+    {
+        const int Room = CommitFormat.OpenBytes - CommitFormat.PreambleBytes;
+        int length = CommitObjectBuilder.HeaderLength(header);
+        while (length > Room)
+        {
+            // Pages go until their bytes make up what is over; their framing makes up the rest, and
+            // the header is measured again in case it did not.
+            long over = length - Room;
+            List<CommitLevel> levels = [.. header.Levels];
+            bool dropped = false;
+            for (int i = levels.Count - 1; i >= 0 && over > 0; i--)
+            {
+                List<InlinedPage> kept = [.. levels[i].Inlined];
+                while (kept.Count > 0 && over > 0)
+                {
+                    over -= kept[^1].Bytes.Length;
+                    kept.RemoveAt(kept.Count - 1);
+                    dropped = true;
+                }
+
+                levels[i] = levels[i] with { Inlined = kept };
+            }
+
+            if (!dropped)
+            {
+                throw new InvalidOperationException(
+                    $"The commit's header would take {length} bytes, and a reader opens a commit object by reading its first " +
+                    $"{CommitFormat.OpenBytes}: the version would never open. What fills it is the schema, the names retired " +
+                    "from it and the levels' records, none of which a commit can leave out.");
+            }
+
+            header = header with { Levels = levels };
+            length = CommitObjectBuilder.HeaderLength(header);
+        }
+
+        return header;
     }
 
     /// <summary>The tree a header names at level 0, where appends land; empty when it names

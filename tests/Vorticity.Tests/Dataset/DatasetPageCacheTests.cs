@@ -270,6 +270,62 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
+    public async Task AHeaderLeavesOutThePagesThatWouldTakeItPastTheReadThatOpensIt()
+    {
+        // A schema widened to thousands of columns leaves less room than the pages of the load
+        // the version before carried, which the change has in hand and would carry on: the deepest
+        // go, and the version opens in one read, those pages read where they lie.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore inner = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(inner);
+        // Small pages, so that the load's header carries a good part of its tree.
+        byte[] narrow = Wide(2);
+        CommitOptions options = new CommitOptions
+        {
+            Seed = Seed,
+            Rule = new ProllyBoundaryRule(Seed, minBytes: 256, targetBytes: 512, maxBytes: 1_024),
+            Template = new CommitHeader { Version = 1, Schema = narrow },
+        };
+        await DatasetCommitter.CommitAsync(store, [.. Enumerable.Range(0, Objects).Select(i => Add(2L * i))], options, ct);
+        CommitResult result = await DatasetCommitter.CommitAsync(store, [new DatasetOperation.ChangeSchema(narrow, Wide(5_000), [])], options, ct);
+        Assert.Equal(OperationOutcome.Applied, result.Outcomes[0]);
+
+        CommitObject opened = await CommitObject.OpenAsync(store, CommitKey.For(result.Version), ct);
+        Assert.True(opened.Header.Schema.Length > 128 << 10, $"the schema takes {opened.Header.Schema.Length} bytes");
+        Assert.True(opened.HeaderEnd <= CommitFormat.OpenBytes);
+        CommitPageSource pages = new CommitPageSource(store);
+        pages.Open(result.Version, opened);
+        int entries = 0;
+        await foreach (TreeEntry _ in DatasetLevels.Of(opened.Header)[1].EnumerateAsync(pages, ct))
+        {
+            entries++;
+        }
+
+        Assert.Equal(Objects, entries);
+    }
+
+    [Fact]
+    public async Task AHeaderTooLargeForTheReadThatOpensItIsRefusedBeforeAnythingIsWritten()
+    {
+        // A version that could never be opened is not written: its readers would take it for torn,
+        // and its repair would find it whole.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        CommitOptions options = new CommitOptions { Seed = Seed, Template = new CommitHeader { Version = 1, Schema = Wide(10_000) } };
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await DatasetCommitter.CommitAsync(store, [Add(0)], options, ct));
+        Assert.Equal(0UL, await DatasetCommitter.NewestVersionAsync(store, ct));
+    }
+
+    /// <summary>The bytes of a schema of <paramref name="columns"/> columns with long names.</summary>
+    private static byte[] Wide(int columns)
+    {
+        DTypeArena types = new DTypeArena();
+        string[] names = [.. Enumerable.Range(0, columns).Select(i => $"a_column_with_a_long_name_{i:D6}")];
+        DType[] fields = [.. Enumerable.Range(0, columns).Select(_ => types.Primitive(PType.I64, Nullability.Nullable))];
+        return Vorticity.Types.Serialization.DTypeProtobuf.Serialize(types.Struct(names, fields, Nullability.NonNullable));
+    }
+
+    [Fact]
     public async Task AHandleAsksAgainOnlyForThePagesAnotherWritersCommitChanged()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
