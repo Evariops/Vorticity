@@ -48,9 +48,9 @@ public sealed record CompactionOptions
 {
     internal const int DefaultFanout = 10;
 
-    internal const long DefaultTargetBytesAtLevelOne = 256L << 20;
+    internal const long DefaultTargetBytesAtLevelOne = 128L << 10;
 
-    internal const long DefaultMaxObjectBytes = 4L << 30;
+    internal const long DefaultMaxObjectBytes = 4L << 20;
 
     internal const int DefaultMaxFragments = 4;
 
@@ -62,10 +62,28 @@ public sealed record CompactionOptions
     /// <summary>The fan-out <c>F</c>, how much bigger each level is than the one below; 10 by default.</summary>
     public int Fanout { get; init; } = DefaultFanout;
 
-    /// <summary>The size an object written into level 1 targets; 256 MiB by default.</summary>
+    /// <summary>
+    /// The size an object written into level 1 targets; 128 KiB by default. Each level above
+    /// targets <c>F</c> times the one below, up to <see cref="MaxObjectBytes"/>, and holds <c>F</c>
+    /// times as much whatever its objects' size: level 1 holds <c>F</c> of its objects.
+    /// </summary>
+    /// <remarks>
+    /// Small, because level 1 is where level 0 empties when it holds a few small commits: merging
+    /// them into a level of gigabytes would rewrite the level for a few rows, where a small one
+    /// takes them for a few times their size and passes them on. A load too large for level 1
+    /// goes past it, into the first level that holds it.
+    /// </remarks>
     public long TargetBytesAtLevelOne { get; init; } = DefaultTargetBytesAtLevelOne;
 
-    /// <summary>The cap on an output object, so that one stays a reasonable unit of rewrite; 4 GiB by default.</summary>
+    /// <summary>
+    /// The cap on an output object, so that one stays a reasonable unit of rewrite: what a delete or
+    /// an update of one of its rows rewrites, and what a compaction reads at least; 4 MiB by default.
+    /// </summary>
+    /// <remarks>
+    /// Measured on ten million rows, a delete of ten rows cost 40 ms under a cap of 16 MiB and 14 ms
+    /// under 4 MiB, rewriting 12 and 3 MB, while a scan of every row took 19 and 23 ms over nine and
+    /// thirty-one objects. A dataset that is scanned far more than it is changed may raise it.
+    /// </remarks>
     public long MaxObjectBytes { get; init; } = DefaultMaxObjectBytes;
 
     /// <summary>The index fragments an object may carry before a fragment compaction is due; 4 by default.</summary>
@@ -122,9 +140,15 @@ public sealed record CompactionOptions
     }
 
     /// <summary>
-    /// What a level may hold before it is over its size. Level 0 is bounded by an object count
-    /// instead and is refused here.
+    /// What a level may hold before it is over its size: <c>F</c> times the level below, level 1
+    /// holding <c>F</c> of its objects, whatever the cap on an object says. Level 0 is bounded by an
+    /// object count instead and is refused here.
     /// </summary>
+    /// <remarks>
+    /// The capacity does not stop at <c>F</c> capped objects: a level would then hold no more than
+    /// the one below it, and a dataset would need a level for every <c>F</c> such objects rather
+    /// than one for every factor of <c>F</c>.
+    /// </remarks>
     internal long CapacityBytes(int level)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(level);
@@ -136,8 +160,40 @@ public sealed record CompactionOptions
                 "Level 0 is bounded by its object count, not by its bytes; see LevelZeroCeiling.");
         }
 
-        long target = TargetBytes(level);
-        return target >= long.MaxValue / Math.Max(Fanout, 1) ? long.MaxValue : target * Fanout;
+        long fanout = Math.Max(Fanout, 1);
+        long capacity = TargetBytesAtLevelOne;
+        for (int i = 0; i < level; i++)
+        {
+            if (capacity >= long.MaxValue / fanout)
+            {
+                return long.MaxValue;
+            }
+
+            capacity *= fanout;
+        }
+
+        return capacity;
+    }
+
+    /// <summary>
+    /// The level a leveled compaction of level 0 writes into: the first above it whose capacity
+    /// holds what level 0 holds, never past the top a cap allows.
+    /// </summary>
+    /// <remarks>
+    /// A few small commits then merge into a level a few times their size, and a load go past the
+    /// levels it would only overflow, rather than being rewritten once per level on its way up.
+    /// Nothing orders the levels among themselves but their sizes: rows in any level are rows of
+    /// the dataset, and each level above 0 only has to stay key-disjoint.
+    /// </remarks>
+    internal int LevelZeroDestination(long bytes)
+    {
+        int level = 1;
+        while (!IsTop(level) && Fanout > 1 && CapacityBytes(level) < bytes)
+        {
+            level++;
+        }
+
+        return level;
     }
 
     /// <summary>The style this dataset merges under, never <see cref="CompactionStyle.Auto"/>.</summary>

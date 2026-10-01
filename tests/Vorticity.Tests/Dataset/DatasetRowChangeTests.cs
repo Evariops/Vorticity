@@ -185,11 +185,13 @@ public sealed class DatasetRowChangeTests
         (VortexDataset dataset, List<ChangeRow> written) = await CreateAsync(store, clustered: true, interleaved: false, ct);
         await using (dataset)
         {
+            // Objects capped at 2 KiB, so that the rows lie in several key-disjoint objects whatever
+            // level they land in.
             CompactionOptions compaction = new CompactionOptions
             {
                 LevelZeroCeiling = 1,
                 TargetBytesAtLevelOne = 2 << 10,
-                MaxObjectBytes = 1L << 30,
+                MaxObjectBytes = 2 << 10,
             };
             while (await dataset.CompactAsync(compaction, ct) is not null)
             {

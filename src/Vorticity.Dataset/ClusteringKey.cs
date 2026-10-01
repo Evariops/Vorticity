@@ -52,13 +52,29 @@ internal sealed class ClusteringKey
     /// <summary>Whether the key is a tuple rather than one column.</summary>
     public bool IsComposite => _paths.Length > 1;
 
+    /// <summary>
+    /// Whether an object whose rows come in key order needs no run to be walked by key: one
+    /// top-level column of integers that holds no null. Its file statistics then say the column is
+    /// sorted, and a sorted column is the source a key cursor and a key-ordered read take before any
+    /// run, with the zone map as its index, so a run beside it is bytes nobody reads.
+    /// </summary>
+    public bool OrdersBySortedColumn =>
+        !IsComposite
+        && !_paths[0].Contains('.', StringComparison.Ordinal)
+        && _dtypes[0].Kind == DTypeKind.Primitive
+        && _dtypes[0].PType.IsInteger()
+        && !_dtypes[0].IsNullable;
+
     /// <summary>The caller's write options, with the mandatory sorted run on the key added.</summary>
     public VortexWriteOptions Applied(VortexWriteOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
-        // Required rather than budgeted: on a narrow table the index budget would drop the run, and
-        // a dataset whose objects have no run cannot be walked in key order at all.
+        // Required rather than budgeted, and spared by the budget: on a narrow table the run is as
+        // large as the column it orders, so the budget would refuse it on every object past a
+        // mebibyte, compaction outputs included, and a dataset whose objects have no run cannot be
+        // walked in key order at all.
         IndexSpec run = IndexSpec.SortedRuns.AsRequired();
+        options = options with { BudgetSparesRequired = true };
         if (!IsComposite)
         {
             return options.WithIndexes(options.WritePolicy.For(_paths[0], run));

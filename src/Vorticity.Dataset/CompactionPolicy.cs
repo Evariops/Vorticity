@@ -103,7 +103,10 @@ internal static class CompactionPolicy
                 fragmented[0].Level, fragmented[0].Level, style, CompactionTrigger.Fragments, fragmented, 0, 0);
     }
 
-    /// <summary>The job that empties a level into the one above it.</summary>
+    /// <summary>
+    /// The job that empties a level into one above it: the next, or for level 0 under the leveled
+    /// style, the first whose capacity holds it.
+    /// </summary>
     private static CompactionJob? Build(
         VortexDataset dataset,
         List<List<CompactionInput>> levels,
@@ -112,13 +115,24 @@ internal static class CompactionPolicy
         CompactionStyle style,
         CompactionTrigger trigger)
     {
-        int to = from + 1;
         List<CompactionInput> sources = style == CompactionStyle.Leveled
             ? Leveled(levels[from], from)
             : Contiguous(levels, from);
         if (sources.Count == 0)
         {
             return null;
+        }
+
+        int to = from + 1;
+        if (style == CompactionStyle.Leveled && from == 0)
+        {
+            long bytes = 0;
+            foreach (CompactionInput source in sources)
+            {
+                bytes += source.Entry.Bytes;
+            }
+
+            to = settings.LevelZeroDestination(bytes);
         }
 
         List<CompactionInput> inputs = [.. sources];

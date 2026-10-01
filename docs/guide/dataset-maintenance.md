@@ -23,8 +23,8 @@ CompactionPlan plan = await dataset.PlanCompactionAsync();
 
 ```
 after 10 appends: version 11, 50000 rows, 10 objects, lag 2
-plan: work True, style Leveled, clustered True, lag 2, objects by level [10], bytes by level [128962]
-  job: level 0 to 1, LevelZeroCeiling, 10 objects, 50000 rows, 128962 bytes, target 268435456
+plan: work True, style Leveled, clustered True, lag 2, objects by level [10], bytes by level [128862]
+  job: level 0 to 1, LevelZeroCeiling, 10 objects, 50000 rows, 128862 bytes, target 131072
   cost: 0 requests (0 get, 0 head, 0 put, 0 delete, 0 list), 0 dependent steps, 0 bytes read, 0 written
 ```
 
@@ -47,12 +47,12 @@ CompactionResult? compacted = await dataset.CompactAsync();
 ```
 
 ```
-compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128962 bytes in and 79866 out, 50000 rows
-  cost: 26 requests (12 get, 10 head, 2 put, 0 delete, 2 list), 26 dependent steps, 133220 bytes read, 80479 written
+compacted: version 12, Applied, level 0 to 1, 10 objects in and 1 out, 128862 bytes in and 79036 out, 50000 rows
+  cost: 28 requests (12 get, 14 head, 2 put, 0 delete, 0 list), 28 dependent steps, 133120 bytes read, 79649 written
 now: 1 objects, lag 0; again: nothing to do
 ```
 
-**Ten objects became one, and 128 962 bytes became 79 866**: the same 50 000 rows in two thirds of
+**Ten objects became one, and 128 862 bytes became 79 036**: the same 50 000 rows in two thirds of
 the space, because a column encoder does more with 50 000 rows than with 5 000 at a time. Small
 appends cost size, and compaction is what gets it back.
 
@@ -64,6 +64,12 @@ which rewrites each row less often and bounds lookups less. `CompactionOptions` 
 ceiling, the fan-out between levels, the size of a level 1 object and the cap on an output object.
 `Outcome` says whether the commit applied, or found that a concurrent writer had already done it.
 
+Level 0 goes to the first level that holds it: the ten appends here, 126 KiB, fit level 1, which
+holds ten objects of 128 KiB; a load of gigabytes goes past the levels it would only overflow and
+is written once. A dataset that takes many small commits then pays for each a merge into a level a
+few times its size, never one into the levels that hold the bulk of its rows. An output object is
+at most `MaxObjectBytes`, 4 MiB by default, which is also what a delete of one row rewrites.
+
 ## Verify
 
 ```csharp
@@ -72,8 +78,8 @@ DatasetVerification since = await dataset.VerifyAsync(since: checkedAt);
 ```
 
 ```
-verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 11 requests (8 get, 3 head, 0 put, 0 delete, 0 list), 11 dependent steps, 147381 bytes read, 0 written
-verify since 12: holds True, 1 objects, 1 pages; cost: 12 requests (9 get, 3 head, 0 put, 0 delete, 0 list), 12 dependent steps, 28850 bytes read, 0 written
+verify: holds True, 1 objects, 1 commits, 1 pages, 0 fragments, 0 unhashed, 0 problems; cost: 9 requests (6 get, 3 head, 0 put, 0 delete, 0 list), 9 dependent steps, 146049 bytes read, 0 written
+verify since 12: holds True, 1 objects, 1 pages; cost: 12 requests (9 get, 3 head, 0 put, 0 delete, 0 list), 12 dependent steps, 28830 bytes read, 0 written
 ```
 
 `VerifyAsync` checks the version's tree pages, objects and index fragments against what their
@@ -81,7 +87,7 @@ references promise, and names every problem instead of throwing: `Problems` is a
 sentences, empty when `Holds` is true. An object is hashed against the hash its entry records;
 `Unhashed` counts the imported objects whose entry records none, whose length is checked instead.
 `since` skips what an earlier, trusted version shares with this one: after one more append, it
-read 28 850 bytes where a full verification read 147 323.
+read 28 830 bytes where a full verification read 146 049.
 
 ## Vacuum
 
@@ -123,8 +129,8 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 | | requests | what they are |
 |---|---|---|
 | `PlanCompactionAsync` | 0 | the header the handle holds |
-| `CompactAsync` | 56 | every input object read, one object written, one commit |
-| `VerifyAsync` | 11 | every object hashed, every page read |
+| `CompactAsync` | 28 | every input object read, one object written, one commit |
+| `VerifyAsync` | 9 | every object hashed, every page read |
 | `VerifyAsync(since)` | 12 | what the earlier version does not share |
 | `VacuumAsync` | 28 to 30 | a listing, a head per commit object, the retained trees, the deletes in batches |
 

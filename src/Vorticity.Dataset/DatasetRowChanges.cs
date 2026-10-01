@@ -191,8 +191,10 @@ internal static class DatasetRowChanges
                 return (matched, null);
             }
 
-            // Written in the version's schema, which an object of an earlier one is read as.
-            ObjectDraft? draft = matched < held.Entry.Rows ? dataset.StartObjectUnder(version.Schema) : null;
+            // Written in the version's schema, which an object of an earlier one is read as. The rows
+            // kept are the object's own in its own order, and an object above level 0 is a
+            // compaction's, whose rows come in key order.
+            ObjectDraft? draft = matched < held.Entry.Rows ? dataset.StartObjectUnder(version.Schema, inKeyOrder: held.Level > 0) : null;
             try
             {
                 long kept = await SplitAsync(file, columns, filter, draft?.Writer, changed, cancellationToken).ConfigureAwait(false);
@@ -420,10 +422,9 @@ internal sealed class ChangedRecords<TRecord> : ChangedRows
         _update = update;
         _binding = RecordBinding.For<TRecord>(schema.Columns, dataset.Session.Options.Extensions);
         _firstRow = firstRow;
-        long levelOne = dataset.Compaction.LevelTargetBytes > 0
-            ? dataset.Compaction.LevelTargetBytes
-            : CompactionOptions.DefaultTargetBytesAtLevelOne;
-        _target = Math.Min(levelOne, Math.Max(dataset.Options.MaxObjectBytes / 2, 1));
+        // Rolled at what compaction writes at most: the changed rows land in level 0, where a
+        // large change in many small objects would put the level over its ceiling at once.
+        _target = Math.Min(CompactionOptions.DefaultMaxObjectBytes, Math.Max(dataset.Options.MaxObjectBytes / 2, 1));
     }
 
     internal override async ValueTask TakeAsync(RecordBatch batch, CancellationToken cancellationToken)

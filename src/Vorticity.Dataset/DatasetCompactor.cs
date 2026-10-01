@@ -88,7 +88,7 @@ internal static class DatasetCompactor
         // Every input is read as this schema and every output written in it: a compaction is also
         // how objects of an earlier schema come to hold the current one.
         DatasetSchema schema = dataset.Snapshot.Schema;
-        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow);
+        ObjectStream outputs = new ObjectStream(dataset, schema, job.TargetBytes, job.FirstRow, inKeyOrder: merge);
         long rows;
         try
         {
@@ -337,6 +337,7 @@ internal static class DatasetCompactor
     {
         private readonly VortexDataset _dataset;
         private readonly DatasetSchema _schema;
+        private readonly bool _inKeyOrder;
         private readonly long _target;
         private readonly List<WrittenObject> _written = [];
         private byte[] _lastKey = [];
@@ -345,10 +346,11 @@ internal static class DatasetCompactor
         private long _rows;
         private long _firstRow;
 
-        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow)
+        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder)
         {
             _dataset = dataset;
             _schema = schema;
+            _inKeyOrder = inKeyOrder;
             _target = target;
             _firstRow = firstRow;
         }
@@ -391,7 +393,7 @@ internal static class DatasetCompactor
 
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
         {
-            _draft ??= _dataset.StartObjectUnder(_schema);
+            _draft ??= _dataset.StartObjectUnder(_schema, _inKeyOrder);
             await _draft.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
             _rows += batch.RowCount;
         }

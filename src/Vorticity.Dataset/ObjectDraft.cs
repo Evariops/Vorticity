@@ -41,6 +41,12 @@ public sealed class ObjectDraft : IAsyncDisposable
     /// <summary>Where the bytes wait until the object is put.</summary>
     internal ObjectSegmentSink Sink { get; }
 
+    /// <summary>
+    /// Whether the object is written with no run on the clustering key, its rows coming in key order:
+    /// its seal checks that the statistics say so, since a key cursor then walks the column itself.
+    /// </summary>
+    internal bool BySortedColumn { get; init; }
+
     /// <summary>Abandons the object unless a commit took it.</summary>
     /// <returns>A task that completes when the writer's buffers are released.</returns>
     public async ValueTask DisposeAsync()

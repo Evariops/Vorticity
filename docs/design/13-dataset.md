@@ -161,9 +161,12 @@ refused: compaction is the caller's background job, and **a library never stalls
 - **Level 0** holds appended objects as they came, overlapping in key: at most **8**.
 - **Levels 1 to L**, when the dataset declares a clustering key, hold objects with **disjoint key
   ranges** within a level, so a lookup by key touches at most one object per level: **8 + L** in all.
-  This is leveled compaction as RocksDB does it, with Vortex files as the sorted tables. An object
-  written into level `i` targets `256 MiB × F^(i−1)`, `F` = 10, capped at 4 GiB, and a level holds `F`
-  of them; a level holding a single object is never over its size.
+  This is leveled compaction as RocksDB does it, with Vortex files as the sorted tables. Level `i`
+  holds `128 KiB × F^i`, `F` = 10, and an object written into it targets `128 KiB × F^(i−1)`, **capped
+  at 4 MiB**: the cap is what a delete rewrites (§12), and the capacities keep growing past it, so
+  that a level holds `F` times the one below whatever the size of its objects and a dataset of `N`
+  bytes spans about `log_F(N / 128 KiB)` levels. A level holding a single object is never over its
+  size.
 - Without a clustering key, levels are **size tiers**: a lookup touches every object the summaries do
   not refute, which is output-sensitive rather than bounded, and the plan says so.
 - **Inside every object, at most K = 4 runs per index entry**, the same rule as a single file
@@ -182,11 +185,27 @@ index compaction of everything it touches.
 
 **Level 0 is not sorted, and nobody sorts it.** An append arrives in any order and the writer streams
 with bounded memory ([11-write-strategy.md](11-write-strategy.md)). So the write policy **requires a
-sorted run on the clustering key** in every object ([10-indexes.md](10-indexes.md) §6), and the
-compaction reads each input **in key order through that run**
-([12-index-reads.md](12-index-reads.md) §5): the merge's inputs are ordered, its outputs are sorted by
-construction, and the writer never learns to sort. An append whose run the budget would refuse is
-refused as an append.
+sorted run on the clustering key** in every object whose rows may be out of order
+([10-indexes.md](10-indexes.md) §6), and the compaction reads each input **in key order through that
+run** ([12-index-reads.md](12-index-reads.md) §5): the merge's inputs are ordered, its outputs are
+sorted by construction, and the writer never learns to sort. The run is the object's structure rather
+than a hint, so the index budget spares it: on a narrow table it is as large as the column it orders,
+and a budget of a tenth of the data would refuse it on every object past a mebibyte, the merge's
+outputs included.
+
+**An object whose rows come in key order carries no run** when the key is one integer column that
+holds no null: a merge's output, or the rewrite of one (§12). Its statistics say the column is
+sorted, and a sorted column is the source a key cursor and a key-ordered read take before any run,
+its zone map as the index, so a run beside it is bytes nobody reads. The seal checks that a key cursor
+opens on the column alone, so that an object whose order was lost is refused rather than read as one
+without the key.
+
+**Level 0 empties into the first level whose capacity holds it**, not always into level 1. A few
+small commits, a few kilobytes, merge into level 1, rewriting a level a few times their size rather
+than the levels that hold the dataset; a load of gigabytes goes past the levels it would only
+overflow, and is written once rather than once per level on its way up. Nothing orders the levels
+among themselves but their sizes: a row in any level is a row of the dataset, and each level above 0
+only has to stay key-disjoint.
 
 The merge emits **windows, not rows**: at each step the input holding the smallest key emits every
 row at or below the smallest key the others hold, a contiguous window of its current batch, so the
@@ -207,9 +226,10 @@ slower.
 ### 5.4 The price
 
 Leveled compaction with `F` = 10 rewrites each row about `F/2` times per level it crosses: about
-**20 to 25×** the appended bytes over four levels. Tiered rewrites each row about once per level,
-about **L×**. The default is leveled when a clustering key is declared and tiered otherwise. A dataset
-that appends 1 TiB a day, leveled, writes about 25 TiB a day in compaction: the honest cost of the
+**20 to 25×** the appended bytes over four levels. A small commit crosses every level, a load only
+those above the one it lands in. Tiered rewrites each row about once per level, about **L×**. The
+default is leveled when a clustering key is declared and tiered otherwise. A dataset that appends
+1 TiB a day, leveled, writes about 25 TiB a day in compaction: the honest cost of the
 one-object-per-level read bound, which every LSM store pays.
 
 ## 6. Indexes at scale
@@ -457,7 +477,9 @@ summaries would stop being exact, so a count, a minimum or a mean answered from 
 deleted rows; and the zone maps and indexes would answer for rows that are gone. The read path is the
 one this design bounds (§1) and the write path the one it makes pay (§2), so a delete rewrites. What it
 costs is an object per object touched, whatever the number of rows; a filter on the clustering key
-touches at most the 8 + L objects a lookup does.
+touches at most the 8 + L objects a lookup does, and an object is at most `MaxObjectBytes`, 4 MiB by
+default (§5.2), so a delete of one row rewrites at most that much per level whatever the size of the
+dataset.
 
 **What keeps the invariants.** The rows an object keeps are a subset of its rows, so its keys lie inside
 its old range: a level above 0 stays key-disjoint and the tree's order holds; without a clustering key
@@ -553,3 +575,11 @@ a number or making it nullable (§13).
 - **Tampering**: an object replaced at equal size, a page, a root and a fragment torn at every byte, a
   fragment of another object: readers answer exactly, and verify names each.
 - **Rust**: compaction outputs are among the files the cross-check hands to Rust 0.86.1.
+- **The churn** (`bench/Vorticity.Benchmarks.Churn`): ten million rows, then ten thousand commits of
+  ten rows — appends, updates and deletes at random keys — with compaction drained and vacuum run
+  between them. Every cost stays flat from the first commit to the last: an append 1.2 ms, an update
+  19 ms, a delete 14 ms, compaction under a millisecond a commit; a point lookup 0.9 ms in four
+  requests, a seek and ten steps either way 0.5 ms, a hundred rows by position 0.3 ms, a scan of
+  every row 20 ms; the heap between 60 and 80 MiB. Before the level-0 destination, the cap on an
+  object and the chunked buffer, an update cost 820 ms, compaction 100 ms a commit and the heap grew
+  to 2.2 GiB over the first 150 commits.
