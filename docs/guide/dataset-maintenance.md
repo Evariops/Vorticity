@@ -73,7 +73,10 @@ few times its size, never one into the levels that hold the bulk of its rows. An
 at most `MaxObjectBytes`, 4 MiB by default.
 
 Compaction writes the live rows only: the rows a delete marked in an input object end with it, and
-its outputs carry no marks. A compaction that read an object before a delete marked rows in it
+its outputs carry no marks. An object whose marks reach half a delete's bounds, a sixteenth of its
+rows or half a kilobyte of positions, is rewritten alone in its level by a job whose `Trigger` is
+`Marks`: after the bounds of the levels and before the fragments, the most marked object first. A
+compaction that read an object before a delete marked rows in it
 finds the object's entry changed at its commit, and is `Abandoned` rather than bringing those rows
 back.
 

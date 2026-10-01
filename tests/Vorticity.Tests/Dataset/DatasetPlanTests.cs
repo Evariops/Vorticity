@@ -151,8 +151,9 @@ public sealed class DatasetPlanTests
     }
 
     /// <summary>
-    /// The tally under a page, counted here from its leaves -- sums and maxima written out, not the
-    /// tally's own arithmetic -- and held against the one every parent entry carries for it.
+    /// The tally under a page, counted here from its leaves -- sums and maxima written out, the share
+    /// and the vector read off the decoded entry, not the tally's own arithmetic -- and held against
+    /// the one every parent entry carries for it.
     /// </summary>
     private static async Task<ObjectTally> TallyAsync(VortexDataset dataset, PageReference reference, int depth, CancellationToken ct)
     {
@@ -161,6 +162,8 @@ public sealed class DatasetPlanTests
         long largest = 0;
         long deleted = 0;
         long fragments = 0;
+        long marked = 0;
+        long vector = 0;
         if (depth == 1)
         {
             foreach (TreeEntry entry in TreePage.ReadLeaf(page))
@@ -170,9 +173,11 @@ public sealed class DatasetPlanTests
                 largest = Math.Max(largest, held.Bytes);
                 deleted += held.DeletedRows;
                 fragments = Math.Max(fragments, held.Fragments.Count);
+                marked = Math.Max(marked, held.DeletedRows * ObjectTally.Whole / held.PhysicalRows);
+                vector = Math.Max(vector, held.HasDeletions ? held.Deletions.ToBytes().Length : 0);
             }
 
-            return new ObjectTally(bytes, largest, deleted, fragments);
+            return new ObjectTally(bytes, largest, deleted, fragments, marked, vector);
         }
 
         foreach (InternalEntry child in TreePage.ReadInternal(page))
@@ -184,9 +189,11 @@ public sealed class DatasetPlanTests
             largest = Math.Max(largest, below.Largest);
             deleted += below.DeletedRows;
             fragments = Math.Max(fragments, below.MostFragments);
+            marked = Math.Max(marked, below.MostMarked);
+            vector = Math.Max(vector, below.LargestVector);
         }
 
-        return new ObjectTally(bytes, largest, deleted, fragments);
+        return new ObjectTally(bytes, largest, deleted, fragments, marked, vector);
     }
 
     /// <summary>The dataset's fold, with the tally left out of every page, as a build before tallies wrote them.</summary>
@@ -211,7 +218,8 @@ public sealed class DatasetPlanTests
     /// <summary>
     /// Random levels: a level 0 of overlapping ranges around its ceiling, levels above of disjoint
     /// ranges with holes, a few ranges nobody states, sizes drawn from a handful so that the largest
-    /// ties, fragments up to six, and some objects with rows marked.
+    /// ties, fragments up to six, and some objects with rows marked: a few, or runs enough that the
+    /// vector alone makes them due.
     /// </summary>
     private static List<(int Level, ReadOnlyMemory<byte> Key, ObjectEntry Entry)> Shape(Random random)
     {
@@ -232,7 +240,7 @@ public sealed class DatasetPlanTests
                     high,
                     1_000L * random.Next(1, 5),
                     random.Next(10) == 0 ? random.Next(1, 7) : 0,
-                    random.Next(8) == 0 ? random.Next(1, 20) : 0,
+                    random.Next(8) == 0 ? random.Next(1, 20) : random.Next(30) == 0 ? random.Next(150, 400) : 0,
                     keyed: random.Next(25) != 0));
             }
         }
@@ -255,7 +263,7 @@ public sealed class DatasetPlanTests
         }
 
         ObjectEntry entry = new ObjectEntry(
-            CommitKey.ForData($"{level:x2}{low:x12}{high:x12}"), uid, high - low + 100, bytes, uid, references, summaries);
+            CommitKey.ForData($"{level:x2}{low:x12}{high:x12}"), uid, Math.Max(high - low + 100, (3L * deleted) + 1), bytes, uid, references, summaries);
         if (deleted > 0)
         {
             entry = entry.WithDeletions(DeletionVector.Of([.. Enumerable.Range(0, deleted).Select(row => (long)row * 3)]));

@@ -133,8 +133,9 @@ A **leaf entry** describes one data object:
 
 An **internal entry** holds a page reference to a child, the sum of its rows, the **union** of its
 children's summaries, and the **tally** of the objects under it: their bytes, the largest of them, the
-rows marked deleted in them and the most index fragments one of them carries, which a compaction plans
-by (§5.3). The union is intersection-shaped, which is the one thing about it a reader must
+rows marked deleted in them, the most index fragments one of them carries, and the most any one of
+them has marked, as a share of its rows and as the bytes of its vector, which a compaction plans by
+(§5.3). The union is intersection-shaped, which is the one thing about it a reader must
 get right: a column travels up only when every child carries it, and a bound only when every child
 has one, since keeping a bound because another child was silent would prune a subtree that holds the
 answer. One inexact child makes the union inexact.
@@ -226,14 +227,15 @@ The rows written are checked against the inputs' count: a rewrite that loses row
 it must not have. Measured on four interleaved level-0 objects: 42 808 bytes in, one sorted object of
 16 596 out.
 
-Triggers: level 0 above its ceiling, a level above its size, then an entry above K fragments, a
-compaction of index bytes only (§6.4).
+Triggers: level 0 above its ceiling, a level above its size, an object whose marks are due (§12),
+then an entry above K fragments, a compaction of index bytes only (§6.4).
 
 **A leveled plan descends the trees rather than reading them.** A level's bytes are the sum of the
 tallies its top page carries, and the header carries that page. The largest object of a level over
 its size, the one a job pushes down, is at the end of one descent that follows the largest tally at
-each page. The objects of the level below that the job's key range meets, and the objects over
-their fragments, are found by walks that skip every subtree whose summary or tally rules it out. A
+each page. The objects of the level below that the job's key range meets, the objects over their
+fragments and the one whose marks are the most due are found by walks that skip every subtree whose
+summary or tally rules it out. A
 cold plan over 125 000 objects asks the store for two pages, where reading every leaf asks for 124.
 A tiered plan still reads every leaf: its job is the longest run of one level's objects that nothing
 else sits between, which only the order of every level says. So does a plan over a level whose pages
@@ -501,7 +503,9 @@ another key. One `ReplaceObjects` commits the whole change, so a reader sees all
 the marks would cost its reads more than they save the write: under `MarkedObjectBytes`, a mebibyte,
 where a rewrite is a few requests and leaves the object exact; when the rows marked in it would pass an
 eighth of its rows (`MarkedShare`), since every read of it steps over them; and when its vector would
-pass 1 KiB (`MarkedVectorBytes`), a few hundred runs. The vector lives in a leaf page: a commit that
+pass 1 KiB (`MarkedVectorBytes`), a few hundred runs. The vector is counted as the runs it will form:
+at a run a row when that already fits, and otherwise from the rows' places, read before anything is
+written, since the rows a range takes are one run whatever their number. The vector lives in a leaf page: a commit that
 marks a row in any object of a page writes the page again, and while a level's pages fit the header's
 inline room (§3) every commit carries them, so the bound weighs the rewrites the marks save against
 the bytes they add to each commit. The rows a rewritten object keeps are a subset of
@@ -524,16 +528,20 @@ batch or per step:
 | the summaries | an entry with marks keeps its bounds, which its live rows still lie inside, and drops what they no longer prove: exactness, a null count other than zero, a column left with no bound. They prune; they no longer answer |
 
 **Compaction folds the marks.** It reads each input's live rows and writes objects without marks, so
-a vector lasts until its object is next compacted, and an object whose marks would pass their share is
-rewritten by the delete that would pass it. A compaction that read an object before a delete marked
+a vector lasts until its object is next compacted. A level no merge reaches, the top one above all, is
+purged instead. An object whose marks reach half a delete's bounds, a sixteenth of its rows or half a
+kilobyte of vector, is rewritten alone, in its level and inside its range, by a job of its own
+(`CompactionTrigger.Marks`), the most marked first; the plan finds it by descending the shares and
+vectors the tallies carry (§5.3). A delete that would pass the bounds rewrites the object itself only
+when compaction lags. A compaction that read an object before a delete marked
 rows in it would bring those rows back: its `ReplaceObjects` names the entries it read — uid, key and
 vector — and is abandoned when one of them changed (§8.2).
 
 **What it costs.** Measured by the churn (§15) on ten million rows and thirty thousand commits of ten
-rows at random keys: an update takes 1.8 to 3.1 ms and a delete 1.0 to 1.8 ms, where rewriting the
-4 MiB objects that hold the rows takes 19 and 14 ms. A commit writes 23 KiB at first and 63 to 101 KiB
+rows at random keys: an update takes 2.0 to 3.5 ms and a delete 1.1 to 2.0 ms, where rewriting the
+4 MiB objects that hold the rows takes 19 and 14 ms. A commit writes 23 KiB at first and 40 to 75 KiB
 once the vectors have filled, most of it the leaf page the header carries, where a rewrite writes
-3.3 MiB. After a thousand commits the store holds 137 MiB rather than 449 MiB, since the retention
+3.3 MiB; compaction, merges and purges together, writes 61 to 111 KiB a commit. After a thousand commits the store holds 137 MiB rather than 449 MiB, since the retention
 window keeps every object a rewrite replaced (§10). The reads cost what they cost on the rewritten
 dataset: a filter over every object makes the same 220 requests, and a point lookup, a seek, a count
 under a key range and the largest key stay where they were. What the marks keep is space: up to an
@@ -627,7 +635,9 @@ by widening a number or making it nullable (§13).
   every read — rows by position, rows in key order both ways with null keys around the marks, key
   cursors, their ranks and seeks, counts, extremes, aggregates — under a seeded fuzzer of deletes and
   updates; a compaction that read an object before rows were marked in it is abandoned; a count told
-  to leave rows out counts none of them on any tier, each switched off in turn.
+  to leave rows out counts none of them on any tier, each switched off in turn; an object whose marks
+  are due by share or by vector is purged alone in its level; a range too long for a vector's worst
+  case is marked as the run it is, an update's rows written once.
 - **Schema evolution**: objects of each earlier schema read as the current one through scans, counts,
   extremes, key order, key cursors, deletes, updates and compaction, filters over added columns
   included; every change that would lose a value is refused.
@@ -636,9 +646,9 @@ by widening a number or making it nullable (§13).
 - **Rust**: compaction outputs are among the files the cross-check hands to Rust 0.86.1.
 - **The churn** (`bench/Vorticity.Benchmarks.Churn`): ten million rows, then thirty thousand commits of
   ten rows — appends, updates and deletes at random keys — with compaction drained and vacuum run
-  between them. Every cost stays flat, or levels off once the marks have filled: an append 0.8 ms, an
-  update 1.8 to 3.1 ms, a delete 1.0 to 1.8 ms, compaction under a millisecond a commit, a commit's
-  bytes 23 KiB and then 63 to 101 KiB; a point lookup 0.6 to 0.8 ms in two to three requests, a
+  between them. Every cost stays flat, or levels off once the marks have filled: an append 0.8 to
+  1.2 ms, an update 2.0 to 3.5 ms, a delete 1.1 to 2.0 ms, compaction about a millisecond a commit, a
+  commit's bytes 23 KiB and then 40 to 75 KiB; a point lookup 0.6 to 0.8 ms in two to three requests, a
   seek and ten steps either way 0.2 to 0.6 ms, a hundred rows by position 0.2 ms, a scan of every
   row 27 ms; the heap between 60 and 80 MiB. Rewriting instead of marking, an update takes 19 ms and
   a commit writes 3.3 MiB. Before the level-0 destination, the cap on an object and the chunked buffer,

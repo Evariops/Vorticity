@@ -176,7 +176,8 @@ when the rows marked in it would pass an eighth of its rows or a kilobyte of pos
 whole, and one whose summaries refute the filter is not opened. `ObjectsMarked` counts the objects a
 change marked, `ObjectsIn` and `ObjectsOut` those it rewrote, and `BytesIn` and `BytesOut` what the
 rewrites read and wrote. `DataObject.DeletedRows` says how many rows an object holds marked, which
-compaction drops when it next rewrites the object.
+compaction drops when it next rewrites the object: in a merge, or alone once its marks reach half of
+those bounds.
 
 A reader sees the change whole or not at all. Rows appended by another writer while the change is
 worked out are not touched; if another writer rewrites an object the change read, a compaction for
