@@ -17,18 +17,23 @@ namespace Vorticity.Dataset;
 /// caller that changed its mind calls instead.
 /// </summary>
 /// <remarks>
-/// The bytes are held in chunks of <see cref="ChunkBytes"/> from a pool, never in one buffer: a
-/// buffer that doubles as the object grows copies it at every step, and hands the pool arrays of
-/// every size up to the object's, which a pool then keeps. A chunk is the most a pool is handed
-/// back at once, whatever the object's size.
+/// The bytes are held in chunks from a pool, never in one buffer: a buffer that doubles as the object
+/// grows copies it at every step, and hands the pool arrays of every size up to the object's, which a
+/// pool then keeps. The first chunk is <see cref="FirstChunkBytes"/>, each next one twice the one
+/// before up to <see cref="ChunkBytes"/>, so a small object, as a commit of a few rows writes, holds
+/// a few kilobytes of the pool rather than a mebibyte, and a chunk is the most a pool is handed back
+/// at once, whatever the object's size.
 /// </remarks>
 internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 {
     /// <summary>The most bytes this sink buffers before refusing, 1 GiB.</summary>
     public const long DefaultMaxBytes = 1L << 30;
 
-    /// <summary>The bytes of one chunk of the buffer.</summary>
+    /// <summary>The bytes of the largest chunks of the buffer, those past the first few.</summary>
     internal const int ChunkBytes = 1 << 20;
+
+    /// <summary>The bytes of the first chunk of the buffer.</summary>
+    internal const int FirstChunkBytes = 64 << 10;
 
     private readonly IObjectStore _store;
     private readonly string _key;
@@ -41,6 +46,9 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 
     /// <summary>The bytes written, which survives the buffer's release so the object's size does.</summary>
     private long _written;
+
+    /// <summary>The bytes written into the last chunk.</summary>
+    private int _used;
     private bool _committed;
     private bool _closed;
     private bool _released;
@@ -109,21 +117,25 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         _hash.Append(rest);
         while (!rest.IsEmpty)
         {
-            int at = (int)(_written % ChunkBytes);
-            if (at == 0 && _written / ChunkBytes == _chunks.Count)
+            if (_chunks.Count == 0 || _used == SizeOf(_chunks.Count - 1))
             {
-                _chunks.Add(_pool.Rent(ChunkBytes));
+                _chunks.Add(_pool.Rent(SizeOf(_chunks.Count)));
+                _used = 0;
             }
 
-            Span<byte> room = _chunks[^1].Memory.Span.Slice(at, ChunkBytes - at);
+            Span<byte> room = _chunks[^1].Memory.Span[_used..SizeOf(_chunks.Count - 1)];
             int taken = Math.Min(room.Length, rest.Length);
             rest[..taken].CopyTo(room);
             rest = rest[taken..];
+            _used += taken;
             _written += taken;
         }
 
         return ValueTask.CompletedTask;
     }
+
+    /// <summary>The bytes chunk <paramref name="chunk"/> takes of what is written: twice the one before, up to <see cref="ChunkBytes"/>.</summary>
+    private static int SizeOf(int chunk) => chunk >= 4 ? ChunkBytes : Math.Min(FirstChunkBytes << chunk, ChunkBytes);
 
     /// <summary>
     /// Does nothing: nothing is durable until the object exists, and the object exists all at once
@@ -190,12 +202,9 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         return new ReadOnlySequence<byte>(first, 0, last, last.Memory.Length);
     }
 
-    /// <summary>The written part of one chunk.</summary>
-    private ReadOnlyMemory<byte> Held(int chunk)
-    {
-        long start = (long)chunk * ChunkBytes;
-        return _chunks[chunk].Memory[..(int)Math.Min(ChunkBytes, _written - start)];
-    }
+    /// <summary>The written part of one chunk: all of it but for the last.</summary>
+    private ReadOnlyMemory<byte> Held(int chunk) =>
+        _chunks[chunk].Memory[..(chunk == _chunks.Count - 1 ? _used : SizeOf(chunk))];
 
     private void Release()
     {

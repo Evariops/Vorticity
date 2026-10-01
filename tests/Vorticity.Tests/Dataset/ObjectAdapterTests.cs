@@ -109,6 +109,34 @@ public sealed class ObjectAdapterTests
     }
 
     [Fact]
+    public async Task ASinkHoldsItsBytesInChunksThatGrowAndPutsThemBackInOrder()
+    {
+        // Pieces of odd sizes across chunks of 64 KiB, 128, 256, 512 and then a mebibyte each: the
+        // object is the bytes in the order they were written, read in place or put.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        byte[] expected = new byte[(3 << 20) + 12_345];
+        new Random(0x5_1_4C).NextBytes(expected);
+        await using ObjectSegmentSink sink = new ObjectSegmentSink(store, "data/chunked");
+        for (int at = 0, piece = 1; at < expected.Length; at += piece, piece = (piece * 7 % 100_003) + 1)
+        {
+            await sink.WriteAsync(expected.AsMemory(at, Math.Min(piece, expected.Length - at)), ct);
+        }
+
+        Assert.Equal(expected.Length, sink.Position);
+        await using (Vorticity.IO.ISegmentSource content = sink.Content())
+        {
+            using Vorticity.IO.SegmentLease lease = await content.ReadAsync(new Vorticity.IO.SegmentRange(100_000, 900_000), ct);
+            Assert.False(lease.IsContiguous);
+            Assert.True(System.Buffers.BuffersExtensions.ToArray(lease.Bytes).AsSpan().SequenceEqual(expected.AsSpan(100_000, 900_000)));
+        }
+
+        Assert.Equal(PutOutcome.Created, await sink.CommitAsync(ct));
+        using ObjectRange stored = await store.GetRangeAsync("data/chunked", 0, expected.Length, ct);
+        Assert.True(stored.Contiguous().Span.SequenceEqual(expected));
+    }
+
+    [Fact]
     public async Task ASinkOverATakenKeyReportsItRatherThanOverwriting()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
