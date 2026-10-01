@@ -304,17 +304,9 @@ internal sealed class DeletionVector : IRowExclusion, IEquatable<DeletionVector>
     /// </summary>
     public byte[] ToBytes()
     {
-        int bytes = TreePage.VarintBytes((ulong)_starts.Length);
-        long end = 0;
-        for (int run = 0; run < _starts.Length; run++)
-        {
-            bytes += TreePage.VarintBytes((ulong)(_starts[run] - end)) + TreePage.VarintBytes((ulong)(_ends[run] - _starts[run] - 1));
-            end = _ends[run];
-        }
-
-        byte[] value = new byte[bytes];
+        byte[] value = new byte[EncodedBytes];
         Span<byte> at = TreePage.WriteVarint(value, (ulong)_starts.Length);
-        end = 0;
+        long end = 0;
         for (int run = 0; run < _starts.Length; run++)
         {
             at = TreePage.WriteVarint(at, (ulong)(_starts[run] - end));
