@@ -116,6 +116,7 @@ already writes:
 | a level's bytes, against its capacity | the sum of every leaf's bytes | the tallies on its top page, which the header carries: every page's summary carries the tally of what lies under it, folded by a commit as it folds the bounds |
 | the objects a level-0 job takes | level 0's leaves | the same, since level 0 holds at most eight |
 | which object of a full level goes down | every leaf of the level, then the largest | one descent along the largest tally, which finds the same object |
+| the object past where the level's last job stopped | nothing | one descent along the keys, past the pointer the header records with the level |
 | the objects of the next level a job meets | every leaf of that level | a walk that skips each subtree whose bounds lie outside the job's range |
 | the objects over their fragments | every leaf | a walk into the subtrees whose tally holds one |
 | which objects hold the most marks | nothing | the sum of marked rows in every tally, for the purge of §4 |
@@ -126,12 +127,25 @@ follow the rule the rows summed up the tree already follow: each commit rewrites
 entry it changes, so a tally costs no page the commit does not already write. A page written before
 tallies carries none, and a level holding one is planned by its leaves until a commit rewrites it.
 
-**Not built.** First, a compaction pointer per level: the key the last job of a level stopped at, as
-LevelDB keeps one. It would spread the rewrites evenly over the keys, where the largest object lies
-wherever it happens to be. Second, a tiered plan by descent. A tiered job concatenates the longest
-run of one level's objects that nothing else sits between, and only the order of every level says
-where the runs are. A policy that took the run at a pointer instead would need one descent per level
-for each object of the run.
+**Then the pointer, and the tiered plan.** Each level of a header carries a pointer, the tree key the
+level's last job stopped at, as LevelDB keeps one (`CompactionOptions.Pick = RoundRobin`). A job
+records it with its replacement, which moves it when the replacement applies and leaves it when the
+job is abandoned; every commit after carries it, and a level that empties forgets it. The next job of
+the level takes the object past it, and the first past the end, so that the rewrites go over every
+key in turn, where the largest object lies wherever it happens to be. The object past a key is at
+the end of one descent along the keys, as the largest is at the end of one along the tallies: the
+two picks cost a plan the same.
+
+They do not cost the writes the same. The churn on ten million rows, 30 000 commits, takes the same
+jobs either way for its first 15 000 or so. With two seeds of three the round robin then wrote 6 %
+more in compaction, 2 149 and 2 146 MiB against 2 032 and 2 019, and 16 % more in the objects the
+updates and deletes wrote themselves; the third seed took the same jobs throughout. So the largest first stays the default.
+
+**Not built.** A tiered plan by descent. A tiered job concatenates a run of one level's objects
+that nothing else sits between, and where the runs are is a fact of every level's order: the
+longest of them is found only by reading every leaf. The run past the pointer would need much less:
+it ends before the first object another level holds past its start, which one descent per level
+finds.
 
 ## 4. Folding marks where no merge goes
 
@@ -279,8 +293,8 @@ subject destroyed in place of the rows. It belongs to the store library or to th
 ## 6. What to build, in order
 
 1. **Planning in the depth of the tree** (§3). Built for the leveled style: a tally in every page's
-   summary, one descent to the largest object, and walks that skip what the bounds and tallies rule
-   out. A pointer per level and a tiered plan by descent are left.
+   summary, one descent to the largest object or to the one past a level's pointer, and walks that
+   skip what the bounds and tallies rule out. A tiered plan by descent is left.
 2. **Purge jobs** (§4). Built: a trigger `Marks` after the levels' bounds and before the fragments,
    at half a delete's bounds. The churn measures a commit's bytes with and without it: the purges
    move a fifth of them into compaction and leave the total as it was.

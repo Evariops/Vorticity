@@ -23,6 +23,23 @@ public enum CompactionStyle
     Tiered = 2,
 }
 
+/// <summary>Which objects a job takes from a level over its size.</summary>
+public enum CompactionPick
+{
+    /// <summary>
+    /// The largest object of a leveled level, and the longest run of a tiered one that nothing else
+    /// sits between: the most bytes one job moves.
+    /// </summary>
+    Largest = 0,
+
+    /// <summary>
+    /// The object past where the level's last job stopped, and back to the first past the end, as
+    /// LevelDB takes them: every key is rewritten in turn, wherever the largest objects lie. A tiered
+    /// job takes the run that starts there.
+    /// </summary>
+    RoundRobin = 1,
+}
+
 /// <summary>Why a compaction was planned.</summary>
 public enum CompactionTrigger
 {
@@ -97,6 +114,9 @@ public sealed record CompactionOptions
 
     /// <summary>Leveled, tiered, or whichever the clustering key implies.</summary>
     public CompactionStyle Style { get; init; } = CompactionStyle.Auto;
+
+    /// <summary>Which objects a job takes from a level over its size; the largest by default.</summary>
+    public CompactionPick Pick { get; init; } = CompactionPick.Largest;
 
     /// <summary>Whether an object whose marks reach half a delete's bounds is rewritten without them; true by default.</summary>
     internal bool PurgeMarks { get; init; } = true;
@@ -293,6 +313,12 @@ public sealed record CompactionJob
     /// input's own position, so that they take its place.
     /// </summary>
     internal long FirstRow { get; init; }
+
+    /// <summary>
+    /// The tree key of the last object the job takes from its source level, which that level's next
+    /// job starts past under a round robin; empty for a job that moves no pointer.
+    /// </summary>
+    internal ReadOnlyMemory<byte> Stop { get; init; }
 }
 
 /// <summary>

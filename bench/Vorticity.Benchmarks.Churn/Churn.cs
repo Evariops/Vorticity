@@ -309,7 +309,7 @@ internal static class Churn
     /// <summary>The compaction the caller asks for: the library's defaults, or the sizes the command line gave.</summary>
     private static CompactionOptions Compaction(ChurnOptions options)
     {
-        CompactionOptions compaction = new CompactionOptions { PurgeMarks = options.Purge };
+        CompactionOptions compaction = new CompactionOptions { PurgeMarks = options.Purge, Pick = options.Pick };
         if (options.MaxObjectMiB > 0)
         {
             compaction = compaction with { MaxObjectBytes = (long)options.MaxObjectMiB << 20 };

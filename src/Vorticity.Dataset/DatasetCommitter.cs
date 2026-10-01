@@ -169,6 +169,16 @@ internal static class DatasetCommitter
                 }
             }
 
+            // Each level a replacement took its sources from records where it stopped, once the
+            // replacement applied; the latest in the batch wins, as it would in two commits.
+            for (int i = 0; i < operations.Count; i++)
+            {
+                if (operations[i] is DatasetOperation.ReplaceObjects { Pointer: { } pointer } && outcomes[i] == OperationOutcome.Applied)
+                {
+                    next = next.WithPointer(pointer.Level, pointer.Key);
+                }
+            }
+
             // A repack moves the pages last, over the trees the changes produced: a leaf the batch
             // rewrote is already in this commit, and what is left in the named objects moves now.
             if (repack.Versions.Count > 0)
@@ -577,6 +587,7 @@ internal static class DatasetCommitter
             {
                 Depth = tree.Depth,
                 Rows = tree.Rows,
+                Pointer = levels.PointerOf(level),
             });
         }
 

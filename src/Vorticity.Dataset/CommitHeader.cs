@@ -49,6 +49,12 @@ internal sealed record CommitLevel(int Level, long Entries, PageReference Top, I
 
     /// <summary>The rows of every object under it.</summary>
     public long Rows { get; init; }
+
+    /// <summary>
+    /// The tree key the level's last job stopped at, which its next job starts past under a round
+    /// robin; empty until a job of the level records one.
+    /// </summary>
+    public ReadOnlyMemory<byte> Pointer { get; init; }
 }
 
 /// <summary>A commit object's header.</summary>
@@ -143,6 +149,7 @@ internal sealed record CommitHeader
         internal const int Inlined = 4;
         internal const int Depth = 5;
         internal const int Rows = 6;
+        internal const int Pointer = 7;
     }
 
     internal static class InlinedField
@@ -322,6 +329,11 @@ internal sealed record CommitHeader
                 {
                     inlined.Dispose();
                 }
+            }
+
+            if (!level.Pointer.IsEmpty)
+            {
+                inner.WriteBytes(LevelField.Pointer, level.Pointer.Span);
             }
 
             writer.WriteBytes(Field.Levels, inner.WrittenSpan);
@@ -576,6 +588,7 @@ internal sealed record CommitHeader
         long rows = 0;
         PageReference top = PageReference.None;
         List<InlinedPage> inlined = [];
+        byte[] pointer = [];
         ProtoReader reader = new ProtoReader(bytes);
         while (reader.TryReadTag(out int field, out ProtoWireType wire))
         {
@@ -599,13 +612,16 @@ internal sealed record CommitHeader
                 case (LevelField.Inlined, ProtoWireType.LengthDelimited):
                     inlined.Add(ReadInlined(reader.ReadLengthDelimited()));
                     break;
+                case (LevelField.Pointer, ProtoWireType.LengthDelimited):
+                    pointer = reader.ReadLengthDelimited().ToArray();
+                    break;
                 default:
                     reader.SkipField(wire);
                     break;
             }
         }
 
-        return new CommitLevel(level, entries, top, inlined) { Depth = depth, Rows = rows };
+        return new CommitLevel(level, entries, top, inlined) { Depth = depth, Rows = rows, Pointer = pointer };
     }
 
     private static InlinedPage ReadInlined(ReadOnlySpan<byte> bytes)
