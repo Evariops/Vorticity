@@ -15,18 +15,32 @@ namespace Vorticity.Dataset;
 internal sealed class DatasetSnapshot
 {
     private readonly ObjectCache _objects;
+    private long _knownAt;
 
-    internal DatasetSnapshot(CommitHeader header, CommitPageSource pages, ObjectCache objects, DatasetSchema? previous = null)
+    internal DatasetSnapshot(
+        CommitObject commit, CommitPageSource pages, ObjectCache objects, DateTimeOffset knownAt, DatasetSchema? previous = null)
     {
-        Header = header;
-        Levels = DatasetLevels.Of(header);
+        Commit = commit;
+        Header = commit.Header;
+        Levels = DatasetLevels.Of(Header);
         Pages = pages;
-        Schema = DatasetSchema.Of(header, previous);
+        Schema = DatasetSchema.Of(Header, previous);
         _objects = objects;
+        _knownAt = knownAt.UtcTicks;
     }
+
+    /// <summary>The version's commit object, as the handle read it or wrote it.</summary>
+    internal CommitObject Commit { get; }
 
     /// <summary>The version's header.</summary>
     internal CommitHeader Header { get; }
+
+    /// <summary>
+    /// The last time the handle knew this version to be the latest, by its own clock. A version after
+    /// it was created later, and vacuum takes a commit only a retention window after the next one
+    /// superseded it: until then every version after this one is still in the store.
+    /// </summary>
+    internal DateTimeOffset KnownAt => new DateTimeOffset(Interlocked.Read(ref _knownAt), TimeSpan.Zero);
 
     /// <summary>The version's schema, which every object it holds reads as.</summary>
     internal DatasetSchema Schema { get; }
@@ -42,6 +56,23 @@ internal sealed class DatasetSnapshot
 
     /// <summary>The rows of every object it holds.</summary>
     internal long RowCount => Levels.Rows;
+
+    /// <summary>Records that the handle found, at <paramref name="at"/>, that this version was still the latest.</summary>
+    internal void Confirm(DateTimeOffset at)
+    {
+        long ticks = at.UtcTicks;
+        long seen = Interlocked.Read(ref _knownAt);
+        while (ticks > seen)
+        {
+            long found = Interlocked.CompareExchange(ref _knownAt, ticks, seen);
+            if (found == seen)
+            {
+                return;
+            }
+
+            seen = found;
+        }
+    }
 
     /// <summary>
     /// The objects inside <c>[from, to)</c> whose summaries, and their ancestors', do not refute

@@ -75,7 +75,15 @@ public sealed record DatasetOptions
     /// </remarks>
     public long PageCacheBytes { get; init; } = 32L << 20;
 
-    /// <summary>The clock a commit's creation time is read from; the system's by default.</summary>
+    /// <summary>
+    /// The clock a commit's creation time is read from, and that dates when the handle last knew its
+    /// version to be the latest; the system's by default.
+    /// </summary>
+    /// <remarks>
+    /// It must agree with the store's to within half the retention window, as a vacuum's clock must:
+    /// for that half window after it learned its version was the latest, a handle takes every version
+    /// after it for still being in the store, and past it lists the commits instead.
+    /// </remarks>
     public TimeProvider TimeProvider { get; init; } = TimeProvider.System;
 
     /// <summary>

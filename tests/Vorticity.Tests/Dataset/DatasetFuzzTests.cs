@@ -378,6 +378,7 @@ public sealed class DatasetFuzzTests
             ClusteringKey = ["key"],
             RetentionWindow = TimeSpan.FromSeconds(3_600),
             Write = new VortexWriteOptions { RowBlockSize = 128, DataBlockTargetBytes = 8 << 10 },
+            TimeProvider = clock,
         };
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, schema, options, ct);
         await using VortexDataset second = await VortexDataset.OpenAsync(store, options, ct);

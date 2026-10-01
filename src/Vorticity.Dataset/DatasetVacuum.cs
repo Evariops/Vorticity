@@ -65,6 +65,10 @@ internal static class DatasetVacuum
     /// <summary>The retention window applied when the dataset sets none.</summary>
     public static readonly TimeSpan DefaultWindow = TimeSpan.FromDays(7);
 
+    /// <summary>The window a header's retention sets: its seconds, or <see cref="DefaultWindow"/> when it sets none.</summary>
+    public static TimeSpan WindowOf(RetentionSettings retention) =>
+        retention.Seconds > 0 ? TimeSpan.FromSeconds(retention.Seconds) : DefaultWindow;
+
     /// <summary>Marks from every version inside the window, then sweeps what is unmarked and old.</summary>
     /// <exception cref="CommitFormatException">A page it must mark from is not what its reference says.</exception>
     /// <exception cref="ObjectNotFoundException">A page it must mark from is missing; nothing was deleted.</exception>
@@ -82,7 +86,7 @@ internal static class DatasetVacuum
         }
 
         RetentionSettings retention = head.Header.Retention;
-        TimeSpan window = retention.Seconds > 0 ? TimeSpan.FromSeconds(retention.Seconds) : DefaultWindow;
+        TimeSpan window = WindowOf(retention);
 
         // A commit newer than the one marked from is not this vacuum's to judge.
         List<(ulong Version, string Key, DateTimeOffset Created)> commits = [];

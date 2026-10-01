@@ -1,9 +1,9 @@
 // What finding a dataset's latest version on a directory of files costs, against the commits kept.
 //
 // A dataset on a FileObjectStore holds `Commits` versions, empty commits on top of its creation.
-// The latest version is found three ways: by listing the commits (`Listed`, what an open does and
-// what a refresh or a commit attempt did), from the latest version itself (`Known`, a refresh with
-// nothing newer), and from ten versions behind (`Behind`, a writer that lost to others).
+// The latest version is found three ways: by listing the commits (`Listed`, what an open does, and
+// a handle whose version is too old to trust), from the latest version itself (`Known`, a refresh
+// with nothing newer), and from ten versions behind (`Behind`, a writer that lost to others).
 using System;
 using System.IO;
 using System.Threading;
@@ -57,12 +57,12 @@ public class LatestVersionBenchmarks
     /// <summary>From the latest version: nothing newer.</summary>
     [Benchmark]
     public ulong Known() =>
-        DatasetCommitter.LatestAsync(_store, (ulong)Commits, CancellationToken.None).AsTask().GetAwaiter().GetResult().Version;
+        DatasetCommitter.LatestAsync(_store, (ulong)Commits, trusted: true, CancellationToken.None).AsTask().GetAwaiter().GetResult().Version;
 
     /// <summary>From ten versions behind.</summary>
     [Benchmark]
     public ulong Behind() =>
-        DatasetCommitter.LatestAsync(_store, (ulong)Commits - 10, CancellationToken.None).AsTask().GetAwaiter().GetResult().Version;
+        DatasetCommitter.LatestAsync(_store, (ulong)Commits - 10, trusted: true, CancellationToken.None).AsTask().GetAwaiter().GetResult().Version;
 
     private async Task BuildAsync()
     {
