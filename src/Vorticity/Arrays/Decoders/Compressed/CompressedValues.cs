@@ -440,12 +440,9 @@ internal ref struct ValueWriter
         where TEnd : unmanaged
         where TValue : unmanaged
     {
-        // Without 256-bit vectors, a node whose runs average more than two steps of stores is
-        // filled run by run: at that length the stores' tests cost a run more than they save.
+        // Without vectors of the value's width, a run is a span fill.
         if (!(Vector256.IsHardwareAccelerated && Vector256<TValue>.IsSupported)
-            && (!(Vector128.IsHardwareAccelerated && Vector128<TValue>.IsSupported)
-                || ends.IsEmpty
-                || WidenEnd(ends[^1]) > (ulong)ends.Length * (ulong)(8 * Vector128<TValue>.Count)))
+            && !(Vector128.IsHardwareAccelerated && Vector128<TValue>.IsSupported))
         {
             return FilledRuns<TEnd, TValue>(ends, in source, firstRun, offset, length, in sourceValidity, in validity, tracked);
         }
@@ -458,13 +455,20 @@ internal ref struct ValueWriter
         // A run is stores of the value in every lane, a vector at a time, the last written past the
         // run's end into rows the next runs write again: a run holds few rows, and the call a fill
         // makes outweighs them. The runs whose last vector would pass the rows are filled. With
-        // 128-bit vectors a step is four stores and a run longer than two steps is filled, since a
-        // fill's own unrolled loop outruns one store a step there.
+        // 128-bit vectors a step is four stores, whatever the run's length: on an Apple M4 Pro, one
+        // window of 2 048 runs of 64 `i32` rows took 5.1 µs where a fill a run took 9.3, and runs of
+        // 16 to 4 096 rows came out 1.4 to 2.3 times faster than the fill.
         int lanes = Vector256.IsHardwareAccelerated && Vector256<TValue>.IsSupported ? Vector256<TValue>.Count
             : Vector128.IsHardwareAccelerated && Vector128<TValue>.IsSupported ? Vector128<TValue>.Count
             : 0;
         int position = 0;
-        for (int run = firstRun; run < ends.Length && position < length; run++)
+        int run = firstRun;
+        if (!tracked && !(Vector256.IsHardwareAccelerated && Vector256<TValue>.IsSupported))
+        {
+            (run, position) = StoredRuns(ends, values, ref into, run, offset, length);
+        }
+
+        for (; run < ends.Length && position < length; run++)
         {
             ulong end = WidenEnd(ends[run]) - offset;
             if (end > unsignedLength)
@@ -494,17 +498,23 @@ internal ref struct ValueWriter
                     destination[position..endRow].Fill(values[run]);
                 }
             }
-            else if (lanes != 0 && rows <= 8 * lanes && position + rows + (4 * lanes) - 1 <= length)
+            else if (lanes != 0 && position + rows + (4 * lanes) - 1 <= length)
             {
+                // The step walks a reference to a bound rather than an index from the run's
+                // start: the loop then holds the reference, the bound and the value, and Native AOT
+                // no longer spills the row it reached to the stack and reloads it every step.
                 Vector128<TValue> repeated = Vector128.Create(values[run]);
-                for (int k = 0; k < rows; k += 4 * lanes)
+                ref TValue at = ref Unsafe.Add(ref into, position);
+                ref TValue stop = ref Unsafe.Add(ref at, rows);
+                do
                 {
-                    ref TValue at = ref Unsafe.Add(ref into, position + k);
                     repeated.StoreUnsafe(ref at);
                     repeated.StoreUnsafe(ref at, (nuint)lanes);
                     repeated.StoreUnsafe(ref at, (nuint)(2 * lanes));
                     repeated.StoreUnsafe(ref at, (nuint)(3 * lanes));
+                    at = ref Unsafe.Add(ref at, 4 * lanes);
                 }
+                while (Unsafe.IsAddressLessThan(ref at, ref stop));
             }
             else
             {
@@ -521,7 +531,63 @@ internal ref struct ValueWriter
         return position;
     }
 
-    /// <summary>The run loop of long runs: a span fill a run.</summary>
+    /// <summary>
+    /// The runs of a column with no validity to track, stored four 128-bit vectors a step until the
+    /// first run whose last step would pass the rows: the loop the general one leaves the rest to.
+    /// </summary>
+    /// <returns>The run it stopped at and the row it reached.</returns>
+    /// <remarks>
+    /// Apart from the general loop because that one calls out, a fill near the end and the
+    /// validity's writes, and every call costs a run the spills and reloads of what the loop holds:
+    /// this one calls nothing, and Native AOT keeps the run, the row and the bounds in registers.
+    /// </remarks>
+    private static (int Run, int Position) StoredRuns<TEnd, TValue>(
+        ReadOnlySpan<TEnd> ends, ReadOnlySpan<TValue> values, ref TValue into, int run, ulong offset, int length)
+        where TEnd : unmanaged
+        where TValue : unmanaged
+    {
+        int lanes = Vector128<TValue>.Count;
+        ulong unsignedLength = (ulong)(uint)length;
+        int position = 0;
+        for (; run < ends.Length && position < length; run++)
+        {
+            ulong end = WidenEnd(ends[run]) - offset;
+            if (end > unsignedLength)
+            {
+                end = unsignedLength;
+            }
+
+            int endRow = (int)end;
+            if (endRow <= position)
+            {
+                continue;
+            }
+
+            if (endRow + (4 * lanes) - 1 > length)
+            {
+                break;
+            }
+
+            Vector128<TValue> repeated = Vector128.Create(values[run]);
+            ref TValue at = ref Unsafe.Add(ref into, position);
+            ref TValue stop = ref Unsafe.Add(ref into, endRow);
+            do
+            {
+                repeated.StoreUnsafe(ref at);
+                repeated.StoreUnsafe(ref at, (nuint)lanes);
+                repeated.StoreUnsafe(ref at, (nuint)(2 * lanes));
+                repeated.StoreUnsafe(ref at, (nuint)(3 * lanes));
+                at = ref Unsafe.Add(ref at, 4 * lanes);
+            }
+            while (Unsafe.IsAddressLessThan(ref at, ref stop));
+
+            position = endRow;
+        }
+
+        return (run, position);
+    }
+
+    /// <summary>The run loop without vectors of the value's width: a span fill a run.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private readonly int FilledRuns<TEnd, TValue>(
         ReadOnlySpan<TEnd> ends, in ValueReader source, int firstRun, ulong offset, int length,
@@ -564,8 +630,10 @@ internal ref struct ValueWriter
     /// Same shape as <c>RowKernels.WidenCode</c> and for the same reason: every branch but one is
     /// a constant-false compare of two <c>typeof</c>s, which the JIT removes when it specializes.
     /// A negative end is impossible here -- `ValidateEnds` has already walked them -- so the signed
-    /// types widen through <c>long</c> and cast.
+    /// types widen through <c>long</c> and cast. Inlined by demand, since Native AOT left it a call
+    /// a run, the branches being too many for its budget before they fold.
     /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong WidenEnd<TEnd>(TEnd end)
         where TEnd : unmanaged
     {

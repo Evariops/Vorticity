@@ -1,4 +1,9 @@
 using System;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
@@ -253,20 +258,46 @@ internal sealed class RunEndDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         int count = wanted.Length;
+        Span<int> stack = stackalloc int[StackRows];
+        Scratch<int> scratch = new Scratch<int>(count, stack);
         DataBufferSet dataBuffers = DataBufferSet.Collect(context.Canonical, in values, false, default);
         try
         {
+            // The wanted rows ascend, so each search could start where the last one stopped; it
+            // does not, because a binary search over a run count is already logarithmic and a
+            // resumed linear scan is worse whenever the rows are far apart - which is the case a
+            // take is for. The searches are typed and run four abreast instead, so that the loads
+            // of four of them are in flight at once.
+            Span<int> runs = scratch.Span;
+            ulong unsignedOffset = (ulong)offset;
+            switch (endsPType)
+            {
+                case PType.U8:
+                    FindRuns(MemoryMarshal.Cast<byte, byte>(ends)[..runCount], unsignedOffset, wanted, runs);
+                    break;
+                case PType.U16:
+                    FindRuns(MemoryMarshal.Cast<byte, ushort>(ends)[..runCount], unsignedOffset, wanted, runs);
+                    break;
+                case PType.U32:
+                    FindRuns(MemoryMarshal.Cast<byte, uint>(ends)[..runCount], unsignedOffset, wanted, runs);
+                    break;
+                case PType.U64:
+                    FindRuns(MemoryMarshal.Cast<byte, ulong>(ends)[..runCount], unsignedOffset, wanted, runs);
+                    break;
+                default:
+                    for (int i = 0; i < count; i++)
+                    {
+                        runs[i] = FindRun(ends, endsPType, runCount, unsignedOffset, wanted[i]);
+                    }
+
+                    break;
+            }
+
             ValueWriter writer = ValueWriter.Create(context, in values, count, 0, Id);
             ValidityWriter validity = ValidityWriter.Create(context, count, tracked, Id);
-
-            ulong unsignedOffset = (ulong)offset;
             for (int i = 0; i < count; i++)
             {
-                // The wanted rows ascend, so each search could start where the last one stopped;
-                // it does not, because a binary search over a run count is already logarithmic and
-                // a resumed linear scan is worse whenever the rows are far apart - which is the
-                // case a take is for.
-                int run = FindRun(ends, endsPType, runCount, unsignedOffset, wanted[i]);
+                int run = runs[i];
                 if (run < 0)
                 {
                     CompressedThrow.Format(
@@ -286,7 +317,102 @@ internal sealed class RunEndDecoder : ArrayDecoder
         finally
         {
             dataBuffers.Dispose();
+            scratch.Dispose();
         }
+    }
+
+    /// <summary>The wanted rows a take searches on the stack: a take's batch, past which the pool lends.</summary>
+    private const int StackRows = 128;
+
+    /// <summary>
+    /// Each wanted row's run, the first whose end, less <paramref name="offset"/>, is above the row,
+    /// or -1 for a row past every run: four searches at a time, each halving its span without a
+    /// branch, and the rest one by one.
+    /// </summary>
+    private static void FindRuns<TEnd>(ReadOnlySpan<TEnd> ends, ulong offset, ReadOnlySpan<int> wanted, Span<int> runs)
+        where TEnd : unmanaged
+    {
+        int runCount = ends.Length;
+        if (runCount == 0)
+        {
+            runs[..wanted.Length].Fill(-1);
+            return;
+        }
+
+        ref TEnd first = ref MemoryMarshal.GetReference(ends);
+        int i = 0;
+        for (; i + 4 <= wanted.Length; i += 4)
+        {
+            ulong t0 = (ulong)(uint)wanted[i] + offset;
+            ulong t1 = (ulong)(uint)wanted[i + 1] + offset;
+            ulong t2 = (ulong)(uint)wanted[i + 2] + offset;
+            ulong t3 = (ulong)(uint)wanted[i + 3] + offset;
+            int l0 = 0;
+            int l1 = 0;
+            int l2 = 0;
+            int l3 = 0;
+            for (int span = runCount; span > 1;)
+            {
+                int half = span >> 1;
+                l0 = End(ref first, l0 + half - 1) <= t0 ? l0 + half : l0;
+                l1 = End(ref first, l1 + half - 1) <= t1 ? l1 + half : l1;
+                l2 = End(ref first, l2 + half - 1) <= t2 ? l2 + half : l2;
+                l3 = End(ref first, l3 + half - 1) <= t3 ? l3 + half : l3;
+                span -= half;
+            }
+
+            runs[i] = Settle(ref first, l0, t0, runCount);
+            runs[i + 1] = Settle(ref first, l1, t1, runCount);
+            runs[i + 2] = Settle(ref first, l2, t2, runCount);
+            runs[i + 3] = Settle(ref first, l3, t3, runCount);
+        }
+
+        for (; i < wanted.Length; i++)
+        {
+            ulong target = (ulong)(uint)wanted[i] + offset;
+            int lower = 0;
+            for (int span = runCount; span > 1;)
+            {
+                int half = span >> 1;
+                lower = End(ref first, lower + half - 1) <= target ? lower + half : lower;
+                span -= half;
+            }
+
+            runs[i] = Settle(ref first, lower, target, runCount);
+        }
+    }
+
+    /// <summary>The search's last step: the run left, or the one after it, or none past the last.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Settle<TEnd>(ref TEnd first, int lower, ulong target, int runCount)
+        where TEnd : unmanaged
+    {
+        int run = End(ref first, lower) > target ? lower : lower + 1;
+        return run < runCount ? run : -1;
+    }
+
+    /// <summary>Run end <paramref name="index"/>, widened, folded at instantiation.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong End<TEnd>(ref TEnd first, int index)
+        where TEnd : unmanaged
+    {
+        TEnd end = Unsafe.Add(ref first, index);
+        if (typeof(TEnd) == typeof(byte))
+        {
+            return Unsafe.As<TEnd, byte>(ref end);
+        }
+
+        if (typeof(TEnd) == typeof(ushort))
+        {
+            return Unsafe.As<TEnd, ushort>(ref end);
+        }
+
+        if (typeof(TEnd) == typeof(uint))
+        {
+            return Unsafe.As<TEnd, uint>(ref end);
+        }
+
+        return Unsafe.As<TEnd, ulong>(ref end);
     }
 
     /// <summary>The first run whose (offset-adjusted) end is strictly above <paramref name="row"/>.</summary>
@@ -324,31 +450,85 @@ internal sealed class RunEndDecoder : ArrayDecoder
             return;
         }
 
-        ulong previous = 0;
-        for (int run = 0; run < runCount; run++)
+        // The ends' type resolved once for the walk, not once an end: the walk is the whole of a
+        // run-end node's checks, and an end read through its type is a call per run. The type was
+        // checked unsigned before anything indexed with it.
+        EndsShape shape = endsPType switch
         {
-            ulong end = CompressedValues.ReadUnsigned(ends, endsPType, run);
-            if (run != 0 && end <= previous)
-            {
-                CompressedThrow.Format(
-                    $"vortex.runend run ends must be strictly increasing; {end} follows {previous}.");
-            }
+            PType.U8 => Shape(MemoryMarshal.Cast<byte, byte>(ends)[..runCount]),
+            PType.U16 => Shape(MemoryMarshal.Cast<byte, ushort>(ends)[..runCount]),
+            PType.U32 => Shape(MemoryMarshal.Cast<byte, uint>(ends)[..runCount]),
+            PType.U64 => Shape(MemoryMarshal.Cast<byte, ulong>(ends)[..runCount]),
+            _ => throw new System.Diagnostics.UnreachableException($"{Id} run ends are checked unsigned before they are walked."),
+        };
 
-            previous = end;
-        }
-
-        ulong first = CompressedValues.ReadUnsigned(ends, endsPType, 0);
-        if (offset != 0 && first < (ulong)offset)
+        if (shape.Descent > 0)
         {
             CompressedThrow.Format(
-                $"vortex.runend first run end {first} must be at least the offset {offset}.");
+                $"vortex.runend run ends must be strictly increasing; {shape.Fallen} follows {shape.Before}.");
+        }
+
+        if (offset != 0 && shape.First < (ulong)offset)
+        {
+            CompressedThrow.Format(
+                $"vortex.runend first run end {shape.First} must be at least the offset {offset}.");
         }
 
         ulong required = (ulong)offset + (ulong)(uint)length;
-        if (previous < required)
+        if (shape.Last < required)
         {
             CompressedThrow.Format(
-                $"vortex.runend last run end {previous} must be at least offset + length {required}.");
+                $"vortex.runend last run end {shape.Last} must be at least offset + length {required}.");
         }
+    }
+
+    /// <summary>What the checks of a node's run ends need: its first and last end, and its first descent.</summary>
+    /// <param name="First">The first end.</param>
+    /// <param name="Last">The last end.</param>
+    /// <param name="Descent">The first end not above the one before it, or -1.</param>
+    /// <param name="Before">The end before the descent.</param>
+    /// <param name="Fallen">The end at the descent.</param>
+    private readonly record struct EndsShape(ulong First, ulong Last, int Descent, ulong Before, ulong Fallen);
+
+    /// <summary>
+    /// The shape of a node's run ends, the walk a vector of ends at a time against the same vector
+    /// one end earlier, and the descent named one end at a time only once a vector has found one.
+    /// </summary>
+    private static EndsShape Shape<TEnd>(ReadOnlySpan<TEnd> ends)
+        where TEnd : unmanaged, IComparisonOperators<TEnd, TEnd, bool>
+    {
+        ref TEnd first = ref MemoryMarshal.GetReference(ends);
+        int i = 1;
+        if (Vector128.IsHardwareAccelerated && Vector128<TEnd>.IsSupported)
+        {
+            Vector128<TEnd> descents = Vector128<TEnd>.Zero;
+            for (; i + Vector128<TEnd>.Count <= ends.Length; i += Vector128<TEnd>.Count)
+            {
+                descents |= Vector128.LessThanOrEqual(
+                    Vector128.LoadUnsafe(ref first, (nuint)i), Vector128.LoadUnsafe(ref first, (nuint)(i - 1)));
+            }
+
+            if (descents != Vector128<TEnd>.Zero)
+            {
+                i = 1;
+            }
+        }
+
+        int descent = -1;
+        for (; i < ends.Length; i++)
+        {
+            if (ends[i] <= ends[i - 1])
+            {
+                descent = i;
+                break;
+            }
+        }
+
+        return new EndsShape(
+            End(ref first, 0),
+            End(ref first, ends.Length - 1),
+            descent,
+            descent > 0 ? End(ref first, descent - 1) : 0,
+            descent > 0 ? End(ref first, descent) : 0);
     }
 }

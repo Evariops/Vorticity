@@ -85,7 +85,7 @@ public sealed partial class PerRowDispatchTests
         ("Arrays/Decoders/Compressed/FsstDecoder.cs", 5, 3, "R11"),
         ("Arrays/Decoders/Compressed/OnPairDecoder.cs", 6, 3, "R2; the dictionary's two walks are typed, and the one call left there refuses a type that is not an integer"),
         ("Arrays/Decoders/Compressed/Patches.cs", 3, 1, "R4 (GetPosition); the other two are per run"),
-        ("Arrays/Decoders/Compressed/RunEndDecoder.cs", 4, 0, "per run, not per row"),
+        ("Arrays/Decoders/Compressed/RunEndDecoder.cs", 2, 0, "per run, not per row: the walk of a shape with no typed kernel, and the search for a range's first run; the ends' checks and a take's searches read them typed"),
         ("Columns/ExtensionColumn.cs", 1, 0, "legitimate: the column API is per row by design"),
         ("Columns/ListColumn.cs", 2, 0, "legitimate: the column API is per row by design"),
         ("Columns/VortexColumn.cs", 1, 0, "legitimate: the column API is per row by design"),
@@ -102,7 +102,7 @@ public sealed partial class PerRowDispatchTests
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
-    private const int TotalCalls = 47;
+    private const int TotalCalls = 45;
 
     /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
