@@ -1,7 +1,9 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Vorticity.Zstd.Internal;
 
@@ -202,8 +204,8 @@ internal static class Fse
         }
 
         Span<FseEntry> table = stackalloc FseEntry[1 << WeightsMaxTableLog];
-        bool fast = BuildTable(table, normalized.Slice(0, maxSymbolValue + 1), tableLog, error);
-        return DecodeTwoStates(source.Slice(headerSize), weights, table, tableLog, fast);
+        BuildTable(table, normalized.Slice(0, maxSymbolValue + 1), tableLog, error);
+        return DecodeTwoStates(source.Slice(headerSize), weights, table, tableLog);
     }
 
     /// <summary>libzstd's <c>FSE_DECOMPRESS_WKSP_SIZE</c>, in bytes.</summary>
@@ -279,72 +281,151 @@ internal static class Fse
     }
 
     /// <summary>libzstd's <c>FSE_decompress_usingDTable_generic</c> on a 64-bit container.</summary>
-    private static int DecodeTwoStates(ReadOnlySpan<byte> source, Span<byte> output, ReadOnlySpan<FseEntry> table, int tableLog, bool fast)
+    /// <remarks>
+    /// <para>
+    /// The weights end where the stream overflows, so the statuses of libzstd's reload decide
+    /// exactly as there (see <see cref="BackwardBitReader"/>), computed from the stream's position
+    /// rather than returned: the reload itself is one clamped move, without branches. The stream's
+    /// state lives in locals, an entry is one 32-bit load, and a state reads its bits with two shifts
+    /// that give 0 for none (a state of a symbol above half the table reads no bit).
+    /// </para>
+    /// <para>
+    /// A stream under eight bytes is read from a zero-padded copy, its bits below the stream counted
+    /// as consumed: that is the container libzstd assembles byte by byte.
+    /// </para>
+    /// </remarks>
+    private static int DecodeTwoStates(ReadOnlySpan<byte> source, Span<byte> output, ReadOnlySpan<FseEntry> table, int tableLog)
     {
         const ZstdError error = ZstdError.HuffmanTable;
-        var bits = new BackwardBitReader(source, error);
-        int state1 = (int)bits.ReadBits(tableLog);
-        bits.Reload();
-        int state2 = (int)bits.ReadBits(tableLog);
-        bits.Reload();
-        if (bits.Reload() == BitStreamStatus.Overflow)
+        if (source.IsEmpty || source[^1] == 0)
+        {
+            Throw.Error(error);
+        }
+
+        nint bc = 8 - BackwardBitReader.HighBit(source[^1]);
+        nint position;
+        Span<byte> padded = stackalloc byte[8];
+        scoped ref byte bits = ref MemoryMarshal.GetReference(source);
+        if (source.Length >= 8)
+        {
+            position = source.Length - 8;
+        }
+        else
+        {
+            padded.Clear();
+            source.CopyTo(padded);
+            bc += (8 - source.Length) * 8;
+            position = 0;
+            bits = ref MemoryMarshal.GetReference(padded);
+        }
+
+        ulong container = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bits, position));
+        ref uint entries = ref Unsafe.As<FseEntry, uint>(ref MemoryMarshal.GetReference(table));
+        ref byte op = ref MemoryMarshal.GetReference(output);
+        Debug.Assert(output.Length >= 256 && table.Length >= 1 << tableLog);
+
+        // libzstd reloads after each initial state, then once more and refuses an overflow. An
+        // overflowed stream (more than 64 bits consumed) stays as it is; any other reload is the
+        // clamped one below, whatever its status.
+        nint state1 = (nint)ReadBits(container, ref bc, tableLog);
+        Reload(ref bits, ref position, ref bc, ref container);
+        nint state2 = (nint)ReadBits(container, ref bc, tableLog);
+        Reload(ref bits, ref position, ref bc, ref container);
+        if (bc > 64)
         {
             Throw.Error(error);
         }
 
         // At most 255 weights: the last symbol's weight is implied.
-        int max = 255;
-        int op = 0;
+        const int Max = 255;
+        nint count = 0;
 
-        // Four symbols a round while the stream has bits to spare; on a 64-bit container libzstd
-        // reloads only between rounds.
-        while ((bits.Reload() == BitStreamStatus.Unfinished) & (op < max - 3))
-        {
-            output[op] = Symbol(ref bits, ref state1, table, fast);
-            output[op + 1] = Symbol(ref bits, ref state2, table, fast);
-            output[op + 2] = Symbol(ref bits, ref state1, table, fast);
-            output[op + 3] = Symbol(ref bits, ref state2, table, fast);
-            op += 4;
-        }
-
-        // The tail: the stream ends when it overflows, and the other state then gives one more symbol.
+        // Four symbols a round while the reload before it finds the stream unfinished: not
+        // overflowed, not at its start, and moving by all the bytes consumed. On a 64-bit container
+        // libzstd reloads only between rounds.
         while (true)
         {
-            if (op > max - 2)
+            bool unfinished = (bc <= 64) & (position > 0) & ((bc >> 3) <= position);
+            Reload(ref bits, ref position, ref bc, ref container);
+            if (!(unfinished & (count < Max - 3)))
             {
-                Throw.Error(error);
-            }
-
-            output[op++] = Symbol(ref bits, ref state1, table, fast);
-            if (bits.Reload() == BitStreamStatus.Overflow)
-            {
-                output[op++] = Symbol(ref bits, ref state2, table, fast);
                 break;
             }
 
-            if (op > max - 2)
-            {
-                Throw.Error(error);
-            }
-
-            output[op++] = Symbol(ref bits, ref state2, table, fast);
-            if (bits.Reload() == BitStreamStatus.Overflow)
-            {
-                output[op++] = Symbol(ref bits, ref state1, table, fast);
-                break;
-            }
+            Unsafe.Add(ref op, count) = Symbol(ref entries, ref state1, container, ref bc);
+            Unsafe.Add(ref op, count + 1) = Symbol(ref entries, ref state2, container, ref bc);
+            Unsafe.Add(ref op, count + 2) = Symbol(ref entries, ref state1, container, ref bc);
+            Unsafe.Add(ref op, count + 3) = Symbol(ref entries, ref state2, container, ref bc);
+            count += 4;
         }
 
-        return op;
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static byte Symbol(ref BackwardBitReader bits, ref int state, ReadOnlySpan<FseEntry> table, bool fast)
+        // The tail: the stream ends when it overflows, and the other state then gives one more
+        // symbol. Only the overflow matters here, which a reload reports before doing anything.
+        while (true)
         {
-            FseEntry entry = table[state];
-            uint low = fast ? bits.ReadBitsFast(entry.NbBits) : bits.ReadBits(entry.NbBits);
-            state = entry.NewState + (int)low;
-            return entry.Symbol;
+            if (count > Max - 2)
+            {
+                Throw.Error(error);
+            }
+
+            Unsafe.Add(ref op, count++) = Symbol(ref entries, ref state1, container, ref bc);
+            if (bc > 64)
+            {
+                Unsafe.Add(ref op, count++) = Symbol(ref entries, ref state2, container, ref bc);
+                break;
+            }
+
+            Reload(ref bits, ref position, ref bc, ref container);
+            if (count > Max - 2)
+            {
+                Throw.Error(error);
+            }
+
+            Unsafe.Add(ref op, count++) = Symbol(ref entries, ref state2, container, ref bc);
+            if (bc > 64)
+            {
+                Unsafe.Add(ref op, count++) = Symbol(ref entries, ref state1, container, ref bc);
+                break;
+            }
+
+            Reload(ref bits, ref position, ref bc, ref container);
         }
+
+        return (int)count;
+
+        // An entry as one 32-bit value: the next state's base, then the symbol, then the bits to read.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static byte Symbol(ref uint entries, ref nint state, ulong container, ref nint bc)
+        {
+            uint entry = Unsafe.Add(ref entries, state);
+            state = (nint)(entry & 0xFFFF) + (nint)ReadBits(container, ref bc, (nint)(entry >> 24));
+            return (byte)(entry >> 16);
+        }
+    }
+
+    /// <summary>
+    /// libzstd's <c>BIT_readBits</c>: 0 to 31 bits, as two shifts that give 0 for none. Past the
+    /// container, the shifts take their counts modulo 64, as libzstd's do: the stream then fails.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong ReadBits(ulong container, ref nint bc, nint count)
+    {
+        ulong value = ((container << (int)bc) >> 1) >> ((int)count ^ 63);
+        bc += count;
+        return value;
+    }
+
+    /// <summary>
+    /// libzstd's <c>BIT_reloadDStream</c> without its status: back by the whole bytes consumed, but not
+    /// below the start of the stream. An overflowed stream is at its start already: it stays.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Reload(ref byte bits, ref nint position, ref nint bc, ref ulong container)
+    {
+        nint bytes = Math.Min(bc >> 3, position);
+        position -= bytes;
+        bc -= bytes << 3;
+        container = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bits, position));
     }
 }
 

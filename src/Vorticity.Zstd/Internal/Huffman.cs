@@ -1,8 +1,10 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace Vorticity.Zstd.Internal;
 
@@ -24,7 +26,8 @@ internal sealed class HuffmanTable
 
     public const int MaxSymbols = 256;
 
-    public readonly ushort[] Entries = new ushort[1 << MaxTableLog];
+    /// <summary>The table, and four entries past the widest: the fill writes four entries at a time.</summary>
+    public readonly ushort[] Entries = new ushort[(1 << MaxTableLog) + 4];
 
     /// <summary>The number of bits an entry is looked up with.</summary>
     public int TableLog;
@@ -33,41 +36,95 @@ internal sealed class HuffmanTable
     /// <summary>
     /// libzstd's <c>HUF_readDTableX1_wksp</c>: reads a tree description and builds the table.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// No widening to 11 bits, unlike libzstd: it widens every table so that its fast loop shifts by
+    /// a constant, but on Arm64 a shift by a register costs the same, and a narrower table is that
+    /// much less to fill (a 9-bit tree fills 512 entries instead of 2048).
+    /// </para>
+    /// <para>
+    /// Codes are assigned by increasing weight, then by symbol: the symbols of weight w take
+    /// 2^(w-1) consecutive entries each, from the lowest weight up. As libzstd does, the symbols are
+    /// first sorted by weight (those of weight 0 left out), and the table is then written in order,
+    /// one weight at a time, so that
+    /// the length of a symbol's entries is the same all through its inner loop. Up to four entries, a
+    /// symbol takes one 8-byte store, whose excess the next symbol overwrites (the last one's falls
+    /// in the four entries past the table); from eight, 16-byte stores.
+    /// </para>
+    /// </remarks>
     /// <returns>The bytes the description takes.</returns>
     public int Read(ReadOnlySpan<byte> source)
     {
         Span<byte> weights = stackalloc byte[MaxSymbols];
         Span<int> rankCount = stackalloc int[MaxTableLog + 1];
-        int size = ReadWeights(source, weights, rankCount, out int symbolCount, out int tableLog);
+        int size = ReadWeights(source, weights, rankCount, out int symbols, out int log);
+        nint symbolCount = symbols;
+        int tableLog = log;
 
-        // No widening to 11 bits, unlike libzstd: it widens every table so that its fast loop shifts
-        // by a constant, but on Arm64 a shift by a register costs the same, and a narrower table is
-        // that much less to fill (a 9-bit tree fills 512 entries instead of 2048).
-        // Codes are assigned by increasing weight, then by symbol: the symbols of weight w take
-        // 2^(w-1) consecutive entries each, starting with the lowest weight.
-        Span<int> rankStart = stackalloc int[MaxTableLog + 2];
-        int next = 0;
+        // ---- the symbols of the table sorted by weight, stable. Weight 0 has no entry: its symbols,
+        // which come in long runs, are skipped rather than sorted, since each would wait on the
+        // store of the one before through their shared counter.
+        Span<int> nextSlot = stackalloc int[MaxTableLog + 1];
+        int slot = 0;
         for (int w = 1; w <= tableLog; w++)
         {
-            rankStart[w] = next;
-            next += rankCount[w] << (w - 1);
+            nextSlot[w] = slot;
+            slot += rankCount[w];
         }
 
-        ushort[] entries = Entries;
-        for (int s = 0; s < symbolCount; s++)
+        Span<byte> sorted = stackalloc byte[MaxSymbols];
+        ref byte weight = ref MemoryMarshal.GetReference(weights);
+        ref int next = ref MemoryMarshal.GetReference(nextSlot);
+        ref byte order = ref MemoryMarshal.GetReference(sorted);
+        for (nint s = 0; s < symbolCount; s++)
         {
-            int w = weights[s];
+            nint w = Unsafe.Add(ref weight, s);
             if (w == 0)
             {
                 continue;
             }
 
-            int length = 1 << (w - 1);
-            ushort entry = (ushort)((s << 8) | (tableLog + 1 - w));
-            entries.AsSpan(rankStart[w], length).Fill(entry);
-            rankStart[w] += length;
+            ref int at = ref Unsafe.Add(ref next, w);
+            int a = at;
+            Unsafe.Add(ref order, a) = (byte)s;
+            at = a + 1;
         }
 
+        // ---- the entries, in table order
+        ref ushort table = ref MemoryMarshal.GetArrayDataReference(Entries);
+        nint symbol = 0;
+        nint position = 0;
+        for (int w = 1; w <= tableLog; w++)
+        {
+            nint count = rankCount[w];
+            nint length = (nint)1 << (w - 1);
+            nint end = symbol + count;
+            ulong nbBits = (ulong)(tableLog + 1 - w);
+            if (length <= 4)
+            {
+                for (; symbol < end; symbol++)
+                {
+                    ulong entry = ((ulong)Unsafe.Add(ref order, symbol) << 8) | nbBits;
+                    Unsafe.WriteUnaligned(ref Unsafe.As<ushort, byte>(ref Unsafe.Add(ref table, position)), entry * 0x0001000100010001UL);
+                    position += length;
+                }
+            }
+            else
+            {
+                for (; symbol < end; symbol++)
+                {
+                    var entries = Vector128.Create((ushort)((Unsafe.Add(ref order, symbol) << 8) | (int)nbBits));
+                    for (nint i = 0; i < length; i += 8)
+                    {
+                        Unsafe.WriteUnaligned(ref Unsafe.As<ushort, byte>(ref Unsafe.Add(ref table, position + i)), entries);
+                    }
+
+                    position += length;
+                }
+            }
+        }
+
+        Debug.Assert(position == 1 << tableLog);
         TableLog = tableLog;
         return size;
     }
@@ -75,6 +132,10 @@ internal sealed class HuffmanTable
     /// <summary>
     /// libzstd's <c>HUF_readStats</c>: the weights of a tree, the last one implied.
     /// </summary>
+    /// <remarks>
+    /// The weights are counted in four histograms, one for each weight of a group of four: equal
+    /// weights come in runs, and one counter would make each count wait on the store of the last.
+    /// </remarks>
     /// <returns>The bytes the description takes.</returns>
     private static int ReadWeights(ReadOnlySpan<byte> source, Span<byte> weights, Span<int> rankCount, out int symbolCount, out int tableLog)
     {
@@ -115,18 +176,44 @@ internal sealed class HuffmanTable
             count = Fse.DecodeHuffmanWeights(source.Slice(1, inputSize), weights);
         }
 
-        rankCount.Clear();
+        // Four histograms of 16 counters; a weight above 12 is refused below, and counted modulo 16.
+        Span<int> histograms = stackalloc int[4 * 16];
+        histograms.Clear();
+        ref int h = ref MemoryMarshal.GetReference(histograms);
+        ref byte weight = ref MemoryMarshal.GetReference(weights);
         uint weightTotal = 0;
-        for (int n = 0; n < count; n++)
+        nint above = 0;
+        nint n4 = 0;
+        for (; n4 + 4 <= count; n4 += 4)
         {
-            int w = weights[n];
-            if (w > MaxTableLog)
-            {
-                Throw.Error(error);
-            }
+            nint w0 = Unsafe.Add(ref weight, n4);
+            nint w1 = Unsafe.Add(ref weight, n4 + 1);
+            nint w2 = Unsafe.Add(ref weight, n4 + 2);
+            nint w3 = Unsafe.Add(ref weight, n4 + 3);
+            above |= (MaxTableLog - w0) | (MaxTableLog - w1) | (MaxTableLog - w2) | (MaxTableLog - w3);
+            Unsafe.Add(ref h, w0 & 15)++;
+            Unsafe.Add(ref h, 16 + (w1 & 15))++;
+            Unsafe.Add(ref h, 32 + (w2 & 15))++;
+            Unsafe.Add(ref h, 48 + (w3 & 15))++;
+            weightTotal += ((1u << (int)w0) >> 1) + ((1u << (int)w1) >> 1) + ((1u << (int)w2) >> 1) + ((1u << (int)w3) >> 1);
+        }
 
-            rankCount[w]++;
-            weightTotal += (1u << w) >> 1;
+        for (; n4 < count; n4++)
+        {
+            nint w = Unsafe.Add(ref weight, n4);
+            above |= MaxTableLog - w;
+            Unsafe.Add(ref h, w & 15)++;
+            weightTotal += (1u << (int)w) >> 1;
+        }
+
+        if (above < 0)
+        {
+            Throw.Error(error);
+        }
+
+        for (int w = 0; w <= MaxTableLog; w++)
+        {
+            rankCount[w] = Unsafe.Add(ref h, w) + Unsafe.Add(ref h, 16 + w) + Unsafe.Add(ref h, 32 + w) + Unsafe.Add(ref h, 48 + w);
         }
 
         if (weightTotal == 0)
