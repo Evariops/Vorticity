@@ -11,37 +11,53 @@ namespace Vorticity.Zstd.Internal;
 /// code's meaning folded together, so that a lookup yields the value's base and how many bits to add.
 /// </summary>
 /// <remarks>
-/// The fields are laid out for <see cref="SeqEntry"/>, which loads an entry whole: the next state on
-/// top, where one shift extracts it, folded into the add that completes the state.
-/// <see cref="NextState"/> is an index into the whole <see cref="SequenceTableSet"/>, where every state
-/// takes two entries: the table's slot included, doubled.
+/// <para>
+/// A 64-bit value, laid out per code for the fast loop, which loads it whole (see
+/// <see cref="SeqEntry"/>): the next state on top (bits 48 to 63), where one shift extracts it, folded
+/// into the add that completes the state; the base value below it (bits 16 to 47); and in the low byte
+/// the count the next positions in the bitstream add up without extracting it first, the rest of the
+/// entry only adding multiples of 256: the state's own bits for the two lengths, the extra bits for
+/// the offset, whose other count is then the second byte.
+/// </para>
+/// <para>
+/// <see cref="NextState"/> is an index into the whole <see cref="SequenceTableSet"/>, where every
+/// state takes two entries: the table's slot included, doubled.
+/// </para>
 /// </remarks>
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-internal struct SeqSymbol
+[StructLayout(LayoutKind.Sequential)]
+internal readonly struct SeqSymbol
 {
-    public uint BaseValue;
-    public byte NbAdditionalBits;
-    public byte NbBits;
-    public ushort NextState;
+    public readonly ulong Value;
 
-    public SeqSymbol(ushort nextState, byte nbAdditionalBits, byte nbBits, uint baseValue)
+    public SeqSymbol(ulong value) => Value = value;
+
+    /// <summary>An entry of <paramref name="code"/>, from its fields.</summary>
+    public SeqSymbol(SequenceCode code, int nextState, int nbAdditionalBits, int nbBits, uint baseValue)
     {
-        NextState = nextState;
-        NbAdditionalBits = nbAdditionalBits;
-        NbBits = nbBits;
-        BaseValue = baseValue;
+        ulong counts = code == SequenceCode.Offset
+            ? (byte)nbAdditionalBits | ((ulong)(byte)nbBits << 8)
+            : (byte)nbBits | ((ulong)(byte)nbAdditionalBits << 8);
+        Value = counts | ((ulong)baseValue << 16) | ((ulong)(ushort)nextState << 48);
     }
+
+    public int NextState => (int)(Value >> 48);
+
+    public int NbAdditionalBits(SequenceCode code) => (int)SeqEntry.ExtraBits(code, Value);
+
+    public int NbBits(SequenceCode code) => (int)SeqEntry.NbBits(code, Value);
+
+    public uint BaseValue(SequenceCode code) => (uint)SeqEntry.BaseValue(code, Value);
 }
 
 /// <summary>
-/// A <see cref="SeqSymbol"/> loaded whole, as a little-endian <see cref="ulong"/>: one load the table
-/// index folds into, the fields then by shifts, instead of an address computed for four narrow loads.
+/// The fields of a <see cref="SeqSymbol"/> loaded whole, as a <see cref="ulong"/>: one load the table
+/// index folds into, then one instruction a field.
 /// </summary>
 /// <remarks>
-/// The counts are masked to the widths they need (extra bits up to 31, state bits up to 9), not to a
-/// byte: the JIT turns a shift and a mask into one <c>ubfx</c> except for widths of 8 and 16, which it
-/// leaves to casts that cost two instructions more. The results stay 64-bit, so that no conversion
-/// adds a move.
+/// The fields are masked to the widths they need (extra bits up to 31, state bits up to 9, a base
+/// value up to 17 bits for the lengths, 31 for the offsets), not to a byte or a half: the JIT turns a
+/// shift and a mask into one <c>ubfx</c> except for widths of 8, 16 and 32, which it leaves to casts
+/// that cost an instruction more. The results stay 64-bit, so that no conversion adds a move.
 /// </remarks>
 internal static class SeqEntry
 {
@@ -51,14 +67,38 @@ internal static class SeqEntry
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static nint NextState(ulong entry) => (nint)(entry >> 48);
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nint ExtraBits(ulong entry) => (nint)((entry >> 32) & 0x1F);
+    // ---- the two lengths: the state's bits in the low byte, then the extra bits
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nint NbBits(ulong entry) => (nint)((entry >> 40) & 0xF);
+    public static nint LengthNbBits(ulong entry) => (nint)(entry & 0xF);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint BaseValue(ulong entry) => (uint)entry;
+    public static nint LengthExtraBits(ulong entry) => (nint)((entry >> 8) & 0x1F);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint LengthBase(ulong entry) => (nuint)((entry >> 16) & 0x1FFFF);
+
+    // ---- the offset: the extra bits in the low byte, then the state's bits
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nint OffsetExtraBits(ulong entry) => (nint)(entry & 0x1F);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nint OffsetNbBits(ulong entry) => (nint)((entry >> 8) & 0xF);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint OffsetBase(ulong entry) => (nuint)((entry >> 16) & 0x7FFFFFFF);
+
+    // ---- by code, for the paths that are not hot
+
+    public static nint ExtraBits(SequenceCode code, ulong entry) =>
+        code == SequenceCode.Offset ? OffsetExtraBits(entry) : LengthExtraBits(entry);
+
+    public static nint NbBits(SequenceCode code, ulong entry) =>
+        code == SequenceCode.Offset ? OffsetNbBits(entry) : LengthNbBits(entry);
+
+    public static nuint BaseValue(SequenceCode code, ulong entry) =>
+        code == SequenceCode.Offset ? OffsetBase(entry) : LengthBase(entry);
 }
 
 /// <summary>The three sequence codes, in the order of their slots in a <see cref="SequenceTableSet"/>.</summary>
@@ -173,7 +213,7 @@ internal sealed class SequenceTableSet
     {
         SequenceCodes.Symbol(code, symbol, out uint baseValue, out byte bits);
         int slot = Slot(code);
-        Entries[slot] = new SeqSymbol((ushort)slot, bits, 0, baseValue);
+        Entries[slot] = new SeqSymbol(code, slot, bits, 0, baseValue);
         Entries[slot + 1] = Entries[slot];
         Own(code, 0);
     }
@@ -390,7 +430,11 @@ internal static class SequenceCodes
         ref uint bases = ref MemoryMarshal.GetReference(baseValue);
         ref byte extraBits = ref MemoryMarshal.GetReference(bits);
 
-        // ---- per symbol: its template, its first state, and its place in the laid-down order
+        // ---- per symbol: its template, its first state, and its place in the laid-down order. The
+        // template holds the base value and the extra bits where the code's layout puts them, less
+        // the 1 that nbBits + 1 doubles by (see the states below).
+        int extraShift = code == SequenceCode.Offset ? 0 : 8;
+        int nbBitsShift = code == SequenceCode.Offset ? 8 : 0;
         nint lowCount = 0;
         nint laid = 0;
         ulong copies = 0;
@@ -401,7 +445,7 @@ internal static class SequenceCodes
             // All three by arithmetic on the sign mask: Math.Abs and Math.Max become branches.
             nint count = Unsafe.Add(ref counts, s);
             nint sign = count >> 63;
-            Unsafe.Add(ref templates, s) = (Unsafe.Add(ref bases, s) | ((ulong)Unsafe.Add(ref extraBits, s) << 32)) - (1UL << 40);
+            Unsafe.Add(ref templates, s) = ((ulong)Unsafe.Add(ref bases, s) << 16) + ((ulong)Unsafe.Add(ref extraBits, s) << extraShift) - (1UL << nbBitsShift);
             Unsafe.Add(ref next, s) = (ushort)((count ^ sign) - sign);
 
             // Below one unit: next in the list of the top cells, by a store whose index only moves
@@ -458,8 +502,8 @@ internal static class SequenceCodes
         ref ulong output = ref Unsafe.As<SeqSymbol, ulong>(ref MemoryMarshal.GetReference(entries));
         for (nint u = 0; u < tableSize; u += 2)
         {
-            ulong first = Entry(ref cells, ref next, ref templates, u, bitsOffset, stateBase);
-            ulong second = Entry(ref cells, ref next, ref templates, u + 1, bitsOffset, stateBase);
+            ulong first = Entry(ref cells, ref next, ref templates, u, bitsOffset, stateBase, nbBitsShift);
+            ulong second = Entry(ref cells, ref next, ref templates, u + 1, bitsOffset, stateBase, nbBitsShift);
             output = first;
             Unsafe.Add(ref output, 1) = first;
             Unsafe.Add(ref output, 2) = second;
@@ -468,14 +512,14 @@ internal static class SequenceCodes
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        static ulong Entry(ref byte cells, ref ushort next, ref ulong templates, nint u, nint bitsOffset, nint stateBase)
+        static ulong Entry(ref byte cells, ref ushort next, ref ulong templates, nint u, nint bitsOffset, nint stateBase, int nbBitsShift)
         {
             nint symbol = Unsafe.Add(ref cells, u);
             nint nextState = Unsafe.Add(ref next, symbol);
             Unsafe.Add(ref next, symbol) = (ushort)(nextState + 1);
             nint doubling = (nint)BitOperations.LeadingZeroCount((ulong)nextState) - bitsOffset;
             nint state = (nextState << (int)doubling) + stateBase;
-            return Unsafe.Add(ref templates, symbol) + ((ulong)doubling << 40) + ((ulong)state << 48);
+            return Unsafe.Add(ref templates, symbol) + ((ulong)doubling << nbBitsShift) + ((ulong)state << 48);
         }
     }
 }

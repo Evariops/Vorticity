@@ -95,9 +95,9 @@ public sealed class FseTests
         for (int i = 0; i < 64; i++)
         {
             SeqSymbol expected = SequenceCodes.DefaultLiteralLengths.Entries[2 * i];
-            Assert.Equal(expected.NbBits, table[i].NbBits);
+            Assert.Equal(expected.NbBits(SequenceCode.LiteralLength), table[i].NbBits);
             Assert.Equal(expected.NextState / 2, table[i].NewState);
-            Assert.Equal(expected.BaseValue, SequenceCodes.LiteralLengthBase[table[i].Symbol]);
+            Assert.Equal(expected.BaseValue(SequenceCode.LiteralLength), SequenceCodes.LiteralLengthBase[table[i].Symbol]);
         }
     }
 

@@ -32,9 +32,8 @@ public sealed class PredefinedTableTests
             SeqSymbol actual = table.Entries[2 * i];
             Assert.Equal(actual, table.Entries[(2 * i) + 1]);
             int nextState = (actual.NextState - slot) / 2;
-            Assert.True(
-                (nextState, actual.NbAdditionalBits, actual.NbBits, actual.BaseValue) == expected[i],
-                $"state {i}: expected {expected[i]}, got ({nextState}, {actual.NbAdditionalBits}, {actual.NbBits}, {actual.BaseValue})");
+            var fields = (nextState, actual.NbAdditionalBits(table.Code), actual.NbBits(table.Code), actual.BaseValue(table.Code));
+            Assert.True(fields == expected[i], $"state {i}: expected {expected[i]}, got {fields}");
         }
     }
 

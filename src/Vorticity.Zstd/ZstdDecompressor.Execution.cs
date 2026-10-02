@@ -208,9 +208,9 @@ public sealed partial class ZstdDecompressor
         ulong llEntry = SeqEntry.Load(ref tables, llState);
         ulong mlEntry = SeqEntry.Load(ref tables, mlState);
         ulong ofEntry = SeqEntry.Load(ref tables, ofState);
-        nint ofBits = SeqEntry.ExtraBits(ofEntry);
-        nint mlBits = SeqEntry.ExtraBits(mlEntry);
-        nint llBits = SeqEntry.ExtraBits(llEntry);
+        nint ofBits = SeqEntry.OffsetExtraBits(ofEntry);
+        nint mlBits = SeqEntry.LengthExtraBits(mlEntry);
+        nint llBits = SeqEntry.LengthExtraBits(llEntry);
 
         // The common sequence: an offset of up to 30 extra bits (no reload inside the sequence),
         // lengths without extra bits, and the reload after it eight bytes or more from the start.
@@ -221,7 +221,7 @@ public sealed partial class ZstdDecompressor
 
         // ---- the general path: libzstd's ZSTD_decodeSequence in full
         {
-            nuint raw = SeqEntry.BaseValue(ofEntry) + ReadBits(container, bc, ofBits);
+            nuint raw = SeqEntry.OffsetBase(ofEntry) + ReadBits(container, bc, ofBits);
             bc += ofBits;
             if (ofBits > 1)
             {
@@ -232,17 +232,17 @@ public sealed partial class ZstdDecompressor
             }
             else
             {
-                offset = ResolveOffset(raw, SeqEntry.BaseValue(llEntry) == 0, ref rep0, ref rep1, ref rep2);
+                offset = ResolveOffset(raw, SeqEntry.LengthBase(llEntry) == 0, ref rep0, ref rep1, ref rep2);
             }
 
-            matchLength = (nint)SeqEntry.BaseValue(mlEntry) + (nint)ReadBits(container, bc, mlBits);
+            matchLength = (nint)SeqEntry.LengthBase(mlEntry) + (nint)ReadBits(container, bc, mlBits);
             bc += mlBits;
             if (ofBits + mlBits + llBits >= 57 - (SequenceCodes.LiteralLengthMaxLog + SequenceCodes.MatchLengthMaxLog + SequenceCodes.OffsetMaxLog))
             {
                 ReloadClamped(ref bits, ref ptr, ref bc, ref container);
             }
 
-            litLength = (nint)SeqEntry.BaseValue(llEntry) + (nint)ReadBits(container, bc, llBits);
+            litLength = (nint)SeqEntry.LengthBase(llEntry) + (nint)ReadBits(container, bc, llBits);
             bc += llBits;
             NextStates(llEntry, mlEntry, ofEntry, container, ref bc, ref llState, ref mlState, ref ofState);
             ReloadClamped(ref bits, ref ptr, ref bc, ref container);
@@ -258,11 +258,11 @@ public sealed partial class ZstdDecompressor
         // ---- a repeat offset, branched on as libzstd does; the rest as for a new one, written twice
         // so that each path runs straight to its own end
         {
-            nuint raw = SeqEntry.BaseValue(ofEntry) + ReadBits(container, bc, ofBits);
-            offset = ResolveOffset(raw, SeqEntry.BaseValue(llEntry) == 0, ref rep0, ref rep1, ref rep2);
-            matchLength = (nint)SeqEntry.BaseValue(mlEntry);
-            litLength = (nint)SeqEntry.BaseValue(llEntry);
-            CommonStates(llEntry, mlEntry, ofEntry, ofBits, ref bits, ref ptr, ref bc, ref container, ref llState, ref mlState, ref ofState);
+            nuint raw = SeqEntry.OffsetBase(ofEntry) + ReadBits(container, bc, ofBits);
+            offset = ResolveOffset(raw, SeqEntry.LengthBase(llEntry) == 0, ref rep0, ref rep1, ref rep2);
+            matchLength = (nint)SeqEntry.LengthBase(mlEntry);
+            litLength = (nint)SeqEntry.LengthBase(llEntry);
+            CommonStates(llEntry, mlEntry, ofEntry, ref bits, ref ptr, ref bc, ref container, ref llState, ref mlState, ref ofState);
 
             ref byte litAfter = ref Unsafe.Add(ref lit, litLength);
             ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
@@ -286,13 +286,13 @@ public sealed partial class ZstdDecompressor
 
     CommonNewOffset:
         {
-            offset = SeqEntry.BaseValue(ofEntry) + ReadBitsFast(container, bc, ofBits);
+            offset = SeqEntry.OffsetBase(ofEntry) + ReadBitsFast(container, bc, (nint)ofEntry);
             rep2 = rep1;
             rep1 = rep0;
             rep0 = offset;
-            matchLength = (nint)SeqEntry.BaseValue(mlEntry);
-            litLength = (nint)SeqEntry.BaseValue(llEntry);
-            CommonStates(llEntry, mlEntry, ofEntry, ofBits, ref bits, ref ptr, ref bc, ref container, ref llState, ref mlState, ref ofState);
+            matchLength = (nint)SeqEntry.LengthBase(mlEntry);
+            litLength = (nint)SeqEntry.LengthBase(llEntry);
+            CommonStates(llEntry, mlEntry, ofEntry, ref bits, ref ptr, ref bc, ref container, ref llState, ref mlState, ref ofState);
 
             // One test for the room and the shape of the copies: then one 16-byte copy each.
             ref byte litAfter = ref Unsafe.Add(ref lit, litLength);
@@ -372,27 +372,40 @@ public sealed partial class ZstdDecompressor
 
     /// <summary>
     /// The three states after a common sequence, whose only extra bits are the offset's, and the
-    /// reload after it, eight bytes or more from the start. The positions of the three state reads are
-    /// sums of the counts, added as a tree.
+    /// reload after it, eight bytes or more from the start.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// These sums are the loop's critical path: each state is read at a position the counts of the
+    /// three entries just loaded add up to. So the counts are added as the entries come, without
+    /// first extracting them, which costs two cycles after a load: the low byte of an entry is the
+    /// count each position needs (the offset's extra bits, then each length's state bits, see
+    /// <see cref="SeqSymbol"/>), and the rest of the entry only adds multiples of 256 to the sum.
+    /// A shift takes its count modulo 64, and every position here is below 64, so the shifts read
+    /// the right bits; the reload takes the low byte of the total, at most 64. The shift counts of
+    /// the length reads come from the raw entries too: 63 - n is n ^ 63 in the low six bits.
+    /// </para>
+    /// <para>
+    /// The positions are added as a tree, and a state reads its bits and the next one (see
+    /// <see cref="ReadStateBits"/>).
+    /// </para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void CommonStates(
-        ulong llEntry, ulong mlEntry, ulong ofEntry, nint ofBits, ref byte bits, ref nint ptr, ref nint bc, ref ulong container,
+        ulong llEntry, ulong mlEntry, ulong ofEntry, ref byte bits, ref nint ptr, ref nint bc, ref ulong container,
         ref nint llState, ref nint mlState, ref nint ofState)
     {
-        nint llNb = SeqEntry.NbBits(llEntry);
-        nint mlNb = SeqEntry.NbBits(mlEntry);
-        nint ofNb = SeqEntry.NbBits(ofEntry);
-        nint llAt = bc + ofBits;
-        nint llMlNb = llNb + mlNb;
-        nint mlAt = llAt + llNb;
+        nint ofNb = SeqEntry.OffsetNbBits(ofEntry);
+        nint llAt = bc + (nint)ofEntry;
+        nint llMlNb = (nint)llEntry + (nint)mlEntry;
+        nint mlAt = llAt + (nint)llEntry;
         nint ofAt = llAt + llMlNb;
-        llState = SeqEntry.NextState(llEntry) + (nint)ReadStateBits(container, llAt, llNb);
-        mlState = SeqEntry.NextState(mlEntry) + (nint)ReadStateBits(container, mlAt, mlNb);
+        llState = SeqEntry.NextState(llEntry) + (nint)ReadStateBits(container, llAt, (nint)llEntry);
+        mlState = SeqEntry.NextState(mlEntry) + (nint)ReadStateBits(container, mlAt, (nint)mlEntry);
         ofState = SeqEntry.NextState(ofEntry) + (nint)ReadStateBits(container, ofAt, ofNb);
-        nint consumed = llAt + (llMlNb + ofNb);
-        Debug.Assert(ptr >= 8 && consumed <= 64);
-        ptr -= consumed >> 3;
+        nint consumed = ofAt + ofNb;
+        Debug.Assert(ptr >= 8 && (consumed & 0xFF) <= 64);
+        ptr -= (consumed >> 3) & 0x1F;
         bc = consumed & 7;
         container = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bits, ptr));
     }
@@ -419,9 +432,9 @@ public sealed partial class ZstdDecompressor
         ulong llEntry, ulong mlEntry, ulong ofEntry, ulong container, ref nint bc,
         ref nint llState, ref nint mlState, ref nint ofState)
     {
-        nint llNb = SeqEntry.NbBits(llEntry);
-        nint mlNb = SeqEntry.NbBits(mlEntry);
-        nint ofNb = SeqEntry.NbBits(ofEntry);
+        nint llNb = SeqEntry.LengthNbBits(llEntry);
+        nint mlNb = SeqEntry.LengthNbBits(mlEntry);
+        nint ofNb = SeqEntry.OffsetNbBits(ofEntry);
         nint mlAt = bc + llNb;
         nint ofAt = mlAt + mlNb;
         llState = SeqEntry.NextState(llEntry) + (nint)ReadStateBits(container, bc, llNb);
@@ -559,10 +572,10 @@ public sealed partial class ZstdDecompressor
         ulong llEntry = SeqEntry.Load(ref s.Tables, s.LiteralLengthState);
         ulong mlEntry = SeqEntry.Load(ref s.Tables, s.MatchLengthState);
         ulong ofEntry = SeqEntry.Load(ref s.Tables, s.OffsetState);
-        nint llBits = SeqEntry.ExtraBits(llEntry);
-        nint mlBits = SeqEntry.ExtraBits(mlEntry);
-        nint ofBits = SeqEntry.ExtraBits(ofEntry);
-        nuint raw = SeqEntry.BaseValue(ofEntry) + ReadBits(s.Container, s.Consumed, ofBits);
+        nint llBits = SeqEntry.LengthExtraBits(llEntry);
+        nint mlBits = SeqEntry.LengthExtraBits(mlEntry);
+        nint ofBits = SeqEntry.OffsetExtraBits(ofEntry);
+        nuint raw = SeqEntry.OffsetBase(ofEntry) + ReadBits(s.Container, s.Consumed, ofBits);
         s.Consumed += ofBits;
         if (ofBits > 1)
         {
@@ -573,17 +586,17 @@ public sealed partial class ZstdDecompressor
         }
         else
         {
-            offset = ResolveOffset(raw, SeqEntry.BaseValue(llEntry) == 0, ref s.Rep0, ref s.Rep1, ref s.Rep2);
+            offset = ResolveOffset(raw, SeqEntry.LengthBase(llEntry) == 0, ref s.Rep0, ref s.Rep1, ref s.Rep2);
         }
 
-        matchLength = (nint)(SeqEntry.BaseValue(mlEntry) + ReadBits(s.Container, s.Consumed, mlBits));
+        matchLength = (nint)(SeqEntry.LengthBase(mlEntry) + ReadBits(s.Container, s.Consumed, mlBits));
         s.Consumed += mlBits;
         if (llBits + mlBits + ofBits >= 57 - (SequenceCodes.LiteralLengthMaxLog + SequenceCodes.MatchLengthMaxLog + SequenceCodes.OffsetMaxLog))
         {
             Reload(ref s.Bits, ref s.Ptr, ref s.Consumed, ref s.Container);
         }
 
-        litLength = (nint)(SeqEntry.BaseValue(llEntry) + ReadBits(s.Container, s.Consumed, llBits));
+        litLength = (nint)(SeqEntry.LengthBase(llEntry) + ReadBits(s.Container, s.Consumed, llBits));
         s.Consumed += llBits;
         if (nbSeq != 1)
         {
@@ -705,7 +718,11 @@ public sealed partial class ZstdDecompressor
     private static void Copy16(ref byte dst, ref byte src) =>
         Unsafe.WriteUnaligned(ref dst, Unsafe.ReadUnaligned<Vector128<byte>>(ref src));
 
-    /// <summary>libzstd's <c>BIT_readBitsFast</c>: 1 to 31 bits from bit <paramref name="at"/> of the container.</summary>
+    /// <summary>
+    /// libzstd's <c>BIT_readBitsFast</c>: 1 to 31 bits from bit <paramref name="at"/> of the container.
+    /// Only the low six bits of <paramref name="count"/> matter: a raw entry whose low byte is the
+    /// count serves as it is.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static nuint ReadBitsFast(ulong container, nint at, nint count) =>
         // A shift takes its count modulo 64, so 64 - count is just -count: one negation.
@@ -714,7 +731,8 @@ public sealed partial class ZstdDecompressor
     /// <summary>
     /// A state's <paramref name="count"/> bits, 0 to 9, and the bit after them: the offset of its next
     /// state in the doubled <see cref="SequenceTableSet"/>, where the extra bit lands on either copy.
-    /// Two shifts, where the bits alone would take three to give 0 for none.
+    /// Two shifts, where the bits alone would take three to give 0 for none. Only the low six bits
+    /// of <paramref name="count"/> and <paramref name="at"/> matter, as for any shift.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static nuint ReadStateBits(ulong container, nint at, nint count) =>
