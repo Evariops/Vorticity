@@ -198,7 +198,9 @@ public sealed partial class ZstdDecompressor
         nuint rep2 = s.Rep2;
         ref byte dst = ref s.Dst;
         ref byte lit = ref s.Lit;
-        nint nbSeq = s.NbSeq;
+        // The sequences left before the last one, which the careful path takes: counted down to 0,
+        // one subtraction and one branch a sequence.
+        nint beforeLast = s.NbSeq - 1;
         nint litLength;
         nint matchLength;
         nuint offset;
@@ -208,19 +210,21 @@ public sealed partial class ZstdDecompressor
         ulong llEntry = SeqEntry.Load(ref tables, llState);
         ulong mlEntry = SeqEntry.Load(ref tables, mlState);
         ulong ofEntry = SeqEntry.Load(ref tables, ofState);
-        nint ofBits = SeqEntry.OffsetExtraBits(ofEntry);
-        nint mlBits = SeqEntry.LengthExtraBits(mlEntry);
-        nint llBits = SeqEntry.LengthExtraBits(llEntry);
-
-        // The common sequence: an offset of up to 30 extra bits (no reload inside the sequence),
-        // lengths without extra bits, and the reload after it eight bytes or more from the start.
-        if (((mlBits | llBits) == 0) & (ofBits <= 30) & (ptr >= FastLoopMinPtr))
+        // The common sequence: lengths without extra bits (the second byte of both their entries),
+        // and the reload after it eight bytes or more from the start. Any offset: with no extra
+        // length bits, a sequence reads at most 7 + 31 + 9 + 9 + 8 = 64 bits, which the container
+        // holds whole, so the reload libzstd makes inside a sequence of 31 bits or more changes
+        // nothing here.
+        if ((((llEntry | mlEntry) & 0x1F00) == 0) & (ptr >= FastLoopMinPtr))
         {
             goto CommonDecode;
         }
 
         // ---- the general path: libzstd's ZSTD_decodeSequence in full
         {
+            nint ofBits = SeqEntry.OffsetExtraBits(ofEntry);
+            nint mlBits = SeqEntry.LengthExtraBits(mlEntry);
+            nint llBits = SeqEntry.LengthExtraBits(llEntry);
             nuint raw = SeqEntry.OffsetBase(ofEntry) + ReadBits(container, bc, ofBits);
             bc += ofBits;
             if (ofBits > 1)
@@ -250,7 +254,8 @@ public sealed partial class ZstdDecompressor
         }
 
     CommonDecode:
-        if (ofBits > 1)
+        // A new offset reads more than one extra bit: bits 1 to 4 of the entry's low byte.
+        if ((ofEntry & 0x1E) != 0)
         {
             goto CommonNewOffset;
         }
@@ -258,7 +263,7 @@ public sealed partial class ZstdDecompressor
         // ---- a repeat offset, branched on as libzstd does; the rest as for a new one, written twice
         // so that each path runs straight to its own end
         {
-            nuint raw = SeqEntry.OffsetBase(ofEntry) + ReadBits(container, bc, ofBits);
+            nuint raw = SeqEntry.OffsetBase(ofEntry) + ReadBits(container, bc, SeqEntry.OffsetExtraBits(ofEntry));
             offset = ResolveOffset(raw, SeqEntry.LengthBase(llEntry) == 0, ref rep0, ref rep1, ref rep2);
             matchLength = (nint)SeqEntry.LengthBase(mlEntry);
             litLength = (nint)SeqEntry.LengthBase(llEntry);
@@ -273,7 +278,7 @@ public sealed partial class ZstdDecompressor
                 Copy16(ref matchStart, ref Unsafe.Subtract(ref matchStart, offset));
                 dst = ref matchEnd;
                 lit = ref litAfter;
-                if (--nbSeq > 1)
+                if (--beforeLast != 0)
                 {
                     goto Loop;
                 }
@@ -304,7 +309,7 @@ public sealed partial class ZstdDecompressor
                 Copy16(ref matchStart, ref Unsafe.Subtract(ref matchStart, offset));
                 dst = ref matchEnd;
                 lit = ref litAfter;
-                if (--nbSeq > 1)
+                if (--beforeLast != 0)
                 {
                     goto Loop;
                 }
@@ -341,7 +346,7 @@ public sealed partial class ZstdDecompressor
 
             dst = ref matchEnd;
             lit = ref litAfter;
-            if (--nbSeq > 1)
+            if (--beforeLast != 0)
             {
                 goto Loop;
             }
@@ -367,7 +372,7 @@ public sealed partial class ZstdDecompressor
         s.Rep2 = rep2;
         s.Dst = ref dst;
         s.Lit = ref lit;
-        s.NbSeq = nbSeq;
+        s.NbSeq = beforeLast + 1;
     }
 
     /// <summary>
