@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
@@ -78,6 +79,24 @@ internal ref struct BackwardBitReader
             _container = container;
             _bitsConsumed = padding + ((sizeof(ulong) - source.Length) * 8);
         }
+    }
+
+    /// <summary>
+    /// A reader already partway through <paramref name="source"/>: the container is the eight bytes at
+    /// <paramref name="position"/>, of which <paramref name="bitsConsumed"/> are consumed from the top.
+    /// </summary>
+    public static BackwardBitReader Resume(ReadOnlySpan<byte> source, int position, int bitsConsumed)
+    {
+        Debug.Assert(position >= 0 && position + sizeof(ulong) <= source.Length);
+        return new BackwardBitReader(source, position, bitsConsumed);
+    }
+
+    private BackwardBitReader(ReadOnlySpan<byte> source, int position, int bitsConsumed)
+    {
+        _source = source;
+        _position = position;
+        _bitsConsumed = bitsConsumed;
+        _container = BinaryPrimitives.ReadUInt64LittleEndian(source.Slice(position));
     }
 
     /// <summary>Bits consumed from the current container; more than 64 once the stream has overflowed.</summary>

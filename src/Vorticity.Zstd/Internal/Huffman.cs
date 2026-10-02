@@ -1,5 +1,8 @@
 using System;
 using System.Buffers.Binary;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Vorticity.Zstd.Internal;
 
@@ -198,7 +201,8 @@ internal sealed class HuffmanTable
     /// <summary>
     /// libzstd's <c>HUF_decompress4X1_usingDTable_internal</c>: a six-byte jump table, then four
     /// streams that each fill a quarter of <paramref name="output"/>, rounded up, the last one taking
-    /// what remains.
+    /// what remains. The fast loop takes them when the table is 11 bits wide and every stream holds
+    /// eight bytes; otherwise, and to finish, one symbol at a time.
     /// </summary>
     public void DecodeFourStreams(ReadOnlySpan<byte> source, Span<byte> output)
     {
@@ -218,6 +222,13 @@ internal sealed class HuffmanTable
         }
 
         int segment = (output.Length + 3) / 4;
+        if (TableLog == FastTableLog && length1 >= 8 && length2 >= 8 && length3 >= 8 && length4 >= 8
+            && 3 * segment < output.Length)
+        {
+            DecodeFourStreamsFast(source, output, length1, length2, length3, segment);
+            return;
+        }
+
         int start2 = 6 + length1;
         int start3 = start2 + length2;
         int start4 = start3 + length3;
@@ -236,6 +247,173 @@ internal sealed class HuffmanTable
         {
             Throw.Error(error);
         }
+    }
+
+    /// <summary>
+    /// libzstd's <c>HUF_decompress4X1_usingDTable_internal_fast_c_loop</c>: the four streams decoded
+    /// together, five symbols each a round, then each stream finished by <see cref="DecodeStream"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A container holds a stream's next bits from its top, with a 1 set just below the last valid
+    /// one: the count of trailing zeros is then the number of bits consumed since the container was
+    /// loaded, and a reload steps back by its whole bytes. Every entry is looked up with the top 11
+    /// bits, a constant shift.
+    /// </para>
+    /// <para>
+    /// Bounds: a round takes at most 5 x 11 bits, under 7 bytes, from each stream, and writes 5
+    /// symbols to each. Before the rounds, their number is capped by what the last stream's quarter
+    /// can take and by what lies between the lowest stream position and the start of the section;
+    /// the stream positions are checked to be in order, the lowest first, so that none can go below
+    /// the section. The careful finish then validates each stream exactly, as the reference decoder.
+    /// </para>
+    /// </remarks>
+    private void DecodeFourStreamsFast(ReadOnlySpan<byte> source, Span<byte> output, int length1, int length2, int length3, int segment)
+    {
+        const ZstdError error = ZstdError.HuffmanStream;
+        int start1 = 6;
+        int start2 = start1 + length1;
+        int start3 = start2 + length2;
+        int start4 = start3 + length3;
+        if (source[start2 - 1] == 0 || source[start3 - 1] == 0 || source[start4 - 1] == 0 || source[^1] == 0)
+        {
+            Throw.Error(error);
+        }
+
+        ref byte input = ref MemoryMarshal.GetReference(source);
+        ref byte ip0 = ref Unsafe.Add(ref input, start2 - 8);
+        ref byte ip1 = ref Unsafe.Add(ref input, start3 - 8);
+        ref byte ip2 = ref Unsafe.Add(ref input, start4 - 8);
+        ref byte ip3 = ref Unsafe.Add(ref input, source.Length - 8);
+        ulong bits0 = InitFastStream(ref ip0);
+        ulong bits1 = InitFastStream(ref ip1);
+        ulong bits2 = InitFastStream(ref ip2);
+        ulong bits3 = InitFastStream(ref ip3);
+
+        ref byte first = ref MemoryMarshal.GetReference(output);
+        ref byte op0 = ref first;
+        ref byte op1 = ref Unsafe.Add(ref first, segment);
+        ref byte op2 = ref Unsafe.Add(ref first, 2 * segment);
+        ref byte op3 = ref Unsafe.Add(ref first, 3 * segment);
+        ref byte oend = ref Unsafe.Add(ref first, output.Length);
+        ref ushort table = ref MemoryMarshal.GetArrayDataReference(Entries);
+
+        while (true)
+        {
+            nint outputRounds = Unsafe.ByteOffset(ref op3, ref oend) / 5;
+            nint inputRounds = Unsafe.ByteOffset(ref input, ref ip0) / 7;
+            nint rounds = Math.Min(outputRounds, inputRounds);
+            if (rounds == 0
+                || Unsafe.IsAddressLessThan(ref ip1, ref ip0)
+                || Unsafe.IsAddressLessThan(ref ip2, ref ip1)
+                || Unsafe.IsAddressLessThan(ref ip3, ref ip2))
+            {
+                break;
+            }
+
+            ref byte olimit = ref Unsafe.Add(ref op3, rounds * 5);
+            do
+            {
+                Symbol(ref table, ref bits0, ref op0, 0);
+                Symbol(ref table, ref bits1, ref op1, 0);
+                Symbol(ref table, ref bits2, ref op2, 0);
+                Symbol(ref table, ref bits3, ref op3, 0);
+                Symbol(ref table, ref bits0, ref op0, 1);
+                Symbol(ref table, ref bits1, ref op1, 1);
+                Symbol(ref table, ref bits2, ref op2, 1);
+                Symbol(ref table, ref bits3, ref op3, 1);
+                Symbol(ref table, ref bits0, ref op0, 2);
+                Symbol(ref table, ref bits1, ref op1, 2);
+                Symbol(ref table, ref bits2, ref op2, 2);
+                Symbol(ref table, ref bits3, ref op3, 2);
+                Symbol(ref table, ref bits0, ref op0, 3);
+                Symbol(ref table, ref bits1, ref op1, 3);
+                Symbol(ref table, ref bits2, ref op2, 3);
+                Symbol(ref table, ref bits3, ref op3, 3);
+                Symbol(ref table, ref bits0, ref op0, 4);
+                Symbol(ref table, ref bits1, ref op1, 4);
+                Symbol(ref table, ref bits2, ref op2, 4);
+                Symbol(ref table, ref bits3, ref op3, 4);
+                ip0 = ref ReloadFast(ref bits0, ref ip0);
+                op0 = ref Unsafe.Add(ref op0, 5);
+                ip1 = ref ReloadFast(ref bits1, ref ip1);
+                op1 = ref Unsafe.Add(ref op1, 5);
+                ip2 = ref ReloadFast(ref bits2, ref ip2);
+                op2 = ref Unsafe.Add(ref op2, 5);
+                ip3 = ref ReloadFast(ref bits3, ref ip3);
+                op3 = ref Unsafe.Add(ref op3, 5);
+            }
+            while (Unsafe.IsAddressLessThan(ref op3, ref olimit));
+        }
+
+        // Each stream finished and checked on its own, as libzstd's HUF_initRemainingDStream.
+        Finish(source, start1, start2, ref input, ref ip0, bits0, output, ref first, ref op0, 0, segment);
+        Finish(source, start2, start3, ref input, ref ip1, bits1, output, ref first, ref op1, segment, segment);
+        Finish(source, start3, start4, ref input, ref ip2, bits2, output, ref first, ref op2, 2 * segment, segment);
+        Finish(source, start4, source.Length, ref input, ref ip3, bits3, output, ref first, ref op3, 3 * segment, output.Length - (3 * segment));
+
+        void Finish(
+            ReadOnlySpan<byte> source, int start, int end, ref byte input, ref byte ip, ulong bits,
+            Span<byte> output, ref byte first, ref byte op, int segmentStart, int segmentLength)
+        {
+            int written = (int)Unsafe.ByteOffset(ref first, ref op) - segmentStart;
+            if ((uint)written > (uint)segmentLength)
+            {
+                Throw.Error(error);
+            }
+
+            // The container may reach below the stream's first byte once the stream is nearly
+            // consumed; the reference reader then sits at the first byte with the bits below counted
+            // as consumed, and more than 64 means the stream was overrun.
+            int position = (int)Unsafe.ByteOffset(ref input, ref ip) - start;
+            int consumed = BitOperations.TrailingZeroCount(bits);
+            if (position < 0)
+            {
+                consumed -= position * 8;
+                position = 0;
+            }
+
+            if (consumed > 64)
+            {
+                Throw.Error(error);
+            }
+
+            var reader = BackwardBitReader.Resume(source.Slice(start, end - start), position, consumed);
+            DecodeStream(ref reader, output.Slice(segmentStart + written, segmentLength - written));
+            if (!reader.IsEndOfStream)
+            {
+                Throw.Error(error);
+            }
+        }
+    }
+
+    /// <summary>libzstd's <c>HUF_initFastDStream</c>: the last eight bytes, the marker made the sentinel.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong InitFastStream(ref byte ip)
+    {
+        int consumed = 8 - BackwardBitReader.HighBit(Unsafe.Add(ref ip, 7));
+        return (Unsafe.ReadUnaligned<ulong>(ref ip) | 1) << consumed;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Symbol(ref ushort table, ref ulong bits, ref byte op, int k)
+    {
+        int entry = Unsafe.Add(ref table, (nint)(bits >> 53));
+        bits <<= entry;
+        Unsafe.Add(ref op, k) = (byte)(entry >> 8);
+    }
+
+    /// <summary>
+    /// Steps a stream back by the whole bytes its container has consumed and reloads it. A ref
+    /// parameter cannot be repointed for the caller, so the new position is returned.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref byte ReloadFast(scoped ref ulong bits, ref byte ip)
+    {
+        int consumed = BitOperations.TrailingZeroCount(bits);
+        ref byte next = ref Unsafe.Subtract(ref ip, consumed >> 3);
+        bits = (Unsafe.ReadUnaligned<ulong>(ref next) | 1) << (consumed & 7);
+        return ref next;
     }
 
     /// <summary>Decodes one symbol per entry until <paramref name="output"/> is full.</summary>
