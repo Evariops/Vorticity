@@ -15,7 +15,7 @@ namespace Vorticity.Zstd.Perf;
 /// moment lands on all of them alike. Several passes show how stable the figures are.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab]</c>; <c>--ab</c>
+/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab] [--dump dir]</c>; <c>--ab</c>
 /// adds a "before" candidate that runs with the legacy switches of the point under work (see
 /// <see cref="AbSwitch"/>). Before timing,
 /// every candidate's output is checked against the platform's.
@@ -27,6 +27,18 @@ public static class Program
     public static int Main(string[] args)
     {
         string[] frames = Option(args, "--frames")?.Split(',') ?? BenchFrames.Names;
+        if (Option(args, "--dump") is string directory)
+        {
+            // The frames as files, for tools outside the process.
+            System.IO.Directory.CreateDirectory(directory);
+            foreach (string name in frames)
+            {
+                System.IO.File.WriteAllBytes(System.IO.Path.Combine(directory, name + ".zst"), BenchFrames.Load(name));
+            }
+
+            return 0;
+        }
+
         int passes = int.Parse(Option(args, "--passes") ?? "5", CultureInfo.InvariantCulture);
         int reps = int.Parse(Option(args, "--reps") ?? "300", CultureInfo.InvariantCulture);
         string? only = Option(args, "--only");
