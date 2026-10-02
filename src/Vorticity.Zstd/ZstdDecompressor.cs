@@ -246,7 +246,7 @@ public sealed partial class ZstdDecompressor
                         Throw.Error(ZstdError.BlockTooLarge);
                     }
 
-                    op += DecodeCompressedBlock(source.Slice(ip, blockSize), destination, op, header.BlockSizeMax, history);
+                    op += DecodeCompressedBlock(source, ip, blockSize, destination, op, header.BlockSizeMax, history);
                     ip += blockSize;
                     break;
 

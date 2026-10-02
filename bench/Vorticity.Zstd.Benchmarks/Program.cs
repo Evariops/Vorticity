@@ -9,6 +9,7 @@ public static class Program
     public static void Main(string[] args)
     {
         BenchmarkConfig.InProcess = args.Contains("--inprocess");
+        BenchmarkConfig.ExplicitJob = args.Contains("--job");
         string[] rest = args.Where(a => a != "--inprocess").ToArray();
         BenchmarkSwitcher.FromAssembly(typeof(Program).Assembly).Run(rest, new BenchmarkConfig());
     }

@@ -29,6 +29,9 @@ public sealed class AllocationTests
     [MemberData(nameof(Frames))]
     public void A_warm_decoder_allocates_nothing(string name)
     {
+#if DEBUG
+        Assert.Skip("allocations are a property of the optimized build");
+#endif
         byte[] frame;
         byte[]? dictionary = null;
         int size;

@@ -30,17 +30,21 @@ public sealed partial class ZstdDecompressor
     /// that interleaves those literals with matches into <paramref name="destination"/> from
     /// <paramref name="op"/>.
     /// </summary>
-    /// <param name="block">The block's content, its header excluded.</param>
+    /// <param name="source">The frame's whole input: raw literals are read in place when it has room after them.</param>
+    /// <param name="blockStart">Where the block's content starts in <paramref name="source"/>, its header excluded.</param>
+    /// <param name="blockSize">The size of the block's content.</param>
     /// <param name="destination">The whole output of the frame: the matches reach back into it.</param>
     /// <param name="op">Where this block's output starts.</param>
     /// <param name="blockSizeMax">The frame's largest block.</param>
     /// <param name="history">What precedes the frame: the dictionary's content, if any.</param>
     /// <returns>The size of the block's content.</returns>
-    private int DecodeCompressedBlock(ReadOnlySpan<byte> block, Span<byte> destination, int op, int blockSizeMax, ReadOnlySpan<byte> history)
+    private int DecodeCompressedBlock(
+        ReadOnlySpan<byte> source, int blockStart, int blockSize, Span<byte> destination, int op, int blockSizeMax, ReadOnlySpan<byte> history)
     {
         int capacity = destination.Length - op;
-        int literalsSize = DecodeLiterals(block, blockSizeMax, Math.Min(blockSizeMax, capacity), out ReadOnlySpan<byte> literals);
-        ReadOnlySpan<byte> sequences = block.Slice(literalsSize);
+        int literalsSize = DecodeLiterals(
+            source, blockStart, blockSize, blockSizeMax, Math.Min(blockSizeMax, capacity), out ReadOnlySpan<byte> literals, out int literalCount);
+        ReadOnlySpan<byte> sequences = source.Slice(blockStart + literalsSize, blockSize - literalsSize);
 
         int nbSeq = DecodeSequencesHeader(sequences, out int headerSize);
         if (nbSeq > 0 && capacity == 0)
@@ -48,17 +52,26 @@ public sealed partial class ZstdDecompressor
             Throw.Error(ZstdError.DestinationTooSmall);
         }
 
-        return ExecuteSequences(sequences.Slice(headerSize), nbSeq, literals, destination, op, blockSizeMax, history);
+        return ExecuteSequences(sequences.Slice(headerSize), nbSeq, literals, literalCount, destination, op, blockSizeMax, history);
     }
 
     /// <summary>libzstd's <c>ZSTD_decodeLiteralsBlock</c>.</summary>
-    /// <param name="block">The block, from its literals section on.</param>
+    /// <param name="source">The frame's whole input.</param>
+    /// <param name="blockStart">Where the block's content starts in <paramref name="source"/>.</param>
+    /// <param name="blockSize">The size of the block's content.</param>
     /// <param name="blockSizeMax">The frame's largest block, which bounds the literals.</param>
     /// <param name="expectedWriteSize">The most the block may write: the literals must fit there too.</param>
-    /// <param name="literals">The literals, in the block itself when stored raw.</param>
+    /// <param name="literals">
+    /// The literals, then at least <see cref="LiteralsMargin"/> readable bytes: copies may read past
+    /// the last literal. Raw literals stay in <paramref name="source"/> when it has that room after them.
+    /// </param>
+    /// <param name="literalCount">The number of literals.</param>
     /// <returns>The size of the literals section.</returns>
-    private int DecodeLiterals(ReadOnlySpan<byte> block, int blockSizeMax, int expectedWriteSize, out ReadOnlySpan<byte> literals)
+    private int DecodeLiterals(
+        ReadOnlySpan<byte> source, int blockStart, int blockSize, int blockSizeMax, int expectedWriteSize,
+        out ReadOnlySpan<byte> literals, out int literalCount)
     {
+        ReadOnlySpan<byte> block = source.Slice(blockStart, blockSize);
         if (block.Length < 2)
         {
             Throw.Error(ZstdError.LiteralsHeader);
@@ -109,6 +122,7 @@ public sealed partial class ZstdDecompressor
                     Throw.Error(ZstdError.DestinationTooSmall);
                 }
 
+                literalCount = size;
                 if (literalsType == 0)
                 {
                     if (headerSize + size > block.Length)
@@ -116,13 +130,22 @@ public sealed partial class ZstdDecompressor
                         Throw.Error(ZstdError.LiteralsHeader);
                     }
 
-                    literals = block.Slice(headerSize, size);
+                    int start = blockStart + headerSize;
+                    if (source.Length - (start + size) >= LiteralsMargin)
+                    {
+                        literals = source.Slice(start);
+                    }
+                    else
+                    {
+                        source.Slice(start, size).CopyTo(_literals);
+                        literals = _literals;
+                    }
+
                     return headerSize + size;
                 }
 
-                Span<byte> buffer = _literals.AsSpan(0, size);
-                buffer.Fill(block[headerSize]);
-                literals = buffer;
+                _literals.AsSpan(0, size).Fill(block[headerSize]);
+                literals = _literals;
                 return headerSize + 1;
             }
 
@@ -218,7 +241,8 @@ public sealed partial class ZstdDecompressor
 
                 _literalEntropy = true;
                 _currentHuffman = table;
-                literals = output;
+                literals = _literals;
+                literalCount = size;
                 return headerSize + compressedSize;
             }
         }

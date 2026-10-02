@@ -3,6 +3,8 @@ using System.Linq;
 using BenchmarkDotNet.Columns;
 using BenchmarkDotNet.Configs;
 using BenchmarkDotNet.Diagnosers;
+using BenchmarkDotNet.Exporters;
+using BenchmarkDotNet.Loggers;
 using BenchmarkDotNet.Jobs;
 using BenchmarkDotNet.Reports;
 using BenchmarkDotNet.Running;
@@ -18,6 +20,9 @@ public sealed class BenchmarkConfig : ManualConfig
 {
     internal static bool InProcess { get; set; }
 
+    /// <summary>A <c>--job</c> on the command line replaces the default job instead of adding to it.</summary>
+    internal static bool ExplicitJob { get; set; }
+
     public BenchmarkConfig()
     {
         Job job = Job.Default;
@@ -26,7 +31,16 @@ public sealed class BenchmarkConfig : ManualConfig
             job = job.WithToolchain(InProcessEmitToolchain.Default);
         }
 
-        AddJob(job);
+        if (!ExplicitJob)
+        {
+            AddJob(job);
+        }
+
+        AddLogger(ConsoleLogger.Default);
+        AddColumnProvider(DefaultColumnProviders.Instance);
+        AddExporter(MarkdownExporter.GitHub);
+        AddAnalyser(DefaultConfig.Instance.GetAnalysers().ToArray());
+        AddValidator(DefaultConfig.Instance.GetValidators().ToArray());
         AddDiagnoser(MemoryDiagnoser.Default);
         AddColumn(new SpeedupColumn());
         HideColumns(Column.Error, Column.StdDev, Column.RatioSD);
