@@ -52,6 +52,11 @@ internal static class Program
             return 2;
         }
 
+        // A round maps its file anew, as the reference maps it at each call: the default session
+        // would hand round two the mapping round one left, pages already mapped. The bench host
+        // sets the same session in `Scenarios.OpenFilesCold`.
+        ScenarioSet.Session = VortexSession.Create(options => options.MappedFileCacheCount = 0);
+
         // The rounds are printed once they are all done, so that formatting a line is not an
         // allocation of the round after it.
         long[] delivered = new long[repeat];

@@ -30,7 +30,7 @@ finds.
 | a kernel | `-- fastlanes` (its class) | 1–8 s | did the kernel move, against the ported arm on the same clock |
 | anything, want a direction | no argument at all | **1 min** | the four default classes, 17 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
-| a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-five axes against Rust, interleaved, each held to a ceiling |
+| a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-six axes against Rust, interleaved, each held to a ceiling |
 | a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
 | a gather, a tile, a dictionary | `-- RowKernel` | 9 s | `Gather`, `GatherMasked`, `Tile` against the per-row type switch each replaced |
 | a string heap cut into views | `-- ViewKernel` | 9 s | `SumLengths`, `BuildFromLengths`, `RequireAscending` against the per-row loops |
@@ -41,7 +41,7 @@ finds.
 | a selective decode (`DecodeSelected`) | `-- --throughput --take --check` | 90 s | 64 rows spread over each of the 57 files, against Rust |
 | a lane, or the degree of parallelism | `-- LanesBench` (`--full` walks 1, 2, 4, 8) | 15 s | ours at n lanes against the reference on a Tokio runtime of n workers, threads pinned both sides |
 | the compressor's decision | `-- CompressorBench` | 12 s | `Choose` and one arm per candidate; `--full` adds the utf8 and f64 columns |
-| the writer, per encoding | `-- --throughput --write --check` | ~2 min | each file read back out to a discarding sink, against Rust, both writers given decoded rows. **A gate** over 56 files; three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`): re-run before believing a red. Only `parquet_variant` produces no ratio, and that is **the reference** refusing to write it |
+| the writer, per encoding | `-- --throughput --write --check` | ~2 min | each file read back out to a discarding sink on both sides, against Rust, both writers given the rows as our reader delivers them; the page prints each writer's bytes beside its time. **A gate** over 56 files; three are noisier than the ×1.15 margin (`onpair`, `sparse`, `constant`): re-run before believing a red. Only `parquet_variant` produces no ratio, and that is **the reference** refusing to write it |
 | every file we write, read by Rust | `bench/crosscheck.sh` | 80 s | 854 files compared scalar by scalar, 2 538 751 rows; needs cargo. `gate.sh --crosscheck` folds it in |
 | **anything, before you push** | `bench/gate.sh` | 68 s | the nine ratchets, `--ffi-check`, `--ratio-check`; exit 1 if one is red. `--throughput` adds the full axis (92 s) |
 | a change too big for a ported arm | `bench/ab.sh <commit> [--after <commit>] <file> [scenario…]` | 7 s | two builds of the library in one process, interleaved, ratio per round |
@@ -182,18 +182,19 @@ journals and in the commits.
 
 ## The gates, and their ceilings
 
-* **`--ratio-check`** — twenty-five axes, ours against Rust, **interleaved against one clock** so
+* **`--ratio-check`** — twenty-six axes, ours against Rust, **interleaved against one clock** so
   that drift is common to both arms. Ten on the dataset (full scan, full scan upstream-lazy,
   projected, projected upstream-lazy, first batch, footer only, read-and-write-back, filtered 1 %,
   filtered half, scattered
   take); four `rewritten` ones that read a file **our writer produced** beside the reference's — the
-  only place our own encoding choices are measured at all; two on key order and one on the exact
-  count; six on predicates pushed into a string or a packed column (equality and prefix over `fsst`
-  and over `dict`, a band over `runend` and over `bitpacked`); and two on a fifty-column table. Each
-  has a ceiling in `RatioCheck.cs`; over it, non-zero exit. 56 s.
+  only place our own encoding choices are measured at all; three on key order, one of them held to a
+  take of rows whose positions the reference is given, and one on the exact count; six on predicates
+  pushed into a string or a packed column (equality and prefix over `fsst` and over `dict`, a band
+  over `runend` and over `bitpacked`); and two on a fifty-column table. Each has a ceiling in
+  `RatioCheck.cs`; over it, non-zero exit. 56 s.
   A bare word narrows it to the axes whose name contains it — `-- --ratio-check write`, `--
   --ratio-check rewritten`, `-- --ratio-check string` — which is the difference between checking one
-  change and waiting for twenty-five axes.
+  change and waiting for twenty-six axes.
 
   **Do not pin tiered compilation for this gate.** `DOTNET_TieredCompilation=0` costs our side
   dynamic profile-guided optimization while the reference, being native, loses nothing: the same
@@ -218,12 +219,14 @@ journals and in the commits.
   whose encodings all have the override.
 
   **`--write`** reads each file back out into a sink that keeps nothing, against `vxbench_write`,
-  which gives the reference's writer the rows decoded, as our reader gives ours, and writes into a
-  `Vec<u8>`: the read is inside the measurement on both sides, so subtract the scan axis before
-  reading the quotient as a statement about writers. It has its own ratchet table of 56
-  references, and it reports an encoding it cannot write rather than dying on it — today that is
-  `parquet_variant` alone, and it is the reference that declines: its variant, decoded, keeps a
-  lazy slice its writer cannot serialize.
+  which gives the reference's writer the rows as our reader gives ours, decoded and a constant kept
+  as one value, and hands its bytes to a sink that keeps nothing too (it was a `Vec<u8>` that grew
+  to hold the file, until 2026-10-02): the read is inside the measurement on both sides, so subtract
+  the scan axis before reading the quotient as a statement about writers. With `--out`, the page
+  prints each writer's bytes beside its time, because a writer can be fast by compressing less. It
+  has its own ratchet table of 56 references, and it reports an encoding it cannot write rather than
+  dying on it — today that is `parquet_variant` alone, and it is the reference that declines: its
+  variant, decoded, keeps a lazy slice its writer cannot serialize.
 
   `--quick` (23 s instead of 70) shortens the warm-up and the per-file budget: a direction, not a
   gate. `--recalibrate N` prints a replacement reference table, as it does for `--ratio-check`.

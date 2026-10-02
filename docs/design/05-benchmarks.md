@@ -10,16 +10,36 @@ measures it; [bench/README.md](../../bench/README.md) says how to run each one.
 
 * **Against Rust.** The reference is Vortex's own implementation, the one the format was designed
   around. A .NET Parquet library would measure a difference of format, not of implementation.
-* **The same work.** Both sides read the same bytes, decode every value they return to its plain
-  form, and must return the same rows, or the run fails.
-* **A file opened again keeps its mapping.** Every call of every instrument opens its file anew, on
-  both sides, and neither keeps a segment cache. Our session keeps the mapping of a file the process
-  opened before and takes it over, pages already mapped; Rust's reader reads the file into buffers
-  of its own at each open, and has no counterpart. The process-per-run actions of §2 open their file
-  once and are not concerned; the scans of §3 and §4 open theirs again on every round.
+* **The same work.** Both sides read the same bytes and must return the same rows, or the run fails.
+  Every call opens its file and maps it anew, on both sides, and reads it where it lies: Rust through
+  `open_buffer` over a `memmap2` mapping, ours through a session that keeps no mapping once a file is
+  closed. Both decode every value they return to its plain form, except a constant column, which both
+  keep as one value and a length: our reader's form, and upstream's `Columnar`. A write hands its
+  bytes to a sink that counts them and keeps none, on both sides. A count is a count on both sides,
+  and a read the reference has no index for is asked of it as the rows it would have to find.
+  Neither side keeps a segment cache.
+* **Rust's figure is its faster setting.** By default Rust cuts a chunk of more than 100 000 rows
+  into splits of 100 000, and its reader decodes the whole chunk again for every split: on the
+  per-encoding corpus, files of one chunk of a million rows, that is ten decodes of each, and the
+  string-heavy files took ten times as long. Asked for one split per chunk it decodes each once, but
+  builds a chunk made of smaller arrays in one piece, three to six times slower on those. Neither
+  wins everywhere, so on one core every Rust figure is the faster of the two, measured on the spot,
+  file by file and axis by axis; on all cores Rust keeps its default, whose splits spread its work.
+* **What that replaced** (2026-10-02). The reference used to read with `open_path`, which copies
+  every segment it needs into buffers of its own, while our side read a mapping, and in the
+  instruments that open their file every round, a mapping a previous round had left it; a column
+  stored in its plain form was then a copy on Rust's side and a view of untouched pages on ours. The
+  reference expanded every constant column, which ours keeps whole; its writer wrote into a
+  `Vec<u8>` that grew to hold the file, where ours counted bytes; the count axis had it decode every
+  column of every row kept, and the uncorrelated key-order axis gave it the positions of the rows;
+  and it read the per-encoding files, one chunk of a million rows each, under its default split,
+  which decoded each of them ten times. Every one of those was a cost on Rust's side alone, and the
+  figures published before that date carried them: by up to twelve times on the decoders of plain
+  columns, ten on a projection of one column in fifty, ten again on every string-heavy file.
 * **Each side built for speed.** Vorticity as a Native AOT binary for the machine's instruction
   set. Vortex 0.86.1 built as upstream builds its own benchmarks: mimalloc, `-C target-cpu=native`,
-  one codegen unit, no LTO.
+  one codegen unit, no LTO, upstream's `release_debug` profile and the `RUSTFLAGS` of its benchmark
+  workflows.
 * **The same threads.** Every scenario runs on one core — Rust's single-threaded runtime, our scans
   at one lane — and on all of them: a Tokio worker per processor for Rust, a lane per processor for
   our scans and as many threads for our writer.
@@ -89,12 +109,17 @@ band axes read files of 65 536 rows our writer makes for them; the last two, gen
 million rows and six columns, and of fifty columns.
 [In one process](../guide/benchmarks.md#in-one-process-after-warm-up) has the figures.
 
-* **`open to first batch` is a latency.** Rust's stream decodes the whole local scan at its first
-  poll, so its first batch costs most of what its whole scan does. The ratio is the time to the
-  first row, and nothing more.
-* The gate has six more axes, which the page leaves out: two time Rust's scan without decoding,
-  which asks another question, and four read one file as each writer wrote it.
-  [bench/README.md](../../bench/README.md) describes them.
+* **`open to first batch` is a latency.** Both sides decode their first batch. Rust's first batch
+  costs most of what its whole scan does on this file, 1.4 ms of 1.6 on 2026-10-02, where ours costs
+  a fifth of ours. The ratio is the time to the first row, and nothing more.
+* **Where the reference has no counterpart, it answers the same question its own way.** A
+  key-ordered read of a band is held against Rust's filtered scan of that band, which returns the
+  same rows in file order; an exact count from the index, against Rust's count of the band with no
+  column decoded. The ratio then prices the index, which is what a caller would weigh.
+* The gate has seven more axes, which the page leaves out: two time Rust's scan without decoding,
+  which asks another question; one holds the uncorrelated key-order read to a take of 64 rows whose
+  positions the reference is given, the floor that read cannot go under; and four read one file as
+  each writer wrote it. [bench/README.md](../../bench/README.md) describes them.
 
 ## 4. Decoders, per encoding
 
@@ -105,11 +130,13 @@ last 10 scans and of 3 processes, Native AOT against Rust's `vxbench` binary: wh
 once warm. [Decoding, per encoding](../guide/benchmarks.md#decoding-per-encoding) has all 57.
 
 * **Past what memory can move is not decoding.** A column stored in its plain form is handed out as
-  a view of the mapped file, nothing copied: the figure measures the walk of the layout.
-* **The widest gaps are not skipped work.** In `varbinview`, `struct` and the tables, the stored
-  arrays are already in their plain form, and Rust's `RecursiveCanonical` has nothing more to
-  decode: its time there is its scan's own.
-* **Each scan opens the file again**, and so takes over the mapping §1 describes.
+  a view of the mapped file on both sides, nothing copied: the figure measures the walk of the
+  layout, and the ratio compares two walks.
+* **The widest gaps are UTF-8 validation.** In `varbin`, `varbinview`, `struct` and the tables, the
+  stored arrays are already in their plain form, and the time is the check that every string is
+  UTF-8, which both sides make: a sampled profile of Rust's scan of `varbinview` spends it in
+  `from_utf8` and `validate_view`, under `VarBinViewData::try_new`.
+* **Each scan opens the file again and maps it anew**, on both sides.
 
 Take and write per encoding are measured in one process, on the JIT after warm-up, each file held to
 a ceiling (`--throughput --take`, `--throughput --write`):

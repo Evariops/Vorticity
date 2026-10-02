@@ -63,25 +63,44 @@ surface to measure except the scan. The empty-call floor is 2.5 ns.
   workers under `with_tokio`, which is how upstream's benchmarks use every core, against our reader
   at `n` lanes. The count is the same on both sides; a ratio between a reader held to one core and
   one free to use them all measures a threading model.
-* **Decoded where the work is split.** Each split is decoded to its canonical form on its own task,
-  through `ScanBuilder::map`, as upstream's Arrow conversion does. Decoded in the loop that drains
-  the stream instead, the splits would be read on every core and decoded on one.
-* **Every value decoded.** Each entry point that reads values executes `RecursiveCanonical`:
-  `execute::<Canonical>` stops at the first canonical kind, a struct among them, which on a table is
-  before a single column has been decoded. `--ffi-check` asserts that both readers return the same
-  rows and the same checksum of every decoded value, in file order, on seven corpus files.
-* **The writer is given decoded rows**, which is what our reader hands our writer. Given the file's
-  own encodings, the reference's writer re-encodes from them, which is not the work our side does,
-  and refuses a numeric column stored as zstd, which it cannot append to a builder.
+* **Decoded where the work is split.** Each split is decoded on its own task, through
+  `ScanBuilder::map`, as upstream's Arrow conversion does. Decoded in the loop that drains the stream
+  instead, the splits would be read on every core and decoded on one.
+* **Every value decoded, to the form our reader delivers.** Each entry point that reads values takes
+  every split to `plain`: `execute::<RecursiveCanonical>`, because `execute::<Canonical>` stops at
+  the first canonical kind, a struct among them, which on a table is before a single column has been
+  decoded; and a constant column kept as one value and a length, through upstream's own `Columnar`,
+  because our reader keeps it so and expands it only when its values are asked for.
+  `RecursiveCanonical` alone expanded it, a cost on this side only. `--ffi-check` asserts that both
+  readers return the same rows and the same checksum of every decoded value, in file order, on seven
+  corpus files, and the per-encoding gates check the rows of every file before timing it.
+* **The file is mapped, anew at every call, on both sides.** `open_buffer` over a `memmap2` mapping,
+  which reads the file where it lies, as our reader reads every file it opens from a path; the bench
+  opens ours through a session that keeps no mapping once a file is closed
+  (`MappedFileCacheCount = 0`). Upstream's `open_path` reads every segment it needs into buffers of
+  its own instead: measured against our mapping, a column stored in its plain form cost this side a
+  copy and ours a view of pages nothing touched, and the decoding tables printed that I/O as
+  decoding, up to twelve times on `table_wide`. Neither side keeps a segment cache.
+* **On one core, the faster of the reference's two splits.** Upstream's default cuts a chunk of more
+  than 100 000 rows into splits of 100 000, and its flat reader decodes the whole chunk again for
+  each: on the per-encoding corpus, files of one chunk of a million rows, every string is validated
+  ten times. One split per chunk (`vxbench_set_split`, `--split per-chunk`) decodes a chunk once but
+  builds a chunk of smaller arrays in one piece, three to six times slower on the `chunked_` files.
+  Neither wins everywhere, so on one core the harnesses time both and keep the faster, file by file;
+  on all cores the default stays, its splits being how the reference spreads a chunk over the cores.
+* **The writer is given the rows as our reader hands them to our writer**, `plain` again. Given the
+  file's own encodings, the reference's writer re-encodes from them, which is not the work our side
+  does, and refuses a numeric column stored as zstd, which it cannot append to a builder.
+* **The writer's bytes are counted and dropped**, by a `DiscardSink` of this crate, as the .NET side's
+  `DiscardSink` drops ours. It was a `Vec<u8>` that grew to hold the whole file. `vxbench_write_bytes`
+  says how many bytes a write produced, so the page can print each writer's size beside its time.
+* **Each side is asked the same question.** A count is answered by `vxbench_count_filtered`, a
+  projection of no column, as our `CountAsync` produces no batch; a key-ordered read of a band by the
+  rows of that band, `vxbench_scan_filtered`, the reference having no key order and no index.
 * **The session is built once.** `VortexSession::default()` registers every edition and initializes
   the arrow and parquet-variant integrations: about 90 µs, which nothing on the .NET side pays per
   open, since `EncodingRegistry` is static. Built per call, it would read as Rust being slow to open
   a file.
-* **The file is opened from scratch on every call**, on both sides, and neither keeps a segment
-  cache. Our session does keep the mapping of a file it opened before and takes it over at the next
-  open, pages already mapped (`VortexSessionOptions.MappedFileCacheCount`); Rust's reader reads the
-  file into buffers of its own at each open and has no counterpart. A program that opens a file
-  once pays neither.
 * **Panics are caught** at the boundary: unwinding across a C ABI is undefined behaviour. Every
   entry point returns a count, or a negative status.
 
@@ -97,7 +116,7 @@ cd tools/vxbench-rs && cargo build --release
 dotnet run -c Release --project bench/Vorticity.Benchmarks -- --ffi-check
 
 # Then the ratios:
-dotnet run -c Release --project bench/Vorticity.Benchmarks -- --filter '*Comparison*'
+dotnet run -c Release --project bench/Vorticity.Benchmarks -- --ratio-check
 ```
 
 `VORTICITY_VXBENCH` points the loader at a prebuilt library; otherwise the resolver walks up from

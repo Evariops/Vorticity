@@ -65,6 +65,10 @@ internal static class Program
             return 0;
         }
 
+        // Before any mode: every comparison opens its file anew each round, and the reference maps
+        // it anew each time, so our side must not take over a mapping a previous round left.
+        Scenarios.OpenFilesCold();
+
         if (args.Length > 0 && args[0] == "--ffi-check")
         {
             return await FfiCheck().ConfigureAwait(false);
@@ -513,7 +517,7 @@ internal static class Program
           <word> [<word>…]         bare words become a filter: `fsst` is `--filter *fsst*`
                                      --out <page>      each class's table as its section of the
                                                        benchmark page, docs/guide/benchmarks.md
-          --ratio-check [axis…]    25 axes, ours over the reference, one clock, ~55 s
+          --ratio-check [axis…]    26 axes, ours over the reference, one clock, ~55 s
                                      NEVER under DOTNET_TieredCompilation=0: the pin costs our
                                      side dynamic PGO and the native reference nothing, which
                                      turns nine green axes red. ab.sh pins both its sides and

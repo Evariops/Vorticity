@@ -222,8 +222,11 @@ windows stay in order.
 splits as its rows are scattered over. On a sorted column the rows of consecutive keys are
 consecutive, so the walk is a plain scan. On sorted runs over a column **uncorrelated with file
 order**, a window can touch a split per row, and a scattered take costs what it costs: 64 rows of an
-uncorrelated column read in key order take longer than Rust's reader takes for the same 64 rows as a
-take over 64 splits (the key-order axes of [05-benchmarks.md](05-benchmarks.md) §3, measured on
+uncorrelated column read in key order take longer than Rust's reader takes for 64 rows scattered the
+same way whose positions it is given, a take over 64 splits (the `against a take` axis of
+`--ratio-check`, a gate the benchmark page leaves out), and less than Rust's filtered scan of the
+same band, which is what a reader without the index has to do (the key-order axes of
+[05-benchmarks.md](05-benchmarks.md) §3, measured on
 [the benchmark page](../guide/benchmarks.md#in-one-process-after-warm-up)). So it is the tool for a
 selective range, a top-k or a merge, and not for a whole uncorrelated column, where sorting the
 scan's output costs less. The plan's `OrderPlan` states the source, the runs the range reaches and
