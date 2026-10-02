@@ -15,7 +15,7 @@ namespace Vorticity.Zstd.Perf;
 /// moment lands on all of them alike. Several passes show how stable the figures are.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab] [--dump dir] [--no-check]
+/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab] [--dump dir] [--no-check] [--no-pair]
 /// [--pmu default|EV1,EV2]</c>; <c>--pmu</c> counts hardware events per decode and sequence (under sudo); <c>--ab</c>
 /// adds a "before" candidate that runs with the legacy switches of the point under work (see
 /// <see cref="AbSwitch"/>). Before timing,
@@ -72,7 +72,8 @@ public static class Program
         Batch = Option(args, "--batch") is string batch ? int.Parse(batch, CultureInfo.InvariantCulture) : null;
         NoCheck = args.Contains("--no-check");
 
-        var zstd = new ZstdDecompressor();
+        // --no-pair: one block at a time, to measure what pairing them brings.
+        var zstd = new ZstdDecompressor { PairsBlocks = !args.Contains("--no-pair") };
         var platform = new ZstandardDecoder();
         NativeReference? native = NativeReference.TryLoad();
 

@@ -19,8 +19,8 @@ namespace Vorticity.Zstd;
 /// </para>
 /// <para>
 /// Only blocks with many short sequences pair: at least <see cref="MinPairSequences"/> each, with
-/// lengths the tables expect short (<see cref="MaxPairLengths"/>), where the chains, not the copies,
-/// take the time. A frame of blocks with few sequences is not even looked ahead in.
+/// lengths the tables expect short (<see cref="MaxPairLengths"/>, <see cref="MaxPairLiterals"/>),
+/// where the chains, not the copies, take the time. A frame of blocks with few sequences is not even looked ahead in.
 /// </para>
 /// <para>
 /// The result and the errors are those of decoding the blocks one after the other. B is read before
@@ -40,7 +40,14 @@ public sealed partial class ZstdDecompressor
     /// two blocks are decoded side by side: the pair pays for the chains of states, which the copies of
     /// longer sequences hide anyway, while their records only add to them.
     /// </summary>
-    private const int MaxPairLengths = 24;
+    private const int MaxPairLengths = 15;
+
+    /// <summary>
+    /// The longest literal length, on average as the table expects it, for which two blocks are
+    /// decoded side by side: a literal length of 16 or more has extra bits, and a sequence with
+    /// extra bits takes the pair loop's slow path (random64-L3, 47% of them, lost 5%).
+    /// </summary>
+    private const int MaxPairLiterals = 8;
 
     /// <summary>The most sequences of a pair decoded side by side: the rest of each block runs alone.</summary>
     private const int MaxPairSequences = 1 << 15;
@@ -217,8 +224,7 @@ public sealed partial class ZstdDecompressor
         SequenceState b = default;
         nint decoded = 0;
         ref ulong records = ref Unsafe.NullRef<ulong>();
-        if (nbSeqB >= MinPairSequences
-            && _sequenceTables.ExpectedLengthsTimes2 <= 2 * MaxPairLengths && tablesB.ExpectedLengthsTimes2 <= 2 * MaxPairLengths
+        if (nbSeqB >= MinPairSequences && ShortSequences(_sequenceTables) && ShortSequences(tablesB)
             && TryBeginSequences(bitstreamB, nbSeqB, tablesB, _pairShortBitstream, out b))
         {
             // Every sequence but the last of each: the last reads no states, the careful path takes it.
@@ -270,6 +276,10 @@ public sealed partial class ZstdDecompressor
         ExecuteRecords(ref b, ref Unsafe.Add(ref records, RecordStride / 2), decoded, literalsB, literalCountB, destination, opB, blockSizeMax, history);
         return writtenA + RunSequences(ref b, literalsB, literalCountB, destination, opB, blockSizeMax, history);
     }
+
+    /// <summary>Whether the tables expect the sequences short enough for the pair to pay.</summary>
+    private static bool ShortSequences(SequenceTableSet tables) =>
+        (tables.ExpectedLengthsTimes2 <= 2 * MaxPairLengths) & (tables.ExpectedLiteralsTimes2 <= 2 * MaxPairLiterals);
 
     /// <summary>
     /// Decodes up to <paramref name="count"/> sequences of each of two blocks, one of each a step,
@@ -506,11 +516,12 @@ public sealed partial class ZstdDecompressor
     /// <paramref name="s"/> if it could not execute it.
     /// </summary>
     /// <remarks>
-    /// The room is proven a batch of records at a time, as the pair loop proves its bitstream: a
-    /// record of 16 literals and a 16-byte match at most moves the output by 32 bytes and the
-    /// literals by 16, so the next (room / 32) such records fit, and each only checks its own shape.
-    /// Any other record takes the checked path and is charged to the batch for the room it took, a
-    /// new batch being proven only once it is spent.
+    /// The output's room is proven a batch of records at a time, as the pair loop proves its
+    /// bitstream: a record of 16 literals and a 16-byte match at most moves the output by 32 bytes,
+    /// so the next (room / 32) such records fit, and each only checks its shape and its literals
+    /// (a bound on those, 16 a record, would stop a block with few literals at once). Any other
+    /// record takes the checked path and is charged to the batch for the output it took, a new
+    /// batch being proven only once it is spent.
     /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static nint ExecuteRecordsFast(
@@ -531,9 +542,7 @@ public sealed partial class ZstdDecompressor
         nuint offBase;
 
     Batch:
-        batch = Math.Min(
-            Unsafe.ByteOffset(ref record, ref end) >> 5,
-            Math.Min(Unsafe.ByteOffset(ref dst, ref fastLimit) >> 5, Unsafe.ByteOffset(ref lit, ref litEnd) >> 4));
+        batch = Math.Min(Unsafe.ByteOffset(ref record, ref end) >> 5, Unsafe.ByteOffset(ref dst, ref fastLimit) >> 5);
         if (batch <= 0)
         {
             goto Stop;
@@ -555,7 +564,7 @@ public sealed partial class ZstdDecompressor
         {
             offset = ResolveOffset(offBase - 1, litLength == 0, ref rep0, ref rep1, ref rep2);
             ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
-            if (IsShortRecord(ref frameStart, ref matchStart, litLength, matchLength, offset))
+            if (IsShortRecord(ref frameStart, ref matchStart, ref litEnd, ref Unsafe.Add(ref lit, litLength), litLength, matchLength, offset))
             {
                 Copy16(ref dst, ref lit);
                 Copy16(ref matchStart, ref Unsafe.Subtract(ref matchStart, offset));
@@ -579,7 +588,7 @@ public sealed partial class ZstdDecompressor
             rep1 = rep0;
             rep0 = offset;
             ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
-            if (IsShortRecord(ref frameStart, ref matchStart, litLength, matchLength, offset))
+            if (IsShortRecord(ref frameStart, ref matchStart, ref litEnd, ref Unsafe.Add(ref lit, litLength), litLength, matchLength, offset))
             {
                 Copy16(ref dst, ref lit);
                 Copy16(ref matchStart, ref Unsafe.Subtract(ref matchStart, offset));
@@ -634,8 +643,8 @@ public sealed partial class ZstdDecompressor
             dst = ref matchEnd;
             lit = ref litAfter;
 
-            // The room it took, in records of 32 bytes of output and 16 literals: at least one.
-            batch -= Max((litLength + matchLength + 31) >> 5, (litLength + 15) >> 4);
+            // The output it took, in records of 32 bytes: at least one.
+            batch -= (litLength + matchLength + 31) >> 5;
             if (batch > 0)
             {
                 goto Loop;
@@ -659,21 +668,16 @@ public sealed partial class ZstdDecompressor
         return (nint)((nuint)Unsafe.ByteOffset(ref records, ref record) / (RecordStride * sizeof(ulong)));
     }
 
-    /// <summary>The larger of two values, by their difference's sign: no branch.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static nint Max(nint a, nint b)
-    {
-        nint difference = a - b;
-        return a - (difference & (difference >> 63));
-    }
-
     /// <summary>
     /// Whether a record within a batch (see <see cref="ExecuteRecordsFast"/>) takes one 16-byte copy of
-    /// literals and one of match, 16 or more apart, the match within the output: one condition.
+    /// literals there are, and one of match, 16 or more apart, the match within the output: one
+    /// condition.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool IsShortRecord(ref byte frameStart, ref byte matchStart, nint litLength, nint matchLength, nuint offset) =>
+    private static bool IsShortRecord(
+        ref byte frameStart, ref byte matchStart, ref byte litEnd, ref byte litAfter, nint litLength, nint matchLength, nuint offset) =>
         (offset <= (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart))
+        & !Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd)
         & (litLength <= 16)
         & (matchLength <= 16)
         & (offset >= 16);

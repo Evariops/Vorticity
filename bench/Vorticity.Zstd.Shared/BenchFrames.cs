@@ -28,8 +28,20 @@ internal static class BenchFrames
         "repeats-L3" => Compress("repeats", 1 << 20, 3),
         "incompressible" => Compress("incompressible", 256 << 10, 3),
         "small-json-L3" => Compress("json", 4 << 10, 3),
-        _ => throw new ArgumentException("unknown frame " + name, nameof(name)),
+        _ => Generic(name),
     };
+
+    /// <summary>Any other kind at any level, 1 MiB: <c>kind-L&lt;level&gt;</c>.</summary>
+    private static byte[] Generic(string name)
+    {
+        int dash = name.LastIndexOf("-L", StringComparison.Ordinal);
+        if (dash <= 0 || !int.TryParse(name.AsSpan(dash + 2), out int level))
+        {
+            throw new ArgumentException("unknown frame " + name, nameof(name));
+        }
+
+        return Compress(name[..dash], 1 << 20, level);
+    }
 
     /// <summary>The content size a frame declares: every benchmark frame declares one.</summary>
     public static int ContentSize(byte[] frame) =>

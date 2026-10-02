@@ -185,6 +185,9 @@ internal sealed class SequenceTableSet
     public nint ExpectedLengthsTimes2 =>
         _expectedTimes2[(int)SequenceCode.LiteralLength] + _expectedTimes2[(int)SequenceCode.MatchLength];
 
+    /// <summary>Twice the literal length a sequence has on average, as the current table says.</summary>
+    public nint ExpectedLiteralsTimes2 => _expectedTimes2[(int)SequenceCode.LiteralLength];
+
     /// <summary>The state every frame starts from: a dictionary's tables, if it has them.</summary>
     public void BeginFrame(SeqTable? literalLengths, SeqTable? offsets, SeqTable? matchLengths)
     {
