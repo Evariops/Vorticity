@@ -132,11 +132,16 @@ public sealed partial class ZstdDecompressor
     /// then copies the literals left after the last one.
     /// </summary>
     /// <returns>The size of the block's content.</returns>
+    /// <remarks>
+    /// The block may write up to <paramref name="blockSizeMax"/> bytes: past the destination that is
+    /// <see cref="ZstdError.DestinationTooSmall"/>, past the block's maximum the frame is invalid.
+    /// </remarks>
     private int ExecuteSequences(
-        ReadOnlySpan<byte> bitstream, int nbSeq, ReadOnlySpan<byte> literals, Span<byte> destination, int op, ReadOnlySpan<byte> history)
+        ReadOnlySpan<byte> bitstream, int nbSeq, ReadOnlySpan<byte> literals, Span<byte> destination, int op, int blockSizeMax, ReadOnlySpan<byte> history)
     {
         int start = op;
-        int oend = destination.Length;
+        int blockEnd = (int)Math.Min((long)op + blockSizeMax, int.MaxValue);
+        int oend = Math.Min(destination.Length, blockEnd);
         int litPtr = 0;
 
         if (nbSeq > 0)
@@ -247,7 +252,7 @@ public sealed partial class ZstdDecompressor
                 // ---- execute: libzstd's ZSTD_execSequenceEnd, checks in its order
                 if ((long)litLength + matchLength > oend - op)
                 {
-                    Throw.Error(ZstdError.DestinationTooSmall);
+                    Throw.Error((long)op + litLength + matchLength > blockEnd ? ZstdError.BlockTooLarge : ZstdError.DestinationTooSmall);
                 }
 
                 if (litLength > (uint)(literals.Length - litPtr))
@@ -307,7 +312,7 @@ public sealed partial class ZstdDecompressor
         int last = literals.Length - litPtr;
         if (last > oend - op)
         {
-            Throw.Error(ZstdError.DestinationTooSmall);
+            Throw.Error((long)op + last > blockEnd ? ZstdError.BlockTooLarge : ZstdError.DestinationTooSmall);
         }
 
         literals.Slice(litPtr).CopyTo(destination.Slice(op));

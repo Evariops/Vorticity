@@ -15,6 +15,10 @@ namespace Vorticity.Zstd;
 /// allocates nothing. It is not thread-safe: use one per thread.
 /// </para>
 /// <para>
+/// Every block must regenerate at most the frame's <c>Block_Maximum_Size</c>, as RFC 8878 states.
+/// libzstd enforces this when it streams and only partly in one shot; Vorticity.Zstd always does.
+/// </para>
+/// <para>
 /// <see cref="Decompress"/> decodes one whole frame per call, from the start of the source into the
 /// start of the destination. When the source ends before the frame does, or the destination cannot
 /// hold it, it reports so without consuming or writing anything: call again with the whole frame, or
@@ -195,6 +199,11 @@ public sealed partial class ZstdDecompressor
                         Throw.Error(ZstdError.Truncated);
                     }
 
+                    if (blockSize > header.BlockSizeMax)
+                    {
+                        Throw.Error(ZstdError.BlockTooLarge);
+                    }
+
                     if (blockSize > destination.Length - op)
                     {
                         Throw.Error(ZstdError.DestinationTooSmall);
@@ -209,6 +218,11 @@ public sealed partial class ZstdDecompressor
                     if (source.Length - ip < 1)
                     {
                         Throw.Error(ZstdError.Truncated);
+                    }
+
+                    if (blockSize > header.BlockSizeMax)
+                    {
+                        Throw.Error(ZstdError.BlockTooLarge);
                     }
 
                     if (blockSize > destination.Length - op)

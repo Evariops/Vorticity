@@ -48,7 +48,7 @@ public sealed partial class ZstdDecompressor
             Throw.Error(ZstdError.DestinationTooSmall);
         }
 
-        return ExecuteSequences(sequences.Slice(headerSize), nbSeq, literals, destination, op, history);
+        return ExecuteSequences(sequences.Slice(headerSize), nbSeq, literals, destination, op, blockSizeMax, history);
     }
 
     /// <summary>libzstd's <c>ZSTD_decodeLiteralsBlock</c>.</summary>
