@@ -10,8 +10,12 @@ public sealed partial class ZstdDecompressor
     /// libzstd's <c>ZSTD_decodeSeqHeaders</c>: the number of sequences, then the table of each code,
     /// as a mode and, for the FSE mode, a description.
     /// </summary>
+    /// <param name="section">The sequences section.</param>
+    /// <param name="tables">Where the block's tables go.</param>
+    /// <param name="previous">The previous block's tables when they are in another set; null when <paramref name="tables"/> holds them.</param>
+    /// <param name="headerSize">The size of the header.</param>
     /// <returns>The number of sequences.</returns>
-    private int DecodeSequencesHeader(ReadOnlySpan<byte> section, out int headerSize)
+    private int DecodeSequencesHeader(ReadOnlySpan<byte> section, SequenceTableSet tables, SequenceTableSet? previous, out int headerSize)
     {
         const ZstdError error = ZstdError.SequencesHeader;
         if (section.IsEmpty)
@@ -63,9 +67,9 @@ public sealed partial class ZstdDecompressor
 
         int modes = section[ip++];
         Span<short> norm = stackalloc short[SequenceCodes.MaxMatchLength + 1];
-        ip += BuildSequenceTable(SequenceCode.LiteralLength, modes >> 6, section.Slice(ip), norm, SequenceCodes.DefaultLiteralLengths);
-        ip += BuildSequenceTable(SequenceCode.Offset, (modes >> 4) & 3, section.Slice(ip), norm, SequenceCodes.DefaultOffsets);
-        ip += BuildSequenceTable(SequenceCode.MatchLength, (modes >> 2) & 3, section.Slice(ip), norm, SequenceCodes.DefaultMatchLengths);
+        ip += BuildSequenceTable(tables, previous, SequenceCode.LiteralLength, modes >> 6, section.Slice(ip), norm, SequenceCodes.DefaultLiteralLengths);
+        ip += BuildSequenceTable(tables, previous, SequenceCode.Offset, (modes >> 4) & 3, section.Slice(ip), norm, SequenceCodes.DefaultOffsets);
+        ip += BuildSequenceTable(tables, previous, SequenceCode.MatchLength, (modes >> 2) & 3, section.Slice(ip), norm, SequenceCodes.DefaultMatchLengths);
 
         headerSize = ip;
         return nbSeq;
@@ -73,12 +77,13 @@ public sealed partial class ZstdDecompressor
 
     /// <summary>libzstd's <c>ZSTD_buildSeqTable</c>: selects or builds the table of one code.</summary>
     /// <returns>The bytes the table's description takes.</returns>
-    private int BuildSequenceTable(SequenceCode code, int mode, ReadOnlySpan<byte> source, Span<short> norm, SeqTable predefined)
+    private int BuildSequenceTable(
+        SequenceTableSet tables, SequenceTableSet? previous, SequenceCode code, int mode, ReadOnlySpan<byte> source, Span<short> norm, SeqTable predefined)
     {
         switch (mode)
         {
             case 0: // predefined
-                _sequenceTables.Use(predefined);
+                tables.Use(predefined);
                 return 0;
 
             case 1: // RLE: one symbol, every sequence
@@ -87,7 +92,7 @@ public sealed partial class ZstdDecompressor
                     Throw.Error(ZstdError.FseTable);
                 }
 
-                _sequenceTables.BuildRle(code, source[0]);
+                tables.BuildRle(code, source[0]);
                 return 1;
 
             case 2: // FSE: a table description
@@ -99,7 +104,7 @@ public sealed partial class ZstdDecompressor
                     Throw.Error(ZstdError.FseTable);
                 }
 
-                _sequenceTables.Build(code, norm.Slice(0, maxSymbolValue + 1), tableLog);
+                tables.Build(code, norm.Slice(0, maxSymbolValue + 1), tableLog);
                 return size;
             }
 
@@ -109,7 +114,15 @@ public sealed partial class ZstdDecompressor
                     Throw.Error(ZstdError.RepeatWithoutTable);
                 }
 
-                _sequenceTables.Repeat(code);
+                if (previous is null)
+                {
+                    tables.Repeat(code);
+                }
+                else
+                {
+                    tables.RepeatFrom(previous, code);
+                }
+
                 return 0;
         }
     }

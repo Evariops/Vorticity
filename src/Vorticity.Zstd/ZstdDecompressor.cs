@@ -241,8 +241,26 @@ public sealed partial class ZstdDecompressor
                         Throw.Error(ZstdError.BlockTooLarge);
                     }
 
-                    op += DecodeCompressedBlock(source, ip, blockSize, destination, op, header.BlockSizeMax, history);
-                    ip += blockSize;
+                    // With the next block compressed too, both at once (see ZstdDecompressor.Pairs.cs).
+                    int next = ip + blockSize;
+                    if (!lastBlock && _lastBlockSequences >= MinPairSequences && PairsBlocks
+                        && TryPeekCompressedBlock(source, next, header.BlockSizeMax, out int nextSize, out bool nextLast)
+                        && WorthPairing(source, ip, blockSize, next + FrameFormat.BlockHeaderSize, nextSize))
+                    {
+                        op += DecodeBlockPair(
+                            source, ip, blockSize, next + FrameFormat.BlockHeaderSize, nextSize, destination, op, header.BlockSizeMax, history, out bool paired);
+                        if (paired)
+                        {
+                            next += FrameFormat.BlockHeaderSize + nextSize;
+                            lastBlock = nextLast;
+                        }
+                    }
+                    else
+                    {
+                        op += DecodeCompressedBlock(source, ip, blockSize, destination, op, header.BlockSizeMax, history);
+                    }
+
+                    ip = next;
                     break;
 
                 default:
@@ -317,6 +335,7 @@ public sealed partial class ZstdDecompressor
         _literalEntropy = false;
         _sequenceEntropy = false;
         _currentHuffman = _huffman;
+        _lastBlockSequences = MinPairSequences;
 
         DecoderDictionary? dictionary = _dictionary;
         if (dictionary is not null && dictionary.HasEntropy)

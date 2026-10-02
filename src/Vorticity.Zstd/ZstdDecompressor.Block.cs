@@ -12,7 +12,7 @@ public sealed partial class ZstdDecompressor
     // ---- the state a frame carries from one block to the next
     private readonly byte[] _literals;
     private readonly HuffmanTable _huffman;
-    private readonly SequenceTableSet _sequenceTables;
+    private SequenceTableSet _sequenceTables;
     private HuffmanTable _currentHuffman;
     private bool _literalEntropy;
     private bool _sequenceEntropy;
@@ -38,10 +38,11 @@ public sealed partial class ZstdDecompressor
     {
         int capacity = destination.Length - op;
         int literalsSize = DecodeLiterals(
-            source, blockStart, blockSize, blockSizeMax, Math.Min(blockSizeMax, capacity), out ReadOnlySpan<byte> literals, out int literalCount);
+            source, blockStart, blockSize, blockSizeMax, Math.Min(blockSizeMax, capacity), _literals, out ReadOnlySpan<byte> literals, out int literalCount);
         ReadOnlySpan<byte> sequences = source.Slice(blockStart + literalsSize, blockSize - literalsSize);
 
-        int nbSeq = DecodeSequencesHeader(sequences, out int headerSize);
+        int nbSeq = DecodeSequencesHeader(sequences, _sequenceTables, null, out int headerSize);
+        _lastBlockSequences = nbSeq;
         if (nbSeq > 0 && capacity == 0)
         {
             Throw.Error(ZstdError.DestinationTooSmall);
@@ -56,6 +57,7 @@ public sealed partial class ZstdDecompressor
     /// <param name="blockSize">The size of the block's content.</param>
     /// <param name="blockSizeMax">The frame's largest block, which bounds the literals.</param>
     /// <param name="expectedWriteSize">The most the block may write: the literals must fit there too.</param>
+    /// <param name="buffer">Where literals that are not read in place go, with <see cref="LiteralsMargin"/> bytes after them.</param>
     /// <param name="literals">
     /// The literals, then at least <see cref="LiteralsMargin"/> readable bytes: copies may read past
     /// the last literal. Raw literals stay in <paramref name="source"/> when it has that room after them.
@@ -63,7 +65,7 @@ public sealed partial class ZstdDecompressor
     /// <param name="literalCount">The number of literals.</param>
     /// <returns>The size of the literals section.</returns>
     private int DecodeLiterals(
-        ReadOnlySpan<byte> source, int blockStart, int blockSize, int blockSizeMax, int expectedWriteSize,
+        ReadOnlySpan<byte> source, int blockStart, int blockSize, int blockSizeMax, int expectedWriteSize, byte[] buffer,
         out ReadOnlySpan<byte> literals, out int literalCount)
     {
         ReadOnlySpan<byte> block = source.Slice(blockStart, blockSize);
@@ -132,15 +134,15 @@ public sealed partial class ZstdDecompressor
                     }
                     else
                     {
-                        source.Slice(start, size).CopyTo(_literals);
-                        literals = _literals;
+                        source.Slice(start, size).CopyTo(buffer);
+                        literals = buffer;
                     }
 
                     return headerSize + size;
                 }
 
-                _literals.AsSpan(0, size).Fill(block[headerSize]);
-                literals = _literals;
+                buffer.AsSpan(0, size).Fill(block[headerSize]);
+                literals = buffer;
                 return headerSize + 1;
             }
 
@@ -202,7 +204,7 @@ public sealed partial class ZstdDecompressor
                 }
 
                 ReadOnlySpan<byte> compressed = block.Slice(headerSize, compressedSize);
-                Span<byte> output = _literals.AsSpan(0, size);
+                Span<byte> output = buffer.AsSpan(0, size);
                 HuffmanTable table;
                 if (literalsType == 3)
                 {
@@ -236,7 +238,7 @@ public sealed partial class ZstdDecompressor
 
                 _literalEntropy = true;
                 _currentHuffman = table;
-                literals = _literals;
+                literals = buffer;
                 literalCount = size;
                 return headerSize + compressedSize;
             }

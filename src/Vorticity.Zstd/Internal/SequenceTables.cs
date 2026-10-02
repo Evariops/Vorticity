@@ -119,12 +119,15 @@ internal sealed class SeqTable
     public readonly int TableLog;
     public readonly SequenceCode Code;
 
+    /// <summary>Twice the value a state of the table stands for on average (see <see cref="SequenceCodes.BuildTable"/>).</summary>
+    public readonly nint ExpectedTimes2;
+
     public SeqTable(SequenceCode code, ReadOnlySpan<short> norm, int tableLog)
     {
         Code = code;
         TableLog = tableLog;
         Entries = new SeqSymbol[2 << tableLog];
-        SequenceCodes.BuildTable(code, Entries, norm, tableLog);
+        ExpectedTimes2 = SequenceCodes.BuildTable(code, Entries, norm, tableLog);
     }
 }
 
@@ -162,6 +165,9 @@ internal sealed class SequenceTableSet
 
     private readonly int[] _tableLog = new int[3];
 
+    /// <summary>Per code: twice the value its table's states stand for on average.</summary>
+    private readonly nint[] _expectedTimes2 = new nint[3];
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int Slot(SequenceCode code) => code switch
     {
@@ -171,6 +177,13 @@ internal sealed class SequenceTableSet
     };
 
     public int TableLog(SequenceCode code) => _tableLog[(int)code];
+
+    /// <summary>
+    /// Twice the literal length plus the match length a sequence has on average, as the distributions
+    /// of the current tables say: how long its copies are.
+    /// </summary>
+    public nint ExpectedLengthsTimes2 =>
+        _expectedTimes2[(int)SequenceCode.LiteralLength] + _expectedTimes2[(int)SequenceCode.MatchLength];
 
     /// <summary>The state every frame starts from: a dictionary's tables, if it has them.</summary>
     public void BeginFrame(SeqTable? literalLengths, SeqTable? offsets, SeqTable? matchLengths)
@@ -185,6 +198,7 @@ internal sealed class SequenceTableSet
             {
                 _current[(int)code] = table;
                 _tableLog[(int)code] = table.TableLog;
+                _expectedTimes2[(int)code] = table.ExpectedTimes2;
             }
         }
     }
@@ -195,17 +209,36 @@ internal sealed class SequenceTableSet
         int code = (int)table.Code;
         _current[code] = table;
         _tableLog[code] = table.TableLog;
+        _expectedTimes2[code] = table.ExpectedTimes2;
         Materialize(table.Code);
     }
 
     /// <summary>The table the previous block used, for the repeat mode.</summary>
     public void Repeat(SequenceCode code) => Materialize(code);
 
+    /// <summary>
+    /// The repeat mode of a block decoded alongside the one before it, whose tables are in
+    /// <paramref name="previous"/>: that block's table of <paramref name="code"/>, shared or copied.
+    /// </summary>
+    public void RepeatFrom(SequenceTableSet previous, SequenceCode code)
+    {
+        SeqTable? shared = previous._current[(int)code];
+        if (shared is not null)
+        {
+            Use(shared);
+            return;
+        }
+
+        int slot = Slot(code);
+        int tableLog = previous._tableLog[(int)code];
+        previous.Entries.AsSpan(slot, 2 << tableLog).CopyTo(Entries.AsSpan(slot));
+        Own(code, tableLog, previous._expectedTimes2[(int)code]);
+    }
+
     /// <summary>libzstd's <c>ZSTD_buildFSETable</c>, into the slot.</summary>
     public void Build(SequenceCode code, ReadOnlySpan<short> norm, int tableLog)
     {
-        SequenceCodes.BuildTable(code, Entries.AsSpan(Slot(code)), norm, tableLog);
-        Own(code, tableLog);
+        Own(code, tableLog, SequenceCodes.BuildTable(code, Entries.AsSpan(Slot(code)), norm, tableLog));
     }
 
     /// <summary>libzstd's <c>ZSTD_buildSeqTable_rle</c>: one state that every sequence takes.</summary>
@@ -215,14 +248,15 @@ internal sealed class SequenceTableSet
         int slot = Slot(code);
         Entries[slot] = new SeqSymbol(code, slot, bits, 0, baseValue);
         Entries[slot + 1] = Entries[slot];
-        Own(code, 0);
+        Own(code, 0, (2 * (nint)baseValue) + ((nint)1 << bits) - 1);
     }
 
-    private void Own(SequenceCode code, int tableLog)
+    private void Own(SequenceCode code, int tableLog, nint expectedTimes2)
     {
         _current[(int)code] = null;
         _held[(int)code] = null;
         _tableLog[(int)code] = tableLog;
+        _expectedTimes2[(int)code] = expectedTimes2;
     }
 
     private void Materialize(SequenceCode code)
@@ -397,7 +431,11 @@ internal static class SequenceCodes
     /// twice in one store.
     /// </para>
     /// </remarks>
-    public static void BuildTable(SequenceCode code, Span<SeqSymbol> entries, ReadOnlySpan<short> norm, int tableLog)
+    /// <returns>
+    /// Twice the value a state stands for on average, its extra bits halfway: how long a length is
+    /// expected to be, which decides whether two blocks are decoded side by side.
+    /// </returns>
+    public static nint BuildTable(SequenceCode code, Span<SeqSymbol> entries, ReadOnlySpan<short> norm, int tableLog)
     {
         ReadOnlySpan<uint> baseValue = code switch
         {
@@ -437,16 +475,22 @@ internal static class SequenceCodes
         int nbBitsShift = code == SequenceCode.Offset ? 8 : 0;
         nint lowCount = 0;
         nint laid = 0;
+        nint weighted = 0;
         ulong copies = 0;
         for (nint s = 0; s < symbolCount; s++, copies += 0x0101010101010101UL)
         {
             // A count is -1 (below one unit) or positive: its absolute value is the symbol's first
-            // state, its sign moves the threshold, its positive part is how many cells it lays down.
-            // All three by arithmetic on the sign mask: Math.Abs and Math.Max become branches.
+            // state, and the number of states it takes; its sign moves the threshold, its positive
+            // part is how many cells it lays down. All by arithmetic on the sign mask: Math.Abs and
+            // Math.Max become branches.
             nint count = Unsafe.Add(ref counts, s);
             nint sign = count >> 63;
-            Unsafe.Add(ref templates, s) = ((ulong)Unsafe.Add(ref bases, s) << 16) + ((ulong)Unsafe.Add(ref extraBits, s) << extraShift) - (1UL << nbBitsShift);
-            Unsafe.Add(ref next, s) = (ushort)((count ^ sign) - sign);
+            nint states = (count ^ sign) - sign;
+            nint symbolBase = (nint)Unsafe.Add(ref bases, s);
+            int symbolBits = Unsafe.Add(ref extraBits, s);
+            Unsafe.Add(ref templates, s) = ((ulong)symbolBase << 16) + ((ulong)symbolBits << extraShift) - (1UL << nbBitsShift);
+            Unsafe.Add(ref next, s) = (ushort)states;
+            weighted += states * ((2 * symbolBase) + ((nint)1 << symbolBits) - 1);
 
             // Below one unit: next in the list of the top cells, by a store whose index only moves
             // for such a symbol.
@@ -539,6 +583,8 @@ internal static class SequenceCodes
             output = ref Unsafe.Add(ref output, 2);
             output2 = ref Unsafe.Add(ref output2, 2);
         }
+
+        return weighted >> tableLog;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static ulong Entry(ref byte cells, ref ushort next, ref ulong templates, nint u, nint bitsOffset, nint stateBase, int nbBitsShift)
