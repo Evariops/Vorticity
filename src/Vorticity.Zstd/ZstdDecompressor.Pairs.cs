@@ -343,8 +343,8 @@ public sealed partial class ZstdDecompressor
             ulong offBaseA;
             if (((llEntryA | mlEntryA) & 0x1F00) == 0)
             {
+                offBaseA = OffBase(containerA << (int)bcA, ofEntryA);
                 nint consumedA = CommonNextStates(llEntryA, mlEntryA, ofEntryA, bcA, containerA, ref llA, ref mlA, ref ofA);
-                offBaseA = (1UL << (int)ofEntryA) + ReadBits(containerA, bcA, (nint)ofEntryA);
                 lengthsA = (ulong)SeqEntry.LengthBase(llEntryA) | ((ulong)SeqEntry.LengthBase(mlEntryA) << 32);
                 streamA = ref Unsafe.Subtract(ref streamA, (consumedA >> 3) & 0x1F);
                 bcA = consumedA & 7;
@@ -363,8 +363,8 @@ public sealed partial class ZstdDecompressor
             ulong offBaseB;
             if (((llEntryB | mlEntryB) & 0x1F00) == 0)
             {
+                offBaseB = OffBase(containerB << (int)bcB, ofEntryB);
                 nint consumedB = CommonNextStates(llEntryB, mlEntryB, ofEntryB, bcB, containerB, ref llB, ref mlB, ref ofB);
-                offBaseB = (1UL << (int)ofEntryB) + ReadBits(containerB, bcB, (nint)ofEntryB);
                 lengthsB = (ulong)SeqEntry.LengthBase(llEntryB) | ((ulong)SeqEntry.LengthBase(mlEntryB) << 32);
                 streamB = ref Unsafe.Subtract(ref streamB, (consumedB >> 3) & 0x1F);
                 bcB = consumedB & 7;
@@ -390,10 +390,11 @@ public sealed partial class ZstdDecompressor
 
     Common:
         {
-            nint bcBeforeA = bcA;
-            ulong containerBeforeA = containerA;
-            nint bcBeforeB = bcB;
-            ulong containerBeforeB = containerB;
+            // The container as the offset reads it, taken first: the states then replace both.
+            ulong offsetBitsA = containerA << (int)bcA;
+            ulong offsetBitsB = containerB << (int)bcB;
+            // A's states, then B's: interleaving them one instruction each loses 2-3% (the two chains
+            // then compete for the same units in the same cycles).
             nint consumedA = CommonNextStates(llEntryA, mlEntryA, ofEntryA, bcA, containerA, ref llA, ref mlA, ref ofA);
             nint consumedB = CommonNextStates(llEntryB, mlEntryB, ofEntryB, bcB, containerB, ref llB, ref mlB, ref ofB);
             streamA = ref Unsafe.Subtract(ref streamA, (consumedA >> 3) & 0x1F);
@@ -402,10 +403,14 @@ public sealed partial class ZstdDecompressor
             streamB = ref Unsafe.Subtract(ref streamB, (consumedB >> 3) & 0x1F);
             bcB = consumedB & 7;
             containerB = Unsafe.ReadUnaligned<ulong>(ref streamB);
-            output = (ulong)SeqEntry.LengthBase(llEntryA) | ((ulong)SeqEntry.LengthBase(mlEntryA) << 32);
-            Unsafe.Add(ref output, 1) = (1UL << (int)ofEntryA) + ReadBits(containerBeforeA, bcBeforeA, (nint)ofEntryA);
-            Unsafe.Add(ref output, 2) = (ulong)SeqEntry.LengthBase(llEntryB) | ((ulong)SeqEntry.LengthBase(mlEntryB) << 32);
-            Unsafe.Add(ref output, 3) = (1UL << (int)ofEntryB) + ReadBits(containerBeforeB, bcBeforeB, (nint)ofEntryB);
+            ulong lengthsA = (ulong)SeqEntry.LengthBase(llEntryA) | ((ulong)SeqEntry.LengthBase(mlEntryA) << 32);
+            ulong offBaseA = OffBase(offsetBitsA, ofEntryA);
+            ulong lengthsB = (ulong)SeqEntry.LengthBase(llEntryB) | ((ulong)SeqEntry.LengthBase(mlEntryB) << 32);
+            ulong offBaseB = OffBase(offsetBitsB, ofEntryB);
+            output = lengthsA;
+            Unsafe.Add(ref output, 1) = offBaseA;
+            Unsafe.Add(ref output, 2) = lengthsB;
+            Unsafe.Add(ref output, 3) = offBaseB;
             output = ref Unsafe.Add(ref output, RecordStride);
             if (--batch != 0)
             {
@@ -446,7 +451,7 @@ public sealed partial class ZstdDecompressor
         nint ofBits = SeqEntry.OffsetExtraBits(ofEntry);
         nint mlBits = SeqEntry.LengthExtraBits(mlEntry);
         nint llBits = SeqEntry.LengthExtraBits(llEntry);
-        offBase = (1UL << (int)ofBits) + ReadBits(container, bc, ofBits);
+        offBase = OffBase(container << (int)bc, ofEntry);
         bc += ofBits;
         nuint matchLength = SeqEntry.LengthBase(mlEntry) + ReadBits(container, bc, mlBits);
         bc += mlBits;
@@ -461,6 +466,16 @@ public sealed partial class ZstdDecompressor
         ReloadClamped(ref bits, ref ptr, ref bc, ref container);
         lengths = (ulong)litLength | ((ulong)matchLength << 32);
     }
+
+    /// <summary>
+    /// The <c>offBase</c> of an offset code c, (1 &lt;&lt; c) plus its c extra bits, from the container
+    /// shifted to them (<paramref name="bits"/>) and the raw entry, whose low six bits are c: the bits
+    /// shifted down by one, a 1 set above them, then all shifted down to c bits below that 1. Two
+    /// instructions less than adding the power of two to the bits read, which a code of 0 makes take
+    /// three shifts anyway.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ulong OffBase(ulong bits, ulong ofEntry) => ((bits >> 1) | (1UL << 63)) >> ((int)ofEntry ^ 63);
 
     /// <summary>
     /// Executes <paramref name="count"/> records of a block, every <see cref="RecordStride"/> ulongs
