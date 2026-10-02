@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
 
@@ -20,6 +21,19 @@ internal sealed class StructDecoder : ArrayDecoder
     /// <summary>The shared, stateless instance.</summary>
     public static readonly StructDecoder Instance = new StructDecoder();
 
+    /// <summary>Which rows of the children a decode asks for.</summary>
+    private enum Rows : byte
+    {
+        /// <summary>Every row.</summary>
+        Whole,
+
+        /// <summary>A contiguous range.</summary>
+        Range,
+
+        /// <summary>The rows a selection names.</summary>
+        Selected,
+    }
+
     private StructDecoder()
     {
     }
@@ -34,7 +48,7 @@ internal sealed class StructDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, 0, length, ranged: false);
+        return Core(context, in node, dtype, length, 0, length, [], Rows.Whole);
     }
 
     /// <summary>Every child of the node decodes a range, the validity child included.</summary>
@@ -82,11 +96,72 @@ internal sealed class StructDecoder : ArrayDecoder
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, start, count, ranged: true);
+        return Core(context, in node, dtype, length, start, count, [], Rows.Range);
     }
 
+    /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecode => true;
+
+    /// <summary>
+    /// Every child selects, the validity child included: a child that does not is decoded whole
+    /// once by the reader's retained chunk rather than once by every batch of a take.
+    /// </summary>
+    /// <inheritdoc/>
+    public override bool SelectsWithoutFullDecodeOf(ArrayDecodeContext context, in ArrayNode node, DType dtype)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        int fieldCount = dtype.FieldCount;
+        int fieldBase = node.ChildCount - fieldCount;
+        if (fieldBase is not (0 or 1) ||
+            (fieldBase == 1 && !context.ChildSelectsWithoutFullDecode(in node, 0, context.Types.Bool(Nullability.NonNullable))))
+        {
+            return false;
+        }
+
+        for (int i = 0; i < fieldCount; i++)
+        {
+            if (!context.ChildSelectsWithoutFullDecode(in node, fieldBase + i, dtype.GetField(i)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// What a row costs is its fields' to say, and a field selecting by frame would make a
+    /// dictionary over these values pay a frame for each of its entries.
+    /// </remarks>
+    public override bool SelectsByRow => false;
+
+    /// <summary>
+    /// The wanted rows of every field, and of the validity, each selected by its own encoding: no
+    /// field is decoded whole to have a few of its rows gathered out of it.
+    /// </summary>
+    /// <inheritdoc/>
+    public override int DecodeSelected(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, ReadOnlySpan<int> wanted)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, 0, wanted.Length, wanted, Rows.Selected);
+    }
+
+    /// <summary>One child's rows, as <paramref name="rows"/> asks for them.</summary>
+    private static int Child(
+        ArrayDecodeContext context, in ArrayNode node, int index, DType type, int length, int start, int count,
+        ReadOnlySpan<int> wanted, Rows rows) => rows switch
+    {
+        Rows.Whole => context.DecodeChild(in node, index, type, length),
+        Rows.Range => context.DecodeChildRange(in node, index, type, length, start, count),
+        Rows.Selected => context.DecodeChildSelected(in node, index, type, length, wanted),
+        _ => throw new UnreachableException($"Rows {(byte)rows} is not defined."),
+    };
+
     private static int Core(
-        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count, bool ranged)
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count,
+        ReadOnlySpan<int> wanted, Rows rows)
     {
         EncodingMetadata.RequireEmpty(node.Metadata, Id);
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
@@ -106,7 +181,7 @@ internal sealed class StructDecoder : ArrayDecoder
         else if (childCount == fieldCount + 1)
         {
             fieldBase = 1;
-            validity = DecodeLeadingValidity(context, in node, length, start, count, ranged);
+            validity = DecodeLeadingValidity(context, in node, length, start, count, wanted, rows);
         }
         else
         {
@@ -127,7 +202,7 @@ internal sealed class StructDecoder : ArrayDecoder
 
         if (Narrows(in projection, fieldCount))
         {
-            return Project(context, in node, dtype, length, validity, fieldBase, in projection, start, count, ranged);
+            return Project(context, in node, dtype, length, validity, fieldBase, in projection, start, count, wanted, rows);
         }
 
         Span<int> stack = stackalloc int[StackFields];
@@ -137,9 +212,7 @@ internal sealed class StructDecoder : ArrayDecoder
             Span<int> indices = fields.Span;
             for (int i = 0; i < fieldCount; i++)
             {
-                indices[i] = ranged
-                    ? context.DecodeChildRange(in node, fieldBase + i, dtype.GetField(i), length, start, count)
-                    : context.DecodeChild(in node, fieldBase + i, dtype.GetField(i), length);
+                indices[i] = Child(context, in node, fieldBase + i, dtype.GetField(i), length, start, count, wanted, rows);
             }
 
             return context.Canonical.AddStruct(dtype, count, validity, indices);
@@ -188,13 +261,14 @@ internal sealed class StructDecoder : ArrayDecoder
     /// <param name="validity">The struct's validity, already decoded.</param>
     /// <param name="fieldBase">The serialized index of field zero.</param>
     /// <param name="projection">The fields to keep.</param>
-    /// <param name="start">The first row of the range, when <paramref name="ranged"/>.</param>
-    /// <param name="count">The rows produced: the range's, or the whole length.</param>
-    /// <param name="ranged">Whether a range of the fields is decoded rather than the whole.</param>
+    /// <param name="start">The first row of the range, when <paramref name="rows"/> asks for one.</param>
+    /// <param name="count">The rows produced: the range's, the selection's, or the whole length.</param>
+    /// <param name="wanted">The rows a selection names, when <paramref name="rows"/> asks for them.</param>
+    /// <param name="rows">Which rows of the fields are decoded.</param>
     /// <returns>The canonical struct, holding only those fields.</returns>
     private static int Project(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, Validity validity,
-        int fieldBase, in Layouts.FieldMask projection, int start, int count, bool ranged)
+        int fieldBase, in Layouts.FieldMask projection, int start, int count, ReadOnlySpan<int> wanted, Rows rows)
     {
         int selected = projection.SelectedCount(dtype.FieldCount);
         Scratch<int> children = new Scratch<int>(selected, default);
@@ -209,9 +283,7 @@ internal sealed class StructDecoder : ArrayDecoder
             for (int s = 0; s < selected; s++)
             {
                 int i = projection.SelectedField(s);
-                int child = ranged
-                    ? context.DecodeChildRange(in node, fieldBase + i, dtype.GetField(i), length, start, count)
-                    : context.DecodeChild(in node, fieldBase + i, dtype.GetField(i), length);
+                int child = Child(context, in node, fieldBase + i, dtype.GetField(i), length, start, count, wanted, rows);
                 childSpan[s] = child;
                 nameSpan[s] = context.Types.InternName(dtype.GetFieldNameUtf8(i));
 
@@ -239,12 +311,10 @@ internal sealed class StructDecoder : ArrayDecoder
     /// never a bitmap fast path.
     /// </summary>
     private static Validity DecodeLeadingValidity(
-        ArrayDecodeContext context, in ArrayNode node, int length, int start, int count, bool ranged)
+        ArrayDecodeContext context, in ArrayNode node, int length, int start, int count, ReadOnlySpan<int> wanted, Rows rows)
     {
         DType boolType = context.Types.Bool(Nullability.NonNullable);
-        int decoded = ranged
-            ? context.DecodeChildRange(in node, 0, boolType, length, start, count)
-            : context.DecodeChild(in node, 0, boolType, length);
+        int decoded = Child(context, in node, 0, boolType, length, start, count, wanted, rows);
 
         CanonicalNode bits = context.Canonical.GetNode(decoded);
         if (bits.Kind != CanonicalKind.Bool)

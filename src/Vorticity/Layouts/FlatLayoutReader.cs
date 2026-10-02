@@ -384,9 +384,12 @@ internal sealed class FlatLayoutReader : LayoutReader
     /// <param name="result">The gathered node, when served.</param>
     /// <returns><see langword="false"/> when the selection is empty, no window was given, or the chunk is not to be read in ranges.</returns>
     /// <remarks>
-    /// A selection spanning at least half its batch is the rows of a pruned or filtered scan, which
-    /// the next batches of the window want too, so the window is decoded and kept; a sparser one is
-    /// a take, which wants a few rows of each batch, and the range it spans is all it decodes.
+    /// A selection spanning at least half its batch, a row of it every <see cref="ClusterGap"/>
+    /// rows of its span or closer, is the rows of a pruned or filtered scan, which the next batches
+    /// of the window want too, so the window is decoded and kept: its clusters would cover the span
+    /// anyway. A sparser one is a take, which wants a few rows of each batch, or of each window
+    /// once a take's batch spans the zones between its rows, and the clusters it spans are all it
+    /// decodes.
     /// </remarks>
     private bool TryWindowSelected(
         in LayoutNode node, RowRange rows, in FieldMask fields, ScanContext context, int total, int length,
@@ -415,7 +418,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
 
         int spanned = last + 1 - from;
-        if (key is long claimed && 2L * spanned >= length &&
+        if (key is long claimed && 2L * spanned >= length && (long)ClusterGap * context.SelectionCount >= spanned &&
             TryAcquireWindow(in root, in node, in fields, context, total, windowStart, windowLength, claimed, out CanonicalArena held, out int window) &&
             Holds(held, window, end))
         {
@@ -660,7 +663,7 @@ internal sealed class FlatLayoutReader : LayoutReader
                 chunkRoot = LoadRoot(in node, context);
             }
 
-            if (!context.Decode.SelectsWithoutFullDecode(in chunkRoot))
+            if (!context.Decode.SelectsWithoutFullDecode(in chunkRoot, node.DType))
             {
                 // Where the whole chunk would be decoded to gather a few rows out of it, a window of
                 // it, or the range the selection spans, is decoded instead when the encoding can.
@@ -719,7 +722,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         ArrayNode wholeRoot = default;
         bool parsed = false;
         if (Ranged(in node, context, ref wholeRoot, ref parsed) &&
-            !context.Decode.SelectsWithoutFullDecode(in wholeRoot) &&
+            !context.Decode.SelectsWithoutFullDecode(in wholeRoot, node.DType) &&
             Scattered(context, total) &&
             context.TryGetSelectionBounds(out int first, out int last))
         {

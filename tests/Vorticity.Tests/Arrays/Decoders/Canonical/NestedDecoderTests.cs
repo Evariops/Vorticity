@@ -193,6 +193,34 @@ public sealed class NestedDecoderTests
         Assert.Throws<VortexFormatException>(() => h.Decode(b, node, dtype, 2));
     }
 
+    [Fact]
+    public void AListSelectionReadsTheWantedRowsOffsetsAlone()
+    {
+        // Rows 0 and 1 share an offset, row 3 is the last: each row's span is its offset and the next.
+        using DecodeHarness h = new DecodeHarness();
+        BlobBuilder b = new BlobBuilder();
+        BlobNode node = List(b, I32(1, 2, 3, 4, 5, 6, 7), I32(0, 2, 2, 5, 7), 7);
+
+        DType dtype = h.Types.List(h.Types.Primitive(PType.I32, Nullability.NonNullable), Nullability.NonNullable);
+        CanonicalNode decoded = h.Node(h.DecodeSelected(b, node, dtype, 4, [0, 1, 3]));
+
+        Assert.Equal(CanonicalKind.ListView, decoded.Kind);
+        Assert.Equal(3, decoded.Length);
+        Assert.Equal([0L, 2, 5], [ReadOffset(decoded.Offsets.Span, decoded.OffsetPType, 0), ReadOffset(decoded.Offsets.Span, decoded.OffsetPType, 1), ReadOffset(decoded.Offsets.Span, decoded.OffsetPType, 2)]);
+        Assert.Equal([2L, 0, 2], [ReadOffset(decoded.Sizes.Span, decoded.SizePType, 0), ReadOffset(decoded.Sizes.Span, decoded.SizePType, 1), ReadOffset(decoded.Sizes.Span, decoded.SizePType, 2)]);
+    }
+
+    [Fact]
+    public void AListSelectionRejectsAWantedRowRunningPastTheElementsChild()
+    {
+        using DecodeHarness h = new DecodeHarness();
+        BlobBuilder b = new BlobBuilder();
+        BlobNode node = List(b, I32(1, 2, 3, 4, 5), I32(0, 2, 6), 5);
+
+        DType dtype = h.Types.List(h.Types.Primitive(PType.I32, Nullability.NonNullable), Nullability.NonNullable);
+        Assert.Throws<VortexFormatException>(() => h.DecodeSelected(b, node, dtype, 2, [1]));
+    }
+
     // -------------------------------------------------------------------------- vortex.listview
 
     private static BlobNode ListView(

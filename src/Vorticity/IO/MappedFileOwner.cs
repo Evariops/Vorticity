@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.MemoryMappedFiles;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 using Vorticity.Buffers;
 using Vorticity.Serialization.Schemas;
@@ -15,20 +16,33 @@ namespace Vorticity.IO;
 /// it: the mapping lives until the last lease on it is released.
 /// </summary>
 /// <remarks>
+/// <para>
 /// <see cref="SegmentOwner.Buffer"/> stays <see cref="VortexBuffer.Empty"/>: a file may be larger
 /// than <see cref="int.MaxValue"/> and a <see cref="VortexBuffer"/> cannot describe it. The base
 /// pointer and the <see cref="long"/> length live here instead, and <see cref="View"/> is the only
 /// way to obtain an addressable window.
+/// </para>
+/// <para>
+/// Unix maps with <c>mmap</c> called directly, <see cref="NativeFile.TryMap"/>, and Windows through
+/// a view accessor. A finalizer unmaps the first if its owner is dropped without its last release,
+/// as the accessor's handle does the second.
+/// </para>
 /// </remarks>
 internal sealed unsafe class MappedFileOwner : SegmentOwner
 {
-    private readonly MemoryMappedViewAccessor _view;
+    // Null for a mapping made with mmap.
+    private readonly MemoryMappedViewAccessor? _view;
     private readonly SafeFileHandle? _ownedHandle;
     private readonly byte* _base;
     private readonly long _length;
 
+    // What mmap returned, zero once unmapped: one exchange takes it, for a release or the finalizer.
+    private nint _mapped;
+
+    private static long s_finalizedMappings;
+
     private MappedFileOwner(
-        MemoryMappedViewAccessor view,
+        MemoryMappedViewAccessor? view,
         SafeFileHandle? ownedHandle,
         byte* basePointer,
         long length)
@@ -37,7 +51,30 @@ internal sealed unsafe class MappedFileOwner : SegmentOwner
         _ownedHandle = ownedHandle;
         _base = basePointer;
         _length = length;
+        if (view is null)
+        {
+            _mapped = (nint)basePointer;
+        }
+        else
+        {
+            GC.SuppressFinalize(this);
+        }
     }
+
+    /// <summary>Unmaps a mapping made with mmap whose owner was dropped without its last release.</summary>
+    ~MappedFileOwner()
+    {
+        if (Unmap())
+        {
+            Interlocked.Increment(ref s_finalizedMappings);
+        }
+    }
+
+    /// <summary>
+    /// How many mappings this process has unmapped from the finalizer rather than from a last
+    /// release: none for a reader used correctly, and one more for each owner a test drops.
+    /// </summary>
+    internal static long FinalizedMappingCount => Interlocked.Read(ref s_finalizedMappings);
 
     /// <summary>Maps the first <paramref name="length"/> bytes of the file behind <paramref name="handle"/>.</summary>
     /// <param name="handle">A readable file handle.</param>
@@ -45,6 +82,11 @@ internal sealed unsafe class MappedFileOwner : SegmentOwner
     /// <param name="ownsHandle">Whether the handle is disposed with the mapping's last lease.</param>
     internal static MappedFileOwner Map(SafeFileHandle handle, long length, bool ownsHandle)
     {
+        if (NativeFile.TryMap(handle, length, out byte* mapped))
+        {
+            return new MappedFileOwner(view: null, ownsHandle ? handle : null, mapped, length);
+        }
+
         // leaveOpen: true — the handle's lifetime is ours to manage. The file object holds a
         // reference on the handle for as long as it lives, and on Unix the handle holds the lock
         // FileShare asked for, so it is dropped as soon as the view exists: the view does not need
@@ -197,9 +239,30 @@ internal sealed unsafe class MappedFileOwner : SegmentOwner
 
     protected override void FreeCore()
     {
-        _view.SafeMemoryMappedViewHandle.ReleasePointer();
-        _view.Dispose();
+        if (_view is null)
+        {
+            Unmap();
+            GC.SuppressFinalize(this);
+        }
+        else
+        {
+            _view.SafeMemoryMappedViewHandle.ReleasePointer();
+            _view.Dispose();
+        }
+
         _ownedHandle?.Dispose();
+    }
+
+    private bool Unmap()
+    {
+        nint mapped = Interlocked.Exchange(ref _mapped, 0);
+        if (mapped == 0)
+        {
+            return false;
+        }
+
+        NativeFile.Unmap((byte*)mapped, _length);
+        return true;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

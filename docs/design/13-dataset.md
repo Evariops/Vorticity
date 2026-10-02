@@ -377,7 +377,7 @@ secondary index is excluded, since every compaction would rewrite it.
 ## 7. Identity and integrity
 
 - **Every postscript this library writes mints a uid**: sixteen random bytes in the metadata entry
-  `vorticity.identity`, written right after the footer, so the open's 64 KiB tail read covers it and
+  `vorticity.identity`, written right after the footer, so the open's tail read covers it and
   reading it costs no request. It identifies a **version of the bytes**, not a file: an append in
   place mints a new one, and a fragment bound to the old uid is refused. It costs 72 to 96 bytes a
   file; `VortexWriteOptions.Identity` pins it for a reproducible write.

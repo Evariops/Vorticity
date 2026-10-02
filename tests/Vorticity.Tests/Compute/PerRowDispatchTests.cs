@@ -82,10 +82,10 @@ public sealed partial class PerRowDispatchTests
         ("Arrays/Decoders/Compressed/DictDecoder.cs", 1, 0, "legitimate: an error message"),
         ("Arrays/Decoders/Compressed/EncodedNodes.cs", 3, 0, "per run, not per row: the binary search for a slice's run bounds and the rebased ends; one error message"),
         ("Arrays/Decoders/Compressed/FastLanesRleDecoder.cs", 5, 0, "per run, not per row"),
-        ("Arrays/Decoders/Compressed/FsstDecoder.cs", 5, 3, "R11"),
+        ("Arrays/Decoders/Compressed/FsstDecoder.cs", 2, 0, "R11 done: a selection's offsets and lengths are read at their types, resolved once; the two left bound the code stream"),
         ("Arrays/Decoders/Compressed/OnPairDecoder.cs", 6, 3, "R2; the dictionary's two walks are typed, and the one call left there refuses a type that is not an integer"),
         ("Arrays/Decoders/Compressed/Patches.cs", 3, 1, "R4 (GetPosition); the other two are per run"),
-        ("Arrays/Decoders/Compressed/RunEndDecoder.cs", 4, 0, "per run, not per row"),
+        ("Arrays/Decoders/Compressed/RunEndDecoder.cs", 2, 0, "per run, not per row: the walk of a shape with no typed kernel, and the search for a range's first run; the ends' checks and a take's searches read them typed"),
         ("Columns/ExtensionColumn.cs", 1, 0, "legitimate: the column API is per row by design"),
         ("Columns/ListColumn.cs", 2, 0, "legitimate: the column API is per row by design"),
         ("Columns/VortexColumn.cs", 1, 0, "legitimate: the column API is per row by design"),
@@ -102,7 +102,7 @@ public sealed partial class PerRowDispatchTests
     /// A wired site resolves the physical type once, before its walk; the shape it is supposed to
     /// make is its file going to zero calls.
     /// </remarks>
-    private const int TotalCalls = 47;
+    private const int TotalCalls = 42;
 
     /// <summary>Calls the table classifies as being inside a per-row or per-patch loop.</summary>
     /// <remarks>
@@ -110,7 +110,7 @@ public sealed partial class PerRowDispatchTests
     /// left in the file is an error path: that change of COMPOSITION is what this column exists
     /// to record.
     /// </remarks>
-    private const int TotalPerRow = 7;
+    private const int TotalPerRow = 4;
 
     [Fact]
     public void NoFileDispatchesPerRowMoreOftenThanItsCeiling()

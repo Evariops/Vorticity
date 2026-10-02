@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
+using Vorticity.File;
 using Vorticity.Serialization.Schemas;
 
 namespace Vorticity.IO;
@@ -107,7 +108,20 @@ internal interface ISegmentReader : IAsyncDisposable
 
     /// <summary>
     /// Whether a read hands out the bytes where they lie, in memory or in a mapping, rather than
-    /// fetching them: a file then serves nothing from the tail its open read.
+    /// fetching them: a file then serves nothing from the tail its open read, unless that tail is
+    /// the whole file and the reader would map it for a scan.
     /// </summary>
     bool ReadsInPlace => false;
+
+    /// <summary>
+    /// The bytes an open reads first from the tail of a file longer than the format's tail window,
+    /// when its caller did not raise the window: by default the window itself, which holds any
+    /// postscript and so keeps an open to one or two round trips.
+    /// </summary>
+    /// <remarks>
+    /// A reader whose read is a copy and costs no round trip asks for less, what a footer usually
+    /// spans: the open then reads the rest of a larger footer, or the window when the postscript
+    /// itself reaches past it.
+    /// </remarks>
+    int TailReadSize => VortexFileFormat.InitialReadSize;
 }

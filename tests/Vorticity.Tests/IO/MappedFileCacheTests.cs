@@ -241,19 +241,7 @@ public sealed class MappedFileCacheTests
         string directory = Path.Combine(AppContext.BaseDirectory, "kept-mappings");
         Directory.CreateDirectory(directory);
         string path = Path.Combine(directory, $"ids-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
-        long[] ids = new long[4_096];
-        for (int i = 0; i < ids.Length; i++)
-        {
-            ids[i] = i;
-        }
-
-        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter(path, [("id", VortexType.Int64)]))
-        {
-            ColumnsBuilder builder = writer.Builder();
-            builder.Column<long>(0).Append(ids);
-            await writer.WriteAsync(builder, CancellationToken.None);
-            await writer.CompleteAsync(CancellationToken.None);
-        }
+        long expected = await WriteSpreadIdsAsync(path, CancellationToken.None);
 
         await using VortexSession session = VortexSession.Create(options => options.MappedFileCacheCount = 4);
         long sum = 0;
@@ -268,7 +256,7 @@ public sealed class MappedFileCacheTests
             }
         }
 
-        Assert.Equal(4_096L * 4_095 / 2, sum);
+        Assert.Equal(expected, sum);
         Assert.Equal(1, session.Mappings!.Count);
         global::System.IO.File.Delete(path);
         session.ReleaseMappedFiles();
@@ -283,21 +271,19 @@ public sealed class MappedFileCacheTests
         string directory = Path.Combine(AppContext.BaseDirectory, "kept-mappings");
         Directory.CreateDirectory(directory);
         string path = Path.Combine(directory, $"late-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
-        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter(path, [("id", VortexType.Int64)]))
-        {
-            ColumnsBuilder builder = writer.Builder();
-            builder.Column<long>(0).Append([1L, 2L, 3L]);
-            await writer.WriteAsync(builder, ct);
-            await writer.CompleteAsync(ct);
-        }
+        await WriteSpreadIdsAsync(path, ct);
 
         VortexSession session = VortexSession.Create(options => options.MappedFileCacheCount = 4);
         await using (VortexFile first = await session.OpenAsync(path, cancellationToken: ct))
         {
+            long rows = 0;
             await foreach (BatchView batch in first.Scan("id").WithCancellation(ct))
             {
-                Assert.Equal(3, batch.RowCount);
+                rows += batch.RowCount;
             }
+
+            Assert.Equal(SpreadIds, rows);
+            Assert.Equal(1, session.Mappings!.Count);
         }
 
         // An open that passed its check before the session was disposed, and ends after: it took
@@ -308,6 +294,35 @@ public sealed class MappedFileCacheTests
         Assert.Throws<ObjectDisposedException>(() => late.SegmentSpecs.Length);
         Assert.Equal(0, session.Mappings!.Count);
         global::System.IO.File.Delete(path);
+    }
+
+    /// <summary>Ids <see cref="WriteSpreadIdsAsync"/> writes: eight bytes each, 128 KiB.</summary>
+    private const int SpreadIds = 16_384;
+
+    /// <summary>
+    /// Writes ids that do not compress, so that the file outgrows what an open reads of it whole
+    /// and its scan maps it; returns their sum.
+    /// </summary>
+    private static async Task<long> WriteSpreadIdsAsync(string path, CancellationToken ct)
+    {
+        long[] ids = new long[SpreadIds];
+        long sum = 0;
+        for (int i = 0; i < ids.Length; i++)
+        {
+            ids[i] = (long)((ulong)i * 0x9E3779B97F4A7C15UL);
+            sum += ids[i];
+        }
+
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter(path, [("id", VortexType.Int64)]))
+        {
+            ColumnsBuilder builder = writer.Builder();
+            builder.Column<long>(0).Append(ids);
+            await writer.WriteAsync(builder, ct);
+            await writer.CompleteAsync(ct);
+        }
+
+        Assert.True(new FileInfo(path).Length > VortexOpenOptions.DefaultInitialReadSize);
+        return sum;
     }
 
     /// <summary>Opens the file through the cache, maps it, checks every byte, and returns the mapping it read.</summary>

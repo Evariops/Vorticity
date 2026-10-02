@@ -155,12 +155,13 @@ internal abstract class ArrayDecoder
     /// </summary>
     /// <param name="context">Per-batch arenas, buffers, options and the decoder table.</param>
     /// <param name="node">The serialized node.</param>
+    /// <param name="dtype">The DType the node decodes to, which a parent needs to ask its children.</param>
     /// <remarks>
     /// The readers ask this rather than the flag once the node is in hand: an encoding that selects
     /// only on some nodes, and decodes the others whole, sends those to the retained chunk like any
     /// encoding on the fallback.
     /// </remarks>
-    public virtual bool SelectsWithoutFullDecodeOf(ArrayDecodeContext context, in ArrayNode node) =>
+    public virtual bool SelectsWithoutFullDecodeOf(ArrayDecodeContext context, in ArrayNode node, DType dtype) =>
         SelectsWithoutFullDecode;
 
     /// <summary>

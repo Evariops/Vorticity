@@ -95,7 +95,7 @@ internal sealed class ZstdDecoder : ArrayDecoder
     /// selection decompresses the whole array, which the reader's retained chunk does once for
     /// every batch rather than once per batch.
     /// </remarks>
-    public override bool SelectsWithoutFullDecodeOf(ArrayDecodeContext context, in ArrayNode node) =>
+    public override bool SelectsWithoutFullDecodeOf(ArrayDecodeContext context, in ArrayNode node, DType dtype) =>
         DecodesRange(context, in node);
 
     /// <inheritdoc/>

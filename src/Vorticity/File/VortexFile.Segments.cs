@@ -7,10 +7,11 @@ using Vorticity.Serialization.Schemas;
 
 namespace Vorticity;
 
-// Over a source that fetches its bytes, the file is the reader its scans read through, which never
-// dispose it: a segment inside the tail the open read is a view of it, and the source reads the
-// others. Such a segment is not asked of the source, so it is not counted among a scan's requests
-// either: a scan fills it with FillFromTail before it counts, and every other count asks Holds.
+// Over a source that fetches its bytes, or that would map for a scan a file the open read whole,
+// the file is the reader its scans read through, which never dispose it: a segment inside the tail
+// the open read is a view of it, and the source reads the others. Such a segment is not asked of the source, so it
+// is not counted among a scan's requests either: a scan fills it with FillFromTail before it
+// counts, and every other count asks Holds.
 public sealed partial class VortexFile : ISegmentReader
 {
     /// <summary>

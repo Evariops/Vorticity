@@ -142,6 +142,31 @@ internal readonly record struct FileInode(ulong Device, ulong Inode, ulong Inode
         return true;
     }
 
+    /// <summary>
+    /// The length of the regular file open as <paramref name="descriptor"/>, from one fstat; false
+    /// for anything else, and off macOS, where this code does not read the file's type.
+    /// </summary>
+    /// <param name="descriptor">A descriptor its caller keeps open across the call.</param>
+    /// <param name="length">The file's length, when this returns true.</param>
+    /// <remarks>macOS's st_mode is the two bytes at 4, the type in its top four bits.</remarks>
+    internal static unsafe bool TryGetRegularLength(int descriptor, out long length)
+    {
+        length = 0;
+        if (Stat == null || !OperatingSystem.IsMacOS())
+        {
+            return false;
+        }
+
+        byte* status = stackalloc byte[256];
+        if (Stat(descriptor, status) != 0 || (*(ushort*)(status + 4) & 0xF000) != 0x8000)
+        {
+            return false;
+        }
+
+        length = *(long*)(status + SizeOffset);
+        return true;
+    }
+
     // FILE_STANDARD_INFO has the length (EndOfFile) at 8; FILE_ID_INFO is the volume's 64-bit serial
     // number and then the file's 128-bit id, which NTFS fills in its low half only and ReFS in both.
     private static unsafe bool TryGetOnWindows(SafeFileHandle handle, long length, out FileInode identity)
@@ -232,7 +257,8 @@ internal readonly record struct FileInode(ulong Device, ulong Inode, ulong Inode
         return null;
     }
 
-    private static IntPtr Export(string[] libraries, string symbol)
+    /// <summary>The address of <paramref name="symbol"/> in the first of <paramref name="libraries"/> that exports it, or zero.</summary>
+    internal static IntPtr Export(string[] libraries, string symbol)
     {
         foreach (string library in libraries)
         {

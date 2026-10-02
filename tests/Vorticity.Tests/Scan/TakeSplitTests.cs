@@ -17,8 +17,8 @@ using Xunit;
 namespace Vorticity.Tests.Scan;
 
 /// <summary>
-/// How a take is cut into batches: a run of zones holding its rows is one batch, a zone holding
-/// none of them is not read, and the rows come out the same at any degree.
+/// How a take is cut into batches: the taken rows of a window are one batch, a zone between them
+/// holding none of them is spanned and not decoded, and the rows come out the same at any degree.
 /// </summary>
 public sealed class TakeSplitTests
 {
@@ -26,15 +26,16 @@ public sealed class TakeSplitTests
     private const int Rows = 65_536;
 
     /// <summary>
-    /// Rows in the first three splits of the take, the sixth and the eighth: three runs, the
-    /// splits between them holding none.
+    /// Rows in the first three splits of the take, the sixth and the eighth, splits between them
+    /// holding none: one window, the chunk's eight zones, and five rows, fewer than a run on
+    /// several lanes stops at.
     /// </summary>
     private static readonly long[] Wanted = [3, 9_000, 20_000, 45_000, Rows - 1];
 
     [Theory]
     [InlineData(1)]
     [InlineData(4)]
-    public async Task ARunOfSplitsHoldingTakenRowsIsOneBatch(int degree)
+    public async Task TheTakenRowsOfAWindowAreOneBatch(int degree)
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         string path = await WriteAsync(ct);
@@ -62,7 +63,7 @@ public sealed class TakeSplitTests
                 Values.DescribeRows(batch, taken);
             }
 
-            Assert.Equal(3, batches);
+            Assert.Equal(1, batches);
             Assert.Equal(Wanted.Length, taken.Count);
             for (int i = 0; i < Wanted.Length; i++)
             {

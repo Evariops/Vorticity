@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
@@ -24,6 +25,8 @@ internal readonly ref struct FsstPrefix
     private readonly ReadOnlySpan<byte> _shared;
     private readonly ulong _head;
     private readonly ulong _tail;
+    private readonly Vector128<byte> _wideHead;
+    private readonly Vector128<byte> _wideTail;
     private readonly int _rest;
     private readonly ulong _restBits;
 
@@ -35,6 +38,12 @@ internal readonly ref struct FsstPrefix
         {
             _head = Unsafe.ReadUnaligned<ulong>(ref MemoryMarshal.GetReference(shared));
             _tail = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref MemoryMarshal.GetReference(shared), shared.Length - sizeof(ulong)));
+        }
+
+        if (shared.Length >= Vector128<byte>.Count)
+        {
+            _wideHead = Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(shared));
+            _wideTail = Vector128.LoadUnsafe(ref MemoryMarshal.GetReference(shared), (nuint)(shared.Length - Vector128<byte>.Count));
         }
 
         _rest = rest.Length;
@@ -80,8 +89,9 @@ internal readonly ref struct FsstPrefix
     /// <summary>Whether <paramref name="codes"/> open with the shared codes.</summary>
     /// <remarks>
     /// Eight bytes or more are compared as their first and last words, which overlap under sixteen,
-    /// and the bytes between those past sixteen: most rows of a column that shares a prefix pass,
-    /// and a call to compare spans costs a row more than the compare.
+    /// and sixteen or more as their first and last vectors and the vectors between, the last one
+    /// overlapping: most rows of a column that shares a prefix pass, and a call to compare spans
+    /// costs a row more than the compare.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool Opens(ReadOnlySpan<byte> codes)
@@ -98,9 +108,28 @@ internal readonly ref struct FsstPrefix
         }
 
         ref byte first = ref MemoryMarshal.GetReference(codes);
-        return Unsafe.ReadUnaligned<ulong>(ref first) == _head &&
-            Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, length - sizeof(ulong))) == _tail &&
-            (length <= 2 * sizeof(ulong) || codes[sizeof(ulong)..(length - sizeof(ulong))].SequenceEqual(_shared[sizeof(ulong)..(length - sizeof(ulong))]));
+        if (length < Vector128<byte>.Count)
+        {
+            return Unsafe.ReadUnaligned<ulong>(ref first) == _head &&
+                Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref first, length - sizeof(ulong))) == _tail;
+        }
+
+        nuint last = (nuint)(length - Vector128<byte>.Count);
+        if (Vector128.LoadUnsafe(ref first) != _wideHead || Vector128.LoadUnsafe(ref first, last) != _wideTail)
+        {
+            return false;
+        }
+
+        ref byte shared = ref MemoryMarshal.GetReference(_shared);
+        for (nuint at = (nuint)Vector128<byte>.Count; at < last; at += (nuint)Vector128<byte>.Count)
+        {
+            if (Vector128.LoadUnsafe(ref first, at) != Vector128.LoadUnsafe(ref shared, at))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>Whether a row whose codes are <paramref name="codes"/> starts with the prefix.</summary>

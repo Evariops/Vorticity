@@ -377,12 +377,19 @@ internal sealed class FsstDecoder : ArrayDecoder
     /// Decompresses one wanted row at a time, each from its own slice of the code stream.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Each row is decoded into the remaining heap rather than into a slice of exactly its own
     /// length, and the difference is not cosmetic. The kernel's fast path is an 8-byte store per
     /// symbol that it may only take while 8 bytes of slack remain; handed a destination cut to the
     /// row's exact size, every symbol in every row would fall to the narrow tail path instead. The
     /// declared length is still enforced - the kernel's return value must equal it - so cutting the
     /// span adds nothing a check does not already give.
+    /// </para>
+    /// <para>
+    /// The offsets are read at their type, resolved once, and each row's decoded size is kept and
+    /// checked against its declared length once the rows are decoded, the lengths at their type
+    /// too: read through a switch, the two offsets and the length cost a row three dispatches.
+    /// </para>
     /// </remarks>
     private static void DecodeRows(
         in FsstDecodeTable table,
@@ -396,35 +403,123 @@ internal sealed class FsstDecoder : ArrayDecoder
         ref uint escapeBits)
     {
         ReadOnlySpan<byte> rawOffsets = offsets.Values.Span;
-        ReadOnlySpan<byte> rawLengths = lengths.Values.Span;
         ReadOnlySpan<byte> stream = codes.Span;
-        int written = 0;
+        Span<int> stack = stackalloc int[StackRows];
+        using Scratch<int> sizes = new Scratch<int>(wanted.Length, stack);
+        switch (offsetsPType)
+        {
+            case PType.U8:
+                DecodeRows<byte>(table, rawOffsets, stream, wanted, destination, sizes.Span, ref escapeBits);
+                break;
+            case PType.U16:
+                DecodeRows<ushort>(table, rawOffsets, stream, wanted, destination, sizes.Span, ref escapeBits);
+                break;
+            case PType.U32:
+                DecodeRows<uint>(table, rawOffsets, stream, wanted, destination, sizes.Span, ref escapeBits);
+                break;
+            case PType.U64:
+                DecodeRows<ulong>(table, rawOffsets, stream, wanted, destination, sizes.Span, ref escapeBits);
+                break;
+            case PType.I8:
+                DecodeRows<sbyte>(table, rawOffsets, stream, wanted, destination, sizes.Span, ref escapeBits);
+                break;
+            case PType.I16:
+                DecodeRows<short>(table, rawOffsets, stream, wanted, destination, sizes.Span, ref escapeBits);
+                break;
+            case PType.I32:
+                DecodeRows<int>(table, rawOffsets, stream, wanted, destination, sizes.Span, ref escapeBits);
+                break;
+            default:
+                DecodeRows<long>(table, rawOffsets, stream, wanted, destination, sizes.Span, ref escapeBits);
+                break;
+        }
 
+        ReadOnlySpan<byte> rawLengths = lengths.Values.Span;
+        switch (lengthsPType)
+        {
+            case PType.U8:
+                RequireDeclared<byte>(rawLengths, sizes.Span, wanted);
+                break;
+            case PType.U16:
+                RequireDeclared<ushort>(rawLengths, sizes.Span, wanted);
+                break;
+            case PType.U32:
+                RequireDeclared<uint>(rawLengths, sizes.Span, wanted);
+                break;
+            case PType.U64:
+                RequireDeclared<ulong>(rawLengths, sizes.Span, wanted);
+                break;
+            case PType.I8:
+                RequireDeclared<sbyte>(rawLengths, sizes.Span, wanted);
+                break;
+            case PType.I16:
+                RequireDeclared<short>(rawLengths, sizes.Span, wanted);
+                break;
+            case PType.I32:
+                RequireDeclared<int>(rawLengths, sizes.Span, wanted);
+                break;
+            default:
+                RequireDeclared<long>(rawLengths, sizes.Span, wanted);
+                break;
+        }
+    }
+
+    /// <summary>Rows of a selection whose decoded sizes are kept on the stack.</summary>
+    private const int StackRows = 256;
+
+    /// <summary>The rows of <see cref="DecodeRows"/>, their offsets at <typeparamref name="T"/>.</summary>
+    private static void DecodeRows<T>(
+        in FsstDecodeTable table,
+        ReadOnlySpan<byte> rawOffsets,
+        ReadOnlySpan<byte> stream,
+        ReadOnlySpan<int> wanted,
+        Span<byte> destination,
+        Span<int> sizes,
+        ref uint escapeBits)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> typed = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, T>(rawOffsets);
+        int written = 0;
         for (int k = 0; k < wanted.Length; k++)
         {
             int row = wanted[k];
-            long start = CanonicalSupport.ReadInteger(rawOffsets, offsetsPType, row);
-            long end = CanonicalSupport.ReadInteger(rawOffsets, offsetsPType, row + 1);
+            long start = long.CreateSaturating(typed[row]);
+            long end = long.CreateSaturating(typed[row + 1]);
             if (start < 0 || end < start || end > stream.Length)
             {
-                CompressedThrow.Format(
-                    $"{Id} row {row} spans codes [{start}, {end}) of a {stream.Length}-byte " +
-                    "codes buffer.");
+                BadRow(row, start, end, stream.Length);
             }
 
-            int expected = (int)CanonicalSupport.ReadInteger(rawLengths, lengthsPType, k);
             int got = table.Decode(
                 stream.Slice((int)start, (int)(end - start)), destination.Slice(written), Id,
                 ref escapeBits);
-            if (got != expected)
-            {
-                CompressedThrow.Format(
-                    $"{Id} row {row} decoded to {got} bytes; it declares {expected}.");
-            }
-
+            sizes[k] = got;
             written += got;
         }
     }
+
+    /// <summary>Refuses a wanted row whose decoded size is not the length it declares.</summary>
+    private static void RequireDeclared<T>(ReadOnlySpan<byte> rawLengths, ReadOnlySpan<int> sizes, ReadOnlySpan<int> wanted)
+        where T : unmanaged, System.Numerics.IBinaryInteger<T>
+    {
+        ReadOnlySpan<T> declared = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, T>(rawLengths)[..sizes.Length];
+        for (int k = 0; k < sizes.Length; k++)
+        {
+            long expected = long.CreateSaturating(declared[k]);
+            if (sizes[k] != expected)
+            {
+                CompressedThrow.Format(
+                    $"{Id} row {wanted[k]} decoded to {sizes[k]} bytes; it declares {expected}.");
+            }
+        }
+    }
+
+    /// <summary>Refuses a wanted row whose codes do not lie in the codes buffer.</summary>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void BadRow(int row, long start, long end, int stream) =>
+        CompressedThrow.Format(
+            $"{Id} row {row} spans codes [{start}, {end}) of a {stream}-byte codes buffer.");
 
     /// <summary>
     /// The extent of the code stream, <c>offsets[0]..offsets[length]</c>, validated against the
@@ -477,6 +572,9 @@ internal sealed class FsstDecoder : ArrayDecoder
             .Cast<byte, T>(raw)[..(length + 1)];
         long origin = long.CreateChecked(offsets[0]);
         long previous = origin;
+
+        // Asked once: a column with no nulls, the common one, costs no call a row to say so.
+        bool allValid = rows.IsAllValid;
         for (int row = 0; row < length; row++)
         {
             long next = long.CreateChecked(offsets[row + 1]);
@@ -489,7 +587,7 @@ internal sealed class FsstDecoder : ArrayDecoder
             int size = (int)(next - previous);
             previous = next;
 
-            if (!rows.IsValid(row))
+            if (!allValid && !rows.IsValid(row))
             {
                 destination[row] = Compute.Trilean.Unknown;
                 continue;

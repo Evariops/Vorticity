@@ -88,26 +88,45 @@ internal static class IntegerKernels
     // machine: `Vector<T>.IsSupported` asks about the type, is true everywhere, and would send a
     // run with intrinsics disabled down an emulated vector path instead of the scalar tail this
     // guard exists to leave behind.
+    //
+    // Four vectors a step, all loaded before any is stored, and walked by reference: a vector a
+    // step indexed its spans twice, each with a bound check, and stored each sum before the next
+    // load. The caller checked that the two spans are as long.
     private static void AddWrapping<T>(ReadOnlySpan<byte> source, Span<byte> destination, T reference)
         where T : unmanaged, IBinaryInteger<T>, IUnsignedNumber<T>
     {
         ReadOnlySpan<T> src = MemoryMarshal.Cast<byte, T>(source);
         Span<T> dst = MemoryMarshal.Cast<byte, T>(destination);
+        ref T from = ref MemoryMarshal.GetReference(src);
+        ref T into = ref MemoryMarshal.GetReference(dst);
+        nuint length = (nuint)Math.Min(src.Length, dst.Length);
 
-        int i = 0;
-        if (Vector.IsHardwareAccelerated && src.Length >= Vector<T>.Count)
+        nuint i = 0;
+        if (Vector.IsHardwareAccelerated && length >= (nuint)Vector<T>.Count)
         {
             Vector<T> offset = new Vector<T>(reference);
-            int lanes = Vector<T>.Count;
-            for (; i <= src.Length - lanes; i += lanes)
+            nuint lanes = (nuint)Vector<T>.Count;
+            for (; i + (4 * lanes) <= length; i += 4 * lanes)
             {
-                (Vector.LoadUnsafe(in src[i]) + offset).StoreUnsafe(ref dst[i]);
+                Vector<T> a = Vector.LoadUnsafe(ref from, i) + offset;
+                Vector<T> b = Vector.LoadUnsafe(ref from, i + lanes) + offset;
+                Vector<T> c = Vector.LoadUnsafe(ref from, i + (2 * lanes)) + offset;
+                Vector<T> d = Vector.LoadUnsafe(ref from, i + (3 * lanes)) + offset;
+                a.StoreUnsafe(ref into, i);
+                b.StoreUnsafe(ref into, i + lanes);
+                c.StoreUnsafe(ref into, i + (2 * lanes));
+                d.StoreUnsafe(ref into, i + (3 * lanes));
+            }
+
+            for (; i + lanes <= length; i += lanes)
+            {
+                (Vector.LoadUnsafe(ref from, i) + offset).StoreUnsafe(ref into, i);
             }
         }
 
-        for (; i < src.Length; i++)
+        for (; i < length; i++)
         {
-            dst[i] = unchecked(src[i] + reference);
+            Unsafe.Add(ref into, i) = unchecked(Unsafe.Add(ref from, i) + reference);
         }
     }
 
