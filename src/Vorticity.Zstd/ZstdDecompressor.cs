@@ -34,12 +34,7 @@ public sealed partial class ZstdDecompressor
     {
         _literals = new byte[FrameFormat.MaxBlockSize + LiteralsMargin];
         _huffman = new HuffmanTable();
-        _ownLiteralLengths = new SeqTable(SequenceCodes.LiteralLengthMaxLog);
-        _ownOffsets = new SeqTable(SequenceCodes.OffsetMaxLog);
-        _ownMatchLengths = new SeqTable(SequenceCodes.MatchLengthMaxLog);
-        _literalLengths = SequenceCodes.DefaultLiteralLengths;
-        _offsets = SequenceCodes.DefaultOffsets;
-        _matchLengths = SequenceCodes.DefaultMatchLengths;
+        _sequenceTables = new SequenceTableSet();
         _currentHuffman = _huffman;
     }
 
@@ -322,9 +317,6 @@ public sealed partial class ZstdDecompressor
         _literalEntropy = false;
         _sequenceEntropy = false;
         _currentHuffman = _huffman;
-        _literalLengths = _ownLiteralLengths;
-        _offsets = _ownOffsets;
-        _matchLengths = _ownMatchLengths;
 
         DecoderDictionary? dictionary = _dictionary;
         if (dictionary is not null && dictionary.HasEntropy)
@@ -332,9 +324,7 @@ public sealed partial class ZstdDecompressor
             _literalEntropy = true;
             _sequenceEntropy = true;
             _currentHuffman = dictionary.Huffman!;
-            _literalLengths = dictionary.LiteralLengths!;
-            _offsets = dictionary.Offsets!;
-            _matchLengths = dictionary.MatchLengths!;
+            _sequenceTables.BeginFrame(dictionary.LiteralLengths, dictionary.Offsets, dictionary.MatchLengths);
             _rep0 = dictionary.Rep0;
             _rep1 = dictionary.Rep1;
             _rep2 = dictionary.Rep2;

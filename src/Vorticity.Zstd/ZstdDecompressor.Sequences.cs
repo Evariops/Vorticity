@@ -63,18 +63,9 @@ public sealed partial class ZstdDecompressor
 
         int modes = section[ip++];
         Span<short> norm = stackalloc short[SequenceCodes.MaxMatchLength + 1];
-        ip += BuildSequenceTable(
-            modes >> 6, section.Slice(ip), norm, SequenceCodes.MaxLiteralLength, SequenceCodes.LiteralLengthMaxLog,
-            SequenceCodes.LiteralLengthBase, SequenceCodes.LiteralLengthBits,
-            SequenceCodes.DefaultLiteralLengths, _ownLiteralLengths, ref _literalLengths);
-        ip += BuildSequenceTable(
-            (modes >> 4) & 3, section.Slice(ip), norm, SequenceCodes.MaxOffset, SequenceCodes.OffsetMaxLog,
-            SequenceCodes.OffsetBase, SequenceCodes.OffsetBits,
-            SequenceCodes.DefaultOffsets, _ownOffsets, ref _offsets);
-        ip += BuildSequenceTable(
-            (modes >> 2) & 3, section.Slice(ip), norm, SequenceCodes.MaxMatchLength, SequenceCodes.MatchLengthMaxLog,
-            SequenceCodes.MatchLengthBase, SequenceCodes.MatchLengthBits,
-            SequenceCodes.DefaultMatchLengths, _ownMatchLengths, ref _matchLengths);
+        ip += BuildSequenceTable(SequenceCode.LiteralLength, modes >> 6, section.Slice(ip), norm, SequenceCodes.DefaultLiteralLengths);
+        ip += BuildSequenceTable(SequenceCode.Offset, (modes >> 4) & 3, section.Slice(ip), norm, SequenceCodes.DefaultOffsets);
+        ip += BuildSequenceTable(SequenceCode.MatchLength, (modes >> 2) & 3, section.Slice(ip), norm, SequenceCodes.DefaultMatchLengths);
 
         headerSize = ip;
         return nbSeq;
@@ -82,38 +73,33 @@ public sealed partial class ZstdDecompressor
 
     /// <summary>libzstd's <c>ZSTD_buildSeqTable</c>: selects or builds the table of one code.</summary>
     /// <returns>The bytes the table's description takes.</returns>
-    private int BuildSequenceTable(
-        int mode, ReadOnlySpan<byte> source, Span<short> norm, int maxSymbol, int maxLog,
-        ReadOnlySpan<uint> baseValue, ReadOnlySpan<byte> bits,
-        SeqTable predefined, SeqTable own, ref SeqTable current)
+    private int BuildSequenceTable(SequenceCode code, int mode, ReadOnlySpan<byte> source, Span<short> norm, SeqTable predefined)
     {
         switch (mode)
         {
             case 0: // predefined
-                current = predefined;
+                _sequenceTables.Use(predefined);
                 return 0;
 
             case 1: // RLE: one symbol, every sequence
-                if (source.IsEmpty || source[0] > maxSymbol)
+                if (source.IsEmpty || source[0] > SequenceCodes.MaxSymbol(code))
                 {
                     Throw.Error(ZstdError.FseTable);
                 }
 
-                SequenceCodes.BuildRle(own, source[0], baseValue, bits);
-                current = own;
+                _sequenceTables.BuildRle(code, source[0]);
                 return 1;
 
             case 2: // FSE: a table description
             {
-                int maxSymbolValue = maxSymbol;
+                int maxSymbolValue = SequenceCodes.MaxSymbol(code);
                 int size = Fse.ReadNCount(norm, ref maxSymbolValue, out int tableLog, source, ZstdError.FseTable);
-                if (tableLog > maxLog)
+                if (tableLog > SequenceCodes.MaxLog(code))
                 {
                     Throw.Error(ZstdError.FseTable);
                 }
 
-                SequenceCodes.BuildTable(own, norm.Slice(0, maxSymbolValue + 1), tableLog, baseValue, bits);
-                current = own;
+                _sequenceTables.Build(code, norm.Slice(0, maxSymbolValue + 1), tableLog);
                 return size;
             }
 
@@ -123,6 +109,7 @@ public sealed partial class ZstdDecompressor
                     Throw.Error(ZstdError.RepeatWithoutTable);
                 }
 
+                _sequenceTables.Repeat(code);
                 return 0;
         }
     }

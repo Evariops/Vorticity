@@ -76,12 +76,9 @@ internal sealed class DecoderDictionary
         position += huffman.Read(buffer.Slice(position));
 
         Span<short> norm = stackalloc short[SequenceCodes.MaxMatchLength + 1];
-        Offsets = ReadTable(buffer, ref position, norm, SequenceCodes.MaxOffset, SequenceCodes.OffsetMaxLog,
-            SequenceCodes.OffsetBase, SequenceCodes.OffsetBits);
-        MatchLengths = ReadTable(buffer, ref position, norm, SequenceCodes.MaxMatchLength, SequenceCodes.MatchLengthMaxLog,
-            SequenceCodes.MatchLengthBase, SequenceCodes.MatchLengthBits);
-        LiteralLengths = ReadTable(buffer, ref position, norm, SequenceCodes.MaxLiteralLength, SequenceCodes.LiteralLengthMaxLog,
-            SequenceCodes.LiteralLengthBase, SequenceCodes.LiteralLengthBits);
+        Offsets = ReadTable(buffer, ref position, norm, SequenceCode.Offset);
+        MatchLengths = ReadTable(buffer, ref position, norm, SequenceCode.MatchLength);
+        LiteralLengths = ReadTable(buffer, ref position, norm, SequenceCode.LiteralLength);
 
         if (position + 12 > buffer.Length)
         {
@@ -109,19 +106,15 @@ internal sealed class DecoderDictionary
         HasEntropy = true;
     }
 
-    private static SeqTable ReadTable(
-        ReadOnlySpan<byte> buffer, ref int position, Span<short> norm, int maxSymbol, int maxLog,
-        ReadOnlySpan<uint> baseValue, ReadOnlySpan<byte> bits)
+    private static SeqTable ReadTable(ReadOnlySpan<byte> buffer, ref int position, Span<short> norm, SequenceCode code)
     {
-        int maxSymbolValue = maxSymbol;
+        int maxSymbolValue = SequenceCodes.MaxSymbol(code);
         position += Fse.ReadNCount(norm, ref maxSymbolValue, out int tableLog, buffer.Slice(position), ZstdError.FseTable);
-        if (tableLog > maxLog)
+        if (tableLog > SequenceCodes.MaxLog(code))
         {
             Throw.Error(ZstdError.FseTable);
         }
 
-        var table = new SeqTable(maxLog);
-        SequenceCodes.BuildTable(table, norm.Slice(0, maxSymbolValue + 1), tableLog, baseValue, bits);
-        return table;
+        return new SeqTable(code, norm.Slice(0, maxSymbolValue + 1), tableLog);
     }
 }

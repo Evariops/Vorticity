@@ -12,13 +12,8 @@ public sealed partial class ZstdDecompressor
     // ---- the state a frame carries from one block to the next
     private readonly byte[] _literals;
     private readonly HuffmanTable _huffman;
-    private readonly SeqTable _ownLiteralLengths;
-    private readonly SeqTable _ownOffsets;
-    private readonly SeqTable _ownMatchLengths;
+    private readonly SequenceTableSet _sequenceTables;
     private HuffmanTable _currentHuffman;
-    private SeqTable _literalLengths;
-    private SeqTable _offsets;
-    private SeqTable _matchLengths;
     private bool _literalEntropy;
     private bool _sequenceEntropy;
     private uint _rep0;

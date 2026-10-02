@@ -23,12 +23,18 @@ public sealed class PredefinedTableTests
     {
         Assert.Equal(tableLog, table.TableLog);
         Assert.Equal(1 << tableLog, expected.Length);
+
+        // Every state takes two entries, alike, and the next states index the whole doubled table
+        // set: libzstd's are relative to the table.
+        int slot = SequenceTableSet.Slot(table.Code);
         for (int i = 0; i < expected.Length; i++)
         {
-            SeqSymbol actual = table.Entries[i];
+            SeqSymbol actual = table.Entries[2 * i];
+            Assert.Equal(actual, table.Entries[(2 * i) + 1]);
+            int nextState = (actual.NextState - slot) / 2;
             Assert.True(
-                (actual.NextState, actual.NbAdditionalBits, actual.NbBits, actual.BaseValue) == expected[i],
-                $"state {i}: expected {expected[i]}, got ({actual.NextState}, {actual.NbAdditionalBits}, {actual.NbBits}, {actual.BaseValue})");
+                (nextState, actual.NbAdditionalBits, actual.NbBits, actual.BaseValue) == expected[i],
+                $"state {i}: expected {expected[i]}, got ({nextState}, {actual.NbAdditionalBits}, {actual.NbBits}, {actual.BaseValue})");
         }
     }
 

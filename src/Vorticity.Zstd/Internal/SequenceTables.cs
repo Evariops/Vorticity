@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Vorticity.Zstd.Internal;
@@ -7,13 +8,19 @@ namespace Vorticity.Zstd.Internal;
 /// One state of a sequence decoding table, libzstd's <c>ZSTD_seqSymbol</c>: the FSE transition and the
 /// code's meaning folded together, so that a lookup yields the value's base and how many bits to add.
 /// </summary>
+/// <remarks>
+/// The fields are laid out for <see cref="SeqEntry"/>, which loads an entry whole: the next state on
+/// top, where one shift extracts it, folded into the add that completes the state.
+/// <see cref="NextState"/> is an index into the whole <see cref="SequenceTableSet"/>, where every state
+/// takes two entries: the table's slot included, doubled.
+/// </remarks>
 [StructLayout(LayoutKind.Sequential, Pack = 1)]
 internal struct SeqSymbol
 {
-    public ushort NextState;
+    public uint BaseValue;
     public byte NbAdditionalBits;
     public byte NbBits;
-    public uint BaseValue;
+    public ushort NextState;
 
     public SeqSymbol(ushort nextState, byte nbAdditionalBits, byte nbBits, uint baseValue)
     {
@@ -24,15 +31,165 @@ internal struct SeqSymbol
     }
 }
 
-/// <summary>A decoding table for one of the three sequence codes, and the accuracy it is read with.</summary>
+/// <summary>
+/// A <see cref="SeqSymbol"/> loaded whole, as a little-endian <see cref="ulong"/>: one load the table
+/// index folds into, the fields then by shifts, instead of an address computed for four narrow loads.
+/// </summary>
+/// <remarks>
+/// The counts are masked to the widths they need (extra bits up to 31, state bits up to 9), not to a
+/// byte: the JIT turns a shift and a mask into one <c>ubfx</c> except for widths of 8 and 16, which it
+/// leaves to casts that cost two instructions more. The results stay 64-bit, so that no conversion
+/// adds a move.
+/// </remarks>
+internal static class SeqEntry
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ulong Load(ref SeqSymbol table, nint state) => Unsafe.As<SeqSymbol, ulong>(ref Unsafe.Add(ref table, state));
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nint NextState(ulong entry) => (nint)(entry >> 48);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nint ExtraBits(ulong entry) => (nint)((entry >> 32) & 0x1F);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nint NbBits(ulong entry) => (nint)((entry >> 40) & 0xF);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint BaseValue(ulong entry) => (uint)entry;
+}
+
+/// <summary>The three sequence codes, in the order of their slots in a <see cref="SequenceTableSet"/>.</summary>
+internal enum SequenceCode
+{
+    LiteralLength,
+    Offset,
+    MatchLength,
+}
+
+/// <summary>
+/// A table shared between decoders, the predefined ones and a dictionary's: built for the slot of its
+/// code, and copied into a decoder's <see cref="SequenceTableSet"/> when one uses it.
+/// </summary>
 internal sealed class SeqTable
 {
     public readonly SeqSymbol[] Entries;
-    public int TableLog;
+    public readonly int TableLog;
+    public readonly SequenceCode Code;
 
-    public SeqTable(int maxTableLog)
+    public SeqTable(SequenceCode code, ReadOnlySpan<short> norm, int tableLog)
     {
-        Entries = new SeqSymbol[1 << maxTableLog];
+        Code = code;
+        TableLog = tableLog;
+        Entries = new SeqSymbol[2 << tableLog];
+        SequenceCodes.BuildTable(code, Entries, norm, tableLog);
+    }
+}
+
+/// <summary>
+/// A decoder's three sequence tables in one array, each in its slot: literal lengths, then offsets,
+/// then match lengths. One base serves the three lookups, and a state is an index into the whole.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Every state takes two consecutive entries, alike: a state's index is twice its number, plus any
+/// bit. A state then reads its <c>n</c> bits as <c>n + 1</c>, the bit after them landing on either
+/// copy, with two shifts where <c>n</c> alone, which may be 0, takes three.
+/// </para>
+/// <para>
+/// A slot holds the table its code currently decodes with: built there (FSE and RLE modes), or copied
+/// there from a shared table (predefined mode, a dictionary's), which the repeat mode then keeps. A
+/// shared table is copied only when the slot does not hold it already, and a dictionary's only once a
+/// block repeats it.
+/// </para>
+/// </remarks>
+internal sealed class SequenceTableSet
+{
+    public const int LiteralLengthSlot = 0;
+    public const int OffsetSlot = LiteralLengthSlot + (2 << SequenceCodes.LiteralLengthMaxLog);
+    public const int MatchLengthSlot = OffsetSlot + (2 << SequenceCodes.OffsetMaxLog);
+    public const int Size = MatchLengthSlot + (2 << SequenceCodes.MatchLengthMaxLog);
+
+    public readonly SeqSymbol[] Entries = new SeqSymbol[Size];
+
+    /// <summary>Per code: the shared table in use, null when the slot's own build is.</summary>
+    private readonly SeqTable?[] _current = new SeqTable?[3];
+
+    /// <summary>Per code: the shared table the slot holds a copy of, null when it holds its own build.</summary>
+    private readonly SeqTable?[] _held = new SeqTable?[3];
+
+    private readonly int[] _tableLog = new int[3];
+
+    public static int Slot(SequenceCode code) => code switch
+    {
+        SequenceCode.LiteralLength => LiteralLengthSlot,
+        SequenceCode.Offset => OffsetSlot,
+        _ => MatchLengthSlot,
+    };
+
+    public int TableLog(SequenceCode code) => _tableLog[(int)code];
+
+    /// <summary>The state every frame starts from: a dictionary's tables, if it has them.</summary>
+    public void BeginFrame(SeqTable? literalLengths, SeqTable? offsets, SeqTable? matchLengths)
+    {
+        Select(literalLengths, SequenceCode.LiteralLength);
+        Select(offsets, SequenceCode.Offset);
+        Select(matchLengths, SequenceCode.MatchLength);
+
+        void Select(SeqTable? table, SequenceCode code)
+        {
+            if (table is not null)
+            {
+                _current[(int)code] = table;
+                _tableLog[(int)code] = table.TableLog;
+            }
+        }
+    }
+
+    /// <summary>A shared table, copied into the slot unless it is there already.</summary>
+    public void Use(SeqTable table)
+    {
+        int code = (int)table.Code;
+        _current[code] = table;
+        _tableLog[code] = table.TableLog;
+        Materialize(table.Code);
+    }
+
+    /// <summary>The table the previous block used, for the repeat mode.</summary>
+    public void Repeat(SequenceCode code) => Materialize(code);
+
+    /// <summary>libzstd's <c>ZSTD_buildFSETable</c>, into the slot.</summary>
+    public void Build(SequenceCode code, ReadOnlySpan<short> norm, int tableLog)
+    {
+        SequenceCodes.BuildTable(code, Entries.AsSpan(Slot(code)), norm, tableLog);
+        Own(code, tableLog);
+    }
+
+    /// <summary>libzstd's <c>ZSTD_buildSeqTable_rle</c>: one state that every sequence takes.</summary>
+    public void BuildRle(SequenceCode code, int symbol)
+    {
+        SequenceCodes.Symbol(code, symbol, out uint baseValue, out byte bits);
+        int slot = Slot(code);
+        Entries[slot] = new SeqSymbol((ushort)slot, bits, 0, baseValue);
+        Entries[slot + 1] = Entries[slot];
+        Own(code, 0);
+    }
+
+    private void Own(SequenceCode code, int tableLog)
+    {
+        _current[(int)code] = null;
+        _held[(int)code] = null;
+        _tableLog[(int)code] = tableLog;
+    }
+
+    private void Materialize(SequenceCode code)
+    {
+        SeqTable? table = _current[(int)code];
+        if (!ReferenceEquals(table, _held[(int)code]))
+        {
+            table!.Entries.CopyTo(Entries.AsSpan(Slot(code)));
+            _held[(int)code] = table;
+        }
     }
 }
 
@@ -135,25 +292,67 @@ internal static class SequenceCodes
     ];
 
     /// <summary>The predefined tables, built once from the default distributions.</summary>
-    public static readonly SeqTable DefaultLiteralLengths = BuildDefault(LiteralLengthDefaultNorm, 6, LiteralLengthBase, LiteralLengthBits);
-    public static readonly SeqTable DefaultMatchLengths = BuildDefault(MatchLengthDefaultNorm, 6, MatchLengthBase, MatchLengthBits);
-    public static readonly SeqTable DefaultOffsets = BuildDefault(OffsetDefaultNorm, 5, OffsetBase, OffsetBits);
+    public static readonly SeqTable DefaultLiteralLengths = new(SequenceCode.LiteralLength, LiteralLengthDefaultNorm, 6);
+    public static readonly SeqTable DefaultOffsets = new(SequenceCode.Offset, OffsetDefaultNorm, 5);
+    public static readonly SeqTable DefaultMatchLengths = new(SequenceCode.MatchLength, MatchLengthDefaultNorm, 6);
 
-    private static SeqTable BuildDefault(ReadOnlySpan<short> norm, int tableLog, ReadOnlySpan<uint> baseValue, ReadOnlySpan<byte> bits)
+    /// <summary>The largest symbol of a code.</summary>
+    public static int MaxSymbol(SequenceCode code) => code switch
     {
-        var table = new SeqTable(tableLog);
-        BuildTable(table, norm, tableLog, baseValue, bits);
-        return table;
+        SequenceCode.LiteralLength => MaxLiteralLength,
+        SequenceCode.Offset => MaxOffset,
+        _ => MaxMatchLength,
+    };
+
+    /// <summary>The largest accuracy of a code's table.</summary>
+    public static int MaxLog(SequenceCode code) => code switch
+    {
+        SequenceCode.LiteralLength => LiteralLengthMaxLog,
+        SequenceCode.Offset => OffsetMaxLog,
+        _ => MatchLengthMaxLog,
+    };
+
+    /// <summary>What a symbol of a code stands for: a base value and a number of extra bits.</summary>
+    public static void Symbol(SequenceCode code, int symbol, out uint baseValue, out byte bits)
+    {
+        switch (code)
+        {
+            case SequenceCode.LiteralLength:
+                baseValue = LiteralLengthBase[symbol];
+                bits = LiteralLengthBits[symbol];
+                break;
+            case SequenceCode.Offset:
+                baseValue = OffsetBase[symbol];
+                bits = OffsetBits[symbol];
+                break;
+            default:
+                baseValue = MatchLengthBase[symbol];
+                bits = MatchLengthBits[symbol];
+                break;
+        }
     }
 
     /// <summary>
     /// libzstd's <c>ZSTD_buildFSETable</c>: spreads the symbols of a normalized distribution over the
-    /// table and folds each symbol's base value and extra bits into its states.
+    /// table and folds each symbol's base value and extra bits into its states, each written twice,
+    /// whose next states are indices into the <see cref="SequenceTableSet"/> slot of <paramref name="code"/>.
     /// </summary>
     /// <remarks>The distribution comes from <see cref="Fse.ReadNCount"/>, which has validated it.</remarks>
-    public static void BuildTable(SeqTable table, ReadOnlySpan<short> norm, int tableLog, ReadOnlySpan<uint> baseValue, ReadOnlySpan<byte> bits)
+    public static void BuildTable(SequenceCode code, Span<SeqSymbol> entries, ReadOnlySpan<short> norm, int tableLog)
     {
-        Span<SeqSymbol> entries = table.Entries;
+        ReadOnlySpan<uint> baseValue = code switch
+        {
+            SequenceCode.LiteralLength => LiteralLengthBase,
+            SequenceCode.Offset => OffsetBase,
+            _ => MatchLengthBase,
+        };
+        ReadOnlySpan<byte> bits = code switch
+        {
+            SequenceCode.LiteralLength => LiteralLengthBits,
+            SequenceCode.Offset => OffsetBits,
+            _ => MatchLengthBits,
+        };
+        int slot = SequenceTableSet.Slot(code);
         int tableSize = 1 << tableLog;
         int highThreshold = tableSize - 1;
         Span<ushort> symbolNext = stackalloc ushort[MaxMatchLength + 1];
@@ -194,20 +393,13 @@ internal static class SequenceCodes
             int symbol = symbols[u];
             int nextState = symbolNext[symbol]++;
             int nbBits = tableLog - BackwardBitReader.HighBit((uint)nextState);
-            entries[u] = new SeqSymbol(
-                (ushort)((nextState << nbBits) - tableSize),
+            var entry = new SeqSymbol(
+                (ushort)(slot + (((nextState << nbBits) - tableSize) << 1)),
                 bits[symbol],
                 (byte)nbBits,
                 baseValue[symbol]);
+            entries[2 * u] = entry;
+            entries[(2 * u) + 1] = entry;
         }
-
-        table.TableLog = tableLog;
-    }
-
-    /// <summary>libzstd's <c>ZSTD_buildSeqTable_rle</c>: one state that every sequence takes.</summary>
-    public static void BuildRle(SeqTable table, int symbol, ReadOnlySpan<uint> baseValue, ReadOnlySpan<byte> bits)
-    {
-        table.Entries[0] = new SeqSymbol(0, bits[symbol], 0, baseValue[symbol]);
-        table.TableLog = 0;
     }
 }

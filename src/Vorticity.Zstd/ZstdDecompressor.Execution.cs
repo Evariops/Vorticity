@@ -16,25 +16,44 @@ public sealed partial class ZstdDecompressor
     private readonly byte[] _shortBitstream = new byte[8];
 
     /// <summary>
-    /// The decoder's whole state between two sequences, for the careful path to take over from the
-    /// fast loop.
+    /// The decoder's whole state between two sequences: what the fast loop starts from, and hands to
+    /// the careful path when it stops.
     /// </summary>
     private ref struct SequenceState
     {
         public ref byte Bits;
         public nint Ptr;
-        public int Consumed;
+        public nint Consumed;
         public ulong Container;
-        public ref SeqSymbol LiteralLengths;
-        public ref SeqSymbol MatchLengths;
-        public ref SeqSymbol Offsets;
+
+        /// <summary>The three tables, one array: the states index it whole.</summary>
+        public ref SeqSymbol Tables;
         public nint LiteralLengthState;
         public nint MatchLengthState;
         public nint OffsetState;
         public nuint Rep0;
         public nuint Rep1;
         public nuint Rep2;
+
+        /// <summary>Where the next sequence writes, and its literals start.</summary>
+        public ref byte Dst;
+        public ref byte Lit;
+
+        /// <summary>The sequences left, a pending one included.</summary>
+        public nint NbSeq;
+
+        /// <summary>A sequence the fast loop decoded but did not execute.</summary>
+        public bool Pending;
+        public nint LitLength;
+        public nint MatchLength;
+        public nuint Offset;
     }
+
+    /// <summary>
+    /// The lowest bitstream position the common path of the fast loop takes a sequence from: its
+    /// reload, which steps back by up to 8 bytes, then needs no clamp.
+    /// </summary>
+    private const int FastLoopMinPtr = 8;
 
     /// <summary>
     /// libzstd's <c>ZSTD_decompressSequences_body</c>: each sequence decoded and executed at once,
@@ -43,18 +62,19 @@ public sealed partial class ZstdDecompressor
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The fast loop calls nothing, so that its state stays in registers: a sequence it cannot take
-    /// hands the rest of the block to <see cref="ExecuteSequencesCareful"/>. Why no access of the
-    /// fast loop leaves its buffer, established before it and kept by every iteration:
+    /// <see cref="ExecuteSequencesFast"/> runs the bulk of the sequences; the last one, the end of the
+    /// bitstream and any sequence it cannot take go to <see cref="ExecuteSequencesCareful"/>. Why no
+    /// access of the fast loop leaves its buffer, established here and kept by every iteration:
     /// </para>
     /// <list type="bullet">
-    /// <item>A sequence runs here only if it ends <see cref="WildCopyOverlength"/> bytes before the
+    /// <item>A sequence runs there only if it ends <see cref="WildCopyOverlength"/> bytes before the
     /// destination does, and its literals before the last literal: a 16-byte copy that overruns stays
     /// inside the destination, and inside <paramref name="literals"/>, which has
     /// <see cref="LiteralsMargin"/> readable bytes after the last literal.</item>
     /// <item>Its match lies wholly within this frame's output, before the write position.</item>
     /// <item>The bitstream is read eight bytes at a time at a position that never goes below its
-    /// start (see <see cref="Reload"/>). A stream under eight bytes is first copied into eight.</item>
+    /// start: the common path reloads only from <see cref="FastLoopMinPtr"/> bytes, the general path
+    /// clamps. A stream under eight bytes is first copied into eight.</item>
     /// <item>States index their tables in range: a table built from a validated distribution maps
     /// every state and its low bits back into the table.</item>
     /// </list>
@@ -64,210 +84,414 @@ public sealed partial class ZstdDecompressor
         Span<byte> destination, int op, int blockSizeMax, ReadOnlySpan<byte> history)
     {
         Debug.Assert(literals.Length - literalCount >= LiteralsMargin);
-        ref byte frameStart = ref MemoryMarshal.GetReference(destination);
-        ref byte dst = ref Unsafe.Add(ref frameStart, op);
-        ref byte lit = ref MemoryMarshal.GetReference(literals);
-        ref byte litEnd = ref Unsafe.Add(ref lit, literalCount);
-        nint fastRoom = Math.Min((nint)op + blockSizeMax, destination.Length - WildCopyOverlength);
-        ref byte fastLimit = ref Unsafe.Add(ref frameStart, Math.Max(fastRoom, op));
-
-        if (nbSeq > 0)
+        if (nbSeq == 0)
         {
-            _sequenceEntropy = true;
-
-            // ---- the bitstream, libzstd's BIT_initDStream
-            if (bitstream.IsEmpty || bitstream[^1] == 0)
-            {
-                Throw.Error(ZstdError.SequenceBitstream);
-            }
-
-            int bc = 8 - BackwardBitReader.HighBit(bitstream[^1]);
-            nint ptr;
-            if (bitstream.Length >= 8)
-            {
-                ptr = bitstream.Length - 8;
-            }
-            else
-            {
-                Array.Clear(_shortBitstream);
-                bitstream.CopyTo(_shortBitstream);
-                bc += (8 - bitstream.Length) * 8;
-                bitstream = _shortBitstream;
-                ptr = 0;
-            }
-
-            ref byte bits = ref MemoryMarshal.GetReference(bitstream);
-            ulong container = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bits, ptr));
-
-            SeqTable llTableObject = _literalLengths;
-            SeqTable ofTableObject = _offsets;
-            SeqTable mlTableObject = _matchLengths;
-            ref SeqSymbol llTable = ref MemoryMarshal.GetArrayDataReference(llTableObject.Entries);
-            ref SeqSymbol ofTable = ref MemoryMarshal.GetArrayDataReference(ofTableObject.Entries);
-            ref SeqSymbol mlTable = ref MemoryMarshal.GetArrayDataReference(mlTableObject.Entries);
-
-            // ---- the initial states, each read followed by a reload
-            nint llState = (nint)ReadBits(container, ref bc, llTableObject.TableLog);
-            Reload(ref bits, ref ptr, ref bc, ref container);
-            nint ofState = (nint)ReadBits(container, ref bc, ofTableObject.TableLog);
-            Reload(ref bits, ref ptr, ref bc, ref container);
-            nint mlState = (nint)ReadBits(container, ref bc, mlTableObject.TableLog);
-            Reload(ref bits, ref ptr, ref bc, ref container);
-
-            nuint rep0 = _rep0;
-            nuint rep1 = _rep1;
-            nuint rep2 = _rep2;
-            nint litLength;
-            nint matchLength;
-            nuint offset;
-
-            while (true)
-            {
-                // ---- decode: libzstd's ZSTD_decodeSequence, with the repeat offsets selected
-                // without a branch
-                ref SeqSymbol ll = ref Unsafe.Add(ref llTable, llState);
-                ref SeqSymbol ml = ref Unsafe.Add(ref mlTable, mlState);
-                ref SeqSymbol of = ref Unsafe.Add(ref ofTable, ofState);
-                int llBits = ll.NbAdditionalBits;
-                int mlBits = ml.NbAdditionalBits;
-                int ofBits = of.NbAdditionalBits;
-                uint litLengthBase = ll.BaseValue;
-
-                // Extra bits are read only when there are some, as libzstd does: for most data the
-                // literal and match lengths have none, and the branch is then always predicted.
-                if (ofBits > 1)
-                {
-                    offset = of.BaseValue + (nuint)ReadBitsFast(container, ref bc, ofBits);
-                    rep2 = rep1;
-                    rep1 = rep0;
-                    rep0 = offset;
-                }
-                else
-                {
-                    nuint raw = of.BaseValue + (ofBits == 0 ? 0 : (nuint)ReadBitsFast(container, ref bc, 1));
-                    offset = ResolveOffset(raw, ofBits, litLengthBase == 0, ref rep0, ref rep1, ref rep2);
-                }
-
-                matchLength = (nint)ml.BaseValue;
-                if (mlBits > 0)
-                {
-                    matchLength += (nint)ReadBitsFast(container, ref bc, mlBits);
-                }
-
-                if (llBits + mlBits + ofBits >= 57 - (SequenceCodes.LiteralLengthMaxLog + SequenceCodes.MatchLengthMaxLog + SequenceCodes.OffsetMaxLog))
-                {
-                    Reload(ref bits, ref ptr, ref bc, ref container);
-                }
-
-                litLength = (nint)litLengthBase;
-                if (llBits > 0)
-                {
-                    litLength += (nint)ReadBitsFast(container, ref bc, llBits);
-                }
-
-                if (nbSeq != 1)
-                {
-                    llState = ll.NextState + (nint)ReadBits(container, ref bc, ll.NbBits);
-                    mlState = ml.NextState + (nint)ReadBits(container, ref bc, ml.NbBits);
-                    ofState = of.NextState + (nint)ReadBits(container, ref bc, of.NbBits);
-                    Reload(ref bits, ref ptr, ref bc, ref container);
-                }
-
-                // ---- execute: libzstd's ZSTD_execSequence
-                ref byte litAfter = ref Unsafe.Add(ref lit, litLength);
-                ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
-                if (Unsafe.IsAddressGreaterThan(ref Unsafe.Add(ref matchStart, matchLength), ref fastLimit)
-                    || Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd)
-                    || offset > (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart))
-                {
-                    break;
-                }
-
-                // Literals: one 16-byte copy covers nearly all of them.
-                Copy16(ref dst, ref lit);
-                if (litLength > 16)
-                {
-                    WideCopy(ref Unsafe.Add(ref dst, 16), ref Unsafe.Add(ref lit, 16), litLength - 16);
-                }
-
-                lit = ref litAfter;
-                ref byte match = ref Unsafe.Subtract(ref matchStart, offset);
-                if (offset >= 16)
-                {
-                    // Source and destination at least 16 apart: plain 16-byte steps.
-                    Copy16(ref matchStart, ref match);
-                    if (matchLength > 16)
-                    {
-                        WideCopy(ref Unsafe.Add(ref matchStart, 16), ref Unsafe.Add(ref match, 16), matchLength - 16);
-                    }
-                }
-                else
-                {
-                    OverlapCopy(ref matchStart, ref match, offset, matchLength);
-                }
-
-                dst = ref Unsafe.Add(ref matchStart, matchLength);
-                if (--nbSeq == 0)
-                {
-                    goto Done;
-                }
-            }
-
-            // ---- the careful path takes over, from the sequence just decoded to the last.
-            var state = new SequenceState
-            {
-                Bits = ref bits,
-                Ptr = ptr,
-                Consumed = bc,
-                Container = container,
-                LiteralLengths = ref llTable,
-                MatchLengths = ref mlTable,
-                Offsets = ref ofTable,
-                LiteralLengthState = llState,
-                MatchLengthState = mlState,
-                OffsetState = ofState,
-                Rep0 = rep0,
-                Rep1 = rep1,
-                Rep2 = rep2,
-            };
-            int position = (int)Unsafe.ByteOffset(ref frameStart, ref dst);
-            int literal = (int)Unsafe.ByteOffset(ref MemoryMarshal.GetReference(literals), ref lit);
-            return ExecuteSequencesCareful(
-                ref state, nbSeq, litLength, matchLength, offset, literals, literal, literalCount,
-                destination, op, position, blockSizeMax, history);
-
-        Done:
-            if (!(ptr == 0 && bc == 64))
-            {
-                Throw.Error(ZstdError.SequenceBitstream);
-            }
-
-            _rep0 = (uint)rep0;
-            _rep1 = (uint)rep1;
-            _rep2 = (uint)rep2;
+            return FinishBlock(literals, 0, literalCount, destination, op, op, blockSizeMax);
         }
 
-        int written = (int)Unsafe.ByteOffset(ref frameStart, ref dst);
-        int literalsDone = (int)Unsafe.ByteOffset(ref MemoryMarshal.GetReference(literals), ref lit);
-        return FinishBlock(literals, literalsDone, literalCount, destination, op, written, blockSizeMax);
+        _sequenceEntropy = true;
+
+        // ---- the bitstream, libzstd's BIT_initDStream
+        if (bitstream.IsEmpty || bitstream[^1] == 0)
+        {
+            Throw.Error(ZstdError.SequenceBitstream);
+        }
+
+        nint bc = 8 - BackwardBitReader.HighBit(bitstream[^1]);
+        nint ptr;
+        if (bitstream.Length >= 8)
+        {
+            ptr = bitstream.Length - 8;
+        }
+        else
+        {
+            Array.Clear(_shortBitstream);
+            bitstream.CopyTo(_shortBitstream);
+            bc += (8 - bitstream.Length) * 8;
+            bitstream = _shortBitstream;
+            ptr = 0;
+        }
+
+        ref byte bits = ref MemoryMarshal.GetReference(bitstream);
+        ulong container = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bits, ptr));
+
+        // ---- the initial states, each read followed by a reload: indices into the whole table set
+        SequenceTableSet tables = _sequenceTables;
+        int llLog = tables.TableLog(SequenceCode.LiteralLength);
+        int ofLog = tables.TableLog(SequenceCode.Offset);
+        int mlLog = tables.TableLog(SequenceCode.MatchLength);
+        nint llState = SequenceTableSet.LiteralLengthSlot + ((nint)ReadBits(container, bc, llLog) << 1);
+        bc += llLog;
+        Reload(ref bits, ref ptr, ref bc, ref container);
+        nint ofState = SequenceTableSet.OffsetSlot + ((nint)ReadBits(container, bc, ofLog) << 1);
+        bc += ofLog;
+        Reload(ref bits, ref ptr, ref bc, ref container);
+        nint mlState = SequenceTableSet.MatchLengthSlot + ((nint)ReadBits(container, bc, mlLog) << 1);
+        bc += mlLog;
+        Reload(ref bits, ref ptr, ref bc, ref container);
+
+        ref byte frameStart = ref MemoryMarshal.GetReference(destination);
+        var state = new SequenceState
+        {
+            Bits = ref bits,
+            Ptr = ptr,
+            Consumed = bc,
+            Container = container,
+            Tables = ref MemoryMarshal.GetArrayDataReference(tables.Entries),
+            LiteralLengthState = llState,
+            MatchLengthState = mlState,
+            OffsetState = ofState,
+            Rep0 = _rep0,
+            Rep1 = _rep1,
+            Rep2 = _rep2,
+            Dst = ref Unsafe.Add(ref frameStart, op),
+            Lit = ref MemoryMarshal.GetReference(literals),
+            NbSeq = nbSeq,
+        };
+
+        if (nbSeq > 1)
+        {
+            nint fastRoom = Math.Min((nint)op + blockSizeMax, destination.Length - WildCopyOverlength);
+            ExecuteSequencesFast(
+                ref state, ref frameStart, ref Unsafe.Add(ref frameStart, Math.Max(fastRoom, op)),
+                ref Unsafe.Add(ref MemoryMarshal.GetReference(literals), literalCount));
+        }
+
+        return ExecuteSequencesCareful(ref state, literals, literalCount, destination, op, blockSizeMax, history);
     }
 
     /// <summary>
-    /// Executes the sequence the fast loop could not, then decodes and executes the remaining ones,
-    /// checking each copy in libzstd's order (<c>ZSTD_execSequenceEnd</c>).
+    /// The fast loop: decodes and executes every sequence but the last, while each fits the room
+    /// proven for copies that run past their end; otherwise it stops, with the sequence it could not
+    /// execute pending.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It calls nothing, so that its state stays in registers, and its common paths are straight: an
+    /// offset without extra length bits, eight bytes or more of bitstream before the reload, literals
+    /// and a match of up to 16 bytes, 16 or more apart; a new offset on one path, a repeat code on
+    /// another. Any other sequence takes the general path, still in this loop.
+    /// </para>
+    /// <para>
+    /// The layout is written for the JIT, which without profile data places the target of
+    /// <c>if (c) goto L;</c> right after the branch, and a block that rejoins further down between the
+    /// branch and the join. So each test of the common path is one condition, combined with
+    /// <c>&amp;</c> rather than <c>&amp;&amp;</c> (a chain would be weighed as unlikely), jumping to its
+    /// common continuation; and the general path runs to the end of its iteration on its own, back to
+    /// the loop head. The rare blocks then land after the loop, and the common path takes no branch
+    /// but the loop's.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ExecuteSequencesFast(ref SequenceState s, ref byte frameStart, ref byte fastLimit, ref byte litEnd)
+    {
+        ref byte bits = ref s.Bits;
+        nint ptr = s.Ptr;
+        nint bc = s.Consumed;
+        ulong container = s.Container;
+        ref SeqSymbol tables = ref s.Tables;
+        nint llState = s.LiteralLengthState;
+        nint mlState = s.MatchLengthState;
+        nint ofState = s.OffsetState;
+        nuint rep0 = s.Rep0;
+        nuint rep1 = s.Rep1;
+        nuint rep2 = s.Rep2;
+        ref byte dst = ref s.Dst;
+        ref byte lit = ref s.Lit;
+        nint nbSeq = s.NbSeq;
+        nint litLength;
+        nint matchLength;
+        nuint offset;
+
+    Loop:
+        // Each entry whole, in one load the table index folds into; its fields by shifts.
+        ulong llEntry = SeqEntry.Load(ref tables, llState);
+        ulong mlEntry = SeqEntry.Load(ref tables, mlState);
+        ulong ofEntry = SeqEntry.Load(ref tables, ofState);
+        nint ofBits = SeqEntry.ExtraBits(ofEntry);
+        nint mlBits = SeqEntry.ExtraBits(mlEntry);
+        nint llBits = SeqEntry.ExtraBits(llEntry);
+
+        // The common sequence: an offset of up to 30 extra bits (no reload inside the sequence),
+        // lengths without extra bits, and the reload after it eight bytes or more from the start.
+        if (((mlBits | llBits) == 0) & (ofBits <= 30) & (ptr >= FastLoopMinPtr))
+        {
+            goto CommonDecode;
+        }
+
+        // ---- the general path: libzstd's ZSTD_decodeSequence in full
+        {
+            nuint raw = SeqEntry.BaseValue(ofEntry) + ReadBits(container, bc, ofBits);
+            bc += ofBits;
+            if (ofBits > 1)
+            {
+                offset = raw;
+                rep2 = rep1;
+                rep1 = rep0;
+                rep0 = raw;
+            }
+            else
+            {
+                offset = ResolveOffset(raw, SeqEntry.BaseValue(llEntry) == 0, ref rep0, ref rep1, ref rep2);
+            }
+
+            matchLength = (nint)SeqEntry.BaseValue(mlEntry) + (nint)ReadBits(container, bc, mlBits);
+            bc += mlBits;
+            if (ofBits + mlBits + llBits >= 57 - (SequenceCodes.LiteralLengthMaxLog + SequenceCodes.MatchLengthMaxLog + SequenceCodes.OffsetMaxLog))
+            {
+                ReloadClamped(ref bits, ref ptr, ref bc, ref container);
+            }
+
+            litLength = (nint)SeqEntry.BaseValue(llEntry) + (nint)ReadBits(container, bc, llBits);
+            bc += llBits;
+            NextStates(llEntry, mlEntry, ofEntry, container, ref bc, ref llState, ref mlState, ref ofState);
+            ReloadClamped(ref bits, ref ptr, ref bc, ref container);
+            goto Execute;
+        }
+
+    CommonDecode:
+        if (ofBits > 1)
+        {
+            goto CommonNewOffset;
+        }
+
+        // ---- a repeat offset, branched on as libzstd does; the rest as for a new one, written twice
+        // so that each path runs straight to its own end
+        {
+            nuint raw = SeqEntry.BaseValue(ofEntry) + ReadBits(container, bc, ofBits);
+            offset = ResolveOffset(raw, SeqEntry.BaseValue(llEntry) == 0, ref rep0, ref rep1, ref rep2);
+            matchLength = (nint)SeqEntry.BaseValue(mlEntry);
+            litLength = (nint)SeqEntry.BaseValue(llEntry);
+            CommonStates(llEntry, mlEntry, ofEntry, ofBits, ref bits, ref ptr, ref bc, ref container, ref llState, ref mlState, ref ofState);
+
+            ref byte litAfter = ref Unsafe.Add(ref lit, litLength);
+            ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
+            ref byte matchEnd = ref Unsafe.Add(ref matchStart, matchLength);
+            if (FitsShortCopies(ref frameStart, ref fastLimit, ref litEnd, ref litAfter, ref matchStart, ref matchEnd, litLength, matchLength, offset))
+            {
+                Copy16(ref dst, ref lit);
+                Copy16(ref matchStart, ref Unsafe.Subtract(ref matchStart, offset));
+                dst = ref matchEnd;
+                lit = ref litAfter;
+                if (--nbSeq > 1)
+                {
+                    goto Loop;
+                }
+
+                goto Stop;
+            }
+
+            goto Execute;
+        }
+
+    CommonNewOffset:
+        {
+            offset = SeqEntry.BaseValue(ofEntry) + ReadBitsFast(container, bc, ofBits);
+            rep2 = rep1;
+            rep1 = rep0;
+            rep0 = offset;
+            matchLength = (nint)SeqEntry.BaseValue(mlEntry);
+            litLength = (nint)SeqEntry.BaseValue(llEntry);
+            CommonStates(llEntry, mlEntry, ofEntry, ofBits, ref bits, ref ptr, ref bc, ref container, ref llState, ref mlState, ref ofState);
+
+            // One test for the room and the shape of the copies: then one 16-byte copy each.
+            ref byte litAfter = ref Unsafe.Add(ref lit, litLength);
+            ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
+            ref byte matchEnd = ref Unsafe.Add(ref matchStart, matchLength);
+            if (FitsShortCopies(ref frameStart, ref fastLimit, ref litEnd, ref litAfter, ref matchStart, ref matchEnd, litLength, matchLength, offset))
+            {
+                Copy16(ref dst, ref lit);
+                Copy16(ref matchStart, ref Unsafe.Subtract(ref matchStart, offset));
+                dst = ref matchEnd;
+                lit = ref litAfter;
+                if (--nbSeq > 1)
+                {
+                    goto Loop;
+                }
+
+                goto Stop;
+            }
+
+            goto Execute;
+        }
+
+    // ---- any sequence, decoded: libzstd's ZSTD_execSequence
+    Execute:
+        {
+            ref byte litAfter = ref Unsafe.Add(ref lit, litLength);
+            ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
+            ref byte matchEnd = ref Unsafe.Add(ref matchStart, matchLength);
+            if (Unsafe.IsAddressGreaterThan(ref matchEnd, ref fastLimit)
+                | Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd)
+                | (offset > (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart)))
+            {
+                goto Pending;
+            }
+
+            WildCopy16(ref dst, ref lit, litLength);
+            ref byte match = ref Unsafe.Subtract(ref matchStart, offset);
+            if (offset >= 16)
+            {
+                WildCopy16(ref matchStart, ref match, matchLength);
+            }
+            else
+            {
+                OverlapCopy(ref matchStart, ref match, offset, matchLength);
+            }
+
+            dst = ref matchEnd;
+            lit = ref litAfter;
+            if (--nbSeq > 1)
+            {
+                goto Loop;
+            }
+
+            goto Stop;
+        }
+
+    Pending:
+        s.Pending = true;
+        s.LitLength = litLength;
+        s.MatchLength = matchLength;
+        s.Offset = offset;
+
+    Stop:
+        s.Ptr = ptr;
+        s.Consumed = bc;
+        s.Container = container;
+        s.LiteralLengthState = llState;
+        s.MatchLengthState = mlState;
+        s.OffsetState = ofState;
+        s.Rep0 = rep0;
+        s.Rep1 = rep1;
+        s.Rep2 = rep2;
+        s.Dst = ref dst;
+        s.Lit = ref lit;
+        s.NbSeq = nbSeq;
+    }
+
+    /// <summary>
+    /// The three states after a common sequence, whose only extra bits are the offset's, and the
+    /// reload after it, eight bytes or more from the start. The positions of the three state reads are
+    /// sums of the counts, added as a tree.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CommonStates(
+        ulong llEntry, ulong mlEntry, ulong ofEntry, nint ofBits, ref byte bits, ref nint ptr, ref nint bc, ref ulong container,
+        ref nint llState, ref nint mlState, ref nint ofState)
+    {
+        nint llNb = SeqEntry.NbBits(llEntry);
+        nint mlNb = SeqEntry.NbBits(mlEntry);
+        nint ofNb = SeqEntry.NbBits(ofEntry);
+        nint llAt = bc + ofBits;
+        nint llMlNb = llNb + mlNb;
+        nint mlAt = llAt + llNb;
+        nint ofAt = llAt + llMlNb;
+        llState = SeqEntry.NextState(llEntry) + (nint)ReadStateBits(container, llAt, llNb);
+        mlState = SeqEntry.NextState(mlEntry) + (nint)ReadStateBits(container, mlAt, mlNb);
+        ofState = SeqEntry.NextState(ofEntry) + (nint)ReadStateBits(container, ofAt, ofNb);
+        nint consumed = llAt + (llMlNb + ofNb);
+        Debug.Assert(ptr >= 8 && consumed <= 64);
+        ptr -= consumed >> 3;
+        bc = consumed & 7;
+        container = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bits, ptr));
+    }
+
+    /// <summary>
+    /// Whether a sequence fits the room proven for copies past their end, and takes one 16-byte copy
+    /// of literals and one of match, 16 or more apart: one condition, the comparisons combined with
+    /// <c>&amp;</c>, which the JIT turns into one chain of conditional compares and one branch.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool FitsShortCopies(
+        ref byte frameStart, ref byte fastLimit, ref byte litEnd, ref byte litAfter, ref byte matchStart, ref byte matchEnd,
+        nint litLength, nint matchLength, nuint offset) =>
+        !Unsafe.IsAddressGreaterThan(ref matchEnd, ref fastLimit)
+        & !Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd)
+        & (offset <= (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart))
+        & (litLength <= 16)
+        & (matchLength <= 16)
+        & (offset >= 16);
+
+    /// <summary>The three states after a sequence: libzstd's ZSTD_updateFseStateWithDInfo, in order.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void NextStates(
+        ulong llEntry, ulong mlEntry, ulong ofEntry, ulong container, ref nint bc,
+        ref nint llState, ref nint mlState, ref nint ofState)
+    {
+        nint llNb = SeqEntry.NbBits(llEntry);
+        nint mlNb = SeqEntry.NbBits(mlEntry);
+        nint ofNb = SeqEntry.NbBits(ofEntry);
+        nint mlAt = bc + llNb;
+        nint ofAt = mlAt + mlNb;
+        llState = SeqEntry.NextState(llEntry) + (nint)ReadStateBits(container, bc, llNb);
+        mlState = SeqEntry.NextState(mlEntry) + (nint)ReadStateBits(container, mlAt, mlNb);
+        ofState = SeqEntry.NextState(ofEntry) + (nint)ReadStateBits(container, ofAt, ofNb);
+        bc = ofAt + ofNb;
+    }
+
+    /// <summary>
+    /// libzstd's <c>BIT_reloadDStream</c> without its status: back by the whole bytes consumed, but
+    /// not below the start of the stream. An overflowed stream is then at the start already, and stays.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void ReloadClamped(ref byte bits, ref nint ptr, ref nint bc, ref ulong container)
+    {
+        nint bytes = Math.Min(bc >> 3, ptr);
+        ptr -= bytes;
+        bc -= bytes << 3;
+        container = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bits, ptr));
+    }
+
+    /// <summary>
+    /// Copies <paramref name="length"/> bytes 16 at a time, one block at least: libzstd's
+    /// <c>ZSTD_wildcopy</c>, writing up to 15 past the end. Source and destination are 16 or more
+    /// apart. A loop that always runs once, so that a short copy takes no branch.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void WildCopy16(ref byte dst, ref byte src, nint length)
+    {
+        nint i = 0;
+        do
+        {
+            Copy16(ref Unsafe.Add(ref dst, i), ref Unsafe.Add(ref src, i));
+            i += 16;
+        }
+        while (i < length);
+    }
+
+    /// <summary>
+    /// Executes the sequence the fast loop left pending, if any, then decodes and executes the
+    /// remaining ones, checking each copy in libzstd's order (<c>ZSTD_execSequenceEnd</c>), and ends
+    /// the block.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private int ExecuteSequencesCareful(
-        ref SequenceState state, int nbSeq, nint litLength, nint matchLength, nuint offset,
-        ReadOnlySpan<byte> literals, int literal, int literalCount,
-        Span<byte> destination, int blockStart, int position, int blockSizeMax, ReadOnlySpan<byte> history)
+        ref SequenceState state, ReadOnlySpan<byte> literals, int literalCount,
+        Span<byte> destination, int blockStart, int blockSizeMax, ReadOnlySpan<byte> history)
     {
         ref byte frameStart = ref MemoryMarshal.GetReference(destination);
         ref byte lit = ref MemoryMarshal.GetReference(literals);
-        nint o = position;
-        nint litPtr = literal;
+        nint o = Unsafe.ByteOffset(ref frameStart, ref state.Dst);
+        nint litPtr = Unsafe.ByteOffset(ref lit, ref state.Lit);
         nint blockEnd = (nint)blockStart + blockSizeMax;
         nint oend = Math.Min(blockEnd, destination.Length);
+        nint nbSeq = state.NbSeq;
+        nint litLength;
+        nint matchLength;
+        nuint offset;
+
+        if (state.Pending)
+        {
+            litLength = state.LitLength;
+            matchLength = state.MatchLength;
+            offset = state.Offset;
+        }
+        else
+        {
+            Debug.Assert(nbSeq > 0);
+            DecodeSequence(ref state, nbSeq, out litLength, out matchLength, out offset);
+        }
 
         while (true)
         {
@@ -330,28 +554,40 @@ public sealed partial class ZstdDecompressor
     }
 
     /// <summary>The fast loop's decoding, on the state the careful path carries.</summary>
-    private static void DecodeSequence(ref SequenceState s, int nbSeq, out nint litLength, out nint matchLength, out nuint offset)
+    private static void DecodeSequence(ref SequenceState s, nint nbSeq, out nint litLength, out nint matchLength, out nuint offset)
     {
-        ref SeqSymbol ll = ref Unsafe.Add(ref s.LiteralLengths, s.LiteralLengthState);
-        ref SeqSymbol ml = ref Unsafe.Add(ref s.MatchLengths, s.MatchLengthState);
-        ref SeqSymbol of = ref Unsafe.Add(ref s.Offsets, s.OffsetState);
-        int llBits = ll.NbAdditionalBits;
-        int mlBits = ml.NbAdditionalBits;
-        int ofBits = of.NbAdditionalBits;
-        nuint raw = of.BaseValue + (nuint)ReadBits(s.Container, ref s.Consumed, ofBits);
-        offset = ResolveOffset(raw, ofBits, ll.BaseValue == 0, ref s.Rep0, ref s.Rep1, ref s.Rep2);
-        matchLength = (nint)(ml.BaseValue + ReadBits(s.Container, ref s.Consumed, mlBits));
+        ulong llEntry = SeqEntry.Load(ref s.Tables, s.LiteralLengthState);
+        ulong mlEntry = SeqEntry.Load(ref s.Tables, s.MatchLengthState);
+        ulong ofEntry = SeqEntry.Load(ref s.Tables, s.OffsetState);
+        nint llBits = SeqEntry.ExtraBits(llEntry);
+        nint mlBits = SeqEntry.ExtraBits(mlEntry);
+        nint ofBits = SeqEntry.ExtraBits(ofEntry);
+        nuint raw = SeqEntry.BaseValue(ofEntry) + ReadBits(s.Container, s.Consumed, ofBits);
+        s.Consumed += ofBits;
+        if (ofBits > 1)
+        {
+            offset = raw;
+            s.Rep2 = s.Rep1;
+            s.Rep1 = s.Rep0;
+            s.Rep0 = raw;
+        }
+        else
+        {
+            offset = ResolveOffset(raw, SeqEntry.BaseValue(llEntry) == 0, ref s.Rep0, ref s.Rep1, ref s.Rep2);
+        }
+
+        matchLength = (nint)(SeqEntry.BaseValue(mlEntry) + ReadBits(s.Container, s.Consumed, mlBits));
+        s.Consumed += mlBits;
         if (llBits + mlBits + ofBits >= 57 - (SequenceCodes.LiteralLengthMaxLog + SequenceCodes.MatchLengthMaxLog + SequenceCodes.OffsetMaxLog))
         {
             Reload(ref s.Bits, ref s.Ptr, ref s.Consumed, ref s.Container);
         }
 
-        litLength = (nint)(ll.BaseValue + ReadBits(s.Container, ref s.Consumed, llBits));
+        litLength = (nint)(SeqEntry.BaseValue(llEntry) + ReadBits(s.Container, s.Consumed, llBits));
+        s.Consumed += llBits;
         if (nbSeq != 1)
         {
-            s.LiteralLengthState = ll.NextState + (nint)ReadBits(s.Container, ref s.Consumed, ll.NbBits);
-            s.MatchLengthState = ml.NextState + (nint)ReadBits(s.Container, ref s.Consumed, ml.NbBits);
-            s.OffsetState = of.NextState + (nint)ReadBits(s.Container, ref s.Consumed, of.NbBits);
+            NextStates(llEntry, mlEntry, ofEntry, s.Container, ref s.Consumed, ref s.LiteralLengthState, ref s.MatchLengthState, ref s.OffsetState);
             Reload(ref s.Bits, ref s.Ptr, ref s.Consumed, ref s.Container);
         }
     }
@@ -373,23 +609,14 @@ public sealed partial class ZstdDecompressor
     }
 
     /// <summary>
-    /// The offset an offset code's value designates, and the repeat offsets after it (RFC 8878,
-    /// 3.1.1.5), branched on as libzstd does. <paramref name="raw"/> is the code's base plus its
-    /// extra bits: a new offset when the code has more than one extra bit, otherwise 0 to 2, which
-    /// with no literal before the match shifts up by one to index Repeated_Offset1 to 3, the last
-    /// meaning Repeated_Offset1 - 1.
+    /// The offset a repeat code designates, and the repeat offsets after it (RFC 8878, 3.1.1.5),
+    /// branched on as libzstd does. <paramref name="raw"/> is the code's base plus its extra bit, 0 to
+    /// 2, which with no literal before the match shifts up by one to index Repeated_Offset1 to 3, the
+    /// last meaning Repeated_Offset1 - 1.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static nuint ResolveOffset(nuint raw, int ofBits, bool noLiteral, ref nuint rep0, ref nuint rep1, ref nuint rep2)
+    private static nuint ResolveOffset(nuint raw, bool noLiteral, ref nuint rep0, ref nuint rep1, ref nuint rep2)
     {
-        if (ofBits > 1)
-        {
-            rep2 = rep1;
-            rep1 = rep0;
-            rep0 = raw;
-            return raw;
-        }
-
         nuint index = raw + (noLiteral ? 1u : 0u);
         if (index == 0)
         {
@@ -409,47 +636,29 @@ public sealed partial class ZstdDecompressor
     }
 
     /// <summary>
-    /// Copies <paramref name="length"/> bytes forward, overlapping or not: 16 at a time while source
-    /// and destination are 16 apart, then byte by byte. It writes nothing past its end.
+    /// Copies <paramref name="length"/> bytes forward, exactly: nothing is written past the end. From
+    /// another buffer, or from far enough back, it is one block copy; a match that overlaps its own
+    /// output repeats a pattern, which is copied in blocks that double, each from the start of the copy.
     /// </summary>
     private static void CopyForward(ref byte dst, nint d, ref byte src, nint s, nint length)
     {
-        nint end = d + length;
-        if (Unsafe.AreSame(ref dst, ref src) && d - s < 16)
+        nint distance = d - s;
+        if (!Unsafe.AreSame(ref dst, ref src) || distance >= length)
         {
-            for (; d < end; d++, s++)
-            {
-                Unsafe.Add(ref dst, d) = Unsafe.Add(ref src, s);
-            }
-
+            Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref dst, d), ref Unsafe.Add(ref src, s), (uint)length);
             return;
         }
 
-        for (; d + 16 <= end; d += 16, s += 16)
+        // The first period, then blocks of what is already written: a whole number of periods each,
+        // so that every block continues the pattern in phase.
+        Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref dst, d), ref Unsafe.Add(ref dst, s), (uint)distance);
+        nint done = distance;
+        while (done < length)
         {
-            Copy16(ref Unsafe.Add(ref dst, d), ref Unsafe.Add(ref src, s));
+            nint block = Math.Min(done, length - done);
+            Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref dst, d + done), ref Unsafe.Add(ref dst, d), (uint)block);
+            done += block;
         }
-
-        for (; d < end; d++, s++)
-        {
-            Unsafe.Add(ref dst, d) = Unsafe.Add(ref src, s);
-        }
-    }
-
-    /// <summary>
-    /// Copies at least <paramref name="length"/> bytes 16 at a time, writing up to 15 past the end:
-    /// libzstd's <c>ZSTD_wildcopy</c>. Source and destination are at least 16 apart.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void WideCopy(ref byte dst, ref byte src, nint length)
-    {
-        nint i = 0;
-        do
-        {
-            Copy16(ref Unsafe.Add(ref dst, i), ref Unsafe.Add(ref src, i));
-            i += 16;
-        }
-        while (i < length);
     }
 
     /// <summary>
@@ -496,25 +705,27 @@ public sealed partial class ZstdDecompressor
     private static void Copy16(ref byte dst, ref byte src) =>
         Unsafe.WriteUnaligned(ref dst, Unsafe.ReadUnaligned<Vector128<byte>>(ref src));
 
-    /// <summary>libzstd's <c>BIT_readBitsFast</c>: 1 to 31 bits.</summary>
+    /// <summary>libzstd's <c>BIT_readBitsFast</c>: 1 to 31 bits from bit <paramref name="at"/> of the container.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ReadBitsFast(ulong container, ref int bc, int count)
-    {
+    private static nuint ReadBitsFast(ulong container, nint at, nint count) =>
         // A shift takes its count modulo 64, so 64 - count is just -count: one negation.
-        uint value = (uint)((container << bc) >> -count);
-        bc += count;
-        return value;
-    }
+        (nuint)((container << (int)at) >> (int)-count);
+
+    /// <summary>
+    /// A state's <paramref name="count"/> bits, 0 to 9, and the bit after them: the offset of its next
+    /// state in the doubled <see cref="SequenceTableSet"/>, where the extra bit lands on either copy.
+    /// Two shifts, where the bits alone would take three to give 0 for none.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static nuint ReadStateBits(ulong container, nint at, nint count) =>
+        // 63 - count is count ^ 63 for a count up to 63: one instruction, off the dependency chain.
+        (nuint)((container << (int)at) >> ((int)count ^ 63));
 
     /// <summary>libzstd's <c>BIT_readBits</c>: 0 to 31 bits, as two shifts that give 0 for none.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint ReadBits(ulong container, ref int bc, int count)
-    {
+    private static nuint ReadBits(ulong container, nint at, nint count) =>
         // 63 - count is count ^ 63 for a count up to 63: one instruction.
-        uint value = (uint)(((container << bc) >> 1) >> (count ^ 63));
-        bc += count;
-        return value;
-    }
+        (nuint)(((container << (int)at) >> 1) >> ((int)count ^ 63));
 
     /// <summary>
     /// libzstd's <c>BIT_reloadDStream</c>. From eight bytes up, the position moves back by the whole
@@ -522,7 +733,7 @@ public sealed partial class ZstdDecompressor
     /// moves by what is left, and an overflowed stream stays as it is.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Reload(ref byte bits, ref nint ptr, ref int bc, ref ulong container)
+    private static void Reload(ref byte bits, ref nint ptr, ref nint bc, ref ulong container)
     {
         if (ptr >= 8)
         {
@@ -534,7 +745,7 @@ public sealed partial class ZstdDecompressor
         {
             nint bytes = Math.Min(bc >> 3, ptr);
             ptr -= bytes;
-            bc -= (int)bytes << 3;
+            bc -= bytes << 3;
         }
         else
         {

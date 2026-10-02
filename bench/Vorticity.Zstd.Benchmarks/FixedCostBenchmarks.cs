@@ -26,9 +26,7 @@ public class FixedCostBenchmarks
     ];
 
     private readonly HuffmanTable _huffman = new();
-    private readonly SeqTable _ll = new(9);
-    private readonly SeqTable _of = new(8);
-    private readonly SeqTable _ml = new(9);
+    private readonly SequenceTableSet _tables = new();
     private readonly short[] _norm = new short[53];
 
     [Benchmark]
@@ -52,9 +50,9 @@ public class FixedCostBenchmarks
     public int SequenceTables()
     {
         int position = 0;
-        position += Build(_ll, Tables.AsSpan(position), 35, SequenceCodes.LiteralLengthBase, SequenceCodes.LiteralLengthBits);
-        position += Build(_of, Tables.AsSpan(position), 31, SequenceCodes.OffsetBase, SequenceCodes.OffsetBits);
-        position += Build(_ml, Tables.AsSpan(position), 52, SequenceCodes.MatchLengthBase, SequenceCodes.MatchLengthBits);
+        position += Build(SequenceCode.LiteralLength, Tables.AsSpan(position));
+        position += Build(SequenceCode.Offset, Tables.AsSpan(position));
+        position += Build(SequenceCode.MatchLength, Tables.AsSpan(position));
         return position;
     }
 
@@ -71,11 +69,11 @@ public class FixedCostBenchmarks
         return position;
     }
 
-    private int Build(SeqTable table, ReadOnlySpan<byte> source, int max, ReadOnlySpan<uint> bases, ReadOnlySpan<byte> bits)
+    private int Build(SequenceCode code, ReadOnlySpan<byte> source)
     {
-        int symbol = max;
+        int symbol = SequenceCodes.MaxSymbol(code);
         int size = Fse.ReadNCount(_norm, ref symbol, out int tableLog, source, ZstdError.FseTable);
-        SequenceCodes.BuildTable(table, _norm.AsSpan(0, symbol + 1), tableLog, bases, bits);
+        _tables.Build(code, _norm.AsSpan(0, symbol + 1), tableLog);
         return size;
     }
 }
