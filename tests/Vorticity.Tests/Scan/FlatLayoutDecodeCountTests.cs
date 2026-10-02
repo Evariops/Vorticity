@@ -163,8 +163,7 @@ public sealed class FlatLayoutDecodeCountTests
     /// rows alone where its encoding selects them, the ranges around them where it decodes ranges.
     /// </summary>
     /// <param name="booleans">
-    /// A column of random booleans, whose encoding decodes ranges and cannot select; otherwise a
-    /// column of random integers, stored plain, which selects.
+    /// A column of random booleans rather than of random integers, both stored plain.
     /// </param>
     /// <remarks>
     /// <para>
@@ -189,10 +188,11 @@ public sealed class FlatLayoutDecodeCountTests
     /// </para>
     /// <para>
     /// A plain integer column was the incompressible stream that fell back, until `vortex.primitive`
-    /// learned to gather its wanted rows out of the buffer as it lies; booleans now stand for the
-    /// encodings that cannot select. The take is one batch over the chunk since a take spans the
-    /// zones of a window that hold none of its rows, so the booleans decode the clusters around the
-    /// wanted rows, single rows here, rather than the chunk.
+    /// learned to gather its wanted rows out of the buffer as it lies, and `vortex.bool` after it.
+    /// The take is one batch over the chunk since a take spans the zones of a window that hold none
+    /// of its rows, and an encoding that cannot select decodes the clusters around the wanted rows
+    /// rather than the chunk; the bound the test holds is the one the defect broke, a chunk decoded
+    /// more than once, and the floor is the one the counter missed, nothing counted at all.
     /// </para>
     /// </remarks>
     [Theory]
@@ -243,16 +243,10 @@ public sealed class FlatLayoutDecodeCountTests
 
             Assert.Equal(expected, taken);
 
-            // One decode of the chunk at most, whatever the take asks for, and never none: the wanted
-            // rows alone from an encoding that selects them, at least those from any other.
-            if (booleans)
-            {
-                Assert.InRange(decoded, wanted.Length, Ideal);
-            }
-            else
-            {
-                Assert.Equal(wanted.Length, decoded);
-            }
+            // One decode of the chunk at most, whatever the take asks for, and never none: both
+            // columns select, and give the wanted rows alone.
+            Assert.InRange(decoded, wanted.Length, Ideal);
+            Assert.Equal(wanted.Length, decoded);
         }
         finally
         {
