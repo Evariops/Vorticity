@@ -12,7 +12,7 @@ namespace Vorticity.Zstd.Perf;
 /// block are taken from the frame itself, then each step is timed alone, many times over.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights [--frames a,b] [--repeat N]</c>, the repeats
+/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build [--frames a,b] [--repeat N]</c>, the repeats
 /// for a profiler to attach. Prints the median time
 /// of one operation, and its cycles at the clock the M4 Pro's performance cores run (4.44 GHz).
 /// </remarks>
@@ -22,7 +22,9 @@ internal static class Micro
 
     private sealed record Table(SequenceCode Code, short[] Norm, int TableLog, byte[] Description);
 
-    private sealed record Blocks(List<Table> Tables, List<byte[]> Trees, int Sequences);
+    private sealed record Literals(byte[] Tree, byte[] Streams, int Size);
+
+    private sealed record Blocks(List<Table> Tables, List<byte[]> Trees, int Sequences, List<Literals> Sections);
 
     /// <summary>The number of sequences in a frame's compressed blocks.</summary>
     public static int CountSequences(byte[] frame) => Parse(frame).Sequences;
@@ -49,6 +51,52 @@ internal static class Micro
                         foreach (Table t in blocks.Tables)
                         {
                             set.Build(t.Code, t.Norm, t.TableLog);
+                        }
+                    });
+                    break;
+                }
+
+                case "x1":
+                case "x2":
+                case "x2build":
+                {
+                    // The four-stream literal sections alone, their trees read beforehand; x2build
+                    // times the double-symbol table's construction from a read tree.
+                    bool useDouble = what != "x1";
+                    var table = new HuffmanTable();
+                    var output = new byte[128 << 10];
+                    int symbols = 0;
+                    foreach (Literals l in blocks.Sections)
+                    {
+                        symbols += l.Size;
+                    }
+
+                    if (what == "x2build")
+                    {
+                        var trees = blocks.Sections.ConvertAll(l => l.Tree);
+                        Report(name, $"{trees.Count} double-symbol tables", trees.Count, 0, () =>
+                        {
+                            foreach (byte[] tree in trees)
+                            {
+                                table.Read(tree);
+                                table.BuildDoubleForBenchmark();
+                            }
+                        });
+                        break;
+                    }
+
+                    Report(name, $"{blocks.Sections.Count} sections, {symbols} symbols ({what})", blocks.Sections.Count, symbols, () =>
+                    {
+                        byte[]? current = null;
+                        foreach (Literals l in blocks.Sections)
+                        {
+                            if (!ReferenceEquals(l.Tree, current))
+                            {
+                                table.Read(l.Tree);
+                                current = l.Tree;
+                            }
+
+                            table.DecodeFourStreams(l.Streams, output.AsSpan(0, l.Size), useDouble);
                         }
                     });
                     break;
@@ -139,7 +187,7 @@ internal static class Micro
 
         Array.Sort(samples);
         double ns = samples[samples.Length / 2];
-        string perCell = cells == 0 ? string.Empty : $", {ns * Ghz * operations / cells:F2} cycles a cell";
+        string perCell = cells == 0 ? string.Empty : $", {ns * Ghz * operations / cells:F2} cycles a cell (or symbol)";
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"{frame,-15} {what}: {ns,8:F1} ns ({ns * Ghz,7:F0} cycles) each, min {samples[0]:F1}{perCell}"));
     }
@@ -149,6 +197,7 @@ internal static class Micro
     {
         var tables = new List<Table>();
         var trees = new List<byte[]>();
+        var sections = new List<Literals>();
         int sequences = 0;
         if (FrameHeader.Parse(frame, out FrameHeader header) != ZstdError.None)
         {
@@ -164,19 +213,19 @@ internal static class Micro
             int size = blockHeader >> 3;
             if (type == 2)
             {
-                sequences += ParseBlock(frame.AsSpan(ip, size), tables, trees);
+                sequences += ParseBlock(frame.AsSpan(ip, size), tables, trees, sections);
             }
 
             ip += type == 1 ? 1 : size;
             if ((blockHeader & 1) != 0)
             {
-                return new Blocks(tables, trees, sequences);
+                return new Blocks(tables, trees, sequences, sections);
             }
         }
     }
 
     /// <returns>The block's number of sequences.</returns>
-    private static int ParseBlock(ReadOnlySpan<byte> block, List<Table> tables, List<byte[]> trees)
+    private static int ParseBlock(ReadOnlySpan<byte> block, List<Table> tables, List<byte[]> trees, List<Literals> sections)
     {
         int literalsType = block[0] & 3;
         int sizeFormat = (block[0] >> 2) & 3;
@@ -194,15 +243,23 @@ internal static class Micro
         else
         {
             uint lhc = (uint)(block[0] | (block[1] << 8) | (block[2] << 16) | (block[3] << 24));
-            (int hs, int compressed) = sizeFormat switch
+            (int hs, int compressed, int regenerated) = sizeFormat switch
             {
-                2 => (4, (int)(lhc >> 18)),
-                3 => (5, (int)(lhc >> 22) + (block[4] << 10)),
-                _ => (3, (int)((lhc >> 14) & 0x3FF)),
+                2 => (4, (int)(lhc >> 18), (int)((lhc >> 4) & 0x3FFF)),
+                3 => (5, (int)(lhc >> 22) + (block[4] << 10), (int)((lhc >> 4) & 0x3FFFF)),
+                _ => (3, (int)((lhc >> 14) & 0x3FF), (int)((lhc >> 4) & 0x3FF)),
             };
             if (literalsType == 2)
             {
                 trees.Add(block.Slice(hs, compressed).ToArray());
+            }
+
+            // Four-stream sections, each with the tree it decodes with (its own, or the last one).
+            if (sizeFormat != 0 && trees.Count > 0)
+            {
+                byte[] tree = trees[^1];
+                int treeSize = literalsType == 2 ? new HuffmanTable().Read(tree) : 0;
+                sections.Add(new Literals(tree, block.Slice(hs + treeSize, compressed - treeSize).ToArray(), regenerated));
             }
 
             section = hs + compressed;

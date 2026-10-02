@@ -231,7 +231,7 @@ public sealed partial class ZstdDecompressor
                 }
                 else
                 {
-                    table.DecodeFourStreams(compressed, output);
+                    table.DecodeFourStreams(compressed, output, table.PrefersDouble(compressed.Length, size));
                 }
 
                 _literalEntropy = true;

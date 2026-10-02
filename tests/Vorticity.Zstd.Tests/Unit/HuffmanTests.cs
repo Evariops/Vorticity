@@ -56,6 +56,50 @@ public sealed class HuffmanTests
         FrameAssert.DecodesTo(frame, content);
     }
 
+    public static TheoryData<int, int, int> DoubleSymbolCodes()
+    {
+        var data = new TheoryData<int, int, int>();
+        int seed = 1000;
+        foreach (int symbols in new[] { 2, 3, 7, 17, 40, 100, 129 })
+        {
+            foreach (int maxLength in new[] { 1, 2, 4, 6, 8, 10, 11 })
+            {
+                if (symbols <= 1 << maxLength)
+                {
+                    data.Add(seed++, symbols, maxLength);
+                }
+            }
+        }
+
+        return data;
+    }
+
+    /// <summary>
+    /// The double-symbol table decodes four streams as the single-symbol one does, its own rounds
+    /// then the single-symbol finish of each stream, whatever the code: built by runs, it must pair
+    /// every two codes that fit in 11 bits, and only those.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(DoubleSymbolCodes))]
+    public void The_double_symbol_table_decodes_as_the_single_one(int seed, int symbols, int maxLength)
+    {
+        var random = new Random(seed);
+        HuffmanCode code = HuffmanCode.Random(random, symbols, maxLength);
+        var table = new HuffmanTable();
+        table.Read(code.DescribeDirect());
+        foreach (int count in new[] { 6, 64, 999, 20000 })
+        {
+            byte[] literals = RandomSymbols(random, code, count);
+            byte[] streams = code.EncodeFourStreams(literals);
+            byte[] single = new byte[count];
+            byte[] pairs = new byte[count];
+            table.DecodeFourStreams(streams, single, preferDouble: false);
+            table.DecodeFourStreams(streams, pairs, preferDouble: true);
+            Assert.Equal(literals, single);
+            Assert.Equal(literals, pairs);
+        }
+    }
+
     [Fact]
     public void A_weight_above_12_is_refused()
     {

@@ -32,6 +32,20 @@ internal sealed class HuffmanTable
     /// <summary>The number of bits an entry is looked up with.</summary>
     public int TableLog;
 
+    /// <summary>The width of the double-symbol table: the fast loops' widest tree.</summary>
+    public const int DoubleLog = FastTableLog;
+
+    /// <summary>
+    /// The double-symbol table (libzstd's X2, derived from <see cref="Entries"/> when a literal section
+    /// asks for it): for each value of the next 11 bits, the one or two symbols whose codes they start
+    /// with, as <c>nbBits | symbols &lt;&lt; 8 | count &lt;&lt; 30</c>: the bits to consume where a shift
+    /// takes them, the symbols where one store writes both, the count where an add takes it shifted.
+    /// </summary>
+    private uint[]? _double;
+
+    /// <summary>Whether <see cref="_double"/> was built from the current tree.</summary>
+    private bool _hasDouble;
+
 
     /// <summary>
     /// libzstd's <c>HUF_readDTableX1_wksp</c>: reads a tree description and builds the table.
@@ -126,6 +140,7 @@ internal sealed class HuffmanTable
 
         Debug.Assert(position == 1 << tableLog);
         TableLog = tableLog;
+        _hasDouble = false;
         return size;
     }
 
@@ -269,7 +284,7 @@ internal sealed class HuffmanTable
     /// what remains. The fast loop takes them when the table is 11 bits wide and every stream holds
     /// eight bytes; otherwise, and to finish, one symbol at a time.
     /// </summary>
-    public void DecodeFourStreams(ReadOnlySpan<byte> source, Span<byte> output)
+    public void DecodeFourStreams(ReadOnlySpan<byte> source, Span<byte> output, bool preferDouble = false)
     {
         const ZstdError error = ZstdError.HuffmanStream;
         if (source.Length < 10 || output.Length < 6)
@@ -290,7 +305,12 @@ internal sealed class HuffmanTable
         if (TableLog <= FastTableLog && length1 >= 8 && length2 >= 8 && length3 >= 8 && length4 >= 8
             && 3 * segment < output.Length)
         {
-            DecodeFourStreamsFast(source, output, length1, length2, length3, segment);
+            if (preferDouble && !_hasDouble)
+            {
+                BuildDouble();
+            }
+
+            DecodeFourStreamsFast(source, output, length1, length2, length3, segment, preferDouble);
             return;
         }
 
@@ -334,7 +354,7 @@ internal sealed class HuffmanTable
     /// the section. The careful finish then validates each stream exactly, as the reference decoder.
     /// </para>
     /// </remarks>
-    private void DecodeFourStreamsFast(ReadOnlySpan<byte> source, Span<byte> output, int length1, int length2, int length3, int segment)
+    private void DecodeFourStreamsFast(ReadOnlySpan<byte> source, Span<byte> output, int length1, int length2, int length3, int segment, bool useDouble)
     {
         const ZstdError error = ZstdError.HuffmanStream;
         int start1 = 6;
@@ -363,9 +383,19 @@ internal sealed class HuffmanTable
         streams.Bits1 = InitFastStream(ref streams.Ip1);
         streams.Bits2 = InitFastStream(ref streams.Ip2);
         streams.Bits3 = InitFastStream(ref streams.Ip3);
-        RunFourStreams(
-            ref streams, ref MemoryMarshal.GetArrayDataReference(Entries), 64 - TableLog, ref input,
-            ref Unsafe.Add(ref first, output.Length));
+        if (useDouble)
+        {
+            RunFourStreamsDouble(
+                ref streams, ref MemoryMarshal.GetArrayDataReference(_double!), ref input,
+                ref Unsafe.Add(ref first, segment), ref Unsafe.Add(ref first, 2 * segment),
+                ref Unsafe.Add(ref first, 3 * segment), ref Unsafe.Add(ref first, output.Length));
+        }
+        else
+        {
+            RunFourStreams(
+                ref streams, ref MemoryMarshal.GetArrayDataReference(Entries), 64 - TableLog, ref input,
+                ref Unsafe.Add(ref first, output.Length));
+        }
 
         // Each stream finished and checked on its own, as libzstd's HUF_initRemainingDStream.
         Finish(source, start1, start2, ref input, ref streams.Ip0, streams.Bits0, output, ref first, ref streams.Op0, 0, segment);
@@ -505,6 +535,206 @@ internal sealed class HuffmanTable
         s.Op1 = ref op1;
         s.Op2 = ref op2;
         s.Op3 = ref op3;
+    }
+
+    /// <summary>
+    /// The rounds of <see cref="DecodeFourStreamsFast"/> on the double-symbol table: each lookup writes
+    /// two bytes and moves on by the one or two symbols it decoded, five lookups a stream a round.
+    /// </summary>
+    /// <remarks>
+    /// A round takes at most 5 x 11 bits from each stream, as the single-symbol rounds, and writes at
+    /// most ten bytes to each: the rounds are capped by what the most filled quarter has left, and
+    /// recounted when they run out.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void RunFourStreamsDouble(
+        ref FourStreams s, ref uint table, ref byte input, ref byte end0, ref byte end1, ref byte end2, ref byte end3)
+    {
+        ulong bits0 = s.Bits0;
+        ulong bits1 = s.Bits1;
+        ulong bits2 = s.Bits2;
+        ulong bits3 = s.Bits3;
+        ref byte ip0 = ref s.Ip0;
+        ref byte ip1 = ref s.Ip1;
+        ref byte ip2 = ref s.Ip2;
+        ref byte ip3 = ref s.Ip3;
+        ref byte op0 = ref s.Op0;
+        ref byte op1 = ref s.Op1;
+        ref byte op2 = ref s.Op2;
+        ref byte op3 = ref s.Op3;
+
+        while (true)
+        {
+            nint room = Math.Min(
+                Math.Min(Unsafe.ByteOffset(ref op0, ref end0), Unsafe.ByteOffset(ref op1, ref end1)),
+                Math.Min(Unsafe.ByteOffset(ref op2, ref end2), Unsafe.ByteOffset(ref op3, ref end3)));
+            nint rounds = Math.Min(room / 10, Unsafe.ByteOffset(ref input, ref ip0) / 7);
+            if (rounds <= 0
+                || Unsafe.IsAddressLessThan(ref ip1, ref ip0)
+                || Unsafe.IsAddressLessThan(ref ip2, ref ip1)
+                || Unsafe.IsAddressLessThan(ref ip3, ref ip2))
+            {
+                break;
+            }
+
+            do
+            {
+                op0 = ref Pair(ref table, ref bits0, ref op0);
+                op1 = ref Pair(ref table, ref bits1, ref op1);
+                op2 = ref Pair(ref table, ref bits2, ref op2);
+                op3 = ref Pair(ref table, ref bits3, ref op3);
+                op0 = ref Pair(ref table, ref bits0, ref op0);
+                op1 = ref Pair(ref table, ref bits1, ref op1);
+                op2 = ref Pair(ref table, ref bits2, ref op2);
+                op3 = ref Pair(ref table, ref bits3, ref op3);
+                op0 = ref Pair(ref table, ref bits0, ref op0);
+                op1 = ref Pair(ref table, ref bits1, ref op1);
+                op2 = ref Pair(ref table, ref bits2, ref op2);
+                op3 = ref Pair(ref table, ref bits3, ref op3);
+                op0 = ref Pair(ref table, ref bits0, ref op0);
+                op1 = ref Pair(ref table, ref bits1, ref op1);
+                op2 = ref Pair(ref table, ref bits2, ref op2);
+                op3 = ref Pair(ref table, ref bits3, ref op3);
+                op0 = ref Pair(ref table, ref bits0, ref op0);
+                op1 = ref Pair(ref table, ref bits1, ref op1);
+                op2 = ref Pair(ref table, ref bits2, ref op2);
+                op3 = ref Pair(ref table, ref bits3, ref op3);
+                ip0 = ref ReloadFast(ref bits0, ref ip0);
+                ip1 = ref ReloadFast(ref bits1, ref ip1);
+                ip2 = ref ReloadFast(ref bits2, ref ip2);
+                ip3 = ref ReloadFast(ref bits3, ref ip3);
+            }
+            while (--rounds > 0);
+        }
+
+        s.Bits0 = bits0;
+        s.Bits1 = bits1;
+        s.Bits2 = bits2;
+        s.Bits3 = bits3;
+        s.Ip0 = ref ip0;
+        s.Ip1 = ref ip1;
+        s.Ip2 = ref ip2;
+        s.Ip3 = ref ip3;
+        s.Op0 = ref op0;
+        s.Op1 = ref op1;
+        s.Op2 = ref op2;
+        s.Op3 = ref op3;
+    }
+
+    /// <summary>One lookup of the double-symbol table: both bytes written, the output moved by the count.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref byte Pair(scoped ref uint table, scoped ref ulong bits, ref byte op)
+    {
+        ulong entry = Unsafe.Add(ref table, (nint)(bits >> (64 - DoubleLog)));
+        Unsafe.WriteUnaligned(ref op, (ushort)(entry >> 8));
+        bits <<= (int)entry;
+        return ref Unsafe.Add(ref op, (nint)(entry >> 30));
+    }
+
+    /// <summary>
+    /// libzstd's <c>HUF_selectDecoder</c>, with costs measured here: whether four streams of
+    /// <paramref name="compressedSize"/> bytes decode <paramref name="symbols"/> symbols faster with
+    /// the double-symbol table.
+    /// </summary>
+    /// <remarks>
+    /// Two symbols share a lookup when their codes fit in 11 bits together, which is common below six
+    /// bits a symbol on average, and rare above. There, a symbol costs 1.4 cycles instead of 2.4 (the
+    /// URL frame's literals), and building the table some 2,200 cycles: worth it from about 2,000
+    /// symbols, and always once built, which a section reusing the previous tree finds.
+    /// </remarks>
+    public bool PrefersDouble(int compressedSize, int symbols) =>
+        compressedSize * 4 < symbols * 3 && (_hasDouble || symbols >= 2048);
+
+    /// <summary>Builds the double-symbol table of the current tree, for a micro-benchmark.</summary>
+    internal void BuildDoubleForBenchmark() => BuildDouble();
+
+    /// <summary>
+    /// libzstd's <c>HUF_readDTableX2</c>, derived from the single-symbol table: the code each value of
+    /// the next 11 bits starts with, and the next code too when it ends within those bits.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Filled by runs rather than value by value. A symbol of code length <c>n</c> owns a run of
+    /// 2^(11 - n) values, and the single-symbol table lists the runs from the longest codes to the
+    /// shortest, each aligned on its size (a complete code, which the weights were checked to make,
+    /// sorted by length, has that property). Within the run of a first symbol of length <c>n1</c>, the
+    /// values go through the 11 - n1 bits that follow its code, and the second symbol of a value is
+    /// the run of the whole table those bits fall in, scaled down by 2^n1. The codes too long to fit
+    /// come first: a prefix of the run that keeps one symbol; then each code that fits, a run of
+    /// 2^(11 - n1 - n2) values that keep two.
+    /// </para>
+    /// </remarks>
+    private void BuildDouble()
+    {
+        // Four entries past the table: a fill writes four at a time.
+        uint[] table = _double ??= new uint[(1 << DoubleLog) + 4];
+        int scale = DoubleLog - TableLog;
+        ref ushort single = ref MemoryMarshal.GetArrayDataReference(Entries);
+        ref uint output = ref MemoryMarshal.GetArrayDataReference(table);
+
+        // ---- the runs of the single-symbol table, in its order: symbol, code length, start in 11 bits
+        Span<byte> runSymbol = stackalloc byte[MaxSymbols];
+        Span<byte> runBits = stackalloc byte[MaxSymbols];
+        Span<short> runStart = stackalloc short[MaxSymbols];
+        int runs = 0;
+        for (int i = 0; i < 1 << TableLog;)
+        {
+            ushort entry = Unsafe.Add(ref single, i);
+            int bits = entry & 0xFF;
+            runSymbol[runs] = (byte)(entry >> 8);
+            runBits[runs] = (byte)bits;
+            runStart[runs] = (short)(i << scale);
+            runs++;
+            i += 1 << (TableLog - bits);
+        }
+
+        // The first run whose code is at most r bits long, for every r: the runs that fit after a
+        // first code of 11 - r bits, all at the end.
+        Span<short> firstFitting = stackalloc short[DoubleLog + 1];
+        int k = 0;
+        for (int r = DoubleLog; r >= 0; r--)
+        {
+            while (k < runs && runBits[k] > r)
+            {
+                k++;
+            }
+
+            firstFitting[r] = (short)k;
+        }
+
+        // ---- each first symbol's run: the values that keep it alone, then one run a second symbol
+        for (int j = 0; j < runs; j++)
+        {
+            int firstBits = runBits[j];
+            int room = DoubleLog - firstBits;
+            ref uint row = ref Unsafe.Add(ref output, runStart[j]);
+            uint firstSymbol = (uint)runSymbol[j] << 8;
+            int fitting = firstFitting[room];
+            int alone = (fitting < runs ? runStart[fitting] : 1 << DoubleLog) >> firstBits;
+            Fill(ref row, alone, (uint)firstBits | firstSymbol | (1u << 30));
+            for (int f = fitting; f < runs; f++)
+            {
+                int secondBits = runBits[f];
+                uint pair = (uint)(firstBits + secondBits) | firstSymbol | ((uint)runSymbol[f] << 16) | (2u << 30);
+                Fill(ref Unsafe.Add(ref row, runStart[f] >> firstBits), 1 << (room - secondBits), pair);
+            }
+        }
+
+        _hasDouble = true;
+
+        // Four entries a store, up to three past the end: the fills go in increasing order, so the
+        // next one writes over the excess, and the last one's falls in the four entries past the table.
+        static void Fill(ref uint at, nint count, uint value)
+        {
+            var four = Vector128.Create(value);
+            nint i = 0;
+            do
+            {
+                Unsafe.WriteUnaligned(ref Unsafe.As<uint, byte>(ref Unsafe.Add(ref at, i)), four);
+                i += 4;
+            }
+            while (i < count);
+        }
     }
 
     /// <summary>libzstd's <c>HUF_initFastDStream</c>: the last eight bytes, the marker made the sentinel.</summary>
