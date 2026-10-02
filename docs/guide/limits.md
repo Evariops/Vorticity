@@ -139,7 +139,8 @@ before scanning.
   approaches a 256 MiB ceiling; one block that claims 300 MiB trips it. The batch ceiling, when
   set, adds the decodes of a batch's columns together, and starts again at the next batch.
 * The open reads the file's tail in one request of `InitialReadSize` bytes, 64 KiB by default and
-  never less; a footer larger than that costs a second read, not a refusal.
+  never less, but for a local file, which reads its last 8 KiB first since a read costs it no round
+  trip; a footer larger than that costs a second read, not a refusal.
 * `IndexCacheBytes` on the session bounds what each open file keeps of decoded index runs. It is a
   memory ceiling rather than a safety one, and 0 keeps nothing.
 * A cap refusal is `VortexFormatException`, an unknown component `VortexUnsupportedException`:

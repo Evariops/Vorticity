@@ -21,14 +21,15 @@ internal interface IReadAnticipation
 /// </summary>
 /// <remarks>
 /// <para>
-/// An open reads the file's last 64 KiB, which one positional read serves for less than a
-/// mapping costs to make and to drop, and a file that is opened for its schema, its statistics
-/// or a count they answer reads nothing else. A scan maps it: the mapping is kept, and serves
-/// every read after it two to three times faster than a positional read of the same size, with
-/// no buffer and no allocation per batch, and synchronously. A positional scan would save the
-/// mapping's cost, about 16 µs and 0.8 µs for each 16 KiB page touched a first time, only on a
-/// file read once and under 4 MiB, and would pay for it with an allocation and an asynchronous
-/// completion per batch.
+/// An open reads the file's last 8 KiB, or the whole file up to 64 KiB, which one positional
+/// read serves for less than a mapping costs to make and to drop, and a file that is opened for
+/// its schema, its statistics or a count they answer reads nothing else. A file the open read
+/// whole serves its scans from that read and is never mapped. A scan maps any other: the mapping
+/// is kept, and serves every read after it two to three times faster than a positional read of
+/// the same size, with no buffer and no allocation per batch, and synchronously. A positional scan
+/// would save the mapping's cost, about 16 µs and 0.8 µs for each 16 KiB page touched a first
+/// time, only on a file read once and under 4 MiB, and would pay for it with an allocation and an
+/// asynchronous completion per batch.
 /// </para>
 /// <para>
 /// A positional read is a <c>pread</c> on the caller's thread into a pooled buffer, completed
@@ -60,12 +61,12 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     private MappedFileOwner? _mapping;
     private int _disposed;
 
-    private LocalFileSource(SafeFileHandle handle, string path, MappedFileCache? mappings)
+    private LocalFileSource(SafeFileHandle handle, string path, MappedFileCache? mappings, long length)
     {
         _handle = handle;
         _path = path;
         _mappings = mappings;
-        Length = RandomAccess.GetLength(handle);
+        Length = length;
     }
 
     private LocalFileSource(MappedFileOwner kept, string path, MappedFileCache mappings, long length)
@@ -93,20 +94,8 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
             return new LocalFileSource(kept, path, mappings, length);
         }
 
-        // System.IO.File spelled out: this library has a `Vorticity.File` namespace of its own.
-        // FileShare.Delete gives Windows what Unix has without asking: a file being read can be
-        // deleted or replaced under its name, the reader keeping the bytes it opened.
-        SafeFileHandle handle = System.IO.File.OpenHandle(
-            path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, FileOptions.RandomAccess);
-        try
-        {
-            return new LocalFileSource(handle, path, mappings);
-        }
-        catch
-        {
-            handle.Dispose();
-            throw;
-        }
+        SafeFileHandle handle = NativeFile.OpenRead(path, out long opened);
+        return new LocalFileSource(handle, path, mappings, opened);
     }
 
     /// <summary>The file length in bytes, read once at open.</summary>
@@ -233,6 +222,11 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
     // A scan maps the file before it reads a data segment.
     bool ISegmentReader.ReadsInPlace => true;
 
+    // A positional read is a copy and no round trip: the last 8 KiB hold the footer of a file of a
+    // few columns, and read in a quarter of the time the window's 64 KiB take; a larger footer is
+    // read whole by a second read.
+    int ISegmentReader.TailReadSize => 8 * 1024;
+
     /// <summary>Drops the reader's reference on the mapping and closes the handle; leases already handed out stay valid.</summary>
     /// <returns>A completed task.</returns>
     public ValueTask DisposeAsync()
@@ -284,7 +278,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
             {
                 // A short count is legal and not the end; none at all is a file shorter than its
                 // footer says.
-                int read = RandomAccess.Read(handle, destination[done..], offset + done);
+                int read = NativeFile.Read(handle, destination[done..], offset + done);
                 if (read <= 0)
                 {
                     SegmentIo.ThrowTruncatedRead(offset, length, done);

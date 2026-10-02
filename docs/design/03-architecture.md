@@ -127,8 +127,12 @@ into aligned buffers) and `MemorySegmentSource` (bytes the caller holds, never c
 opened **from a path** reads positionally until a scan's plan says it will read data, and is mapped
 from then on:
 
-- the open reads the last 64 KiB positionally: mapping a whole file to read its tail costs more
-  than one read;
+- the open reads the last 8 KiB positionally, or the whole file up to 64 KiB, and a larger footer
+  whole in a second read: mapping a whole file to read its tail costs more than one read. A file
+  the open read whole is never mapped: its scans are served from that read;
+- the file is opened, locked as `FileShare.Read` locks it, mapped and read with the system's calls
+  made directly where the platform has them (`NativeFile`): on macOS a third fewer calls than the
+  framework makes for an open, a scan and a close;
 - the first scan whose plan reads any data maps the file, once, and the mapping is the file's until
   it is disposed and the last lease on it released. A held mapping reads two to three times faster
   than a positional read at every size, and a mapped scan allocates nothing per batch, so no

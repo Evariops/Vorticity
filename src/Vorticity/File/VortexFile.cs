@@ -61,7 +61,10 @@ public sealed partial class VortexFile : IAsyncDisposable
     private readonly ISegmentReader _source;
     private readonly bool _ownsSource;
 
-    /// <summary>Whether the file serves from its tail the segments lying there: when its source fetches its bytes.</summary>
+    /// <summary>
+    /// Whether the file serves from its tail the segments lying there: when its source fetches its
+    /// bytes, or when the tail is the whole file and its source would otherwise map it for a scan.
+    /// </summary>
     private readonly bool _servesTail;
     private readonly SegmentOwner _tail;
     private readonly long _tailOffset;
@@ -86,7 +89,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     {
         _source = state.Source;
         _ownsSource = state.OwnsSource;
-        _servesTail = !state.Source.ReadsInPlace;
+        _servesTail = !state.Source.ReadsInPlace || (state.TailOffset == 0 && state.Source is IReadAnticipation);
         _tail = state.Tail;
         _tailOffset = state.TailOffset;
         FileLength = state.FileLength;
@@ -301,17 +304,39 @@ public sealed partial class VortexFile : IAsyncDisposable
 
             // A file whose scans are served from the tail reads it from a boundary of the alignment
             // its segments declare, and at that alignment, so that a segment inside keeps it. One
-            // whose source reads in place slices only structures out of it.
-            long startMask = source.ReadsInPlace ? -1L : -(long)VortexLimits.MaxAlignment;
+            // whose source reads in place slices only structures out of it, from a boundary of
+            // theirs, so that a source in memory hands out a view of it rather than a copy.
+            long startMask = source.ReadsInPlace ? -(long)VortexFileFormat.TailAlignment : -(long)VortexLimits.MaxAlignment;
             int alignment = source.ReadsInPlace ? VortexFileFormat.TailAlignment : VortexLimits.MaxAlignment;
-            long tailOffset = (fileLength - InitialReadSize(options.InitialReadSize, fileLength)) & startMask;
-            int initialReadSize = (int)(fileLength - tailOffset);
-            tail = await source
-                .ReadRangeAsync(tailOffset, initialReadSize, alignment, cancellationToken)
-                .ConfigureAwait(false);
-            if (tail.Length != initialReadSize)
+
+            // A file longer than the window is read first over what its source asks for, unless the
+            // caller raised the window; the window holds any postscript a shorter read misses.
+            int window = InitialReadSize(options.InitialReadSize, fileLength);
+            int wanted = window < fileLength && options.InitialReadSize <= VortexOpenOptions.DefaultInitialReadSize
+                ? Math.Min(window, source.TailReadSize)
+                : window;
+            long tailOffset;
+            while (true)
             {
-                FileThrow.ShortRead(tailOffset, initialReadSize, tail.Length);
+                tailOffset = (fileLength - wanted) & startMask;
+                int initialReadSize = (int)(fileLength - tailOffset);
+                tail = await source
+                    .ReadRangeAsync(tailOffset, initialReadSize, alignment, cancellationToken)
+                    .ConfigureAwait(false);
+                if (tail.Length != initialReadSize)
+                {
+                    FileThrow.ShortRead(tailOffset, initialReadSize, tail.Length);
+                }
+
+                if (wanted == window || HoldsPostscript(tail.Buffer.Span))
+                {
+                    break;
+                }
+
+                SegmentOwner partial = tail;
+                tail = null;
+                partial.Release();
+                wanted = window;
             }
 
             PostscriptInfo postscript = ParsePostscript(tail.Buffer.Span, tailOffset, fileLength, options);
@@ -328,24 +353,44 @@ public sealed partial class VortexFile : IAsyncDisposable
                     FileThrow.FooterRegionTooLarge(gap);
                 }
 
-                SegmentOwner prefix = await source
-                    .ReadRangeAsync(required, (int)gap, alignment, cancellationToken)
-                    .ConfigureAwait(false);
-                try
+                if (source.ReadsInPlace)
                 {
-                    if (prefix.Length != (int)gap)
-                    {
-                        FileThrow.ShortRead(required, (int)gap, prefix.Length);
-                    }
-
-                    SegmentOwner combined = Concatenate(prefix, tail, alignment);
+                    // A source that reads in place reads the region whole: a view of its memory, or
+                    // one copy where its first read was a copy too, rather than the gap and a third
+                    // buffer the two are copied into.
+                    int whole = (int)(fileLength - required);
+                    SegmentOwner region = await source
+                        .ReadRangeAsync(required, whole, alignment, cancellationToken)
+                        .ConfigureAwait(false);
                     SegmentOwner previous = tail;
-                    tail = combined;
+                    tail = region;
                     previous.Release();
+                    if (region.Length != whole)
+                    {
+                        FileThrow.ShortRead(required, whole, region.Length);
+                    }
                 }
-                finally
+                else
                 {
-                    prefix.Release();
+                    SegmentOwner prefix = await source
+                        .ReadRangeAsync(required, (int)gap, alignment, cancellationToken)
+                        .ConfigureAwait(false);
+                    try
+                    {
+                        if (prefix.Length != (int)gap)
+                        {
+                            FileThrow.ShortRead(required, (int)gap, prefix.Length);
+                        }
+
+                        SegmentOwner combined = Concatenate(prefix, tail, alignment);
+                        SegmentOwner previous = tail;
+                        tail = combined;
+                        previous.Release();
+                    }
+                    finally
+                    {
+                        prefix.Release();
+                    }
                 }
 
                 tailOffset = fileLength - tail.Length;
@@ -380,6 +425,12 @@ public sealed partial class VortexFile : IAsyncDisposable
             throw;
         }
     }
+
+    /// <summary>Whether <paramref name="window"/> holds the end record and the postscript it declares.</summary>
+    private static bool HoldsPostscript(ReadOnlySpan<byte> window) =>
+        window.Length >= VortexFileFormat.EofSize
+        && window.Length - VortexFileFormat.EofSize >= BinaryPrimitives.ReadUInt16LittleEndian(
+            window.Slice(window.Length - VortexFileFormat.EofSize + VortexFileFormat.EofPostscriptLengthOffset, 2));
 
     private static int InitialReadSize(int configured, long fileLength)
     {
@@ -1035,7 +1086,8 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <param name="share">The share of the file's rows the plan reads, from 0 to 1.</param>
     internal void AnticipateReads(double share)
     {
-        if (share > 0 && _source is IReadAnticipation reader)
+        // A file the open read whole serves every segment from that read: nothing is left to map.
+        if (share > 0 && !_servesTail && _source is IReadAnticipation reader)
         {
             reader.AnticipateData();
         }
@@ -1106,7 +1158,8 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     /// <summary>
     /// The reader this file's scans read through: the source, or, when the source fetches its
-    /// bytes, the file itself, which serves from the tail the open read every segment lying there.
+    /// bytes or would map a file the open read whole, the file itself, which serves from the tail
+    /// the open read every segment lying there.
     /// </summary>
     internal ISegmentReader Segments => _servesTail ? this : _source;
 

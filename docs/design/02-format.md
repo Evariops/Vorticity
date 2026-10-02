@@ -43,7 +43,9 @@ Frozen constants (these never change):
 **Open sequence (2 round trips worst case, 1 best case):**
 
 1. Read the 64 KiB tail (or the whole file if smaller). By construction this always covers the
-   postscript (`MAX_POSTSCRIPT_SIZE` + `EOF_SIZE` ≤ 64 KiB).
+   postscript (`MAX_POSTSCRIPT_SIZE` + `EOF_SIZE` ≤ 64 KiB). A local file, whose reads are copies
+   and cost no round trip, reads its last 8 KiB first; one whose postscript reaches past them reads
+   the 64 KiB next.
 2. Validate magic and version from the last 8 bytes, read the postscript length.
 3. Parse the postscript → locate dtype / layout / statistics / footer / metadata.
 4. If any of those segments falls outside the window already read, issue one targeted second read.

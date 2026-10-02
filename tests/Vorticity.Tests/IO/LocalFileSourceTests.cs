@@ -102,6 +102,29 @@ public sealed class LocalFileSourceTests
     }
 
     [Fact]
+    public async Task AFileTheOpenReadWholeIsScannedFromThatReadAndNeverMapped()
+    {
+        Decoders.EnsureRegistered();
+        string path = Corpus.Path("encodings/bool");
+        Assert.True(new System.IO.FileInfo(path).Length <= VortexOpenOptions.DefaultInitialReadSize);
+
+        // A session of its own, for the reason the test above gives.
+        await using VortexSession session = VortexSession.Create(_ => { });
+        await using VortexFile file = await session.OpenAsync(path, cancellationToken: CancellationToken.None);
+        LocalFileSource source = Assert.IsType<LocalFileSource>(file.Source);
+        Assert.Same(file, file.Segments);
+
+        long rows = 0;
+        await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
+        {
+            rows += batch.RowCount;
+        }
+
+        Assert.Equal(file.RowCount, rows);
+        Assert.False(source.IsMapped);
+    }
+
+    [Fact]
     public async Task AScanItsZoneMapsRuleOutMapsNothing()
     {
         Decoders.EnsureRegistered();

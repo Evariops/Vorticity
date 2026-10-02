@@ -32,7 +32,7 @@ public enum VortexTornTailPolicy : byte
 /// </remarks>
 public sealed record VortexOpenOptions
 {
-    private readonly int _initialReadSize = 65_536;
+    private readonly int _initialReadSize = DefaultInitialReadSize;
 
     /// <summary>The file length, or -1 for unknown.</summary>
     private readonly long _length = -1;
@@ -43,10 +43,19 @@ public sealed record VortexOpenOptions
     private readonly VortexReadOptions? _read;
     private readonly Switches _switches;
 
+    /// <summary><see cref="InitialReadSize"/> unless a caller raises it.</summary>
+    internal const int DefaultInitialReadSize = 65_536;
+
     /// <summary>The defaults.</summary>
     internal static VortexOpenOptions Default { get; } = new VortexOpenOptions();
 
     /// <summary>Bytes read from the tail at open; floored at 64 KiB and clamped to the file.</summary>
+    /// <remarks>
+    /// Left at its default, an open of a local file larger than that reads its last 8 KiB first,
+    /// which hold the footer of a file of a few columns, and then its whole footer when that is
+    /// larger: the read is a copy there and costs no round trip, and 8 KiB cost a quarter of what
+    /// 64 KiB do.
+    /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     public int InitialReadSize
     {
