@@ -12,15 +12,14 @@ namespace Vorticity.Zstd.Internal;
 /// </summary>
 /// <remarks>
 /// An entry is libzstd's <c>HUF_DEltX1</c> as a little-endian <see cref="ushort"/>: the code length in
-/// the low byte, the symbol in the high byte. A table narrower than 11 bits is widened to 11, as
-/// libzstd does for its fast decoder: entries are replicated, codes do not change.
+/// the low byte, the symbol in the high byte. The table keeps the tree's own width.
 /// </remarks>
 internal sealed class HuffmanTable
 {
     /// <summary>The longest code a tree may describe; libzstd's <c>HUF_TABLELOG_MAX</c>.</summary>
     public const int MaxTableLog = 12;
 
-    /// <summary>The width every narrower table is widened to.</summary>
+    /// <summary>The widest table the fast four-stream loop takes: five codes of this length fit in 7 bytes.</summary>
     public const int FastTableLog = 11;
 
     public const int MaxSymbols = 256;
@@ -29,6 +28,7 @@ internal sealed class HuffmanTable
 
     /// <summary>The number of bits an entry is looked up with.</summary>
     public int TableLog;
+
 
     /// <summary>
     /// libzstd's <c>HUF_readDTableX1_wksp</c>: reads a tree description and builds the table.
@@ -40,31 +40,9 @@ internal sealed class HuffmanTable
         Span<int> rankCount = stackalloc int[MaxTableLog + 1];
         int size = ReadWeights(source, weights, rankCount, out int symbolCount, out int tableLog);
 
-        // Widen to the fast width: every weight but 0 moves up by the difference.
-        if (tableLog < FastTableLog)
-        {
-            int scale = FastTableLog - tableLog;
-            for (int s = 0; s < symbolCount; s++)
-            {
-                if (weights[s] != 0)
-                {
-                    weights[s] += (byte)scale;
-                }
-            }
-
-            for (int w = FastTableLog; w > scale; w--)
-            {
-                rankCount[w] = rankCount[w - scale];
-            }
-
-            for (int w = scale; w > 0; w--)
-            {
-                rankCount[w] = 0;
-            }
-
-            tableLog = FastTableLog;
-        }
-
+        // No widening to 11 bits, unlike libzstd: it widens every table so that its fast loop shifts
+        // by a constant, but on Arm64 a shift by a register costs the same, and a narrower table is
+        // that much less to fill (a 9-bit tree fills 512 entries instead of 2048).
         // Codes are assigned by increasing weight, then by symbol: the symbols of weight w take
         // 2^(w-1) consecutive entries each, starting with the lowest weight.
         Span<int> rankStart = stackalloc int[MaxTableLog + 2];
@@ -222,7 +200,7 @@ internal sealed class HuffmanTable
         }
 
         int segment = (output.Length + 3) / 4;
-        if (TableLog == FastTableLog && length1 >= 8 && length2 >= 8 && length3 >= 8 && length4 >= 8
+        if (TableLog <= FastTableLog && length1 >= 8 && length2 >= 8 && length3 >= 8 && length4 >= 8
             && 3 * segment < output.Length)
         {
             DecodeFourStreamsFast(source, output, length1, length2, length3, segment);
@@ -252,13 +230,14 @@ internal sealed class HuffmanTable
     /// <summary>
     /// libzstd's <c>HUF_decompress4X1_usingDTable_internal_fast_c_loop</c>: the four streams decoded
     /// together, five symbols each a round, then each stream finished by <see cref="DecodeStream"/>.
+    /// Tables of up to 11 bits take it, looked up with a shift by a register.
     /// </summary>
     /// <remarks>
     /// <para>
     /// A container holds a stream's next bits from its top, with a 1 set just below the last valid
     /// one: the count of trailing zeros is then the number of bits consumed since the container was
-    /// loaded, and a reload steps back by its whole bytes. Every entry is looked up with the top 11
-    /// bits, a constant shift.
+    /// loaded, and a reload steps back by its whole bytes. Every entry is looked up with the top
+    /// <see cref="TableLog"/> bits.
     /// </para>
     /// <para>
     /// Bounds: a round takes at most 5 x 11 bits, under 7 bytes, from each stream, and writes 5
@@ -297,6 +276,7 @@ internal sealed class HuffmanTable
         ref byte op3 = ref Unsafe.Add(ref first, 3 * segment);
         ref byte oend = ref Unsafe.Add(ref first, output.Length);
         ref ushort table = ref MemoryMarshal.GetArrayDataReference(Entries);
+        int shift = 64 - TableLog;
 
         while (true)
         {
@@ -314,26 +294,26 @@ internal sealed class HuffmanTable
             ref byte olimit = ref Unsafe.Add(ref op3, rounds * 5);
             do
             {
-                Symbol(ref table, ref bits0, ref op0, 0);
-                Symbol(ref table, ref bits1, ref op1, 0);
-                Symbol(ref table, ref bits2, ref op2, 0);
-                Symbol(ref table, ref bits3, ref op3, 0);
-                Symbol(ref table, ref bits0, ref op0, 1);
-                Symbol(ref table, ref bits1, ref op1, 1);
-                Symbol(ref table, ref bits2, ref op2, 1);
-                Symbol(ref table, ref bits3, ref op3, 1);
-                Symbol(ref table, ref bits0, ref op0, 2);
-                Symbol(ref table, ref bits1, ref op1, 2);
-                Symbol(ref table, ref bits2, ref op2, 2);
-                Symbol(ref table, ref bits3, ref op3, 2);
-                Symbol(ref table, ref bits0, ref op0, 3);
-                Symbol(ref table, ref bits1, ref op1, 3);
-                Symbol(ref table, ref bits2, ref op2, 3);
-                Symbol(ref table, ref bits3, ref op3, 3);
-                Symbol(ref table, ref bits0, ref op0, 4);
-                Symbol(ref table, ref bits1, ref op1, 4);
-                Symbol(ref table, ref bits2, ref op2, 4);
-                Symbol(ref table, ref bits3, ref op3, 4);
+                Symbol(ref table, shift, ref bits0, ref op0, 0);
+                Symbol(ref table, shift, ref bits1, ref op1, 0);
+                Symbol(ref table, shift, ref bits2, ref op2, 0);
+                Symbol(ref table, shift, ref bits3, ref op3, 0);
+                Symbol(ref table, shift, ref bits0, ref op0, 1);
+                Symbol(ref table, shift, ref bits1, ref op1, 1);
+                Symbol(ref table, shift, ref bits2, ref op2, 1);
+                Symbol(ref table, shift, ref bits3, ref op3, 1);
+                Symbol(ref table, shift, ref bits0, ref op0, 2);
+                Symbol(ref table, shift, ref bits1, ref op1, 2);
+                Symbol(ref table, shift, ref bits2, ref op2, 2);
+                Symbol(ref table, shift, ref bits3, ref op3, 2);
+                Symbol(ref table, shift, ref bits0, ref op0, 3);
+                Symbol(ref table, shift, ref bits1, ref op1, 3);
+                Symbol(ref table, shift, ref bits2, ref op2, 3);
+                Symbol(ref table, shift, ref bits3, ref op3, 3);
+                Symbol(ref table, shift, ref bits0, ref op0, 4);
+                Symbol(ref table, shift, ref bits1, ref op1, 4);
+                Symbol(ref table, shift, ref bits2, ref op2, 4);
+                Symbol(ref table, shift, ref bits3, ref op3, 4);
                 ip0 = ref ReloadFast(ref bits0, ref ip0);
                 op0 = ref Unsafe.Add(ref op0, 5);
                 ip1 = ref ReloadFast(ref bits1, ref ip1);
@@ -396,9 +376,9 @@ internal sealed class HuffmanTable
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Symbol(ref ushort table, ref ulong bits, ref byte op, int k)
+    private static void Symbol(ref ushort table, int shift, ref ulong bits, ref byte op, int k)
     {
-        int entry = Unsafe.Add(ref table, (nint)(bits >> 53));
+        int entry = Unsafe.Add(ref table, (nint)(bits >> shift));
         bits <<= entry;
         Unsafe.Add(ref op, k) = (byte)(entry >> 8);
     }
