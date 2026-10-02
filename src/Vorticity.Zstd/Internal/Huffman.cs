@@ -260,23 +260,103 @@ internal sealed class HuffmanTable
         }
 
         ref byte input = ref MemoryMarshal.GetReference(source);
-        ref byte ip0 = ref Unsafe.Add(ref input, start2 - 8);
-        ref byte ip1 = ref Unsafe.Add(ref input, start3 - 8);
-        ref byte ip2 = ref Unsafe.Add(ref input, start4 - 8);
-        ref byte ip3 = ref Unsafe.Add(ref input, source.Length - 8);
-        ulong bits0 = InitFastStream(ref ip0);
-        ulong bits1 = InitFastStream(ref ip1);
-        ulong bits2 = InitFastStream(ref ip2);
-        ulong bits3 = InitFastStream(ref ip3);
-
         ref byte first = ref MemoryMarshal.GetReference(output);
-        ref byte op0 = ref first;
-        ref byte op1 = ref Unsafe.Add(ref first, segment);
-        ref byte op2 = ref Unsafe.Add(ref first, 2 * segment);
-        ref byte op3 = ref Unsafe.Add(ref first, 3 * segment);
-        ref byte oend = ref Unsafe.Add(ref first, output.Length);
-        ref ushort table = ref MemoryMarshal.GetArrayDataReference(Entries);
-        int shift = 64 - TableLog;
+        var streams = new FourStreams
+        {
+            Ip0 = ref Unsafe.Add(ref input, start2 - 8),
+            Ip1 = ref Unsafe.Add(ref input, start3 - 8),
+            Ip2 = ref Unsafe.Add(ref input, start4 - 8),
+            Ip3 = ref Unsafe.Add(ref input, source.Length - 8),
+            Op0 = ref first,
+            Op1 = ref Unsafe.Add(ref first, segment),
+            Op2 = ref Unsafe.Add(ref first, 2 * segment),
+            Op3 = ref Unsafe.Add(ref first, 3 * segment),
+        };
+        streams.Bits0 = InitFastStream(ref streams.Ip0);
+        streams.Bits1 = InitFastStream(ref streams.Ip1);
+        streams.Bits2 = InitFastStream(ref streams.Ip2);
+        streams.Bits3 = InitFastStream(ref streams.Ip3);
+        RunFourStreams(
+            ref streams, ref MemoryMarshal.GetArrayDataReference(Entries), 64 - TableLog, ref input,
+            ref Unsafe.Add(ref first, output.Length));
+
+        // Each stream finished and checked on its own, as libzstd's HUF_initRemainingDStream.
+        Finish(source, start1, start2, ref input, ref streams.Ip0, streams.Bits0, output, ref first, ref streams.Op0, 0, segment);
+        Finish(source, start2, start3, ref input, ref streams.Ip1, streams.Bits1, output, ref first, ref streams.Op1, segment, segment);
+        Finish(source, start3, start4, ref input, ref streams.Ip2, streams.Bits2, output, ref first, ref streams.Op2, 2 * segment, segment);
+        Finish(source, start4, source.Length, ref input, ref streams.Ip3, streams.Bits3, output, ref first, ref streams.Op3, 3 * segment, output.Length - (3 * segment));
+
+        void Finish(
+            ReadOnlySpan<byte> source, int start, int end, ref byte input, ref byte ip, ulong bits,
+            Span<byte> output, ref byte first, ref byte op, int segmentStart, int segmentLength)
+        {
+            int written = (int)Unsafe.ByteOffset(ref first, ref op) - segmentStart;
+            if ((uint)written > (uint)segmentLength)
+            {
+                Throw.Error(error);
+            }
+
+            // The container may reach below the stream's first byte once the stream is nearly
+            // consumed; the reference reader then sits at the first byte with the bits below counted
+            // as consumed, and more than 64 means the stream was overrun.
+            int position = (int)Unsafe.ByteOffset(ref input, ref ip) - start;
+            int consumed = BitOperations.TrailingZeroCount(bits);
+            if (position < 0)
+            {
+                consumed -= position * 8;
+                position = 0;
+            }
+
+            if (consumed > 64)
+            {
+                Throw.Error(error);
+            }
+
+            var reader = BackwardBitReader.Resume(source.Slice(start, end - start), position, consumed);
+            DecodeStream(ref reader, output.Slice(segmentStart + written, segmentLength - written));
+            if (!reader.IsEndOfStream)
+            {
+                Throw.Error(error);
+            }
+        }
+    }
+
+    /// <summary>The four streams between the fast loop and their finish: containers, input and output positions.</summary>
+    private ref struct FourStreams
+    {
+        public ulong Bits0;
+        public ulong Bits1;
+        public ulong Bits2;
+        public ulong Bits3;
+        public ref byte Ip0;
+        public ref byte Ip1;
+        public ref byte Ip2;
+        public ref byte Ip3;
+        public ref byte Op0;
+        public ref byte Op1;
+        public ref byte Op2;
+        public ref byte Op3;
+    }
+
+    /// <summary>
+    /// The rounds of <see cref="DecodeFourStreamsFast"/>: a method of its own that calls nothing, so
+    /// that the twelve values of the four streams stay in registers, none of them living past it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void RunFourStreams(ref FourStreams s, ref ushort table, int shift, ref byte input, ref byte oend)
+    {
+        ulong bits0 = s.Bits0;
+        ulong bits1 = s.Bits1;
+        ulong bits2 = s.Bits2;
+        ulong bits3 = s.Bits3;
+        ref byte ip0 = ref s.Ip0;
+        ref byte ip1 = ref s.Ip1;
+        ref byte ip2 = ref s.Ip2;
+        ref byte ip3 = ref s.Ip3;
+        ref byte op0 = ref s.Op0;
+        ref byte op1 = ref s.Op1;
+        ref byte op2 = ref s.Op2;
+        ref byte op3 = ref s.Op3;
 
         while (true)
         {
@@ -326,45 +406,18 @@ internal sealed class HuffmanTable
             while (Unsafe.IsAddressLessThan(ref op3, ref olimit));
         }
 
-        // Each stream finished and checked on its own, as libzstd's HUF_initRemainingDStream.
-        Finish(source, start1, start2, ref input, ref ip0, bits0, output, ref first, ref op0, 0, segment);
-        Finish(source, start2, start3, ref input, ref ip1, bits1, output, ref first, ref op1, segment, segment);
-        Finish(source, start3, start4, ref input, ref ip2, bits2, output, ref first, ref op2, 2 * segment, segment);
-        Finish(source, start4, source.Length, ref input, ref ip3, bits3, output, ref first, ref op3, 3 * segment, output.Length - (3 * segment));
-
-        void Finish(
-            ReadOnlySpan<byte> source, int start, int end, ref byte input, ref byte ip, ulong bits,
-            Span<byte> output, ref byte first, ref byte op, int segmentStart, int segmentLength)
-        {
-            int written = (int)Unsafe.ByteOffset(ref first, ref op) - segmentStart;
-            if ((uint)written > (uint)segmentLength)
-            {
-                Throw.Error(error);
-            }
-
-            // The container may reach below the stream's first byte once the stream is nearly
-            // consumed; the reference reader then sits at the first byte with the bits below counted
-            // as consumed, and more than 64 means the stream was overrun.
-            int position = (int)Unsafe.ByteOffset(ref input, ref ip) - start;
-            int consumed = BitOperations.TrailingZeroCount(bits);
-            if (position < 0)
-            {
-                consumed -= position * 8;
-                position = 0;
-            }
-
-            if (consumed > 64)
-            {
-                Throw.Error(error);
-            }
-
-            var reader = BackwardBitReader.Resume(source.Slice(start, end - start), position, consumed);
-            DecodeStream(ref reader, output.Slice(segmentStart + written, segmentLength - written));
-            if (!reader.IsEndOfStream)
-            {
-                Throw.Error(error);
-            }
-        }
+        s.Bits0 = bits0;
+        s.Bits1 = bits1;
+        s.Bits2 = bits2;
+        s.Bits3 = bits3;
+        s.Ip0 = ref ip0;
+        s.Ip1 = ref ip1;
+        s.Ip2 = ref ip2;
+        s.Ip3 = ref ip3;
+        s.Op0 = ref op0;
+        s.Op1 = ref op1;
+        s.Op2 = ref op2;
+        s.Op3 = ref op3;
     }
 
     /// <summary>libzstd's <c>HUF_initFastDStream</c>: the last eight bytes, the marker made the sentinel.</summary>
