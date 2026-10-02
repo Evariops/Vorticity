@@ -32,8 +32,9 @@ VortexWriteOptions repeating = new()
 
 Each shape is one column of ten million rows, written under each configuration, then opened and
 read: a **scan** decodes every value to its plain form and reads it once, a **take** reads a thousand
-rows spread over the file. A column chooses its encoding chunk by chunk, so the volume only scales
-the times.
+rows spread over the file. Each read opens the file anew and maps it again, so a larger file pays for
+its pages every time, as a file opened once does. A column chooses its encoding chunk by chunk, so the
+volume only scales the times.
 
 **Crosses at** is the storage throughput at which a configuration and `Auto` read the column whole
 in the same time, counting its bytes at that throughput and then its scan. Below it the smaller file
@@ -43,17 +44,20 @@ object store about 0.1.
 
 ## Integers
 
-Bit-packing, runs, a progression and a dictionary each scan within about twice the time of the plain
-column and take a row as cheaply. Zstd frames are the exception, an order of magnitude slower to scan
-and far slower to take from where the values do not come in runs: where zstd is not the smallest
-form, `Auto` never writes it. On increasing timestamps it is the smallest, and `Smallest` takes it,
-for a scan more than ten times as long: worth it only from storage slower than its crossing, a few
-hundred MB/s.
+Bit-packing, runs, a progression and a dictionary each scan in about the time of the plain column,
+within a fifth either way and a third faster for runs and a progression, the plain column's eight
+bytes a value having to be paged in; and they take a row as cheaply. Zstd
+frames are the exception, an order of magnitude slower to scan and far slower to take from where the
+values do not come in runs: where zstd is not the smallest form, `Auto` never writes it. On
+increasing timestamps Pco is the smallest, 1.35 bytes a value against bit-packing's 3.38, and
+`Smallest` takes it, for a scan more than ten times as long: worth it only from storage slower than
+its crossing, about 300 MB/s.
 
 A column whose values repeat across the file more than within a chunk, 100 003 values over ten
-million rows, takes a dictionary only in larger chunks: at 16 MiB it halves the bytes, for a
-somewhat slower scan. On the nullable integers a `Dictionary` hint saves a few percent of the bytes
-bit-packing leaves, for a slower scan.
+million rows, takes a dictionary only in larger chunks: at 16 MiB it halves the bytes for the same
+scan. `Smallest` writes it with Pco instead, a hundredth of the bytes for a scan ten times as long.
+On the nullable integers a `Dictionary` hint saves a few percent of the bytes bit-packing leaves, for
+a slower scan.
 
 ## Floating point
 
@@ -72,9 +76,9 @@ third larger.
 Text is where the choice matters most. On values that do not repeat, `Auto` writes zstd frames, the
 smallest form, and FSST then scans in a fraction of their time; a take costs the frames about what a
 scan costs them, because each row it wants sits in a frame that is inflated whole, where FSST reads
-a row at a time. FSST is the larger file here: from storage faster than its crossing, a few hundred
-MB/s, it is also the faster file to scan. A column read by row, or from a local drive, wants the
-`Fsst` hint.
+a row at a time. FSST is the larger file here: from storage faster than its crossing, under 100 MB/s
+on the UUIDs and a few hundred on the log lines, it is also the faster file to scan. A column read by
+row, or from a local drive, wants the `Fsst` hint.
 
 The ids show the other lever. A dictionary of 10 000 entries stored again in every chunk is most of
 what the column costs to read; in chunks of 16 MiB it is stored far fewer times, and the column is
@@ -88,10 +92,12 @@ from anything but slow storage the bitmap, which `None` keeps, reads faster.
 ## The profiles side by side
 
 `Fastest` chooses what `Auto` chooses on these shapes, and writes no index. `Smallest` tries every
-scheme on every chunk and writes several times slower than `Auto`, for a smaller file where one
-exists: the timestamps' zstd, a chunk here and there. `None` writes the plain form, which scans
-fastest when the storage is fast enough to deliver its bytes, 8 per value for a number and as many
-as the text holds, and is the largest file every time. The benchmark page counts them under
+scheme on every chunk and writes several times slower than `Auto`, up to fifteen, for a smaller file
+where one exists: Pco on the timestamps and the repeating integers, a chunk here and there. `None`
+writes the plain form, the largest file every time, 8 bytes a value for a number and as many as the
+text holds; it scans fastest only where decoding costs more than paging those bytes in, on most
+doubles and on text that does not repeat, about as fast as the packed integers, and slower than a
+dictionary of a few values. The benchmark page counts them under
 [the encodings, column by column](benchmarks.md#encodings-column-by-column).
 
 ## What to steer, and with what
@@ -156,8 +162,8 @@ yours.
 falls where the tables' crossings put it, and compares every candidate with every other, where the
 tables compare each with `Auto`. So it can find the plain form ahead of FSST for text scanned from
 fast storage, the plain form being larger and faster to decode; under the bytes alone, a dictionary
-a few percent smaller than what `Smallest` alone takes; and for rows read one at a time, zstd, which
-reaches a row by inflating only the frame that holds it.
+in 16 MiB chunks for the columns that repeat across the file; and for rows read one at a time, zstd,
+which reaches a row by inflating only the frame that holds it, or OnPair on text.
 
 * **It is a measurement.** A column costs seconds: run it once for a kind of data, keep the
   options, and run it again when the data or the machine changes. Under the JIT, it first waits for
@@ -170,9 +176,11 @@ reaches a row by inflating only the frame that holds it.
 
 ## Watch out
 
-* **The benchmark page's times are one machine's**, with the file in the page cache. The bytes carry
-  to any machine, and so do the ratios between the scans; where a choice crosses scales with the
-  machine's decode speed.
+* **The benchmark page's times are one machine's**, with the file in the page cache and mapped anew
+  by each read. The bytes carry to any machine, and so do the ratios between the scans; where a
+  choice crosses scales with the machine's decode speed. A process that opens the same file again
+  keeps its mapping (`MappedFileCacheCount`), and there the plain form, whose pages are already in,
+  scans faster than these tables say.
 * **A take pays per block it touches.** The thousand rows measured touch every chunk of the file,
   which is the worst case for a frame and a large dictionary alike; rows that sit together cost far
   less.
