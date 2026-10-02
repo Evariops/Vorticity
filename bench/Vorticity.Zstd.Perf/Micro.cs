@@ -12,7 +12,8 @@ namespace Vorticity.Zstd.Perf;
 /// block are taken from the frame itself, then each step is timed alone, many times over.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights [--frames a,b]</c>. Prints the median time
+/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights [--frames a,b] [--repeat N]</c>, the repeats
+/// for a profiler to attach. Prints the median time
 /// of one operation, and its cycles at the clock the M4 Pro's performance cores run (4.44 GHz).
 /// </remarks>
 internal static class Micro
@@ -23,8 +24,9 @@ internal static class Micro
 
     private sealed record Blocks(List<Table> Tables, List<byte[]> Trees);
 
-    public static int Run(string what, string[] frames)
+    public static int Run(string what, string[] frames, int repeat)
     {
+        for (int r = 0; r < repeat; r++)
         foreach (string name in frames)
         {
             Blocks blocks = Parse(BenchFrames.Load(name));

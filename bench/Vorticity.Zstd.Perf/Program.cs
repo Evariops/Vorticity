@@ -41,7 +41,7 @@ public static class Program
 
         if (Option(args, "--micro") is string micro)
         {
-            return Micro.Run(micro, frames);
+            return Micro.Run(micro, frames, int.Parse(Option(args, "--repeat") ?? "1", CultureInfo.InvariantCulture));
         }
 
         int passes = int.Parse(Option(args, "--passes") ?? "5", CultureInfo.InvariantCulture);
