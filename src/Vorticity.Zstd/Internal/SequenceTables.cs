@@ -497,18 +497,47 @@ internal static class SequenceCodes
         // reads nbBits = tableLog - highbit(count + k) bits and continues in the doubled slot at
         // slot + 2 x ((count + k) << nbBits) - 2 x size. The entry is summed, not or-ed, from a
         // template that already takes the 1 off nbBits + 1, the shift that doubles.
+        //
+        // A counter a symbol, read, incremented and written back each cell, makes a chain through
+        // memory whenever a frequent symbol comes back within a few cells: each read waits on the
+        // write before. So the two halves of the table are built side by side, each with its own
+        // counters, those of the second half starting where the first half leaves them: the count
+        // of each symbol in the first half comes from four histograms, each taking every fourth
+        // cell, in which no chain forms either.
         nint stateBase = SequenceTableSet.Slot(code) - (2 * tableSize);
         nint bitsOffset = 63 - tableLog - 1;
+        nint half = tableSize >> 1;
+        Span<ushort> histograms = stackalloc ushort[4 * 64];
+        histograms.Clear();
+        ref ushort h = ref MemoryMarshal.GetReference(histograms);
+        for (nint u = 0; u < half; u += 4)
+        {
+            Unsafe.Add(ref h, Unsafe.Add(ref cells, u))++;
+            Unsafe.Add(ref h, 64 + Unsafe.Add(ref cells, u + 1))++;
+            Unsafe.Add(ref h, 128 + Unsafe.Add(ref cells, u + 2))++;
+            Unsafe.Add(ref h, 192 + Unsafe.Add(ref cells, u + 3))++;
+        }
+
+        Span<ushort> secondNext = stackalloc ushort[MaxMatchLength + 1];
+        ref ushort next2 = ref MemoryMarshal.GetReference(secondNext);
+        for (nint s = 0; s < symbolCount; s++)
+        {
+            Unsafe.Add(ref next2, s) = (ushort)(Unsafe.Add(ref next, s) + Unsafe.Add(ref h, s) + Unsafe.Add(ref h, 64 + s)
+                + Unsafe.Add(ref h, 128 + s) + Unsafe.Add(ref h, 192 + s));
+        }
+
         ref ulong output = ref Unsafe.As<SeqSymbol, ulong>(ref MemoryMarshal.GetReference(entries));
-        for (nint u = 0; u < tableSize; u += 2)
+        ref ulong output2 = ref Unsafe.Add(ref output, 2 * half);
+        for (nint u = 0; u < half; u++)
         {
             ulong first = Entry(ref cells, ref next, ref templates, u, bitsOffset, stateBase, nbBitsShift);
-            ulong second = Entry(ref cells, ref next, ref templates, u + 1, bitsOffset, stateBase, nbBitsShift);
+            ulong second = Entry(ref cells, ref next2, ref templates, u + half, bitsOffset, stateBase, nbBitsShift);
             output = first;
             Unsafe.Add(ref output, 1) = first;
-            Unsafe.Add(ref output, 2) = second;
-            Unsafe.Add(ref output, 3) = second;
-            output = ref Unsafe.Add(ref output, 4);
+            output2 = second;
+            Unsafe.Add(ref output2, 1) = second;
+            output = ref Unsafe.Add(ref output, 2);
+            output2 = ref Unsafe.Add(ref output2, 2);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
