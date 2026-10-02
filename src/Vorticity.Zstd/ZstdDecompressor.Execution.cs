@@ -687,44 +687,53 @@ public sealed partial class ZstdDecompressor
     }
 
     /// <summary>
-    /// A match closer than 16 bytes, which repeats a pattern: libzstd's <c>ZSTD_overlapCopy8</c>
-    /// spreads it to at least 8 apart, then 8 bytes a step, writing up to 7 past the end.
+    /// A match closer than 16 bytes, which repeats a pattern of <paramref name="offset"/> bytes: its
+    /// first 16 bytes are one byte shuffle of the bytes before the match, then stored as many times as
+    /// it takes, each store moving on by the largest multiple of the period that fits in 16 bytes, so
+    /// that the pattern stays in phase. No load waits on a store, where libzstd's
+    /// <c>ZSTD_overlapCopy8</c> reloads each 8 bytes it has just written; up to 15 bytes are written
+    /// past the end.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void OverlapCopy(ref byte dst, ref byte match, nuint offset, nint length)
     {
-        if (offset < 8)
+        Debug.Assert(offset is > 0 and < 16);
+        Vector128<byte> source = Unsafe.ReadUnaligned<Vector128<byte>>(ref match);
+        Vector128<byte> indices = Unsafe.ReadUnaligned<Vector128<byte>>(ref Unsafe.Add(ref MemoryMarshal.GetReference(PatternIndices), (nint)offset * 16));
+        Vector128<byte> pattern = Vector128.Shuffle(source, indices);
+        nint step = PatternStep[(int)offset];
+        nint i = 0;
+        do
         {
-            dst = match;
-            Unsafe.Add(ref dst, 1) = Unsafe.Add(ref match, 1);
-            Unsafe.Add(ref dst, 2) = Unsafe.Add(ref match, 2);
-            Unsafe.Add(ref dst, 3) = Unsafe.Add(ref match, 3);
-            match = ref Unsafe.Add(ref match, Spread32[(int)offset]);
-            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 4), Unsafe.ReadUnaligned<uint>(ref match));
-            match = ref Unsafe.Subtract(ref match, Spread64[(int)offset]);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, i), pattern);
+            i += step;
         }
-        else
-        {
-            Unsafe.WriteUnaligned(ref dst, Unsafe.ReadUnaligned<ulong>(ref match));
-        }
-
-        if (length > 8)
-        {
-            nint i = 8;
-            do
-            {
-                Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, i), Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref match, i)));
-                i += 8;
-            }
-            while (i < length);
-        }
+        while (i < length);
     }
 
-    /// <summary>libzstd's <c>dec32table</c>: how far the source moves to spread a short offset.</summary>
-    private static ReadOnlySpan<byte> Spread32 => [0, 1, 2, 1, 4, 4, 4, 4];
+    /// <summary>For each period from 1 to 15, the byte of the pattern each of 16 positions repeats: j mod period.</summary>
+    private static ReadOnlySpan<byte> PatternIndices =>
+    [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1,
+        0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0,
+        0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3,
+        0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0,
+        0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3,
+        0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6, 0, 1,
+        0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5, 6,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, 3, 4, 5,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 1, 2, 3, 4,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 0, 1, 2, 3,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0, 1, 2,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 0, 1,
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 0,
+    ];
 
-    /// <summary>libzstd's <c>dec64table</c>: then the source lies 8 or more behind.</summary>
-    private static ReadOnlySpan<byte> Spread64 => [8, 8, 8, 7, 8, 9, 10, 11];
+    /// <summary>For each period, the largest multiple of it that fits in 16 bytes: how far a store moves on.</summary>
+    private static ReadOnlySpan<byte> PatternStep => [16, 16, 16, 15, 16, 15, 12, 14, 16, 9, 10, 11, 12, 13, 14, 15];
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void Copy16(ref byte dst, ref byte src) =>
