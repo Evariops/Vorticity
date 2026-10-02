@@ -842,7 +842,7 @@ internal static class Report
         text.AppendLine(Header(runs));
         text.AppendLine();
         text.AppendLine("rows       file         cores     scenario       ours AOT, ms (low-high)  ours JIT, ms (low-high)  " +
-            "rust, ms (low-high)     ratio   ours GB/s rust GB/s ours alloc  ours MiB  rust MiB  rows out");
+            "rust, ms (low-high)     speedup ours GB/s rust GB/s ours alloc  ours MiB  rust MiB  rows out");
         foreach (Row row in table)
         {
             bool asked = row.Scenario.Reference is not null;
@@ -850,7 +850,7 @@ internal static class Report
                 $"{row.Fixture.Rows,-10:N0} {row.Fixture.Writer,-12} {Label(row.Cores),-9} {row.Scenario.Name,-14} " +
                 $"{Work(row.Aot),-24} {(row.Cores == Cores.One ? Work(row.Jit) : "-"),-24} " +
                 $"{Work(row.Theirs, asked),-23} " +
-                $"{Ratio(row),-7} {Throughput(row, row.Aot),9} {Throughput(row, row.Theirs),9} {Bytes(row.Allocated),10}  " +
+                $"{Speedup(row),-7} {Throughput(row, row.Aot),9} {Throughput(row, row.Theirs),9} {Bytes(row.Allocated),10}  " +
                 $"{Side(row.Aot, m => m.RssBytes.Median / (1024 * 1024)),8}  " +
                 $"{Side(row.Theirs, m => m.RssBytes.Median / (1024 * 1024), asked: asked),8}  " +
                 $"{(row.Aot is null ? "refused" : row.Aot.Rows.ToString("N0", CultureInfo.InvariantCulture)),10}"));
@@ -859,12 +859,12 @@ internal static class Report
         if (kernels is { Count: > 0 })
         {
             text.AppendLine();
-            text.AppendLine("encoding                                     rows  ours ns/row  rust ns/row  ratio  ours GB/s  rust GB/s");
+            text.AppendLine("encoding                                     rows  ours ns/row  rust ns/row  speedup  ours GB/s  rust GB/s");
             foreach (KernelRow kernel in kernels)
             {
                 text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                     $"{kernel.Encoding,-40} {kernel.Rows,9:N0} {NsPerRow(kernel, kernel.OursUs),12} {NsPerRow(kernel, kernel.TheirsUs),12} " +
-                    $"{KernelRatio(kernel),6} {KernelThroughput(kernel, kernel.OursUs),10} {KernelThroughput(kernel, kernel.TheirsUs),10}" +
+                    $"{KernelSpeedup(kernel),8} {KernelThroughput(kernel, kernel.OursUs),10} {KernelThroughput(kernel, kernel.TheirsUs),10}" +
                     $"{(kernel.Problem is null ? string.Empty : "  " + kernel.Problem)}"));
             }
         }
@@ -923,13 +923,12 @@ internal static class Report
             : string.Create(CultureInfo.InvariantCulture, $"{ns:F1}");
     }
 
-    private static double KernelRatioOf(KernelRow kernel) =>
-        kernel.Problem is null && kernel.OursUs > 0 && kernel.TheirsUs > 0 ? kernel.OursUs / kernel.TheirsUs : 0;
+    /// <summary>The reference's warm scan over ours, or 0 when either side has none.</summary>
+    private static double KernelSpeedupOf(KernelRow kernel) =>
+        kernel.Problem is null && kernel.OursUs > 0 && kernel.TheirsUs > 0 ? kernel.TheirsUs / kernel.OursUs : 0;
 
-    private static string KernelRatio(KernelRow kernel) =>
-        KernelRatioOf(kernel) is > 0 and double ratio
-            ? string.Create(CultureInfo.InvariantCulture, $"{ratio:F2}x")
-            : "n/a";
+    private static string KernelSpeedup(KernelRow kernel) =>
+        KernelSpeedupOf(kernel) is > 0 and double speedup ? ResultsPage.Speedup(speedup) : "n/a";
 
     private static string KernelThroughput(KernelRow kernel, double micros) =>
         micros <= 0 || kernel.Plain == 0
@@ -1036,7 +1035,7 @@ internal static class Report
                     ? "#### One core"
                     : string.Create(CultureInfo.InvariantCulture, $"#### All {Environment.ProcessorCount} cores"));
                 text.AppendLine();
-                text.AppendLine("| scenario | file | Vorticity, ms | Vortex Rust, ms | ratio | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |");
+                text.AppendLine("| scenario | file | Vorticity, ms | Vortex Rust, ms | speedup | Vorticity, GB/s | Vortex Rust, GB/s | Vorticity, allocated | peak, Vorticity / Rust |");
                 text.AppendLine("|---|---|---:|---:|---:|---:|---:|---:|---:|");
                 foreach (Scenario scenario in Scenarios)
                 {
@@ -1045,7 +1044,7 @@ internal static class Report
                         bool asked = row.Scenario.Reference is not null;
                         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                             $"| `{row.Scenario.Name}` | {FileName(row.Fixture)} | {Work(row.Aot)} | " +
-                            $"{Work(row.Theirs, asked)} | {Ratio(row)} | {Throughput(row, row.Aot)} | " +
+                            $"{Work(row.Theirs, asked)} | {Speedup(row)} | {Throughput(row, row.Aot)} | " +
                             $"{Throughput(row, row.Theirs)} | {Bytes(row.Allocated)} | {Peak(row, asked)} |"));
                     }
                 }
@@ -1066,16 +1065,16 @@ internal static class Report
     private static string DecodingSection(List<KernelRow> kernels)
     {
         StringBuilder text = new StringBuilder(KernelSection(kernels));
-        List<KernelRow> decoded = [.. kernels.Where(k => KernelRatioOf(k) > 0)];
+        List<KernelRow> decoded = [.. kernels.Where(k => KernelSpeedupOf(k) > 0)];
         if (decoded.Count > 0)
         {
-            List<double> ratios = [.. decoded.Select(KernelRatioOf)];
-            List<KernelRow> over = [.. decoded.Where(k => KernelRatioOf(k) >= 1).OrderByDescending(KernelRatioOf)];
+            List<double> speedups = [.. decoded.Select(KernelSpeedupOf)];
+            List<KernelRow> behind = [.. decoded.Where(k => KernelSpeedupOf(k) <= 1).OrderBy(KernelSpeedupOf)];
             text.Append(string.Create(CultureInfo.InvariantCulture,
-                $"Vorticity decoded {decoded.Count - over.Count} of {decoded.Count} files in less time than Rust; the median ratio is {Median(ratios):F2}x."));
-            text.AppendLine(over.Count == 0
+                $"Vorticity decoded {decoded.Count - behind.Count} of {decoded.Count} files in less time than Rust; the median speedup is {ResultsPage.Speedup(Median(speedups))}."));
+            text.AppendLine(behind.Count == 0
                 ? string.Empty
-                : $" At 1.00x or above: {string.Join(", ", over.Select(k => $"`{k.Encoding}` {KernelRatio(k)}"))}.");
+                : $" At 1.00x or below: {string.Join(", ", behind.Select(k => $"`{k.Encoding}` {KernelSpeedup(k)}"))}.");
             text.AppendLine();
         }
 
@@ -1123,13 +1122,13 @@ internal static class Report
         text.AppendLine("decoded and nothing copied, and its figure, past what memory can move, measures the walk of the");
         text.AppendLine("layout. Throughput is over the plain size, as above.");
         text.AppendLine();
-        text.AppendLine("| encoding | rows | Vorticity, ns/row | Vortex Rust, ns/row | ratio | Vorticity, GB/s | Vortex Rust, GB/s |");
+        text.AppendLine("| encoding | rows | Vorticity, ns/row | Vortex Rust, ns/row | speedup | Vorticity, GB/s | Vortex Rust, GB/s |");
         text.AppendLine("|---|---:|---:|---:|---:|---:|---:|");
         foreach (KernelRow kernel in kernels)
         {
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                 $"| `{kernel.Encoding}` | {kernel.Rows:N0} | {NsPerRow(kernel, kernel.OursUs)} | {NsPerRow(kernel, kernel.TheirsUs)} | " +
-                $"{KernelRatio(kernel)} | {KernelThroughput(kernel, kernel.OursUs)} | {KernelThroughput(kernel, kernel.TheirsUs)} |"));
+                $"{KernelSpeedup(kernel)} | {KernelThroughput(kernel, kernel.OursUs)} | {KernelThroughput(kernel, kernel.TheirsUs)} |"));
         }
 
         text.AppendLine();
@@ -1198,7 +1197,7 @@ internal static class Report
     /// </summary>
     private static string ScenarioReading(List<Row> table)
     {
-        List<Row> compared = [.. table.Where(r => RatioOf(r) > 0)];
+        List<Row> compared = [.. table.Where(r => SpeedupOf(r) > 0)];
         StringBuilder text = new StringBuilder();
 
         foreach (Cores cores in (Cores[])[Cores.One, Cores.All])
@@ -1209,15 +1208,15 @@ internal static class Report
                 continue;
             }
 
-            Row best = at.MinBy(RatioOf)!;
-            Row worst = at.MaxBy(RatioOf)!;
-            int ahead = at.Count(r => RatioOf(r) < 1);
+            Row best = at.MaxBy(SpeedupOf)!;
+            Row worst = at.MinBy(SpeedupOf)!;
+            int ahead = at.Count(r => SpeedupOf(r) > 1);
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
                 $"**{(cores == Cores.One ? "On one core" : $"On all {Environment.ProcessorCount} cores")}.** Vorticity took less time than Rust on {ahead} of {at.Count} compared rows."));
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"The lowest ratio is `{best.Scenario.Name}` at {best.Fixture.Rows:N0} rows on {FileName(best.Fixture)} file ({Ratio(best)}), the highest"));
+                $"The highest speedup is `{best.Scenario.Name}` at {best.Fixture.Rows:N0} rows on {FileName(best.Fixture)} file ({Speedup(best)}), the lowest"));
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"`{worst.Scenario.Name}` at {worst.Fixture.Rows:N0} rows on {FileName(worst.Fixture)} file ({Ratio(worst)})."));
+                $"`{worst.Scenario.Name}` at {worst.Fixture.Rows:N0} rows on {FileName(worst.Fixture)} file ({Speedup(worst)})."));
             text.AppendLine();
         }
 
@@ -1277,18 +1276,16 @@ internal static class Report
     }
 
     /// <summary>
-    /// Our native build's action time over the reference's, the direction of every ratio in the
-    /// bench: under 1.00x, we took less. 0 when either side has no time to divide.
+    /// The reference's action time over our native build's, the speedup every page prints: above
+    /// 1.00x, we took less. 0 when either side has no time to divide.
     /// </summary>
-    private static double RatioOf(Row row) =>
-        row.Theirs is null || row.Aot is null || row.Theirs.WorkMs.Median <= 0
+    private static double SpeedupOf(Row row) =>
+        row.Theirs is null || row.Aot is null || row.Aot.WorkMs.Median <= 0
             ? 0
-            : row.Aot.WorkMs.Median / row.Theirs.WorkMs.Median;
+            : row.Theirs.WorkMs.Median / row.Aot.WorkMs.Median;
 
-    private static string Ratio(Row row) =>
-        RatioOf(row) is > 0 and double ratio
-            ? string.Create(CultureInfo.InvariantCulture, $"{ratio:F2}x")
-            : "n/a";
+    private static string Speedup(Row row) =>
+        SpeedupOf(row) is > 0 and double speedup ? ResultsPage.Speedup(speedup) : "n/a";
 
     private static string First(string message)
     {
@@ -1302,7 +1299,7 @@ internal static class Report
             $"{runs} runs of each scenario, each in its own process, the median reported with the " +
             $"lowest and highest beside it; one discarded run before them.\n" +
             $"Figures are the action's time inside the process, from its own clock; the process start is reported apart.\n" +
-            $"Ratio is our Native AOT build's time over the reference's: under 1.00x, we took less.\n" +
+            $"Speedup is the reference's time over our Native AOT build's: above 1.00x, we took less.\n" +
             $"machine: {ResultsPage.Processor()} ({RuntimeInformation.OSArchitecture}), " +
             $"{Environment.ProcessorCount} processors, {RuntimeInformation.OSDescription}\n" +
             $"runtime: {RuntimeInformation.FrameworkDescription}, as Native AOT for this instruction set and on the JIT; " +

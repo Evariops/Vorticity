@@ -1689,8 +1689,8 @@ internal static class ThroughputCheck
 
         text.AppendLine();
         text.AppendLine(take
-            ? "| encoding | Vorticity, µs | Vortex Rust, µs | ratio |"
-            : "| encoding | Vorticity, µs | Vortex Rust, µs | ratio | Vorticity, bytes | Vortex Rust, bytes |");
+            ? "| encoding | Vorticity, µs | Vortex Rust, µs | speedup |"
+            : "| encoding | Vorticity, µs | Vortex Rust, µs | speedup | Vorticity, bytes | Vortex Rust, bytes |");
         text.AppendLine(take ? "|---|---:|---:|---:|" : "|---|---:|---:|---:|---:|---:|");
         foreach ((string encoding, Measurement m) in shown)
         {
@@ -1700,23 +1700,23 @@ internal static class ThroughputCheck
                     ? string.Create(CultureInfo.InvariantCulture, $" {size.Ours:N0} | {size.Theirs:N0} |")
                     : " — | — |";
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"| `{encoding}` | {m.Ours:N0} | {m.Theirs:N0} | {m.Ratio.Median:F2}x |{bytes}"));
+                $"| `{encoding}` | {m.Ours:N0} | {m.Theirs:N0} | {ResultsPage.Speedup(m.Speedup.Median)} |{bytes}"));
         }
 
         text.AppendLine();
-        List<double> ratios = [.. shown.Select(s => s.Measured.Ratio.Median)];
-        ratios.Sort();
-        double median = ratios.Count % 2 == 1
-            ? ratios[ratios.Count / 2]
-            : (ratios[(ratios.Count / 2) - 1] + ratios[ratios.Count / 2]) / 2;
+        List<double> speedups = [.. shown.Select(s => s.Measured.Speedup.Median)];
+        speedups.Sort();
+        double median = speedups.Count % 2 == 1
+            ? speedups[speedups.Count / 2]
+            : (speedups[(speedups.Count / 2) - 1] + speedups[speedups.Count / 2]) / 2;
         List<(string Encoding, Measurement Measured)> behind =
-            [.. shown.Where(s => s.Measured.Ratio.Median >= 1).OrderByDescending(s => s.Measured.Ratio.Median)];
+            [.. shown.Where(s => s.Measured.Speedup.Median <= 1).OrderBy(s => s.Measured.Speedup.Median)];
         text.Append(string.Create(CultureInfo.InvariantCulture,
-            $"Vorticity took less time on {shown.Count - behind.Count} of {shown.Count} files; the median ratio is {median:F2}x."));
+            $"Vorticity took less time on {shown.Count - behind.Count} of {shown.Count} files; the median speedup is {ResultsPage.Speedup(median)}."));
         text.AppendLine(behind.Count == 0
             ? string.Empty
             : string.Create(CultureInfo.InvariantCulture,
-                $" At 1.00x or above: {string.Join(", ", behind.Select(b => $"`{b.Encoding}` {b.Measured.Ratio.Median:F2}x"))}."));
+                $" At 1.00x or below: {string.Join(", ", behind.Select(b => $"`{b.Encoding}` {ResultsPage.Speedup(b.Measured.Speedup.Median)}"))}."));
         List<string> perChunk = [.. shown.Where(s => s.Measured.Split == RustReader.SplitPerChunk).Select(s => $"`{s.Encoding}`")];
         List<string> byDefault = [.. shown.Where(s => s.Measured.Split != RustReader.SplitPerChunk).Select(s => $"`{s.Encoding}`")];
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
@@ -1727,12 +1727,13 @@ internal static class ThroughputCheck
                 .Where(w => w.Value.Theirs > 0)
                 .Select(w => (w.Key, (double)w.Value.Ours / w.Value.Theirs))];
             List<(string Encoding, double Ratio)> larger = [.. sizes.Where(s => s.Ratio > 1.05).OrderByDescending(s => s.Ratio)];
+            // In times, not with an x: on a page where an x is a speedup, more bytes would read as faster.
             string above = larger.Count == 0
                 ? "."
-                : "; more than 5 % above them on " + string.Join(", ", larger.Select(l => string.Create(
-                    CultureInfo.InvariantCulture, $"`{l.Encoding}` ({l.Ratio:F2}x)"))) + ".";
+                : "; more than 5 % above them on " + string.Join(", ", larger.Select((l, i) =>
+                    $"`{l.Encoding}` ({ResultsPage.Figure(l.Ratio)} times{(i == 0 ? " Rust's" : string.Empty)})")) + ".";
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"Its bytes were within 5 % of Rust's or fewer on {sizes.Count - larger.Count} of {sizes.Count} files{above}"));
+                $"Vorticity's bytes were within 5 % of Rust's or fewer on {sizes.Count - larger.Count} of {sizes.Count} files{above}"));
         }
 
         if (declined.Count > 0)
@@ -1897,6 +1898,7 @@ internal static class ThroughputCheck
             : MinRounds;
 
         List<double> ratios = [];
+        List<double> speedups = [];
         List<double> mine = [];
         List<double> theirs = [];
         long stop = Stopwatch.GetTimestamp() + (long)(Budget * Stopwatch.Frequency);
@@ -1922,6 +1924,7 @@ internal static class ThroughputCheck
             mine.Add(ours);
             theirs.Add(rustTime);
             ratios.Add(rustTime == 0 ? 0 : ours / rustTime);
+            speedups.Add(ours == 0 ? 0 : rustTime / ours);
 
             if (round + 1 >= minimum)
             {
@@ -1940,13 +1943,18 @@ internal static class ThroughputCheck
             RustReader.Require(RustReader.SetSplit(RustReader.SplitDefault), "split");
         }
 
-        return new Measurement(Median([.. mine]), Median([.. theirs]), interval, repeats, split);
+        // The page's figure is the same rounds read the other way, bootstrapped on their own: the
+        // inverse of a median of an even count is not the median of the inverses.
+        Interval speedup = Statistics.Bootstrap(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(speedups));
+        return new Measurement(Median([.. mine]), Median([.. theirs]), interval, speedup, repeats, split);
     }
 
     /// <summary>One file measured: both readers, the ratio's interval, and how it was timed.</summary>
+    /// <param name="Ratio">The median per-round ratio, ours over Rust's, and its 95% interval: what the gate holds.</param>
+    /// <param name="Speedup">The median per-round speedup, Rust's time over ours: what the page prints.</param>
     /// <param name="Split">The reference's split the file was timed under, the faster of its two.</param>
     private readonly record struct Measurement(
-        double Ours, double Theirs, Interval Ratio, int Repeats, long Split);
+        double Ours, double Theirs, Interval Ratio, Interval Speedup, int Repeats, long Split);
 
     /// <summary>Scans per timed round, so that one round clears the timer's noise floor.</summary>
     private static int Repeats(double microseconds) =>

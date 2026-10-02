@@ -15,7 +15,9 @@ Its figures were taken on 2026-09-27, before the harness stopped charging Rust f
 did not do ([05-benchmarks.md](../design/05-benchmarks.md) §1), and favoured Vorticity. What stands
 are the sections that compare Vorticity with itself: the encodings column by column, the advice,
 and the kernels against the loops they replaced, measured then with each scan pass taking over the
-mapping the previous one left, which [the benchmark page](benchmarks.md) no longer does.
+mapping the previous one left, which [the benchmark page](benchmarks.md) no longer does. The kernel
+tables printed BenchmarkDotNet's ratio then; their speedups were computed on 2026-10-02 from the
+Mean column of the same run.
 
 * **The two sides.** Vorticity as a Native AOT binary built for the machine's instruction set,
   with the workstation garbage collector, where a section says so, and on the JIT otherwise. Vortex
@@ -24,7 +26,7 @@ mapping the previous one left, which [the benchmark page](benchmarks.md) no long
   gives its compiler this machine's instruction set, AVX-512 included, as .NET's JIT has it. Both
   map the file and read it where it lies, decode every value they return to its plain form, a
   constant column kept as one value on both, and must return the same rows or the run fails.
-* **Ratio** is Vorticity's time over Rust's: under 1.00x, Vorticity took less.
+* **Speedup** is Rust's time over Vorticity's: above 1.00x, Vorticity took less.
 * **Throughput** is the plain size of the rows returned over the time, as on [the benchmark
   page](benchmarks.md).
 * **All cores** are the 32 hardware threads, simultaneous multithreading included, where the arm64
@@ -491,21 +493,22 @@ It keeps the writer's choice under every goal on the 10 other columns.
 
 Each hot loop of the library against the loop it replaced, or against the floor of the work it
 does, measured by BenchmarkDotNet in one process on one clock, both checked to give the same result
-before any is timed. A **Ratio** column is the row's time over its baseline's, the row in bold.
-These are the fast profile's figures, which tell a direction: `--full` before a class's name runs
-the reference profile on that class, the one to quote a small difference from.
+before any is timed. A **Speedup** column is the mean time of the row's baseline, the row whose
+`MannWhitney(5%)` cell reads `Baseline`, over the row's own: above 1.00x, the row took less. These
+are the fast profile's figures, which tell a direction: `--full` before a class's name runs the
+reference profile on that class, the one to quote a small difference from.
 
 <!-- results: kernel:FastLanesKernelBenchmarks -->
 ### `FastLanesKernelBenchmarks`
 
-| Method       | BitWidth | Mean       | Error     | StdDev    | Ratio | MannWhitney(5%) | ns/row | GB/s  | Allocated | Alloc Ratio |
-|------------- |--------- |-----------:|----------:|----------:|------:|---------------- |-------:|------:|----------:|------------:|
-| &#39;i64 scalar&#39; | 17       |  95.737 μs | 1.3069 μs | 0.2023 μs |  1.00 | Baseline        |   1.46 |  5.48 |         - |          NA |
-| &#39;i64 vector&#39; | 17       |   8.919 μs | 1.2853 μs | 0.1989 μs |  0.09 | Faster          |   0.14 | 58.78 |         - |          NA |
-| &#39;i32 scalar&#39; | 17       | 107.554 μs | 0.4447 μs | 0.1155 μs |  1.12 | Same            |   1.64 |  2.44 |         - |          NA |
-| &#39;i64 pack&#39;   | 17       |  11.620 μs | 0.2981 μs | 0.0461 μs |  0.12 | Faster          |   0.18 | 45.12 |         - |          NA |
-| &#39;i32 pack&#39;   | 17       |  12.505 μs | 0.4404 μs | 0.0681 μs |  0.13 | Faster          |   0.19 | 20.96 |         - |          NA |
-| &#39;i32 vector&#39; | 17       |   4.634 μs | 0.1085 μs | 0.0168 μs |  0.05 | Faster          |   0.07 | 56.58 |         - |          NA |
+| Method       | BitWidth | Mean       | Error     | StdDev    | Speedup | MannWhitney(5%) | ns/row | GB/s  | Allocated | Alloc Ratio |
+|------------- |--------- |-----------:|----------:|----------:|--------:|---------------- |-------:|------:|----------:|------------:|
+| &#39;i64 scalar&#39; | 17       |  95.737 μs | 1.3069 μs | 0.2023 μs |   1.00x | Baseline        |   1.46 |  5.48 |         - |          NA |
+| &#39;i64 vector&#39; | 17       |   8.919 μs | 1.2853 μs | 0.1989 μs |   10.7x | Faster          |   0.14 | 58.78 |         - |          NA |
+| &#39;i32 scalar&#39; | 17       | 107.554 μs | 0.4447 μs | 0.1155 μs |   0.89x | Same            |   1.64 |  2.44 |         - |          NA |
+| &#39;i64 pack&#39;   | 17       |  11.620 μs | 0.2981 μs | 0.0461 μs |   8.24x | Faster          |   0.18 | 45.12 |         - |          NA |
+| &#39;i32 pack&#39;   | 17       |  12.505 μs | 0.4404 μs | 0.0681 μs |   7.66x | Faster          |   0.19 | 20.96 |         - |          NA |
+| &#39;i32 vector&#39; | 17       |   4.634 μs | 0.1085 μs | 0.0168 μs |   20.7x | Faster          |   0.07 | 56.58 |         - |          NA |
 
 *Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit b5104f2 with uncommitted changes, 2026-09-27 03:15 UTC.*
 <!-- /results: kernel:FastLanesKernelBenchmarks -->
@@ -536,14 +539,14 @@ Benchmarks with issues:
 <!-- results: kernel:CompressorBenchmarks -->
 ### `CompressorBenchmarks`
 
-| Method                       | Column | Mean          | Error         | StdDev      | Ratio | MannWhitney(5%) | Allocated | Alloc Ratio |
-|----------------------------- |------- |--------------:|--------------:|------------:|------:|---------------- |----------:|------------:|
-| &#39;Choose, the whole decision&#39; | i64    | 57,255.034 ns | 1,758.2423 ns | 456.6099 ns | 1.000 | Baseline        |      72 B |        1.00 |
-| &#39;candidate: sequence&#39;        | i64    |     13.330 ns |     3.0557 ns |   0.4729 ns | 0.000 | Faster          |         - |        0.00 |
-| &#39;candidate: bit packing&#39;     | i64    | 21,888.618 ns | 3,518.0519 ns | 913.6269 ns | 0.382 | Faster          |         - |        0.00 |
-| &#39;candidate: FSST&#39;            | i64    |      2.234 ns |     1.1546 ns |   0.2998 ns | 0.000 | Faster          |         - |        0.00 |
-| &#39;candidate: zstd&#39;            | i64    | 26,766.801 ns | 2,571.6941 ns | 667.8608 ns | 0.468 | Faster          |      72 B |        1.00 |
-| &#39;candidate: ALP&#39;             | i64    |      2.614 ns |     0.0307 ns |   0.0047 ns | 0.000 | Faster          |         - |        0.00 |
+| Method                       | Column | Mean          | Error         | StdDev      | Speedup | MannWhitney(5%) | Allocated | Alloc Ratio |
+|----------------------------- |------- |--------------:|--------------:|------------:|--------:|---------------- |----------:|------------:|
+| &#39;Choose, the whole decision&#39; | i64    | 57,255.034 ns | 1,758.2423 ns | 456.6099 ns |   1.00x | Baseline        |      72 B |        1.00 |
+| &#39;candidate: sequence&#39;        | i64    |     13.330 ns |     3.0557 ns |   0.4729 ns |  4,295x | Faster          |         - |        0.00 |
+| &#39;candidate: bit packing&#39;     | i64    | 21,888.618 ns | 3,518.0519 ns | 913.6269 ns |   2.62x | Faster          |         - |        0.00 |
+| &#39;candidate: FSST&#39;            | i64    |      2.234 ns |     1.1546 ns |   0.2998 ns | 25,629x | Faster          |         - |        0.00 |
+| &#39;candidate: zstd&#39;            | i64    | 26,766.801 ns | 2,571.6941 ns | 667.8608 ns |   2.14x | Faster          |      72 B |        1.00 |
+| &#39;candidate: ALP&#39;             | i64    |      2.614 ns |     0.0307 ns |   0.0047 ns | 21,903x | Faster          |         - |        0.00 |
 
 *Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; BenchmarkDotNet 0.16.0-preview.1, the fast profile; commit b5104f2 with uncommitted changes, 2026-09-27 03:15 UTC.*
 <!-- /results: kernel:CompressorBenchmarks -->

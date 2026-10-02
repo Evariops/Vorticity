@@ -809,30 +809,31 @@ internal static class RatioCheck
         StringBuilder text = new StringBuilder();
         text.AppendLine("## In one process, after warm-up");
         text.AppendLine();
-        text.AppendLine("Both readers called in turn in one process, Rust's through a C ABI, against one clock: at least");
+        text.AppendLine("Both readers called in turn in one process, Rust's through a C ABI, against one clock. A round times");
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-            $"{MinRounds} rounds after a {WarmupBudget.TotalSeconds:F0}-second warm-up, until the 95 % interval of the per-round ratios is within"));
+            $"both, and its speedup is Rust's time over Vorticity's: at least {MinRounds} rounds after a {WarmupBudget.TotalSeconds:F0}-second warm-up,"));
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-            $"{Precision:P0} of their median. Our side runs on the JIT, warmed. Each call opens its file and maps it anew, on"));
-        text.AppendLine("both sides, and asks both the same question. Each axis is one the `--ratio-check` gate holds to a");
-        text.AppendLine("ceiling; what each one reads and asks is in [05-benchmarks.md](../design/05-benchmarks.md) §3.");
+            $"until the 95 % interval of their median is within {Precision:P0} of it. Our side runs on the JIT, warmed. Each"));
+        text.AppendLine("call opens its file and maps it anew, on both sides, and asks both the same question. Each axis is");
+        text.AppendLine("one the `--ratio-check` gate holds to a ceiling; what each one reads and asks is in");
+        text.AppendLine("[05-benchmarks.md](../design/05-benchmarks.md) §3.");
         text.AppendLine();
-        text.AppendLine("| axis | Vorticity, µs | Vortex Rust, µs | ratio | 95 % interval |");
+        text.AppendLine("| axis | Vorticity, µs | Vortex Rust, µs | speedup | 95 % interval |");
         text.AppendLine("|---|---:|---:|---:|---|");
         foreach ((string axis, Measurement m) in shown)
         {
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"| {axis} | {m.Ours:N1} | {m.Theirs:N1} | {m.Ratio.Median:F2}x | {m.Ratio.Low:F3} to {m.Ratio.High:F3} |"));
+                $"| {axis} | {m.Ours:N1} | {m.Theirs:N1} | {ResultsPage.Speedup(m.Speedup.Median)} | {ResultsPage.Figure(m.Speedup.Low)} to {ResultsPage.Figure(m.Speedup.High)} |"));
         }
 
         text.AppendLine();
-        List<(string Axis, Measurement Measured)> behind = [.. shown.Where(m => m.Measured.Ratio.Median >= 1).OrderByDescending(m => m.Measured.Ratio.Median)];
+        List<(string Axis, Measurement Measured)> behind = [.. shown.Where(m => m.Measured.Speedup.Median <= 1).OrderBy(m => m.Measured.Speedup.Median)];
         text.Append(string.Create(CultureInfo.InvariantCulture,
             $"Vorticity took less time on {shown.Count - behind.Count} of {shown.Count} axes."));
         text.AppendLine(behind.Count == 0
             ? string.Empty
             : string.Create(CultureInfo.InvariantCulture,
-                $" At 1.00x or above: {string.Join(", ", behind.Select(b => $"{b.Axis} ({b.Measured.Ratio.Median:F2}x)"))}."));
+                $" At 1.00x or below: {string.Join(", ", behind.Select(b => $"{b.Axis} ({ResultsPage.Speedup(b.Measured.Speedup.Median)})"))}."));
         List<string> perChunk = [.. shown.Where(m => m.Measured.Split == RustReader.SplitPerChunk).Select(m => m.Axis)];
         List<string> byDefault = [.. shown.Where(m => m.Measured.Split != RustReader.SplitPerChunk).Select(m => m.Axis)];
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
@@ -1920,6 +1921,7 @@ internal static class RatioCheck
         int repeats = Repeats(Math.Min(hotOurs, hotTheirs), hotOurs + hotTheirs);
 
         List<double> ratios = [];
+        List<double> speedups = [];
         List<double> mine = [];
         List<double> rust = [];
         long stop = Stopwatch.GetTimestamp() + (long)(Budget * Stopwatch.Frequency);
@@ -1942,6 +1944,7 @@ internal static class RatioCheck
             mine.Add(ours);
             rust.Add(theirs);
             ratios.Add(theirs == 0 ? 0 : ours / theirs);
+            speedups.Add(ours == 0 ? 0 : theirs / ours);
 
             if (round + 1 >= MinRounds)
             {
@@ -1955,17 +1958,23 @@ internal static class RatioCheck
         }
 
         RustReader.Require(RustReader.SetSplit(RustReader.SplitDefault), "split");
-        return new Measurement(Median([.. mine]), Median([.. rust]), interval, repeats, split);
+
+        // The page's figure is the same rounds read the other way, bootstrapped on their own: the
+        // inverse of a median of an even count, or of an interpolated bound, is not the median or
+        // the bound of the inverses.
+        Interval speedup = Statistics.Bootstrap(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(speedups));
+        return new Measurement(Median([.. mine]), Median([.. rust]), interval, speedup, repeats, split);
     }
 
     /// <summary>One axis measured: both sides, the ratio's interval, and how it was timed.</summary>
     /// <param name="Ours">Median microseconds per round on our side.</param>
     /// <param name="Theirs">Median microseconds per round on Rust's.</param>
-    /// <param name="Ratio">The median per-round ratio and its 95% interval.</param>
+    /// <param name="Ratio">The median per-round ratio and its 95% interval: what the gate holds.</param>
+    /// <param name="Speedup">The median per-round speedup, Rust's time over ours, and its 95% interval: what the page prints.</param>
     /// <param name="Repeats">Calls per timed round.</param>
     /// <param name="Split">The reference's split the axis was timed under, the faster of its two.</param>
     private readonly record struct Measurement(
-        double Ours, double Theirs, Interval Ratio, int Repeats, long Split);
+        double Ours, double Theirs, Interval Ratio, Interval Speedup, int Repeats, long Split);
 
     /// <summary>Calls per timed round, so that one round clears the timer's noise floor.</summary>
     /// <param name="microseconds">One call on the FASTER of the two sides.</param>

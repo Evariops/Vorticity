@@ -43,8 +43,9 @@ measures it; [bench/README.md](../../bench/README.md) says how to run each one.
 * **The same threads.** Every scenario runs on one core — Rust's single-threaded runtime, our scans
   at one lane — and on all of them: a Tokio worker per processor for Rust, a lane per processor for
   our scans and as many threads for our writer.
-* **One direction for every ratio**: Vorticity's time over Rust's. Under 1.00×, Vorticity took
-  less.
+* **A speedup on every page**: Rust's time over Vorticity's, so that above 1.00× Vorticity took
+  less, and in a kernel's table its baseline's time over its own. The gates hold the inverse,
+  Vorticity's time over Rust's, under a ceiling (§3); their consoles print that ratio.
 * **The targets**: within 2× of Rust's time on a full scan and 1.5× on a decoder, per instruction
   set, and files no larger than 105 % of Rust's. The benchmark page says where each time stands;
   `WrittenSizeTests` holds the bytes the writer gives the whole conformance corpus under a ceiling
@@ -95,15 +96,16 @@ them:
   It is a known defect, not a cost of the work.
 * **Native AOT, and the JIT.** The tables are the native build's. On the JIT, a fresh process
   compiles the code the first time it runs it, which the page's last table measures; a process that
-  stays up pays that once, and then reads the ratios of §3 and §4. Starting a process is not in the
+  stays up pays that once, and then reads the speedups of §3 and §4. Starting a process is not in the
   figures, and the page gives it apart.
 
 ## 3. In one process, after warm-up
 
 `--ratio-check` calls both implementations in one process, Rust's through a C ABI, in turn and
 against one clock: at least 21 rounds, until the 95 % interval of the per-round ratios is within
-5 % of their median. Our side runs on the JIT, warmed. Each axis is a gate: its ratio must stay
-under a ceiling. The first eight axes read a corpus file Rust's writer made,
+5 % of their median. Our side runs on the JIT, warmed. Each axis is a gate: its ratio, our time over
+Rust's, must stay under a ceiling. The page reads the same rounds the other way up, the median of
+the per-round speedups and its interval. The first eight axes read a corpus file Rust's writer made,
 `containers/zoned_many_zones_nulls`: 65 536 rows, five columns, 64 zones. The key-order, string and
 band axes read files of 65 536 rows our writer makes for them; the last two, generated tables of a
 million rows and six columns, and of fifty columns.
@@ -111,11 +113,11 @@ million rows and six columns, and of fifty columns.
 
 * **`open to first batch` is a latency.** Both sides decode their first batch. Rust's first batch
   costs most of what its whole scan does on this file, 1.4 ms of 1.6 on 2026-10-02, where ours costs
-  a fifth of ours. The ratio is the time to the first row, and nothing more.
+  a fifth of ours. The speedup is on the time to the first row, and nothing more.
 * **Where the reference has no counterpart, it answers the same question its own way.** A
   key-ordered read of a band is held against Rust's filtered scan of that band, which returns the
   same rows in file order; an exact count from the index, against Rust's count of the band with no
-  column decoded. The ratio then prices the index, which is what a caller would weigh.
+  column decoded. The speedup then prices the index, which is what a caller would weigh.
 * The gate has seven more axes, which the page leaves out: two time Rust's scan without decoding,
   which asks another question; one holds the uncorrelated key-order read to a take of 64 rows whose
   positions the reference is given, the floor that read cannot go under; and four read one file as
@@ -131,7 +133,7 @@ once warm. [Decoding, per encoding](../guide/benchmarks.md#decoding-per-encoding
 
 * **Past what memory can move is not decoding.** A column stored in its plain form is handed out as
   a view of the mapped file on both sides, nothing copied: the figure measures the walk of the
-  layout, and the ratio compares two walks.
+  layout, and the speedup compares two walks.
 * **The widest gaps are UTF-8 validation.** In `varbin`, `varbinview`, `struct` and the tables, the
   stored arrays are already in their plain form, and the time is the check that every string is
   UTF-8, which both sides make: a sampled profile of Rust's scan of `varbinview` spends it in
