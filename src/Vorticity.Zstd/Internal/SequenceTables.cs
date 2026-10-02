@@ -1,4 +1,6 @@
 using System;
+using System.Diagnostics;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -120,6 +122,7 @@ internal sealed class SequenceTableSet
 
     private readonly int[] _tableLog = new int[3];
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int Slot(SequenceCode code) => code switch
     {
         SequenceCode.LiteralLength => LiteralLengthSlot,
@@ -337,7 +340,23 @@ internal static class SequenceCodes
     /// table and folds each symbol's base value and extra bits into its states, each written twice,
     /// whose next states are indices into the <see cref="SequenceTableSet"/> slot of <paramref name="code"/>.
     /// </summary>
-    /// <remarks>The distribution comes from <see cref="Fse.ReadNCount"/>, which has validated it.</remarks>
+    /// <remarks>
+    /// <para>
+    /// The distribution comes from <see cref="Fse.ReadNCount"/>, which has validated it: every symbol
+    /// is within the code's alphabet, and the counts, a symbol below one unit of probability counting
+    /// one, sum to the table's size. No index here needs a bounds check.
+    /// </para>
+    /// <para>
+    /// As libzstd's fast spread, without a branch that depends on the counts: the symbols are first
+    /// laid down in order, eight copies a write, then scattered over the table. The cells k x step
+    /// (modulo the size) for k from 0 run over the whole table once, and the laid-down symbols go to
+    /// those below the threshold, in order: every cell is written, the index into the laid-down
+    /// symbols moving only on those, and the top cells, written with whatever comes next, are then
+    /// given to the symbols below one unit. With no chain from one cell to the next, four cells a
+    /// step. Each state is then built whole from its symbol's base value and extra bits, and written
+    /// twice in one store.
+    /// </para>
+    /// </remarks>
     public static void BuildTable(SequenceCode code, Span<SeqSymbol> entries, ReadOnlySpan<short> norm, int tableLog)
     {
         ReadOnlySpan<uint> baseValue = code switch
@@ -352,54 +371,111 @@ internal static class SequenceCodes
             SequenceCode.Offset => OffsetBits,
             _ => MatchLengthBits,
         };
-        int slot = SequenceTableSet.Slot(code);
-        int tableSize = 1 << tableLog;
-        int highThreshold = tableSize - 1;
+        Debug.Assert(norm.Length <= MaxMatchLength + 1 && entries.Length >= 2 << tableLog);
+        Debug.Assert(baseValue.Length >= norm.Length && bits.Length >= norm.Length);
+
+        nint tableSize = (nint)1 << tableLog;
+        nint symbolCount = norm.Length;
         Span<ushort> symbolNext = stackalloc ushort[MaxMatchLength + 1];
+        Span<ulong> template = stackalloc ulong[MaxMatchLength + 1];
+        Span<byte> spread = stackalloc byte[(1 << LiteralLengthMaxLog) + 8];
         Span<byte> symbols = stackalloc byte[1 << LiteralLengthMaxLog];
+        Span<byte> lowSymbols = stackalloc byte[MaxMatchLength + 1];
+        ref ushort next = ref MemoryMarshal.GetReference(symbolNext);
+        ref ulong templates = ref MemoryMarshal.GetReference(template);
+        ref byte spreadStart = ref MemoryMarshal.GetReference(spread);
+        ref byte cells = ref MemoryMarshal.GetReference(symbols);
+        ref byte low = ref MemoryMarshal.GetReference(lowSymbols);
+        ref short counts = ref MemoryMarshal.GetReference(norm);
+        ref uint bases = ref MemoryMarshal.GetReference(baseValue);
+        ref byte extraBits = ref MemoryMarshal.GetReference(bits);
 
-        // Symbols below one unit of probability take one cell each, from the top.
-        for (int s = 0; s < norm.Length; s++)
+        // ---- per symbol: its template, its first state, and its place in the laid-down order
+        nint lowCount = 0;
+        nint laid = 0;
+        ulong copies = 0;
+        for (nint s = 0; s < symbolCount; s++, copies += 0x0101010101010101UL)
         {
-            if (norm[s] == -1)
+            // A count is -1 (below one unit) or positive: its absolute value is the symbol's first
+            // state, its sign moves the threshold, its positive part is how many cells it lays down.
+            // All three by arithmetic on the sign mask: Math.Abs and Math.Max become branches.
+            nint count = Unsafe.Add(ref counts, s);
+            nint sign = count >> 63;
+            Unsafe.Add(ref templates, s) = (Unsafe.Add(ref bases, s) | ((ulong)Unsafe.Add(ref extraBits, s) << 32)) - (1UL << 40);
+            Unsafe.Add(ref next, s) = (ushort)((count ^ sign) - sign);
+
+            // Below one unit: next in the list of the top cells, by a store whose index only moves
+            // for such a symbol.
+            Unsafe.Add(ref low, lowCount) = (byte)s;
+            lowCount -= sign;
+
+            // Eight copies of the symbol a write: nearly every count fits in one.
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref spreadStart, laid), copies);
+            for (nint i = 8; i < count; i += 8)
             {
-                symbols[highThreshold--] = (byte)s;
-                symbolNext[s] = 1;
+                Unsafe.WriteUnaligned(ref Unsafe.Add(ref spreadStart, laid + i), copies);
             }
-            else
-            {
-                symbolNext[s] = (ushort)norm[s];
-            }
+
+            laid += count & ~sign;
         }
 
-        int mask = tableSize - 1;
-        int step = Fse.TableStep(tableSize);
-        int position = 0;
-        for (int s = 0; s < norm.Length; s++)
+        nint highThreshold = tableSize - 1 - lowCount;
+        Debug.Assert(laid == highThreshold + 1);
+
+        // ---- the scatter, four cells a step: see the remarks
+        nint mask = tableSize - 1;
+        nint step = Fse.TableStep((int)tableSize);
+        nint at = 0;
+        nint taken = 0;
+        for (nint k = 0; k < tableSize; k += 4, at += 4 * step)
         {
-            for (int i = 0; i < norm[s]; i++)
-            {
-                symbols[position] = (byte)s;
-                do
-                {
-                    position = (position + step) & mask;
-                }
-                while (position > highThreshold);
-            }
+            nint p0 = at & mask;
+            nint p1 = (at + step) & mask;
+            nint p2 = (at + (2 * step)) & mask;
+            nint p3 = (at + (3 * step)) & mask;
+            Unsafe.Add(ref cells, p0) = Unsafe.Add(ref spreadStart, taken);
+            taken += p0 <= highThreshold ? 1 : 0;
+            Unsafe.Add(ref cells, p1) = Unsafe.Add(ref spreadStart, taken);
+            taken += p1 <= highThreshold ? 1 : 0;
+            Unsafe.Add(ref cells, p2) = Unsafe.Add(ref spreadStart, taken);
+            taken += p2 <= highThreshold ? 1 : 0;
+            Unsafe.Add(ref cells, p3) = Unsafe.Add(ref spreadStart, taken);
+            taken += p3 <= highThreshold ? 1 : 0;
         }
 
-        for (int u = 0; u < tableSize; u++)
+        Debug.Assert(taken == laid);
+        for (nint i = 0; i < lowCount; i++)
         {
-            int symbol = symbols[u];
-            int nextState = symbolNext[symbol]++;
-            int nbBits = tableLog - BackwardBitReader.HighBit((uint)nextState);
-            var entry = new SeqSymbol(
-                (ushort)(slot + (((nextState << nbBits) - tableSize) << 1)),
-                bits[symbol],
-                (byte)nbBits,
-                baseValue[symbol]);
-            entries[2 * u] = entry;
-            entries[(2 * u) + 1] = entry;
+            Unsafe.Add(ref cells, tableSize - 1 - i) = Unsafe.Add(ref low, i);
+        }
+
+        // ---- the states, in table order: a symbol's k-th cell decodes the state count + k, which
+        // reads nbBits = tableLog - highbit(count + k) bits and continues in the doubled slot at
+        // slot + 2 x ((count + k) << nbBits) - 2 x size. The entry is summed, not or-ed, from a
+        // template that already takes the 1 off nbBits + 1, the shift that doubles.
+        nint stateBase = SequenceTableSet.Slot(code) - (2 * tableSize);
+        nint bitsOffset = 63 - tableLog - 1;
+        ref ulong output = ref Unsafe.As<SeqSymbol, ulong>(ref MemoryMarshal.GetReference(entries));
+        for (nint u = 0; u < tableSize; u += 2)
+        {
+            ulong first = Entry(ref cells, ref next, ref templates, u, bitsOffset, stateBase);
+            ulong second = Entry(ref cells, ref next, ref templates, u + 1, bitsOffset, stateBase);
+            output = first;
+            Unsafe.Add(ref output, 1) = first;
+            Unsafe.Add(ref output, 2) = second;
+            Unsafe.Add(ref output, 3) = second;
+            output = ref Unsafe.Add(ref output, 4);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static ulong Entry(ref byte cells, ref ushort next, ref ulong templates, nint u, nint bitsOffset, nint stateBase)
+        {
+            nint symbol = Unsafe.Add(ref cells, u);
+            nint nextState = Unsafe.Add(ref next, symbol);
+            Unsafe.Add(ref next, symbol) = (ushort)(nextState + 1);
+            nint doubling = (nint)BitOperations.LeadingZeroCount((ulong)nextState) - bitsOffset;
+            nint state = (nextState << (int)doubling) + stateBase;
+            return Unsafe.Add(ref templates, symbol) + ((ulong)doubling << 40) + ((ulong)state << 48);
         }
     }
 }
