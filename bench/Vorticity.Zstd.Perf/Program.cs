@@ -215,8 +215,9 @@ public static class Program
             double[] all = samples[c];
             Array.Sort(all);
             medians[c] = all[all.Length / 2];
-            Console.WriteLine($"  {candidates[c].Name,-12} {all[0],9:F1} {all[all.Length / 4],9:F1} {medians[c],9:F1} {all[3 * all.Length / 4],9:F1}   " +
-                string.Join(" ", passMedians[c].Select(m => m.ToString("F1", CultureInfo.InvariantCulture))));
+            // Two decimals: the small frames take a few microseconds, where a tenth is 4%.
+            Console.WriteLine($"  {candidates[c].Name,-12} {all[0],9:F2} {all[all.Length / 4],9:F2} {medians[c],9:F2} {all[3 * all.Length / 4],9:F2}   " +
+                string.Join(" ", passMedians[c].Select(m => m.ToString("F2", CultureInfo.InvariantCulture))));
         }
 
         int zstdIndex = candidates.FindIndex(c => c.Name == "zstd");
