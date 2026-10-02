@@ -39,9 +39,15 @@ public static class Program
             return 0;
         }
 
+        if (Option(args, "--micro") is string micro)
+        {
+            return Micro.Run(micro, frames);
+        }
+
         int passes = int.Parse(Option(args, "--passes") ?? "5", CultureInfo.InvariantCulture);
         int reps = int.Parse(Option(args, "--reps") ?? "300", CultureInfo.InvariantCulture);
         string? only = Option(args, "--only");
+        Batch = Option(args, "--batch") is string batch ? int.Parse(batch, CultureInfo.InvariantCulture) : null;
 
         var zstd = new ZstdDecompressor();
         var platform = new ZstandardDecoder();
@@ -134,7 +140,17 @@ public static class Program
             }
         }
 
-        double tick = 1_000_000.0 / Stopwatch.Frequency;
+        // A sample times enough decodes back to back to last some 50 us: a small frame's single
+        // decode is a few timer ticks, too coarse a measure.
+        long probe = Stopwatch.GetTimestamp();
+        for (int i = 0; i < 10; i++)
+        {
+            candidates[0].Decode(frame, buffer);
+        }
+
+        double probeUs = Stopwatch.GetElapsedTime(probe).TotalMicroseconds / 10;
+        int batch = Batch ?? Math.Max(1, (int)(50 / Math.Max(probeUs, 0.01)));
+        double tick = 1_000_000.0 / Stopwatch.Frequency / batch;
         for (int p = 0; p < passes; p++)
         {
             var pass = new double[count][];
@@ -148,8 +164,13 @@ public static class Program
                 for (int k = 0; k < count; k++)
                 {
                     int c = (r + k) % count;
+                    Candidate candidate = candidates[c];
                     long start = Stopwatch.GetTimestamp();
-                    candidates[c].Decode(frame, buffer);
+                    for (int b = 0; b < batch; b++)
+                    {
+                        candidate.Decode(frame, buffer);
+                    }
+
                     pass[c][r] = (Stopwatch.GetTimestamp() - start) * tick;
                 }
             }
@@ -163,7 +184,7 @@ public static class Program
         }
 
         Console.WriteLine();
-        Console.WriteLine($"{name}: {frame.Length} -> {size} bytes");
+        Console.WriteLine($"{name}: {frame.Length} -> {size} bytes" + (batch > 1 ? $", {batch} decodes a sample" : string.Empty));
         Console.WriteLine($"  {"decoder",-12} {"min",9} {"p25",9} {"median",9} {"p75",9}   medians per pass (us)");
         var medians = new double[count];
         for (int c = 0; c < count; c++)
@@ -190,6 +211,9 @@ public static class Program
 
         return true;
     }
+
+    /// <summary>The decodes a sample times, from <c>--batch</c>; by default enough for some 50 us.</summary>
+    private static int? Batch { get; set; }
 
     private static string? Option(string[] args, string name)
     {
