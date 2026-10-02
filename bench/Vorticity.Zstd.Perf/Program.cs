@@ -15,7 +15,7 @@ namespace Vorticity.Zstd.Perf;
 /// moment lands on all of them alike. Several passes show how stable the figures are.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab] [--dump dir]</c>; <c>--ab</c>
+/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab] [--dump dir] [--no-check]</c>; <c>--ab</c>
 /// adds a "before" candidate that runs with the legacy switches of the point under work (see
 /// <see cref="AbSwitch"/>). Before timing,
 /// every candidate's output is checked against the platform's.
@@ -48,6 +48,7 @@ public static class Program
         int reps = int.Parse(Option(args, "--reps") ?? "300", CultureInfo.InvariantCulture);
         string? only = Option(args, "--only");
         Batch = Option(args, "--batch") is string batch ? int.Parse(batch, CultureInfo.InvariantCulture) : null;
+        NoCheck = args.Contains("--no-check");
 
         var zstd = new ZstdDecompressor();
         var platform = new ZstandardDecoder();
@@ -114,7 +115,7 @@ public static class Program
         {
             byte[] output = new byte[size];
             int written = candidate.Decode(frame, output);
-            if (written != size || !output.AsSpan().SequenceEqual(expected))
+            if (!NoCheck && (written != size || !output.AsSpan().SequenceEqual(expected)))
             {
                 Console.WriteLine($"{name}: {candidate.Name} produced a different output ({written} bytes)");
                 return false;
@@ -211,6 +212,12 @@ public static class Program
 
         return true;
     }
+
+    /// <summary>
+    /// From <c>--no-check</c>: time a decoder whose output differs, which a probe that alters the
+    /// decoding on purpose (to find what bounds it) makes.
+    /// </summary>
+    private static bool NoCheck { get; set; }
 
     /// <summary>The decodes a sample times, from <c>--batch</c>; by default enough for some 50 us.</summary>
     private static int? Batch { get; set; }
