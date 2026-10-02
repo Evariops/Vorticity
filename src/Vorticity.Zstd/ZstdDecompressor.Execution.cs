@@ -133,16 +133,37 @@ public sealed partial class ZstdDecompressor
                 int ofBits = of.NbAdditionalBits;
                 uint litLengthBase = ll.BaseValue;
 
-                nuint raw = of.BaseValue + (nuint)ReadBits(container, ref bc, ofBits);
-                offset = ResolveOffset(raw, ofBits, litLengthBase == 0, ref rep0, ref rep1, ref rep2);
+                // Extra bits are read only when there are some, as libzstd does: for most data the
+                // literal and match lengths have none, and the branch is then always predicted.
+                if (ofBits > 1)
+                {
+                    offset = of.BaseValue + (nuint)ReadBitsFast(container, ref bc, ofBits);
+                    rep2 = rep1;
+                    rep1 = rep0;
+                    rep0 = offset;
+                }
+                else
+                {
+                    nuint raw = of.BaseValue + (ofBits == 0 ? 0 : (nuint)ReadBitsFast(container, ref bc, 1));
+                    offset = ResolveOffset(raw, ofBits, litLengthBase == 0, ref rep0, ref rep1, ref rep2);
+                }
 
-                matchLength = (nint)(ml.BaseValue + ReadBits(container, ref bc, mlBits));
+                matchLength = (nint)ml.BaseValue;
+                if (mlBits > 0)
+                {
+                    matchLength += (nint)ReadBitsFast(container, ref bc, mlBits);
+                }
+
                 if (llBits + mlBits + ofBits >= 57 - (SequenceCodes.LiteralLengthMaxLog + SequenceCodes.MatchLengthMaxLog + SequenceCodes.OffsetMaxLog))
                 {
                     Reload(ref bits, ref ptr, ref bc, ref container);
                 }
 
-                litLength = (nint)(litLengthBase + ReadBits(container, ref bc, llBits));
+                litLength = (nint)litLengthBase;
+                if (llBits > 0)
+                {
+                    litLength += (nint)ReadBitsFast(container, ref bc, llBits);
+                }
 
                 if (nbSeq != 1)
                 {
@@ -475,11 +496,22 @@ public sealed partial class ZstdDecompressor
     private static void Copy16(ref byte dst, ref byte src) =>
         Unsafe.WriteUnaligned(ref dst, Unsafe.ReadUnaligned<Vector128<byte>>(ref src));
 
+    /// <summary>libzstd's <c>BIT_readBitsFast</c>: 1 to 31 bits.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint ReadBitsFast(ulong container, ref int bc, int count)
+    {
+        // A shift takes its count modulo 64, so 64 - count is just -count: one negation.
+        uint value = (uint)((container << bc) >> -count);
+        bc += count;
+        return value;
+    }
+
     /// <summary>libzstd's <c>BIT_readBits</c>: 0 to 31 bits, as two shifts that give 0 for none.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint ReadBits(ulong container, ref int bc, int count)
     {
-        uint value = (uint)(((container << bc) >> 1) >> (63 - count));
+        // 63 - count is count ^ 63 for a count up to 63: one instruction.
+        uint value = (uint)(((container << bc) >> 1) >> (count ^ 63));
         bc += count;
         return value;
     }

@@ -15,7 +15,9 @@ namespace Vorticity.Zstd.Perf;
 /// moment lands on all of them alike. Several passes show how stable the figures are.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd]</c>. Before timing,
+/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab]</c>; <c>--ab</c>
+/// adds a "before" candidate that runs with the legacy switches of the point under work (see
+/// <see cref="AbSwitch"/>). Before timing,
 /// every candidate's output is checked against the platform's.
 /// </remarks>
 public static class Program
@@ -41,6 +43,19 @@ public static class Program
         if (native is not null)
         {
             candidates.Add(new("libzstd-ref", (f, o) => native.Decompress(f, o)));
+        }
+
+        if (args.Contains("--ab"))
+        {
+            // The point under measurement, toggled per call: "before" sets the legacy switches.
+            var before = new ZstdDecompressor();
+            candidates.Insert(1, new("before", (f, o) =>
+            {
+                AbSwitch.Set(legacy: true);
+                before.Decompress(f, o, out _, out int w);
+                AbSwitch.Set(legacy: false);
+                return w;
+            }));
         }
         else
         {
@@ -168,5 +183,14 @@ public static class Program
     {
         int i = Array.IndexOf(args, name);
         return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+    }
+}
+
+/// <summary>The legacy switches of the optimization point under work, for <c>--ab</c>.</summary>
+internal static class AbSwitch
+{
+    public static void Set(bool legacy)
+    {
+        _ = legacy;
     }
 }
