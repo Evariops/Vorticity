@@ -204,7 +204,7 @@ public sealed partial class ZstdDecompressor
                         Throw.Error(ZstdError.DestinationTooSmall);
                     }
 
-                    source.Slice(ip, blockSize).CopyTo(destination.Slice(op));
+                    BulkCopy.Copy(source.Slice(ip, blockSize), destination.Slice(op));
                     op += blockSize;
                     ip += blockSize;
                     break;
