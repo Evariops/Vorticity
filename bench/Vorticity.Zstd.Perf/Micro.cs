@@ -22,7 +22,10 @@ internal static class Micro
 
     private sealed record Table(SequenceCode Code, short[] Norm, int TableLog, byte[] Description);
 
-    private sealed record Blocks(List<Table> Tables, List<byte[]> Trees);
+    private sealed record Blocks(List<Table> Tables, List<byte[]> Trees, int Sequences);
+
+    /// <summary>The number of sequences in a frame's compressed blocks.</summary>
+    public static int CountSequences(byte[] frame) => Parse(frame).Sequences;
 
     public static int Run(string what, string[] frames, int repeat)
     {
@@ -146,6 +149,7 @@ internal static class Micro
     {
         var tables = new List<Table>();
         var trees = new List<byte[]>();
+        int sequences = 0;
         if (FrameHeader.Parse(frame, out FrameHeader header) != ZstdError.None)
         {
             throw new InvalidOperationException("bad frame");
@@ -160,18 +164,19 @@ internal static class Micro
             int size = blockHeader >> 3;
             if (type == 2)
             {
-                ParseBlock(frame.AsSpan(ip, size), tables, trees);
+                sequences += ParseBlock(frame.AsSpan(ip, size), tables, trees);
             }
 
             ip += type == 1 ? 1 : size;
             if ((blockHeader & 1) != 0)
             {
-                return new Blocks(tables, trees);
+                return new Blocks(tables, trees, sequences);
             }
         }
     }
 
-    private static void ParseBlock(ReadOnlySpan<byte> block, List<Table> tables, List<byte[]> trees)
+    /// <returns>The block's number of sequences.</returns>
+    private static int ParseBlock(ReadOnlySpan<byte> block, List<Table> tables, List<byte[]> trees)
     {
         int literalsType = block[0] & 3;
         int sizeFormat = (block[0] >> 2) & 3;
@@ -208,15 +213,17 @@ internal static class Micro
         int at = 1;
         if (nbSeq == 0xFF)
         {
+            nbSeq = sequences[1] + (sequences[2] << 8) + 0x7F00;
             at = 3;
         }
         else if (nbSeq >= 0x80)
         {
+            nbSeq = ((nbSeq - 0x80) << 8) + sequences[1];
             at = 2;
         }
         else if (nbSeq == 0)
         {
-            return;
+            return 0;
         }
 
         int modes = sequences[at++];
@@ -240,5 +247,7 @@ internal static class Micro
                 at += length;
             }
         }
+
+        return nbSeq;
     }
 }

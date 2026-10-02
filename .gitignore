@@ -23,3 +23,6 @@ tools/native-ref/out/
 .vs/
 .idea/
 .DS_Store
+
+# ---- Hardware counters library (tools/pmu/build.sh) ----
+tools/pmu/out/

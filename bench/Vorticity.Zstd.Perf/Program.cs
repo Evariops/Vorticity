@@ -15,7 +15,8 @@ namespace Vorticity.Zstd.Perf;
 /// moment lands on all of them alike. Several passes show how stable the figures are.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab] [--dump dir] [--no-check]</c>; <c>--ab</c>
+/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab] [--dump dir] [--no-check]
+/// [--pmu default|EV1,EV2]</c>; <c>--pmu</c> counts hardware events per decode and sequence (under sudo); <c>--ab</c>
 /// adds a "before" candidate that runs with the legacy switches of the point under work (see
 /// <see cref="AbSwitch"/>). Before timing,
 /// every candidate's output is checked against the platform's.
@@ -42,6 +43,27 @@ public static class Program
         if (Option(args, "--micro") is string micro)
         {
             return Micro.Run(micro, frames, int.Parse(Option(args, "--repeat") ?? "1", CultureInfo.InvariantCulture));
+        }
+
+        if (Option(args, "--pmu") is string events)
+        {
+            // Hardware counters of Vorticity.Zstd's decodes alone: sudo Vorticity.Zstd.Perf --pmu default|EV1,EV2...
+            Pmu? pmu = Pmu.TryCreate(events == "default" ? Pmu.DefaultEvents : events.Split(','));
+            if (pmu is null)
+            {
+                return 1;
+            }
+
+            var decoder = new ZstdDecompressor();
+            foreach (string name in frames)
+            {
+                byte[] frame = BenchFrames.Load(name);
+                byte[] output = new byte[BenchFrames.ContentSize(frame)];
+                int pmuReps = int.Parse(Option(args, "--reps") ?? "1000", CultureInfo.InvariantCulture);
+                pmu.Measure(name, (f, o) => { decoder.Decompress(f, o, out _, out int w); return w; }, frame, output, pmuReps, Micro.CountSequences(frame), "sequence");
+            }
+
+            return 0;
         }
 
         int passes = int.Parse(Option(args, "--passes") ?? "5", CultureInfo.InvariantCulture);
