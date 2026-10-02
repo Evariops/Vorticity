@@ -133,9 +133,16 @@ public sealed class BenchmarkConfig : ManualConfig
         AddLogger(BenchmarkDotNet.Loggers.ConsoleLogger.Default);
         AddColumnProvider(DefaultColumnProviders.Instance);
         AddDiagnoser(BenchmarkDotNet.Diagnosers.MemoryDiagnoser.Default);
-        // THE DECISION RULE, AS A COLUMN. The project's rule is that a gain counts when `Ratio`
-        // leaves [0.95; 1.05] and `Ratio +- 2*RatioSD` excludes 1 -- arithmetic done by hand on
-        // every table, and therefore done wrong or not at all. This is the same question asked by
+
+        // A SPEEDUP, NOT A RATIO: the direction of every other table the bench publishes (see
+        // SpeedupColumn). The allocation ratio stays; it is bytes, not time.
+        HideColumns(Column.Ratio, Column.RatioSD);
+        AddColumn(new SpeedupColumn());
+
+        // THE DECISION RULE, AS A COLUMN. The project's rule is that a gain counts when a row's
+        // time over its baseline's leaves [0.95; 1.05] and two of that ratio's standard deviations
+        // around it exclude 1 -- arithmetic done by hand on every table, and therefore done wrong
+        // or not at all. This is the same question asked by
         // the library: a TOST against the baseline arm at the same threshold, printed as
         // `Faster` / `Same` / `Slower`. A 3% threshold was proposed; the rule it automates says
         // 5%, so 5% is what the column carries -- a threshold that disagrees with the rule it

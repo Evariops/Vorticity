@@ -146,11 +146,35 @@ public static class ScenarioSet
         return ([.. args[..at], .. args[(at + 2)..]], threads);
     }
 
+    /// <summary>The session every scenario opens a file from a path through; null for the library's default.</summary>
+    /// <remarks>
+    /// <para>
+    /// EVERY HARNESS THAT COMPARES SETS ONE THAT KEEPS NO MAPPING, `MappedFileCacheCount = 0`, and
+    /// the comparisons against Rust depend on it. The default session keeps the mapping of a file it
+    /// closed and hands it to the next open of the same file, pages already mapped. Every instrument
+    /// opens its file anew on every round, and the reference maps it anew each time, so a kept
+    /// mapping made each round after the first cheaper on our side alone: three and a half times
+    /// on the million-row table, measured the day it was found.
+    /// </para>
+    /// <para>
+    /// Not set here, because the option is younger than these scenarios and `bench/ab.sh` builds
+    /// this assembly against older libraries: there both sides open through the default, alike.
+    /// </para>
+    /// </remarks>
+    public static VortexSession? Session { get; set; }
+
+    /// <summary>Opens <paramref name="path"/> through <see cref="Session"/>.</summary>
+    /// <param name="path">The file.</param>
+    public static ValueTask<VortexFile> OpenAsync(string path) =>
+        Session is { } session
+            ? session.OpenAsync(path, options: null, CancellationToken.None)
+            : VortexFile.OpenAsync(path, CancellationToken.None);
+
     /// <summary>What an open costs on its own: the footer, and no row read.</summary>
     /// <param name="path">The file.</param>
     public static async Task<long> FooterOnly(string path)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await OpenAsync(path);
         return file.RowCount;
     }
 
@@ -169,7 +193,7 @@ public static class ScenarioSet
             await using VortexFileWriter appender =
                 await VortexFileWriter.AppendAsync(copy, options: null, CancellationToken.None);
             long start = appender.RowCount;
-            await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
+            await using VortexFile source = await OpenAsync(path);
             long written = 0;
             await foreach (RecordBatch batch in source.ScanBuilder()
                 .Rows(new RowRange(0, rows)).ExecuteAsync().WithCancellation(CancellationToken.None))
@@ -259,7 +283,7 @@ public static class ScenarioSet
     /// <exception cref="NotSupportedException">The file's root is not a struct of columns.</exception>
     private static async Task<(byte[] Bytes, string Column, FilterLiteral[] Probes)> PrepareLookupAsync(string path)
     {
-        await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile source = await OpenAsync(path);
         if (source.DType.Kind != DTypeKind.Struct)
         {
             throw new NotSupportedException(
@@ -319,7 +343,7 @@ public static class ScenarioSet
     /// <param name="path">The file.</param>
     public static async Task<long> ScanAll(string path)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await OpenAsync(path);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -340,7 +364,7 @@ public static class ScenarioSet
     /// </remarks>
     public static async Task<long> ScanAllLanes(string path, int degree)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await OpenAsync(path);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().WithDegreeOfParallelism(degree)
             .ExecuteAsync().WithCancellation(CancellationToken.None))
@@ -355,7 +379,7 @@ public static class ScenarioSet
     /// <param name="path">The file.</param>
     public static async Task<long> ScanProjected(string path)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await OpenAsync(path);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().Project(Field).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -371,7 +395,7 @@ public static class ScenarioSet
     /// <param name="field">The column to keep.</param>
     public static async Task<long> ScanProjectedField(string path, string field)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await OpenAsync(path);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().Project(field).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -402,7 +426,7 @@ public static class ScenarioSet
     /// </remarks>
     public static async Task<long> ScatteredTake(string path, long count, long stride)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await OpenAsync(path);
 
         int wanted = 0;
         long[] indices = new long[count];
@@ -436,7 +460,7 @@ public static class ScenarioSet
             Expr.Ge(Expr.Field(Field), Expr.Literal(FilterLiteral.From(low))),
             Expr.Lt(Expr.Field(Field), Expr.Literal(FilterLiteral.From(low + width))));
 
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await OpenAsync(path);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().Where(band).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -619,12 +643,28 @@ public static class ScenarioSet
             path,
             new VortexWriteOptions { WritePolicy = WritePolicy.None.WithDefault(index), IndexBudgetPerMille = 1_000_000 });
 
-    private static async Task<long> ReadAndWrite(string path, VortexWriteOptions? options)
+    private static Task<long> ReadAndWrite(string path, VortexWriteOptions? options) =>
+        ReadAndWrite(path, options, new DiscardSink());
+
+    /// <summary>The bytes the write-back of <paramref name="path"/> produces: what its time bought.</summary>
+    /// <param name="path">The file.</param>
+    /// <remarks>
+    /// Not a timed scenario. A writer can be fast by compressing less, and a ratio of write times
+    /// read alone would not say so; the per-encoding write table prints these beside its times.
+    /// </remarks>
+    public static async Task<long> WrittenBytes(string path)
+    {
+        DiscardSink sink = new DiscardSink();
+        await ReadAndWrite(path, null, sink);
+        return sink.Position;
+    }
+
+    private static async Task<long> ReadAndWrite(string path, VortexWriteOptions? options, DiscardSink sink)
     {
         // The writer compresses on as many threads as the scan reads on.
-        await using VortexFile source = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile source = await OpenAsync(path);
         await using VortexFileWriter writer = VortexFileWriter.Create(
-            new DiscardSink(),
+            sink,
             source.DType,
             (options ?? new VortexWriteOptions()) with { DegreeOfParallelism = ScanBuilder.DefaultDegreeOfParallelism });
 
@@ -642,8 +682,10 @@ public static class ScenarioSet
 
     /// <summary>A sink that counts bytes and keeps none of them.</summary>
     /// <remarks>
-    /// A write benchmark that measures the filesystem measures the filesystem, and `vxbench_write`
-    /// writes into a `Vec&lt;u8&gt;` for the same reason.
+    /// A write benchmark that measures where the bytes land measures the filesystem, or the
+    /// allocator. `vxbench_write` hands the reference's writer the same sink, its own `DiscardSink`:
+    /// it used to write into a `Vec&lt;u8&gt;` that grew to hold the whole file, a cost charged to
+    /// the reference alone.
     /// </remarks>
     public sealed class DiscardSink : ISegmentSink
     {

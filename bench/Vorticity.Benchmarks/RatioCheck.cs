@@ -90,6 +90,9 @@ internal static class RatioCheck
     /// </remarks>
     private const double Precision = 0.05;
 
+    /// <summary>Calls per split that decide which of the reference's splits an axis is timed under.</summary>
+    private const int SplitRounds = 5;
+
     /// <summary>Wall clock an axis may spend on rounds before it stops asking for more.</summary>
     private const double Budget = 10.0;
 
@@ -160,13 +163,14 @@ internal static class RatioCheck
     ///
     /// THE SCAN AXES COME IN PAIRS, AND EACH PAIR MEASURES TWO DIFFERENT QUESTIONS. Upstream's scan
     /// hands back arrays in the file's own encodings and `len()` answers from their metadata, so
-    /// nothing is decompressed; the .NET reader has no lazy state, because `CanonicalArena` is the
-    /// only representation it has. "full scan" and "projected scan, 1 of 5 columns" therefore drive
-    /// the Rust side through `execute::&lt;Canonical&gt;`, which is the comparison a decoder ratio
-    /// has to be built on. "full scan, upstream lazy" and "projected scan, upstream lazy" keep the
-    /// counting calls beside them, because "how long to get a stream of arrays you may never fully
-    /// read" is a real question about a real API -- it just is not the same question, and quoting
-    /// one as the other is what these pairs exist to prevent.
+    /// nothing is decompressed; the scan this bench runs on our side decodes every column it
+    /// delivers but a constant one, which stays one value and a row count. "full scan" and
+    /// "projected scan, 1 of 5 columns" therefore drive the Rust side to the same form (`plain` in
+    /// `tools/vxbench-rs/src/lib.rs`: canonical, a constant kept), which is the comparison a decoder
+    /// ratio has to be built on. "full scan, upstream lazy" and "projected scan, upstream lazy" keep
+    /// the counting calls beside them, because "how long to get a stream of arrays you may never
+    /// fully read" is a real question about a real API -- it just is not the same question, and
+    /// quoting one as the other is what these pairs exist to prevent.
     /// </remarks>
     private static readonly Axis[] Axes =
     [
@@ -221,11 +225,13 @@ internal static class RatioCheck
     internal static string? Page { get; set; }
 
     /// <summary>
-    /// The axes the page leaves out: Rust's scan without its decode, which asks another question
-    /// than ours, and the rewritten pairs, which judge a writer's choice rather than a reader.
+    /// The axes the page leaves out: Rust's scan without its decode, and a key-ordered read held to
+    /// a take of rows whose positions the reference is given, which ask another question than ours;
+    /// and the rewritten pairs, which judge a writer's choice rather than a reader.
     /// </summary>
     private static bool OnThePage(string axis) =>
         !axis.Contains("upstream lazy", StringComparison.Ordinal) &&
+        !axis.Contains("against a take", StringComparison.Ordinal) &&
         !axis.StartsWith("rewritten", StringComparison.Ordinal);
 
     /// <summary>Where the generated tables live, beside the throughput corpus.</summary>
@@ -377,11 +383,28 @@ internal static class RatioCheck
     /// `--recalibrate N` does the measuring: N passes, the max per axis, printed ready to paste.
     /// </para>
     /// <para>
-    /// The reference side decodes everything it is asked for: its four entry points (scan, threaded
-    /// scan, take, filtered scan) call `execute::&lt;RecursiveCanonical&gt;`, because
-    /// `execute::&lt;Canonical&gt;` stops as soon as the root array is one of twelve canonical kinds
-    /// -- `Struct`, `Map`, `ListView` and `Variant` among them -- and on a tabular file that is
-    /// before a single column has been decoded. `tools/vxbench-rs/src/lib.rs` carries the argument.
+    /// The reference side decodes everything it is asked for into the form our reader delivers: its
+    /// entry points that read values (scan, threaded scan, first batch, take, filtered scans) take
+    /// every split to `plain`, `execute::&lt;RecursiveCanonical&gt;` with a constant column kept as
+    /// one value, because `execute::&lt;Canonical&gt;` stops as soon as the root array is one of
+    /// twelve canonical kinds -- `Struct`, `Map`, `ListView` and `Variant` among them -- and on a
+    /// tabular file that is before a single column has been decoded. Both sides read a mapped file
+    /// where it lies, mapped anew at every call. `tools/vxbench-rs/src/lib.rs` carries the argument.
+    /// </para>
+    /// <para>
+    /// EVERY LINE WAS REBASED ON 2026-10-02, and the code had not moved: the harness had. Until then
+    /// the reference read its file with `open_path`, copying every segment it needed, while our
+    /// side read a mapping a previous round had left it; the reference expanded every constant
+    /// column, which our side keeps as one value; its writer wrote into a `Vec&lt;u8&gt;` while ours
+    /// counted bytes; the count axis decoded every column of every row kept, and the uncorrelated
+    /// key-order axis was given the positions of its rows; and every axis held it to its default
+    /// split, which on the million-row table decoded the one chunk ten times. Each was a cost on
+    /// Rust's side alone. The table was set with `--recalibrate 5 --rebase` under the corrected
+    /// harness, and each note says what the line was on the old one: `projected scan, 1 of 50
+    /// columns` rose from 0.071 to 0.757 and `full scan, 1M table` from 0.037 to 0.331, which is
+    /// what the old harness was worth on them, the second through the split the reference was held
+    /// to (`RustReader.FasterSplit`). Five passes, not three: two axes read in two modes, and three
+    /// passes had seen only the lower one.
     /// </para>
     /// <para>
     /// A line is replaced only when its ceiling does not rise. `--recalibrate` never raises a
@@ -401,31 +424,32 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Dictionary<string, Reference> References = new()
     {
-        ["full scan"] = new(0.312, 2, 0.018),   // 3 passes, spread 0.307-0.312; was 0.344, -9.2%
-        ["full scan, upstream lazy"] = new(0.438, 2, 0.022),   // 3 passes, spread 0.428-0.438; was 0.500, -12.4%
-        ["projected scan, 1 of 5 columns"] = new(0.409, 10, 0.144),   // 3 passes, spread 0.350-0.409; was 0.442, -7.6%
-        ["projected scan, upstream lazy"] = new(0.457, 10, 0.097),   // 3 passes, spread 0.412-0.457; was 0.484, -5.7%
-        ["open to first batch"] = new(0.084, 11, 0.062),   // 3 passes, spread 0.079-0.084; was 0.090, -7.0%
-        ["open, footer only"] = new(0.622, 35, 0.030),   // 3 passes, spread 0.603-0.622; was 0.724, -14.1%
-        ["read and write back"] = new(0.321, 1, 0.009),   // 3 passes, spread 0.373-0.384; held, not rebased: over its reference before this binary too
-        ["filtered scan, 1% band"] = new(0.211, 12, 0.029),   // 3 passes, spread 0.205-0.211; was 0.258, -18.1%
-        ["filtered scan, half the rows"] = new(0.259, 6, 0.049),   // 3 passes, spread 0.247-0.259; was 0.294, -11.8%
-        ["scattered take, 64 of 64 splits"] = new(0.205, 3, 0.013),   // 3 passes, spread 0.203-0.205; was 0.228, -9.9%
-        ["rewritten zoned, reference's"] = new(0.313, 2, 0.025),   // 3 passes, spread 0.305-0.313; was 0.356, -12.1%
-        ["rewritten zoned, ours"] = new(0.914, 2, 0.056),   // 3 passes, spread 0.863-0.914; was 1.089, -16.1%
-        ["rewritten high card, reference's"] = new(0.762, 32, 0.033),   // 3 passes, spread 0.736-0.762; was 0.920, -17.2%
-        ["rewritten high card, ours"] = new(0.842, 23, 0.008),   // 3 passes, spread 0.836-0.842; was 1.001, -15.8%
-        ["key order, sorted column, 1% band"] = new(0.718, 14, 0.057),   // 3 passes, spread 0.676-0.718; was 0.754, -4.8%
-        ["key order, uncorrelated, 64 rows"] = new(1.125, 8, 0.024),   // 3 passes, spread 1.098-1.125; was 1.262, -10.9%
-        ["count, exact cover, 1% band"] = new(0.627, 7, 0.100),   // 3 passes, spread 0.564-0.627; was 0.687, -8.8%
-        ["filtered scan, string equality, fsst"] = new(0.852, 5, 0.148),   // 3 passes, spread 0.726-0.852; was 0.898, -5.1%
-        ["filtered scan, string prefix, fsst"] = new(1.237, 2, 0.039),   // 3 passes, spread 1.189-1.237; was 1.237, 0.0%
-        ["filtered scan, string equality, dict"] = new(1.908, 10, 0.121),   // 3 passes, spread 1.677-1.908; was 1.933, -1.3%
-        ["filtered scan, string prefix, dict"] = new(1.365, 7, 0.020),   // 3 passes, spread 1.337-1.365; was 1.573, -13.2%
-        ["filtered scan, band, runend"] = new(0.968, 14, 0.013),   // 3 passes, spread 0.956-0.968; was 1.301, -25.6%
-        ["filtered scan, band, bitpacked"] = new(0.924, 14, 0.019),   // 3 passes, spread 0.906-0.924; was 1.257, -26.5%
-        ["full scan, 1M table"] = new(0.037, 1, 0.011),   // 3 passes, spread 0.036-0.037; was 0.060, -39.1%
-        ["projected scan, 1 of 50 columns"] = new(0.071, 13, 0.199),   // 3 passes, spread 0.057-0.071; was 0.088, -19.2%
+        ["full scan"] = new(0.318, 2, 0.047),   // 5 passes, spread 0.304-0.319; was 0.312 on the old harness, +1.9%; held at a three-pass calibration of this binary, the five peaking at 0.319
+        ["full scan, upstream lazy"] = new(0.477, 3, 0.017),   // 5 passes, spread 0.469-0.477; was 0.438 on the old harness, +8.9%
+        ["projected scan, 1 of 5 columns"] = new(0.509, 11, 0.127),   // 5 passes, spread 0.444-0.509; was 0.409 on the old harness, +24.4%
+        ["projected scan, upstream lazy"] = new(0.542, 12, 0.022),   // 5 passes, spread 0.531-0.542; was 0.457 on the old harness, +18.6%
+        ["open to first batch"] = new(0.071, 10, 0.052),   // 5 passes, spread 0.068-0.072; was 0.084 on the old harness, -15.5%; held at a three-pass calibration of this binary, the five peaking at 0.072
+        ["open, footer only"] = new(0.632, 33, 0.029),   // 5 passes, spread 0.614-0.632; was 0.622 on the old harness, +1.6%
+        ["read and write back"] = new(0.341, 1, 0.046),   // 5 passes, spread 0.326-0.341; was 0.321 on the old harness, +6.2%
+        ["filtered scan, 1% band"] = new(0.309, 11, 0.196),   // 5 passes, spread 0.248-0.309; was 0.211 on the old harness, +46.4%
+        ["filtered scan, half the rows"] = new(0.300, 7, 0.060),   // 5 passes, spread 0.282-0.300; was 0.259 on the old harness, +15.8%
+        ["scattered take, 64 of 64 splits"] = new(0.227, 4, 0.020),   // 5 passes, spread 0.223-0.227; was 0.205 on the old harness, +10.7%
+        ["rewritten zoned, reference's"] = new(0.319, 2, 0.016),   // 5 passes, spread 0.316-0.321; was 0.313 on the old harness, +1.9%; held at a three-pass calibration of this binary, the five peaking at 0.321
+        ["rewritten zoned, ours"] = new(0.924, 2, 0.031),   // 5 passes, spread 0.910-0.939; was 0.914 on the old harness, +1.1%; held at a three-pass calibration of this binary, the five peaking at 0.939
+        ["rewritten high card, reference's"] = new(0.959, 27, 0.025),   // 5 passes, spread 0.936-0.959; was 0.762 on the old harness, +25.9%
+        ["rewritten high card, ours"] = new(0.994, 23, 0.027),   // 5 passes, spread 0.968-0.994; was 0.842 on the old harness, +18.1%
+        ["key order, sorted column, 1% band"] = new(0.795, 12, 0.025),   // 5 passes, spread 0.775-0.795; was 0.718 on the old harness, +10.7%
+        ["key order, uncorrelated, 64 rows"] = new(0.880, 6, 0.072),   // 5 passes, spread 0.850-0.914; was 1.125 on the old harness, -21.8%; held at a three-pass calibration of this binary, the five peaking at 0.914
+        ["count, exact cover, 1% band"] = new(0.965, 9, 0.141),   // 5 passes, spread 0.828-0.965; was 0.627 on the old harness, +53.9%
+        ["key order, uncorrelated, against a take"] = new(1.381, 9, 0.133),   // 5 passes, spread 1.197-1.381; new
+        ["filtered scan, string equality, fsst"] = new(0.745, 4, 0.187),   // 5 passes, spread 0.605-0.745; was 0.852 on the old harness, -12.6%
+        ["filtered scan, string prefix, fsst"] = new(1.078, 2, 0.015),   // 5 passes, spread 1.138-1.153; was 1.237 on the old harness, -12.9%; held at a three-pass calibration of this binary, the five peaking at 1.153
+        ["filtered scan, string equality, dict"] = new(0.943, 11, 0.059),   // 5 passes, spread 0.888-0.943; was 1.908 on the old harness, -50.6%
+        ["filtered scan, string prefix, dict"] = new(0.943, 9, 0.030),   // 5 passes, spread 0.915-0.943; was 1.365 on the old harness, -30.9%
+        ["filtered scan, band, runend"] = new(1.017, 14, 0.021),   // 5 passes, spread 0.996-1.017; was 0.968 on the old harness, +5.1%
+        ["filtered scan, band, bitpacked"] = new(1.074, 13, 0.079),   // 5 passes, spread 0.989-1.074; was 0.924 on the old harness, +16.2%
+        ["full scan, 1M table"] = new(0.331, 1, 0.081),   // 5 passes, spread 0.304-0.331; was 0.037 on the old harness, +794.6%
+        ["projected scan, 1 of 50 columns"] = new(0.757, 20, 0.061),   // 5 passes, spread 0.710-0.757; was 0.071 on the old harness, +966.2%
     };
 
     /// <summary>
@@ -437,7 +461,7 @@ internal static class RatioCheck
     /// to gate on one; and a recalibration under another binary may raise a reference with
     /// <c>--rebase</c>, because the denominator changed, as a new k changes it.
     /// </remarks>
-    private static readonly string? CalibratedShim = "5ee2b9027373";
+    private static readonly string? CalibratedShim = "49dacfd9920c";
 
     /// <summary>
     /// How far under its reference a ratio may sit before it is called stale.
@@ -785,30 +809,35 @@ internal static class RatioCheck
         StringBuilder text = new StringBuilder();
         text.AppendLine("## In one process, after warm-up");
         text.AppendLine();
-        text.AppendLine("Both readers called in turn in one process, Rust's through a C ABI, against one clock: at least");
+        text.AppendLine("Both readers called in turn in one process, Rust's through a C ABI, against one clock. A round times");
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-            $"{MinRounds} rounds after a {WarmupBudget.TotalSeconds:F0}-second warm-up, until the 95 % interval of the per-round ratios is within"));
+            $"both, and its speedup is Rust's time over Vorticity's: at least {MinRounds} rounds after a {WarmupBudget.TotalSeconds:F0}-second warm-up,"));
         text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-            $"{Precision:P0} of their median. Our side runs on the JIT, warmed. Each axis is a question the `--ratio-check` gate"));
-        text.AppendLine("holds to a ceiling; what each one reads and asks is in");
+            $"until the 95 % interval of their median is within {Precision:P0} of it. Our side runs on the JIT, warmed. Each"));
+        text.AppendLine("call opens its file and maps it anew, on both sides, and asks both the same question. Each axis is");
+        text.AppendLine("one the `--ratio-check` gate holds to a ceiling; what each one reads and asks is in");
         text.AppendLine("[05-benchmarks.md](../design/05-benchmarks.md) §3.");
         text.AppendLine();
-        text.AppendLine("| axis | Vorticity, µs | Vortex Rust, µs | ratio | 95 % interval |");
+        text.AppendLine("| axis | Vorticity, µs | Vortex Rust, µs | speedup | 95 % interval |");
         text.AppendLine("|---|---:|---:|---:|---|");
         foreach ((string axis, Measurement m) in shown)
         {
             text.AppendLine(string.Create(CultureInfo.InvariantCulture,
-                $"| {axis} | {m.Ours:N1} | {m.Theirs:N1} | {m.Ratio.Median:F2}x | {m.Ratio.Low:F3} to {m.Ratio.High:F3} |"));
+                $"| {axis} | {m.Ours:N1} | {m.Theirs:N1} | {ResultsPage.Speedup(m.Speedup.Median)} | {ResultsPage.Figure(m.Speedup.Low)} to {ResultsPage.Figure(m.Speedup.High)} |"));
         }
 
         text.AppendLine();
-        List<(string Axis, Measurement Measured)> behind = [.. shown.Where(m => m.Measured.Ratio.Median >= 1).OrderByDescending(m => m.Measured.Ratio.Median)];
+        List<(string Axis, Measurement Measured)> behind = [.. shown.Where(m => m.Measured.Speedup.Median <= 1).OrderBy(m => m.Measured.Speedup.Median)];
         text.Append(string.Create(CultureInfo.InvariantCulture,
             $"Vorticity took less time on {shown.Count - behind.Count} of {shown.Count} axes."));
         text.AppendLine(behind.Count == 0
             ? string.Empty
             : string.Create(CultureInfo.InvariantCulture,
-                $" At 1.00x or above: {string.Join(", ", behind.Select(b => $"{b.Axis} ({b.Measured.Ratio.Median:F2}x)"))}."));
+                $" At 1.00x or below: {string.Join(", ", behind.Select(b => $"{b.Axis} ({ResultsPage.Speedup(b.Measured.Speedup.Median)})"))}."));
+        List<string> perChunk = [.. shown.Where(m => m.Measured.Split == RustReader.SplitPerChunk).Select(m => m.Axis)];
+        List<string> byDefault = [.. shown.Where(m => m.Measured.Split != RustReader.SplitPerChunk).Select(m => m.Axis)];
+        text.AppendLine(string.Create(CultureInfo.InvariantCulture,
+            $"Rust is timed under the faster of its two splits, axis by axis: one split per chunk on {perChunk.Count} of {shown.Count}, its default on {Report.Fewer(perChunk, byDefault, "; ")}."));
         text.AppendLine();
         text.AppendLine(ResultsPage.Provenance($"Vortex 0.86.1 through the C ABI of `tools/vxbench-rs`, binary {binary}"));
         return text.ToString();
@@ -1214,17 +1243,32 @@ internal static class RatioCheck
 
     /// <summary>The key-order group's axes, in the order they are reported.</summary>
     /// <remarks>
-    /// The index reads: `InKeyOrder` over a sorted column and over an uncorrelated one,
-    /// and a count answered by the exact cover. The Rust side has no key order and no index, so
-    /// each axis is held against the reference's answer to the same QUESTION of the file -- the
-    /// band scanned, the scattered rows taken -- which is the cost a caller would otherwise pay.
+    /// <para>
+    /// The index reads: `InKeyOrder` over a sorted column and over an uncorrelated one, and a count
+    /// answered by the exact cover. The Rust side has no key order and no index, so each of the
+    /// first three axes is held against the reference's answer to the same QUESTION of the file --
+    /// the rows of the band, or their count -- which is the cost a caller would otherwise pay. The
+    /// reference returns the band's rows in file order; on the sorted column that is key order, and
+    /// on the uncorrelated one sorting its 64 rows would add a microsecond.
+    /// </para>
+    /// <para>
+    /// THE FIRST VERSION ASKED THE REFERENCE EASIER OR HARDER QUESTIONS, and the page published
+    /// them as like for like. The uncorrelated axis gave it the positions of 64 rows to take, one
+    /// per split, which a key-ordered read has to find first; the count gave it a filtered scan
+    /// that decoded every column of every row kept, which a count does not ask for. The take is
+    /// kept, as the fourth axis, for what it is: the floor a key-ordered walk over scattered rows
+    /// cannot go under, a gate on our walk and not a comparison, so the page leaves it out.
+    /// </para>
+    /// <para>
     /// `full scan` stays the guard that the window driver slows nothing else.
+    /// </para>
     /// </remarks>
     private static readonly string[] KeyOrderNames =
     [
         "key order, sorted column, 1% band",
         "key order, uncorrelated, 64 rows",
         "count, exact cover, 1% band",
+        "key order, uncorrelated, against a take",
     ];
 
     /// <summary>Rows of the key-order file: 64 splits of 1 024, the scattered take's shape.</summary>
@@ -1262,12 +1306,17 @@ internal static class RatioCheck
             new Axis(
                 KeyOrderNames[1],
                 p => KeyOrderedBand(p, ShuffledField, low, TakeCount),
-                p => RustReader.Require(RustReader.Take(p, TakeCount, TakeStride), "take"),
+                p => RustReader.Require(RustReader.ScanFiltered(p, ShuffledField, low, TakeCount), "filtered scan"),
                 path),
             new Axis(
                 KeyOrderNames[2],
                 p => CoveredCount(p, ShuffledField, low, NarrowBand),
-                p => RustReader.Require(RustReader.ScanFiltered(p, ShuffledField, low, NarrowBand), "filtered scan"),
+                p => RustReader.Require(RustReader.CountFiltered(p, ShuffledField, low, NarrowBand), "count"),
+                path),
+            new Axis(
+                KeyOrderNames[3],
+                p => KeyOrderedBand(p, ShuffledField, low, TakeCount),
+                p => RustReader.Require(RustReader.Take(p, TakeCount, TakeStride), "take"),
                 path),
         ];
         return axes.FindAll(a => selected(a.Name));
@@ -1330,7 +1379,7 @@ internal static class RatioCheck
     /// <summary>A band delivered in the key order of its own column.</summary>
     private static async Task<long> KeyOrderedBand(string path, string field, long low, long width)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().InKeyOrder(field).Where(Band(field, low, width)).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -1344,7 +1393,7 @@ internal static class RatioCheck
     /// <summary>A band counted: the runs answer it, and no data segment is read.</summary>
     private static async Task<long> CoveredCount(string path, string field, long low, long width)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
         return await file.ScanBuilder().Where(Band(field, low, width)).CountAsync().ConfigureAwait(false);
     }
 
@@ -1546,7 +1595,7 @@ internal static class RatioCheck
     /// <summary>Scans keeping the rows whose text column equals a needle.</summary>
     private static async Task<long> StringEquality(string path, string needle)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
         long rows = 0;
         VortexExpr predicate = Expr.Eq(
             Expr.Field(StringField), Expr.Literal(FilterLiteral.From(needle)));
@@ -1562,7 +1611,7 @@ internal static class RatioCheck
     /// <summary>Scans keeping the rows whose text column starts with a prefix.</summary>
     private static async Task<long> StringPrefix(string path, string prefix)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
         long rows = 0;
         VortexExpr predicate = Expr.StartsWith(
             Expr.Field(StringField), FilterLiteral.From(prefix));
@@ -1714,7 +1763,7 @@ internal static class RatioCheck
                 Expr.Field(RunEndField),
                 Expr.Literal(FilterLiteral.From(RunEndBandLow + RunEndBandWidth))));
 
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().Where(band).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -1853,17 +1902,26 @@ internal static class RatioCheck
 
         Warmed[axis.Name] = warmOurs.Count;
 
+        // The reference's faster split on this axis's file, once both are warm: a figure one of its
+        // own settings beats is not its figure (RustReader.FasterSplit).
+        long split = RustReader.FasterSplit(() => axis.Theirs(path), SplitRounds);
+
         // k FROM THE WARM-UP'S TAIL, not from its last call. k is data now that a reference records
         // it (see `Reference`), and a k read off one timing jittered by a call or two on the short
         // axes -- 18 one run, 19 the next -- which would have let `--rebase` mistake noise for an
-        // estimator change. The second half of the warm-up is the part that is actually warm.
+        // estimator change. The second half of the warm-up is the part that is actually warm; the
+        // warm-up timed the reference's default split, so a file it reads faster otherwise is timed
+        // again under the split it keeps.
         double hotOurs = Median([.. warmOurs.Skip(warmOurs.Count / 2)]);
-        double hotTheirs = Median([.. warmTheirs.Skip(warmTheirs.Count / 2)]);
+        double hotTheirs = split == RustReader.SplitDefault
+            ? Median([.. warmTheirs.Skip(warmTheirs.Count / 2)])
+            : Median([.. Enumerable.Range(0, SplitRounds).Select(_ => Time(axis.Theirs, path, 1))]);
 
         // On the FASTER side, because it is the faster side that needs the grouping: see `Repeats`.
         int repeats = Repeats(Math.Min(hotOurs, hotTheirs), hotOurs + hotTheirs);
 
         List<double> ratios = [];
+        List<double> speedups = [];
         List<double> mine = [];
         List<double> rust = [];
         long stop = Stopwatch.GetTimestamp() + (long)(Budget * Stopwatch.Frequency);
@@ -1886,6 +1944,7 @@ internal static class RatioCheck
             mine.Add(ours);
             rust.Add(theirs);
             ratios.Add(theirs == 0 ? 0 : ours / theirs);
+            speedups.Add(ours == 0 ? 0 : theirs / ours);
 
             if (round + 1 >= MinRounds)
             {
@@ -1898,16 +1957,24 @@ internal static class RatioCheck
             }
         }
 
-        return new Measurement(Median([.. mine]), Median([.. rust]), interval, repeats);
+        RustReader.Require(RustReader.SetSplit(RustReader.SplitDefault), "split");
+
+        // The page's figure is the same rounds read the other way, bootstrapped on their own: the
+        // inverse of a median of an even count, or of an interpolated bound, is not the median or
+        // the bound of the inverses.
+        Interval speedup = Statistics.Bootstrap(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(speedups));
+        return new Measurement(Median([.. mine]), Median([.. rust]), interval, speedup, repeats, split);
     }
 
     /// <summary>One axis measured: both sides, the ratio's interval, and how it was timed.</summary>
     /// <param name="Ours">Median microseconds per round on our side.</param>
     /// <param name="Theirs">Median microseconds per round on Rust's.</param>
-    /// <param name="Ratio">The median per-round ratio and its 95% interval.</param>
+    /// <param name="Ratio">The median per-round ratio and its 95% interval: what the gate holds.</param>
+    /// <param name="Speedup">The median per-round speedup, Rust's time over ours, and its 95% interval: what the page prints.</param>
     /// <param name="Repeats">Calls per timed round.</param>
+    /// <param name="Split">The reference's split the axis was timed under, the faster of its two.</param>
     private readonly record struct Measurement(
-        double Ours, double Theirs, Interval Ratio, int Repeats);
+        double Ours, double Theirs, Interval Ratio, Interval Speedup, int Repeats, long Split);
 
     /// <summary>Calls per timed round, so that one round clears the timer's noise floor.</summary>
     /// <param name="microseconds">One call on the FASTER of the two sides.</param>
@@ -2003,7 +2070,7 @@ internal static class RatioCheck
 
     private static async Task<long> ScanProjected(string path)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
         long rows = 0;
         await foreach (RecordBatch batch in file.ScanBuilder().Project(Field).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
@@ -2016,7 +2083,7 @@ internal static class RatioCheck
 
     private static async Task<long> FirstBatch(string path)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -2040,7 +2107,7 @@ internal static class RatioCheck
 
     private static async Task<long> FooterOnly(string path)
     {
-        await using VortexFile file = await VortexFile.OpenAsync(path, CancellationToken.None);
+        await using VortexFile file = await Vorticity.Bench.Scenarios.ScenarioSet.OpenAsync(path);
         return file.RowCount;
     }
 }

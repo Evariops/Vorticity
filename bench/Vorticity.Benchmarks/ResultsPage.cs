@@ -55,6 +55,27 @@ internal static class ResultsPage
             $"{RuntimeInformation.OSDescription}; {RuntimeInformation.FrameworkDescription}" +
             $"{(reference is null ? string.Empty : "; " + reference)}; commit {Commit()}, {DateTime.UtcNow:yyyy-MM-dd HH:mm} UTC.*");
 
+    /// <summary>
+    /// A speedup as every page prints it: the other side's time over the measured side's, so that
+    /// above 1.00x the measured side took less.
+    /// </summary>
+    /// <remarks>
+    /// The gates hold the inverse, our time over Rust's, against a ceiling; a page is read by
+    /// someone asking how much faster, and a figure that grows with the answer reads one way.
+    /// </remarks>
+    internal static string Speedup(double speedup) => Figure(speedup) + "x";
+
+    /// <summary>
+    /// A speedup's figure without its unit, for the bounds of an interval: two decimals under ten,
+    /// one under a hundred, none above, about three significant figures wherever it lands.
+    /// </summary>
+    internal static string Figure(double speedup) => speedup switch
+    {
+        < 10 => speedup.ToString("F2", CultureInfo.InvariantCulture),
+        < 100 => speedup.ToString("F1", CultureInfo.InvariantCulture),
+        _ => speedup.ToString("N0", CultureInfo.InvariantCulture),
+    };
+
     /// <summary>The processor, by name: "Arm64" does not say which one a ratio belongs to.</summary>
     internal static string Processor()
     {

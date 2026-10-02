@@ -23,6 +23,8 @@ fn main() -> ExitCode {
         eprintln!("--threads: a multi-threaded runtime of <n> workers, or of one per processor; without it,");
         eprintln!("the single-threaded runtime, all work on the calling thread.");
         eprintln!("--repeat: run the scenario <n> times and print `round=<i> rows=<n> work_us=<time>` for each.");
+        eprintln!("--split per-chunk: one split per chunk of the file instead of upstream's default, which cuts");
+        eprintln!("a chunk of more than 100 000 rows into splits of 100 000.");
         eprintln!("prints `rows=<n> work_us=<action time inside the process> threads=<workers>` and exits 0,");
         eprintln!("or a reason and exits 1.");
         return ExitCode::from(2);
@@ -38,8 +40,18 @@ fn main() -> ExitCode {
         Err(code) => return code,
     };
 
+    let split = match take_split(&mut args) {
+        Ok(split) => split,
+        Err(code) => return code,
+    };
+
     if vxbench::vxbench_set_threads(threads) != 0 {
         eprintln!("--threads: {threads} is not a thread count");
+        return ExitCode::FAILURE;
+    }
+
+    if vxbench::vxbench_set_split(split) != 0 {
+        eprintln!("--split: {split} is not a split mode");
         return ExitCode::FAILURE;
     }
 
@@ -196,6 +208,29 @@ fn take_repeat(args: &mut Vec<String>) -> Result<usize, ExitCode> {
         Ok(repeat) if repeat > 0 => Ok(repeat),
         _ => {
             eprintln!("--repeat: '{value}' is not a positive count");
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// Takes `--split per-chunk` or `--split default` out of the arguments: the mode
+/// `vxbench_set_split` takes, upstream's default (0) when it is absent.
+fn take_split(args: &mut Vec<String>) -> Result<i64, ExitCode> {
+    let Some(at) = args.iter().position(|arg| arg == "--split") else {
+        return Ok(0);
+    };
+
+    let Some(value) = args.get(at + 1).cloned() else {
+        eprintln!("--split: expected `per-chunk` or `default`");
+        return Err(ExitCode::FAILURE);
+    };
+
+    args.drain(at..at + 2);
+    match value.as_str() {
+        "default" => Ok(0),
+        "per-chunk" => Ok(1),
+        _ => {
+            eprintln!("--split: '{value}' is neither `per-chunk` nor `default`");
             Err(ExitCode::FAILURE)
         }
     }

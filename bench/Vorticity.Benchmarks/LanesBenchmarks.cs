@@ -47,8 +47,13 @@ public class LanesBenchmarks
     private string _path = string.Empty;
 
     [GlobalSetup]
-    public void Setup() => _path = Corpus.Dataset(
-        "VORTICITY_BENCH_DATA", "containers/zoned_many_zones_nulls");
+    public void Setup()
+    {
+        // Here and not only in Program.Main: under `--full` the class runs in a process of
+        // BenchmarkDotNet's, which never enters ours.
+        Scenarios.OpenFilesCold();
+        _path = Corpus.Dataset("VORTICITY_BENCH_DATA", "containers/zoned_many_zones_nulls");
+    }
 
     [Benchmark(Baseline = true, Description = "ours, n lanes")]
     public long Ours() => Set.ScanAllLanes(_path, Lanes).GetAwaiter().GetResult();

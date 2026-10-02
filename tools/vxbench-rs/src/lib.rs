@@ -10,9 +10,15 @@
 //! on the calling thread, or on a multi-threaded Tokio runtime of as many workers as our reader has
 //! lanes: a ratio between a reader held to one core and one free to use them all measures a
 //! threading model, not a decoder.
+//!
+//! Every call does the work our side does, and no other: the file mapped anew and read where it
+//! lies ([`open`]), every value decoded to the form our reader hands its caller ([`plain`]), the
+//! bytes a writer produces counted and dropped ([`DiscardSink`]).
 use std::collections::HashMap;
 use std::ffi::CStr;
 use std::future::Future;
+use std::future::ready;
+use std::io;
 use std::os::raw::c_char;
 use std::panic::AssertUnwindSafe;
 use std::panic::catch_unwind;
@@ -27,12 +33,19 @@ use futures::StreamExt;
 use futures::pin_mut;
 use vortex::VortexSessionDefault;
 use vortex::array::ArrayRef;
+use vortex::array::Canonical;
+use vortex::array::Columnar;
+use vortex::array::ExecutionCtx;
 use vortex::array::IntoArray;
 use vortex::array::RecursiveCanonical;
 use vortex::array::VortexSessionExecute;
+use vortex::array::arrays::ConstantArray;
+use vortex::array::arrays::StructArray;
+use vortex::array::arrays::struct_::StructDataParts;
 use vortex::buffer::Buffer;
 use vortex::scan::strict_sorted_buffer::StrictSortedBuffer;
 use vortex::error::VortexResult;
+use vortex::error::vortex_bail;
 use vortex::expr::Expression;
 use vortex::expr::and;
 use vortex::expr::eq;
@@ -44,10 +57,14 @@ use vortex::expr::gt_eq;
 use vortex::expr::root;
 use vortex::expr::select;
 use vortex::file::OpenOptionsSessionExt;
+use vortex::file::VortexFile;
 use vortex::file::WriteOptionsSessionExt;
+use vortex::io::IoBuf;
+use vortex::io::VortexWrite;
 use vortex::io::runtime::single::block_on;
 use vortex::io::session::RuntimeSessionExt;
 use vortex::layout::scan::scan_builder::ScanBuilder;
+use vortex::layout::scan::split_by::SplitBy;
 use vortex::array::stream::ArrayStreamExt;
 use vortex::dtype::DType;
 use vortex::scalar::DecimalValue;
@@ -71,6 +88,40 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 /// Workers of the multi-threaded runtime every call runs on, or 0 for the single-threaded one.
 static THREADS: AtomicUsize = AtomicUsize::new(0);
+
+/// How every later scan splits the file: [`SPLIT_DEFAULT`] or [`SPLIT_PER_CHUNK`].
+static SPLIT: AtomicUsize = AtomicUsize::new(SPLIT_DEFAULT);
+
+/// Upstream's default, `SplitBy::LayoutSubSplitting`: a chunk of more than 100 000 rows cut into
+/// splits of 100 000.
+const SPLIT_DEFAULT: usize = 0;
+
+/// `SplitBy::Layout`: one split per chunk of the file.
+const SPLIT_PER_CHUNK: usize = 1;
+
+/// Sets how every later scan splits the file: 0 for upstream's default, 1 for one split per chunk.
+///
+/// Neither is the faster on every file, and the difference is the reader's, not a decoder's. Under
+/// the default, the flat reader decodes a chunk whole again for every split it is cut into: ten
+/// times on a chunk of a million rows, every file of the per-encoding corpus, ten times its
+/// strings validated where its arrays check them. One split per chunk decodes it once, but
+/// materializes a chunk of smaller arrays in one piece, where a split of it would have been a view
+/// of one of them. The harnesses time both on one core and keep the faster, file by file: a figure
+/// for the reference that one of its own settings beats is not its figure. On the multi-threaded
+/// runtime they keep the default, whose splits are how the reference spreads a chunk over the cores.
+///
+/// # Safety
+/// None; takes a mode and returns 0, or a negative error for an unknown one.
+#[unsafe(no_mangle)]
+pub extern "C" fn vxbench_set_split(mode: i64) -> i64 {
+    match mode {
+        0 => SPLIT.store(SPLIT_DEFAULT, Ordering::Relaxed),
+        1 => SPLIT.store(SPLIT_PER_CHUNK, Ordering::Relaxed),
+        _ => return ERR_BAD_PATH,
+    }
+
+    0
+}
 
 /// The multi-threaded runtimes, one per worker count asked for, each built once: a runtime built per
 /// call would charge every call for starting its threads.
@@ -124,7 +175,99 @@ where
     }
 }
 
-/// The scan's splits, each decoded to its canonical form on its own task, as row counts.
+/// The scan of `file` every timed entry point starts from, split as [`vxbench_set_split`] last said.
+fn scan(file: &VortexFile) -> VortexResult<ScanBuilder<ArrayRef>> {
+    let scan = file.scan()?;
+    Ok(match SPLIT.load(Ordering::Relaxed) {
+        SPLIT_PER_CHUNK => scan.with_split_by(SplitBy::Layout),
+        _ => scan,
+    })
+}
+
+/// Opens `path` the way our reader opens a file from a path: mapped into memory and read where it
+/// lies, through `open_buffer` over the mapping.
+///
+/// It was `open_path`, which reads every segment it needs into buffers of its own at each open,
+/// while our reader maps the file: a column stored in its plain form cost the reference a copy of
+/// its bytes and our side a view of pages nothing touched, and the decoding tables published that
+/// difference of I/O as a difference of decoders. A mapping per call, dropped with the file, as our
+/// side's bench session maps every open anew and keeps nothing once it is closed.
+fn open(session: &VortexSession, path: &str) -> VortexResult<VortexFile> {
+    let file = std::fs::File::open(path)?;
+    // SAFETY: the bench's files are written before any call reads them and are not changed while
+    // one does.
+    let mapping = unsafe { memmap2::Mmap::map(&file)? };
+    session.open_options().open_buffer(mapping)
+}
+
+/// One array in the form our reader hands its caller: every value decoded to its plain form, except
+/// that a constant whose value is not null stays one value and a length when its type is one our
+/// reader keeps that way.
+///
+/// Our reader keeps such a column as a constant node and expands it only when the caller asks for
+/// its values (`ConstantCanonicalizer`); `RecursiveCanonical` alone would expand it into a full
+/// buffer, a million rows written to say one number, and charge the reference for work our side
+/// does not do. `Columnar` is upstream's own form for exactly this, a canonical array or a constant.
+/// A null constant and a boolean one are expanded on both sides.
+///
+/// A struct's fields take the same form, as our reader keeps a constant column of a table; deeper
+/// than that, `RecursiveCanonical` decides, as it did before.
+fn plain(array: ArrayRef, ctx: &mut ExecutionCtx) -> VortexResult<ArrayRef> {
+    match array.execute::<Columnar>(ctx)? {
+        Columnar::Constant(constant) if kept_as_constant(&constant) => Ok(constant.into_array()),
+        Columnar::Constant(constant) => {
+            Ok(constant.into_array().execute::<RecursiveCanonical>(ctx)?.0.into_array())
+        }
+        Columnar::Canonical(Canonical::Struct(table)) => {
+            let rows = table.len();
+            let StructDataParts {
+                struct_fields,
+                fields,
+                validity,
+            } = table.into_data_parts();
+            let fields = fields
+                .into_iter()
+                .map(|field| plain(field, ctx))
+                .collect::<VortexResult<Vec<_>>>()?;
+
+            // SAFETY: every field keeps its dtype and its length; only its encoding changed.
+            Ok(unsafe {
+                StructArray::new_unchecked(fields, struct_fields, rows, validity.execute(ctx)?)
+            }
+            .into_array())
+        }
+        Columnar::Canonical(canonical) => Ok(canonical
+            .into_array()
+            .execute::<RecursiveCanonical>(ctx)?
+            .0
+            .into_array()),
+    }
+}
+
+/// Whether our reader keeps this constant as one value and a length: a value that is not null, of
+/// a primitive, decimal, string or bytes type, of an extension type stored as one, or a variant,
+/// which our reader keeps as two constant byte columns.
+fn kept_as_constant(constant: &ConstantArray) -> bool {
+    let scalar = constant.scalar();
+    if scalar.is_null() {
+        return false;
+    }
+
+    let dtype = match scalar.dtype() {
+        DType::Extension(extension) => extension.storage_dtype().clone(),
+        dtype => dtype.clone(),
+    };
+    matches!(
+        dtype,
+        DType::Primitive(_, _)
+            | DType::Decimal(_, _)
+            | DType::Utf8(_)
+            | DType::Binary(_)
+            | DType::Variant(_)
+    )
+}
+
+/// The scan's splits, each in its plain form ([`plain`]) on its own task, as row counts.
 ///
 /// Decoding on the split's task rather than in the loop that drains the stream is what lets a
 /// multi-threaded runtime decode on every core; on the single-threaded one it is the same work on
@@ -137,20 +280,19 @@ fn decoded(
     scan.map(move |array: ArrayRef| {
         let mut ctx = session.create_execution_ctx();
         let rows = array.len() as i64;
-        let _canonical: RecursiveCanonical = array.execute(&mut ctx)?;
+        let _plain = plain(array, &mut ctx)?;
         Ok(rows)
     })
     .into_stream()
 }
 
-/// The scan's splits, each decoded to its canonical form on its own task, as arrays: what a writer
-/// is given to encode, the rows as our reader delivers them to ours.
+/// The scan's splits, each in its plain form on its own task, as arrays: what a writer is given to
+/// encode, the rows as our reader delivers them to ours.
 fn canonical(scan: ScanBuilder<ArrayRef>, session: &VortexSession) -> ScanBuilder<ArrayRef> {
     let session = session.clone();
     scan.map(move |array: ArrayRef| {
         let mut ctx = session.create_execution_ctx();
-        let canonical: RecursiveCanonical = array.execute(&mut ctx)?;
-        Ok(canonical.0.into_array())
+        plain(array, &mut ctx)
     })
 }
 
@@ -182,8 +324,8 @@ pub extern "C" fn vxbench_noop() -> i64 {
 pub unsafe extern "C" fn vxbench_scan_all(path: *const c_char) -> i64 {
     run(path, |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(path).await?;
-            let stream = file.scan()?.into_array_stream()?;
+            let file = open(&session, &path)?;
+            let stream = scan(&file)?.into_array_stream()?;
             pin_mut!(stream);
             let mut rows: i64 = 0;
             while let Some(array) = stream.next().await {
@@ -216,8 +358,8 @@ pub unsafe extern "C" fn vxbench_scan_all(path: *const c_char) -> i64 {
 pub unsafe extern "C" fn vxbench_scan_canonical(path: *const c_char) -> i64 {
     run(path, |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(&path).await?;
-            total(decoded(file.scan()?, &session)?).await
+            let file = open(&session, &path)?;
+            total(decoded(scan(&file)?, &session)?).await
         })
     })
 }
@@ -244,7 +386,8 @@ pub unsafe extern "C" fn vxbench_scan_canonical_threads(path: *const c_char, thr
     run(path, move |session, path| {
         runtime(threads as usize)?.block_on(async move {
             let session = session.with_tokio();
-            let file = session.open_options().open_path(&path).await?;
+            let file = open(&session, &path)?;
+            // Upstream's own splits: this runtime always has workers to spread them over.
             total(decoded(file.scan()?, &session)?).await
         })
     })
@@ -262,13 +405,13 @@ pub unsafe extern "C" fn vxbench_scan_projected(path: *const c_char, field: *con
 
     run(path, move |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(path).await?;
+            let file = open(&session, &path)?;
             // Bound against the file's own dtype, the way the reference's own tests do it: an
             // unbound expression is refused by the scan builder's signature.
             let projection = select([field.as_str()], root())
                 .optimize_recursive(file.dtype())
                 .and_then(|expr| expr.bind(file.dtype()))?;
-            let stream = file.scan()?.with_projection(projection).into_array_stream()?;
+            let stream = scan(&file)?.with_projection(projection).into_array_stream()?;
             pin_mut!(stream);
             let mut rows: i64 = 0;
             while let Some(array) = stream.next().await {
@@ -299,16 +442,20 @@ pub unsafe extern "C" fn vxbench_scan_projected_canonical(
 
     run(path, move |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(path).await?;
+            let file = open(&session, &path)?;
             let projection = select([field.as_str()], root())
                 .optimize_recursive(file.dtype())
                 .and_then(|expr| expr.bind(file.dtype()))?;
-            total(decoded(file.scan()?.with_projection(projection), &session)?).await
+            total(decoded(scan(&file)?.with_projection(projection), &session)?).await
         })
     })
 }
 
-/// Opens `path` and reads one batch, returning its row count: the time-to-first-batch axis.
+/// Opens `path` and reads one batch in its plain form, returning its row count: the
+/// time-to-first-batch axis.
+///
+/// The batch is decoded, as our side's first batch is: it used to be handed back in the file's
+/// encodings, its length read off their metadata, a lighter first batch than ours.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
@@ -316,15 +463,40 @@ pub unsafe extern "C" fn vxbench_scan_projected_canonical(
 pub unsafe extern "C" fn vxbench_open_first_batch(path: *const c_char) -> i64 {
     run(path, |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(path).await?;
-            let stream = file.scan()?.into_array_stream()?;
+            let file = open(&session, &path)?;
+            let stream = decoded(scan(&file)?, &session)?;
             pin_mut!(stream);
             match stream.next().await {
-                Some(array) => Ok(array?.len() as i64),
+                Some(rows) => rows,
                 None => Ok(0),
             }
         })
     })
+}
+
+/// A sink that counts the bytes it is handed and keeps none of them: the .NET side's
+/// `DiscardSink`, byte for byte the same work.
+///
+/// It was a `Vec<u8>`, which is not a discarding sink: it grows to hold the whole file, and every
+/// doubling allocates, copies what it held and faults fresh pages in, a cost the .NET side never
+/// paid. The write ratios carried it on Rust's side alone.
+struct DiscardSink {
+    written: u64,
+}
+
+impl VortexWrite for DiscardSink {
+    fn write_all<B: IoBuf>(&mut self, buffer: B) -> impl Future<Output = io::Result<B>> + Send {
+        self.written += buffer.bytes_init() as u64;
+        ready(Ok(buffer))
+    }
+
+    fn flush(&mut self) -> impl Future<Output = io::Result<()>> + Send {
+        ready(Ok(()))
+    }
+
+    fn shutdown(&mut self) -> impl Future<Output = io::Result<()>> + Send {
+        ready(Ok(()))
+    }
 }
 
 /// Reads `path` and writes it back out with the default strategy, returning the rows written.
@@ -332,13 +504,12 @@ pub unsafe extern "C" fn vxbench_open_first_batch(path: *const c_char) -> i64 {
 /// The read is inside the measurement on both sides, the same file through the same reader, and
 /// `vxbench_scan_canonical` gives the figure to subtract when the read is a large share.
 ///
-/// The output goes to an in-memory sink rather than to disk, as the .NET side's `DiscardSink` does:
-/// a write benchmark that measures the filesystem measures the filesystem.
+/// The output goes to a [`DiscardSink`], as the .NET side's goes to its own: a write benchmark
+/// that measures where the bytes land measures the filesystem, or the allocator.
 ///
-/// The writer is given each split decoded to its canonical form, which is what our reader hands
-/// ours: re-encoding from the file's own encodings is not the work our side does. Given them as
-/// stored, the reference's writer also refuses a numeric column stored as zstd, which it cannot
-/// append to a builder.
+/// The writer is given each split in the form our reader hands ours ([`plain`]): re-encoding from
+/// the file's own encodings is not the work our side does. Given them as stored, the reference's
+/// writer also refuses a numeric column stored as zstd, which it cannot append to a builder.
 ///
 /// # Safety
 /// `path` must be a valid NUL-terminated C string for the duration of the call.
@@ -346,16 +517,43 @@ pub unsafe extern "C" fn vxbench_open_first_batch(path: *const c_char) -> i64 {
 pub unsafe extern "C" fn vxbench_write(path: *const c_char) -> i64 {
     run(path, |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(&path).await?;
-            let rows = file.row_count() as i64;
-            let stream = canonical(file.scan()?, &session).into_array_stream()?;
-            session
-                .write_options()
-                .write(Vec::<u8>::new(), stream)
-                .await?;
+            let (rows, _) = write_discarding(&session, &path).await?;
             Ok(rows)
         })
     })
+}
+
+/// The bytes `vxbench_write` writes for `path`: what its time bought, which a write ratio read alone
+/// leaves out. Not a timing axis.
+///
+/// # Safety
+/// `path` must be a valid NUL-terminated C string for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_write_bytes(path: *const c_char) -> i64 {
+    run(path, |session, path| {
+        drive(session, |session| async move {
+            let (_, bytes) = write_discarding(&session, &path).await?;
+            Ok(bytes)
+        })
+    })
+}
+
+/// Reads `path` and writes it to a [`DiscardSink`], returning the rows and the bytes written.
+async fn write_discarding(session: &VortexSession, path: &str) -> VortexResult<(i64, i64)> {
+    let file = open(session, path)?;
+    let rows = file.row_count() as i64;
+    let stream = canonical(scan(&file)?, session).into_array_stream()?;
+    let mut sink = DiscardSink { written: 0 };
+    let summary = session.write_options().write(&mut sink, stream).await?;
+    if summary.size() != sink.written {
+        vortex_bail!(
+            "the writer reported {} bytes and handed the sink {}",
+            summary.size(),
+            sink.written
+        );
+    }
+
+    Ok((rows, sink.written as i64))
 }
 
 /// Reads `path` and writes it to `destination` with the default strategy, returning the rows
@@ -376,9 +574,9 @@ pub unsafe extern "C" fn vxbench_rewrite(path: *const c_char, destination: *cons
 
     run(path, move |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(&path).await?;
+            let file = open(&session, &path)?;
             let rows = file.row_count() as i64;
-            let stream = canonical(file.scan()?, &session).into_array_stream()?;
+            let stream = canonical(scan(&file)?, &session).into_array_stream()?;
             let mut bytes = Vec::<u8>::new();
             session.write_options().write(&mut bytes, stream).await?;
             std::fs::write(&destination, &bytes)?;
@@ -402,14 +600,14 @@ pub unsafe extern "C" fn vxbench_take(path: *const c_char, count: i64, stride: i
 
     run(path, move |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(&path).await?;
+            let file = open(&session, &path)?;
             let rows_in_file = file.row_count();
             let indices: Buffer<u64> = (0..count as u64)
                 .map(|i| (i * stride as u64) + (stride as u64 / 2))
                 .filter(|&row| row < rows_in_file)
                 .collect();
             let selection = StrictSortedBuffer::try_new(indices)?;
-            total(decoded(file.scan()?.with_row_indices(selection), &session)?).await
+            total(decoded(scan(&file)?.with_row_indices(selection), &session)?).await
         })
     })
 }
@@ -435,7 +633,7 @@ pub unsafe extern "C" fn vxbench_scan_filtered(
 
     run(path, move |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(&path).await?;
+            let file = open(&session, &path)?;
             let predicate = and(
                 gt_eq(get_item(field.as_str(), root()), lit(lo)),
                 lt(get_item(field.as_str(), root()), lit(lo + width)),
@@ -443,7 +641,57 @@ pub unsafe extern "C" fn vxbench_scan_filtered(
             let filter = predicate
                 .optimize_recursive(file.dtype())
                 .and_then(|expr| expr.bind(file.dtype()))?;
-            total(decoded(file.scan()?.with_filter(filter), &session)?).await
+            total(decoded(scan(&file)?.with_filter(filter), &session)?).await
+        })
+    })
+}
+
+/// Counts the rows of `path` under `field >= lo AND field < lo + width`, decoding no column the
+/// count does not need.
+///
+/// The counterpart of our side's `CountAsync`, which answers a count without producing a batch: a
+/// projection of no column, so the scan evaluates the predicate, the one column it reads, and
+/// hands back lengths. The filtered scan above decodes every column of every row kept, which is
+/// not what a count asks; the count axis compared the two until this entry point replaced it.
+///
+/// # Safety
+/// `path` and `field` must be valid NUL-terminated C strings for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn vxbench_count_filtered(
+    path: *const c_char,
+    field: *const c_char,
+    lo: i64,
+    width: i64,
+) -> i64 {
+    let Some(field) = (unsafe { text(field) }) else {
+        return ERR_BAD_PATH;
+    };
+
+    run(path, move |session, path| {
+        drive(session, |session| async move {
+            let file = open(&session, &path)?;
+            let predicate = and(
+                gt_eq(get_item(field.as_str(), root()), lit(lo)),
+                lt(get_item(field.as_str(), root()), lit(lo + width)),
+            );
+            let filter = predicate
+                .optimize_recursive(file.dtype())
+                .and_then(|expr| expr.bind(file.dtype()))?;
+            let nothing = select(Vec::<&str>::new(), root())
+                .optimize_recursive(file.dtype())
+                .and_then(|expr| expr.bind(file.dtype()))?;
+            let stream = file
+                .scan()?
+                .with_filter(filter)
+                .with_projection(nothing)
+                .into_array_stream()?;
+            pin_mut!(stream);
+            let mut rows: i64 = 0;
+            while let Some(array) = stream.next().await {
+                rows += array?.len() as i64;
+            }
+
+            Ok(rows)
         })
     })
 }
@@ -515,7 +763,7 @@ where
 {
     run(path, move |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(&path).await?;
+            let file = open(&session, &path)?;
             let column = if field.is_empty() {
                 root()
             } else {
@@ -525,7 +773,7 @@ where
             let filter = predicate
                 .optimize_recursive(file.dtype())
                 .and_then(|expr| expr.bind(file.dtype()))?;
-            total(decoded(file.scan()?.with_filter(filter), &session)?).await
+            total(decoded(scan(&file)?.with_filter(filter), &session)?).await
         })
     })
 }
@@ -556,8 +804,8 @@ pub unsafe extern "C" fn vxbench_scan_checksum(path: *const c_char) -> i64 {
     run(path, |session, path| {
         drive(session, |session| async move {
             let mut ctx = session.create_execution_ctx();
-            let file = session.open_options().open_path(&path).await?;
-            let array = file.scan()?.into_array_stream()?.read_all().await?;
+            let file = open(&session, &path)?;
+            let array = scan(&file)?.into_array_stream()?.read_all().await?;
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
             let dtype = array.dtype().clone();
             for row in 0..array.len() {
@@ -689,7 +937,7 @@ fn hash_decimal(value: &DecimalValue, hash: &mut u64) {
 pub unsafe extern "C" fn vxbench_open_only(path: *const c_char) -> i64 {
     run(path, |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(path).await?;
+            let file = open(&session, &path)?;
             Ok(file.row_count() as i64)
         })
     })
@@ -716,8 +964,8 @@ static SESSION: OnceLock<VortexSession> = OnceLock::new();
 pub unsafe extern "C" fn vxbench_batch_count(path: *const c_char) -> i64 {
     run(path, |session, path| {
         drive(session, |session| async move {
-            let file = session.open_options().open_path(path).await?;
-            let stream = file.scan()?.into_array_stream()?;
+            let file = open(&session, &path)?;
+            let stream = scan(&file)?.into_array_stream()?;
             pin_mut!(stream);
             let mut batches: i64 = 0;
             while let Some(array) = stream.next().await {

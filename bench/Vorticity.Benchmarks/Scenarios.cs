@@ -72,6 +72,14 @@ internal static class Scenarios
             p => RustReader.Require(RustReader.Write(p), "write")),
     ];
 
+    /// <summary>
+    /// Has every scenario open its file through a session that keeps no mapping once the file is
+    /// closed, so that each round maps its file anew, as the reference does at each call: see
+    /// <see cref="Set.Session"/>. The Native AOT runner sets the same session for itself.
+    /// </summary>
+    internal static void OpenFilesCold() =>
+        Set.Session ??= VortexSession.Create(options => options.MappedFileCacheCount = 0);
+
     /// <summary>The scenario <paramref name="name"/> names, or null.</summary>
     /// <param name="name">A `--profile` name.</param>
     internal static Scenario? ByName(string name)

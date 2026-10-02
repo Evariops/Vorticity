@@ -33,6 +33,63 @@ internal static partial class RustReader
     [LibraryImport(Library, EntryPoint = "vxbench_noop")]
     internal static partial long NoOp();
 
+    /// <summary>Upstream's default split: a chunk of more than 100 000 rows cut into splits of 100 000.</summary>
+    internal const long SplitDefault = 0;
+
+    /// <summary>One split per chunk of the file.</summary>
+    internal const long SplitPerChunk = 1;
+
+    /// <summary>Sets how every later scan of the reference splits its file.</summary>
+    /// <param name="mode"><see cref="SplitDefault"/> or <see cref="SplitPerChunk"/>.</param>
+    /// <returns>Zero, or negative for an unknown mode.</returns>
+    /// <remarks>
+    /// Neither is the reference's faster on every file: under the default its flat reader decodes a
+    /// chunk whole again for each split it is cut into, ten times on the corpus's chunks of a million
+    /// rows; one split per chunk decodes it once but materializes a chunk of smaller arrays in one
+    /// piece. On one core the harnesses time both and keep the faster, file by file
+    /// (<see cref="FasterSplit"/>); `vxbench_set_split` in `tools/vxbench-rs` has the measurements.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_set_split")]
+    internal static partial long SetSplit(long mode);
+
+    /// <summary>
+    /// Times <paramref name="call"/> under both of the reference's splits, sets the faster, and
+    /// returns it.
+    /// </summary>
+    /// <param name="call">The reference's side of an axis, on its file.</param>
+    /// <param name="rounds">Timed calls per split, alternating, after one of each to warm them.</param>
+    /// <returns>The split now set: the one whose median call took less.</returns>
+    /// <remarks>
+    /// A figure for the reference that one of its own settings beats is not its figure, and which
+    /// one wins depends on the file, so the choice is measured on the spot rather than written down.
+    /// The calls alternate so that drift falls on both.
+    /// </remarks>
+    internal static long FasterSplit(Func<long> call, int rounds)
+    {
+        ArgumentNullException.ThrowIfNull(call);
+        double[][] times = [new double[rounds], new double[rounds]];
+        for (int round = -1; round < rounds; round++)
+        {
+            for (int mode = 0; mode < 2; mode++)
+            {
+                Require(SetSplit(mode), "split");
+                long start = System.Diagnostics.Stopwatch.GetTimestamp();
+                call();
+                double elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMicroseconds;
+                if (round >= 0)
+                {
+                    times[mode][round] = elapsed;
+                }
+            }
+        }
+
+        Array.Sort(times[0]);
+        Array.Sort(times[1]);
+        long faster = times[SplitPerChunk][rounds / 2] < times[SplitDefault][rounds / 2] ? SplitPerChunk : SplitDefault;
+        Require(SetSplit(faster), "split");
+        return faster;
+    }
+
     /// <summary>
     /// Opens a file and walks every batch of every column, WITHOUT decompressing.
     /// </summary>
@@ -54,10 +111,12 @@ internal static partial class RustReader
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>
     /// <returns>The row count, or negative on failure.</returns>
     /// <remarks>
-    /// The .NET reader has no lazy state: <c>CanonicalArena</c> is the only representation it has,
-    /// so a batch is decompressed by the time its row count exists. A ratio built on
-    /// <see cref="ScanAll"/> therefore compares a scan that decompresses against one that does not,
-    /// on every compressed encoding -- which on the 1M-row axis was most of what the per-encoding
+    /// The scan this bench runs on our side decodes every column by the time its row count exists,
+    /// with one exception: a constant column stays one value and a row count. The reference takes
+    /// the same form, upstream's `Columnar` (`plain` in `tools/vxbench-rs/src/lib.rs`): it used to
+    /// expand every constant through `RecursiveCanonical`, which our side never does. A ratio built
+    /// on <see cref="ScanAll"/> compares a scan that decompresses against one that does not, on
+    /// every compressed encoding -- which on the 1M-row axis was most of what the per-encoding
     /// ratios were measuring.
     /// </remarks>
     [LibraryImport(Library, EntryPoint = "vxbench_scan_canonical", StringMarshalling = StringMarshalling.Utf8)]
@@ -76,6 +135,16 @@ internal static partial class RustReader
     [LibraryImport(Library, EntryPoint = "vxbench_write", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long Write(string path);
 
+    /// <summary>The bytes <see cref="Write"/> writes for <paramref name="path"/>.</summary>
+    /// <param name="path">The file to round-trip, as a UTF-8 C string.</param>
+    /// <returns>The bytes the reference's writer produced, or negative on failure.</returns>
+    /// <remarks>
+    /// Not a timing axis: what a write's time bought. A writer can be fast by compressing less, and
+    /// a ratio of times read alone would not say so.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_write_bytes", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long WriteBytes(string path);
+
     /// <summary>Scans under <c>field &gt;= lo AND field &lt; lo + width</c>, canonicalizing.</summary>
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>
     /// <param name="field">The root field the band applies to; must be an i64.</param>
@@ -90,6 +159,20 @@ internal static partial class RustReader
     /// </remarks>
     [LibraryImport(Library, EntryPoint = "vxbench_scan_filtered", StringMarshalling = StringMarshalling.Utf8)]
     internal static partial long ScanFiltered(string path, string field, long lo, long width);
+
+    /// <summary>Counts the rows under <c>field &gt;= lo AND field &lt; lo + width</c>, decoding no column it does not need.</summary>
+    /// <param name="path">The file to count, as a UTF-8 C string.</param>
+    /// <param name="field">The root field the band applies to; must be an i64.</param>
+    /// <param name="lo">The band's inclusive lower bound.</param>
+    /// <param name="width">The band's width; the upper bound is exclusive.</param>
+    /// <returns>The rows in the band, or negative on failure.</returns>
+    /// <remarks>
+    /// The counterpart of our `CountAsync`: a projection of no column, so the reference reads the
+    /// predicate's column and hands back lengths. <see cref="ScanFiltered"/> decodes every column of
+    /// every row kept, which a count does not ask for; the count axis compared the two before.
+    /// </remarks>
+    [LibraryImport(Library, EntryPoint = "vxbench_count_filtered", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial long CountFiltered(string path, string field, long lo, long width);
 
     /// <summary>Scans under <c>field = value</c> on a text column, canonicalizing.</summary>
     /// <param name="path">The file to scan, as a UTF-8 C string.</param>
