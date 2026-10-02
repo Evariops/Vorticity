@@ -158,7 +158,14 @@ public sealed class FlatLayoutDecodeCountTests
         }
     }
 
-    /// <summary>A TAKE on one oversized chunk decodes it ONCE, not once per wanted row.</summary>
+    /// <summary>
+    /// A TAKE on one oversized chunk decodes it ONCE at most, not once per wanted row: the wanted
+    /// rows alone where its encoding selects them, the ranges around them where it decodes ranges.
+    /// </summary>
+    /// <param name="booleans">
+    /// A column of random booleans, whose encoding decodes ranges and cannot select; otherwise a
+    /// column of random integers, stored plain, which selects.
+    /// </param>
     /// <remarks>
     /// <para>
     /// THE THIRD FACE OF THE SAME DEFECT, and the last one to be seen. The scan left the quadratic
@@ -180,11 +187,20 @@ public sealed class FlatLayoutDecodeCountTests
     /// counter that caught the scan quadratic never covered the take, and a defect no instrument
     /// counts is a defect nobody sees.
     /// </para>
+    /// <para>
+    /// A plain integer column was the incompressible stream that fell back, until `vortex.primitive`
+    /// learned to gather its wanted rows out of the buffer as it lies; booleans now stand for the
+    /// encodings that cannot select. The take is one batch over the chunk since a take spans the
+    /// zones of a window that hold none of its rows, so the booleans decode the clusters around the
+    /// wanted rows, single rows here, rather than the chunk.
+    /// </para>
     /// </remarks>
-    [Fact]
-    public async Task ATakeOnAnOversizedChunkMaterializesItOnce()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ATakeOnAnOversizedChunkMaterializesItOnce(bool booleans)
     {
-        string path = WriteOneChunk(Rows, compressible: false);
+        string path = WriteOneChunk(Rows, compressible: false, booleans);
         try
         {
             long[] wanted = [0, 1, 1023, 1024, 8191, 8192, 8193, 20_000, 33_333, Rows - 1];
@@ -227,8 +243,16 @@ public sealed class FlatLayoutDecodeCountTests
 
             Assert.Equal(expected, taken);
 
-            // EQUALITY, like the scan above: one decode of the chunk, whatever the take asks for.
-            Assert.Equal(Ideal, decoded);
+            // One decode of the chunk at most, whatever the take asks for, and never none: the wanted
+            // rows alone from an encoding that selects them, at least those from any other.
+            if (booleans)
+            {
+                Assert.InRange(decoded, wanted.Length, Ideal);
+            }
+            else
+            {
+                Assert.Equal(wanted.Length, decoded);
+            }
         }
         finally
         {
@@ -342,6 +366,7 @@ public sealed class FlatLayoutDecodeCountTests
     /// <see langword="true"/> for the values 0..n, which the writer turns into `vortex.sequence`.
     /// <see langword="false"/> for a xorshift stream, which no encoding here can model.
     /// </param>
+    /// <param name="booleans">The stream's low bits as a column of booleans, rather than integers.</param>
     /// <remarks>
     /// Built straight into an arena rather than scanned out of a corpus file, because a scan never
     /// yields a batch above 8192 rows and the whole point is a chunk that does.
@@ -352,11 +377,37 @@ public sealed class FlatLayoutDecodeCountTests
     /// counter read zero. The defect lives on the encodings that fall back, which is what a stream
     /// nothing can model produces.
     /// </remarks>
-    private static string WriteOneChunk(int rows, bool compressible = true)
+    private static string WriteOneChunk(int rows, bool compressible = true, bool booleans = false)
     {
         DTypeArena types = new DTypeArena();
         CanonicalArena arena = new CanonicalArena();
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        if (booleans)
+        {
+            DType flag = types.Bool(Nullability.NonNullable);
+            DType flags = types.Struct(["v"], [flag], Nullability.NonNullable);
+            VortexBuffer bits = arena.Allocate((rows + 7) / 8, 8, out Span<byte> packed);
+            ulong next = 0x2545F4914F6CDD1DUL;
+            for (int i = 0; i < packed.Length; i++)
+            {
+                next ^= next << 13;
+                next ^= next >> 7;
+                next ^= next << 17;
+                packed[i] = (byte)next;
+            }
+
+            int flagColumn = arena.AddBool(flag, rows, Validity.NonNullable, bits, 0);
+            int flagRoot = arena.AddStruct(flags, rows, Validity.NonNullable, [flagColumn]);
+            string flagPath = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(), $"vorticity-flatdecode-{Guid.NewGuid():N}.vortex");
+            using (RecordBatch batch = new RecordBatch(arena, flagRoot, 0))
+            {
+                WriteAsync(flagPath, flags, batch).GetAwaiter().GetResult();
+            }
+
+            return flagPath;
+        }
+
         DType schema = types.Struct(["v"], [i64], Nullability.NonNullable);
 
         VortexBuffer values = arena.Allocate(rows * sizeof(long), sizeof(long), out Span<byte> destination);

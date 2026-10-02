@@ -599,18 +599,26 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>
-    /// Extends a split of a take over the splits after it that hold taken rows too, up to the end
-    /// of the window the plan puts it in, so the run is read as one batch.
+    /// Extends a split of a take over the splits after it, up to the last one before the end of the
+    /// window the plan puts it in that holds taken rows, so the window's taken rows are read as one
+    /// batch.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A take is cut zone by zone so that a zone holding none of its rows is neither read nor
     /// decoded, which leaves a sparse take a split per row or two, each paying a batch, a walk of
-    /// the layout and a trip through the lanes. Consecutive zones that hold taken rows read the
-    /// same chunks, the plan's spans ending where any column's chunk does, and decode the same
-    /// rows or frames as one split or as several, so they are one; the first zone without a taken
-    /// row ends the run, as the window does. On several lanes, so does the
-    /// <see cref="TakeRunRows"/>th taken row: a take of a few chunks would otherwise be a split a
-    /// chunk, fewer than the lanes.
+    /// the layout and a trip through the lanes. The zones of one window lie in the chunks of one
+    /// span, the plan's spans ending where any column's chunk does, so a run reads the same
+    /// segments however many of them it covers; and an encoding decodes the rows a run selects, or
+    /// the window that holds them, whichever zones lie between. A zone that holds no taken row is
+    /// therefore spanned rather than ending the run, and decoded by nothing: the run ends at the
+    /// last zone of the window that holds one, and at a dead zone, which the mask says no row of
+    /// is wanted.
+    /// </para>
+    /// <para>
+    /// On several lanes the <see cref="TakeRunRows"/>th taken row ends the run too: a take of a few
+    /// chunks would otherwise be a split a chunk, fewer than the lanes.
+    /// </para>
     /// </remarks>
     private void WidenTake(ref RowRange split)
     {
@@ -619,24 +627,26 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         long end = split.Start - lead + span;
         int most = _lanes.Length > 1 ? TakeRunRows : int.MaxValue;
         int held = take.CountIn(split, ref _takeAt);
+        SplitCursor probe = _cursor;
+        long reach = split.End;
         while (held < most)
         {
-            SplitCursor probe = _cursor;
-            if (!probe.TryNext(out RowRange next) || next.Start != split.End || next.End > end ||
+            if (!probe.TryNext(out RowRange next) || next.Start != reach || next.End > end ||
                 (_live is not null && !_live.AnyLive(next)))
             {
                 return;
             }
 
+            reach = next.End;
             int rows = take.CountIn(next, ref _takeAt);
             if (rows == 0)
             {
-                return;
+                continue;
             }
 
             NotePruned(next);
             held += rows;
-            split = new RowRange(split.Start, next.End);
+            split = new RowRange(split.Start, reach);
             _cursor = probe;
         }
     }

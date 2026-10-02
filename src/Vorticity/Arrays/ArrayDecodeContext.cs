@@ -231,17 +231,38 @@ internal sealed class ArrayDecodeContext
     /// </summary>
     /// <param name="node">The parent node.</param>
     /// <param name="childIndex">0-based child position.</param>
-    internal bool ChildSelectsByRow(in ArrayNode node, int childIndex)
+    /// <param name="childDType">The child's DType.</param>
+    internal bool ChildSelectsByRow(in ArrayNode node, int childIndex, DType childDType)
     {
         ArrayNode child = node.GetChild(childIndex);
         ArrayDecoder decoder = ArrayDecoderTable.Require(_scan, child.Encoding, child.EncodingSpecIndex);
-        return decoder.SelectsByRow && decoder.SelectsWithoutFullDecodeOf(this, in child);
+        return decoder.SelectsByRow && decoder.SelectsWithoutFullDecodeOf(this, in child, childDType);
     }
 
     /// <summary>Whether <paramref name="node"/> reaches a selection of its rows without decoding the rest.</summary>
     /// <param name="node">The node.</param>
-    internal bool SelectsWithoutFullDecode(in ArrayNode node) =>
-        ArrayDecoderTable.Require(_scan, node.Encoding, node.EncodingSpecIndex).SelectsWithoutFullDecodeOf(this, in node);
+    /// <param name="dtype">The DType it decodes to.</param>
+    internal bool SelectsWithoutFullDecode(in ArrayNode node, DType dtype) =>
+        ArrayDecoderTable.Require(_scan, node.Encoding, node.EncodingSpecIndex).SelectsWithoutFullDecodeOf(this, in node, dtype);
+
+    /// <summary>
+    /// Whether child <paramref name="childIndex"/> of <paramref name="node"/> reaches a selection of
+    /// its rows without decoding the rest.
+    /// </summary>
+    /// <param name="node">The parent node.</param>
+    /// <param name="childIndex">0-based child position.</param>
+    /// <param name="childDType">The child's DType.</param>
+    /// <remarks>
+    /// What a parent that pushes a selection into its children asks of each. A child that does not
+    /// would be decoded whole again by every batch of a take, where the reader's retained chunk
+    /// decodes it once; and one that decodes to views is no exception, since its decode can still
+    /// walk every row it holds, a string column checking each value is UTF-8.
+    /// </remarks>
+    internal bool ChildSelectsWithoutFullDecode(in ArrayNode node, int childIndex, DType childDType)
+    {
+        ArrayNode child = node.GetChild(childIndex);
+        return SelectsWithoutFullDecode(in child, childDType);
+    }
 
     /// <summary>Whether child <paramref name="childIndex"/> of <paramref name="node"/> decodes a range of its rows.</summary>
     /// <param name="node">The parent node.</param>
@@ -554,6 +575,65 @@ internal sealed class ArrayDecodeContext
         }
 
         return ClassifyValidityBits(bits.Bits.Span, bits.BitOffset, length) switch
+        {
+            ValidityBitmapShape.AllClear => Validity.AllInvalid,
+            ValidityBitmapShape.AllSet => Validity.AllValid,
+            _ => Validity.Bitmap(decoded),
+        };
+    }
+
+    /// <summary>
+    /// The validity of the rows at <paramref name="wanted"/> of <paramref name="node"/>, read as
+    /// <see cref="DecodeValidity"/> reads the whole and then gathered: the validity child's wanted
+    /// rows selected, and only those classified.
+    /// </summary>
+    /// <param name="node">The array node.</param>
+    /// <param name="firstValidityChildIndex">Where the validity child sits, when present.</param>
+    /// <param name="nullability">The node's declared nullability.</param>
+    /// <param name="length">The node's whole row count.</param>
+    /// <param name="wanted">Row indices, strictly ascending, all in <c>[0, length)</c>.</param>
+    /// <remarks>
+    /// The whole bitmap, classified, then filtered and classified again, is what a selection
+    /// decoding its node whole would produce; classifying the selected bits alone gives the same
+    /// collapse, at the cost of the rows wanted rather than of every row the node holds.
+    /// </remarks>
+    public Validity DecodeValiditySelected(
+        in ArrayNode node, int firstValidityChildIndex, Nullability nullability, int length, ReadOnlySpan<int> wanted)
+    {
+        int childCount = node.ChildCount;
+        if (childCount == firstValidityChildIndex)
+        {
+            return Validity.FromNullability(nullability);
+        }
+
+        if (childCount != firstValidityChildIndex + 1)
+        {
+            ArraysThrow.Format(
+                $"An array with validity has {firstValidityChildIndex} or " +
+                $"{firstValidityChildIndex + 1} children; this one has {childCount}.");
+        }
+
+        DType boolType = Types.Bool(Nullability.NonNullable);
+        int decoded = DecodeChildSelected(in node, firstValidityChildIndex, boolType, length, wanted);
+
+        CanonicalNode bits = Canonical.GetNode(decoded);
+        if (bits.Kind != CanonicalKind.Bool)
+        {
+            ArraysThrow.Format($"A validity child decoded to {bits.Kind}, not Bool.");
+        }
+
+        if (bits.Length != wanted.Length)
+        {
+            ArraysThrow.Format(
+                $"A validity child selected {bits.Length} rows where {wanted.Length} were wanted.");
+        }
+
+        if (wanted.IsEmpty)
+        {
+            return Validity.AllValid;
+        }
+
+        return ClassifyValidityBits(bits.Bits.Span, bits.BitOffset, wanted.Length) switch
         {
             ValidityBitmapShape.AllClear => Validity.AllInvalid,
             ValidityBitmapShape.AllSet => Validity.AllValid,
