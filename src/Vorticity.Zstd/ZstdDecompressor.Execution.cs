@@ -416,20 +416,27 @@ public sealed partial class ZstdDecompressor
     }
 
     /// <summary>
-    /// Whether a sequence fits the room proven for copies past their end, and takes one 16-byte copy
-    /// of literals and one of match, 16 or more apart: one condition, the comparisons combined with
-    /// <c>&amp;</c>, which the JIT turns into one chain of conditional compares and one branch.
+    /// Whether a common sequence fits the room proven for copies past their end, and takes one
+    /// 16-byte copy of literals and one of match, 16 or more apart: one condition, the comparisons
+    /// combined with <c>&amp;</c>, which the JIT turns into one chain of conditional compares and one
+    /// branch.
     /// </summary>
+    /// <remarks>
+    /// The literals need no test of their own: a literal length without extra bits, as in a common
+    /// sequence, is a code from 0 to 15 (code 16 is the first with an extra bit), which is its value.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool FitsShortCopies(
         ref byte frameStart, ref byte fastLimit, ref byte litEnd, ref byte litAfter, ref byte matchStart, ref byte matchEnd,
-        nint litLength, nint matchLength, nuint offset) =>
-        !Unsafe.IsAddressGreaterThan(ref matchEnd, ref fastLimit)
-        & !Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd)
-        & (offset <= (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart))
-        & (litLength <= 16)
-        & (matchLength <= 16)
-        & (offset >= 16);
+        nint litLength, nint matchLength, nuint offset)
+    {
+        Debug.Assert(litLength <= 15);
+        return !Unsafe.IsAddressGreaterThan(ref matchEnd, ref fastLimit)
+            & !Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd)
+            & (offset <= (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart))
+            & (matchLength <= 16)
+            & (offset >= 16);
+    }
 
     /// <summary>The three states after a sequence: libzstd's ZSTD_updateFseStateWithDInfo, in order.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
