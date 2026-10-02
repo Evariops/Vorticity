@@ -1,0 +1,18 @@
+<Project>
+
+  <!-- Library-only properties, decided once the project has said what it is. -->
+  <PropertyGroup Condition="'$(OutputType)' != 'Exe'">
+    <IsAotCompatible Condition="'$(IsAotCompatible)' == ''">true</IsAotCompatible>
+    <IsTrimmable Condition="'$(IsTrimmable)' == ''">true</IsTrimmable>
+    <EnableAotAnalyzer Condition="'$(EnableAotAnalyzer)' == ''">true</EnableAotAnalyzer>
+    <EnableTrimAnalyzer Condition="'$(EnableTrimAnalyzer)' == ''">true</EnableTrimAnalyzer>
+    <EnableSingleFileAnalyzer Condition="'$(EnableSingleFileAnalyzer)' == ''">true</EnableSingleFileAnalyzer>
+  </PropertyGroup>
+
+  <!-- Deterministic source paths are for what ships. Elsewhere they would rewrite every
+       [CallerFilePath] to /_/, and the tests find their data by walking up from their own source. -->
+  <PropertyGroup Condition="'$(IsPackable)' != 'true'">
+    <DeterministicSourcePaths>false</DeterministicSourcePaths>
+  </PropertyGroup>
+
+</Project>

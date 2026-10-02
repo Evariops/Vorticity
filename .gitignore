@@ -1,0 +1,25 @@
+# ---- .NET build output ----
+bin/
+obj/
+artifacts/
+*.user
+*.binlog
+
+# ---- NuGet ----
+*.nupkg
+*.snupkg
+
+# ---- Test output ----
+TestResults/
+*.trx
+
+# ---- BenchmarkDotNet ----
+BenchmarkDotNet.Artifacts/
+
+# ---- Native reference build (tools/native-ref/build.sh) ----
+tools/native-ref/out/
+
+# ---- Editors / OS ----
+.vs/
+.idea/
+.DS_Store

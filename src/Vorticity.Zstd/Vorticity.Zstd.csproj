@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Vorticity.Zstd</RootNamespace>
+    <AssemblyName>Vorticity.Zstd</AssemblyName>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Description>A Zstandard (RFC 8878) decompressor in fully managed C#: no native code, no P/Invoke.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Hashing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Vorticity.Zstd.Tests" />
+    <InternalsVisibleTo Include="Vorticity.Zstd.Benchmarks" />
+    <InternalsVisibleTo Include="Vorticity.Zstd.Perf" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Vorticity.Zstd/Vorticity.Zstd.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Vorticity.Zstd.Tests/Vorticity.Zstd.Tests.csproj" />
+  </Folder>
+  <Folder Name="/bench/">
+    <Project Path="bench/Vorticity.Zstd.Benchmarks/Vorticity.Zstd.Benchmarks.csproj" />
+    <Project Path="bench/Vorticity.Zstd.Perf/Vorticity.Zstd.Perf.csproj" />
+  </Folder>
+</Solution>

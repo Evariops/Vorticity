@@ -1,0 +1,13 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The one runtime dependency, first-party: XxHash64 for the content checksum.
+         dotnet/runtime, MIT, not carried by the shared framework. -->
+    <PackageVersion Include="System.IO.Hashing" Version="10.0.12" />
+    <PackageVersion Include="xunit.v3" Version="4.0.1" />
+    <PackageVersion Include="BenchmarkDotNet" Version="0.16.0-preview.2" />
+  </ItemGroup>
+</Project>
