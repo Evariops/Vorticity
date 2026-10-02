@@ -505,6 +505,13 @@ public sealed partial class ZstdDecompressor
     /// copies past their end. It returns the records it took, the last one left pending in
     /// <paramref name="s"/> if it could not execute it.
     /// </summary>
+    /// <remarks>
+    /// The room is proven a batch of records at a time, as the pair loop proves its bitstream: a
+    /// record of 16 literals and a 16-byte match at most moves the output by 32 bytes and the
+    /// literals by 16, so the next (room / 32) such records fit, and each only checks its own shape.
+    /// Any other record takes the checked path and is charged to the batch for the room it took, a
+    /// new batch being proven only once it is spent.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static nint ExecuteRecordsFast(
         ref SequenceState s, ref ulong records, nint count, ref byte frameStart, ref byte fastLimit, ref byte litEnd)
@@ -517,14 +524,25 @@ public sealed partial class ZstdDecompressor
         ref byte lit = ref s.Lit;
         ref ulong record = ref records;
         ref ulong end = ref Unsafe.Add(ref records, RecordStride * count);
+        nint batch;
         nint litLength;
         nint matchLength;
         nuint offset;
         nuint offBase;
 
+    Batch:
+        batch = Math.Min(
+            Unsafe.ByteOffset(ref record, ref end) >> 5,
+            Math.Min(Unsafe.ByteOffset(ref dst, ref fastLimit) >> 5, Unsafe.ByteOffset(ref lit, ref litEnd) >> 4));
+        if (batch <= 0)
+        {
+            goto Stop;
+        }
+
     Loop:
-        litLength = (nint)(uint)record;
-        matchLength = (nint)(record >> 32);
+        // The lengths as the two halves of their word: no instruction to separate them.
+        litLength = (nint)Unsafe.As<ulong, uint>(ref record);
+        matchLength = (nint)Unsafe.Add(ref Unsafe.As<ulong, uint>(ref record), 1);
         offBase = (nuint)Unsafe.Add(ref record, 1);
         record = ref Unsafe.Add(ref record, RecordStride);
         if (offBase > 3)
@@ -536,21 +554,19 @@ public sealed partial class ZstdDecompressor
         // straight to its own end
         {
             offset = ResolveOffset(offBase - 1, litLength == 0, ref rep0, ref rep1, ref rep2);
-            ref byte litAfter = ref Unsafe.Add(ref lit, litLength);
             ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
-            ref byte matchEnd = ref Unsafe.Add(ref matchStart, matchLength);
-            if (FitsShortRecord(ref frameStart, ref fastLimit, ref litEnd, ref litAfter, ref matchStart, ref matchEnd, litLength, matchLength, offset))
+            if (IsShortRecord(ref frameStart, ref matchStart, litLength, matchLength, offset))
             {
                 Copy16(ref dst, ref lit);
                 Copy16(ref matchStart, ref Unsafe.Subtract(ref matchStart, offset));
-                dst = ref matchEnd;
-                lit = ref litAfter;
-                if (!Unsafe.AreSame(ref record, ref end))
+                dst = ref Unsafe.Add(ref matchStart, matchLength);
+                lit = ref Unsafe.Add(ref lit, litLength);
+                if (--batch != 0)
                 {
                     goto Loop;
                 }
 
-                goto Stop;
+                goto Batch;
             }
 
             goto Execute;
@@ -562,21 +578,19 @@ public sealed partial class ZstdDecompressor
             rep2 = rep1;
             rep1 = rep0;
             rep0 = offset;
-            ref byte litAfter = ref Unsafe.Add(ref lit, litLength);
             ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
-            ref byte matchEnd = ref Unsafe.Add(ref matchStart, matchLength);
-            if (FitsShortRecord(ref frameStart, ref fastLimit, ref litEnd, ref litAfter, ref matchStart, ref matchEnd, litLength, matchLength, offset))
+            if (IsShortRecord(ref frameStart, ref matchStart, litLength, matchLength, offset))
             {
                 Copy16(ref dst, ref lit);
                 Copy16(ref matchStart, ref Unsafe.Subtract(ref matchStart, offset));
-                dst = ref matchEnd;
-                lit = ref litAfter;
-                if (!Unsafe.AreSame(ref record, ref end))
+                dst = ref Unsafe.Add(ref matchStart, matchLength);
+                lit = ref Unsafe.Add(ref lit, litLength);
+                if (--batch != 0)
                 {
                     goto Loop;
                 }
 
-                goto Stop;
+                goto Batch;
             }
 
             goto Execute;
@@ -607,12 +621,15 @@ public sealed partial class ZstdDecompressor
 
             dst = ref matchEnd;
             lit = ref litAfter;
-            if (!Unsafe.AreSame(ref record, ref end))
+
+            // The room it took, in records of 32 bytes of output and 16 literals: at least one.
+            batch -= Max((litLength + matchLength + 31) >> 5, (litLength + 15) >> 4);
+            if (batch > 0)
             {
                 goto Loop;
             }
 
-            goto Stop;
+            goto Batch;
         }
 
     Pending:
@@ -630,20 +647,24 @@ public sealed partial class ZstdDecompressor
         return (nint)((nuint)Unsafe.ByteOffset(ref records, ref record) / (RecordStride * sizeof(ulong)));
     }
 
+    /// <summary>The larger of two values, by their difference's sign: no branch.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static nint Max(nint a, nint b)
+    {
+        nint difference = a - b;
+        return a - (difference & (difference >> 63));
+    }
+
     /// <summary>
-    /// <see cref="FitsShortCopies"/> for a record, whose literal length may take more than one copy:
-    /// it must be 16 at most too.
+    /// Whether a record within a batch (see <see cref="ExecuteRecordsFast"/>) takes one 16-byte copy of
+    /// literals and one of match, 16 or more apart, the match within the output: one condition.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool FitsShortRecord(
-        ref byte frameStart, ref byte fastLimit, ref byte litEnd, ref byte litAfter, ref byte matchStart, ref byte matchEnd,
-        nint litLength, nint matchLength, nuint offset) =>
-        !Unsafe.IsAddressGreaterThan(ref matchEnd, ref fastLimit)
-        & !Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd)
-        & (offset <= (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart))
+    private static bool IsShortRecord(ref byte frameStart, ref byte matchStart, nint litLength, nint matchLength, nuint offset) =>
+        (offset <= (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart))
+        & (litLength <= 16)
         & (matchLength <= 16)
-        & (offset >= 16)
-        & (litLength <= 16);
+        & (offset >= 16);
 
     /// <summary>
     /// The pending sequence <see cref="ExecuteRecordsFast"/> left, if any, then <paramref name="count"/>
