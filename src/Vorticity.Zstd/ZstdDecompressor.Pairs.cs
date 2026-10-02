@@ -608,15 +608,27 @@ public sealed partial class ZstdDecompressor
                 goto Pending;
             }
 
-            WildCopy16(ref dst, ref lit, litLength);
             ref byte match = ref Unsafe.Subtract(ref matchStart, offset);
-            if (offset >= 16)
+            // Unsigned compares, unlike the short path's: shared with it, the JIT would compute them
+            // once, as booleans, and the short path's compares would no longer chain.
+            if (((nuint)litLength < 17) & ((nuint)matchLength < 33) & (offset > 15))
             {
-                WildCopy16(ref matchStart, ref match, matchLength);
+                // A match of up to 32 bytes: two copies straight, no loop whose exit mispredicts.
+                Copy16(ref dst, ref lit);
+                Copy16(ref matchStart, ref match);
+                Copy16(ref Unsafe.Add(ref matchStart, 16), ref Unsafe.Add(ref match, 16));
             }
             else
             {
-                OverlapCopy(ref matchStart, ref match, offset, matchLength);
+                WildCopy16(ref dst, ref lit, litLength);
+                if (offset >= 16)
+                {
+                    WildCopy16(ref matchStart, ref match, matchLength);
+                }
+                else
+                {
+                    OverlapCopy(ref matchStart, ref match, offset, matchLength);
+                }
             }
 
             dst = ref matchEnd;
