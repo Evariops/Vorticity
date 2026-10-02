@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 
 namespace Vorticity.Zstd.Internal;
 
@@ -336,6 +337,7 @@ internal static class Fse
 
         return op;
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static byte Symbol(ref BackwardBitReader bits, ref int state, ReadOnlySpan<FseEntry> table, bool fast)
         {
             FseEntry entry = table[state];

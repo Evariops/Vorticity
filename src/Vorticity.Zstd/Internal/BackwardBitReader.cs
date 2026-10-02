@@ -137,6 +137,7 @@ internal ref struct BackwardBitReader
     public void SkipBits(int count) => _bitsConsumed += count;
 
     /// <summary>libzstd's <c>BIT_reloadDStream</c>: refills the container from the bytes below it.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public BitStreamStatus Reload()
     {
         if (_bitsConsumed > 64)
