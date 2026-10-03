@@ -48,9 +48,17 @@ internal sealed unsafe class NativeReference
 
     public static string LibraryPath => Path.Combine(BenchFrames.RepositoryRoot, "tools", "native-ref", "out", "libzstd_ref.dylib");
 
+    /// <summary>The same library built with threads (build.sh mt): zstdmt.</summary>
+    public static string ThreadedLibraryPath => Path.Combine(BenchFrames.RepositoryRoot, "tools", "native-ref", "out", "libzstd_mt.dylib");
+
     /// <summary>The reference library, or null when tools/native-ref/build.sh has not been run.</summary>
-    public static NativeReference? TryLoad() =>
-        File.Exists(LibraryPath) && NativeLibrary.TryLoad(LibraryPath, out nint library) ? new NativeReference(library) : null;
+    public static NativeReference? TryLoad() => TryLoad(LibraryPath);
+
+    /// <summary>The library built with threads, or null when tools/native-ref/build.sh mt has not been run.</summary>
+    public static NativeReference? TryLoadThreaded() => TryLoad(ThreadedLibraryPath);
+
+    private static NativeReference? TryLoad(string path) =>
+        File.Exists(path) && NativeLibrary.TryLoad(path, out nint library) ? new NativeReference(library) : null;
 
     /// <summary><c>ZSTD_decompressDCtx</c>: the decoded size, or -1 on an error.</summary>
     public int Decompress(ReadOnlySpan<byte> source, Span<byte> destination)
@@ -99,6 +107,31 @@ internal sealed unsafe class NativeReference
         if (prepared == 0 || _isError(_referenceDictionary(context, prepared)) != 0)
         {
             throw new InvalidOperationException("the reference could not prepare the dictionary");
+        }
+
+        return (source, destination) =>
+        {
+            fixed (byte* src = source)
+            fixed (byte* dst = destination)
+            {
+                nuint result = _compress2(context, dst, (nuint)destination.Length, src, (nuint)source.Length);
+                return _isError(result) != 0 ? -1 : (int)result;
+            }
+        };
+    }
+
+    /// <summary>
+    /// <c>ZSTD_compress2</c> at <paramref name="level"/> with <paramref name="workers"/> worker threads
+    /// (the threaded library only), on a context of its own kept from one call to the next.
+    /// </summary>
+    public Func<byte[], byte[], int> WithWorkers(int level, int workers)
+    {
+        const int CompressionLevel = 100;
+        const int NbWorkers = 400;
+        nint context = _createCompression();
+        if (_isError(_setParameter(context, CompressionLevel, level)) != 0 || _isError(_setParameter(context, NbWorkers, workers)) != 0)
+        {
+            throw new InvalidOperationException("this library has no workers");
         }
 
         return (source, destination) =>

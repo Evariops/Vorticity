@@ -40,6 +40,7 @@ public sealed partial class ZstdCompressor
         }
 
         int degree = Math.Min(maxDegreeOfParallelism > 0 ? maxDegreeOfParallelism : Environment.ProcessorCount, plan.Count);
+        using var slots = new SemaphoreSlim(degree);
         var jobs = new Task<(byte[] Buffer, int Size)>[plan.Count];
         int started = 0;
         int written = 0;
@@ -50,12 +51,14 @@ public sealed partial class ZstdCompressor
         {
             for (int flushed = 0; flushed < plan.Count; flushed++)
             {
-                // Up to the degree of jobs at once, the oldest written out first: zstdmt's flush.
-                while (started < plan.Count && started < flushed + degree)
+                // The jobs written out oldest first (zstdmt's flush), up to twice the degree of them
+                // started, the degree of them running: one held back by a slow core leaves the
+                // others running.
+                while (started < plan.Count && started < flushed + (2 * degree))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    int job = started++;
-                    jobs[job] = Task.Run(() => RunJob(plan, address, job), CancellationToken.None);
+                    jobs[started] = RunJobAsync(slots, plan, address, started);
+                    started++;
                 }
 
                 (byte[] buffer, int size) = await jobs[flushed].ConfigureAwait(false);
@@ -100,5 +103,19 @@ public sealed partial class ZstdCompressor
         }
 
         return fits ? written : throw new ArgumentException("The frame does not fit in the destination.", nameof(destination));
+    }
+
+    /// <summary>A job on the thread pool once one of the <paramref name="slots"/> is free, in the order asked.</summary>
+    private async Task<(byte[] Buffer, int Size)> RunJobAsync(SemaphoreSlim slots, JobPlan plan, nint address, int job)
+    {
+        await slots.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            return await Task.Run(() => RunJob(plan, address, job)).ConfigureAwait(false);
+        }
+        finally
+        {
+            slots.Release();
+        }
     }
 }

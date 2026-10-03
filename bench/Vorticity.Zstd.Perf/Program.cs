@@ -175,6 +175,12 @@ public static class Program
     /// </summary>
     private static bool RunCompress(string name, int passes, int reps, string? only, bool ab)
     {
+        int workers = name.LastIndexOf("-mt", StringComparison.Ordinal) is int at and > 0 && int.TryParse(name.AsSpan(at + 3), out int n) ? n : 0;
+        if (workers > 0)
+        {
+            return RunCompressInJobs(name, name[..name.LastIndexOf("-mt", StringComparison.Ordinal)], workers, passes, reps, only, ab);
+        }
+
         bool longDistance = name.EndsWith("-ldm", StringComparison.Ordinal);
         bool withDictionary = name.EndsWith("-dict", StringComparison.Ordinal);
         string frameName = longDistance ? name[..^4] : withDictionary ? name[..^5] : name;
@@ -241,6 +247,59 @@ public static class Program
         }
 
         Time(name, $"{content.Length} bytes at level {level} ->{sizes}", content, new byte[expected.Length], candidates, passes, reps);
+        return true;
+    }
+
+    /// <summary>
+    /// Compression in jobs (<c>-mt&lt;N&gt;</c>): Vorticity.Zstd's CompressAsync at a degree of N, against
+    /// libzstd with N workers (the library built with threads), which must write the same frame.
+    /// </summary>
+    private static bool RunCompressInJobs(string name, string frameName, int workers, int passes, int reps, string? only, bool ab)
+    {
+        (byte[] content, int level) = BenchFrames.LoadContent(frameName);
+        var zstd = new ZstdCompressor(level);
+        var candidates = new List<Candidate>
+        {
+            new("zstd", (s, o) => zstd.CompressAsync(s, o, workers).AsTask().GetAwaiter().GetResult()),
+        };
+        if (ab)
+        {
+            var before = new ZstdCompressor(level);
+            candidates.Add(new("before", (s, o) =>
+            {
+                AbSwitch.Set(legacy: true);
+                int w = before.CompressAsync(s, o, workers).AsTask().GetAwaiter().GetResult();
+                AbSwitch.Set(legacy: false);
+                return w;
+            }));
+        }
+
+        if (NativeReference.TryLoadThreaded() is { } threaded)
+        {
+            candidates.Add(new("libzstd-mt", threaded.WithWorkers(level, workers)));
+        }
+
+        if (only is not null)
+        {
+            candidates = candidates.Where(c => c.Name == only).ToList();
+        }
+
+        byte[] expected = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
+        int expectedSize = candidates[^1].Decode(content, expected);
+        string sizes = string.Empty;
+        foreach (Candidate candidate in candidates)
+        {
+            byte[] output = new byte[expected.Length];
+            int written = candidate.Decode(content, output);
+            sizes += $" {candidate.Name} {written}";
+            if (!NoCheck && !output.AsSpan(0, written).SequenceEqual(expected.AsSpan(0, expectedSize)))
+            {
+                Console.WriteLine($"{name}: {candidate.Name} wrote a different frame ({written} bytes, {candidates[^1].Name} {expectedSize})");
+                return false;
+            }
+        }
+
+        Time(name, $"{content.Length} bytes at level {level} with {workers} workers ->{sizes}", content, new byte[expected.Length], candidates, passes, reps);
         return true;
     }
 
