@@ -159,7 +159,7 @@ internal sealed unsafe class SequenceStore
         }
         else
         {
-            llBits = (nuint)BitOperations.Log2(litLength);
+            llBits = (nuint)(uint)BitOperations.Log2(litLength);
             llCode = llBits + 19;
         }
 
@@ -173,20 +173,24 @@ internal sealed unsafe class SequenceStore
         }
         else
         {
-            mlBits = (nuint)BitOperations.Log2(matchLengthBase);
+            mlBits = (nuint)(uint)BitOperations.Log2(matchLengthBase);
             mlCode = mlBits + 36;
         }
 
-        nuint ofCode = (nuint)BitOperations.Log2(offBase);
+        nuint ofCode = (nuint)(uint)BitOperations.Log2(offBase);
         ulong extras = ((ulong)litLength & ~(ulong.MaxValue << (int)llBits))
             | (((ulong)matchLengthBase & ~(ulong.MaxValue << (int)mlBits)) << (int)llBits)
             | ((ulong)(offBase ^ (1u << (int)ofCode)) << (int)(llBits + mlBits));
-        nuint codes = llCode | ((ofCode + OffsetCodes) << 8) | ((mlCode + MatchLengthCodes) << 16) | ((llBits + mlBits + ofCode) << 24);
+
+        // The codes at their places in the common arrays, which index the counts as they are.
+        nuint ofIndex = ofCode + OffsetCodes;
+        nuint mlIndex = mlCode + MatchLengthCodes;
+        nuint codes = llCode | (ofIndex << 8) | (mlIndex << 16) | ((llBits + mlBits + ofCode) << 24);
         sequence->Extras = extras;
         *(ulong*)&sequence->Codes = codes | ((ulong)offBase << 32);
         counts[llCode]++;
-        counts[OffsetCodes + ofCode]++;
-        counts[MatchLengthCodes + mlCode]++;
+        counts[ofIndex]++;
+        counts[mlIndex]++;
         sequence++;
     }
 

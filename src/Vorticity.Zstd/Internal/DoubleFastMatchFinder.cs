@@ -177,7 +177,11 @@ internal static unsafe class DoubleFastMatchFinder
                 matchLength = Count(ip + 1 + 4, ip + 1 + 4 - offset1, iend) + 4;
                 ip++;
                 byte* anchor = cold->Anchor;
-                SequenceStore.Store(ref cold->Lit, ref cold->Sequence, cold->Counts, (nuint)(ip - anchor), anchor, iend, RepeatCode1, matchLength);
+                byte* lit = cold->Lit;
+                SequenceRecord* sequence = cold->Sequence;
+                SequenceStore.Store(ref lit, ref sequence, cold->Counts, (nuint)(ip - anchor), anchor, iend, RepeatCode1, matchLength);
+                cold->Lit = lit;
+                cold->Sequence = sequence;
                 goto MatchStored;
             }
 
@@ -267,7 +271,13 @@ internal static unsafe class DoubleFastMatchFinder
                 hashLong[hashLong1] = (uint)(ip1 - @base);
             }
 
-            SequenceStore.Store(ref cold->Lit, ref cold->Sequence, cold->Counts, (nuint)(ip - anchor), anchor, iend, OffsetToOffBase(offset), matchLength);
+            // The cursors in locals while they are used: through the cold fields, the JIT reloaded
+            // them after every store the records take, which may alias them.
+            byte* lit = cold->Lit;
+            SequenceRecord* sequence = cold->Sequence;
+            SequenceStore.Store(ref lit, ref sequence, cold->Counts, (nuint)(ip - anchor), anchor, iend, OffsetToOffBase(offset), matchLength);
+            cold->Lit = lit;
+            cold->Sequence = sequence;
         }
 
     MatchStored:
@@ -292,7 +302,9 @@ internal static unsafe class DoubleFastMatchFinder
                 ulong repBytes = Read64(ip);
                 hashSmall[THash.Hash(repBytes, hashLogSmall)] = (uint)(ip - @base);
                 hashLong[Hash8.Hash(repBytes, hashLogLong)] = (uint)(ip - @base);
-                SequenceStore.StoreOnly(ref cold->Sequence, cold->Counts, 0, RepeatCode1, repLength);
+                SequenceRecord* sequence = cold->Sequence;
+                SequenceStore.StoreOnly(ref sequence, cold->Counts, 0, RepeatCode1, repLength);
+                cold->Sequence = sequence;
                 ip += repLength;
                 cold->Anchor = ip;
             }
