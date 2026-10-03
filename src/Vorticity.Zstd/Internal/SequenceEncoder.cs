@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Vorticity.Zstd.Internal;
 
@@ -504,60 +505,135 @@ internal static unsafe class SequenceEncoder
     /// libzstd's <c>ZSTD_encodeSequences_body</c> on a 64-bit container: from the last sequence to the
     /// first, its three states then its extra bits, so that the decoder reads them first to last.
     /// </summary>
+    /// <remarks>
+    /// The stream and the states live in locals, which the helpers update by reference once inlined:
+    /// a writer struct (<see cref="BitWriter"/>, <see cref="FseState"/>) is not promoted to registers
+    /// beyond four fields, and every bit added then went through a store and a load, a third of the
+    /// time of a level-1 compression. The flushes are libzstd's: their places change no bit of the
+    /// stream, only when the container is emptied.
+    /// </remarks>
     /// <returns>The size of the bitstream, or 0 when it does not fit.</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     public static nuint EncodeSequences(
         byte* destination, nuint capacity, FseCTable matchLengthTable, byte* mlCodes, FseCTable offsetTable, byte* ofCodes,
         FseCTable literalLengthTable, byte* llCodes, SequenceRecord* sequences, nuint sequenceCount)
     {
-        var bits = new BitWriter(destination, capacity);
-        if (!bits.IsValid)
+        if (capacity <= sizeof(ulong))
         {
             return 0;
         }
 
-        ReadOnlySpan<byte> llBitsTable = SequenceCodes.LiteralLengthBits;
-        ReadOnlySpan<byte> mlBitsTable = SequenceCodes.MatchLengthBits;
+        byte* ptr = destination;
+        byte* end = destination + capacity - sizeof(ulong);
+        ulong container = 0;
+        nint bitPosition = 0;
+
+        // Static data in the image: it never moves.
+        byte* llBitsTable = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(SequenceCodes.LiteralLengthBits));
+        byte* mlBitsTable = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(SequenceCodes.MatchLengthBits));
+        ushort* mlStates = matchLengthTable.StateTable;
+        FseSymbolTransform* mlSymbols = matchLengthTable.Symbols;
+        ushort* ofStates = offsetTable.StateTable;
+        FseSymbolTransform* ofSymbols = offsetTable.Symbols;
+        ushort* llStates = literalLengthTable.StateTable;
+        FseSymbolTransform* llSymbols = literalLengthTable.Symbols;
 
         // ---- the last sequence: its states start the stream
         nuint last = sequenceCount - 1;
-        var stateMatchLength = new FseState(matchLengthTable, mlCodes[last]);
-        var stateOffset = new FseState(offsetTable, ofCodes[last]);
-        var stateLitLength = new FseState(literalLengthTable, llCodes[last]);
-        bits.AddBits(sequences[last].LitLength, llBitsTable[llCodes[last]]);
-        bits.AddBits(sequences[last].MatchLengthBase, mlBitsTable[mlCodes[last]]);
-        bits.AddBits(sequences[last].OffBase, ofCodes[last]);
-        bits.Flush();
+        nint mlState = InitialState(mlStates, mlSymbols, mlCodes[last]);
+        nint ofState = InitialState(ofStates, ofSymbols, ofCodes[last]);
+        nint llState = InitialState(llStates, llSymbols, llCodes[last]);
+        AddBits(ref container, ref bitPosition, sequences[last].LitLength, llBitsTable[llCodes[last]]);
+        AddBits(ref container, ref bitPosition, sequences[last].MatchLengthBase, mlBitsTable[mlCodes[last]]);
+        AddBits(ref container, ref bitPosition, sequences[last].OffBase, ofCodes[last]);
+        Flush(ref container, ref bitPosition, ref ptr, end);
 
         for (nuint n = sequenceCount - 2; n < sequenceCount; n--)
         {
-            byte llCode = llCodes[n];
-            byte ofCode = ofCodes[n];
-            byte mlCode = mlCodes[n];
-            int llBits = llBitsTable[llCode];
-            int ofBits = ofCode;
-            int mlBits = mlBitsTable[mlCode];
-            stateOffset.Encode(ref bits, ofCode);
-            stateMatchLength.Encode(ref bits, mlCode);
-            stateLitLength.Encode(ref bits, llCode);
-            if (ofBits + mlBits + llBits >= 64 - 7 - (LiteralLengthFseLog + MatchLengthFseLog + OffsetFseLog))
+            nint llCode = llCodes[n];
+            nint ofCode = ofCodes[n];
+            nint mlCode = mlCodes[n];
+            nint llBits = llBitsTable[llCode];
+            nint mlBits = mlBitsTable[mlCode];
+            Encode(ref container, ref bitPosition, ref ofState, ofStates, ofSymbols, ofCode);
+            Encode(ref container, ref bitPosition, ref mlState, mlStates, mlSymbols, mlCode);
+            Encode(ref container, ref bitPosition, ref llState, llStates, llSymbols, llCode);
+            nint extraBits = ofCode + mlBits + llBits;
+            if (extraBits >= 64 - 7 - (LiteralLengthFseLog + MatchLengthFseLog + OffsetFseLog))
             {
-                bits.Flush();
+                Flush(ref container, ref bitPosition, ref ptr, end);
             }
 
-            bits.AddBits(sequences[n].LitLength, llBits);
-            bits.AddBits(sequences[n].MatchLengthBase, mlBits);
-            if (ofBits + mlBits + llBits > 56)
+            SequenceRecord sequence = sequences[n];
+            AddBits(ref container, ref bitPosition, sequence.LitLength, llBits);
+            AddBits(ref container, ref bitPosition, sequence.MatchLengthBase, mlBits);
+            if (extraBits > 56)
             {
-                bits.Flush();
+                Flush(ref container, ref bitPosition, ref ptr, end);
             }
 
-            bits.AddBits(sequences[n].OffBase, ofBits);
-            bits.Flush();
+            AddBits(ref container, ref bitPosition, sequence.OffBase, ofCode);
+            Flush(ref container, ref bitPosition, ref ptr, end);
         }
 
-        stateMatchLength.Flush(ref bits);
-        stateOffset.Flush(ref bits);
-        stateLitLength.Flush(ref bits);
-        return bits.Close();
+        // ---- the final states, which the decoder starts from, then the end marker
+        AddBits(ref container, ref bitPosition, (ulong)mlState, matchLengthTable.TableLog);
+        Flush(ref container, ref bitPosition, ref ptr, end);
+        AddBits(ref container, ref bitPosition, (ulong)ofState, offsetTable.TableLog);
+        Flush(ref container, ref bitPosition, ref ptr, end);
+        AddBits(ref container, ref bitPosition, (ulong)llState, literalLengthTable.TableLog);
+        Flush(ref container, ref bitPosition, ref ptr, end);
+        AddBits(ref container, ref bitPosition, 1, 1);
+        Flush(ref container, ref bitPosition, ref ptr, end);
+        if (ptr >= end)
+        {
+            return 0;
+        }
+
+        return (nuint)(ptr - destination) + (bitPosition > 0 ? 1u : 0u);
+    }
+
+    /// <summary>libzstd's <c>FSE_initCState2</c>: see <see cref="FseState"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static nint InitialState(ushort* states, FseSymbolTransform* symbols, nint symbol)
+    {
+        FseSymbolTransform transform = symbols[symbol];
+        uint nbBitsOut = (transform.DeltaNbBits + (1u << 15)) >> 16;
+        uint value = (nbBitsOut << 16) - transform.DeltaNbBits;
+        return states[(nint)(value >> (int)nbBitsOut) + transform.DeltaFindState];
+    }
+
+    /// <summary>libzstd's <c>FSE_encodeSymbol</c>: the state's low bits out, then its next state.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Encode(ref ulong container, ref nint bitPosition, ref nint state, ushort* states, FseSymbolTransform* symbols, nint symbol)
+    {
+        FseSymbolTransform transform = symbols[symbol];
+        nint nbBitsOut = (nint)((uint)(state + transform.DeltaNbBits) >> 16);
+        AddBits(ref container, ref bitPosition, (ulong)state, nbBitsOut);
+        state = states[(state >> (int)nbBitsOut) + transform.DeltaFindState];
+    }
+
+    /// <summary>libzstd's <c>BIT_addBits</c>: the low <paramref name="count"/> bits (0 to 31) of <paramref name="value"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AddBits(ref ulong container, ref nint bitPosition, ulong value, nint count)
+    {
+        container |= (value & ~(ulong.MaxValue << (int)count)) << (int)bitPosition;
+        bitPosition += count;
+    }
+
+    /// <summary>libzstd's <c>BIT_flushBits</c>: the whole bytes out, never past <paramref name="end"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Flush(ref ulong container, ref nint bitPosition, ref byte* ptr, byte* end)
+    {
+        nint bytes = bitPosition >> 3;
+        Unsafe.WriteUnaligned(ptr, container);
+        ptr += bytes;
+        if (ptr > end)
+        {
+            ptr = end;
+        }
+
+        bitPosition &= 7;
+        container >>= (int)(bytes << 3);
     }
 }

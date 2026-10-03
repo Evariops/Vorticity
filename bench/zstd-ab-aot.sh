@@ -3,15 +3,18 @@
 # time (a table format, an assembly attribute). Builds HEAD (or the ref given) into a worktree as
 # "before", the working tree as "after", then runs them alternately and compares their medians.
 #
-#   bench/zstd-ab-aot.sh [--ref <git-ref>] [--rounds N] [--frames a,b]
+#   bench/zstd-ab-aot.sh [--ref <git-ref>] [--rounds N] [--frames a,b] [--compress]
+#
+# --compress times compression (Vorticity.Zstd.Perf --compress) instead of decompression.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ref=HEAD; rounds=8; frames=reference,text-L3,json-L19
+ref=HEAD; rounds=8; frames=reference,text-L3,json-L19; mode=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ref) ref="$2"; shift 2 ;;
     --rounds) rounds="$2"; shift 2 ;;
     --frames) frames="$2"; shift 2 ;;
+    --compress) mode=(--compress); shift ;;
     *) echo "unknown $1" >&2; exit 2 ;;
   esac
 done
@@ -27,8 +30,8 @@ git -C "$root" worktree remove --force "$work/tree"
 for frame in ${frames//,/ }; do
   b=(); a=()
   for ((i = 0; i < rounds; i++)); do
-    b+=("$("$work/before/Vorticity.Zstd.Perf" --frames "$frame" --only zstd --passes 1 --reps 300 | awk '/^  zstd/ {print $4}')")
-    a+=("$("$work/after/Vorticity.Zstd.Perf" --frames "$frame" --only zstd --passes 1 --reps 300 | awk '/^  zstd/ {print $4}')")
+    b+=("$("$work/before/Vorticity.Zstd.Perf" ${mode[@]+"${mode[@]}"} --frames "$frame" --only zstd --passes 1 --reps 300 | awk '/^  zstd/ {print $4}')")
+    a+=("$("$work/after/Vorticity.Zstd.Perf" ${mode[@]+"${mode[@]}"} --frames "$frame" --only zstd --passes 1 --reps 300 | awk '/^  zstd/ {print $4}')")
   done
   python3 - "$frame" "${b[*]}" "${a[*]}" <<'PY'
 import sys, statistics
