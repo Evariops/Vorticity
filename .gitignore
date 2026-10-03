@@ -95,3 +95,10 @@ bench/.ab/
 # ---- The map of the methods each test class runs (tools/testimpact map), rebuilt locally ----
 tests/.impact/
 AUDIT-SRC-2026-09-25.md
+
+# ---- Vorticity.Zstd: what its native tools build and the corpora its benchmarks download ----
+# libzstd 1.5.7 and decodecorpus (tools/native-ref/build.sh), the hardware counters library
+# (tools/pmu/build.sh), zstd's benchmark data (bench/zstd-corpus.sh).
+tools/native-ref/out/
+tools/pmu/out/
+tests/Vorticity.Zstd.Tests/testdata/corpus/
