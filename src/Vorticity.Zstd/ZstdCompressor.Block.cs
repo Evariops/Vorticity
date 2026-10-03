@@ -65,41 +65,10 @@ public sealed unsafe partial class ZstdCompressor
             ? Math.Min(OptimalMatchFinder.HashLog3Max, parameters.WindowLog)
             : 0;
         int hashSize3 = hashLog3 == 0 ? 0 : 1 << hashLog3;
-        if (_hashTable.Length < hashSize)
-        {
-            _hashTable = GC.AllocateArray<uint>(hashSize, pinned: true);
-        }
-        else if (restart)
-        {
-            Array.Clear(_hashTable);
-        }
-
-        if (_chainTable.Length < chainSize)
-        {
-            _chainTable = GC.AllocateArray<uint>(chainSize, pinned: true);
-        }
-        else if (restart)
-        {
-            Array.Clear(_chainTable);
-        }
-
-        if (_tagTable.Length < tagSize)
-        {
-            _tagTable = GC.AllocateArray<byte>(tagSize, pinned: true);
-        }
-        else if (restart)
-        {
-            Array.Clear(_tagTable);
-        }
-
-        if (_hashTable3.Length < hashSize3)
-        {
-            _hashTable3 = GC.AllocateArray<uint>(hashSize3, pinned: true);
-        }
-        else if (restart)
-        {
-            Array.Clear(_hashTable3);
-        }
+        uint* hashTable = Reserve(ref _hashTable, hashSize, restart);
+        uint* chainTable = Reserve(ref _chainTable, chainSize, restart);
+        byte* tagTable = Reserve(ref _tagTable, tagSize, restart);
+        uint* hashTable3 = Reserve(ref _hashTable3, hashSize3, restart);
 
         if (parameters.Strategy >= Strategy.BinaryTreeOptimal)
         {
@@ -130,10 +99,10 @@ public sealed unsafe partial class ZstdCompressor
             DictLimit = start,
             LowLimit = start,
             NextToUpdate = start,
-            HashTable = _hashTable.Length == 0 ? null : (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_hashTable)),
-            ChainTable = _chainTable.Length == 0 ? null : (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_chainTable)),
-            TagTable = _tagTable.Length == 0 ? null : (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_tagTable)),
-            HashTable3 = _hashTable3.Length == 0 ? null : (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_hashTable3)),
+            HashTable = hashTable,
+            ChainTable = chainTable,
+            TagTable = tagTable,
+            HashTable3 = hashTable3,
             HashLog3 = hashLog3,
             HashCache = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_hashCache)),
             Candidates = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_candidates)),
@@ -144,6 +113,40 @@ public sealed unsafe partial class ZstdCompressor
         _nextIndex = start + (uint)sourceSize + shift;
         _previous.Reset();
         _isFirstBlock = true;
+    }
+
+    /// <summary>
+    /// The alignment of the match finders' tables: a cache line of Apple's cores. A row of the row
+    /// match finder (16 to 64 bytes of tags, 64 to 256 of indices) then never straddles two lines;
+    /// libzstd's workspace aligns its tables to 64 bytes. A pinned array's data is only 8-byte aligned.
+    /// </summary>
+    private const int TableAlignment = 128;
+
+    /// <summary>
+    /// A table of at least <paramref name="size"/> entries from a <see cref="TableAlignment"/> boundary:
+    /// the array grown (and so cleared) when too small, else cleared when <paramref name="clear"/>.
+    /// </summary>
+    /// <returns>The table's first entry, or null when no table was ever needed.</returns>
+    private static T* Reserve<T>(ref T[] table, int size, bool clear)
+        where T : unmanaged
+    {
+        int padded = size == 0 ? 0 : size + (TableAlignment / sizeof(T));
+        if (table.Length < padded)
+        {
+            table = GC.AllocateArray<T>(padded, pinned: true);
+        }
+        else if (clear)
+        {
+            Array.Clear(table);
+        }
+
+        if (table.Length == 0)
+        {
+            return null;
+        }
+
+        nuint start = (nuint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(table));
+        return (T*)((start + (TableAlignment - 1)) & ~(nuint)(TableAlignment - 1));
     }
 
     /// <summary>
