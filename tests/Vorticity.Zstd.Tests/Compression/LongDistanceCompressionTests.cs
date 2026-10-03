@@ -58,6 +58,112 @@ public sealed class LongDistanceCompressionTests
         Corpus.AssertSameBytes(expected, output.AsSpan(0, again), name);
     }
 
+    /// <summary>
+    /// Sizes across the three ways a frame takes a dictionary (attached, its tables copied, loaded):
+    /// libzstd's matcher starts afresh at the source in all of them, and loads a raw-content dictionary
+    /// when the frame does.
+    /// </summary>
+    private static readonly int[] DictionarySizes = [6_000, 100_000, 1_500_000];
+
+    public static TheoryData<string> DictionaryCases()
+    {
+        var data = new TheoryData<string>();
+        foreach (string kind in FarRepeats.Kinds)
+        {
+            foreach (string type in new[] { "trained", "raw" })
+            {
+                foreach (int level in Levels)
+                {
+                    foreach (int size in DictionarySizes)
+                    {
+                        data.Add(CorpusCase.Name(kind, size, level, "dict=" + type));
+                    }
+                }
+            }
+        }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(DictionaryCases))]
+    public void Compresses_with_a_dictionary_like_libzstd(string name)
+    {
+        CorpusCase @case = CorpusCase.Parse(name);
+        (byte[] dictionary, _) = Dictionaries.Get(FarRepeats.Content(@case.Kind), @case.Dictionary!);
+        byte[] data = FarRepeats.Generate(@case.Kind, @case.Size, dictionary);
+        using ZstandardDictionary native = ZstandardDictionary.Create(dictionary, @case.Level);
+        byte[] expected = NativeZstd.Compress(data, new ZstandardCompressionOptions { Dictionary = native, EnableLongDistanceMatching = true });
+
+        var compressor = new ZstdCompressor(@case.Level, dictionary) { LongDistanceMatching = true };
+        byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
+        Assert.Equal(OperationStatus.Done, compressor.Compress(data, output, out _, out int written));
+        Corpus.AssertSameBytes(expected, output.AsSpan(0, written), name);
+
+        byte[] decoded = new byte[data.Length];
+        Assert.Equal(OperationStatus.Done, new ZstdDecompressor(dictionary).Decompress(output.AsSpan(0, written), decoded, out _, out int decodedSize));
+        Corpus.AssertSameBytes(data, decoded.AsSpan(0, decodedSize), name);
+
+        Assert.Equal(OperationStatus.Done, compressor.Compress(data, output, out _, out int again));
+        Corpus.AssertSameBytes(expected, output.AsSpan(0, again), name);
+    }
+
+    /// <summary>
+    /// Long-distance matches across a raw dictionary's end and the source's start, which follow each
+    /// other in the matcher's indices: later in the source, the dictionary's last kilobyte then the
+    /// source's first bytes (a match in the dictionary that runs on into the source), and the
+    /// dictionary's last 24 bytes then the source's first bytes (a match at the source's start that
+    /// runs back into the dictionary, too short for one of its own there). The matcher finds both,
+    /// but so does the parser's own search, which counts across the segments too: the frames guard
+    /// the matcher's reads at the boundary more than they depend on its lengths there.
+    /// </summary>
+    [Theory]
+    [InlineData(16)]
+    [InlineData(18)]
+    [InlineData(19)]
+    [InlineData(22)]
+    public void Matches_across_a_raw_dictionary_end_like_libzstd(int level)
+    {
+        (byte[] dictionary, _) = Dictionaries.Get("text", "raw");
+        byte[] data = DataKinds.Generate("json", 1_500_000);
+        Span<byte> head = data.AsSpan(0, 8192);
+        dictionary.AsSpan(dictionary.Length - 1024).CopyTo(data.AsSpan(500_000));
+        head.CopyTo(data.AsSpan(500_000 + 1024));
+        dictionary.AsSpan(dictionary.Length - 24).CopyTo(data.AsSpan(1_000_000));
+        head.CopyTo(data.AsSpan(1_000_000 + 24));
+
+        using ZstandardDictionary native = ZstandardDictionary.Create(dictionary, level);
+        byte[] expected = NativeZstd.Compress(data, new ZstandardCompressionOptions { Dictionary = native, EnableLongDistanceMatching = true });
+        var compressor = new ZstdCompressor(level, dictionary) { LongDistanceMatching = true };
+        byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
+        Assert.Equal(OperationStatus.Done, compressor.Compress(data, output, out _, out int written));
+        Corpus.AssertSameBytes(expected, output.AsSpan(0, written), "L" + level);
+    }
+
+    /// <summary>
+    /// The dictionary cases must exercise the matcher too: where frames load a raw-content dictionary,
+    /// libzstd's change with it, for most of them.
+    /// </summary>
+    [Fact]
+    public void The_matcher_changes_the_frames_with_a_raw_dictionary()
+    {
+        int changed = 0;
+        foreach (string kind in FarRepeats.Kinds)
+        {
+            (byte[] dictionary, _) = Dictionaries.Get(FarRepeats.Content(kind), "raw");
+            byte[] data = FarRepeats.Generate(kind, DictionarySizes[^1], dictionary);
+            foreach (int level in Levels)
+            {
+                using ZstandardDictionary native = ZstandardDictionary.Create(dictionary, level);
+                byte[] with = NativeZstd.Compress(data, new ZstandardCompressionOptions { Dictionary = native, EnableLongDistanceMatching = true });
+                byte[] without = NativeZstd.Compress(data, new ZstandardCompressionOptions { Dictionary = native });
+                changed += with.AsSpan().SequenceEqual(without) ? 0 : 1;
+            }
+        }
+
+        Assert.True(changed >= FarRepeats.Kinds.Length * Levels.Length / 2, $"only {changed} frames changed");
+    }
+
     /// <summary>The cases must exercise the matcher: libzstd's frames change with it, for most of them.</summary>
     [Fact]
     public void The_matcher_changes_the_frames()
@@ -95,6 +201,29 @@ public sealed class LongDistanceCompressionTests
         CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, "far-walk64/" + Size + "/L22");
     }
 
+    /// <summary>
+    /// The same with a raw-content dictionary, which the frame loads (64 MiB is over six times its
+    /// size), and into the matcher too: the dictionary's stretches in the source are found there.
+    /// </summary>
+    [Fact]
+    public void Turns_itself_on_with_a_dictionary_like_libzstd()
+    {
+        const int Size = (64 << 20) + 300_000;
+        (byte[] dictionary, _) = Dictionaries.Get("walk64", "raw");
+        Assert.True(LongDistanceMatcher.EnabledFor(CompressionParameters.ForFrame(22, Size, dictionary.Length, attached: false)));
+
+        byte[] data = FarRepeats.Generate("far-walk64", Size, dictionary);
+        using ZstandardDictionary native = ZstandardDictionary.Create(dictionary, 22);
+        byte[] expected = NativeZstd.Compress(data, new ZstandardCompressionOptions { Dictionary = native });
+        byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
+        Assert.Equal(OperationStatus.Done, new ZstdCompressor(22, dictionary).Compress(data, output, out _, out int written));
+        Corpus.AssertSameBytes(expected, output.AsSpan(0, written), "far-walk64/" + Size + "/L22/dict=raw");
+
+        byte[] decoded = new byte[data.Length];
+        Assert.Equal(OperationStatus.Done, new ZstdDecompressor(dictionary).Decompress(output.AsSpan(0, written), decoded, out _, out int decodedSize));
+        Corpus.AssertSameBytes(data, decoded.AsSpan(0, decodedSize), "far-walk64/" + Size + "/L22/dict=raw");
+    }
+
     /// <summary>The platform's frame, with or without its long-distance matcher.</summary>
     private static byte[] Libzstd(ReadOnlySpan<byte> data, int level, bool longDistance)
     {
@@ -114,6 +243,28 @@ public sealed class LongDistanceCompressionTests
     {
         public static readonly string[] Kinds = ["far-text", "far-json", "far-random", "far-walk64"];
 
+        /// <summary>The kind of content a far-repeat kind repeats: its dictionaries' kind too.</summary>
+        public static string Content(string kind) => kind.Substring(4) == "random" ? "random64" : kind.Substring(4);
+
+        /// <summary>
+        /// <see cref="Generate(string, int)"/>, with stretches of <paramref name="dictionary"/>, a few
+        /// kilobytes each, written over it every 200 KB or so.
+        /// </summary>
+        public static byte[] Generate(string kind, int size, byte[] dictionary)
+        {
+            byte[] data = Generate(kind, size);
+            int stretches = Math.Max(1, size / 200_000);
+            int length = Math.Min(Math.Min(4096, dictionary.Length / 2), size / 3);
+            for (int i = 0; i < stretches; i++)
+            {
+                int position = (int)((long)size * ((2 * i) + 1) / (2 * stretches));
+                int start = (i * 7919) % (dictionary.Length - length);
+                dictionary.AsSpan(start, Math.Min(length, size - position)).CopyTo(data.AsSpan(position));
+            }
+
+            return data;
+        }
+
         public static byte[] Generate(string kind, int size)
         {
             if (!kind.StartsWith("far-", StringComparison.Ordinal))
@@ -121,7 +272,7 @@ public sealed class LongDistanceCompressionTests
                 return DataKinds.Generate(kind, size);
             }
 
-            string content = kind.Substring(4) == "random" ? "random64" : kind.Substring(4);
+            string content = Content(kind);
             var random = new Random(size ^ kind.Length);
             byte[] stretch = DataKinds.Generate(content, size / 6, seed: 2);
             byte[] data = new byte[size];

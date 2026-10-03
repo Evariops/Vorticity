@@ -146,11 +146,6 @@ public sealed unsafe partial class ZstdCompressor
         }
         else
         {
-            if (LongDistanceMatching)
-            {
-                throw new NotSupportedException("Long-distance matching is not implemented yet with a dictionary.");
-            }
-
             parameters = BeginDictionaryFrame(source, sourceSize);
             dictionaryId = _dictionary.Id;
         }

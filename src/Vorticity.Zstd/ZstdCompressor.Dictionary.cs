@@ -68,7 +68,9 @@ public sealed unsafe partial class ZstdCompressor
     /// <item>loaded (<c>ZSTD_compress_insertDictionary</c>): from 128 KiB and six times the dictionary,
     /// the frame loads it into tables of its own parameters, again as a segment of its own.</item>
     /// </list>
-    /// The frame starts from the dictionary's block state.
+    /// The frame starts from the dictionary's block state. The long-distance matcher, on as the frame's
+    /// parameters decide, takes the parameters of the frame's tables and starts afresh at the source;
+    /// a frame that loads a raw-content dictionary loads it into the matcher too.
     /// </summary>
     /// <returns>The frame's parameters: its window.</returns>
     private CompressionParameters BeginDictionaryFrame(byte* source, int sourceSize)
@@ -77,19 +79,22 @@ public sealed unsafe partial class ZstdCompressor
         ulong size = (ulong)sourceSize;
         CompressionParameters prepared = dictionary.Parameters;
         bool attach = size <= AttachCutoff(prepared.Strategy);
-        CompressionParameters frame = CompressionParameters.ForFrame(dictionary.Level, sourceSize, dictionary.Size, attach);
-        if (LongDistanceMatcher.EnabledFor(frame))
+        CompressionParameters frame = CompressionParameters.ForFrame(dictionary.Level, sourceSize, dictionary.Size, attach, LongDistanceMatching);
+        bool longDistance = LongDistanceMatching || LongDistanceMatcher.EnabledFor(frame);
+        bool usePreparedTables = size < PreparedTablesCutoff || size < (ulong)dictionary.Size * LoadDictionaryMultiplier;
+        CompressionParameters tables = !usePreparedTables ? frame
+            : attach ? prepared.ForAttachedSource(sourceSize, dictionary.Size, frame.WindowLog)
+            : prepared.WithWindow(frame.WindowLog);
+        if (longDistance && tables.Strategy < Strategy.BinaryTreeOptimal)
         {
-            throw new NotSupportedException("Long-distance matching is not implemented yet with a dictionary.");
+            throw new NotSupportedException("Long-distance matching is implemented for the optimal parsers only.");
         }
 
-        bool usePreparedTables = size < PreparedTablesCutoff || size < (ulong)dictionary.Size * LoadDictionaryMultiplier;
         if (usePreparedTables && attach)
         {
-            CompressionParameters tables = prepared.ForAttachedSource(sourceSize, dictionary.Size, frame.WindowLog);
             uint dictionaryEnd = dictionary.State->End;
             bool hasContent = dictionary.ContentLength != 0;
-            BeginFrame(tables, source, sourceSize, longDistance: false, hasContent ? dictionaryEnd : WindowStartIndex);
+            BeginFrame(tables, source, sourceSize, longDistance, hasContent ? dictionaryEnd : WindowStartIndex);
             if (hasContent)
             {
                 _matchState.LoadedDictEnd = _matchState.DictLimit;
@@ -98,8 +103,7 @@ public sealed unsafe partial class ZstdCompressor
         }
         else if (usePreparedTables)
         {
-            CompressionParameters tables = prepared.WithWindow(frame.WindowLog);
-            BeginFrame(tables, source, sourceSize, longDistance: false);
+            BeginFrame(tables, source, sourceSize, longDistance);
             CopyDictionaryTables(dictionary);
 
             // The dictionary's window, then the source past its end: not contiguous.
@@ -123,7 +127,12 @@ public sealed unsafe partial class ZstdCompressor
         }
         else
         {
-            BeginFrame(frame, source, sourceSize, longDistance: false, loadedIndices: dictionary.FullContentLength);
+            BeginFrame(frame, source, sourceSize, longDistance, loadedIndices: dictionary.FullContentLength);
+            if (longDistance && dictionary.IsRawContent)
+            {
+                _longDistanceMatcher!.LoadDictionary(dictionary.FullContent, dictionary.FullContentLength, source);
+            }
+
             uint start = _matchState.DictLimit;
             CompressionDictionary.LoadContent(ref _matchState, dictionary.FullContent, dictionary.FullContentLength, preparedDictionary: false);
             if (_matchState.End != start)
@@ -140,7 +149,7 @@ public sealed unsafe partial class ZstdCompressor
                     _matchState.LowLimit = contentEnd;
                 }
 
-                _nextIndex = contentEnd + (uint)sourceSize + (frame.Strategy == Strategy.BinaryTreeUltra2 ? (uint)FrameFormat.MaxBlockSize : 0);
+                _nextIndex = contentEnd + (uint)sourceSize + (tables.Strategy == Strategy.BinaryTreeUltra2 ? (uint)FrameFormat.MaxBlockSize : 0);
             }
         }
 

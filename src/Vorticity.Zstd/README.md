@@ -28,8 +28,8 @@ level, byte for byte, at every level from -131072 to 22 (libzstd's nine strategi
 post-block splitters, and the long-distance matching it turns on at level 22 for sources over
 64 MiB). With a dictionary, zstd-format or raw content, the frames are those libzstd writes with the
 dictionary prepared at the same level (`ZSTD_createCDict`, then `ZSTD_CCtx_refCDict`, as the
-platform's `ZstandardDictionary` does), again byte for byte at every level (long-distance matching
-aside, for now). A warm compressor allocates nothing. It is not thread-safe.
+platform's `ZstandardDictionary` does), again byte for byte at every level, long-distance matching
+included. A warm compressor allocates nothing. It is not thread-safe.
 
 ## Layout
 

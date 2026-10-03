@@ -170,7 +170,8 @@ internal unsafe struct LongDistanceCursor
 /// </summary>
 /// <remarks>
 /// libzstd clears the matcher's tables and starts its window afresh at every frame: nothing is kept
-/// from one frame to the next.
+/// from one frame to the next. A frame that loads a raw-content dictionary loads it here too (see
+/// <see cref="LoadDictionary"/>), a segment of its own below the source.
 /// </remarks>
 internal sealed unsafe class LongDistanceMatcher
 {
@@ -207,6 +208,12 @@ internal sealed unsafe class LongDistanceMatcher
     private byte* _base;
     private uint _dictLimit;
     private uint _lowLimit;
+
+    /// <summary>The base of a dictionary's content below the source, as libzstd's <c>window.dictBase</c>.</summary>
+    private byte* _dictBase;
+
+    /// <summary>libzstd's <c>ldmState.loadedDictEnd</c>: the end of a loaded dictionary's content, 0 without one.</summary>
+    private uint _loadedDictEnd;
 
     /// <summary>
     /// The sum of the first entry of every bucket searched, read ahead of the search as libzstd
@@ -278,6 +285,31 @@ internal sealed unsafe class LongDistanceMatcher
         _base = source - WindowStartIndex;
         _dictLimit = WindowStartIndex;
         _lowLimit = WindowStartIndex;
+        _dictBase = null;
+        _loadedDictEnd = 0;
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_loadDictionaryContent</c> for the matcher, after <see cref="BeginFrame"/>: the
+    /// window over <paramref name="content"/> from index 2, its split points into the table
+    /// (<c>ZSTD_ldm_fillHashTable</c>), then the frame's <paramref name="source"/> past it, not
+    /// contiguous: the content becomes the window's extDict. Only raw content gets here:
+    /// <c>ZSTD_loadZstdDictionary</c> passes the matcher no state for a zstd-format dictionary's.
+    /// </summary>
+    /// <param name="content">The dictionary's content, of 8 bytes or more.</param>
+    /// <param name="size">Its size.</param>
+    /// <param name="source">The frame's source.</param>
+    public void LoadDictionary(byte* content, nuint size, byte* source)
+    {
+        _base = content - WindowStartIndex;
+        _loadedDictEnd = (uint)size + WindowStartIndex;
+        Fill(content, content + size);
+
+        // libzstd's ZSTD_window_update for the source: the content, over 8 bytes, is searched apart.
+        _dictBase = _base;
+        _lowLimit = WindowStartIndex;
+        _dictLimit = _loadedDictEnd;
+        _base = source - _dictLimit;
     }
 
     /// <summary>
@@ -287,10 +319,11 @@ internal sealed unsafe class LongDistanceMatcher
     /// <returns>The number of sequences, in <see cref="Sequences"/>.</returns>
     public nuint GenerateSequences(byte* source, nuint size)
     {
-        // libzstd's ZSTD_window_enforceMaxDist, at the block's end here.
+        // libzstd's ZSTD_window_enforceMaxDist, at the block's end here: a dictionary's content stays
+        // whole until the block ends a window past it.
         uint blockEndIndex = (uint)(source + size - _base);
         uint maxDistance = 1u << _windowLog;
-        if (blockEndIndex > maxDistance)
+        if (blockEndIndex > maxDistance + _loadedDictEnd)
         {
             uint newLowLimit = blockEndIndex - maxDistance;
             if (_lowLimit < newLowLimit)
@@ -302,13 +335,21 @@ internal sealed unsafe class LongDistanceMatcher
             {
                 _dictLimit = _lowLimit;
             }
+
+            _loadedDictEnd = 0;
         }
 
-        return GenerateBlock(source, size, Sequences);
+        return _lowLimit < _dictLimit
+            ? GenerateBlock<ExtDictionary>(source, size, Sequences)
+            : GenerateBlock<NoDictionary>(source, size, Sequences);
     }
 
-    /// <summary>libzstd's <c>ZSTD_ldm_generateSequences_internal</c> without a dictionary.</summary>
-    private nuint GenerateBlock(byte* istart, nuint size, RawSequence* sequences)
+    /// <summary>
+    /// libzstd's <c>ZSTD_ldm_generateSequences_internal</c>, a dictionary's content below the source
+    /// (<see cref="ExtDictionary"/>) or not.
+    /// </summary>
+    private nuint GenerateBlock<TDictionary>(byte* istart, nuint size, RawSequence* sequences)
+        where TDictionary : IDictionaryMode
     {
         nuint count = 0;
         uint minMatchLength = (uint)_minMatchLength;
@@ -373,7 +414,7 @@ internal sealed unsafe class LongDistanceMatcher
                 {
                     if (HasChecksum(group, target))
                     {
-                        Consider(group, checksum, split, anchor, iend, ref best);
+                        Consider<TDictionary>(group, checksum, split, anchor, iend, ref best);
                     }
                 }
 
@@ -436,13 +477,20 @@ internal sealed unsafe class LongDistanceMatcher
     /// <summary>
     /// The entries of a group in turn, as libzstd searches its bucket: those with the checksum, within
     /// the window, that match at least the minimum forward; the best match, forward and backward,
-    /// replaced only by a strictly longer one.
+    /// replaced only by a strictly longer one. Over an extDict, a match in it runs on into the prefix
+    /// (<c>ZSTD_count_2segments</c>), and one that reaches back to the prefix's start runs back on into
+    /// the extDict's end (<c>ZSTD_ldm_countBackwardsMatch_2segments</c>).
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void Consider(ulong* group, uint checksum, byte* split, byte* anchor, byte* iend, ref LongMatch best)
+    private void Consider<TDictionary>(ulong* group, uint checksum, byte* split, byte* anchor, byte* iend, ref LongMatch best)
+        where TDictionary : IDictionaryMode
     {
-        uint lowestIndex = _dictLimit;
-        byte* lowPrefix = _base + lowestIndex;
+        bool extDict = TDictionary.Mode == ExtDictionary.Value;
+        uint dictLimit = _dictLimit;
+        uint lowestIndex = extDict ? _lowLimit : dictLimit;
+        byte* lowPrefix = _base + dictLimit;
+        byte* dictStart = extDict ? _dictBase + _lowLimit : null;
+        byte* dictEnd = extDict ? _dictBase + dictLimit : null;
         for (ulong* entry = group; entry < group + GroupSize; entry++)
         {
             uint entryOffset = (uint)*entry;
@@ -451,14 +499,35 @@ internal sealed unsafe class LongDistanceMatcher
                 continue;
             }
 
-            byte* match = _base + entryOffset;
-            nuint forward = Count(split, match, iend);
-            if (forward < (uint)_minMatchLength)
+            nuint forward;
+            nuint backward;
+            if (extDict && entryOffset < dictLimit)
             {
-                continue;
+                byte* match = _dictBase + entryOffset;
+                forward = Count2Segments(split, match, iend, dictEnd, lowPrefix);
+                if (forward < (uint)_minMatchLength)
+                {
+                    continue;
+                }
+
+                backward = CountBackward(split, anchor, match, dictStart);
+            }
+            else
+            {
+                byte* match = _base + entryOffset;
+                forward = Count(split, match, iend);
+                if (forward < (uint)_minMatchLength)
+                {
+                    continue;
+                }
+
+                backward = CountBackward(split, anchor, match, lowPrefix);
+                if (extDict && match - backward == lowPrefix && lowPrefix != dictStart)
+                {
+                    backward += CountBackward(split - backward, anchor, dictEnd, dictStart);
+                }
             }
 
-            nuint backward = CountBackward(split, anchor, match, lowPrefix);
             if (forward + backward > best.Forward + best.Backward)
             {
                 best.Entry = entry;
@@ -495,6 +564,35 @@ internal sealed unsafe class LongDistanceMatcher
 
         rolling = hash;
         return n;
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_ldm_fillHashTable</c>: the split points from <paramref name="ip"/> to
+    /// <paramref name="iend"/> into the table, those a whole minimum length past the start.
+    /// </summary>
+    private void Fill(byte* ip, byte* iend)
+    {
+        uint minMatchLength = (uint)_minMatchLength;
+        uint hashMask = (1u << (_hashLog - _bucketSizeLog)) - 1;
+        byte* istart = ip;
+        nuint* splits = (nuint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_splits));
+        ulong rolling = uint.MaxValue;
+        while (ip < iend)
+        {
+            uint splitCount = 0;
+            nuint hashed = Feed(ref rolling, ip, (nuint)(iend - ip), splits, ref splitCount);
+            for (uint n = 0; n < splitCount; n++)
+            {
+                if (ip + splits[n] >= istart + minMatchLength)
+                {
+                    byte* split = ip + splits[n] - minMatchLength;
+                    ulong xxhash = XxHash64.HashToUInt64(new ReadOnlySpan<byte>(split, (int)minMatchLength));
+                    Insert((uint)xxhash & hashMask, (uint)(split - _base) | (xxhash >> 32 << 32));
+                }
+            }
+
+            ip += hashed;
+        }
     }
 
     /// <summary>libzstd's <c>ZSTD_ldm_insertEntry</c>: an entry at its bucket's next place, round robin.</summary>

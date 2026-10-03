@@ -201,8 +201,23 @@ internal struct CompressionParameters
     /// (<c>ZSTD_CCtx_refCDict</c>) of <paramref name="dictionarySize"/> bytes, all of the buffer: sized
     /// for the source alone when the dictionary is attached, which has its own tables, else for both.
     /// </summary>
-    public static CompressionParameters ForFrame(int level, long sourceSize, long dictionarySize, bool attached) =>
-        Select(level, (ulong)sourceSize, (ulong)dictionarySize, attached ? ParameterMode.AttachedDictionary : ParameterMode.Frame);
+    /// <param name="level">The dictionary's level.</param>
+    /// <param name="sourceSize">The size of the frame's content.</param>
+    /// <param name="dictionarySize">The size of the dictionary's buffer.</param>
+    /// <param name="attached">Whether the frame attaches the dictionary.</param>
+    /// <param name="longDistanceMatching">Whether the long-distance matcher is asked for, as in <see cref="ForFrame(int, long, bool)"/>.</param>
+    public static CompressionParameters ForFrame(int level, long sourceSize, long dictionarySize, bool attached, bool longDistanceMatching = false)
+    {
+        ParameterMode mode = attached ? ParameterMode.AttachedDictionary : ParameterMode.Frame;
+        CompressionParameters parameters = Select(level, (ulong)sourceSize, (ulong)dictionarySize, mode);
+        if (longDistanceMatching)
+        {
+            parameters.WindowLog = LongDistanceMatcher.DefaultWindowLog;
+            parameters.Adjust((ulong)sourceSize, (ulong)dictionarySize, mode);
+        }
+
+        return parameters;
+    }
 
     /// <summary>
     /// libzstd's <c>ZSTD_createCDict_byReference</c>: the parameters of a prepared dictionary of

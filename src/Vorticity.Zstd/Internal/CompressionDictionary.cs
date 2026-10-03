@@ -79,6 +79,12 @@ internal sealed unsafe class CompressionDictionary
     /// <summary>The size of <see cref="FullContent"/>: 0 under 8 bytes of dictionary, which libzstd ignores.</summary>
     public nuint FullContentLength { get; private set; }
 
+    /// <summary>
+    /// Whether the dictionary is raw content, of 8 bytes or more: the only kind libzstd loads into its
+    /// long-distance matcher too (<c>ZSTD_loadZstdDictionary</c> passes the matcher no state).
+    /// </summary>
+    public bool IsRawContent { get; private set; }
+
     /// <summary>Prepares <paramref name="dictionary"/> for frames at <paramref name="level"/>.</summary>
     /// <exception cref="System.IO.InvalidDataException">A zstd-format dictionary whose tables are invalid.</exception>
     public static CompressionDictionary Create(ReadOnlySpan<byte> dictionary, int level)
@@ -128,6 +134,10 @@ internal sealed unsafe class CompressionDictionary
             int entropySize = LoadEntropy(Entropy, _buffer.AsSpan(0, Size));
             content += entropySize;
             contentSize -= (nuint)entropySize;
+        }
+        else
+        {
+            IsRawContent = true;
         }
 
         FullContent = content;

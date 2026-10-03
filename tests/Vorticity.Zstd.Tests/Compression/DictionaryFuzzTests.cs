@@ -16,7 +16,8 @@ namespace Vorticity.Zstd.Tests.Compression;
 /// (attached up to 8 to 32 KiB, its tables copied below 128 KiB or six times its size, loaded beyond).
 /// The compressors are reused from frame to frame, whatever way the last one took; the sources lie
 /// against inaccessible pages. Every frame must be the platform's, given the dictionary prepared at
-/// the same level, and decode to its content.
+/// the same level, and decode to its content. A third of the optimal parsers' frames are made with
+/// the long-distance matcher asked for.
 /// </summary>
 /// <remarks><c>VORTICITY_ZSTD_FUZZ_ITERATIONS</c> sets the number of frames per seed (default 300).</remarks>
 public sealed class DictionaryFuzzTests
@@ -48,7 +49,7 @@ public sealed class DictionaryFuzzTests
             dictionaries.Add(Generate(random, size, null));
         }
 
-        var compressors = new Dictionary<(int, int), (ZstdCompressor Zstd, ZstandardDictionary Native)>();
+        var compressors = new Dictionary<(int, int, bool), (ZstdCompressor Zstd, ZstandardDictionary Native)>();
         using var source = new GuardedBuffer(1 << 20);
         try
         {
@@ -63,6 +64,7 @@ public sealed class DictionaryFuzzTests
                     2 or 3 => random.Next(5, 16),
                     _ => random.Next(16, 23),
                 };
+                bool longDistance = level >= 16 && random.Next(3) == 0;
                 int size = random.Next(5) switch
                 {
                     0 => random.Next(64),
@@ -76,17 +78,18 @@ public sealed class DictionaryFuzzTests
                 Span<byte> src = random.Next(2) == 0 ? source.AtEnd(size) : source.AtStart(size);
                 data.CopyTo(src);
 
-                if (!compressors.TryGetValue((index, level), out var pair))
+                if (!compressors.TryGetValue((index, level, longDistance), out var pair))
                 {
-                    pair = (new ZstdCompressor(level, dictionary), ZstandardDictionary.Create(dictionary, level));
-                    compressors.Add((index, level), pair);
+                    pair = (new ZstdCompressor(level, dictionary) { LongDistanceMatching = longDistance }, ZstandardDictionary.Create(dictionary, level));
+                    compressors.Add((index, level, longDistance), pair);
                 }
 
-                string name = $"seed {seed}, iteration {iteration}: {size} bytes at level {level}, dictionary {index} of {dictionary.Length} bytes";
+                string name = $"seed {seed}, iteration {iteration}: {size} bytes at level {level}, dictionary {index} of {dictionary.Length} bytes"
+                    + (longDistance ? " with ldm" : string.Empty);
                 byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(size)];
                 Assert.True(pair.Zstd.Compress(src, output, out int consumed, out int written) == OperationStatus.Done, name);
                 Assert.Equal(size, consumed);
-                byte[] expected = NativeZstd.Compress(data, new ZstandardCompressionOptions { Dictionary = pair.Native });
+                byte[] expected = NativeZstd.Compress(data, new ZstandardCompressionOptions { Dictionary = pair.Native, EnableLongDistanceMatching = longDistance });
                 Corpus.AssertSameBytes(expected, output.AsSpan(0, written), name);
 
                 byte[] decoded = new byte[size];
