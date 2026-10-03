@@ -9,7 +9,7 @@ namespace Vorticity.Zstd.Internal;
 /// (<see cref="MatchState.HashTable"/>) for long matches, one of short hashes
 /// (<see cref="MatchState.ChainTable"/>), the long one tried first.
 /// </summary>
-internal static unsafe class DoubleFastMatchFinder
+internal static unsafe partial class DoubleFastMatchFinder
 {
     /// <summary>
     /// libzstd's <c>ZSTD_fillDoubleHashTableForCCtx</c> in its fast mode: every third position of a

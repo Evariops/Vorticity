@@ -473,6 +473,64 @@ internal static unsafe class HuffmanEncoder
         return nbBits >> 3;
     }
 
+    /// <summary>
+    /// libzstd's <c>HUF_readCTable</c>: the table a description gives, as a dictionary carries it.
+    /// Each symbol's length follows from its weight, its code from canonical order: by length, the
+    /// longest first, then by symbol.
+    /// </summary>
+    /// <param name="table">The table, its symbols past the description's left without a code.</param>
+    /// <param name="source">The description: the weights, compressed or not.</param>
+    /// <param name="hasZeroWeights">Whether a symbol up to the last described has no code.</param>
+    /// <returns>The bytes the description takes.</returns>
+    public static int ReadCTable(HuffmanCTable table, ReadOnlySpan<byte> source, out bool hasZeroWeights)
+    {
+        Span<byte> weights = stackalloc byte[HuffmanTable.MaxSymbols + 1];
+        Span<int> rankCount = stackalloc int[HuffmanTable.MaxTableLog + 1];
+        int size = HuffmanTable.ReadWeights(source, weights, rankCount, out int symbolCount, out int tableLog);
+        if (symbolCount > HuffmanTable.MaxSymbols)
+        {
+            Throw.Error(ZstdError.HuffmanTable);
+        }
+
+        hasZeroWeights = rankCount[0] > 0;
+        ulong* elements = table.Elements;
+        new Span<ulong>(elements, HuffmanTable.MaxSymbols).Clear();
+        Span<ushort> perRank = stackalloc ushort[HuffmanTable.MaxTableLog + 2];
+        perRank.Clear();
+        for (int n = 0; n < symbolCount; n++)
+        {
+            int weight = weights[n];
+            int nbBits = weight == 0 ? 0 : tableLog + 1 - weight;
+            elements[n] = (ulong)nbBits;
+            perRank[nbBits]++;
+        }
+
+        // The first code of each length, from the longest.
+        Span<ushort> valuePerRank = stackalloc ushort[HuffmanTable.MaxTableLog + 2];
+        valuePerRank.Clear();
+        ushort min = 0;
+        for (int n = tableLog; n > 0; n--)
+        {
+            valuePerRank[n] = min;
+            min += perRank[n];
+            min >>= 1;
+        }
+
+        for (int n = 0; n < symbolCount; n++)
+        {
+            int nbBits = HuffmanCTable.NbBits(elements[n]);
+            ulong value = valuePerRank[nbBits]++;
+            if (nbBits > 0)
+            {
+                elements[n] |= value << (64 - nbBits);
+            }
+        }
+
+        table.TableLog = tableLog;
+        table.MaxSymbolValue = symbolCount - 1;
+        return size;
+    }
+
     /// <summary>libzstd's <c>HUF_validateCTable</c>: whether the table has a code for every symbol counted.</summary>
     public static bool ValidateCTable(HuffmanCTable table, uint* count, uint maxSymbolValue)
     {

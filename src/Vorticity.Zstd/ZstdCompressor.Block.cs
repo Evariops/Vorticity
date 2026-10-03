@@ -50,13 +50,19 @@ public sealed unsafe partial class ZstdCompressor
     /// window placed after the last frame's (restarting, tables cleared, only near the index limit),
     /// the long-distance matcher started afresh when on, and the block state every frame starts from.
     /// </summary>
-    private void BeginFrame(CompressionParameters parameters, byte* source, int sourceSize, bool longDistance)
+    /// <param name="parameters">The parameters of the frame's tables.</param>
+    /// <param name="source">The frame's content.</param>
+    /// <param name="sourceSize">Its size.</param>
+    /// <param name="longDistance">Whether the long-distance matcher is on.</param>
+    /// <param name="minimumStart">The lowest index the frame may start at: above an attached dictionary's.</param>
+    private void BeginFrame(CompressionParameters parameters, byte* source, int sourceSize, bool longDistance, uint minimumStart = WindowStartIndex)
     {
         _parameters = parameters;
+        _frameParameters = parameters;
         // btultra2 moves the window past its first block once (OptimalMatchFinder): the frame may
         // reach a block's indices further than its size.
         uint shift = parameters.Strategy == Strategy.BinaryTreeUltra2 ? (uint)FrameFormat.MaxBlockSize : 0;
-        bool restart = (ulong)_nextIndex + (ulong)sourceSize + shift > IndexLimit;
+        bool restart = (ulong)Math.Max(_nextIndex, minimumStart) + (ulong)sourceSize + shift > IndexLimit;
         bool rows = parameters.UsesRowMatchFinder;
         int hashSize = 1 << parameters.HashLog;
         int chainSize = parameters.Strategy == Strategy.Fast || rows ? 0 : 1 << parameters.ChainLog;
@@ -65,10 +71,10 @@ public sealed unsafe partial class ZstdCompressor
             ? Math.Min(OptimalMatchFinder.HashLog3Max, parameters.WindowLog)
             : 0;
         int hashSize3 = hashLog3 == 0 ? 0 : 1 << hashLog3;
-        uint* hashTable = Reserve(ref _hashTable, hashSize, restart);
-        uint* chainTable = Reserve(ref _chainTable, chainSize, restart);
-        byte* tagTable = Reserve(ref _tagTable, tagSize, restart);
-        uint* hashTable3 = Reserve(ref _hashTable3, hashSize3, restart);
+        uint* hashTable = Tables.Reserve(ref _hashTable, hashSize, restart);
+        uint* chainTable = Tables.Reserve(ref _chainTable, chainSize, restart);
+        byte* tagTable = Tables.Reserve(ref _tagTable, tagSize, restart);
+        uint* hashTable3 = Tables.Reserve(ref _hashTable3, hashSize3, restart);
 
         if (parameters.Strategy >= Strategy.BinaryTreeOptimal)
         {
@@ -92,13 +98,14 @@ public sealed unsafe partial class ZstdCompressor
         }
 
         Array.Clear(_hashCache);
-        uint start = _nextIndex;
+        uint start = Math.Max(_nextIndex, minimumStart);
         _matchState = new MatchState
         {
             Base = source - start,
             DictLimit = start,
             LowLimit = start,
             NextToUpdate = start,
+            End = start,
             HashTable = hashTable,
             ChainTable = chainTable,
             TagTable = tagTable,
@@ -113,40 +120,6 @@ public sealed unsafe partial class ZstdCompressor
         _nextIndex = start + (uint)sourceSize + shift;
         _previous.Reset();
         _isFirstBlock = true;
-    }
-
-    /// <summary>
-    /// The alignment of the match finders' tables: a cache line of Apple's cores. A row of the row
-    /// match finder (16 to 64 bytes of tags, 64 to 256 of indices) then never straddles two lines;
-    /// libzstd's workspace aligns its tables to 64 bytes. A pinned array's data is only 8-byte aligned.
-    /// </summary>
-    private const int TableAlignment = 128;
-
-    /// <summary>
-    /// A table of at least <paramref name="size"/> entries from a <see cref="TableAlignment"/> boundary:
-    /// the array grown (and so cleared) when too small, else cleared when <paramref name="clear"/>.
-    /// </summary>
-    /// <returns>The table's first entry, or null when no table was ever needed.</returns>
-    private static T* Reserve<T>(ref T[] table, int size, bool clear)
-        where T : unmanaged
-    {
-        int padded = size == 0 ? 0 : size + (TableAlignment / sizeof(T));
-        if (table.Length < padded)
-        {
-            table = GC.AllocateArray<T>(padded, pinned: true);
-        }
-        else if (clear)
-        {
-            Array.Clear(table);
-        }
-
-        if (table.Length == 0)
-        {
-            return null;
-        }
-
-        nuint start = (nuint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(table));
-        return (T*)((start + (TableAlignment - 1)) & ~(nuint)(TableAlignment - 1));
     }
 
     /// <summary>
@@ -165,8 +138,14 @@ public sealed unsafe partial class ZstdCompressor
         {
             int blockSize = OptimalBlockSize(ip, remaining, blockSizeMax, savings);
             int lastBlock = blockSize == remaining ? 1 : 0;
-            // As libzstd, from the block's start: the window covers it whole, the matches then
-            // limited to it by the match finder.
+            // As libzstd: a dictionary dropped for the whole block when the window passes it before
+            // the block's end; the window moved from the block's start, covering the block whole,
+            // the matches then limited to it by the match finder.
+            if (_dictionary is not null)
+            {
+                _matchState.CheckDictionaryValidity(ip + blockSize);
+            }
+
             _matchState.EnforceMaxDistance(ip);
             if (_matchState.NextToUpdate < _matchState.LowLimit)
             {
@@ -329,6 +308,15 @@ public sealed unsafe partial class ZstdCompressor
             // libzstd's ZSTD_ldm_blockCompress for the optimal parsers: the block's long-distance
             // matches are only offered to the parser, which weighs them with its own.
             _optimal!.LongDistance.Count = _longDistanceMatcher!.GenerateSequences(source, (nuint)size);
+        }
+
+        if (_matchState.LowLimit < _matchState.DictLimit || _matchState.Dictionary != null)
+        {
+            // libzstd's ZSTD_matchState_dictMode: a segment below the prefix (extDict), or an
+            // attached dictionary.
+            nuint dictionaryLiterals = FindSequencesWithDictionary(source, size, rep);
+            _store.StoreLastLiterals(source + size - (nint)dictionaryLiterals, dictionaryLiterals);
+            return;
         }
 
         nuint lastLiterals = _parameters.Strategy switch

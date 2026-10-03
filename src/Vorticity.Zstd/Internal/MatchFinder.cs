@@ -30,6 +30,28 @@ internal unsafe struct MatchState
 
     public uint NextToUpdate;
 
+    /// <summary>
+    /// libzstd's <c>window.dictBase</c>: the base of the indices from <see cref="LowLimit"/> up to
+    /// <see cref="DictLimit"/>, a segment apart from the source (a dictionary loaded into the tables,
+    /// or copied there): libzstd's extDict.
+    /// </summary>
+    public byte* DictionaryBase;
+
+    /// <summary>libzstd's <c>window.nextSrc</c>, as an index: where the window's bytes end.</summary>
+    public uint End;
+
+    /// <summary>
+    /// libzstd's <c>loadedDictEnd</c>: the end of a dictionary's indices, while the frame may still
+    /// reach it; 0 without one.
+    /// </summary>
+    public uint LoadedDictEnd;
+
+    /// <summary>
+    /// libzstd's <c>dictMatchState</c>: a prepared dictionary's own state, searched in place beside
+    /// the frame's tables (attached), while the frame may reach it; null otherwise.
+    /// </summary>
+    public MatchState* Dictionary;
+
     public uint* HashTable;
 
     /// <summary>The second table: the short hashes of the double-fast strategy, the chains of the lazy ones.</summary>
@@ -77,36 +99,40 @@ internal unsafe struct MatchState
     public CompressionParameters Parameters;
 
     /// <summary>
-    /// libzstd's <c>ZSTD_getLowestPrefixIndex</c> without a dictionary: the lowest index a match from
-    /// <paramref name="current"/> may reach, within the window.
+    /// libzstd's <c>ZSTD_getLowestPrefixIndex</c>: the lowest index a match from
+    /// <paramref name="current"/> may reach in the prefix, within the window; with a dictionary, the
+    /// prefix's start, the dictionary being valid as long as it is within the window at all.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly uint LowestPrefixIndex(uint current)
     {
         uint maxDistance = 1u << Parameters.WindowLog;
-        return current - DictLimit > maxDistance ? current - maxDistance : DictLimit;
+        uint withinWindow = current - DictLimit > maxDistance ? current - maxDistance : DictLimit;
+        return LoadedDictEnd != 0 ? DictLimit : withinWindow;
     }
 
     /// <summary>
-    /// libzstd's <c>ZSTD_getLowestMatchIndex</c> without a dictionary: as
-    /// <see cref="LowestPrefixIndex"/>, from <see cref="LowLimit"/>, as the lazy searches have it.
+    /// libzstd's <c>ZSTD_getLowestMatchIndex</c>: as <see cref="LowestPrefixIndex"/>, from
+    /// <see cref="LowLimit"/>, an extDict included.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public readonly uint LowestMatchIndex(uint current)
     {
         uint maxDistance = 1u << Parameters.WindowLog;
-        return current - LowLimit > maxDistance ? current - maxDistance : LowLimit;
+        uint withinWindow = current - LowLimit > maxDistance ? current - maxDistance : LowLimit;
+        return LoadedDictEnd != 0 ? LowLimit : withinWindow;
     }
 
     /// <summary>
-    /// libzstd's <c>ZSTD_window_enforceMaxDist</c> without a dictionary: the window moves up so that it
-    /// ends at <paramref name="blockEnd"/>, which libzstd passes the block's start as.
+    /// libzstd's <c>ZSTD_window_enforceMaxDist</c>: the window moves up so that it ends at
+    /// <paramref name="blockEnd"/>, which libzstd passes the block's start as; once it moves past a
+    /// dictionary's end, the dictionary is dropped.
     /// </summary>
     public void EnforceMaxDistance(byte* blockEnd)
     {
         uint blockEndIndex = (uint)(blockEnd - Base);
         uint maxDistance = 1u << Parameters.WindowLog;
-        if (blockEndIndex > maxDistance)
+        if (blockEndIndex > maxDistance + LoadedDictEnd)
         {
             uint newLowLimit = blockEndIndex - maxDistance;
             if (LowLimit < newLowLimit)
@@ -118,6 +144,25 @@ internal unsafe struct MatchState
             {
                 DictLimit = LowLimit;
             }
+
+            LoadedDictEnd = 0;
+            Dictionary = null;
+        }
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_checkDictValidity</c> at a block's end: the dictionary dropped for the whole
+    /// block when the block reaches past the window from its end, or when the window no longer follows
+    /// it.
+    /// </summary>
+    public void CheckDictionaryValidity(byte* blockEnd)
+    {
+        uint blockEndIndex = (uint)(blockEnd - Base);
+        uint maxDistance = 1u << Parameters.WindowLog;
+        if (blockEndIndex > LoadedDictEnd + maxDistance || LoadedDictEnd != DictLimit)
+        {
+            LoadedDictEnd = 0;
+            Dictionary = null;
         }
     }
 }
@@ -255,6 +300,41 @@ internal static unsafe class MatchFinder
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static ulong Read64(byte* p) => Unsafe.ReadUnaligned<ulong>(p);
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_count_2segments</c>: a match in a segment of its own (an extDict, a
+    /// dictionary), which may run past <paramref name="matchEnd"/> into the prefix, from
+    /// <paramref name="prefixStart"/>.
+    /// </summary>
+    public static nuint Count2Segments(byte* input, byte* match, byte* inputEnd, byte* matchEnd, byte* prefixStart)
+    {
+        byte* virtualEnd = input + (matchEnd - match);
+        if (virtualEnd > inputEnd)
+        {
+            virtualEnd = inputEnd;
+        }
+
+        nuint length = Count(input, match, virtualEnd);
+        return match + length != matchEnd ? length : length + Count(input + length, prefixStart, inputEnd);
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_index_overlap_check</c>: a repeat offset's index, but for the three just below
+    /// the prefix, whose four bytes would straddle the segments.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool IndexOverlapCheck(uint prefixLowestIndex, uint repIndex) => (prefixLowestIndex - 1) - repIndex >= 3;
+
+    /// <summary>libzstd's <c>ZSTD_SHORT_CACHE_TAG_BITS</c>: the tag a prepared dictionary's fast tables keep beside each index.</summary>
+    public const int TagBits = CompressionParameters.DictionaryTagBits;
+
+    /// <summary>The tag's mask.</summary>
+    public const uint TagMask = (1u << TagBits) - 1;
+
+    /// <summary>libzstd's <c>ZSTD_writeTaggedIndex</c>: an index and its hash's low 8 bits, at the hash's other bits.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void WriteTaggedIndex(uint* table, nuint hashAndTag, uint index) =>
+        table[hashAndTag >> TagBits] = (index << TagBits) | ((uint)hashAndTag & TagMask);
 
     /// <summary>
     /// libzstd's <c>ZSTD_count</c>: how many bytes from <paramref name="input"/> equal those from

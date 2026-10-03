@@ -66,6 +66,17 @@ internal sealed unsafe class BlockState
         MatchLengthRepeat = FseRepeat.None;
     }
 
+    /// <summary>A copy of <paramref name="other"/>: its tables, their repeat modes, its repeat offsets.</summary>
+    public void CopyFrom(BlockState other)
+    {
+        Huffman.CopyFrom(other.Huffman);
+        HuffmanRepeat = other.HuffmanRepeat;
+        CopySequenceTablesFrom(other);
+        Rep[0] = other.Rep[0];
+        Rep[1] = other.Rep[1];
+        Rep[2] = other.Rep[2];
+    }
+
     /// <summary>libzstd's copy of <c>prevEntropy->fse</c> into <c>nextEntropy->fse</c>, when a block has no sequence.</summary>
     public void CopySequenceTablesFrom(BlockState other)
     {

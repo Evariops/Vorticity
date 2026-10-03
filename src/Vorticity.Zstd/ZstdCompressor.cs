@@ -131,16 +131,31 @@ public sealed unsafe partial class ZstdCompressor
     /// <returns>The size of the frame, or -1 when it does not fit.</returns>
     private int CompressFrame(byte* source, int sourceSize, byte* destination, int capacity)
     {
-        CompressionParameters parameters = CompressionParameters.ForFrame(Level, sourceSize, LongDistanceMatching);
-        if (LongDistanceMatching && parameters.Strategy < Strategy.BinaryTreeOptimal)
+        CompressionParameters parameters;
+        uint dictionaryId = 0;
+        if (_dictionary is null)
         {
-            throw new NotSupportedException("Long-distance matching is implemented for the optimal parsers only.");
+            parameters = CompressionParameters.ForFrame(Level, sourceSize, LongDistanceMatching);
+            if (LongDistanceMatching && parameters.Strategy < Strategy.BinaryTreeOptimal)
+            {
+                throw new NotSupportedException("Long-distance matching is implemented for the optimal parsers only.");
+            }
+
+            BeginFrame(parameters, source, sourceSize, LongDistanceMatching || LongDistanceMatcher.EnabledFor(parameters));
+        }
+        else
+        {
+            if (LongDistanceMatching)
+            {
+                throw new NotSupportedException("Long-distance matching is not implemented yet with a dictionary.");
+            }
+
+            parameters = BeginDictionaryFrame(source, sourceSize);
+            dictionaryId = _dictionary.Id;
         }
 
-        BeginFrame(parameters, source, sourceSize, LongDistanceMatching || LongDistanceMatcher.EnabledFor(parameters));
-
         byte* header = stackalloc byte[FrameHeaderSizeMax];
-        int headerSize = WriteFrameHeader(header, parameters.WindowLog, (ulong)sourceSize, AppendChecksum);
+        int headerSize = WriteFrameHeader(header, parameters.WindowLog, (ulong)sourceSize, AppendChecksum, dictionaryId);
         if (headerSize > capacity)
         {
             return -1;
@@ -186,22 +201,39 @@ public sealed unsafe partial class ZstdCompressor
     }
 
     /// <summary>
-    /// libzstd's <c>ZSTD_writeFrameHeader</c> for a frame that declares its content size and names no
-    /// dictionary: a single segment when the window covers the whole content.
+    /// libzstd's <c>ZSTD_writeFrameHeader</c> for a frame that declares its content size: a single
+    /// segment when the window covers the whole content; the dictionary's identifier, if any, in as
+    /// few bytes as it takes.
     /// </summary>
     /// <returns>The size of the header.</returns>
-    private static int WriteFrameHeader(byte* header, int windowLog, ulong contentSize, bool checksum)
+    private static int WriteFrameHeader(byte* header, int windowLog, ulong contentSize, bool checksum, uint dictionaryId)
     {
         ulong windowSize = 1UL << windowLog;
         bool singleSegment = windowSize >= contentSize;
         int contentSizeCode = (contentSize >= 256 ? 1 : 0) + (contentSize >= 65536 + 256 ? 1 : 0) + (contentSize >= 0xFFFFFFFFUL ? 1 : 0);
-        int descriptor = ((checksum ? 1 : 0) << 2) | ((singleSegment ? 1 : 0) << 5) | (contentSizeCode << 6);
+        int dictionaryIdCode = (dictionaryId > 0 ? 1 : 0) + (dictionaryId >= 256 ? 1 : 0) + (dictionaryId >= 65536 ? 1 : 0);
+        int descriptor = dictionaryIdCode | ((checksum ? 1 : 0) << 2) | ((singleSegment ? 1 : 0) << 5) | (contentSizeCode << 6);
         Unsafe.WriteUnaligned(header, FrameFormat.Magic);
         header[4] = (byte)descriptor;
         int position = 5;
         if (!singleSegment)
         {
             header[position++] = (byte)((windowLog - FrameFormat.WindowLogMin) << 3);
+        }
+
+        switch (dictionaryIdCode)
+        {
+            case 1:
+                header[position++] = (byte)dictionaryId;
+                break;
+            case 2:
+                Unsafe.WriteUnaligned(header + position, (ushort)dictionaryId);
+                position += 2;
+                break;
+            case 3:
+                Unsafe.WriteUnaligned(header + position, dictionaryId);
+                position += 4;
+                break;
         }
 
         switch (contentSizeCode)

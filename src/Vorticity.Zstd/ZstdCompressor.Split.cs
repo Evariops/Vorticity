@@ -31,7 +31,7 @@ public sealed unsafe partial class ZstdCompressor
     /// libzstd's <c>ZSTD_resolveBlockSplitterMode</c>: the post-block splitter applies to btopt and the
     /// stronger strategies, from a window of 128 KiB.
     /// </summary>
-    private bool PostSplitterEnabled => _parameters.Strategy >= Strategy.BinaryTreeOptimal && _parameters.WindowLog >= 17;
+    private bool PostSplitterEnabled => _frameParameters.Strategy >= Strategy.BinaryTreeOptimal && _frameParameters.WindowLog >= 17;
 
     private uint* SplitCounts(int index) => (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_splitCounts)) + (index * SequenceStore.AllCodes);
 

@@ -152,7 +152,7 @@ internal sealed class HuffmanTable
     /// weights come in runs, and one counter would make each count wait on the store of the last.
     /// </remarks>
     /// <returns>The bytes the description takes.</returns>
-    private static int ReadWeights(ReadOnlySpan<byte> source, Span<byte> weights, Span<int> rankCount, out int symbolCount, out int tableLog)
+    internal static int ReadWeights(ReadOnlySpan<byte> source, Span<byte> weights, Span<int> rankCount, out int symbolCount, out int tableLog)
     {
         const ZstdError error = ZstdError.HuffmanTable;
         if (source.IsEmpty)
