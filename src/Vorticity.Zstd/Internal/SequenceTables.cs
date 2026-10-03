@@ -212,6 +212,13 @@ internal sealed class SequenceTableSet
     /// <summary>The state every frame starts from: a dictionary's tables, if it has them.</summary>
     public void BeginFrame(SeqTable? literalLengths, SeqTable? offsets, SeqTable? matchLengths)
     {
+        // Frame after frame with one dictionary, the tables are its own already, and with them their
+        // logs and averages, which are set together.
+        if (ReferenceEquals(_current[0], literalLengths) & ReferenceEquals(_current[1], offsets) & ReferenceEquals(_current[2], matchLengths))
+        {
+            return;
+        }
+
         Select(literalLengths, SequenceCode.LiteralLength);
         Select(offsets, SequenceCode.Offset);
         Select(matchLengths, SequenceCode.MatchLength);
@@ -241,6 +248,7 @@ internal sealed class SequenceTableSet
     /// when the three are the shared tables of one family, the set's own otherwise, the shared tables
     /// among them copied into their slots unless there already.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public SeqSymbol[] Prepare()
     {
         SeqSymbol[]? family = _current[0]?.Family;
@@ -249,6 +257,13 @@ internal sealed class SequenceTableSet
             return family;
         }
 
+        return PrepareOwn();
+    }
+
+    /// <summary><see cref="Prepare"/> for a block that mixes its tables: the set's own array.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private SeqSymbol[] PrepareOwn()
+    {
         Materialize(SequenceCode.LiteralLength);
         Materialize(SequenceCode.Offset);
         Materialize(SequenceCode.MatchLength);

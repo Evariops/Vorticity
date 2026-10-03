@@ -303,13 +303,15 @@ public sealed partial class ZstdDecompressor
         {
             nint bcBefore = bc;
             ulong containerBefore = container;
-            nint consumed = ExtraNextStates(llEntry, mlEntry, ofEntry, bc, container, ref llState, ref mlState, ref ofState, out nint mlAt, out nint llAt);
+            nint consumed = ExtraNextStates(llEntry, mlEntry, ofEntry, bc, container, ref llState, ref mlState, ref ofState, out nint mlAt);
             ptr -= (consumed >> 3) & 0x1F;
             bc = consumed & 7;
             container = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bits, ptr));
             nuint raw = SeqEntry.OffsetBase(ofEntry) + ReadBits(containerBefore, bcBefore, (nint)ofEntry);
             matchLength = (nint)SeqEntry.LengthBase(mlEntry) + (nint)ReadBits(containerBefore, mlAt, (nint)(mlEntry >> 8));
-            litLength = (nint)SeqEntry.LengthBase(llEntry) + (nint)ReadBits(containerBefore, llAt, (nint)(llEntry >> 8));
+            // The literal length's bits after the match length's: a position computed here, where the
+            // states have freed their registers, rather than kept from before them (it was spilled).
+            litLength = (nint)SeqEntry.LengthBase(llEntry) + (nint)ReadBits(containerBefore, mlAt + (nint)(mlEntry >> 8), (nint)(llEntry >> 8));
             if ((ofEntry & 0x1E) != 0)
             {
                 offset = raw;
@@ -549,17 +551,17 @@ public sealed partial class ZstdDecompressor
 
     /// <summary>
     /// The three states after a sequence whose extra bits all come from the container before it
-    /// (fewer than 31: libzstd reloads inside a sequence only from 31), and the positions of the
-    /// lengths' extra bits. As <see cref="CommonNextStates"/>, every position adds the raw entries,
+    /// (fewer than 31: libzstd reloads inside a sequence only from 31), and the position of the match
+    /// length's extra bits. As <see cref="CommonNextStates"/>, every position adds the raw entries,
     /// whose low byte (the second, shifted down, for a length's extra bits) is the count it needs and
     /// whose other bits only add multiples of 256, which no shift sees; the sum is a tree, the states
-    /// first.
+    /// first. The literal length's extra bits follow the match length's.
     /// </summary>
     /// <returns>The position in the container after the sequence, in the low byte: at most 64.</returns>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static nint ExtraNextStates(
         ulong llEntry, ulong mlEntry, ulong ofEntry, nint bc, ulong container, ref nint llState, ref nint mlState, ref nint ofState,
-        out nint mlAt, out nint llAt)
+        out nint mlAt)
     {
         nint lengthsExtra = (nint)(mlEntry >> 8) + (nint)(llEntry >> 8);
         mlAt = bc + (nint)ofEntry;
@@ -571,7 +573,6 @@ public sealed partial class ZstdDecompressor
         ofState = SeqEntry.NextState(ofEntry) + (nint)ReadStateBits(container, ofStateAt, ofNb);
         mlState = SeqEntry.NextState(mlEntry) + (nint)ReadStateBits(container, mlStateAt, (nint)mlEntry);
         llState = SeqEntry.NextState(llEntry) + (nint)ReadStateBits(container, statesAt, (nint)llEntry);
-        llAt = mlAt + (nint)(mlEntry >> 8);
         nint consumed = ofStateAt + ofNb;
         Debug.Assert((consumed & 0xFF) <= 64);
         return consumed;
