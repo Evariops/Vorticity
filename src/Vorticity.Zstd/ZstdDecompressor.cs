@@ -334,15 +334,21 @@ public sealed partial class ZstdDecompressor
         _rep2 = 8;
         _literalEntropy = false;
         _sequenceEntropy = false;
-        _currentHuffman = _huffman;
         _lastBlockSequences = MinPairSequences;
 
+        // A reference is written only when it changes: each write is a call to the GC's write
+        // barrier, and frame after frame with one dictionary the references stay the same.
         DecoderDictionary? dictionary = _dictionary;
+        HuffmanTable huffman = dictionary is not null && dictionary.HasEntropy ? dictionary.Huffman! : _huffman;
+        if (!ReferenceEquals(_currentHuffman, huffman))
+        {
+            _currentHuffman = huffman;
+        }
+
         if (dictionary is not null && dictionary.HasEntropy)
         {
             _literalEntropy = true;
             _sequenceEntropy = true;
-            _currentHuffman = dictionary.Huffman!;
             _sequenceTables.BeginFrame(dictionary.LiteralLengths, dictionary.Offsets, dictionary.MatchLengths);
             _rep0 = dictionary.Rep0;
             _rep1 = dictionary.Rep1;

@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using Vorticity.Zstd.Internal;
 
 namespace Vorticity.Zstd;
@@ -66,13 +67,30 @@ public sealed partial class ZstdDecompressor
         }
 
         int modes = section[ip++];
+        // The three tables repeated, in the same set: they stay as they are. Most blocks of small
+        // frames with a dictionary, which repeat its tables.
+        if ((modes == RepeatAll) & (previous is null) & _sequenceEntropy)
+        {
+            headerSize = ip;
+            return nbSeq;
+        }
+
+        headerSize = ip + BuildSequenceTables(section.Slice(ip), modes, tables, previous);
+        return nbSeq;
+    }
+
+    /// <summary>The modes byte of a block that repeats its three tables.</summary>
+    private const int RepeatAll = 0xFC;
+
+    /// <summary>The three tables, from the modes and the descriptions after them: the size of these.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private int BuildSequenceTables(ReadOnlySpan<byte> section, int modes, SequenceTableSet tables, SequenceTableSet? previous)
+    {
         Span<short> norm = stackalloc short[SequenceCodes.MaxMatchLength + 1];
-        ip += BuildSequenceTable(tables, previous, SequenceCode.LiteralLength, modes >> 6, section.Slice(ip), norm, SequenceCodes.DefaultLiteralLengths);
+        int ip = BuildSequenceTable(tables, previous, SequenceCode.LiteralLength, modes >> 6, section, norm, SequenceCodes.DefaultLiteralLengths);
         ip += BuildSequenceTable(tables, previous, SequenceCode.Offset, (modes >> 4) & 3, section.Slice(ip), norm, SequenceCodes.DefaultOffsets);
         ip += BuildSequenceTable(tables, previous, SequenceCode.MatchLength, (modes >> 2) & 3, section.Slice(ip), norm, SequenceCodes.DefaultMatchLengths);
-
-        headerSize = ip;
-        return nbSeq;
+        return ip;
     }
 
     /// <summary>libzstd's <c>ZSTD_buildSeqTable</c>: selects or builds the table of one code.</summary>

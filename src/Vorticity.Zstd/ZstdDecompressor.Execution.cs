@@ -775,6 +775,7 @@ public sealed partial class ZstdDecompressor
     }
 
     /// <summary>The fast loop's decoding, on the state the careful path carries.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void DecodeSequence(ref SequenceState s, nint nbSeq, out nint litLength, out nint matchLength, out nuint offset)
     {
         ulong llEntry = SeqEntry.Load(ref s.Tables, s.LiteralLengthState);
@@ -825,7 +826,9 @@ public sealed partial class ZstdDecompressor
             Throw.Error((long)position + last > blockEnd ? ZstdError.BlockTooLarge : ZstdError.DestinationTooSmall);
         }
 
-        literals.Slice(literal, last).CopyTo(destination.Slice(position));
+        CopyExact(
+            ref Unsafe.Add(ref MemoryMarshal.GetReference(destination), position),
+            ref Unsafe.Add(ref MemoryMarshal.GetReference(literals), literal), last);
         return position + last - blockStart;
     }
 
@@ -861,12 +864,13 @@ public sealed partial class ZstdDecompressor
     /// another buffer, or from far enough back, it is one block copy; a match that overlaps its own
     /// output repeats a pattern, which is copied in blocks that double, each from the start of the copy.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void CopyForward(ref byte dst, nint d, ref byte src, nint s, nint length)
     {
         nint distance = d - s;
         if (!Unsafe.AreSame(ref dst, ref src) || distance >= length)
         {
-            Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref dst, d), ref Unsafe.Add(ref src, s), (uint)length);
+            CopyExact(ref Unsafe.Add(ref dst, d), ref Unsafe.Add(ref src, s), length);
             return;
         }
 
@@ -879,6 +883,52 @@ public sealed partial class ZstdDecompressor
             nint block = Math.Min(done, length - done);
             Unsafe.CopyBlockUnaligned(ref Unsafe.Add(ref dst, d + done), ref Unsafe.Add(ref dst, d), (uint)block);
             done += block;
+        }
+    }
+
+    /// <summary>
+    /// Copies <paramref name="length"/> bytes exactly, between places that do not overlap: up to 32
+    /// bytes as two loads that may overlap each other, then two stores, with no call; more through
+    /// the runtime's block copy. The careful path's copies and the literals that end a block are
+    /// short, a few of them a frame: on small frames, the calls were the cost.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CopyExact(ref byte dst, ref byte src, nint length)
+    {
+        if ((nuint)length > 32)
+        {
+            Unsafe.CopyBlockUnaligned(ref dst, ref src, (uint)length);
+        }
+        else if (length >= 16)
+        {
+            Vector128<byte> head = Unsafe.ReadUnaligned<Vector128<byte>>(ref src);
+            Vector128<byte> tail = Unsafe.ReadUnaligned<Vector128<byte>>(ref Unsafe.Add(ref src, length - 16));
+            Unsafe.WriteUnaligned(ref dst, head);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, length - 16), tail);
+        }
+        else if (length >= 8)
+        {
+            ulong head = Unsafe.ReadUnaligned<ulong>(ref src);
+            ulong tail = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref src, length - 8));
+            Unsafe.WriteUnaligned(ref dst, head);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, length - 8), tail);
+        }
+        else if (length >= 4)
+        {
+            uint head = Unsafe.ReadUnaligned<uint>(ref src);
+            uint tail = Unsafe.ReadUnaligned<uint>(ref Unsafe.Add(ref src, length - 4));
+            Unsafe.WriteUnaligned(ref dst, head);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, length - 4), tail);
+        }
+        else if (length > 0)
+        {
+            // 1 to 3 bytes: the first, the middle one and the last, which cover them.
+            byte first = src;
+            byte middle = Unsafe.Add(ref src, length >> 1);
+            byte last = Unsafe.Add(ref src, length - 1);
+            dst = first;
+            Unsafe.Add(ref dst, length >> 1) = middle;
+            Unsafe.Add(ref dst, length - 1) = last;
         }
     }
 

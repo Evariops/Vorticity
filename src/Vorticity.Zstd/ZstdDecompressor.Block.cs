@@ -237,7 +237,10 @@ public sealed partial class ZstdDecompressor
                 }
 
                 _literalEntropy = true;
-                _currentHuffman = table;
+                if (!ReferenceEquals(_currentHuffman, table))
+                {
+                    _currentHuffman = table;
+                }
                 literals = buffer;
                 literalCount = size;
                 return headerSize + compressedSize;

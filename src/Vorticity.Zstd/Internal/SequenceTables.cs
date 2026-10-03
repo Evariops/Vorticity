@@ -220,7 +220,7 @@ internal sealed class SequenceTableSet
         {
             if (table is not null)
             {
-                _current[(int)code] = table;
+                SetCurrent(code, table);
                 _tableLog[(int)code] = table.TableLog;
                 _expectedTimes2[(int)code] = table.ExpectedTimes2;
             }
@@ -231,7 +231,7 @@ internal sealed class SequenceTableSet
     public void Use(SeqTable table)
     {
         int code = (int)table.Code;
-        _current[code] = table;
+        SetCurrent(table.Code, table);
         _tableLog[code] = table.TableLog;
         _expectedTimes2[code] = table.ExpectedTimes2;
     }
@@ -288,6 +288,18 @@ internal sealed class SequenceTableSet
         Entries[slot] = new SeqSymbol(code, slot, bits, 0, baseValue);
         Entries[slot + 1] = Entries[slot];
         Own(code, 0, (2 * (nint)baseValue) + ((nint)1 << bits) - 1);
+    }
+
+    /// <summary>
+    /// The shared table a code decodes with, written only when it changes: each write of a reference
+    /// is a call to the GC's write barrier, and frame after frame with one dictionary it stays the same.
+    /// </summary>
+    private void SetCurrent(SequenceCode code, SeqTable table)
+    {
+        if (!ReferenceEquals(_current[(int)code], table))
+        {
+            _current[(int)code] = table;
+        }
     }
 
     private void Own(SequenceCode code, int tableLog, nint expectedTimes2)
