@@ -81,11 +81,15 @@ internal unsafe interface IMatchHash
     static abstract nuint Hash(ulong bytes, int hashLog);
 }
 
-/// <summary>libzstd's <c>ZSTD_hash4Ptr</c>.</summary>
+/// <summary>
+/// libzstd's <c>ZSTD_hash4Ptr</c>, <c>(u * prime) &gt;&gt; (32 - h)</c> in 32 bits, as
+/// <c>(u * (prime &lt;&lt; 32)) &gt;&gt; (64 - h)</c> in 64: the same bits, without the zero extension
+/// the JIT put after a 32-bit hash.
+/// </summary>
 internal readonly struct Hash4 : IMatchHash
 {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(ulong bytes, int hashLog) => ((uint)bytes * 2654435761u) >> (32 - hashLog);
+    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * (2654435761UL << 32)) >> (64 - hashLog));
 }
 
 /// <summary>
@@ -146,6 +150,17 @@ internal static unsafe class MatchFinder
     {
         long below = (long)index - low;
         return (nuint)(index - (below & (below >> 63)));
+    }
+
+    /// <summary>
+    /// <see cref="ClampToWindow(uint, uint)"/> on indices read from their table into native integers:
+    /// the load widens them, where a 32-bit index cost a zero extension at each use.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint ClampToWindow(nuint index, nuint low)
+    {
+        nint below = (nint)(index - low);
+        return index - (nuint)(below & (below >> 63));
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

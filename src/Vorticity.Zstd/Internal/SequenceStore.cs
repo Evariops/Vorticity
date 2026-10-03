@@ -263,6 +263,12 @@ internal sealed unsafe class SequenceStore
     /// libzstd's <c>ZSTD_safecopyLiterals</c>: never reads past <paramref name="end"/>; wild copies up to
     /// <paramref name="limitWild"/>, then a byte at a time.
     /// </summary>
+    /// <remarks>
+    /// Inlined although rare: a call in a match finder makes the JIT keep what is live across it in
+    /// the registers a call preserves, too few, and it spilled values of the search loop to the stack
+    /// at every position.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void SafeCopyLiterals(byte* destination, byte* source, byte* end, byte* limitWild)
     {
         if (source <= limitWild)

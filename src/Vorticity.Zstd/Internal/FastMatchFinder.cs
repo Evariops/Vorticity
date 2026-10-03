@@ -91,7 +91,7 @@ internal static unsafe class FastMatchFinder
         byte* @base = state.Base;
         byte* istart = source;
         uint endIndex = (uint)(istart - @base + (nint)size);
-        uint prefixStartIndex = state.LowestPrefixIndex(endIndex);
+        nuint prefixStartIndex = state.LowestPrefixIndex(endIndex);
         byte* iend = istart + size;
         byte* ilimit = iend - HashReadSize;
 
@@ -112,7 +112,7 @@ internal static unsafe class FastMatchFinder
 
         nuint hash0;
         nuint hash1;
-        uint matchIndex;
+        nuint matchIndex;
         uint offBase;
         byte* match0;
         nuint matchLength;
@@ -155,10 +155,13 @@ internal static unsafe class FastMatchFinder
 
         do
         {
-            // ---- ip0, and the repeat offset at ip2
-            uint repValue = Read32(ip2 - repOffset1);
+            // ---- ip0, and the repeat offset at ip2. The offset is 0 (invalid) only before the
+            // block's first match, when the candidate is ip2 itself: compared with ip2, it is not a
+            // test the JIT hoists and keeps in a register.
+            byte* repeat = ip2 - repOffset1;
+            uint repValue = Read32(repeat);
             hashTable[hash0] = (uint)(ip0 - @base);
-            if ((Read32(ip2) == repValue) & (repOffset1 > 0))
+            if ((Read32(ip2) == repValue) & (repeat != ip2))
             {
                 current0 = (uint)(ip0 - @base);
 
@@ -291,10 +294,10 @@ internal static unsafe class FastMatchFinder
     /// <summary>
     /// libzstd's <c>ZSTD_match4Found_cmov</c>: whether the candidate at <paramref name="matchIndex"/>,
     /// within the window, starts with the same four bytes. A candidate below the window is read at
-    /// the window's start instead (see <see cref="MatchFinder.ClampToWindow"/>), and the window test
+    /// the window's start instead (see <see cref="MatchFinder.ClampToWindow(nuint, nuint)"/>), and the window test
     /// joins the compare in one condition.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool MatchFound(byte* current, byte* @base, uint matchIndex, uint lowLimit) =>
+    private static bool MatchFound(byte* current, byte* @base, nuint matchIndex, nuint lowLimit) =>
         (Read32(current) == Read32(@base + ClampToWindow(matchIndex, lowLimit))) & (matchIndex >= lowLimit);
 }
