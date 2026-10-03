@@ -33,9 +33,10 @@ internal static class BenchFrames
 
     /// <summary>
     /// Any other kind at any level, 1 MiB: <c>kind-L&lt;level&gt;</c>; 16 KiB with a <c>small-</c>
-    /// prefix, the size up to which libzstd's lazy levels search hash chains rather than rows; 80 MiB
-    /// with a <c>big-</c> prefix, past which libzstd's level 22 turns its long-distance matcher on
-    /// (that frame is compressed at level 1: it only carries the content).
+    /// prefix, the size up to which libzstd's lazy levels search hash chains rather than rows; 1 KiB
+    /// with a <c>tiny-</c> prefix, a record of the size dictionaries are made for; 80 MiB with a
+    /// <c>big-</c> prefix, past which libzstd's level 22 turns its long-distance matcher on (that
+    /// frame is compressed at level 1: it only carries the content).
     /// </summary>
     private static byte[] Generic(string name)
     {
@@ -47,8 +48,43 @@ internal static class BenchFrames
 
         string kind = name[..dash];
         return kind.StartsWith("small-", StringComparison.Ordinal) ? Compress(kind["small-".Length..], 16 << 10, level)
+            : kind.StartsWith("tiny-", StringComparison.Ordinal) ? Compress(kind["tiny-".Length..], 1 << 10, level)
             : kind.StartsWith("big-", StringComparison.Ordinal) ? Compress(kind["big-".Length..], 80 << 20, 1)
             : Compress(kind, 1 << 20, level);
+    }
+
+    /// <summary>
+    /// A dictionary for a frame's content, by the frame's name: 16 KiB trained on 200 records of 1 KiB
+    /// of its kind (other seeds than the content's), or 32 KiB of raw content for the kinds the trainer
+    /// learns nothing from.
+    /// </summary>
+    public static byte[] Dictionary(string name)
+    {
+        int dash = name.LastIndexOf("-L", StringComparison.Ordinal);
+        string kind = dash > 0 ? name[..dash] : throw new ArgumentException("no kind in " + name, nameof(name));
+        foreach (string prefix in new[] { "small-", "tiny-", "big-" })
+        {
+            kind = kind.StartsWith(prefix, StringComparison.Ordinal) ? kind[prefix.Length..] : kind;
+        }
+
+        const int Samples = 200;
+        byte[] samples = new byte[Samples * 1024];
+        int[] lengths = new int[Samples];
+        for (int i = 0; i < Samples; i++)
+        {
+            DataKinds.Generate(kind, 1024, 1000 + i).CopyTo(samples, i * 1024);
+            lengths[i] = 1024;
+        }
+
+        try
+        {
+            using ZstandardDictionary trained = ZstandardDictionary.Train(samples, lengths, 16 << 10);
+            return trained.Data.ToArray();
+        }
+        catch (Exception)
+        {
+            return DataKinds.Generate(kind, 32 << 10, 7);
+        }
     }
 
     /// <summary>

@@ -169,21 +169,34 @@ public static class Program
     /// <summary>
     /// Compression of a frame's content by each candidate: Vorticity.Zstd must write the platform's frame,
     /// byte for byte, wherever its level is implemented; each frame's size is shown. A name ending in
-    /// <c>-ldm</c> turns the long-distance matcher on, and leaves the reference build out.
+    /// <c>-ldm</c> turns the long-distance matcher on, and leaves the reference build out; one ending
+    /// in <c>-dict</c> compresses with a dictionary of the content's kind (<see cref="BenchFrames.Dictionary"/>),
+    /// prepared at the level, every candidate the same way.
     /// </summary>
     private static bool RunCompress(string name, int passes, int reps, string? only, bool ab)
     {
         bool longDistance = name.EndsWith("-ldm", StringComparison.Ordinal);
-        (byte[] content, int level) = BenchFrames.LoadContent(longDistance ? name[..^4] : name);
+        bool withDictionary = name.EndsWith("-dict", StringComparison.Ordinal);
+        string frameName = longDistance ? name[..^4] : withDictionary ? name[..^5] : name;
+        (byte[] content, int level) = BenchFrames.LoadContent(frameName);
+        byte[]? dictionary = withDictionary ? BenchFrames.Dictionary(frameName) : null;
         byte[] expected = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
-        var platform = new ZstandardEncoder(new ZstandardCompressionOptions { Quality = level, EnableLongDistanceMatching = longDistance });
+        ZstandardDictionary? prepared = dictionary is null ? null : ZstandardDictionary.Create(dictionary, level);
+        var platform = new ZstandardEncoder(new ZstandardCompressionOptions { Quality = level, EnableLongDistanceMatching = longDistance, Dictionary = prepared });
         if (platform.Compress(content, expected, out _, out int expectedSize, isFinalBlock: true) != System.Buffers.OperationStatus.Done)
         {
             Console.WriteLine($"{name}: the platform could not compress");
             return false;
         }
 
-        var zstd = new ZstdCompressor(level) { LongDistanceMatching = longDistance };
+        ZstdCompressor NewCompressor()
+        {
+            ZstdCompressor compressor = dictionary is null ? new ZstdCompressor(level) : new ZstdCompressor(level, dictionary);
+            compressor.LongDistanceMatching = longDistance;
+            return compressor;
+        }
+
+        var zstd = NewCompressor();
         NativeReference? native = longDistance ? null : NativeReference.TryLoad();
         var candidates = new List<Candidate>
         {
@@ -192,12 +205,14 @@ public static class Program
         };
         if (native is not null)
         {
-            candidates.Add(new("libzstd-ref", (s, o) => native.Compress(s, o, level)));
+            candidates.Add(dictionary is null
+                ? new("libzstd-ref", (s, o) => native.Compress(s, o, level))
+                : new("libzstd-ref", native.WithDictionary(dictionary, level)));
         }
 
         if (ab)
         {
-            var before = new ZstdCompressor(level) { LongDistanceMatching = longDistance };
+            var before = NewCompressor();
             candidates.Insert(1, new("before", (s, o) =>
             {
                 AbSwitch.Set(legacy: true);

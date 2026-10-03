@@ -16,6 +16,10 @@ internal sealed unsafe class NativeReference
     private readonly delegate* unmanaged<nuint, uint> _isError;
     private readonly delegate* unmanaged<nint, int, int, nuint> _setParameter;
     private readonly delegate* unmanaged<nint, void*, nuint, byte*, nuint, nuint> _generateSequences;
+    private readonly delegate* unmanaged<void*, nuint, int, nint> _createDictionary;
+    private readonly delegate* unmanaged<nint, nint, nuint> _referenceDictionary;
+    private readonly delegate* unmanaged<nint, byte*, nuint, byte*, nuint, nuint> _compress2;
+    private readonly delegate* unmanaged<nint> _createCompression;
     private readonly nint _context;
     private readonly nint _compressionContext;
     private readonly nint _sequencesContext;
@@ -29,7 +33,11 @@ internal sealed unsafe class NativeReference
         _isError = (delegate* unmanaged<nuint, uint>)NativeLibrary.GetExport(library, "ZSTD_isError");
         _setParameter = (delegate* unmanaged<nint, int, int, nuint>)NativeLibrary.GetExport(library, "ZSTD_CCtx_setParameter");
         _generateSequences = (delegate* unmanaged<nint, void*, nuint, byte*, nuint, nuint>)NativeLibrary.GetExport(library, "ZSTD_generateSequences");
+        _createDictionary = (delegate* unmanaged<void*, nuint, int, nint>)NativeLibrary.GetExport(library, "ZSTD_createCDict");
+        _referenceDictionary = (delegate* unmanaged<nint, nint, nuint>)NativeLibrary.GetExport(library, "ZSTD_CCtx_refCDict");
+        _compress2 = (delegate* unmanaged<nint, byte*, nuint, byte*, nuint, nuint>)NativeLibrary.GetExport(library, "ZSTD_compress2");
         VersionAddress = NativeLibrary.GetExport(library, "ZSTD_versionNumber");
+        _createCompression = createCompression;
         _context = create();
         _compressionContext = createCompression();
         _sequencesContext = createCompression();
@@ -71,6 +79,37 @@ internal sealed unsafe class NativeReference
             nuint result = _generateSequences(_sequencesContext, seqs, (nuint)(sequences.Length / 16), src, (nuint)source.Length);
             return _isError(result) != 0 ? -1 : (int)result;
         }
+    }
+
+    /// <summary>
+    /// A context that compresses with <paramref name="dictionary"/> prepared at <paramref name="level"/>,
+    /// as the platform's encoder does (a <c>ZSTD_CDict</c>, then <c>ZSTD_CCtx_refCDict</c>): its
+    /// <c>ZSTD_compress2</c> writes the frame. <c>ZSTD_createCDict</c> copies the dictionary, which
+    /// prepares it as <c>ZSTD_createCDict_byReference</c> does.
+    /// </summary>
+    public Func<byte[], byte[], int> WithDictionary(byte[] dictionary, int level)
+    {
+        nint prepared;
+        fixed (byte* bytes = dictionary)
+        {
+            prepared = _createDictionary(bytes, (nuint)dictionary.Length, level);
+        }
+
+        nint context = _createCompression();
+        if (prepared == 0 || _isError(_referenceDictionary(context, prepared)) != 0)
+        {
+            throw new InvalidOperationException("the reference could not prepare the dictionary");
+        }
+
+        return (source, destination) =>
+        {
+            fixed (byte* src = source)
+            fixed (byte* dst = destination)
+            {
+                nuint result = _compress2(context, dst, (nuint)destination.Length, src, (nuint)source.Length);
+                return _isError(result) != 0 ? -1 : (int)result;
+            }
+        };
     }
 
     /// <summary><c>ZSTD_compressCCtx</c>, on a context kept from one call to the next: the frame's size, or -1 on an error.</summary>

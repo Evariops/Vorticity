@@ -35,9 +35,11 @@ internal static class Micro
         for (int r = 0; r < repeat; r++)
         foreach (string name in frames)
         {
-            // A name ending in -ldm compresses with the long-distance matcher on.
+            // A name ending in -ldm compresses with the long-distance matcher on; in -dict, with a
+            // dictionary of the content's kind (compress and ncompress only, timed per frame).
             bool longDistance = name.EndsWith("-ldm", StringComparison.Ordinal);
-            string frameName = longDistance ? name[..^4] : name;
+            bool withDictionary = name.EndsWith("-dict", StringComparison.Ordinal);
+            string frameName = longDistance ? name[..^4] : withDictionary ? name[..^5] : name;
             Blocks blocks = Parse(BenchFrames.Load(frameName));
             switch (what)
             {
@@ -159,9 +161,15 @@ internal static class Micro
                     // Compression's stages alone, on the blocks a real compression of the frame's
                     // content cuts: a cycle count per sequence, and per byte (per literal for cliterals).
                     (byte[] content, int level) = BenchFrames.LoadContent(frameName);
-                    var compressor = new ZstdCompressor(level) { LongDistanceMatching = longDistance };
-                    List<ZstdCompressor.BlockRecord> records = compressor.RecordBlocks(content);
-                    int sequences = 0;
+                    byte[]? dictionary = withDictionary ? BenchFrames.Dictionary(frameName) : null;
+                    if (dictionary is not null && what is not ("compress" or "ncompress"))
+                    {
+                        throw new ArgumentException(what + " takes no dictionary");
+                    }
+
+                    var compressor = dictionary is null ? new ZstdCompressor(level) { LongDistanceMatching = longDistance } : new ZstdCompressor(level, dictionary);
+                    List<ZstdCompressor.BlockRecord> records = dictionary is null ? compressor.RecordBlocks(content) : [];
+                    int sequences = dictionary is null ? 0 : 1;
                     int literals = 0;
                     foreach (ZstdCompressor.BlockRecord record in records)
                     {
@@ -184,8 +192,9 @@ internal static class Micro
                             NativeReference native = NativeReference.TryLoad() ?? throw new InvalidOperationException("no " + NativeReference.LibraryPath);
                             PcSampler.Libraries.Add((NativeReference.LibraryPath, "_ZSTD_versionNumber", native.VersionAddress));
                             byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
+                            Func<byte[], byte[], int> compress = dictionary is null ? (s, o) => native.Compress(s, o, level) : native.WithDictionary(dictionary, level);
                             Report(name, $"libzstd compression, {sequences} sequences, {content.Length} bytes, per sequence", sequences, content.Length,
-                                () => native.Compress(content, frame, level));
+                                () => compress(content, frame));
                             break;
                         }
 
