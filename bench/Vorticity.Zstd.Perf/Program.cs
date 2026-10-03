@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO.Compression;
 using System.Linq;
+using System.Runtime.InteropServices;
 using Vorticity.Zstd.Bench;
 
 namespace Vorticity.Zstd.Perf;
@@ -15,7 +16,7 @@ namespace Vorticity.Zstd.Perf;
 /// moment lands on all of them alike. Several passes show how stable the figures are.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab] [--dump dir] [--no-check] [--no-pair]
+/// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd,libzstd-ref] [--ab] [--dump dir] [--no-check] [--no-pair]
 /// [--pmu default|EV1,EV2] [--compress]</c>; <c>--pmu</c> counts hardware events per decode and sequence (under sudo); <c>--ab</c>
 /// adds a "before" candidate that runs with the legacy switches of the point under work (see
 /// <see cref="AbSwitch"/>). <c>--compress</c> times compression instead: each frame's content, at the
@@ -24,10 +25,22 @@ namespace Vorticity.Zstd.Perf;
 /// </remarks>
 public static class Program
 {
+    private const int QosClassUserInteractive = 0x21;
+
     private sealed record Candidate(string Name, Func<byte[], byte[], int> Decode);
+
+    [DllImport("libSystem.dylib")]
+    private static extern int pthread_set_qos_class_self_np(int qosClass, int relativePriority);
 
     public static int Main(string[] args)
     {
+        // The timed thread at the user-interactive QoS: kept on the performance cores at their full
+        // clock, which a default thread is not when other processes compete.
+        if (OperatingSystem.IsMacOS())
+        {
+            _ = pthread_set_qos_class_self_np(QosClassUserInteractive, 0);
+        }
+
         string[] frames = Option(args, "--frames")?.Split(',') ?? BenchFrames.Names;
         if (Option(args, "--dump") is string directory)
         {
@@ -123,7 +136,7 @@ public static class Program
 
         if (only is not null)
         {
-            candidates = candidates.Where(c => c.Name == only).ToList();
+            candidates = candidates.Where(c => only.Split(',').Contains(c.Name)).ToList();
         }
 
         Console.WriteLine($"runtime: {System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}, " +
@@ -218,11 +231,12 @@ public static class Program
 
         if (ab)
         {
-            var before = NewCompressor();
+            // The same compressor, its tables in the same pages: the two differ only by the code
+            // that runs, not by where the tables landed in the caches.
             candidates.Insert(1, new("before", (s, o) =>
             {
                 AbSwitch.Set(legacy: true);
-                before.Compress(s, o, out _, out int w);
+                zstd.Compress(s, o, out _, out int w);
                 AbSwitch.Set(legacy: false);
                 return w;
             }));
@@ -230,7 +244,7 @@ public static class Program
 
         if (only is not null)
         {
-            candidates = candidates.Where(c => c.Name == only).ToList();
+            candidates = candidates.Where(c => only.Split(',').Contains(c.Name)).ToList();
         }
 
         string sizes = string.Empty;
@@ -281,7 +295,7 @@ public static class Program
 
         if (only is not null)
         {
-            candidates = candidates.Where(c => c.Name == only).ToList();
+            candidates = candidates.Where(c => only.Split(',').Contains(c.Name)).ToList();
         }
 
         byte[] expected = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];

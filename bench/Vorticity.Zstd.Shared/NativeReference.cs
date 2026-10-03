@@ -46,7 +46,11 @@ internal sealed unsafe class NativeReference
     /// <summary>Where <c>ZSTD_versionNumber</c> is loaded: the library's slide, for a profiler.</summary>
     public nint VersionAddress { get; }
 
-    public static string LibraryPath => Path.Combine(BenchFrames.RepositoryRoot, "tools", "native-ref", "out", "libzstd_ref.dylib");
+    /// <summary>The reference library; <c>VORTICITY_ZSTD_LIBZSTD</c> names another build of it, for experiments on libzstd itself.</summary>
+    public static string LibraryPath =>
+        Environment.GetEnvironmentVariable("VORTICITY_ZSTD_LIBZSTD") is { Length: > 0 } path
+            ? path
+            : Path.Combine(BenchFrames.RepositoryRoot, "tools", "native-ref", "out", "libzstd_ref.dylib");
 
     /// <summary>The same library built with threads (build.sh mt): zstdmt.</summary>
     public static string ThreadedLibraryPath => Path.Combine(BenchFrames.RepositoryRoot, "tools", "native-ref", "out", "libzstd_mt.dylib");

@@ -12,10 +12,11 @@ namespace Vorticity.Zstd.Perf;
 /// block are taken from the frame itself, then each step is timed alone, many times over.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|compress|ncompress|cmatch|nmatch|centropy|cliterals|chist|csequences [--frames a,b] [--repeat N]
-/// [--pcprofile file]</c>, the repeats for a profiler to attach; <c>--pcprofile</c> samples the
+/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|compress|ncompress|cmatch|nmatch|compressab|cmatchab|centropy|cliterals|chist|csequences
+/// [--frames a,b] [--repeat N] [--pcprofile file]</c>, the repeats for a profiler to attach; <c>--pcprofile</c> samples the
 /// timed loops' program counters (see <see cref="PcSampler"/>). Prints the median time
-/// of one operation, and its cycles at the clock the M4 Pro's performance cores run (4.44 GHz).
+/// of one operation, and its cycles at the clock the M4 Pro's performance cores run (4.44 GHz);
+/// <c>compressab</c> and <c>cmatchab</c> time both sides of <see cref="AbSwitch"/> on one compressor.
 /// </remarks>
 internal static class Micro
 {
@@ -153,6 +154,8 @@ internal static class Micro
                 case "ncompress":
                 case "cmatch":
                 case "nmatch":
+                case "compressab":
+                case "cmatchab":
                 case "centropy":
                 case "cliterals":
                 case "chist":
@@ -202,6 +205,18 @@ internal static class Micro
                             Report(name, $"match finding, {sequences} sequences, {content.Length} bytes, per sequence", sequences, content.Length,
                                 () => compressor.FindSequencesOnly(content, records));
                             break;
+                        case "cmatchab":
+                            ReportAb(name, $"match finding, {sequences} sequences, per sequence", sequences,
+                                () => compressor.FindSequencesOnly(content, records));
+                            break;
+                        case "compressab":
+                        {
+                            byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
+                            ReportAb(name, $"compression, {sequences} sequences, per sequence", sequences,
+                                () => compressor.Compress(content, frame, out _, out _));
+                            break;
+                        }
+
                         case "nmatch":
                         {
                             // libzstd's match finding, per Vorticity.Zstd's sequences (the same, block splits aside).
@@ -234,7 +249,7 @@ internal static class Micro
                 }
 
                 default:
-                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, compress, ncompress, cmatch, nmatch, centropy, cliterals, chist, csequences");
+                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, compress, ncompress, cmatch, nmatch, compressab, cmatchab, centropy, cliterals, chist, csequences");
                     return 1;
             }
         }
@@ -299,6 +314,54 @@ internal static class Micro
         string perCell = cells == 0 ? string.Empty : $", {ns * Ghz * operations / cells:F2} cycles a cell (or symbol)";
         Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
             $"{frame,-15} {what}: {ns,8:F1} ns ({ns * Ghz,7:F0} cycles) each, min {samples[0]:F1}{perCell}"));
+    }
+
+    /// <summary>
+    /// <see cref="Report"/> for the two sides of <see cref="AbSwitch"/>, on the same objects (a
+    /// compressor's tables in the same pages), a sample of each in turn, in alternating order.
+    /// </summary>
+    private static void ReportAb(string frame, string what, int operations, Action body)
+    {
+        int batch = 1;
+        long start = Stopwatch.GetTimestamp();
+        while (Stopwatch.GetElapsedTime(start).TotalMilliseconds < 2)
+        {
+            for (int i = 0; i < batch; i++)
+            {
+                body();
+            }
+
+            batch *= 2;
+        }
+
+        var before = new double[101];
+        var after = new double[101];
+        using (PcSampler.Start())
+        {
+            for (int s = 0; s < before.Length; s++)
+            {
+                for (int side = 0; side < 2; side++)
+                {
+                    bool legacy = ((s + side) & 1) == 0;
+                    AbSwitch.Set(legacy);
+                    long t0 = Stopwatch.GetTimestamp();
+                    for (int i = 0; i < batch; i++)
+                    {
+                        body();
+                    }
+
+                    (legacy ? before : after)[s] = Stopwatch.GetElapsedTime(t0).TotalNanoseconds / batch / operations;
+                }
+            }
+        }
+
+        AbSwitch.Set(legacy: false);
+        Array.Sort(before);
+        Array.Sort(after);
+        double b = before[before.Length / 2];
+        double a = after[after.Length / 2];
+        Console.WriteLine(string.Create(CultureInfo.InvariantCulture,
+            $"{frame,-15} {what}: before {b,8:F1} ns, after {a,8:F1} ns, speedup {b / a:F3}x (min {before[0]:F1} / {after[0]:F1})"));
     }
 
     /// <summary>The table descriptions of a frame's compressed blocks.</summary>

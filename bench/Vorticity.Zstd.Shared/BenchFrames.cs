@@ -33,7 +33,8 @@ internal static class BenchFrames
 
     /// <summary>
     /// Any other kind at any level, 1 MiB: <c>kind-L&lt;level&gt;</c>; 16 KiB with a <c>small-</c>
-    /// prefix, the size up to which libzstd's lazy levels search hash chains rather than rows; 1 KiB
+    /// prefix, the size up to which libzstd's lazy levels search hash chains rather than rows; 256 KiB
+    /// with a <c>mid-</c> prefix, whose match finders' tables fit in the L2 cache; 1 KiB
     /// with a <c>tiny-</c> prefix, a record of the size dictionaries are made for; 80 MiB with a
     /// <c>big-</c> prefix, past which libzstd's level 22 turns its long-distance matcher on (that
     /// frame is compressed at level 1: it only carries the content).
@@ -48,6 +49,7 @@ internal static class BenchFrames
 
         string kind = name[..dash];
         return kind.StartsWith("small-", StringComparison.Ordinal) ? Compress(kind["small-".Length..], 16 << 10, level)
+            : kind.StartsWith("mid-", StringComparison.Ordinal) ? Compress(kind["mid-".Length..], 256 << 10, level)
             : kind.StartsWith("tiny-", StringComparison.Ordinal) ? Compress(kind["tiny-".Length..], 1 << 10, level)
             : kind.StartsWith("big-", StringComparison.Ordinal) ? Compress(kind["big-".Length..], 80 << 20, 1)
             : Compress(kind, 1 << 20, level);
@@ -62,7 +64,7 @@ internal static class BenchFrames
     {
         int dash = name.LastIndexOf("-L", StringComparison.Ordinal);
         string kind = dash > 0 ? name[..dash] : throw new ArgumentException("no kind in " + name, nameof(name));
-        foreach (string prefix in new[] { "small-", "tiny-", "big-" })
+        foreach (string prefix in new[] { "small-", "mid-", "tiny-", "big-" })
         {
             kind = kind.StartsWith(prefix, StringComparison.Ordinal) ? kind[prefix.Length..] : kind;
         }
