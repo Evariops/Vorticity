@@ -5,7 +5,7 @@
     <AssemblyName>Vorticity.Zstd</AssemblyName>
     <IsPackable>true</IsPackable>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <Description>A Zstandard (RFC 8878) decompressor in fully managed C#: no native code, no P/Invoke.</Description>
+    <Description>A Zstandard (RFC 8878) decompressor and compressor in fully managed C#: no native code, no P/Invoke.</Description>
   </PropertyGroup>
 
   <ItemGroup>

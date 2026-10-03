@@ -16,9 +16,10 @@ namespace Vorticity.Zstd.Perf;
 /// </summary>
 /// <remarks>
 /// Usage: <c>Vorticity.Zstd.Perf [--frames a,b] [--passes N] [--reps N] [--only zstd] [--ab] [--dump dir] [--no-check] [--no-pair]
-/// [--pmu default|EV1,EV2]</c>; <c>--pmu</c> counts hardware events per decode and sequence (under sudo); <c>--ab</c>
+/// [--pmu default|EV1,EV2] [--compress]</c>; <c>--pmu</c> counts hardware events per decode and sequence (under sudo); <c>--ab</c>
 /// adds a "before" candidate that runs with the legacy switches of the point under work (see
-/// <see cref="AbSwitch"/>). Before timing,
+/// <see cref="AbSwitch"/>). <c>--compress</c> times compression instead: each frame's content, at the
+/// level its name gives (3 for the reference). Before timing,
 /// every candidate's output is checked against the platform's.
 /// </remarks>
 public static class Program
@@ -71,6 +72,21 @@ public static class Program
         string? only = Option(args, "--only");
         Batch = Option(args, "--batch") is string batch ? int.Parse(batch, CultureInfo.InvariantCulture) : null;
         NoCheck = args.Contains("--no-check");
+
+        if (args.Contains("--compress"))
+        {
+            Console.WriteLine($"runtime: {System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription}, " +
+                $"AOT: {!System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported}, passes {passes} x {reps} reps, compression");
+            foreach (string name in frames)
+            {
+                if (!RunCompress(name, passes, reps, only, args.Contains("--ab")))
+                {
+                    return 1;
+                }
+            }
+
+            return 0;
+        }
 
         // --no-pair: one block at a time, to measure what pairing them brings.
         var zstd = new ZstdDecompressor { PairsBlocks = !args.Contains("--no-pair") };
@@ -145,7 +161,75 @@ public static class Program
             }
         }
 
-        byte[] buffer = new byte[size];
+        Time(name, $"{frame.Length} -> {size} bytes", frame, new byte[size], candidates, passes, reps);
+        return true;
+    }
+
+    /// <summary>
+    /// Compression of a frame's content by each candidate: Vorticity.Zstd must write the platform's frame,
+    /// byte for byte, wherever its level is implemented; each frame's size is shown.
+    /// </summary>
+    private static bool RunCompress(string name, int passes, int reps, string? only, bool ab)
+    {
+        (byte[] content, int level) = BenchFrames.LoadContent(name);
+        byte[] expected = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
+        if (!ZstandardEncoder.TryCompress(content, expected, out int expectedSize, level, 0))
+        {
+            Console.WriteLine($"{name}: the platform could not compress");
+            return false;
+        }
+
+        var zstd = new ZstdCompressor(level);
+        var platform = new ZstandardEncoder(level);
+        NativeReference? native = NativeReference.TryLoad();
+        var candidates = new List<Candidate>
+        {
+            new("zstd", (s, o) => { zstd.Compress(s, o, out _, out int w); return w; }),
+            new("platform", (s, o) => { platform.Reset(); platform.Compress(s, o, out _, out int w, isFinalBlock: true); return w; }),
+        };
+        if (native is not null)
+        {
+            candidates.Add(new("libzstd-ref", (s, o) => native.Compress(s, o, level)));
+        }
+
+        if (ab)
+        {
+            var before = new ZstdCompressor(level);
+            candidates.Insert(1, new("before", (s, o) =>
+            {
+                AbSwitch.Set(legacy: true);
+                before.Compress(s, o, out _, out int w);
+                AbSwitch.Set(legacy: false);
+                return w;
+            }));
+        }
+
+        if (only is not null)
+        {
+            candidates = candidates.Where(c => c.Name == only).ToList();
+        }
+
+        string sizes = string.Empty;
+        foreach (Candidate candidate in candidates)
+        {
+            byte[] output = new byte[expected.Length];
+            int written = candidate.Decode(content, output);
+            sizes += $" {candidate.Name} {written}";
+            if (!NoCheck && !output.AsSpan(0, written).SequenceEqual(expected.AsSpan(0, expectedSize)))
+            {
+                Console.WriteLine($"{name}: {candidate.Name} wrote a different frame ({written} bytes, the platform {expectedSize})");
+                return false;
+            }
+        }
+
+        Time(name, $"{content.Length} bytes at level {level} ->{sizes}", content, new byte[expected.Length], candidates, passes, reps);
+        return true;
+    }
+
+    /// <summary>Times every candidate on the same input, alternated, and prints their statistics.</summary>
+    private static void Time(string name, string title, byte[] input, byte[] buffer, List<Candidate> candidates, int passes, int reps)
+    {
+        byte[] frame = input;
         int count = candidates.Count;
         var samples = new double[count][];
         var passMedians = new double[count][];
@@ -208,7 +292,7 @@ public static class Program
         }
 
         Console.WriteLine();
-        Console.WriteLine($"{name}: {frame.Length} -> {size} bytes" + (batch > 1 ? $", {batch} decodes a sample" : string.Empty));
+        Console.WriteLine($"{name}: {title}" + (batch > 1 ? $", {batch} runs a sample" : string.Empty));
         Console.WriteLine($"  {"decoder",-12} {"min",9} {"p25",9} {"median",9} {"p75",9}   medians per pass (us)");
         var medians = new double[count];
         for (int c = 0; c < count; c++)
@@ -233,8 +317,6 @@ public static class Program
                 }
             }
         }
-
-        return true;
     }
 
     /// <summary>

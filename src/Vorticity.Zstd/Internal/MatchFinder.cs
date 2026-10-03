@@ -1,0 +1,191 @@
+using System.Numerics;
+using System.Runtime.CompilerServices;
+
+namespace Vorticity.Zstd.Internal;
+
+/// <summary>
+/// libzstd's <c>ZSTD_window_t</c> and the tables of its <c>ZSTD_MatchState_t</c>, for a frame whose
+/// whole source is in memory: an index is a position relative to <see cref="Base"/>.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A frame's first byte has the index the previous frame ended at, as libzstd's context continues
+/// its indices from one frame to the next: the entries the tables keep from earlier frames then lie
+/// below the frame's <see cref="DictLimit"/>, invalid without clearing the tables. They are cleared
+/// only when the indices restart, near the top of their range.
+/// </para>
+/// <para>
+/// <see cref="Base"/> points that many bytes before the source, which is pinned: it is never read
+/// below <see cref="DictLimit"/>.
+/// </para>
+/// </remarks>
+internal unsafe struct MatchState
+{
+    public byte* Base;
+
+    /// <summary>The lowest index of the prefix the matches may reach.</summary>
+    public uint DictLimit;
+
+    public uint LowLimit;
+
+    public uint NextToUpdate;
+
+    public uint* HashTable;
+
+    /// <summary>The second table: the short hashes of the double-fast strategy, the chains of the lazy ones.</summary>
+    public uint* ChainTable;
+
+    public CompressionParameters Parameters;
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_getLowestPrefixIndex</c> without a dictionary: the lowest index a match from
+    /// <paramref name="current"/> may reach, within the window.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly uint LowestPrefixIndex(uint current)
+    {
+        uint maxDistance = 1u << Parameters.WindowLog;
+        return current - DictLimit > maxDistance ? current - maxDistance : DictLimit;
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_window_enforceMaxDist</c> without a dictionary: the window moves up so that it
+    /// ends at <paramref name="blockEnd"/>, which libzstd passes the block's start as.
+    /// </summary>
+    public void EnforceMaxDistance(byte* blockEnd)
+    {
+        uint blockEndIndex = (uint)(blockEnd - Base);
+        uint maxDistance = 1u << Parameters.WindowLog;
+        if (blockEndIndex > maxDistance)
+        {
+            uint newLowLimit = blockEndIndex - maxDistance;
+            if (LowLimit < newLowLimit)
+            {
+                LowLimit = newLowLimit;
+            }
+
+            if (DictLimit < LowLimit)
+            {
+                DictLimit = LowLimit;
+            }
+        }
+    }
+}
+
+/// <summary>A hash of the next bytes of the source: libzstd's <c>ZSTD_hashPtr</c> for one length.</summary>
+internal unsafe interface IMatchHash
+{
+    static abstract nuint Hash(byte* p, int hashLog);
+}
+
+/// <summary>libzstd's <c>ZSTD_hash4Ptr</c>.</summary>
+internal readonly unsafe struct Hash4 : IMatchHash
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint Hash(byte* p, int hashLog) => (Unsafe.ReadUnaligned<uint>(p) * 2654435761u) >> (32 - hashLog);
+}
+
+/// <summary>libzstd's <c>ZSTD_hash5Ptr</c>.</summary>
+internal readonly unsafe struct Hash5 : IMatchHash
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint Hash(byte* p, int hashLog) => (nuint)(((Unsafe.ReadUnaligned<ulong>(p) << 24) * 889523592379UL) >> (64 - hashLog));
+}
+
+/// <summary>libzstd's <c>ZSTD_hash6Ptr</c>.</summary>
+internal readonly unsafe struct Hash6 : IMatchHash
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint Hash(byte* p, int hashLog) => (nuint)(((Unsafe.ReadUnaligned<ulong>(p) << 16) * 227718039650203UL) >> (64 - hashLog));
+}
+
+/// <summary>libzstd's <c>ZSTD_hash7Ptr</c>.</summary>
+internal readonly unsafe struct Hash7 : IMatchHash
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint Hash(byte* p, int hashLog) => (nuint)(((Unsafe.ReadUnaligned<ulong>(p) << 8) * 58295818150454627UL) >> (64 - hashLog));
+}
+
+/// <summary>libzstd's <c>ZSTD_hash8Ptr</c>.</summary>
+internal readonly unsafe struct Hash8 : IMatchHash
+{
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint Hash(byte* p, int hashLog) => (nuint)((Unsafe.ReadUnaligned<ulong>(p) * 0xCF1BBCDCB7A56463UL) >> (64 - hashLog));
+}
+
+/// <summary>What the match finders share.</summary>
+internal static unsafe class MatchFinder
+{
+    /// <summary>libzstd's <c>HASH_READ_SIZE</c>: a hash reads eight bytes, which must be in the source.</summary>
+    public const int HashReadSize = 8;
+
+    /// <summary>libzstd's <c>kSearchStrength</c>: how soon an unfruitful search speeds up.</summary>
+    public const int SearchStrength = 8;
+
+    /// <summary>libzstd's <c>REPCODE1_TO_OFFBASE</c>.</summary>
+    public const uint RepeatCode1 = 1;
+
+    /// <summary>libzstd's <c>OFFSET_TO_OFFBASE</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint OffsetToOffBase(uint offset) => offset + 3;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint Read32(byte* p) => Unsafe.ReadUnaligned<uint>(p);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static ulong Read64(byte* p) => Unsafe.ReadUnaligned<ulong>(p);
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_count</c>: how many bytes from <paramref name="input"/> equal those from
+    /// <paramref name="match"/>, up to <paramref name="inputLimit"/>, which no read passes.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint Count(byte* input, byte* match, byte* inputLimit)
+    {
+        byte* start = input;
+        byte* loopLimit = inputLimit - (sizeof(ulong) - 1);
+        if (input < loopLimit)
+        {
+            ulong diff = Read64(match) ^ Read64(input);
+            if (diff != 0)
+            {
+                return (nuint)(BitOperations.TrailingZeroCount(diff) >> 3);
+            }
+
+            input += sizeof(ulong);
+            match += sizeof(ulong);
+            while (input < loopLimit)
+            {
+                diff = Read64(match) ^ Read64(input);
+                if (diff == 0)
+                {
+                    input += sizeof(ulong);
+                    match += sizeof(ulong);
+                    continue;
+                }
+
+                input += BitOperations.TrailingZeroCount(diff) >> 3;
+                return (nuint)(input - start);
+            }
+        }
+
+        if (input < inputLimit - 3 && Read32(match) == Read32(input))
+        {
+            input += 4;
+            match += 4;
+        }
+
+        if (input < inputLimit - 1 && Unsafe.ReadUnaligned<ushort>(match) == Unsafe.ReadUnaligned<ushort>(input))
+        {
+            input += 2;
+            match += 2;
+        }
+
+        if (input < inputLimit && *match == *input)
+        {
+            input++;
+        }
+
+        return (nuint)(input - start);
+    }
+}

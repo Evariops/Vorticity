@@ -43,6 +43,24 @@ internal static class BenchFrames
         return Compress(name[..dash], 1 << 20, level);
     }
 
+    /// <summary>
+    /// What a name means for compression: the content of its frame, and the level it was compressed
+    /// at (3 for the reference frame, whose name has none).
+    /// </summary>
+    public static (byte[] Content, int Level) LoadContent(string name)
+    {
+        byte[] frame = Load(name);
+        byte[] content = new byte[ContentSize(frame)];
+        using (var decoder = new ZstandardDecoder())
+        {
+            decoder.Decompress(frame, content, out _, out _);
+        }
+
+        int dash = name.LastIndexOf("-L", StringComparison.Ordinal);
+        int level = dash > 0 && int.TryParse(name.AsSpan(dash + 2), out int parsed) ? parsed : 3;
+        return (content, level);
+    }
+
     /// <summary>The content size a frame declares: every benchmark frame declares one.</summary>
     public static int ContentSize(byte[] frame) =>
         ZstdDecompressor.TryGetFrameContentSize(frame, out ulong size) ? checked((int)size) : throw new InvalidDataException("no content size");

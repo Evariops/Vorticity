@@ -2,6 +2,7 @@ using System;
 using Vorticity.Zstd.Internal;
 using Vorticity.Zstd.Tests.Support;
 using Xunit;
+using BitWriter = Vorticity.Zstd.Tests.Support.BitWriter;
 
 namespace Vorticity.Zstd.Tests.Unit;
 

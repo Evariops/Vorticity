@@ -12,15 +12,20 @@ namespace Vorticity.Zstd.Bench;
 internal sealed unsafe class NativeReference
 {
     private readonly delegate* unmanaged<nint, byte*, nuint, byte*, nuint, nuint> _decompress;
+    private readonly delegate* unmanaged<nint, byte*, nuint, byte*, nuint, int, nuint> _compress;
     private readonly delegate* unmanaged<nuint, uint> _isError;
     private readonly nint _context;
+    private readonly nint _compressionContext;
 
     private NativeReference(nint library)
     {
         var create = (delegate* unmanaged<nint>)NativeLibrary.GetExport(library, "ZSTD_createDCtx");
+        var createCompression = (delegate* unmanaged<nint>)NativeLibrary.GetExport(library, "ZSTD_createCCtx");
         _decompress = (delegate* unmanaged<nint, byte*, nuint, byte*, nuint, nuint>)NativeLibrary.GetExport(library, "ZSTD_decompressDCtx");
+        _compress = (delegate* unmanaged<nint, byte*, nuint, byte*, nuint, int, nuint>)NativeLibrary.GetExport(library, "ZSTD_compressCCtx");
         _isError = (delegate* unmanaged<nuint, uint>)NativeLibrary.GetExport(library, "ZSTD_isError");
         _context = create();
+        _compressionContext = createCompression();
     }
 
     public static string LibraryPath => Path.Combine(BenchFrames.RepositoryRoot, "tools", "native-ref", "out", "libzstd_ref.dylib");
@@ -36,6 +41,17 @@ internal sealed unsafe class NativeReference
         fixed (byte* dst = destination)
         {
             nuint result = _decompress(_context, dst, (nuint)destination.Length, src, (nuint)source.Length);
+            return _isError(result) != 0 ? -1 : (int)result;
+        }
+    }
+
+    /// <summary><c>ZSTD_compressCCtx</c>, on a context kept from one call to the next: the frame's size, or -1 on an error.</summary>
+    public int Compress(ReadOnlySpan<byte> source, Span<byte> destination, int level)
+    {
+        fixed (byte* src = source)
+        fixed (byte* dst = destination)
+        {
+            nuint result = _compress(_compressionContext, dst, (nuint)destination.Length, src, (nuint)source.Length, level);
             return _isError(result) != 0 ? -1 : (int)result;
         }
     }
