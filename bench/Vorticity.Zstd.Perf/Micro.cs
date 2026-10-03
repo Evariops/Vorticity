@@ -12,8 +12,9 @@ namespace Vorticity.Zstd.Perf;
 /// block are taken from the frame itself, then each step is timed alone, many times over.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|cmatch|centropy|cliterals|chist|csequences [--frames a,b] [--repeat N]</c>, the repeats
-/// for a profiler to attach. Prints the median time
+/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|cmatch|centropy|cliterals|chist|csequences [--frames a,b] [--repeat N]
+/// [--pcprofile file]</c>, the repeats for a profiler to attach; <c>--pcprofile</c> samples the
+/// timed loops' program counters (see <see cref="PcSampler"/>). Prints the median time
 /// of one operation, and its cycles at the clock the M4 Pro's performance cores run (4.44 GHz).
 /// </remarks>
 internal static class Micro
@@ -236,15 +237,18 @@ internal static class Micro
         }
 
         var samples = new double[101];
-        for (int s = 0; s < samples.Length; s++)
+        using (PcSampler.Start())
         {
-            long t0 = Stopwatch.GetTimestamp();
-            for (int i = 0; i < batch; i++)
+            for (int s = 0; s < samples.Length; s++)
             {
-                body();
-            }
+                long t0 = Stopwatch.GetTimestamp();
+                for (int i = 0; i < batch; i++)
+                {
+                    body();
+                }
 
-            samples[s] = Stopwatch.GetElapsedTime(t0).TotalNanoseconds / batch / operations;
+                samples[s] = Stopwatch.GetElapsedTime(t0).TotalNanoseconds / batch / operations;
+            }
         }
 
         Array.Sort(samples);

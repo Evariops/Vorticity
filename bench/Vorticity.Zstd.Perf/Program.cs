@@ -43,6 +43,7 @@ public static class Program
 
         if (Option(args, "--micro") is string micro)
         {
+            PcSampler.Path = Option(args, "--pcprofile");
             return Micro.Run(micro, frames, int.Parse(Option(args, "--repeat") ?? "1", CultureInfo.InvariantCulture));
         }
 
