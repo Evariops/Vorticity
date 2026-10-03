@@ -19,6 +19,9 @@ BenchmarkDotNet.Artifacts/
 # ---- Native reference build (tools/native-ref/build.sh) ----
 tools/native-ref/out/
 
+# ---- Benchmark corpora (bench/zstd-corpus.sh) ----
+tests/Vorticity.Zstd.Tests/testdata/corpus/
+
 # ---- Editors / OS ----
 .vs/
 .idea/

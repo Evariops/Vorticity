@@ -4,6 +4,9 @@ using System.Runtime.InteropServices;
 
 namespace Vorticity.Zstd.Bench;
 
+/// <summary>One call of a codec bound to its context: the size written, or -1 on an error.</summary>
+internal delegate int SpanCodec(ReadOnlySpan<byte> source, Span<byte> destination);
+
 /// <summary>
 /// libzstd 1.5.7 built with today's compiler (tools/native-ref/build.sh), called through function
 /// pointers: the speed a well-compiled C decoder reaches, measured in the same process as Vorticity.Zstd.
@@ -20,6 +23,9 @@ internal sealed unsafe class NativeReference
     private readonly delegate* unmanaged<nint, nint, nuint> _referenceDictionary;
     private readonly delegate* unmanaged<nint, byte*, nuint, byte*, nuint, nuint> _compress2;
     private readonly delegate* unmanaged<nint> _createCompression;
+    private readonly delegate* unmanaged<nint> _createDecompression;
+    private readonly delegate* unmanaged<void*, nuint, nint> _createDecompressionDictionary;
+    private readonly delegate* unmanaged<nint, nint, nuint> _referenceDecompressionDictionary;
     private readonly nint _context;
     private readonly nint _compressionContext;
     private readonly nint _sequencesContext;
@@ -36,8 +42,11 @@ internal sealed unsafe class NativeReference
         _createDictionary = (delegate* unmanaged<void*, nuint, int, nint>)NativeLibrary.GetExport(library, "ZSTD_createCDict");
         _referenceDictionary = (delegate* unmanaged<nint, nint, nuint>)NativeLibrary.GetExport(library, "ZSTD_CCtx_refCDict");
         _compress2 = (delegate* unmanaged<nint, byte*, nuint, byte*, nuint, nuint>)NativeLibrary.GetExport(library, "ZSTD_compress2");
+        _createDecompressionDictionary = (delegate* unmanaged<void*, nuint, nint>)NativeLibrary.GetExport(library, "ZSTD_createDDict");
+        _referenceDecompressionDictionary = (delegate* unmanaged<nint, nint, nuint>)NativeLibrary.GetExport(library, "ZSTD_DCtx_refDDict");
         VersionAddress = NativeLibrary.GetExport(library, "ZSTD_versionNumber");
         _createCompression = createCompression;
+        _createDecompression = create;
         _context = create();
         _compressionContext = createCompression();
         _sequencesContext = createCompression();
@@ -101,6 +110,13 @@ internal sealed unsafe class NativeReference
     /// </summary>
     public Func<byte[], byte[], int> WithDictionary(byte[] dictionary, int level)
     {
+        SpanCodec compress = CompressorWith(dictionary, level);
+        return (source, destination) => compress(source, destination);
+    }
+
+    /// <summary><see cref="WithDictionary"/>, on spans.</summary>
+    public SpanCodec CompressorWith(byte[] dictionary, int level)
+    {
         nint prepared;
         fixed (byte* bytes = dictionary)
         {
@@ -119,6 +135,35 @@ internal sealed unsafe class NativeReference
             fixed (byte* dst = destination)
             {
                 nuint result = _compress2(context, dst, (nuint)destination.Length, src, (nuint)source.Length);
+                return _isError(result) != 0 ? -1 : (int)result;
+            }
+        };
+    }
+
+    /// <summary>
+    /// A context that decompresses with <paramref name="dictionary"/>, as the platform's decoder does
+    /// (a <c>ZSTD_DDict</c>, then <c>ZSTD_DCtx_refDDict</c>): its <c>ZSTD_decompressDCtx</c> decodes the frame.
+    /// </summary>
+    public SpanCodec DecompressorWith(byte[] dictionary)
+    {
+        nint prepared;
+        fixed (byte* bytes = dictionary)
+        {
+            prepared = _createDecompressionDictionary(bytes, (nuint)dictionary.Length);
+        }
+
+        nint context = _createDecompression();
+        if (prepared == 0 || _isError(_referenceDecompressionDictionary(context, prepared)) != 0)
+        {
+            throw new InvalidOperationException("the reference could not load the dictionary");
+        }
+
+        return (source, destination) =>
+        {
+            fixed (byte* src = source)
+            fixed (byte* dst = destination)
+            {
+                nuint result = _decompress(context, dst, (nuint)destination.Length, src, (nuint)source.Length);
                 return _isError(result) != 0 ? -1 : (int)result;
             }
         };

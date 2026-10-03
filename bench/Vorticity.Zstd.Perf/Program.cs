@@ -21,7 +21,8 @@ namespace Vorticity.Zstd.Perf;
 /// adds a "before" candidate that runs with the legacy switches of the point under work (see
 /// <see cref="AbSwitch"/>). <c>--compress</c> times compression instead: each frame's content, at the
 /// level its name gives (3 for the reference). Before timing,
-/// every candidate's output is checked against the platform's.
+/// every candidate's output is checked against the platform's. <c>--corpus silesia,github,github-dict</c>
+/// measures zstd's own benchmark data instead, level by level (see <see cref="Corpus"/>).
 /// </remarks>
 public static class Program
 {
@@ -52,6 +53,18 @@ public static class Program
             }
 
             return 0;
+        }
+
+        if (Option(args, "--corpus") is string corpora)
+        {
+            // zstd's own benchmark data, level by level: bench/zstd-corpus.sh downloads it.
+            return Corpus.Run(corpora.Split(','), Option(args, "--levels"), Option(args, "--seconds"), Option(args, "--only"),
+                Option(args, "--results"), Option(args, "--markdown"));
+        }
+
+        if (Option(args, "--corpus-report") is string results)
+        {
+            return Corpus.Report(results, Option(args, "--markdown"));
         }
 
         if (Option(args, "--micro") is string micro)
