@@ -20,6 +20,7 @@ var compressor = new ZstdCompressor(level: 3);    // reusable: tables and buffer
 byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
 OperationStatus status = compressor.Compress(content, frame, out int consumed, out int written);
 var withDictionary = new ZstdCompressor(level: 3, dictionaryBytes);   // prepared once, for every frame
+int size = await compressor.CompressAsync(content, frame, maxDegreeOfParallelism: 8);   // jobs on the thread pool
 ```
 
 `Compress` writes one whole frame per call, which declares its content size (and, with
@@ -30,6 +31,13 @@ post-block splitters, and the long-distance matching it turns on at level 22 for
 dictionary prepared at the same level (`ZSTD_createCDict`, then `ZSTD_CCtx_refCDict`, as the
 platform's `ZstandardDictionary` does), again byte for byte at every level, long-distance matching
 included. A warm compressor allocates nothing. It is not thread-safe.
+
+`CompressAsync` writes the frame libzstd writes with workers (`ZSTD_c_nbWorkers` of 1 or more, zstdmt):
+the source cut into jobs of four windows (1 MiB to 1 GiB, each but the first loading the end of the one
+before), compressed on the thread pool, up to the degree of parallelism at a time, by compressors the
+instance keeps for them. The frame is the same whatever the degree, and up to 512 KiB it is the one
+`Compress` writes. It is checked against libzstd built with threads (`tools/native-ref/build.sh mt`).
+Long-distance matching is not implemented yet in jobs.
 
 ## Layout
 

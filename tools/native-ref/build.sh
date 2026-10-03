@@ -8,6 +8,9 @@
 #   decodecorpus        zstd's own generator of random VALID frames, which exercises the modes an
 #                       encoder almost never emits (RLE and repeat sequence tables, treeless
 #                       literals, direct Huffman weights...). Used to build the test corpus.
+#   libzstd_mt.dylib    the same library with ZSTD_MULTITHREAD: zstdmt, what libzstd writes with
+#                       ZSTD_c_nbWorkers >= 1, the oracle of the parallel compressor. `build.sh mt`
+#                       builds it alone.
 #
 # The sources are the zstd 1.5.7 release tarball, downloaded once and checked against its SHA-256;
 # ZSTD_SRC=<dir> points at an already extracted tree instead.
@@ -38,6 +41,26 @@ lib="$src/lib"
 cc="${CC:-cc}"
 echo "compiler: $($cc --version | head -1)"
 
+# libzstd_mt.dylib: compression with worker threads (zstdmt), decompression for the round trips.
+build_mt() {
+  local objs="$out/obj-mt"
+  rm -rf "$objs" && mkdir -p "$objs"
+  (
+    cd "$objs"
+    $cc -O3 -DZSTD_MULTITHREAD -pthread -c -I"$lib" -I"$lib/common" \
+      "$lib"/common/*.c "$lib"/compress/*.c \
+      "$lib/decompress/zstd_ddict.c" "$lib/decompress/zstd_decompress.c" \
+      "$lib/decompress/zstd_decompress_block.c" "$lib/decompress/huf_decompress.c"
+    $cc -dynamiclib -pthread -o "$out/libzstd_mt.dylib" ./*.o
+  )
+  echo "built: $out/libzstd_mt.dylib"
+}
+
+if [[ "${1:-}" == mt ]]; then
+  build_mt
+  exit 0
+fi
+
 # libzstd_ref.dylib: the reference library, with the flags of the measurement it reproduces.
 objs="$out/obj-ref"
 rm -rf "$objs" && mkdir -p "$objs"
@@ -66,4 +89,5 @@ $cc -O2 -DZSTD_MULTITHREAD=0 \
   "$lib"/compress/zstd_opt.c "$lib"/compress/zstd_preSplit.c \
   "$lib"/decompress/*.c "$lib"/dictBuilder/*.c -lm
 
+build_mt
 echo "built: $out/libzstd_ref.dylib $out/zd $out/decodecorpus"

@@ -136,21 +136,29 @@ public sealed unsafe partial class ZstdCompressor
     }
 
     /// <summary>
-    /// libzstd's <c>ZSTD_compress_frameChunk</c>: the source cut into blocks, each compressed, RLE or
-    /// raw, the last one flagged.
+    /// libzstd's <c>ZSTD_compress_frameChunk</c> over a whole frame: the source cut into blocks, each
+    /// compressed, RLE or raw, the last one flagged.
     /// </summary>
     /// <returns>The size of the blocks, or -1 when they do not fit.</returns>
-    private int CompressBlocks(byte* source, int sourceSize, byte* destination, int capacity)
+    private int CompressBlocks(byte* source, int sourceSize, byte* destination, int capacity) =>
+        CompressBlocks(source, sourceSize, destination, capacity, _parameters.BlockSizeMax(sourceSize), lastChunk: true, savings: 0);
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_compress_frameChunk</c>: a chunk of the frame cut into blocks of up to
+    /// <paramref name="blockSizeMax"/>, each compressed, RLE or raw, the last one flagged when the
+    /// chunk ends the frame. <paramref name="savings"/> is what the frame saved before the chunk
+    /// (libzstd's consumed less produced sizes), which allows its blocks to be split.
+    /// </summary>
+    /// <returns>The size of the blocks, or -1 when they do not fit.</returns>
+    private int CompressBlocks(byte* source, int sourceSize, byte* destination, int capacity, int blockSizeMax, bool lastChunk, long savings)
     {
-        int blockSizeMax = _parameters.BlockSizeMax(sourceSize);
         int remaining = sourceSize;
         byte* ip = source;
         int op = 0;
-        long savings = 0;
         while (remaining > 0)
         {
             int blockSize = OptimalBlockSize(ip, remaining, blockSizeMax, savings);
-            int lastBlock = blockSize == remaining ? 1 : 0;
+            int lastBlock = lastChunk && blockSize == remaining ? 1 : 0;
             // As libzstd: a dictionary dropped for the whole block when the window passes it before
             // the block's end; the window moved from the block's start, covering the block whole,
             // the matches then limited to it by the match finder.
