@@ -27,7 +27,8 @@ namespace Vorticity.Zstd.Perf;
 /// [--results file.tsv] [--markdown file.md]</c>, or <c>Vorticity.Zstd.Perf --corpus-report file.tsv [--markdown file.md]</c>
 /// to render results already measured. <c>silesia</c> is silesia.tar, the twelve files in one frame,
 /// as lzbench reads it; <c>github</c> the 500 records, a frame each, on one context;
-/// <c>github-dict</c> the same with github.dict. A direction is timed for some <c>--seconds</c> (5 by
+/// <c>github-dict</c> the same with github.dict; <c>github.tar</c> and <c>github.tar-dict</c> the
+/// records' tar in one frame, as zstd's regression tests also take them. A direction is timed for some <c>--seconds</c> (5 by
 /// default), never fewer than three rounds. <c>--only</c> keeps the named candidates besides libzstd,
 /// the reference. <c>--results</c> appends each level's measures to a file as soon as they are taken,
 /// and the tables are rendered from the whole file, a later measure replacing an earlier one: a run
@@ -468,8 +469,19 @@ internal static class Corpus
                 return new DataSet(name, dictionary is null ? "github" : "github + dict", title, content, offsets, dictionary);
             }
 
+            case "github.tar":
+            case "github.tar-dict":
+            {
+                // The archive itself, one frame of several blocks, as zstd's regression tests take it.
+                byte[] tar = Unzstd(Path.Combine(directory, "github.tar.zst"));
+                byte[]? dictionary = name == "github.tar-dict" ? Unzstd(Path.Combine(directory, "github.dict.zst")) : null;
+                string title = $"the records' tar, {tar.Length:N0} bytes, one frame" +
+                    (dictionary is null ? string.Empty : $", with github.dict ({dictionary.Length:N0} bytes)");
+                return new DataSet(name, dictionary is null ? "github.tar" : "github.tar + dict", title, tar, [0, tar.Length], dictionary);
+            }
+
             default:
-                throw new ArgumentException("unknown corpus " + name + " (silesia, github, github-dict)", nameof(name));
+                throw new ArgumentException("unknown corpus " + name + " (silesia, github, github-dict, github.tar, github.tar-dict)", nameof(name));
         }
     }
 

@@ -498,6 +498,8 @@ public sealed partial class ZstdDecompressor
     {
         ref byte frameStart = ref MemoryMarshal.GetReference(destination);
         nint fastRoom = Math.Min((nint)blockStart + blockSizeMax, destination.Length - WildCopyOverlength);
+        state.HistoryEnd = ref Unsafe.Add(ref MemoryMarshal.GetReference(history), history.Length);
+        state.HistoryLength = history.Length;
         nint done = ExecuteRecordsFast(
             ref state, ref records, count, ref frameStart,
             ref Unsafe.Add(ref frameStart, Math.Max(fastRoom, Unsafe.ByteOffset(ref frameStart, ref state.Dst))),
@@ -611,10 +613,33 @@ public sealed partial class ZstdDecompressor
             ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
             ref byte matchEnd = ref Unsafe.Add(ref matchStart, matchLength);
             if (Unsafe.IsAddressGreaterThan(ref matchEnd, ref fastLimit)
-                | Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd)
-                | (offset > (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart)))
+                | Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd))
             {
                 goto Pending;
+            }
+
+            nuint prefix = (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart);
+            if (offset > prefix)
+            {
+                // A match in the dictionary, as in ExecuteSequencesFast: copied from there when it
+                // ends there; one that runs on into the frame is the careful path's.
+                nuint back = offset - prefix;
+                if ((back > (nuint)s.HistoryLength) | ((nint)back < matchLength))
+                {
+                    goto Pending;
+                }
+
+                WildCopy16(ref dst, ref lit, litLength);
+                WildCopy32(ref matchStart, ref Unsafe.Subtract(ref s.HistoryEnd, back), matchLength);
+                dst = ref matchEnd;
+                lit = ref litAfter;
+                batch -= (litLength + matchLength + 31) >> 5;
+                if (batch > 0)
+                {
+                    goto Loop;
+                }
+
+                goto Batch;
             }
 
             ref byte match = ref Unsafe.Subtract(ref matchStart, offset);

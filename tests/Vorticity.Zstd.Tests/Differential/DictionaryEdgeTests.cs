@@ -49,6 +49,30 @@ public sealed class DictionaryEdgeTests
         }
     }
 
+    [Theory]
+    [MemberData(nameof(Cases))]
+    public void Edges_of_the_dictionary_across_paired_blocks_decode_like_libzstd(string type, int level)
+    {
+        // The edges at the start of the frame, the only place a match runs on from the dictionary
+        // into the frame (further on, the frame has the same bytes closer); then blocks of short
+        // sequences, which the decoder takes two at a time, the first block with the edges.
+        (byte[] dictionary, _) = Dictionaries.Get("json", type);
+        byte[] data = [.. EdgeContent(dictionary), .. DataKinds.Generate("json", 320 * 1024, 5)];
+        using ZstandardDictionary prepared = ZstandardDictionary.Create(dictionary, level);
+        byte[] frame = NativeZstd.Compress(data, new ZstandardCompressionOptions { Quality = level, Dictionary = prepared });
+
+        foreach (bool paired in new[] { true, false })
+        {
+            var decoder = new ZstdDecompressor(dictionary) { PairsBlocks = paired };
+            byte[] output = new byte[data.Length];
+            OperationStatus status = decoder.Decompress(frame, output, out int consumed, out int written);
+            Assert.Equal(OperationStatus.Done, status);
+            Assert.Equal(frame.Length, consumed);
+            Assert.Equal(data.Length, written);
+            Corpus.AssertSameBytes(data, output, $"{type} L{level} paired {paired}");
+        }
+    }
+
     /// <summary>
     /// The tail of the dictionary at every length up to 40, each followed by bytes it shares nothing
     /// with or by the start of the frame (a match that runs on from the dictionary into the frame);

@@ -156,13 +156,64 @@ public static class Program
             $"AOT: {!System.Runtime.CompilerServices.RuntimeFeature.IsDynamicCodeSupported}, passes {passes} x {reps} reps");
         foreach (string name in frames)
         {
-            if (!Run(name, candidates, passes, reps))
+            if (!(name.EndsWith("-dict", StringComparison.Ordinal) ? RunWithDictionary(name, passes, reps, only) : Run(name, candidates, passes, reps)))
             {
                 return 1;
             }
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Decompression with a dictionary (a name ending in <c>-dict</c>): the frame's content
+    /// compressed by the platform with a dictionary of its kind (<see cref="BenchFrames.Dictionary"/>)
+    /// prepared at its level, decoded by every candidate given that dictionary.
+    /// </summary>
+    private static bool RunWithDictionary(string name, int passes, int reps, string? only)
+    {
+        string frameName = name[..^5];
+        (byte[] content, int level) = BenchFrames.LoadContent(frameName);
+        byte[] dictionary = BenchFrames.Dictionary(frameName);
+        using ZstandardDictionary prepared = ZstandardDictionary.Create(dictionary, level);
+        byte[] buffer = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
+        using (var encoder = new ZstandardEncoder(new ZstandardCompressionOptions { Quality = level, Dictionary = prepared }))
+        {
+            encoder.Compress(content, buffer, out _, out int written, isFinalBlock: true);
+            buffer = buffer.AsSpan(0, written).ToArray();
+        }
+
+        var zstd = new ZstdDecompressor(dictionary);
+        var platform = new ZstandardDecoder(prepared);
+        var candidates = new List<Candidate>
+        {
+            new("zstd", (f, o) => { zstd.Decompress(f, o, out _, out int w); return w; }),
+            new("platform", (f, o) => { platform.Reset(); platform.Decompress(f, o, out _, out int w); return w; }),
+        };
+        if (NativeReference.TryLoad() is { } native)
+        {
+            SpanCodec decode = native.DecompressorWith(dictionary);
+            candidates.Add(new("libzstd-ref", (f, o) => decode(f, o)));
+        }
+
+        if (only is not null)
+        {
+            candidates = candidates.Where(c => only.Split(',').Contains(c.Name)).ToList();
+        }
+
+        foreach (Candidate candidate in candidates)
+        {
+            byte[] output = new byte[content.Length];
+            int written = candidate.Decode(buffer, output);
+            if (!NoCheck && (written != content.Length || !output.AsSpan().SequenceEqual(content)))
+            {
+                Console.WriteLine($"{name}: {candidate.Name} produced a different output ({written} bytes)");
+                return false;
+            }
+        }
+
+        Time(name, $"{buffer.Length} -> {content.Length} bytes, with a dictionary of {dictionary.Length} bytes", buffer, new byte[content.Length], candidates, passes, reps);
+        return true;
     }
 
     private static bool Run(string name, List<Candidate> candidates, int passes, int reps)
