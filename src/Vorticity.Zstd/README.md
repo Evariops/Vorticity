@@ -19,13 +19,17 @@ allocates nothing. It is not thread-safe.
 var compressor = new ZstdCompressor(level: 3);    // reusable: tables and buffers are kept
 byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
 OperationStatus status = compressor.Compress(content, frame, out int consumed, out int written);
+var withDictionary = new ZstdCompressor(level: 3, dictionaryBytes);   // prepared once, for every frame
 ```
 
 `Compress` writes one whole frame per call, which declares its content size (and, with
 `AppendChecksum`, ends with a checksum): the frame libzstd 1.5.7's `ZSTD_compress` writes at the same
 level, byte for byte, at every level from -131072 to 22 (libzstd's nine strategies, its pre- and
 post-block splitters, and the long-distance matching it turns on at level 22 for sources over
-64 MiB). A warm compressor allocates nothing. It is not thread-safe.
+64 MiB). With a dictionary, zstd-format or raw content, the frames are those libzstd writes with the
+dictionary prepared at the same level (`ZSTD_createCDict`, then `ZSTD_CCtx_refCDict`, as the
+platform's `ZstandardDictionary` does), again byte for byte at every level (long-distance matching
+aside, for now). A warm compressor allocates nothing. It is not thread-safe.
 
 ## Layout
 

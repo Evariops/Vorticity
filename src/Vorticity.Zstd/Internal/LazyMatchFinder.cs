@@ -27,16 +27,70 @@ internal static unsafe class LazyMatchFinder
 
     /// <summary>The block's sequences into <paramref name="store"/>, for the strategy and search of the parameters.</summary>
     /// <returns>The size of the literals after the last sequence.</returns>
-    public static nuint CompressBlock(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size)
+    public static nuint CompressBlock(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size) =>
+        Dispatch<NoDictionary>(ref state, store, rep, source, size);
+
+    /// <summary>
+    /// libzstd's loading of a dictionary into the lazy strategies' tables: every position up to
+    /// <paramref name="ip"/>, into the rows (<c>ZSTD_row_update</c>, the tags cleared first) or the
+    /// hash chains (<c>ZSTD_insertAndFindFirstIndex</c>).
+    /// </summary>
+    public static void FillDictionaryTables(ref MatchState state, byte* ip)
+    {
+        CompressionParameters parameters = state.Parameters;
+        int minMatch = Math.Clamp(parameters.MinMatch, 4, 6);
+        if (!parameters.UsesRowMatchFinder)
+        {
+            switch (parameters.MinMatch)
+            {
+                case 5: HashChainSearch<Hash5, NoDictionary>.Fill(ref state, ip); break;
+                case 6: HashChainSearch<Hash6, NoDictionary>.Fill(ref state, ip); break;
+                default: HashChainSearch<Hash4, NoDictionary>.Fill(ref state, ip); break;
+            }
+
+            return;
+        }
+
+        new Span<byte>(state.TagTable, 1 << parameters.HashLog).Clear();
+        switch (minMatch, Math.Clamp(parameters.SearchLog, 4, 6))
+        {
+            case (4, 4): RowSearch<Hash4, Row16, NoDictionary>.Fill(ref state, ip); break;
+            case (4, 5): RowSearch<Hash4, Row32, NoDictionary>.Fill(ref state, ip); break;
+            case (4, _): RowSearch<Hash4, Row64, NoDictionary>.Fill(ref state, ip); break;
+            case (5, 4): RowSearch<Hash5, Row16, NoDictionary>.Fill(ref state, ip); break;
+            case (5, 5): RowSearch<Hash5, Row32, NoDictionary>.Fill(ref state, ip); break;
+            case (5, _): RowSearch<Hash5, Row64, NoDictionary>.Fill(ref state, ip); break;
+            case (_, 4): RowSearch<Hash6, Row16, NoDictionary>.Fill(ref state, ip); break;
+            case (_, 5): RowSearch<Hash6, Row32, NoDictionary>.Fill(ref state, ip); break;
+            default: RowSearch<Hash6, Row64, NoDictionary>.Fill(ref state, ip); break;
+        }
+    }
+
+    /// <summary>
+    /// The block's sequences with a dictionary: below the prefix as a segment of its own
+    /// (<paramref name="extDict"/>), or attached.
+    /// </summary>
+    /// <returns>The size of the literals after the last sequence.</returns>
+    public static nuint CompressBlockWithDictionary(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size, bool extDict) =>
+        extDict
+            ? Dispatch<ExtDictionary>(ref state, store, rep, source, size)
+            : Dispatch<AttachedDictionary>(ref state, store, rep, source, size);
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_selectBlockCompressor</c> for the lazy strategies: the search and its
+    /// specializations, then the parser of the dictionary mode.
+    /// </summary>
+    private static nuint Dispatch<TDictionary>(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size)
+        where TDictionary : IDictionaryMode
     {
         int minMatch = Math.Clamp(state.Parameters.MinMatch, 4, 6);
         if (state.Parameters.Strategy == Strategy.BinaryTreeLazy2)
         {
             return minMatch switch
             {
-                5 => CompressBlock<BinaryTreeSearch<Hash5>, Depth2>(ref state, store, rep, source, size),
-                6 => CompressBlock<BinaryTreeSearch<Hash6>, Depth2>(ref state, store, rep, source, size),
-                _ => CompressBlock<BinaryTreeSearch<Hash4>, Depth2>(ref state, store, rep, source, size),
+                5 => ByDepth<BinaryTreeSearch<Hash5, TDictionary>>(ref state, store, rep, source, size, 2),
+                6 => ByDepth<BinaryTreeSearch<Hash6, TDictionary>>(ref state, store, rep, source, size, 2),
+                _ => ByDepth<BinaryTreeSearch<Hash4, TDictionary>>(ref state, store, rep, source, size, 2),
             };
         }
 
@@ -45,34 +99,250 @@ internal static unsafe class LazyMatchFinder
         {
             return minMatch switch
             {
-                5 => ByDepth<HashChainSearch<Hash5>>(ref state, store, rep, source, size, depth),
-                6 => ByDepth<HashChainSearch<Hash6>>(ref state, store, rep, source, size, depth),
-                _ => ByDepth<HashChainSearch<Hash4>>(ref state, store, rep, source, size, depth),
+                5 => ByDepth<HashChainSearch<Hash5, TDictionary>>(ref state, store, rep, source, size, depth),
+                6 => ByDepth<HashChainSearch<Hash6, TDictionary>>(ref state, store, rep, source, size, depth),
+                _ => ByDepth<HashChainSearch<Hash4, TDictionary>>(ref state, store, rep, source, size, depth),
             };
         }
 
         return (minMatch, Math.Clamp(state.Parameters.SearchLog, 4, 6)) switch
         {
-            (4, 4) => ByDepth<RowSearch<Hash4, Row16>>(ref state, store, rep, source, size, depth),
-            (4, 5) => ByDepth<RowSearch<Hash4, Row32>>(ref state, store, rep, source, size, depth),
-            (4, _) => ByDepth<RowSearch<Hash4, Row64>>(ref state, store, rep, source, size, depth),
-            (5, 4) => ByDepth<RowSearch<Hash5, Row16>>(ref state, store, rep, source, size, depth),
-            (5, 5) => ByDepth<RowSearch<Hash5, Row32>>(ref state, store, rep, source, size, depth),
-            (5, _) => ByDepth<RowSearch<Hash5, Row64>>(ref state, store, rep, source, size, depth),
-            (_, 4) => ByDepth<RowSearch<Hash6, Row16>>(ref state, store, rep, source, size, depth),
-            (_, 5) => ByDepth<RowSearch<Hash6, Row32>>(ref state, store, rep, source, size, depth),
-            _ => ByDepth<RowSearch<Hash6, Row64>>(ref state, store, rep, source, size, depth),
+            (4, 4) => ByDepth<RowSearch<Hash4, Row16, TDictionary>>(ref state, store, rep, source, size, depth),
+            (4, 5) => ByDepth<RowSearch<Hash4, Row32, TDictionary>>(ref state, store, rep, source, size, depth),
+            (4, _) => ByDepth<RowSearch<Hash4, Row64, TDictionary>>(ref state, store, rep, source, size, depth),
+            (5, 4) => ByDepth<RowSearch<Hash5, Row16, TDictionary>>(ref state, store, rep, source, size, depth),
+            (5, 5) => ByDepth<RowSearch<Hash5, Row32, TDictionary>>(ref state, store, rep, source, size, depth),
+            (5, _) => ByDepth<RowSearch<Hash5, Row64, TDictionary>>(ref state, store, rep, source, size, depth),
+            (_, 4) => ByDepth<RowSearch<Hash6, Row16, TDictionary>>(ref state, store, rep, source, size, depth),
+            (_, 5) => ByDepth<RowSearch<Hash6, Row32, TDictionary>>(ref state, store, rep, source, size, depth),
+            _ => ByDepth<RowSearch<Hash6, Row64, TDictionary>>(ref state, store, rep, source, size, depth),
         };
     }
 
     private static nuint ByDepth<TSearch>(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size, int depth)
         where TSearch : struct, ILazySearch =>
-        depth switch
+        TSearch.DictionaryMode == ExtDictionary.Value
+            ? depth switch
+            {
+                0 => CompressBlockExtDict<TSearch, Depth0>(ref state, store, rep, source, size),
+                1 => CompressBlockExtDict<TSearch, Depth1>(ref state, store, rep, source, size),
+                _ => CompressBlockExtDict<TSearch, Depth2>(ref state, store, rep, source, size),
+            }
+            : depth switch
+            {
+                0 => CompressBlock<TSearch, Depth0>(ref state, store, rep, source, size),
+                1 => CompressBlock<TSearch, Depth1>(ref state, store, rep, source, size),
+                _ => CompressBlock<TSearch, Depth2>(ref state, store, rep, source, size),
+            };
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_compressBlock_lazy_extDict_generic</c>: the parser over an extDict below the
+    /// prefix, whose repeat offsets reach into it within the window.
+    /// </summary>
+    private static nuint CompressBlockExtDict<TSearch, TDepth>(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size)
+        where TSearch : struct, ILazySearch
+        where TDepth : struct, ILazyDepth
+    {
+        byte* istart = source;
+        byte* ip = istart;
+        byte* anchor = istart;
+        byte* iend = istart + size;
+        byte* ilimit = iend - HashReadSize - (TSearch.UsesRows ? RowHashCacheSize : 0);
+        byte* @base = state.Base;
+        uint dictLimit = state.DictLimit;
+        byte* prefixStart = @base + dictLimit;
+        byte* dictBase = state.DictionaryBase;
+        byte* dictEnd = dictBase + dictLimit;
+        byte* dictStart = dictBase + state.LowLimit;
+        uint offset1 = rep[0];
+        uint offset2 = rep[1];
+
+        state.LazySkipping = false;
+        ip += ip == prefixStart ? 1 : 0;
+        TSearch.Prepare(ref state);
+        if (TSearch.UsesRows)
         {
-            0 => CompressBlock<TSearch, Depth0>(ref state, store, rep, source, size),
-            1 => CompressBlock<TSearch, Depth1>(ref state, store, rep, source, size),
-            _ => CompressBlock<TSearch, Depth2>(ref state, store, rep, source, size),
-        };
+            TSearch.FillHashCache(ref state, state.NextToUpdate, ilimit);
+        }
+
+        while (ip < ilimit)
+        {
+            nuint matchLength = 0;
+            nuint offBase = RepeatCode1;
+            byte* start = ip + 1;
+            uint current = (uint)(ip - @base);
+
+            // The first repeat offset at ip + 1.
+            {
+                nuint repLength = ExtDictRepeatLength(ref state, ip + 1, current + 1, offset1, dictBase, dictEnd, iend);
+                if (repLength != 0)
+                {
+                    matchLength = repLength;
+                    if (TDepth.Depth == 0)
+                    {
+                        goto StoreSequence;
+                    }
+                }
+            }
+
+            // The first search, at ip.
+            {
+                nuint candidate = 999999999;
+                nuint length = TSearch.FindBestMatch(ref state, ip, iend, ref candidate);
+                if (length > matchLength)
+                {
+                    matchLength = length;
+                    start = ip;
+                    offBase = candidate;
+                }
+            }
+
+            if (matchLength < 4)
+            {
+                nuint step = (nuint)(ip - anchor) >> SearchStrength;
+                ip += step + 1;
+                state.LazySkipping = step > LazySkippingStep;
+                continue;
+            }
+
+            if (TDepth.Depth >= 1)
+            {
+                while (ip < ilimit)
+                {
+                    ip++;
+                    current++;
+                    {
+                        nuint repLength = ExtDictRepeatLength(ref state, ip, current, offset1, dictBase, dictEnd, iend);
+                        int gain2 = (int)(repLength * 3);
+                        int gain1 = (int)(((nint)matchLength * 3) - HighBit(offBase) + 1);
+                        if ((repLength >= 4) & (gain2 > gain1))
+                        {
+                            matchLength = repLength;
+                            offBase = RepeatCode1;
+                            start = ip;
+                        }
+                    }
+
+                    {
+                        nuint candidate = 999999999;
+                        nuint length = TSearch.FindBestMatch(ref state, ip, iend, ref candidate);
+                        int gain2 = (int)(((nint)length * 4) - HighBit(candidate));
+                        int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 4);
+                        if ((length >= 4) & (gain2 > gain1))
+                        {
+                            matchLength = length;
+                            offBase = candidate;
+                            start = ip;
+                            continue;
+                        }
+                    }
+
+                    if (TDepth.Depth == 2 && ip < ilimit)
+                    {
+                        ip++;
+                        current++;
+                        {
+                            nuint repLength = ExtDictRepeatLength(ref state, ip, current, offset1, dictBase, dictEnd, iend);
+                            int gain2 = (int)(repLength * 4);
+                            int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 1);
+                            if ((repLength >= 4) & (gain2 > gain1))
+                            {
+                                matchLength = repLength;
+                                offBase = RepeatCode1;
+                                start = ip;
+                            }
+                        }
+
+                        {
+                            nuint candidate = 999999999;
+                            nuint length = TSearch.FindBestMatch(ref state, ip, iend, ref candidate);
+                            int gain2 = (int)(((nint)length * 4) - HighBit(candidate));
+                            int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 7);
+                            if ((length >= 4) & (gain2 > gain1))
+                            {
+                                matchLength = length;
+                                offBase = candidate;
+                                start = ip;
+                                continue;
+                            }
+                        }
+                    }
+
+                    break;
+                }
+            }
+
+            // An offset (not a repeat code): the match extended backward, in its segment.
+            if (offBase > RepeatCodeCount)
+            {
+                nuint offset = offBase - RepeatCodeCount;
+                uint matchIndex = (uint)((nuint)(start - @base) - offset);
+                byte* match = matchIndex < dictLimit ? dictBase + matchIndex : @base + matchIndex;
+                byte* matchStart = matchIndex < dictLimit ? dictStart : prefixStart;
+                while ((start > anchor) && (match > matchStart) && start[-1] == match[-1])
+                {
+                    start--;
+                    match--;
+                    matchLength++;
+                }
+
+                offset2 = offset1;
+                offset1 = (uint)offset;
+            }
+
+        StoreSequence:
+            store.Store((nuint)(start - anchor), anchor, iend, (uint)offBase, matchLength);
+            anchor = ip = start + matchLength;
+            if (state.LazySkipping)
+            {
+                // A match ends the skipping: the hash cache is filled again.
+                if (TSearch.UsesRows)
+                {
+                    TSearch.FillHashCache(ref state, state.NextToUpdate, ilimit);
+                }
+
+                state.LazySkipping = false;
+            }
+
+            // The second repeat offset, at once.
+            while (ip <= ilimit)
+            {
+                matchLength = ExtDictRepeatLength(ref state, ip, (uint)(ip - @base), offset2, dictBase, dictEnd, iend);
+                if (matchLength == 0)
+                {
+                    break;
+                }
+
+                (offset1, offset2) = (offset2, offset1);
+                store.Store(0, anchor, iend, RepeatCode1, matchLength);
+                ip += matchLength;
+                anchor = ip;
+            }
+        }
+
+        rep[0] = offset1;
+        rep[1] = offset2;
+        return (nuint)(iend - anchor);
+    }
+
+    /// <summary>
+    /// The match of a repeat offset at <paramref name="ip"/> (index <paramref name="current"/>) over an
+    /// extDict: within the window, not straddling the segments; its length, 0 when there is none.
+    /// </summary>
+    private static nuint ExtDictRepeatLength(ref MatchState state, byte* ip, uint current, uint offset, byte* dictBase, byte* dictEnd, byte* iend)
+    {
+        uint dictLimit = state.DictLimit;
+        uint windowLow = state.LowestMatchIndex(current);
+        uint repIndex = current - offset;
+        byte* repMatch = (repIndex < dictLimit ? dictBase : state.Base) + repIndex;
+        if (!(IndexOverlapCheck(dictLimit, repIndex) & (offset <= current - windowLow)) || Read32(ip) != Read32(repMatch))
+        {
+            return 0;
+        }
+
+        byte* repEnd = repIndex < dictLimit ? dictEnd : iend;
+        return Count2Segments(ip + 4, repMatch + 4, iend, repEnd, state.Base + dictLimit) + 4;
+    }
 
     /// <summary>libzstd's <c>ZSTD_compressBlock_lazy_generic</c> for one search and one depth, without a dictionary.</summary>
     private static nuint CompressBlock<TSearch, TDepth>(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size)
@@ -85,15 +355,32 @@ internal static unsafe class LazyMatchFinder
         byte* iend = istart + size;
         byte* ilimit = iend - HashReadSize - (TSearch.UsesRows ? RowHashCacheSize : 0);
         byte* @base = state.Base;
-        byte* prefixLowest = @base + state.DictLimit;
+        uint prefixLowestIndex = state.DictLimit;
+        byte* prefixLowest = @base + prefixLowestIndex;
 
         uint offset1 = rep[0];
         uint offset2 = rep[1];
         uint offsetSaved1 = 0;
         uint offsetSaved2 = 0;
 
-        ip += ip == prefixLowest ? 1 : 0;
+        // An attached dictionary: its indices just below the prefix's.
+        bool attached = TSearch.DictionaryMode == AttachedDictionary.Value;
+        byte* dictBase = null;
+        byte* dictLowest = null;
+        byte* dictEnd = null;
+        uint dictIndexDelta = 0;
+        if (attached)
         {
+            MatchState* dictionary = state.Dictionary;
+            dictBase = dictionary->Base;
+            dictLowest = dictBase + dictionary->DictLimit;
+            dictEnd = dictBase + dictionary->End;
+            dictIndexDelta = prefixLowestIndex - dictionary->End;
+            ip += (ip - prefixLowest) + (dictEnd - dictLowest) == 0 ? 1 : 0;
+        }
+        else
+        {
+            ip += ip == prefixLowest ? 1 : 0;
             uint current = (uint)(ip - @base);
             uint maxRep = current - state.LowestPrefixIndex(current);
             if (offset2 > maxRep)
@@ -127,7 +414,21 @@ internal static unsafe class LazyMatchFinder
             byte* start = ip + 1;
 
             // The first repeat offset at ip + 1.
-            if ((offset1 > 0) & (Read32(ip + 1 - offset1) == Read32(ip + 1)))
+            if (attached)
+            {
+                uint repIndex = (uint)(ip - @base) + 1 - offset1;
+                byte* repMatch = repIndex < prefixLowestIndex ? dictBase + (repIndex - dictIndexDelta) : @base + repIndex;
+                if (IndexOverlapCheck(prefixLowestIndex, repIndex) && Read32(repMatch) == Read32(ip + 1))
+                {
+                    byte* repMatchEnd = repIndex < prefixLowestIndex ? dictEnd : iend;
+                    matchLength = Count2Segments(ip + 1 + 4, repMatch + 4, iend, repMatchEnd, prefixLowest) + 4;
+                    if (TDepth.Depth == 0)
+                    {
+                        goto StoreSequence;
+                    }
+                }
+            }
+            else if ((offset1 > 0) & (Read32(ip + 1 - offset1) == Read32(ip + 1)))
             {
                 matchLength = Count(ip + 1 + 4, ip + 1 + 4 - offset1, iend) + 4;
                 if (TDepth.Depth == 0)
@@ -164,7 +465,19 @@ internal static unsafe class LazyMatchFinder
                 while (ip < ilimit)
                 {
                     ip++;
-                    if ((offset1 > 0) & (Read32(ip) == Read32(ip - offset1)))
+                    if (attached)
+                    {
+                        nuint repLength = AttachedRepeatLength(ip, offset1, @base, prefixLowestIndex, dictBase, dictIndexDelta, dictEnd, iend);
+                        int gain2 = (int)(repLength * 3);
+                        int gain1 = (int)(((nint)matchLength * 3) - HighBit(offBase) + 1);
+                        if ((repLength >= 4) & (gain2 > gain1))
+                        {
+                            matchLength = repLength;
+                            offBase = RepeatCode1;
+                            start = ip;
+                        }
+                    }
+                    else if ((offset1 > 0) & (Read32(ip) == Read32(ip - offset1)))
                     {
                         nuint repLength = Count(ip + 4, ip + 4 - offset1, iend) + 4;
                         int gain2 = (int)(repLength * 3);
@@ -194,7 +507,19 @@ internal static unsafe class LazyMatchFinder
                     if (TDepth.Depth == 2 && ip < ilimit)
                     {
                         ip++;
-                        if ((offset1 > 0) & (Read32(ip) == Read32(ip - offset1)))
+                        if (attached)
+                        {
+                            nuint repLength = AttachedRepeatLength(ip, offset1, @base, prefixLowestIndex, dictBase, dictIndexDelta, dictEnd, iend);
+                            int gain2 = (int)(repLength * 4);
+                            int gain1 = (int)(((nint)matchLength * 4) - HighBit(offBase) + 1);
+                            if ((repLength >= 4) & (gain2 > gain1))
+                            {
+                                matchLength = repLength;
+                                offBase = RepeatCode1;
+                                start = ip;
+                            }
+                        }
+                        else if ((offset1 > 0) & (Read32(ip) == Read32(ip - offset1)))
                         {
                             nuint repLength = Count(ip + 4, ip + 4 - offset1, iend) + 4;
                             int gain2 = (int)(repLength * 4);
@@ -230,10 +555,26 @@ internal static unsafe class LazyMatchFinder
             if (offBase > RepeatCodeCount)
             {
                 nuint offset = offBase - RepeatCodeCount;
-                while (((start > anchor) & (start - offset > prefixLowest)) && start[-1] == (start - offset)[-1])
+                if (attached)
                 {
-                    start--;
-                    matchLength++;
+                    // The match may start in the dictionary.
+                    uint matchIndex = (uint)((nuint)(start - @base) - offset);
+                    byte* match = matchIndex < prefixLowestIndex ? dictBase + matchIndex - dictIndexDelta : @base + matchIndex;
+                    byte* matchStart = matchIndex < prefixLowestIndex ? dictLowest : prefixLowest;
+                    while ((start > anchor) && (match > matchStart) && start[-1] == match[-1])
+                    {
+                        start--;
+                        match--;
+                        matchLength++;
+                    }
+                }
+                else
+                {
+                    while (((start > anchor) & (start - offset > prefixLowest)) && start[-1] == (start - offset)[-1])
+                    {
+                        start--;
+                        matchLength++;
+                    }
                 }
 
                 offset2 = offset1;
@@ -255,13 +596,32 @@ internal static unsafe class LazyMatchFinder
             }
 
             // The second repeat offset, at once.
-            while (((ip <= ilimit) & (offset2 > 0)) && Read32(ip) == Read32(ip - offset2))
+            if (attached)
             {
-                matchLength = Count(ip + 4, ip + 4 - offset2, iend) + 4;
-                (offset1, offset2) = (offset2, offset1);
-                SequenceStore.StoreOnly(ref sequence, counts, 0, RepeatCode1, matchLength);
-                ip += matchLength;
-                anchor = ip;
+                while (ip <= ilimit)
+                {
+                    matchLength = AttachedRepeatLength(ip, offset2, @base, prefixLowestIndex, dictBase, dictIndexDelta, dictEnd, iend);
+                    if (matchLength == 0)
+                    {
+                        break;
+                    }
+
+                    (offset1, offset2) = (offset2, offset1);
+                    SequenceStore.StoreOnly(ref sequence, counts, 0, RepeatCode1, matchLength);
+                    ip += matchLength;
+                    anchor = ip;
+                }
+            }
+            else
+            {
+                while (((ip <= ilimit) & (offset2 > 0)) && Read32(ip) == Read32(ip - offset2))
+                {
+                    matchLength = Count(ip + 4, ip + 4 - offset2, iend) + 4;
+                    (offset1, offset2) = (offset2, offset1);
+                    SequenceStore.StoreOnly(ref sequence, counts, 0, RepeatCode1, matchLength);
+                    ip += matchLength;
+                    anchor = ip;
+                }
             }
         }
 
@@ -272,6 +632,25 @@ internal static unsafe class LazyMatchFinder
         store.Literals = lit;
         store.Sequences = sequence;
         return (nuint)(iend - anchor);
+    }
+
+    /// <summary>
+    /// The match of a repeat offset at <paramref name="ip"/> with a dictionary attached, which it may
+    /// start in: its length, 0 when its four bytes differ or straddle the segments.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static nuint AttachedRepeatLength(
+        byte* ip, uint offset, byte* @base, uint prefixLowestIndex, byte* dictBase, uint dictIndexDelta, byte* dictEnd, byte* iend)
+    {
+        uint repIndex = (uint)(ip - @base) - offset;
+        byte* repMatch = repIndex < prefixLowestIndex ? dictBase + (repIndex - dictIndexDelta) : @base + repIndex;
+        if (!IndexOverlapCheck(prefixLowestIndex, repIndex) || Read32(repMatch) != Read32(ip))
+        {
+            return 0;
+        }
+
+        byte* repMatchEnd = repIndex < prefixLowestIndex ? dictEnd : iend;
+        return Count2Segments(ip + 4, repMatch + 4, iend, repMatchEnd, @base + prefixLowestIndex) + 4;
     }
 
     /// <summary>libzstd's <c>ZSTD_highbit32</c> of an offset code, as the lazy parser weighs it.</summary>
@@ -317,6 +696,15 @@ internal unsafe interface ILazySearch
 
     /// <summary>libzstd's <c>ZSTD_row_fillHashCache</c>: the hashes of the positions from <paramref name="index"/>.</summary>
     static abstract void FillHashCache(ref MatchState state, uint index, byte* limit);
+
+    /// <summary>The dictionary mode of the search: <see cref="IDictionaryMode.Mode"/>.</summary>
+    static abstract int DictionaryMode { get; }
+
+    /// <summary>
+    /// A dictionary's positions into the tables, up to <paramref name="ip"/> excluded (libzstd's
+    /// <c>ZSTD_insertAndFindFirstIndex</c>, <c>ZSTD_row_update</c>): all of them, without the cache.
+    /// </summary>
+    static abstract void Fill(ref MatchState state, byte* ip);
 }
 
 /// <summary>
@@ -324,10 +712,15 @@ internal unsafe interface ILazySearch
 /// table, each position's predecessor of the same hash in the chain table, followed up to
 /// 2^searchLog candidates.
 /// </summary>
-internal readonly unsafe struct HashChainSearch<THash> : ILazySearch
+internal readonly unsafe struct HashChainSearch<THash, TDictionary> : ILazySearch
     where THash : IMatchHash
+    where TDictionary : IDictionaryMode
 {
     public static bool UsesRows => false;
+
+    public static int DictionaryMode => TDictionary.Mode;
+
+    public static void Fill(ref MatchState state, byte* ip) => InsertAndFindFirstIndex(ref state, ip);
 
     public static void Prepare(ref MatchState state)
     {
@@ -351,23 +744,101 @@ internal readonly unsafe struct HashChainSearch<THash> : ILazySearch
 
         // The chain's indices are native integers, read from the table as such: as 32-bit ones, the
         // JIT zero-extended and scaled each in an instruction of its own, on the walk's dependent chain.
+        // An extDict's indices, below the prefix, read from its own base.
+        uint dictLimit = state.DictLimit;
+        byte* prefixStart = @base + dictLimit;
+        byte* dictBase = state.DictionaryBase;
+        byte* dictEnd = dictBase + dictLimit;
+
         nuint matchIndex = InsertAndFindFirstIndex(ref state, ip);
         nuint bestLength = 4 - 1;
         for (; (matchIndex >= lowLimit) & (attempts > 0); attempts--)
         {
-            byte* match = @base + matchIndex;
-
-            // The four bytes that end one past the best length: a longer match has them.
-            if (Read32(match + bestLength - 3) == Read32(ip + bestLength - 3))
+            if (TDictionary.Mode != ExtDictionary.Value || matchIndex >= dictLimit)
             {
-                nuint length = Count(ip, match, end);
+                byte* match = @base + matchIndex;
+
+                // The four bytes that end one past the best length: a longer match has them.
+                if (Read32(match + bestLength - 3) == Read32(ip + bestLength - 3))
+                {
+                    nuint length = Count(ip, match, end);
+                    if (length > bestLength)
+                    {
+                        bestLength = length;
+                        offBase = OffsetToOffBase(current - (uint)matchIndex);
+                        if (ip + length == end)
+                        {
+                            // The longest possible, and reading further would pass the end.
+                            break;
+                        }
+                    }
+                }
+            }
+            else
+            {
+                byte* match = dictBase + matchIndex;
+                if (Read32(match) == Read32(ip))
+                {
+                    nuint length = Count2Segments(ip + 4, match + 4, end, dictEnd, prefixStart) + 4;
+                    if (length > bestLength)
+                    {
+                        bestLength = length;
+                        offBase = OffsetToOffBase(current - (uint)matchIndex);
+                        if (ip + length == end)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (matchIndex <= minChain)
+            {
+                break;
+            }
+
+            matchIndex = chainTable[matchIndex & chainMask];
+        }
+
+        if (TDictionary.Mode == AttachedDictionary.Value)
+        {
+            bestLength = SearchDictionary(ref state, ip, end, ref offBase, bestLength, attempts);
+        }
+
+        return bestLength;
+    }
+
+    /// <summary>
+    /// The attached dictionary's chain, with the attempts the frame's left: its own tables and
+    /// parameters, its indices just below the prefix's.
+    /// </summary>
+    private static nuint SearchDictionary(ref MatchState state, byte* ip, byte* end, ref nuint offBase, nuint bestLength, uint attempts)
+    {
+        MatchState* dictionary = state.Dictionary;
+        uint* chainTable = dictionary->ChainTable;
+        uint chainSize = 1u << dictionary->Parameters.ChainLog;
+        uint chainMask = chainSize - 1;
+        uint lowestIndex = dictionary->DictLimit;
+        byte* dictionaryBase = dictionary->Base;
+        byte* dictionaryEnd = dictionaryBase + dictionary->End;
+        uint dictionarySize = dictionary->End;
+        uint indexDelta = state.DictLimit - dictionarySize;
+        uint minChain = dictionarySize > chainSize ? dictionarySize - chainSize : 0;
+        byte* prefixStart = state.Base + state.DictLimit;
+        uint current = (uint)(ip - state.Base);
+        uint matchIndex = dictionary->HashTable[THash.Hash(Read64(ip), dictionary->Parameters.HashLog)];
+        for (; (matchIndex >= lowestIndex) & (attempts > 0); attempts--)
+        {
+            byte* match = dictionaryBase + matchIndex;
+            if (Read32(match) == Read32(ip))
+            {
+                nuint length = Count2Segments(ip + 4, match + 4, end, dictionaryEnd, prefixStart) + 4;
                 if (length > bestLength)
                 {
                     bestLength = length;
-                    offBase = OffsetToOffBase(current - (uint)matchIndex);
+                    offBase = OffsetToOffBase(current - (matchIndex + indexDelta));
                     if (ip + length == end)
                     {
-                        // The longest possible, and reading further would pass the end.
                         break;
                     }
                 }
@@ -390,7 +861,7 @@ internal readonly unsafe struct HashChainSearch<THash> : ILazySearch
     /// Inlined: across a call, the search's best length lived on the stack.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint InsertAndFindFirstIndex(ref MatchState state, byte* ip)
+    internal static uint InsertAndFindFirstIndex(ref MatchState state, byte* ip)
     {
         uint* hashTable = state.HashTable;
         int hashLog = state.Parameters.HashLog;
@@ -428,13 +899,19 @@ internal readonly unsafe struct HashChainSearch<THash> : ILazySearch
 /// position modulo the tree's size: while it is unsorted, the first is the next position of its
 /// hash and the second <see cref="UnsortedMark"/>, an index below every window.
 /// </remarks>
-internal readonly unsafe struct BinaryTreeSearch<THash> : ILazySearch
+internal readonly unsafe struct BinaryTreeSearch<THash, TDictionary> : ILazySearch
     where THash : IMatchHash
+    where TDictionary : IDictionaryMode
 {
     /// <summary>libzstd's <c>ZSTD_DUBT_UNSORTED_MARK</c>.</summary>
     private const uint UnsortedMark = 1;
 
     public static bool UsesRows => false;
+
+    public static int DictionaryMode => TDictionary.Mode;
+
+    /// <summary>Not used: a dictionary goes into the tree sorted, as the optimal parsers insert (<see cref="OptimalMatchFinder.FillTree"/>).</summary>
+    public static void Fill(ref MatchState state, byte* ip) => throw new NotSupportedException();
 
     public static void Prepare(ref MatchState state)
     {
@@ -527,6 +1004,10 @@ internal readonly unsafe struct BinaryTreeSearch<THash> : ILazySearch
         }
 
         // The longest match, ip inserted on the way.
+        uint dictLimit = state.DictLimit;
+        byte* dictBase = state.DictionaryBase;
+        byte* dictEnd = dictBase + dictLimit;
+        byte* prefixStart = @base + dictLimit;
         nuint commonLengthSmaller = 0;
         nuint commonLengthLarger = 0;
         uint* smallerPtr = tree + (2 * (current & treeMask));
@@ -541,8 +1022,22 @@ internal readonly unsafe struct BinaryTreeSearch<THash> : ILazySearch
         {
             uint* nextPtr = tree + (2 * (matchIndex & treeMask));
             nuint matchLength = Math.Min(commonLengthSmaller, commonLengthLarger);
-            byte* match = @base + matchIndex;
-            matchLength += Count(ip + matchLength, match + matchLength, end);
+            byte* match;
+            if (TDictionary.Mode != ExtDictionary.Value || matchIndex + matchLength >= dictLimit)
+            {
+                match = @base + matchIndex;
+                matchLength += Count(ip + matchLength, match + matchLength, end);
+            }
+            else
+            {
+                match = dictBase + matchIndex;
+                matchLength += Count2Segments(ip + matchLength, match + matchLength, end, dictEnd, prefixStart);
+                if (matchIndex + matchLength >= dictLimit)
+                {
+                    // The match runs into the prefix: its next byte is there.
+                    match = @base + matchIndex;
+                }
+            }
 
             if (matchLength > bestLength)
             {
@@ -560,7 +1055,13 @@ internal readonly unsafe struct BinaryTreeSearch<THash> : ILazySearch
 
                 if (ip + matchLength == end)
                 {
-                    // Equal to the end: no way to know whether smaller or larger, so dropped.
+                    // Equal to the end: no way to know whether smaller or larger, so dropped, the
+                    // attached dictionary's search with it.
+                    if (TDictionary.Mode == AttachedDictionary.Value)
+                    {
+                        compares = 0;
+                    }
+
                     break;
                 }
             }
@@ -597,8 +1098,82 @@ internal readonly unsafe struct BinaryTreeSearch<THash> : ILazySearch
 
         *smallerPtr = *largerPtr = 0;
 
+        if (TDictionary.Mode == AttachedDictionary.Value && compares != 0)
+        {
+            bestLength = FindBetterDictionaryMatch(ref state, ip, end, ref offBase, bestLength, compares);
+        }
+
         // Past a repetitive match, its positions are not inserted.
         state.NextToUpdate = matchEndIndex - 8;
+        return bestLength;
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_DUBT_findBetterDictMatch</c>: the attached dictionary's tree (sorted when it
+    /// was filled), with the compares the frame's left; a longer match taken as the frame's search
+    /// takes one, but against the best offset plus 1.
+    /// </summary>
+    private static nuint FindBetterDictionaryMatch(ref MatchState state, byte* ip, byte* end, ref nuint offBase, nuint bestLength, uint compares)
+    {
+        MatchState* dictionary = state.Dictionary;
+        uint dictMatchIndex = dictionary->HashTable[THash.Hash(Read64(ip), dictionary->Parameters.HashLog)];
+        byte* @base = state.Base;
+        byte* prefixStart = @base + state.DictLimit;
+        uint current = (uint)(ip - @base);
+        byte* dictBase = dictionary->Base;
+        byte* dictEnd = dictBase + dictionary->End;
+        uint dictHighLimit = dictionary->End;
+        uint dictLowLimit = dictionary->LowLimit;
+        uint dictIndexDelta = state.LowLimit - dictHighLimit;
+        uint* dictTree = dictionary->ChainTable;
+        uint treeMask = (1u << (dictionary->Parameters.ChainLog - 1)) - 1;
+        uint treeLow = treeMask >= dictHighLimit - dictLowLimit ? dictLowLimit : dictHighLimit - treeMask;
+        nuint commonLengthSmaller = 0;
+        nuint commonLengthLarger = 0;
+        for (; (compares != 0) && (dictMatchIndex > dictLowLimit); compares--)
+        {
+            uint* nextPtr = dictTree + (2 * (dictMatchIndex & treeMask));
+            nuint matchLength = Math.Min(commonLengthSmaller, commonLengthLarger);
+            byte* match = dictBase + dictMatchIndex;
+            matchLength += Count2Segments(ip + matchLength, match + matchLength, end, dictEnd, prefixStart);
+            if (dictMatchIndex + matchLength >= dictHighLimit)
+            {
+                // The match runs into the prefix: its next byte is there.
+                match = @base + dictMatchIndex + dictIndexDelta;
+            }
+
+            if (matchLength > bestLength)
+            {
+                uint matchIndex = dictMatchIndex + dictIndexDelta;
+                if (4 * (int)(matchLength - bestLength) > HighBit(current - matchIndex + 1) - HighBit((uint)offBase + 1))
+                {
+                    bestLength = matchLength;
+                    offBase = OffsetToOffBase(current - matchIndex);
+                }
+
+                if (ip + matchLength == end)
+                {
+                    break;
+                }
+            }
+
+            if (dictMatchIndex <= treeLow)
+            {
+                break;
+            }
+
+            if (match[matchLength] < ip[matchLength])
+            {
+                commonLengthSmaller = matchLength;
+                dictMatchIndex = nextPtr[1];
+            }
+            else
+            {
+                commonLengthLarger = matchLength;
+                dictMatchIndex = nextPtr[0];
+            }
+        }
+
         return bestLength;
     }
 
@@ -613,7 +1188,13 @@ internal readonly unsafe struct BinaryTreeSearch<THash> : ILazySearch
         nuint commonLengthSmaller = 0;
         nuint commonLengthLarger = 0;
         byte* @base = state.Base;
-        byte* ip = @base + current;
+        uint dictLimit = state.DictLimit;
+        byte* dictBase = state.DictionaryBase;
+        byte* dictEnd = dictBase + dictLimit;
+        byte* prefixStart = @base + dictLimit;
+        bool inExtDict = TDictionary.Mode == ExtDictionary.Value && current < dictLimit;
+        byte* ip = inExtDict ? dictBase + current : @base + current;
+        byte* inputEnd = inExtDict ? dictEnd : end;
         uint* smallerPtr = tree + (2 * (current & treeMask));
         uint* largerPtr = smallerPtr + 1;
 
@@ -621,16 +1202,30 @@ internal readonly unsafe struct BinaryTreeSearch<THash> : ILazySearch
         // the second holds the previous unsorted one, already saved, which may be overwritten.
         uint matchIndex = *smallerPtr;
         uint dummy;
-        uint windowLow = state.LowestMatchIndex(current);
+        uint windowLow = state.LowestIndexInWindow(current);
 
         for (; (compares != 0) && (matchIndex > windowLow); compares--)
         {
             uint* nextPtr = tree + (2 * (matchIndex & treeMask));
             nuint matchLength = Math.Min(commonLengthSmaller, commonLengthLarger);
-            byte* match = @base + matchIndex;
-            matchLength += Count(ip + matchLength, match + matchLength, end);
+            byte* match;
+            if (TDictionary.Mode != ExtDictionary.Value || matchIndex + matchLength >= dictLimit || current < dictLimit)
+            {
+                // Both in the same segment.
+                match = (TDictionary.Mode != ExtDictionary.Value || matchIndex + matchLength >= dictLimit ? @base : dictBase) + matchIndex;
+                matchLength += Count(ip + matchLength, match + matchLength, inputEnd);
+            }
+            else
+            {
+                match = dictBase + matchIndex;
+                matchLength += Count2Segments(ip + matchLength, match + matchLength, inputEnd, dictEnd, prefixStart);
+                if (matchIndex + matchLength >= dictLimit)
+                {
+                    match = @base + matchIndex;
+                }
+            }
 
-            if (ip + matchLength == end)
+            if (ip + matchLength == inputEnd)
             {
                 // Equal to the end: dropped, to keep the tree consistent.
                 break;
@@ -716,14 +1311,33 @@ internal readonly struct Row64 : IRowLog
 /// summed into <see cref="MatchState.Touched"/>, which keeps the loads alive and the lines on their way.
 /// </para>
 /// </remarks>
-internal readonly unsafe struct RowSearch<THash, TRow> : ILazySearch
+internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearch
     where THash : IMatchHash
     where TRow : IRowLog
+    where TDictionary : IDictionaryMode
 {
     /// <summary>libzstd's <c>kSkipThreshold</c>: past this many positions to insert, most are skipped.</summary>
     private const uint SkipThreshold = 384;
 
     public static bool UsesRows => true;
+
+    public static int DictionaryMode => TDictionary.Mode;
+
+    /// <summary>libzstd's <c>ZSTD_row_update</c>: every position up to <paramref name="ip"/>, hashed without the cache.</summary>
+    public static void Fill(ref MatchState state, byte* ip)
+    {
+        Prepare(ref state);
+        byte* @base = state.Base;
+        ulong multiplier = state.RowHashMultiplier;
+        int shift = state.RowHashShift;
+        uint target = (uint)(ip - @base);
+        for (uint index = state.NextToUpdate; index < target; index++)
+        {
+            Insert(state.TagTable, state.HashTable, (nuint)((Read64(@base + index) * multiplier) >> shift), index);
+        }
+
+        state.NextToUpdate = target;
+    }
 
     public static void Prepare(ref MatchState state)
     {
@@ -804,7 +1418,7 @@ internal readonly unsafe struct RowSearch<THash, TRow> : ILazySearch
 
             candidates[count] = matchIndex;
             count++;
-            read += @base[matchIndex];
+            read += (TDictionary.Mode == ExtDictionary.Value && matchIndex < state.DictLimit ? state.DictionaryBase : @base)[matchIndex];
             if (--attempts == 0)
             {
                 break;
@@ -824,15 +1438,31 @@ internal readonly unsafe struct RowSearch<THash, TRow> : ILazySearch
         for (nuint k = 0; k < count; k++)
         {
             uint matchIndex = candidates[k];
-            byte* match = @base + matchIndex;
-
-            // The four bytes that end one past the best length: a longer match has them.
-            if (Read32(match + bestLength - 3) != Read32(ip + bestLength - 3))
+            nuint length;
+            if (TDictionary.Mode != ExtDictionary.Value || matchIndex >= state.DictLimit)
             {
-                continue;
+                byte* match = @base + matchIndex;
+
+                // The four bytes that end one past the best length: a longer match has them.
+                if (Read32(match + bestLength - 3) != Read32(ip + bestLength - 3))
+                {
+                    continue;
+                }
+
+                length = Count(ip, match, end);
+            }
+            else
+            {
+                // An extDict's index, below the prefix.
+                byte* match = state.DictionaryBase + matchIndex;
+                if (Read32(match) != Read32(ip))
+                {
+                    continue;
+                }
+
+                length = Count2Segments(ip + 4, match + 4, end, state.DictionaryBase + state.DictLimit, @base + state.DictLimit) + 4;
             }
 
-            nuint length = Count(ip, match, end);
             if (length > bestLength)
             {
                 bestLength = length;
@@ -840,6 +1470,79 @@ internal readonly unsafe struct RowSearch<THash, TRow> : ILazySearch
                 if (ip + length == end)
                 {
                     // The longest possible, and reading further would pass the end.
+                    break;
+                }
+            }
+        }
+
+        if (TDictionary.Mode == AttachedDictionary.Value)
+        {
+            bestLength = SearchDictionary(ref state, ip, end, ref offBase, bestLength, attempts);
+        }
+
+        return bestLength;
+    }
+
+    /// <summary>
+    /// The attached dictionary's row, with the attempts the frame's left: its own tables, of the same
+    /// row size, hashed without salt; its indices just below the prefix's.
+    /// </summary>
+    private static nuint SearchDictionary(ref MatchState state, byte* ip, byte* end, ref nuint offBase, nuint bestLength, uint attempts)
+    {
+        nuint rowMask = ((nuint)1 << TRow.Log) - 1;
+        MatchState* dictionary = state.Dictionary;
+        nuint hash = (nuint)((Read64(ip) * state.RowHashMultiplier) >> (64 - (dictionary->RowHashLog + LazyMatchFinder.RowHashTagBits)));
+        nuint relativeRow = RowOf(hash);
+        byte* tagRow = dictionary->TagTable + relativeRow;
+        uint* row = dictionary->HashTable + relativeRow;
+        uint lowestIndex = dictionary->DictLimit;
+        byte* dictionaryBase = dictionary->Base;
+        byte* dictionaryEnd = dictionaryBase + dictionary->End;
+        uint indexDelta = state.DictLimit - dictionary->End;
+        byte* prefixStart = state.Base + state.DictLimit;
+        uint current = (uint)(ip - state.Base);
+        uint head = tagRow[0] & (uint)rowMask;
+        nuint headGrouped = (nuint)head << MaskGroupShift;
+        ulong matches = MatchMask(tagRow, (byte)hash, head);
+        uint* candidates = state.Candidates;
+        nuint count = 0;
+        uint read = 0;
+        for (; (matches != 0) & (attempts > 0); matches &= matches - 1)
+        {
+            nuint matchPosition = ((headGrouped + (nuint)(uint)BitOperations.TrailingZeroCount(matches)) >> MaskGroupShift) & rowMask;
+            if (matchPosition == 0)
+            {
+                continue;
+            }
+
+            uint matchIndex = row[matchPosition];
+            if (matchIndex < lowestIndex)
+            {
+                break;
+            }
+
+            read += dictionaryBase[matchIndex];
+            candidates[count++] = matchIndex;
+            attempts--;
+        }
+
+        state.Touched += read;
+        for (nuint k = 0; k < count; k++)
+        {
+            uint matchIndex = candidates[k];
+            byte* match = dictionaryBase + matchIndex;
+            if (Read32(match) != Read32(ip))
+            {
+                continue;
+            }
+
+            nuint length = Count2Segments(ip + 4, match + 4, end, dictionaryEnd, prefixStart) + 4;
+            if (length > bestLength)
+            {
+                bestLength = length;
+                offBase = OffsetToOffBase(current - (matchIndex + indexDelta));
+                if (ip + length == end)
+                {
                     break;
                 }
             }

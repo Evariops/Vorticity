@@ -320,8 +320,13 @@ internal sealed unsafe class CompressionDictionary
                 }
 
                 break;
+            case Strategy.Greedy or Strategy.Lazy or Strategy.Lazy2:
+                LazyMatchFinder.FillDictionaryTables(ref state, end - MatchFinder.HashReadSize);
+                break;
             default:
-                throw new NotSupportedException($"Dictionaries are not implemented yet for the {parameters.Strategy} strategy.");
+                // btlazy2 and the optimal parsers: a sorted tree.
+                OptimalMatchFinder.FillTree(ref state, end - MatchFinder.HashReadSize, end);
+                break;
         }
 
         state.NextToUpdate = state.End;

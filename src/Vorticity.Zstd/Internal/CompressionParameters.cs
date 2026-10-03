@@ -56,6 +56,12 @@ internal struct CompressionParameters
     public Strategy Strategy;
 
     /// <summary>
+    /// The row-based match finder pinned on (1) or off (-1), as a prepared dictionary's tables decide
+    /// it from its own window; 0 for the window of these parameters (<see cref="UsesRowMatchFinder"/>).
+    /// </summary>
+    public sbyte RowMatchFinder;
+
+    /// <summary>
     /// <c>ZSTD_defaultCParameters</c>: for sources over 256 KiB, up to 256 KiB, up to 128 KiB and up
     /// to 16 KiB, a row per level from 0 (the base of the negative levels) to 22, each
     /// <c>W, C, H, S, L, TL, strategy</c>.
@@ -226,8 +232,7 @@ internal struct CompressionParameters
     {
         CompressionParameters parameters = this;
         parameters.Adjust((ulong)sourceSize, (ulong)dictionarySize, ParameterMode.AttachedDictionary);
-        parameters.WindowLog = windowLog;
-        return parameters;
+        return parameters.WithWindow(windowLog) with { RowMatchFinder = UsesRowMatchFinder ? (sbyte)1 : (sbyte)-1 };
     }
 
     /// <summary>libzstd's <c>ZSTD_getCParams_internal</c>: a level's row for the sizes, adjusted.</summary>
@@ -380,7 +385,17 @@ internal struct CompressionParameters
     /// libzstd's <c>ZSTD_resolveRowMatchFinderMode</c> on a machine with 128-bit vectors (arm64, x64):
     /// the lazy strategies search rows once the window passes 16 KiB, hash chains below.
     /// </summary>
-    public readonly bool UsesRowMatchFinder => Strategy is >= Strategy.Greedy and <= Strategy.Lazy2 && WindowLog > 14;
+    public readonly bool UsesRowMatchFinder =>
+        RowMatchFinder != 0 ? RowMatchFinder > 0 : Strategy is >= Strategy.Greedy and <= Strategy.Lazy2 && WindowLog > 14;
+
+    /// <summary>These parameters with <paramref name="windowLog"/>, the row decision kept as these make it.</summary>
+    public readonly CompressionParameters WithWindow(int windowLog)
+    {
+        CompressionParameters parameters = this;
+        parameters.RowMatchFinder = UsesRowMatchFinder ? (sbyte)1 : (sbyte)-1;
+        parameters.WindowLog = windowLog;
+        return parameters;
+    }
 
     /// <summary>The largest block of the frame: libzstd's <c>blockSizeMax</c>.</summary>
     public readonly int BlockSizeMax(long sourceSize) =>

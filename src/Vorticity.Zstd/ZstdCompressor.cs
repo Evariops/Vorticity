@@ -15,7 +15,8 @@ namespace Vorticity.Zstd;
 /// <para>
 /// The frames are those libzstd 1.5.7 writes at the same level (<c>ZSTD_compress</c>), byte for byte:
 /// the same parameters, match finders, block splits and entropy decisions, at every level, long-distance
-/// matching included (libzstd turns it on at level 22 for sources over 64 MiB).
+/// matching included (libzstd turns it on at level 22 for sources over 64 MiB); with a dictionary, those
+/// of libzstd's prepared dictionaries (see <see cref="ZstdCompressor(int, ReadOnlySpan{byte})"/>).
 /// </para>
 /// <para>
 /// An instance keeps its tables and buffers from one frame to the next, so that a warm compressor

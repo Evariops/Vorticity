@@ -18,7 +18,7 @@ public sealed class DictionaryCompressionTests
 {
     private static readonly int[] Sizes = [0, 1, 100, 1000, 4096, 8192, 8193, 16384, 16385, 50_000, 98_000, 131_071, 131_072, 200_000, 400_000];
 
-    private static readonly int[] Levels = [-5, -1, 1, 2, 3];
+    private static readonly int[] Levels = [-5, -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
 
     public static TheoryData<string> Cases()
     {
@@ -47,6 +47,7 @@ public sealed class DictionaryCompressionTests
         CorpusCase @case = CorpusCase.Parse(name);
         byte[] data = @case.Data;
         (byte[] dictionary, _) = @case.GetDictionary()!.Value;
+
         using ZstandardDictionary native = ZstandardDictionary.Create(dictionary, @case.Level);
         byte[] expected = NativeZstd.Compress(data, new ZstandardCompressionOptions { Dictionary = native });
 

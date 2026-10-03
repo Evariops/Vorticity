@@ -92,6 +92,12 @@ internal sealed unsafe class OptimalState
 
     /// <summary>The block's long-distance matches (libzstd's <c>ldmSeqStore</c>), none unless the matcher is on.</summary>
     public LongDistanceCursor LongDistance;
+
+    /// <summary>
+    /// libzstd's <c>symbolCosts</c>: the tables of the block before, which a frame's first block,
+    /// when a dictionary's, takes its statistics from.
+    /// </summary>
+    public BlockState? SymbolCosts;
 }
 
 /// <summary>The minimum length of the optimal parser's matches: libzstd's <c>mls</c>, 3 to 6.</summary>
@@ -179,33 +185,67 @@ internal static unsafe class OptimalMatchFinder
     /// <summary>The block's sequences into <paramref name="store"/>, for the strategy and minimum length of the parameters.</summary>
     /// <returns>The size of the literals after the last sequence.</returns>
     public static nuint CompressBlock(ref MatchState state, OptimalState optimal, SequenceStore store, uint* rep, byte* source, nuint size) =>
+        Dispatch<NoDictionary>(ref state, optimal, store, rep, source, size);
+
+    /// <summary>
+    /// The block's sequences with a dictionary: below the prefix as a segment of its own
+    /// (<paramref name="extDict"/>), or attached.
+    /// </summary>
+    /// <returns>The size of the literals after the last sequence.</returns>
+    public static nuint CompressBlockWithDictionary(
+        ref MatchState state, OptimalState optimal, SequenceStore store, uint* rep, byte* source, nuint size, bool extDict) =>
+        extDict
+            ? Dispatch<ExtDictionary>(ref state, optimal, store, rep, source, size)
+            : Dispatch<AttachedDictionary>(ref state, optimal, store, rep, source, size);
+
+    private static nuint Dispatch<TDictionary>(ref MatchState state, OptimalState optimal, SequenceStore store, uint* rep, byte* source, nuint size)
+        where TDictionary : IDictionaryMode =>
         Math.Clamp(state.Parameters.MinMatch, 3, 6) switch
         {
-            3 => ByStrategy<OptimalLength3>(ref state, optimal, store, rep, source, size),
-            4 => ByStrategy<OptimalLength4>(ref state, optimal, store, rep, source, size),
-            5 => ByStrategy<OptimalLength5>(ref state, optimal, store, rep, source, size),
-            _ => ByStrategy<OptimalLength6>(ref state, optimal, store, rep, source, size),
+            3 => ByStrategy<OptimalLength3, TDictionary>(ref state, optimal, store, rep, source, size),
+            4 => ByStrategy<OptimalLength4, TDictionary>(ref state, optimal, store, rep, source, size),
+            5 => ByStrategy<OptimalLength5, TDictionary>(ref state, optimal, store, rep, source, size),
+            _ => ByStrategy<OptimalLength6, TDictionary>(ref state, optimal, store, rep, source, size),
         };
 
-    private static nuint ByStrategy<TLength>(ref MatchState state, OptimalState optimal, SequenceStore store, uint* rep, byte* source, nuint size)
+    /// <summary>
+    /// libzstd's <c>ZSTD_updateTree</c>, for a dictionary's content: every position up to
+    /// <paramref name="ip"/> sorted into the binary tree, as the optimal parsers insert them (btlazy2
+    /// loads its dictionaries this way too).
+    /// </summary>
+    public static void FillTree(ref MatchState state, byte* ip, byte* end)
+    {
+        switch (Math.Clamp(state.Parameters.MinMatch, 3, 6))
+        {
+            case 3: OptimalParser<OptimalLength3, OptimalLevel0, NoDictionary>.FillTree(ref state, ip, end); break;
+            case 4: OptimalParser<OptimalLength4, OptimalLevel0, NoDictionary>.FillTree(ref state, ip, end); break;
+            case 5: OptimalParser<OptimalLength5, OptimalLevel0, NoDictionary>.FillTree(ref state, ip, end); break;
+            default: OptimalParser<OptimalLength6, OptimalLevel0, NoDictionary>.FillTree(ref state, ip, end); break;
+        }
+    }
+
+    private static nuint ByStrategy<TLength, TDictionary>(ref MatchState state, OptimalState optimal, SequenceStore store, uint* rep, byte* source, nuint size)
         where TLength : struct, IOptimalLength
+        where TDictionary : IDictionaryMode
     {
         switch (state.Parameters.Strategy)
         {
             case Strategy.BinaryTreeOptimal:
-                return OptimalParser<TLength, OptimalLevel0>.CompressBlock(ref state, optimal, store, rep, source, size);
+                return OptimalParser<TLength, OptimalLevel0, TDictionary>.CompressBlock(ref state, optimal, store, rep, source, size);
             case Strategy.BinaryTreeUltra:
-                return OptimalParser<TLength, OptimalLevel2>.CompressBlock(ref state, optimal, store, rep, source, size);
+                return OptimalParser<TLength, OptimalLevel2, TDictionary>.CompressBlock(ref state, optimal, store, rep, source, size);
             default:
             {
-                // btultra2: a first pass over the frame's first block, to seed the statistics.
+                // btultra2: a first pass over the frame's first block, to seed the statistics; with a
+                // dictionary, libzstd runs btultra's parser instead (ZSTD_selectBlockCompressor).
                 uint current = (uint)(source - state.Base);
-                if ((optimal.LiteralLengthSum == 0) && (state.DictLimit == state.LowLimit) && (current == state.DictLimit) && (size > 8))
+                if (TDictionary.Mode == NoDictionary.Value
+                    && (optimal.LiteralLengthSum == 0) && (state.DictLimit == state.LowLimit) && (current == state.DictLimit) && (size > 8))
                 {
                     InitializeStatistics<TLength>(ref state, optimal, store, rep, source, size);
                 }
 
-                return OptimalParser<TLength, OptimalLevel2>.CompressBlock(ref state, optimal, store, rep, source, size);
+                return OptimalParser<TLength, OptimalLevel2, TDictionary>.CompressBlock(ref state, optimal, store, rep, source, size);
             }
         }
     }
@@ -222,7 +262,7 @@ internal static unsafe class OptimalMatchFinder
         repeats[0] = rep[0];
         repeats[1] = rep[1];
         repeats[2] = rep[2];
-        OptimalParser<TLength, OptimalLevel2>.CompressBlock(ref state, optimal, store, repeats, source, size);
+        OptimalParser<TLength, OptimalLevel2, NoDictionary>.CompressBlock(ref state, optimal, store, repeats, source, size);
 
         store.Reset();
         state.Base -= size;
@@ -233,9 +273,10 @@ internal static unsafe class OptimalMatchFinder
 }
 
 /// <summary>libzstd's <c>ZSTD_compressBlock_opt_generic</c> for one minimum length and one level.</summary>
-internal static unsafe class OptimalParser<TLength, TLevel>
+internal static unsafe class OptimalParser<TLength, TLevel, TDictionary>
     where TLength : struct, IOptimalLength
     where TLevel : struct, IOptimalLevel
+    where TDictionary : IDictionaryMode
 {
     private const int BitCostAccuracy = 8;
     private const int BitCostMultiplier = 1 << BitCostAccuracy;
@@ -676,6 +717,15 @@ internal static unsafe class OptimalParser<TLength, TLevel>
                 optimal.Predefined = true;
             }
 
+            if (optimal.SymbolCosts?.HuffmanRepeat == HuffmanRepeat.Valid)
+            {
+                // A Huffman table of every byte: a dictionary's, whose tables give the statistics.
+                optimal.Predefined = false;
+                SeedStatistics(optimal, optimal.SymbolCosts);
+                SetBasePrices(optimal);
+                return;
+            }
+
             uint maxSymbol = 255;
             Histogram.CountSimple(optimal.LiteralFrequencies, ref maxSymbol, source, size);
             optimal.LiteralSum = DownscaleStatistics(optimal.LiteralFrequencies, 255, 8, baseOne: false);
@@ -710,6 +760,40 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         }
 
         SetBasePrices(optimal);
+    }
+
+    /// <summary>
+    /// The first block's statistics from a dictionary's tables (libzstd's <c>ZSTD_rescaleFreqs</c> with
+    /// symbol costs): each symbol as frequent as its code is short, from 2^11 for the literals and
+    /// 2^10 for the codes, 1 for a symbol without one.
+    /// </summary>
+    private static void SeedStatistics(OptimalState optimal, BlockState costs)
+    {
+        optimal.LiteralSum = 0;
+        for (int literal = 0; literal <= 255; literal++)
+        {
+            int bitCost = HuffmanCTable.NbBits(costs.Huffman.Elements[literal]);
+            optimal.LiteralFrequencies[literal] = bitCost != 0 ? 1u << (11 - bitCost) : 1;
+            optimal.LiteralSum += optimal.LiteralFrequencies[literal];
+        }
+
+        optimal.LiteralLengthSum = Seed(optimal.LiteralLengthFrequencies, costs.LiteralLengths, SequenceCodes.MaxLiteralLength);
+        optimal.MatchLengthSum = Seed(optimal.MatchLengthFrequencies, costs.MatchLengths, SequenceCodes.MaxMatchLength);
+        optimal.OffCodeSum = Seed(optimal.OffCodeFrequencies, costs.Offsets, SequenceCodes.MaxOffset);
+
+        // libzstd's FSE_getMaxNbBits: a symbol's longest code.
+        static uint Seed(uint* frequencies, FseCTable table, int maxSymbol)
+        {
+            uint sum = 0;
+            for (int symbol = 0; symbol <= maxSymbol; symbol++)
+            {
+                uint bitCost = (table.Symbols[symbol].DeltaNbBits + 0xFFFF) >> 16;
+                frequencies[symbol] = bitCost != 0 ? 1u << (10 - (int)bitCost) : 1;
+                sum += frequencies[symbol];
+            }
+
+            return sum;
+        }
     }
 
     /// <summary>libzstd's <c>ZSTD_rawLiteralsCost</c> of one literal: libzstd's <c>LIT_PRICE</c>.</summary>
@@ -935,13 +1019,29 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         nuint bestLength = 8;
         uint compares = 1u << state.Parameters.SearchLog;
 
+        uint dictLimit = state.DictLimit;
+        byte* dictBase = state.DictionaryBase;
         hashTable[hash] = current;
         for (; (compares != 0) && (matchIndex >= windowLow); compares--)
         {
             uint* nextPtr = tree + (2 * (matchIndex & treeMask));
             nuint matchLength = Math.Min(commonLengthSmaller, commonLengthLarger);
-            byte* match = @base + matchIndex;
-            matchLength += Count(ip + matchLength, match + matchLength, end);
+            byte* match;
+            if (TDictionary.Mode != ExtDictionary.Value || matchIndex + matchLength >= dictLimit)
+            {
+                match = @base + matchIndex;
+                matchLength += Count(ip + matchLength, match + matchLength, end);
+            }
+            else
+            {
+                match = dictBase + matchIndex;
+                matchLength += Count2Segments(ip + matchLength, match + matchLength, end, dictBase + dictLimit, @base + dictLimit);
+                if (matchIndex + matchLength >= dictLimit)
+                {
+                    // The match runs into the prefix: its next byte is there.
+                    match = @base + matchIndex;
+                }
+            }
 
             if (matchLength > bestLength)
             {
@@ -990,6 +1090,9 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         uint positions = bestLength > 384 ? (uint)Math.Min(192, bestLength - 384) : 0;
         return Math.Max(positions, matchEndIndex - (current + 8));
     }
+
+    /// <summary>libzstd's <c>ZSTD_updateTree</c>: a dictionary's positions up to <paramref name="ip"/> sorted into the tree.</summary>
+    internal static void FillTree(ref MatchState state, byte* ip, byte* end) => UpdateTree(ref state, ip, end);
 
     /// <summary>
     /// libzstd's <c>ZSTD_updateTree_internal</c>: the positions up to <paramref name="ip"/> into the tree.
@@ -1063,6 +1166,28 @@ internal static unsafe class OptimalParser<TLength, TLevel>
                     repLength = Count(ip + minMatch, ip + minMatch - repOffset, end) + minMatch;
                 }
             }
+            else if (TDictionary.Mode == ExtDictionary.Value)
+            {
+                // In the extDict, within the window and not straddling the segments.
+                byte* repMatch = state.DictionaryBase + repIndex;
+                if (((repOffset - 1 < current - windowLow) & IndexOverlapCheck(dictLimit, repIndex))
+                    && ReadMinMatch(ip, minMatch) == ReadMinMatch(repMatch, minMatch))
+                {
+                    repLength = Count2Segments(ip + minMatch, repMatch + minMatch, end, state.DictionaryBase + dictLimit, @base + dictLimit) + minMatch;
+                }
+            }
+            else if (TDictionary.Mode == AttachedDictionary.Value)
+            {
+                // In the attached dictionary, its indices just below the window's.
+                MatchState* dictionary = state.Dictionary;
+                uint indexDelta = windowLow - dictionary->End;
+                byte* repMatch = dictionary->Base + repIndex - indexDelta;
+                if (((repOffset - 1 < current - (dictionary->LowLimit + indexDelta)) & IndexOverlapCheck(dictLimit, repIndex))
+                    && ReadMinMatch(ip, minMatch) == ReadMinMatch(repMatch, minMatch))
+                {
+                    repLength = Count2Segments(ip + minMatch, repMatch + minMatch, end, dictionary->Base + dictionary->End, @base + dictLimit) + minMatch;
+                }
+            }
 
             if (repLength > bestLength)
             {
@@ -1083,7 +1208,9 @@ internal static unsafe class OptimalParser<TLength, TLevel>
             uint matchIndex3 = InsertAndFindFirstIndexHash3(ref state, ref nextToUpdate3, ip);
             if ((matchIndex3 >= matchLow) & (current - matchIndex3 < (1 << 18)))
             {
-                nuint length = Count(ip, @base + matchIndex3, end);
+                nuint length = TDictionary.Mode != ExtDictionary.Value || matchIndex3 >= dictLimit
+                    ? Count(ip, @base + matchIndex3, end)
+                    : Count2Segments(ip, state.DictionaryBase + matchIndex3, end, state.DictionaryBase + dictLimit, @base + dictLimit);
                 if (length >= 3)
                 {
                     bestLength = length;
@@ -1131,12 +1258,28 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         uint compares = 1u << state.Parameters.SearchLog;
         uint dummy;
 
+        nuint dictLimit = state.DictLimit;
+        byte* dictBase = state.DictionaryBase;
         for (; (compares != 0) && (matchIndex >= matchLow); compares--)
         {
             uint* nextPtr = tree + (2 * (matchIndex & treeMask));
             nuint matchLength = Math.Min(commonLengthSmaller, commonLengthLarger);
-            byte* match = @base + matchIndex;
-            matchLength += Count(ip + matchLength, match + matchLength, end);
+            byte* match;
+            if (TDictionary.Mode != ExtDictionary.Value || matchIndex + matchLength >= dictLimit)
+            {
+                match = @base + matchIndex;
+                matchLength += Count(ip + matchLength, match + matchLength, end);
+            }
+            else
+            {
+                match = dictBase + matchIndex;
+                matchLength += Count2Segments(ip + matchLength, match + matchLength, end, dictBase + dictLimit, @base + dictLimit);
+                if (matchIndex + matchLength >= dictLimit)
+                {
+                    // The match runs into the prefix: its next byte is there.
+                    match = @base + matchIndex;
+                }
+            }
 
             if (matchLength > bestLength)
             {
@@ -1151,7 +1294,12 @@ internal static unsafe class OptimalParser<TLength, TLevel>
                 count++;
                 if ((matchLength > OptNum) | (ip + matchLength == end))
                 {
-                    // Dropped, to keep the tree consistent.
+                    // Dropped, to keep the tree consistent; the attached dictionary is not searched.
+                    if (TDictionary.Mode == AttachedDictionary.Value)
+                    {
+                        compares = 0;
+                    }
+
                     break;
                 }
             }
@@ -1186,8 +1334,86 @@ internal static unsafe class OptimalParser<TLength, TLevel>
 
         *smallerPtr = *largerPtr = 0;
 
+        if (TDictionary.Mode == AttachedDictionary.Value && compares != 0)
+        {
+            count = WalkDictionaryTree(matches, count, bestLength, ref state, ip, end, (uint)matchLow, compares, ref matchEndIndex);
+        }
+
         // Past a repetitive match, its positions are not inserted.
         state.NextToUpdate = (uint)(matchEndIndex - 8);
+        return count;
+    }
+
+    /// <summary>
+    /// The attached dictionary's tree, sorted when it was filled, with the compares the frame's left:
+    /// each longer match recorded, its index translated to just below the window's.
+    /// </summary>
+    /// <returns>The number of matches.</returns>
+    private static uint WalkDictionaryTree(
+        OptimalMatch* matches, uint count, nuint bestLength, ref MatchState state, byte* ip, byte* end, uint windowLow, uint compares, ref nuint matchEndIndex)
+    {
+        MatchState* dictionary = state.Dictionary;
+        byte* @base = state.Base;
+        uint current = (uint)(ip - @base);
+        uint highLimit = dictionary->End;
+        uint lowLimit = dictionary->LowLimit;
+        uint indexDelta = windowLow - highLimit;
+        byte* dictionaryBase = dictionary->Base;
+        byte* dictionaryEnd = dictionaryBase + highLimit;
+        byte* prefixStart = @base + state.DictLimit;
+        uint* tree = dictionary->ChainTable;
+        uint treeMask = (1u << (dictionary->Parameters.ChainLog - 1)) - 1;
+        uint treeLow = treeMask < highLimit - lowLimit ? highLimit - treeMask : lowLimit;
+        uint dictMatchIndex = dictionary->HashTable[TLength.Hash(Read64(ip), dictionary->Parameters.HashLog)];
+        nuint commonLengthSmaller = 0;
+        nuint commonLengthLarger = 0;
+        for (; (compares != 0) && (dictMatchIndex > lowLimit); compares--)
+        {
+            uint* nextPtr = tree + (2 * (dictMatchIndex & treeMask));
+            nuint matchLength = Math.Min(commonLengthSmaller, commonLengthLarger);
+            byte* match = dictionaryBase + dictMatchIndex;
+            matchLength += Count2Segments(ip + matchLength, match + matchLength, end, dictionaryEnd, prefixStart);
+            if (dictMatchIndex + matchLength >= highLimit)
+            {
+                // The match runs into the prefix: its next byte is there.
+                match = @base + dictMatchIndex + indexDelta;
+            }
+
+            if (matchLength > bestLength)
+            {
+                uint matchIndex = dictMatchIndex + indexDelta;
+                if (matchLength > matchEndIndex - matchIndex)
+                {
+                    matchEndIndex = matchIndex + (uint)matchLength;
+                }
+
+                bestLength = matchLength;
+                matches[count].OffBase = OffsetToOffBase(current - matchIndex);
+                matches[count].Length = (uint)matchLength;
+                count++;
+                if ((matchLength > OptNum) | (ip + matchLength == end))
+                {
+                    break;
+                }
+            }
+
+            if (dictMatchIndex <= treeLow)
+            {
+                break;
+            }
+
+            if (match[matchLength] < ip[matchLength])
+            {
+                commonLengthSmaller = matchLength;
+                dictMatchIndex = nextPtr[1];
+            }
+            else
+            {
+                commonLengthLarger = matchLength;
+                dictMatchIndex = nextPtr[0];
+            }
+        }
+
         return count;
     }
 }

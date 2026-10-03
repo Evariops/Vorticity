@@ -34,10 +34,6 @@ public sealed unsafe partial class ZstdCompressor
     /// The frames are those libzstd writes with the dictionary prepared at the same level
     /// (<c>ZSTD_createCDict</c>, then <c>ZSTD_CCtx_refCDict</c>), byte for byte: the dictionary's level
     /// is the frames' level. The dictionary is prepared once, here.
-    /// <para>
-    /// Work in progress: only the levels of libzstd's fast and double-fast strategies take a dictionary so far;
-    /// the others throw <see cref="NotSupportedException"/>.
-    /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The level is out of range.</exception>
     /// <exception cref="System.IO.InvalidDataException">A zstd-format dictionary whose tables are invalid.</exception>
@@ -102,8 +98,7 @@ public sealed unsafe partial class ZstdCompressor
         }
         else if (usePreparedTables)
         {
-            CompressionParameters tables = prepared;
-            tables.WindowLog = frame.WindowLog;
+            CompressionParameters tables = prepared.WithWindow(frame.WindowLog);
             BeginFrame(tables, source, sourceSize, longDistance: false);
             CopyDictionaryTables(dictionary);
 
@@ -126,7 +121,7 @@ public sealed unsafe partial class ZstdCompressor
         }
         else
         {
-            BeginFrame(frame, source, sourceSize, longDistance: false);
+            BeginFrame(frame, source, sourceSize, longDistance: false, loadedIndices: dictionary.FullContentLength);
             uint start = _matchState.DictLimit;
             CompressionDictionary.LoadContent(ref _matchState, dictionary.FullContent, dictionary.FullContentLength, preparedDictionary: false);
             if (_matchState.End != start)
@@ -168,7 +163,9 @@ public sealed unsafe partial class ZstdCompressor
             Strategy.DoubleFast => extDict
                 ? DoubleFastMatchFinder.CompressBlockExtDict(ref _matchState, _store, rep, source, (nuint)size)
                 : DoubleFastMatchFinder.CompressBlockAttached(ref _matchState, _store, rep, source, (nuint)size),
-            _ => throw new NotSupportedException($"Dictionaries are not implemented yet for the {_parameters.Strategy} strategy."),
+            Strategy.Greedy or Strategy.Lazy or Strategy.Lazy2 or Strategy.BinaryTreeLazy2 =>
+                LazyMatchFinder.CompressBlockWithDictionary(ref _matchState, _store, rep, source, (nuint)size, extDict),
+            _ => OptimalMatchFinder.CompressBlockWithDictionary(ref _matchState, _optimal!, _store, rep, source, (nuint)size, extDict),
         };
     }
 

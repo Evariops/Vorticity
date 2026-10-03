@@ -124,6 +124,17 @@ internal unsafe struct MatchState
     }
 
     /// <summary>
+    /// The lowest index within the window from <paramref name="current"/>, a dictionary or not: what
+    /// libzstd's <c>ZSTD_insertDUBT1</c> computes for itself.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly uint LowestIndexInWindow(uint current)
+    {
+        uint maxDistance = 1u << Parameters.WindowLog;
+        return current - LowLimit > maxDistance ? current - maxDistance : LowLimit;
+    }
+
+    /// <summary>
     /// libzstd's <c>ZSTD_window_enforceMaxDist</c>: the window moves up so that it ends at
     /// <paramref name="blockEnd"/>, which libzstd passes the block's start as; once it moves past a
     /// dictionary's end, the dictionary is dropped.
@@ -165,6 +176,37 @@ internal unsafe struct MatchState
             Dictionary = null;
         }
     }
+}
+
+/// <summary>
+/// libzstd's <c>ZSTD_dictMode_e</c>, as a type argument of the searches: none, an extDict below the
+/// prefix (a segment of its own, read from <see cref="MatchState.DictionaryBase"/>), or a prepared
+/// dictionary attached (<see cref="MatchState.Dictionary"/>).
+/// </summary>
+internal interface IDictionaryMode
+{
+    static abstract int Mode { get; }
+}
+
+internal readonly struct NoDictionary : IDictionaryMode
+{
+    public const int Value = 0;
+
+    public static int Mode => Value;
+}
+
+internal readonly struct ExtDictionary : IDictionaryMode
+{
+    public const int Value = 1;
+
+    public static int Mode => Value;
+}
+
+internal readonly struct AttachedDictionary : IDictionaryMode
+{
+    public const int Value = 2;
+
+    public static int Mode => Value;
 }
 
 /// <summary>

@@ -55,14 +55,16 @@ public sealed unsafe partial class ZstdCompressor
     /// <param name="sourceSize">Its size.</param>
     /// <param name="longDistance">Whether the long-distance matcher is on.</param>
     /// <param name="minimumStart">The lowest index the frame may start at: above an attached dictionary's.</param>
-    private void BeginFrame(CompressionParameters parameters, byte* source, int sourceSize, bool longDistance, uint minimumStart = WindowStartIndex)
+    /// <param name="loadedIndices">The indices a dictionary loaded before the source takes.</param>
+    private void BeginFrame(
+        CompressionParameters parameters, byte* source, int sourceSize, bool longDistance, uint minimumStart = WindowStartIndex, ulong loadedIndices = 0)
     {
         _parameters = parameters;
         _frameParameters = parameters;
         // btultra2 moves the window past its first block once (OptimalMatchFinder): the frame may
         // reach a block's indices further than its size.
         uint shift = parameters.Strategy == Strategy.BinaryTreeUltra2 ? (uint)FrameFormat.MaxBlockSize : 0;
-        bool restart = (ulong)Math.Max(_nextIndex, minimumStart) + (ulong)sourceSize + shift > IndexLimit;
+        bool restart = (ulong)Math.Max(_nextIndex, minimumStart) + loadedIndices + (ulong)sourceSize + shift > IndexLimit;
         bool rows = parameters.UsesRowMatchFinder;
         int hashSize = 1 << parameters.HashLog;
         int chainSize = parameters.Strategy == Strategy.Fast || rows ? 0 : 1 << parameters.ChainLog;
@@ -303,6 +305,11 @@ public sealed unsafe partial class ZstdCompressor
         rep[0] = _previous.Rep[0];
         rep[1] = _previous.Rep[1];
         rep[2] = _previous.Rep[2];
+        if (_optimal is not null)
+        {
+            // libzstd's opt.symbolCosts: the block state before, a dictionary's for the first block.
+            _optimal.SymbolCosts = _previous;
+        }
         if (_longDistance)
         {
             // libzstd's ZSTD_ldm_blockCompress for the optimal parsers: the block's long-distance
