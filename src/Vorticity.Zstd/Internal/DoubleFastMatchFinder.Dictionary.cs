@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using static Vorticity.Zstd.Internal.MatchFinder;
 
 namespace Vorticity.Zstd.Internal;
@@ -5,6 +6,14 @@ namespace Vorticity.Zstd.Internal;
 /// <summary>libzstd's double-fast match finder with a dictionary: attached, or a segment of its own.</summary>
 internal static unsafe partial class DoubleFastMatchFinder
 {
+    /// <summary>
+    /// <see cref="MatchFinder.Count2Segments"/> out of line: inlined at each of the double-fast searches'
+    /// matches, it made them 3 to 10% slower end to end (their time is in the probes, not the counts).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static nuint CountAcross(byte* input, byte* match, byte* inputEnd, byte* matchEnd, byte* prefixStart) =>
+        Count2Segments(input, match, inputEnd, matchEnd, prefixStart);
+
     /// <summary>
     /// libzstd's <c>ZSTD_fillDoubleHashTableForCDict</c> (<c>ZSTD_dtlm_full</c>): every third position
     /// into both tables, the two after it into the long one where its entry is empty. Each index is
@@ -129,7 +138,7 @@ internal static unsafe partial class DoubleFastMatchFinder
             if (IndexOverlapCheck(prefixLowestIndex, repIndex) && Read32(repMatch) == Read32(ip + 1))
             {
                 byte* repMatchEnd = repIndex < prefixLowestIndex ? dictEnd : iend;
-                matchLength = Count2Segments(ip + 1 + 4, repMatch + 4, iend, repMatchEnd, prefixLowest) + 4;
+                matchLength = CountAcross(ip + 1 + 4, repMatch + 4, iend, repMatchEnd, prefixLowest) + 4;
                 ip++;
                 store.Store((nuint)(ip - anchor), anchor, iend, RepeatCode1, matchLength);
                 goto MatchStored;
@@ -157,7 +166,7 @@ internal static unsafe partial class DoubleFastMatchFinder
                 byte* dictMatchLong = dictBase + dictMatchIndexLong;
                 if (dictMatchLong > dictStart && Read64(dictMatchLong) == bytes)
                 {
-                    matchLength = Count2Segments(ip + 8, dictMatchLong + 8, iend, dictEnd, prefixLowest) + 8;
+                    matchLength = CountAcross(ip + 8, dictMatchLong + 8, iend, dictEnd, prefixLowest) + 8;
                     offset = current - dictMatchIndexLong - dictIndexDelta;
                     while (((ip > anchor) & (dictMatchLong > dictStart)) && ip[-1] == dictMatchLong[-1])
                     {
@@ -227,7 +236,7 @@ internal static unsafe partial class DoubleFastMatchFinder
                     byte* dictMatchLong3 = dictBase + dictMatchIndexLong3;
                     if (dictMatchLong3 > dictStart && Read64(dictMatchLong3) == nextBytes)
                     {
-                        matchLength = Count2Segments(ip + 1 + 8, dictMatchLong3 + 8, iend, dictEnd, prefixLowest) + 8;
+                        matchLength = CountAcross(ip + 1 + 8, dictMatchLong3 + 8, iend, dictEnd, prefixLowest) + 8;
                         ip++;
                         offset = current + 1 - dictMatchIndexLong3 - dictIndexDelta;
                         while (((ip > anchor) & (dictMatchLong3 > dictStart)) && ip[-1] == dictMatchLong3[-1])
@@ -245,7 +254,7 @@ internal static unsafe partial class DoubleFastMatchFinder
             // No long match at ip + 1: the short match found.
             if (matchIndexSmall < prefixLowestIndex)
             {
-                matchLength = Count2Segments(ip + 4, match + 4, iend, dictEnd, prefixLowest) + 4;
+                matchLength = CountAcross(ip + 4, match + 4, iend, dictEnd, prefixLowest) + 4;
                 offset = current - matchIndexSmall;
                 while (((ip > anchor) & (match > dictStart)) && ip[-1] == match[-1])
                 {
@@ -293,7 +302,7 @@ internal static unsafe partial class DoubleFastMatchFinder
                     if (IndexOverlapCheck(prefixLowestIndex, repIndex2) && Read32(repMatch2) == Read32(ip))
                     {
                         byte* repEnd2 = repIndex2 < prefixLowestIndex ? dictEnd : iend;
-                        nuint repLength2 = Count2Segments(ip + 4, repMatch2 + 4, iend, repEnd2, prefixLowest) + 4;
+                        nuint repLength2 = CountAcross(ip + 4, repMatch2 + 4, iend, repEnd2, prefixLowest) + 4;
                         (offset1, offset2) = (offset2, offset1);
                         store.Store(0, anchor, iend, RepeatCode1, repLength2);
                         ulong repBytes = Read64(ip);
@@ -382,7 +391,7 @@ internal static unsafe partial class DoubleFastMatchFinder
                 && Read32(repMatch) == Read32(ip + 1))
             {
                 byte* repMatchEnd = repIndex < prefixStartIndex ? dictEnd : iend;
-                matchLength = Count2Segments(ip + 1 + 4, repMatch + 4, iend, repMatchEnd, prefixStart) + 4;
+                matchLength = CountAcross(ip + 1 + 4, repMatch + 4, iend, repMatchEnd, prefixStart) + 4;
                 ip++;
                 store.Store((nuint)(ip - anchor), anchor, iend, RepeatCode1, matchLength);
             }
@@ -390,7 +399,7 @@ internal static unsafe partial class DoubleFastMatchFinder
             {
                 byte* matchEnd = matchLongIndex < prefixStartIndex ? dictEnd : iend;
                 byte* lowMatchPointer = matchLongIndex < prefixStartIndex ? dictStart : prefixStart;
-                matchLength = Count2Segments(ip + 8, matchLong + 8, iend, matchEnd, prefixStart) + 8;
+                matchLength = CountAcross(ip + 8, matchLong + 8, iend, matchEnd, prefixStart) + 8;
                 uint offset = current - matchLongIndex;
                 while (((ip > anchor) & (matchLong > lowMatchPointer)) && ip[-1] == matchLong[-1])
                 {
@@ -415,7 +424,7 @@ internal static unsafe partial class DoubleFastMatchFinder
                 {
                     byte* matchEnd = matchIndex3 < prefixStartIndex ? dictEnd : iend;
                     byte* lowMatchPointer = matchIndex3 < prefixStartIndex ? dictStart : prefixStart;
-                    matchLength = Count2Segments(ip + 9, match3 + 8, iend, matchEnd, prefixStart) + 8;
+                    matchLength = CountAcross(ip + 9, match3 + 8, iend, matchEnd, prefixStart) + 8;
                     ip++;
                     offset = current + 1 - matchIndex3;
                     while (((ip > anchor) & (match3 > lowMatchPointer)) && ip[-1] == match3[-1])
@@ -429,7 +438,7 @@ internal static unsafe partial class DoubleFastMatchFinder
                 {
                     byte* matchEnd = matchIndex < prefixStartIndex ? dictEnd : iend;
                     byte* lowMatchPointer = matchIndex < prefixStartIndex ? dictStart : prefixStart;
-                    matchLength = Count2Segments(ip + 4, match + 4, iend, matchEnd, prefixStart) + 4;
+                    matchLength = CountAcross(ip + 4, match + 4, iend, matchEnd, prefixStart) + 4;
                     offset = current - matchIndex;
                     while (((ip > anchor) & (match > lowMatchPointer)) && ip[-1] == match[-1])
                     {
@@ -471,7 +480,7 @@ internal static unsafe partial class DoubleFastMatchFinder
                         && Read32(repMatch2) == Read32(ip))
                     {
                         byte* repEnd2 = repIndex2 < prefixStartIndex ? dictEnd : iend;
-                        nuint repLength2 = Count2Segments(ip + 4, repMatch2 + 4, iend, repEnd2, prefixStart) + 4;
+                        nuint repLength2 = CountAcross(ip + 4, repMatch2 + 4, iend, repEnd2, prefixStart) + 4;
                         (offset1, offset2) = (offset2, offset1);
                         store.Store(0, anchor, iend, RepeatCode1, repLength2);
                         ulong repBytes = Read64(ip);

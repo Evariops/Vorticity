@@ -348,6 +348,7 @@ internal static unsafe class MatchFinder
     /// dictionary), which may run past <paramref name="matchEnd"/> into the prefix, from
     /// <paramref name="prefixStart"/>.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static nuint Count2Segments(byte* input, byte* match, byte* inputEnd, byte* matchEnd, byte* prefixStart)
     {
         byte* virtualEnd = input + (matchEnd - match);

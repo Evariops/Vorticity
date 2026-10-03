@@ -1357,6 +1357,17 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
         uint current = (uint)(ip - @base);
         uint read = 0;
 
+        // An attached dictionary's row, which libzstd prefetches first (ZSTD_row_prefetch): read
+        // here, its misses hidden behind the frame's own search.
+        nuint dictionaryHash = 0;
+        if (TDictionary.Mode == AttachedDictionary.Value)
+        {
+            MatchState* dictionary = state.Dictionary;
+            dictionaryHash = (nuint)((Read64(ip) * state.RowHashMultiplier) >> (64 - (dictionary->RowHashLog + LazyMatchFinder.RowHashTagBits)));
+            nuint dictionaryRow = RowOf(dictionaryHash);
+            read += dictionary->TagTable[dictionaryRow] + dictionary->HashTable[dictionaryRow];
+        }
+
         // libzstd's ZSTD_row_update_internal: the positions before ip into their rows, then ip's
         // hash, from the cache; while skipping, ip's hash alone.
         nuint hash;
@@ -1477,7 +1488,7 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
 
         if (TDictionary.Mode == AttachedDictionary.Value)
         {
-            bestLength = SearchDictionary(ref state, ip, end, ref offBase, bestLength, attempts);
+            bestLength = SearchDictionary(ref state, ip, end, ref offBase, bestLength, attempts, dictionaryHash);
         }
 
         return bestLength;
@@ -1485,13 +1496,12 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
 
     /// <summary>
     /// The attached dictionary's row, with the attempts the frame's left: its own tables, of the same
-    /// row size, hashed without salt; its indices just below the prefix's.
+    /// row size, hashed without salt (<paramref name="hash"/>); its indices just below the prefix's.
     /// </summary>
-    private static nuint SearchDictionary(ref MatchState state, byte* ip, byte* end, ref nuint offBase, nuint bestLength, uint attempts)
+    private static nuint SearchDictionary(ref MatchState state, byte* ip, byte* end, ref nuint offBase, nuint bestLength, uint attempts, nuint hash)
     {
         nuint rowMask = ((nuint)1 << TRow.Log) - 1;
         MatchState* dictionary = state.Dictionary;
-        nuint hash = (nuint)((Read64(ip) * state.RowHashMultiplier) >> (64 - (dictionary->RowHashLog + LazyMatchFinder.RowHashTagBits)));
         nuint relativeRow = RowOf(hash);
         byte* tagRow = dictionary->TagTable + relativeRow;
         uint* row = dictionary->HashTable + relativeRow;
