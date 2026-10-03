@@ -1308,8 +1308,13 @@ internal readonly struct Row64 : IRowLog
 /// </para>
 /// <para>
 /// libzstd prefetches the rows of the position eight ahead, whose hash its cache computes, and the
-/// candidates before it compares them. .NET has no prefetch on arm64: those bytes are read instead,
-/// summed into <see cref="MatchState.Touched"/>, which keeps the loads alive and the lines on their way.
+/// candidates before it compares them. .NET has no prefetch on arm64. The row of entries is brought
+/// in by a store instead: of a 0 to its place 0, which no entry takes and nothing reads, in the line
+/// the position writes once inserted. A store retires as a prefetch does, before its line arrives,
+/// where a load holds up the retirement of everything after it until its line is there. The row of
+/// tags has no such place (its first byte is the head, its others are tags, all read by the search,
+/// which a store still on its way would hold up): it is read, as are the candidates, summed into
+/// <see cref="MatchState.Touched"/>, which keeps the loads alive and the lines on their way.
 /// </para>
 /// </remarks>
 internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearch
@@ -1579,7 +1584,8 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
             nuint hash = (nuint)(((Read64(@base + index) * multiplier) ^ salt) >> shift);
             cache[index & (LazyMatchFinder.RowHashCacheSize - 1)] = (uint)hash;
             nuint relativeRow = RowOf(hash);
-            read += state.TagTable[relativeRow] + state.HashTable[relativeRow];
+            read += state.TagTable[relativeRow];
+            state.HashTable[relativeRow] = 0;
         }
 
         state.Touched += read;
@@ -1626,8 +1632,8 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
 
     /// <summary>
     /// libzstd's <c>ZSTD_row_nextCachedHash</c>: the hash of <paramref name="index"/>, from the cache,
-    /// which takes the hash of the position eight further in its place, and reads its rows ahead
-    /// (see the remarks).
+    /// which takes the hash of the position eight further in its place, and brings its rows in
+    /// ahead (see the remarks).
     /// </summary>
     /// <remarks>Hashes are native integers, the shift leaving them 32 bits: no extension before their rows.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1639,7 +1645,8 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
         nuint next = (nuint)(((Read64(@base + index + LazyMatchFinder.RowHashCacheSize) * multiplier) ^ salt) >> shift);
         *slot = (uint)next;
         nuint nextRow = RowOf(next);
-        read += tagTable[nextRow] + hashTable[nextRow];
+        read += tagTable[nextRow];
+        hashTable[nextRow] = 0;
         return hash;
     }
 
