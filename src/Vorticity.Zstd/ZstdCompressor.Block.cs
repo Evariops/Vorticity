@@ -33,6 +33,17 @@ public sealed unsafe partial class ZstdCompressor
     private uint[] _chainTable = [];
     private byte[] _tagTable = [];
     private uint[] _hashTable3 = [];
+
+    /// <summary>
+    /// libzstd's <c>tableValidEnd</c>, for each table of indices: how many entries, from the first, hold
+    /// none at or above the next frame's. All of them, as frames continue the indices of the last; but
+    /// a frame that copies a prepared dictionary's tables restarts at the dictionary's, and only the
+    /// entries it copied are known below its own: a later frame clears the others before it uses them.
+    /// (The tags need no such care: those left over point at cleared entries, which end the search.)
+    /// </summary>
+    private int _hashTableValid = int.MaxValue;
+    private int _chainTableValid = int.MaxValue;
+    private int _hashTable3Valid = int.MaxValue;
     private OptimalState? _optimal;
     private LongDistanceMatcher? _longDistanceMatcher;
     private bool _longDistance;
@@ -73,10 +84,10 @@ public sealed unsafe partial class ZstdCompressor
             ? Math.Min(OptimalMatchFinder.HashLog3Max, parameters.WindowLog)
             : 0;
         int hashSize3 = hashLog3 == 0 ? 0 : 1 << hashLog3;
-        uint* hashTable = Tables.Reserve(ref _hashTable, hashSize, restart);
-        uint* chainTable = Tables.Reserve(ref _chainTable, chainSize, restart);
+        uint* hashTable = Reserve(ref _hashTable, ref _hashTableValid, hashSize, restart);
+        uint* chainTable = Reserve(ref _chainTable, ref _chainTableValid, chainSize, restart);
         byte* tagTable = Tables.Reserve(ref _tagTable, tagSize, restart);
-        uint* hashTable3 = Tables.Reserve(ref _hashTable3, hashSize3, restart);
+        uint* hashTable3 = Reserve(ref _hashTable3, ref _hashTable3Valid, hashSize3, restart);
 
         if (parameters.Strategy >= Strategy.BinaryTreeOptimal)
         {
@@ -284,6 +295,27 @@ public sealed unsafe partial class ZstdCompressor
         }
 
         return compressedSize;
+    }
+
+    /// <summary>
+    /// <see cref="Tables.Reserve"/> for a table of indices, whose entries past <paramref name="valid"/>
+    /// are cleared first (libzstd's <c>ZSTD_cwksp_clean_tables</c>): all of them are then valid.
+    /// </summary>
+    private static uint* Reserve(ref uint[] table, ref int valid, int size, bool restart)
+    {
+        uint[] before = table;
+        uint* entries = Tables.Reserve(ref table, size, restart);
+        if (restart || table != before)
+        {
+            valid = int.MaxValue;
+        }
+        else if (valid < size)
+        {
+            new Span<uint>(entries + valid, size - valid).Clear();
+            valid = size;
+        }
+
+        return entries;
     }
 
     /// <summary>

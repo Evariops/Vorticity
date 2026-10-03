@@ -117,7 +117,9 @@ public sealed unsafe partial class ZstdCompressor
                 _matchState.LowLimit = dictionaryEnd;
             }
 
-            _nextIndex = dictionaryEnd + (uint)sourceSize + (frame.Strategy == Strategy.BinaryTreeUltra2 ? (uint)FrameFormat.MaxBlockSize : 0);
+            // As BeginFrame reserves them, by the strategy that runs: the dictionary's. A dictionary
+            // too small to search leaves no segment below the source, and btultra2's first pass runs.
+            _nextIndex = dictionaryEnd + (uint)sourceSize + (tables.Strategy == Strategy.BinaryTreeUltra2 ? (uint)FrameFormat.MaxBlockSize : 0);
         }
         else
         {
@@ -195,6 +197,11 @@ public sealed unsafe partial class ZstdCompressor
         {
             new Span<uint>(_matchState.HashTable3, 1 << _matchState.HashLog3).Clear();
         }
+
+        // The indices restart at the dictionary's: past what was copied, the tables may hold higher ones.
+        _hashTableValid = hashSize;
+        _chainTableValid = parameters.Strategy != Strategy.Fast && !parameters.UsesRowMatchFinder ? 1 << parameters.ChainLog : 0;
+        _hashTable3Valid = _matchState.HashLog3 != 0 ? 1 << _matchState.HashLog3 : 0;
 
         static void CopyTable(uint* destination, uint* source, int size, bool tagged)
         {
