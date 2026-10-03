@@ -10,9 +10,9 @@ namespace Vorticity.Zstd.Internal;
 /// <summary>
 /// libzstd's lazy parser without a dictionary (<c>ZSTD_compressBlock_lazy_generic</c>): at each
 /// position the best match a search finds, kept (greedy) or weighed against those of the next one
-/// (lazy) or two (lazy2) positions. The search is a hash chain (<c>ZSTD_HcFindBestMatch</c>) or the
-/// row-based match finder (<c>ZSTD_RowFindBestMatch</c>), which libzstd uses on arm64 and x64 once the
-/// window passes 16 KiB.
+/// (lazy) or two (lazy2, btlazy2) positions. The search is a hash chain (<c>ZSTD_HcFindBestMatch</c>),
+/// the row-based match finder (<c>ZSTD_RowFindBestMatch</c>), which libzstd uses on arm64 and x64 once
+/// the window passes 16 KiB, or the binary tree of btlazy2 (<c>ZSTD_BtFindBestMatch</c>).
 /// </summary>
 internal static unsafe class LazyMatchFinder
 {
@@ -30,6 +30,16 @@ internal static unsafe class LazyMatchFinder
     public static nuint CompressBlock(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size)
     {
         int minMatch = Math.Clamp(state.Parameters.MinMatch, 4, 6);
+        if (state.Parameters.Strategy == Strategy.BinaryTreeLazy2)
+        {
+            return minMatch switch
+            {
+                5 => CompressBlock<BinaryTreeSearch<Hash5>, Depth2>(ref state, store, rep, source, size),
+                6 => CompressBlock<BinaryTreeSearch<Hash6>, Depth2>(ref state, store, rep, source, size),
+                _ => CompressBlock<BinaryTreeSearch<Hash4>, Depth2>(ref state, store, rep, source, size),
+            };
+        }
+
         int depth = state.Parameters.Strategy - Strategy.Greedy;
         if (!state.Parameters.UsesRowMatchFinder)
         {
@@ -405,6 +415,260 @@ internal readonly unsafe struct HashChainSearch<THash> : ILazySearch
         state.NextToUpdate = target;
         return hashTable[THash.Hash(Read64(ip), hashLog)];
     }
+}
+
+/// <summary>
+/// libzstd's binary tree of the btlazy2 strategy (<c>ZSTD_BtFindBestMatch</c>, a "dual unsorted binary
+/// tree"): positions are first chained by hash, unsorted, and sorted into the tree of their hash
+/// only when a search reaches them; the tree orders the positions by their bytes, and a search
+/// walks it from the hash's root, inserting the position as it goes.
+/// </summary>
+/// <remarks>
+/// The chain table holds two entries a position, its children in the tree (smaller, larger), at the
+/// position modulo the tree's size: while it is unsorted, the first is the next position of its
+/// hash and the second <see cref="UnsortedMark"/>, an index below every window.
+/// </remarks>
+internal readonly unsafe struct BinaryTreeSearch<THash> : ILazySearch
+    where THash : IMatchHash
+{
+    /// <summary>libzstd's <c>ZSTD_DUBT_UNSORTED_MARK</c>.</summary>
+    private const uint UnsortedMark = 1;
+
+    public static bool UsesRows => false;
+
+    public static void Prepare(ref MatchState state)
+    {
+    }
+
+    public static void FillHashCache(ref MatchState state, uint index, byte* limit)
+    {
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public static nuint FindBestMatch(ref MatchState state, byte* ip, byte* end, ref nuint offBase)
+    {
+        if (ip < state.Base + state.NextToUpdate)
+        {
+            // Skipped: inside a repetitive match the last search went past.
+            return 0;
+        }
+
+        Update(ref state, ip);
+        return FindBestMatchInTree(ref state, ip, end, ref offBase);
+    }
+
+    /// <summary>libzstd's <c>ZSTD_updateDUBT</c>: the positions up to <paramref name="ip"/> (excluded) chained, unsorted.</summary>
+    private static void Update(ref MatchState state, byte* ip)
+    {
+        uint* hashTable = state.HashTable;
+        int hashLog = state.Parameters.HashLog;
+        uint* tree = state.ChainTable;
+        uint treeMask = (1u << (state.Parameters.ChainLog - 1)) - 1;
+        byte* @base = state.Base;
+        uint target = (uint)(ip - @base);
+        for (uint index = state.NextToUpdate; index < target; index++)
+        {
+            nuint hash = THash.Hash(Read64(@base + index), hashLog);
+            uint matchIndex = hashTable[hash];
+            uint* next = tree + (2 * (index & treeMask));
+            hashTable[hash] = index;
+            next[0] = matchIndex;
+            next[1] = UnsortedMark;
+        }
+
+        state.NextToUpdate = target;
+    }
+
+    /// <summary>libzstd's <c>ZSTD_DUBT_findBestMatch</c> without a dictionary.</summary>
+    private static nuint FindBestMatchInTree(ref MatchState state, byte* ip, byte* end, ref nuint offBase)
+    {
+        uint* hashTable = state.HashTable;
+        nuint hash = THash.Hash(Read64(ip), state.Parameters.HashLog);
+        uint matchIndex = hashTable[hash];
+        byte* @base = state.Base;
+        uint current = (uint)(ip - @base);
+        uint windowLow = state.LowestMatchIndex(current);
+        uint* tree = state.ChainTable;
+        uint treeMask = (1u << (state.Parameters.ChainLog - 1)) - 1;
+        uint treeLow = treeMask >= current ? 0 : current - treeMask;
+        uint unsortLimit = Math.Max(treeLow, windowLow);
+        uint* nextCandidate = tree + (2 * (matchIndex & treeMask));
+        uint* unsortedMark = nextCandidate + 1;
+        uint compares = 1u << state.Parameters.SearchLog;
+        uint candidates = compares;
+        uint previousCandidate = 0;
+
+        // The unsorted positions of the hash, newest first, their marks turned into a chain back.
+        while ((matchIndex > unsortLimit) && (*unsortedMark == UnsortedMark) && (candidates > 1))
+        {
+            *unsortedMark = previousCandidate;
+            previousCandidate = matchIndex;
+            matchIndex = *nextCandidate;
+            nextCandidate = tree + (2 * (matchIndex & treeMask));
+            unsortedMark = nextCandidate + 1;
+            candidates--;
+        }
+
+        // The last, still unsorted, dropped: libzstd's speed over ratio.
+        if ((matchIndex > unsortLimit) && (*unsortedMark == UnsortedMark))
+        {
+            *nextCandidate = *unsortedMark = 0;
+        }
+
+        // Each sorted into the tree, the oldest first.
+        matchIndex = previousCandidate;
+        while (matchIndex != 0)
+        {
+            uint* nextCandidateIndex = tree + (2 * (matchIndex & treeMask)) + 1;
+            uint next = *nextCandidateIndex;
+            Insert(ref state, matchIndex, end, candidates, unsortLimit);
+            matchIndex = next;
+            candidates++;
+        }
+
+        // The longest match, ip inserted on the way.
+        nuint commonLengthSmaller = 0;
+        nuint commonLengthLarger = 0;
+        uint* smallerPtr = tree + (2 * (current & treeMask));
+        uint* largerPtr = smallerPtr + 1;
+        uint matchEndIndex = current + 8 + 1;
+        uint dummy;
+        nuint bestLength = 0;
+
+        matchIndex = hashTable[hash];
+        hashTable[hash] = current;
+        for (; (compares != 0) && (matchIndex > windowLow); compares--)
+        {
+            uint* nextPtr = tree + (2 * (matchIndex & treeMask));
+            nuint matchLength = Math.Min(commonLengthSmaller, commonLengthLarger);
+            byte* match = @base + matchIndex;
+            matchLength += Count(ip + matchLength, match + matchLength, end);
+
+            if (matchLength > bestLength)
+            {
+                if (matchLength > matchEndIndex - matchIndex)
+                {
+                    matchEndIndex = matchIndex + (uint)matchLength;
+                }
+
+                // A longer match is taken when its length outweighs its offset's cost.
+                if (4 * (int)(matchLength - bestLength) > HighBit(current - matchIndex + 1) - HighBit((uint)offBase))
+                {
+                    bestLength = matchLength;
+                    offBase = OffsetToOffBase(current - matchIndex);
+                }
+
+                if (ip + matchLength == end)
+                {
+                    // Equal to the end: no way to know whether smaller or larger, so dropped.
+                    break;
+                }
+            }
+
+            if (match[matchLength] < ip[matchLength])
+            {
+                // The match is smaller than ip.
+                *smallerPtr = matchIndex;
+                commonLengthSmaller = matchLength;
+                if (matchIndex <= treeLow)
+                {
+                    smallerPtr = &dummy;
+                    break;
+                }
+
+                smallerPtr = nextPtr + 1;
+                matchIndex = nextPtr[1];
+            }
+            else
+            {
+                // The match is larger.
+                *largerPtr = matchIndex;
+                commonLengthLarger = matchLength;
+                if (matchIndex <= treeLow)
+                {
+                    largerPtr = &dummy;
+                    break;
+                }
+
+                largerPtr = nextPtr;
+                matchIndex = nextPtr[0];
+            }
+        }
+
+        *smallerPtr = *largerPtr = 0;
+
+        // Past a repetitive match, its positions are not inserted.
+        state.NextToUpdate = matchEndIndex - 8;
+        return bestLength;
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_insertDUBT1</c> without a dictionary: an unsorted position sorted into its
+    /// tree, comparing it with up to <paramref name="compares"/> positions.
+    /// </summary>
+    private static void Insert(ref MatchState state, uint current, byte* end, uint compares, uint treeLow)
+    {
+        uint* tree = state.ChainTable;
+        uint treeMask = (1u << (state.Parameters.ChainLog - 1)) - 1;
+        nuint commonLengthSmaller = 0;
+        nuint commonLengthLarger = 0;
+        byte* @base = state.Base;
+        byte* ip = @base + current;
+        uint* smallerPtr = tree + (2 * (current & treeMask));
+        uint* largerPtr = smallerPtr + 1;
+
+        // This position is unsorted: the next sorted one is reached through its first entry, while
+        // the second holds the previous unsorted one, already saved, which may be overwritten.
+        uint matchIndex = *smallerPtr;
+        uint dummy;
+        uint windowLow = state.LowestMatchIndex(current);
+
+        for (; (compares != 0) && (matchIndex > windowLow); compares--)
+        {
+            uint* nextPtr = tree + (2 * (matchIndex & treeMask));
+            nuint matchLength = Math.Min(commonLengthSmaller, commonLengthLarger);
+            byte* match = @base + matchIndex;
+            matchLength += Count(ip + matchLength, match + matchLength, end);
+
+            if (ip + matchLength == end)
+            {
+                // Equal to the end: dropped, to keep the tree consistent.
+                break;
+            }
+
+            if (match[matchLength] < ip[matchLength])
+            {
+                *smallerPtr = matchIndex;
+                commonLengthSmaller = matchLength;
+                if (matchIndex <= treeLow)
+                {
+                    smallerPtr = &dummy;
+                    break;
+                }
+
+                smallerPtr = nextPtr + 1;
+                matchIndex = nextPtr[1];
+            }
+            else
+            {
+                *largerPtr = matchIndex;
+                commonLengthLarger = matchLength;
+                if (matchIndex <= treeLow)
+                {
+                    largerPtr = &dummy;
+                    break;
+                }
+
+                largerPtr = nextPtr;
+                matchIndex = nextPtr[0];
+            }
+        }
+
+        *smallerPtr = *largerPtr = 0;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int HighBit(uint value) => BitOperations.Log2(value);
 }
 
 /// <summary>The entries of a row of the row-based match finder: libzstd's <c>1 &lt;&lt; rowLog</c>.</summary>

@@ -184,7 +184,7 @@ internal struct CompressionParameters
     }
 
     /// <summary>The strongest strategy implemented so far: the stronger ones cascade down to it.</summary>
-    public const Strategy StrongestImplemented = Strategy.Lazy2;
+    public const Strategy StrongestImplemented = Strategy.BinaryTreeLazy2;
 
     /// <summary>
     /// The strategy libzstd uses for <paramref name="level"/> and a source of <paramref name="sourceSize"/>

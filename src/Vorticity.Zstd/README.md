@@ -23,9 +23,9 @@ OperationStatus status = compressor.Compress(content, frame, out int consumed, o
 
 `Compress` writes one whole frame per call, which declares its content size (and, with
 `AppendChecksum`, ends with a checksum): the frame libzstd 1.5.7's `ZSTD_compress` writes at the same
-level, byte for byte. Levels from -131072 to 12 are implemented (libzstd's fast, dfast, greedy, lazy
-and lazy2 strategies); the stronger ones (btlazy2 to btultra2) cascade down to lazy2 for now. A warm
-compressor allocates nothing. It is not thread-safe.
+level, byte for byte. Levels from -131072 to 15 are implemented (libzstd's fast, dfast, greedy, lazy,
+lazy2 and btlazy2 strategies); the stronger ones (btopt to btultra2) cascade down to btlazy2 for now.
+A warm compressor allocates nothing. It is not thread-safe.
 
 ## Layout
 
