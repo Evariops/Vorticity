@@ -1,5 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 
 namespace Vorticity.Zstd.Internal;
 
@@ -31,80 +33,117 @@ internal static unsafe class BlockSplitter
     /// 11th, 5th or every position.
     /// </summary>
     /// <returns>The size of the first block to cut.</returns>
-    public static int Split(byte* block, int blockSize, int level)
+    public static int Split(byte* block, int blockSize, int level) => level switch
     {
-        if (level == 0)
+        0 => SplitFromBorders(block, blockSize),
+        1 => SplitByChunks<Every43rd>(block, blockSize),
+        2 => SplitByChunks<Every11th>(block, blockSize),
+        3 => SplitByChunks<Every5th>(block, blockSize),
+        _ => SplitByChunks<Every1st>(block, blockSize),
+    };
+
+    /// <summary>libzstd's <c>ZSTD_recordFingerprint_N</c>: a chunk's events, the positions sampled at a constant rate.</summary>
+    private static void Record<TSampling>(Fingerprint* fingerprint, byte* source)
+        where TSampling : ISampling
+    {
+        uint* events = fingerprint->Events;
+        new Span<uint>(events, 1 << TSampling.HashLog).Clear();
+        const nuint Limit = ChunkSize - 2 + 1;
+        for (nuint n = 0; n < Limit; n += TSampling.Rate)
         {
-            return SplitFromBorders(block, blockSize);
+            // libzstd's hash2: the byte for 8 bits, the pair hashed for more.
+            nuint hash = TSampling.HashLog == 8
+                ? source[n]
+                : (Unsafe.ReadUnaligned<ushort>(source + n) * Knuth) >> (32 - TSampling.HashLog);
+            events[hash]++;
         }
 
-        return SplitByChunks(block, blockSize, level - 1);
+        fingerprint->EventCount = Limit / TSampling.Rate;
     }
 
-    /// <summary>libzstd's <c>hash2</c>: two bytes for more than 8 bits, one byte for 8.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint Hash2(byte* p, int hashLog) =>
-        hashLog == 8 ? *p : (Unsafe.ReadUnaligned<ushort>(p) * Knuth) >> (32 - hashLog);
-
-    /// <summary>libzstd's <c>recordFingerprint_generic</c>.</summary>
-    private static void Record(Fingerprint* fingerprint, byte* source, nuint size, nuint samplingRate, int hashLog)
+    /// <summary>
+    /// libzstd's <c>fpDistance</c>: how far two histograms of <paramref name="bins"/> bins are, each
+    /// scaled by the other's total, |a[n] * B - b[n] * A| summed; with <paramref name="merge"/>, the
+    /// bins of <paramref name="b"/> added into <paramref name="a"/>'s on the way (libzstd's
+    /// <c>mergeEvents</c>, which a split leaves unused).
+    /// </summary>
+    /// <remarks>
+    /// The totals are below 2^17 (15 chunks of 8 KiB at most), so are the bins: each product, a 64-bit
+    /// unsigned one of 32-bit halves, is exact, and so is their difference, its sign that of the
+    /// 64-bit integer modulo 2^64.
+    /// </remarks>
+    private static ulong Distance(Fingerprint* a, Fingerprint* b, int bins, bool merge)
     {
-        Unsafe.InitBlockUnaligned(fingerprint->Events, 0, (uint)(sizeof(uint) << hashLog));
-        nuint limit = size - 2 + 1;
-        for (nuint n = 0; n < limit; n += samplingRate)
+        uint* aEvents = a->Events;
+        uint* bEvents = b->Events;
+        if (AdvSimd.Arm64.IsSupported)
         {
-            fingerprint->Events[Hash2(source + n, hashLog)]++;
+            Vector128<uint> aTotal = Vector128.Create((uint)a->EventCount);
+            Vector128<uint> bTotal = Vector128.Create((uint)b->EventCount);
+            Vector128<long> low = Vector128<long>.Zero;
+            Vector128<long> high = Vector128<long>.Zero;
+            for (nuint n = 0; n < (nuint)bins; n += 4)
+            {
+                Vector128<uint> aBins = AdvSimd.LoadVector128(aEvents + n);
+                Vector128<uint> bBins = AdvSimd.LoadVector128(bEvents + n);
+                Vector128<ulong> lowDifference = AdvSimd.MultiplyWideningLowerAndSubtract(
+                    AdvSimd.MultiplyWideningLower(aBins.GetLower(), bTotal.GetLower()), bBins.GetLower(), aTotal.GetLower());
+                Vector128<ulong> highDifference = AdvSimd.MultiplyWideningUpperAndSubtract(
+                    AdvSimd.MultiplyWideningUpper(aBins, bTotal), bBins, aTotal);
+                low += AdvSimd.Arm64.Abs(lowDifference.AsInt64()).AsInt64();
+                high += AdvSimd.Arm64.Abs(highDifference.AsInt64()).AsInt64();
+                if (merge)
+                {
+                    AdvSimd.Store(aEvents + n, aBins + bBins);
+                }
+            }
+
+            return (ulong)AdvSimd.Arm64.AddPairwiseScalar(low + high).ToScalar();
         }
 
-        fingerprint->EventCount = limit / samplingRate;
-    }
-
-    /// <summary>libzstd's <c>fpDistance</c>: how far two histograms are, each scaled by the other's total.</summary>
-    private static ulong Distance(Fingerprint* a, Fingerprint* b, int hashLog)
-    {
+        long aCount = (long)a->EventCount;
+        long bCount = (long)b->EventCount;
         ulong distance = 0;
-        for (nuint n = 0; n < (nuint)1 << hashLog; n++)
+        for (nuint n = 0; n < (nuint)bins; n++)
         {
-            long difference = ((long)a->Events[n] * (long)b->EventCount) - ((long)b->Events[n] * (long)a->EventCount);
-            distance += (ulong)Math.Abs(difference);
+            long difference = (aEvents[n] * bCount) - (bEvents[n] * aCount);
+            long sign = difference >> 63;
+            distance += (ulong)((difference ^ sign) - sign);
+            if (merge)
+            {
+                aEvents[n] += bEvents[n];
+            }
         }
 
         return distance;
     }
 
     /// <summary>libzstd's <c>compareFingerprints</c>: whether the new part is too different from the reference.</summary>
-    private static bool IsDifferent(Fingerprint* reference, Fingerprint* next, int penalty, int hashLog)
+    private static bool IsDifferent(ulong distance, Fingerprint* reference, Fingerprint* next, int penalty)
     {
         ulong p50 = (ulong)reference->EventCount * (ulong)next->EventCount;
-        ulong deviation = Distance(reference, next, hashLog);
         ulong threshold = p50 * (ulong)(ThresholdBase + penalty) / ThresholdPenaltyRate;
-        return deviation >= threshold;
+        return distance >= threshold;
     }
 
     /// <summary>libzstd's <c>ZSTD_splitBlock_byChunks</c>.</summary>
-    private static int SplitByChunks(byte* block, int blockSize, int level)
+    private static int SplitByChunks<TSampling>(byte* block, int blockSize)
+        where TSampling : ISampling
     {
-        ReadOnlySpan<int> samplingRates = [43, 11, 5, 1];
-        ReadOnlySpan<int> hashLogs = [8, 9, 10, 10];
-        nuint rate = (nuint)samplingRates[level];
-        int hashLog = hashLogs[level];
         Fingerprint past;
         Fingerprint next;
-        Record(&past, block, ChunkSize, rate, hashLog);
+        Record<TSampling>(&past, block);
         int penalty = ThresholdPenalty;
         int position;
         for (position = ChunkSize; position <= blockSize - ChunkSize; position += ChunkSize)
         {
-            Record(&next, block + position, ChunkSize, rate, hashLog);
-            if (IsDifferent(&past, &next, penalty, hashLog))
+            Record<TSampling>(&next, block + position);
+
+            // The past takes the next's events as the distance is summed: libzstd merges them only
+            // when it does not split, past which the past is not read.
+            if (IsDifferent(Distance(&past, &next, 1 << TSampling.HashLog, merge: true), &past, &next, penalty))
             {
                 return position;
-            }
-
-            // libzstd's mergeEvents adds all its counters; those past the hash log's are never read.
-            for (int n = 0; n < 1 << hashLog; n++)
-            {
-                past.Events[n] += next.Events[n];
             }
 
             past.EventCount += next.EventCount;
@@ -123,24 +162,25 @@ internal static unsafe class BlockSplitter
     /// </summary>
     private static int SplitFromBorders(byte* block, int blockSize)
     {
+        const int Bins = 1 << 8;
         Fingerprint begin;
         Fingerprint end;
         Fingerprint middle;
-        Unsafe.InitBlockUnaligned(begin.Events, 0, HashTableSize * sizeof(uint));
-        Unsafe.InitBlockUnaligned(end.Events, 0, HashTableSize * sizeof(uint));
-        Unsafe.InitBlockUnaligned(middle.Events, 0, HashTableSize * sizeof(uint));
+        Unsafe.InitBlockUnaligned(begin.Events, 0, Bins * sizeof(uint));
+        Unsafe.InitBlockUnaligned(end.Events, 0, Bins * sizeof(uint));
+        Unsafe.InitBlockUnaligned(middle.Events, 0, Bins * sizeof(uint));
         Add(begin.Events, block, SegmentSize);
         Add(end.Events, block + blockSize - SegmentSize, SegmentSize);
         begin.EventCount = end.EventCount = SegmentSize;
-        if (!IsDifferent(&begin, &end, 0, 8))
+        if (!IsDifferent(Distance(&begin, &end, Bins, merge: false), &begin, &end, 0))
         {
             return blockSize;
         }
 
         Add(middle.Events, block + (blockSize / 2) - (SegmentSize / 2), SegmentSize);
         middle.EventCount = SegmentSize;
-        ulong distanceFromBegin = Distance(&begin, &middle, 8);
-        ulong distanceFromEnd = Distance(&end, &middle, 8);
+        ulong distanceFromBegin = Distance(&begin, &middle, Bins, merge: false);
+        ulong distanceFromEnd = Distance(&end, &middle, Bins, merge: false);
         const ulong MinDistance = SegmentSize * SegmentSize / 3;
         if ((ulong)Math.Abs((long)distanceFromBegin - (long)distanceFromEnd) < MinDistance)
         {
@@ -156,5 +196,41 @@ internal static unsafe class BlockSplitter
                 events[source[i]]++;
             }
         }
+    }
+
+    /// <summary>How <see cref="Record"/> samples a chunk: every <see cref="Rate"/>th position, hashed to <see cref="HashLog"/> bits.</summary>
+    private interface ISampling
+    {
+        static abstract nuint Rate { get; }
+
+        static abstract int HashLog { get; }
+    }
+
+    private readonly struct Every43rd : ISampling
+    {
+        public static nuint Rate => 43;
+
+        public static int HashLog => 8;
+    }
+
+    private readonly struct Every11th : ISampling
+    {
+        public static nuint Rate => 11;
+
+        public static int HashLog => 9;
+    }
+
+    private readonly struct Every5th : ISampling
+    {
+        public static nuint Rate => 5;
+
+        public static int HashLog => 10;
+    }
+
+    private readonly struct Every1st : ISampling
+    {
+        public static nuint Rate => 1;
+
+        public static int HashLog => 10;
     }
 }
