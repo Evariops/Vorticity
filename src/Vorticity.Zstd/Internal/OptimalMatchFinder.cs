@@ -493,40 +493,7 @@ internal static unsafe class OptimalParser<TLength, TLevel>
                         goto ShortestPath;
                     }
 
-                    // The prices of the matches found at cur.
-                    for (uint matchIndex = 0; matchIndex < matchCount; matchIndex++)
-                    {
-                        uint offBase = matches[matchIndex].OffBase;
-                        uint lastLength = matches[matchIndex].Length;
-                        uint startLength = matchIndex > 0 ? matches[matchIndex - 1].Length + 1 : minMatch;
-                        uint offCode = (uint)BitOperations.Log2(offBase);
-                        uint offsetPrice = OffsetPrice(optimal, offBase);
-                        for (uint length = lastLength; length >= startLength; length--)
-                        {
-                            uint position = cur + length;
-                            int price = basePrice + (int)(offsetPrice + MatchLengthPrice(optimal, offCode, length));
-                            if ((position > lastPosition) || (price < opt[position].Price))
-                            {
-                                while (lastPosition < position)
-                                {
-                                    // Empty positions filled, for the comparisons to come.
-                                    lastPosition++;
-                                    opt[lastPosition].Price = MaxPrice;
-                                    opt[lastPosition].LiteralLength = 1;
-                                }
-
-                                opt[position].MatchLength = length;
-                                opt[position].OffBase = offBase;
-                                opt[position].LiteralLength = 0;
-                                opt[position].Price = price;
-                            }
-                            else if (TLevel.Level == 0)
-                            {
-                                // Early abort: some ratio for speed.
-                                break;
-                            }
-                        }
-                    }
+                    lastPosition = PriceMatches(optimal, opt, matches, matchCount, cur, basePrice, lastPosition, minMatch);
                 }
 
                 opt[lastPosition + 1].Price = MaxPrice;
@@ -838,6 +805,55 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         return price + (BitCostMultiplier / 5);
     }
 
+    /// <summary>
+    /// The prices of the matches found at <paramref name="cur"/>, each from its longest length down,
+    /// into the positions they reach, cheaper ones replacing the stretches there. A method of its own:
+    /// in the parser, its values spilled to the stack and its nodes' addresses were computed again for
+    /// every field.
+    /// </summary>
+    /// <returns>The last position priced.</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static uint PriceMatches(
+        OptimalState optimal, OptimalNode* opt, OptimalMatch* matches, uint matchCount, uint cur, int basePrice, uint lastPosition, uint minMatch)
+    {
+        for (uint matchIndex = 0; matchIndex < matchCount; matchIndex++)
+        {
+            uint offBase = matches[matchIndex].OffBase;
+            uint lastLength = matches[matchIndex].Length;
+            uint startLength = matchIndex > 0 ? matches[matchIndex - 1].Length + 1 : minMatch;
+            uint offCode = (uint)BitOperations.Log2(offBase);
+            int offsetPrice = basePrice + (int)OffsetPrice(optimal, offBase);
+            for (uint length = lastLength; length >= startLength; length--)
+            {
+                uint position = cur + length;
+                int price = offsetPrice + (int)MatchLengthPrice(optimal, offCode, length);
+                OptimalNode* node = opt + position;
+                if ((position > lastPosition) || (price < node->Price))
+                {
+                    while (lastPosition < position)
+                    {
+                        // Empty positions filled, for the comparisons to come.
+                        lastPosition++;
+                        opt[lastPosition].Price = MaxPrice;
+                        opt[lastPosition].LiteralLength = 1;
+                    }
+
+                    node->MatchLength = length;
+                    node->OffBase = offBase;
+                    node->LiteralLength = 0;
+                    node->Price = price;
+                }
+                else if (TLevel.Level == 0)
+                {
+                    // Early abort: some ratio for speed.
+                    break;
+                }
+            }
+        }
+
+        return lastPosition;
+    }
+
     /// <summary>libzstd's <c>ZSTD_updateStats</c>: a sequence chosen, its symbols counted.</summary>
     private static void UpdateStatistics(OptimalState optimal, uint literalLength, byte* literals, uint offBase, uint matchLength)
     {
@@ -874,6 +890,7 @@ internal static unsafe class OptimalParser<TLength, TLevel>
     private static nuint Hash3(byte* p, int hashLog) => ((Read32(p) << 8) * 506832829u) >> (32 - hashLog);
 
     /// <summary>libzstd's <c>ZSTD_insertAndFindFirstIndexHash3</c>: the positions up to ip into the 3-byte table; ip's entry.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint InsertAndFindFirstIndexHash3(ref MatchState state, ref uint nextToUpdate3, byte* ip)
     {
         uint* hashTable3 = state.HashTable3;
@@ -974,18 +991,32 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         return Math.Max(positions, matchEndIndex - (current + 8));
     }
 
-    /// <summary>libzstd's <c>ZSTD_updateTree_internal</c>: the positions up to <paramref name="ip"/> into the tree.</summary>
+    /// <summary>
+    /// libzstd's <c>ZSTD_updateTree_internal</c>: the positions up to <paramref name="ip"/> into the tree.
+    /// Seldom any: the parser searches most positions, inserting them; the insertion is not inlined.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void UpdateTree(ref MatchState state, byte* ip, byte* end)
     {
+        uint target = (uint)(ip - state.Base);
+        if (state.NextToUpdate < target)
+        {
+            InsertIntoTree(ref state, end, target);
+        }
+
+        state.NextToUpdate = target;
+    }
+
+    /// <summary>The positions from <see cref="MatchState.NextToUpdate"/> up to <paramref name="target"/> into the tree.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void InsertIntoTree(ref MatchState state, byte* end, uint target)
+    {
         byte* @base = state.Base;
-        uint target = (uint)(ip - @base);
         uint index = state.NextToUpdate;
         while (index < target)
         {
             index += InsertIntoTree(ref state, @base + index, end, target);
         }
-
-        state.NextToUpdate = target;
     }
 
     /// <summary>
