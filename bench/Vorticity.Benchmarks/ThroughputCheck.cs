@@ -773,9 +773,9 @@ internal static class ThroughputCheck
         new("varbinview", 0.23, 0.073),   // 3 passes, spread 0.21-0.23; REBASED UP from 0.046 (a new reference binary): +391.4%
         new("variant", 1.00, 0.028),   // 3 passes, spread 0.97-1.00; REBASED UP from 0.98 (a new reference binary): +2.1%
         new("zigzag", 0.83, 0.014),   // 3 passes, spread 0.82-0.83; REBASED UP from 0.79 (a new reference binary): +5.6%
-        new("zstd", 0.63, 0.011),   // 3 passes, spread 0.62-0.63; was 1.06, -40.5%
-        new("zstd_buffers", 1.09, 0.019),   // 3 passes, spread 1.07-1.09; REBASED UP from 0.14 (a new reference binary): +681.0%
-        new("zstd_nullable", 0.69, 0.046),   // 3 passes, spread 0.66-0.69; REBASED UP from 0.61 (a new reference binary): +13.6%
+        new("zstd", 0.50, 0.022),   // 3 passes, spread 0.49-0.50; was 0.63, -20.1%: Vorticity.Zstd in place of the runtime's libzstd
+        new("zstd_buffers", 0.66, 0.011),   // 3 passes, spread 0.65-0.66; was 1.09, -39.3%: Vorticity.Zstd in place of the runtime's libzstd
+        new("zstd_nullable", 0.51, 0.004),   // 3 passes, spread 0.51-0.51; was 0.69, -26.1%: Vorticity.Zstd in place of the runtime's libzstd, its dictionary given with each frame
     ];
 
     /// <summary>
@@ -1062,15 +1062,15 @@ internal static class ThroughputCheck
         new("varbinview", 0.20, 0.050),   // 3 passes, spread 0.19-0.20; REBASED UP from 0.048 (a new reference binary): +310.5%
         new("variant", 1.37, 0.022),   // 3 passes, spread 1.34-1.37; REBASED UP from 1.08 (a new reference binary): +26.5%
         new("zigzag", 1.21, 0.040),   // 3 passes, spread 1.16-1.21; REBASED UP from 0.51 (a new reference binary): +136.4%
-        new("zstd", 0.15, 0.042),   // 3 passes, spread 0.14-0.15; was 0.19, -21.9%
-        new("zstd_buffers", 1.11, 0.030),   // 3 passes, spread 1.07-1.11; REBASED UP from 0.14 (a new reference binary): +690.1%
+        new("zstd", 0.066, 0.037),   // 3 passes, spread 0.063-0.066; was 0.15, -56.3%: 0.073 before Vorticity.Zstd took the runtime's libzstd's place
+        new("zstd_buffers", 0.65, 0.062),   // 3 passes, spread 0.61-0.65; was 1.11, -41.2%: Vorticity.Zstd in place of the runtime's libzstd
         new("chunked_bool", 1.12, 0.023),   // 3 passes, spread 1.09-1.12; REBASED UP from 0.57 (a new reference binary): +95.7%
         new("chunked_decimal", 0.84, 0.024),   // 3 passes, spread 0.82-0.84; REBASED UP from 0.31 (a new reference binary): +169.5%
         new("chunked_mixed_validity", 4.64, 0.261),   // 3 passes, spread 3.43-4.64; REBASED UP from 1.09 (a new reference binary): +325.8%
         new("chunked_varbinview", 0.27, 0.041),   // 3 passes, spread 0.26-0.27; REBASED UP from 0.062 (a new reference binary): +340.8%
         new("table_mixed", 0.32, 0.050),   // 3 passes, spread 0.30-0.32; REBASED UP from 0.064 (a new reference binary): +400.1%
         new("table_wide", 0.66, 0.067),   // 3 passes, spread 0.62-0.66; REBASED UP from 0.18 (a new reference binary): +268.1%
-        new("zstd_nullable", 0.42, 0.016),   // 3 passes, spread 0.42-0.42; was 0.47, -9.6%
+        new("zstd_nullable", 0.089, 0.165),   // 3 passes, spread 0.074-0.089; was 0.42, -78.8%: Vorticity.Zstd in place of the runtime's libzstd, its dictionary given with each frame rather than a decoder built for it per decode
     ];
 
     private const double StaleBelow = 0.70;

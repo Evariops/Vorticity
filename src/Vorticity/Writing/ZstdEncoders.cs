@@ -1,56 +1,53 @@
-using System.IO.Compression;
 using System.Threading;
+using Vorticity.Zstd;
 
 namespace Vorticity.Writing;
 
 /// <summary>
-/// The zstd encoders writers compress their trials with, kept from one writer to the next: an
-/// encoder's native context is close to a megabyte, which every file written built at its first
-/// trial and freed with its writer, where the next file needed the same.
+/// The zstd compressors writers compress their trials with, kept from one writer to the next: a
+/// compressor's tables and buffers are close to two megabytes at the default level, which every
+/// file written built at its first trial and dropped with its writer, where the next file needed
+/// the same.
 /// </summary>
 /// <remarks>
-/// An encoder comes back reset, and every trial resets it again before it compresses, so nothing
-/// of one file reaches the next. The bound is what a few writers at once hold, one each, or one
-/// writer compressing a column's frames on every processor, one each; an encoder past it is
-/// disposed, since each one kept is a megabyte held.
+/// A compressor writes whole frames, one per call, each the same bytes whatever it compressed
+/// before, so nothing of one file reaches the next. The bound is what a few writers at once hold,
+/// one each, or one writer compressing a column's frames on every processor, one each; a
+/// compressor past it is left to the collector, since each one kept is two megabytes held.
 /// </remarks>
 internal static class ZstdEncoders
 {
     private static readonly int Capacity = System.Math.Max(8, System.Environment.ProcessorCount + 1);
 
-    private static readonly ZstandardEncoder?[] Encoders = new ZstandardEncoder?[Capacity];
+    private static readonly ZstdCompressor?[] Encoders = new ZstdCompressor?[Capacity];
     private static readonly Lock Gate = new Lock();
     private static int _count;
 
-    /// <summary>An encoder an earlier writer gave back, or a new one when none waits.</summary>
-    internal static ZstandardEncoder Rent()
+    /// <summary>A compressor an earlier writer gave back, or a new one at the default level when none waits.</summary>
+    internal static ZstdCompressor Rent()
     {
         lock (Gate)
         {
             if (_count > 0)
             {
-                ZstandardEncoder encoder = Encoders[--_count]!;
+                ZstdCompressor encoder = Encoders[--_count]!;
                 Encoders[_count] = null;
                 return encoder;
             }
         }
 
-        return new ZstandardEncoder();
+        return new ZstdCompressor();
     }
 
-    /// <summary>Resets <paramref name="encoder"/> and keeps it for a later writer, or disposes it past the bound.</summary>
-    internal static void Return(ZstandardEncoder encoder)
+    /// <summary>Keeps <paramref name="encoder"/> for a later writer, or lets it go past the bound.</summary>
+    internal static void Return(ZstdCompressor encoder)
     {
-        encoder.Reset();
         lock (Gate)
         {
             if (_count < Capacity)
             {
                 Encoders[_count++] = encoder;
-                return;
             }
         }
-
-        encoder.Dispose();
     }
 }

@@ -17,12 +17,12 @@ packs:
 ```
 
 `Vorticity` is the whole format: opening, scanning, filtering, aggregating, indexes and the
-writer, with `System.IO.Hashing` as its only dependency. `Vorticity.Generators` runs at build time
-only: it turns a `[VortexRecord]` type into the code that reads and writes it, and ships the
-analyzers. The two other packages are separate subjects, both experimental, and referenced the
-same way at the same version as the core: `Vorticity.Dataset` for a versioned dataset over an
-object store ([datasets.md](datasets.md)), `Vorticity.RowEncoding` for byte-sortable keys
-([row-keys.md](row-keys.md)).
+writer, with `System.IO.Hashing` and `Vorticity.Zstd`, this repository's managed Zstandard, as its
+only dependencies. `Vorticity.Generators` runs at build time only: it turns a `[VortexRecord]`
+type into the code that reads and writes it, and ships the analyzers. The two other packages are
+separate subjects, both experimental, and referenced the same way at the same version as the core:
+`Vorticity.Dataset` for a versioned dataset over an object store ([datasets.md](datasets.md)),
+`Vorticity.RowEncoding` for byte-sortable keys ([row-keys.md](row-keys.md)).
 
 Everything that touches bytes is asynchronous: a file is opened with `await`, a scan is consumed
 with `await foreach`, a writer is fed with `WriteAsync`. There is no synchronous path to look for.

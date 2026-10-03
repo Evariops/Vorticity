@@ -9,14 +9,13 @@ is [14-public-api.md](14-public-api.md); what each column type becomes in .NET i
 
 | constraint | consequence |
 |---|---|
-| **No third-party dependency** | FlatBuffers and Protobuf are read and written by runtimes of this repository, hand-written against the five schemas; no `Google.FlatBuffers`, `protobuf-net` or `Apache.Arrow`. One first-party package is referenced: `System.IO.Hashing` from `dotnet/runtime`, for XXH3, which the shared framework does not carry |
+| **No third-party dependency** | FlatBuffers and Protobuf are read and written by runtimes of this repository, hand-written against the five schemas; no `Google.FlatBuffers`, `protobuf-net` or `Apache.Arrow`. Two packages are referenced: `System.IO.Hashing` from `dotnet/runtime`, for XXH3, which the shared framework does not carry, and `Vorticity.Zstd`, this repository's managed Zstandard, rather than the libzstd the runtime ships |
 | **No allocation on the hot path** | no LINQ, no `foreach` over interfaces, no capturing closures, no boxing, no `params` array (only `params ReadOnlySpan<T>`); aligned native buffers, pools for transients, `ref struct` views |
 | **SIMD with a scalar twin** | `System.Runtime.Intrinsics`: `Vector128` everywhere, `Vector256` and `Vector512` where the hardware has them, and a scalar path that the suite runs under `DOTNET_EnableHWIntrinsic=0` and compares bit for bit |
 | **Async only, where there is I/O** | `ValueTask` and `ConfigureAwait(false)` throughout; no blocking public call and no synchronous twin of an asynchronous one. A source whose reads complete at once, a mapped file or bytes in memory, pays for a completed `ValueTask`, not for a second path. Pure CPU work stays synchronous: filling a builder, row encoding, decode kernels |
 
 **One target framework, `net11.0`.** A single target means no `#if`, no API surface that differs by
-target, no test matrix, and no kernel that could diverge between legs; it also makes zstd
-unconditional, since `net11.0` is the first framework with `ZstandardDecoder`. The price is reach:
+target, no test matrix, and no kernel that could diverge between legs. The price is reach:
 .NET 11 is not a long-term-support release, and a consumer pinned to .NET 10 cannot reference the
 library. `netstandard2.1` is out of the question: it lacks `Vector512`, static abstract members,
 `INumber<T>`, `SearchValues` and aligned native allocation, which is to say the performance model.

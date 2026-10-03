@@ -19,7 +19,8 @@ file format (LF AI & Data, formerly SpiralDB).
   ([Performance](#performance)).
 
 No third-party package: the base class library, plus `System.IO.Hashing`, first party, for the
-hashes of the write path and the Bloom filters.
+hashes of the write path and the Bloom filters, and `Vorticity.Zstd`, this repository's managed
+Zstandard, for `vortex.zstd`.
 
 **What parity means here.** Files written by this library are read by Vortex Rust, and every value
 in them reads back equal — that is the parity claimed and the cross-check is what proves it. It is

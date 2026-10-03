@@ -115,38 +115,68 @@ internal enum SequenceCode
 /// decodes from the family's <see cref="Family"/>, the three in their slots; a block that mixes them
 /// with others copies it into its decoder's <see cref="SequenceTableSet"/>.
 /// </summary>
+/// <remarks>
+/// A dictionary's tables are rebuilt in place when its decoder takes another dictionary (see
+/// <see cref="Build"/>): the sets that refer to them are told first (<see cref="SequenceTableSet.Forget"/>),
+/// since they know a table by its reference.
+/// </remarks>
 internal sealed class SeqTable
 {
     public readonly SeqSymbol[] Entries;
-    public readonly int TableLog;
     public readonly SequenceCode Code;
 
-    /// <summary>The three tables of the family this one belongs to, each in its slot; null for none.</summary>
-    public SeqSymbol[]? Family { get; private set; }
-
-    /// <summary>Twice the value a state of the table stands for on average (see <see cref="SequenceCodes.BuildTable"/>).</summary>
-    public readonly nint ExpectedTimes2;
+    /// <summary>
+    /// The table's log, and twice the value a state of it stands for on average (see
+    /// <see cref="SequenceCodes.BuildTable"/>): fields that <see cref="Build"/> sets, not properties,
+    /// whose calls would keep the sets' small methods from being inlined where they are used.
+    /// </summary>
+    public int TableLog;
+    public nint ExpectedTimes2;
 
     public SeqTable(SequenceCode code, ReadOnlySpan<short> norm, int tableLog)
     {
         Code = code;
-        TableLog = tableLog;
         Entries = new SeqSymbol[2 << tableLog];
-        ExpectedTimes2 = SequenceCodes.BuildTable(code, Entries, norm, tableLog);
+        Build(norm, tableLog);
+    }
+
+    /// <summary>A table of <paramref name="code"/> for <see cref="Build"/> to build, with room for the widest.</summary>
+    public SeqTable(SequenceCode code)
+    {
+        Code = code;
+        Entries = new SeqSymbol[2 << SequenceCodes.MaxLog(code)];
+    }
+
+    /// <summary>The three tables of the family this one belongs to, each in its slot; null for none.</summary>
+    public SeqSymbol[]? Family { get; private set; }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_buildFSETable</c>, into <see cref="Entries"/>: for a table no set refers to,
+    /// or whose sets forgot it. Its family, if any, is refreshed by <see cref="Join"/>.
+    /// </summary>
+    public void Build(ReadOnlySpan<short> norm, int tableLog)
+    {
+        TableLog = tableLog;
+        ExpectedTimes2 = SequenceCodes.BuildTable(Code, Entries, norm, tableLog);
     }
 
     /// <summary>
     /// Makes the three tables a family: one array that holds them in their slots, which a block that
-    /// takes all three decodes from as it is, as libzstd points at a dictionary's tables.
+    /// takes all three decodes from as it is, as libzstd points at a dictionary's tables. Joined
+    /// again once rebuilt, they refresh the array they share.
     /// </summary>
     public static void Join(SeqTable literalLengths, SeqTable offsets, SeqTable matchLengths)
     {
-        var family = new SeqSymbol[SequenceTableSet.Size];
-        foreach (SeqTable table in new[] { literalLengths, offsets, matchLengths })
-        {
-            table.Entries.CopyTo(family.AsSpan(SequenceTableSet.Slot(table.Code)));
-            table.Family = family;
-        }
+        SeqSymbol[] family = literalLengths.Family ?? new SeqSymbol[SequenceTableSet.Size];
+        literalLengths.JoinTo(family);
+        offsets.JoinTo(family);
+        matchLengths.JoinTo(family);
+    }
+
+    private void JoinTo(SeqSymbol[] family)
+    {
+        Entries.AsSpan(0, 2 << TableLog).CopyTo(family.AsSpan(SequenceTableSet.Slot(Code)));
+        Family = family;
     }
 }
 
@@ -208,6 +238,21 @@ internal sealed class SequenceTableSet
 
     /// <summary>Twice the literal length a sequence has on average, as the current table says.</summary>
     public nint ExpectedLiteralsTimes2 => _expectedTimes2[(int)SequenceCode.LiteralLength];
+
+    /// <summary>
+    /// Lets go of every shared table: one is about to be rebuilt in place, and a reference to it here
+    /// would take it for the table it was (see <see cref="Materialize"/>, <see cref="BeginFrame"/>).
+    /// </summary>
+    /// <remarks>
+    /// The slots keep what they hold, now counted as their own builds: nothing reads them before the
+    /// next frame chooses its tables, a dictionary's from <see cref="BeginFrame"/> or a block's own,
+    /// since a frame without a dictionary refuses the repeat mode until a block has built a table.
+    /// </remarks>
+    public void Forget()
+    {
+        Array.Clear(_current);
+        Array.Clear(_held);
+    }
 
     /// <summary>The state every frame starts from: a dictionary's tables, if it has them.</summary>
     public void BeginFrame(SeqTable? literalLengths, SeqTable? offsets, SeqTable? matchLengths)
@@ -330,7 +375,7 @@ internal sealed class SequenceTableSet
         SeqTable? table = _current[(int)code];
         if (table is not null && !ReferenceEquals(table, _held[(int)code]))
         {
-            table.Entries.CopyTo(Entries.AsSpan(Slot(code)));
+            table.Entries.AsSpan(0, 2 << table.TableLog).CopyTo(Entries.AsSpan(Slot(code)));
             _held[(int)code] = table;
         }
     }

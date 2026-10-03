@@ -294,9 +294,10 @@ Two caveats:
 
 * **Zstd and Pco are not enabled by default** (`with_compact()`, the `zstd` and `pco` features), so
   ordinary files need neither. This library reads both, every type, mode and delta pco has, and
-  writes both: zstd costs it no dependency, since `net11.0` ships `ZstandardDecoder` in
-  `System.IO.Compression`, and pco is ported, its encoder tried by the size-first profile as
-  `with_compact()` tries it.
+  writes both: zstd costs it no third-party dependency, since its frames go through
+  `Vorticity.Zstd`, this repository's managed Zstandard, which writes libzstd's frames byte for
+  byte, and pco is ported, its encoder tried by the size-first profile as `with_compact()` tries
+  it.
 * **`fastlanes.delta` belongs to no edition.** The Delta scheme is in the list, but the edition
   allowlist forbids its id, so it appears only in files written with enforcement turned off.
 

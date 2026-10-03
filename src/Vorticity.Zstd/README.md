@@ -19,7 +19,8 @@ with Meta.
 ## Requirements
 
 Vorticity.Zstd targets .NET 11 (`net11.0`). Its only dependency is `System.IO.Hashing`, for the XXH64 frame
-checksums. No NuGet package has been published yet: reference `src/Vorticity.Zstd/Vorticity.Zstd.csproj` directly.
+checksums. It is released with Vorticity, which reads and writes `vortex.zstd` through it, at the
+same version; until the next release, reference `src/Vorticity.Zstd/Vorticity.Zstd.csproj` directly.
 
 ## Usage
 
@@ -74,6 +75,18 @@ var decompressor = new ZstdDecompressor(dictionary);
 
 The dictionary is prepared once, in the constructor, and then used for every frame. Vorticity.Zstd does not
 train dictionaries: use `zstd --train`, or `ZstandardDictionary.Train` from `System.IO.Compression`.
+
+A decompressor can also take the dictionary with each frame, which lets one decompressor serve frames of
+any dictionary:
+
+```csharp
+var decompressor = new ZstdDecompressor();
+OperationStatus status = decompressor.Decompress(frame, content, dictionary, out int consumed, out int written);
+```
+
+The dictionary is copied for the call and not kept. Its tables are kept, for the next calls that give the
+same dictionary: from then on, a frame costs a copy of its dictionary and nothing more, as if the
+decompressor had been created with it. Another dictionary rebuilds the tables without allocating.
 
 ### Parallel compression
 

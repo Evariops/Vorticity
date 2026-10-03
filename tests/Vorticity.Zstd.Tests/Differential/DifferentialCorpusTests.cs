@@ -165,6 +165,22 @@ public static class Corpus
         Assert.Equal(OperationStatus.NeedMoreData, status);
         Assert.Equal(0, consumed);
         Assert.Equal(0, written);
+
+        // The dictionary given with the frame instead, against a guard page, where a read past its end
+        // faults.
+        if (dictionary is { } given)
+        {
+            using var guarded = new GuardedBuffer(given.Bytes.Length);
+            Span<byte> placed = guarded.AtEnd(given.Bytes.Length);
+            given.Bytes.CopyTo(placed);
+            var shared = new ZstdDecompressor();
+            byte[] again = new byte[data.Length];
+            status = shared.Decompress(frame, again, placed, out consumed, out written);
+            Assert.True(status == OperationStatus.Done, $"{name}, the dictionary given with the frame: {status} ({shared.LastError})");
+            Assert.Equal(frame.Length, consumed);
+            Assert.Equal(data.Length, written);
+            AssertSameBytes(data, again, name + ", the dictionary given with the frame");
+        }
     }
 
     public static void AssertSameBytes(ReadOnlySpan<byte> expected, ReadOnlySpan<byte> actual, string name)

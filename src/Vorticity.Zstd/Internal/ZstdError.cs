@@ -40,6 +40,9 @@ internal enum ZstdError
     SequenceBitstream,
     LiteralsOverrun,
     OffsetTooLarge,
+
+    // ---- the dictionary given with the frame is invalid: InvalidData
+    DictionaryCorrupted,
 }
 
 /// <summary>Raised inside the decoder and caught at the API boundary, which turns it into a status.</summary>

@@ -77,7 +77,7 @@ jobs:
         env:
           DOTNET_EnableHWIntrinsic: '0'
 
-      # The four packages are what a consumer gets, and nothing else here builds them. Most of
+      # The five packages are what a consumer gets, and nothing else here builds them. Most of
       # what can go wrong is visible at pack time and nowhere else: a readme or a NOTICE that stops
       # being found, a license expression that stops parsing, a project that becomes packable by
       # accident. Warnings are errors, so a pack warning fails the job.

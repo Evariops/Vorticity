@@ -31,10 +31,11 @@ provider would target.
 
 | package | what it holds | depends on |
 |---|---|---|
-| `Vorticity` | the session, files, the writer, schema, the typed scan and its columns, the tool scan, the I/O seam, options, plans, exceptions | `System.IO.Hashing` |
+| `Vorticity` | the session, files, the writer, schema, the typed scan and its columns, the tool scan, the I/O seam, options, plans, exceptions | `System.IO.Hashing`, `Vorticity.Zstd` |
 | `Vorticity.Generators` | the `[VortexRecord]` generator and the analyzers | build time only |
 | `Vorticity.Dataset` | the dataset over an object store, `[Experimental("VX0001")]` | `Vorticity` |
 | `Vorticity.RowEncoding` | the row encoding, `[Experimental("VX0002")]` | `Vorticity` |
+| `Vorticity.Zstd` | Zstandard compression and decompression in managed C#: `ZstdCompressor`, `ZstdDecompressor` | `System.IO.Hashing` |
 
 The core has two public namespaces: `Vorticity`, for everything a caller uses, and
 `Vorticity.IO`, for the segment seam. The attributes the generator reads live in the core, so a

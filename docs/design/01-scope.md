@@ -23,9 +23,9 @@ component and its state.
 ## 2. What Vorticity is
 
 A reader and a writer of Vortex files for .NET 11, with no third-party dependency: the FlatBuffers
-and Protobuf runtimes are written here, and the one package the core references is the first-party
-`System.IO.Hashing` ([03-architecture.md](03-architecture.md) §1). It is compatible with Native AOT
-and trimming.
+and Protobuf runtimes are written here, and so is the Zstandard codec, `Vorticity.Zstd`; the one
+other package the core references is the first-party `System.IO.Hashing`
+([03-architecture.md](03-architecture.md) §1). It is compatible with Native AOT and trimming.
 
 | package | what it holds |
 |---|---|
@@ -33,6 +33,7 @@ and trimming.
 | `Vorticity.Generators` | the `[VortexRecord]` source generator and the analyzers VX1001 to VX1008, build-time only |
 | `Vorticity.Dataset` | a versioned dataset over an object store ([13-dataset.md](13-dataset.md)); experimental, `VX0001` |
 | `Vorticity.RowEncoding` | the byte-sortable row encoding ([06-row-encoding.md](06-row-encoding.md)); experimental, `VX0002`, because upstream reserves the right to change it |
+| `Vorticity.Zstd` | Zstandard compression and decompression in managed C#, which the core's `vortex.zstd` and `vortex.zstd_buffers` go through ([its README](../../src/Vorticity.Zstd/README.md)) |
 | `vxdump` | the inspection tool, written against the public surface only |
 
 ## 3. What it reads

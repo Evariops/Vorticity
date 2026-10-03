@@ -3,7 +3,6 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO.Compression;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -20,6 +19,7 @@ using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 using Vorticity.Types.Serialization;
+using Vorticity.Zstd;
 
 namespace Vorticity.Writing;
 
@@ -2865,7 +2865,7 @@ internal static class ArrayBlobWriter
 
         private BufferSpec[] _specs = [];
         private ProtoWriter _metadata;
-        private ZstandardEncoder? _zstd;
+        private ZstdCompressor? _zstd;
         private Workspace? _measure;
         private EncodingDictionary? _measureEncodings;
 
@@ -2873,11 +2873,11 @@ internal static class ArrayBlobWriter
         internal FlatBufferBuilder Builder { get; } = new FlatBufferBuilder();
 
         /// <summary>
-        /// The encoder every zstd trial of the file compresses in, taken from the process's with
-        /// the first and given back with the workspace: its native context is a megabyte, made once
-        /// for many files rather than once per trial or per file.
+        /// The compressor every zstd trial of the file compresses in, taken from the process's
+        /// with the first and given back with the workspace: its tables are two megabytes, made
+        /// once for many files rather than once per trial or per file.
         /// </summary>
-        internal ZstandardEncoder Zstd => _zstd ??= ZstdEncoders.Rent();
+        internal ZstdCompressor Zstd => _zstd ??= ZstdEncoders.Rent();
 
         /// <summary>
         /// The rows a zstd frame holds the values of, the writer's block; 0 for one frame a column.
@@ -2968,7 +2968,7 @@ internal static class ArrayBlobWriter
             Builder.Clear();
         }
 
-        /// <summary>Hands the builder's and the metadata writer's rentals back, and the zstd encoder and frame table to the process's.</summary>
+        /// <summary>Hands the builder's and the metadata writer's rentals back, and the zstd compressor and frame table to the process's.</summary>
         public void Dispose()
         {
             Builder.Dispose();

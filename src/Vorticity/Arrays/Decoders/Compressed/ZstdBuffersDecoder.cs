@@ -1,12 +1,12 @@
 using System;
 using System.Collections.Generic;
-using System.IO.Compression;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 using Vorticity.Buffers;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types;
+using Vorticity.Zstd;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
@@ -102,10 +102,10 @@ internal sealed class ZstdBuffersDecoder : ArrayDecoder
         // Decompressed into the canonical arena, which is the only writable memory a decoder may
         // have and is released with the batch.
         //
-        // The context's decoder, reused across every buffer of every node the scan meets: the
-        // one-shot form builds and tears down a native decompression context per call.
+        // The context's decompressor, reused across every buffer of every node the scan meets: a
+        // new one would build its tables and literal buffer for every buffer.
         int firstBuffer = -1;
-        ZstandardDecoder reused = context.Scan.Zstd;
+        ZstdDecompressor reused = context.Scan.Zstd;
         for (int i = 0; i < buffers; i++)
         {
             long size = sizes[i];
@@ -123,7 +123,6 @@ internal sealed class ZstdBuffersDecoder : ArrayDecoder
 
             if (size != 0)
             {
-                reused.Reset();
                 System.Buffers.OperationStatus status =
                     reused.Decompress(node.GetBuffer(i).Span, writable, out _, out int written);
                 if (status != System.Buffers.OperationStatus.Done || written != (int)size)

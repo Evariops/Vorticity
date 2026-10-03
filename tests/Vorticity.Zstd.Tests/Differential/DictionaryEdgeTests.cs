@@ -78,7 +78,7 @@ public sealed class DictionaryEdgeTests
     /// with or by the start of the frame (a match that runs on from the dictionary into the frame);
     /// then the dictionary's first bytes.
     /// </summary>
-    private static byte[] EdgeContent(byte[] dictionary)
+    internal static byte[] EdgeContent(byte[] dictionary)
     {
         var random = new Random(11);
         byte[] start = new byte[24];

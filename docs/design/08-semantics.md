@@ -171,10 +171,10 @@ invented per call site:
 | Metadata segment count | 16 (format-mandated) | — |
 | FlatBuffers tables per traversal | 1 000 000 | depth cannot bound work: forward-only uoffsets exclude cycles but not *sharing*, so a few hundred bytes of shared children describe a DAG with 2^depth paths. Matches the reference verifiers' `max_tables` |
 
-The decompression cap shapes the *design*, not just a constant: `ZstandardDecoder.TryDecompress`
-is one-shot and needs a pre-sized destination, so the frame's declared content size is validated
-against the cap **before** allocating. When a frame omits its content size, decompression falls
-back to a streaming loop with a running budget.
+The decompression cap shapes the *design*, not just a constant: `ZstdDecompressor.Decompress`
+decodes a whole frame into a pre-sized destination, so the declared size is validated against the
+cap **before** allocating. A `vortex.zstd` frame must declare its content size, which has to match
+its metadata; a `vortex.zstd_buffers` buffer is sized by the node's metadata.
 
 ## 7. Buffer-level LZ4
 

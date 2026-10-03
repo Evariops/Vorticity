@@ -4,17 +4,17 @@
 // the default writer emits neither, both are legal, and `validate` upstream has explicit rules for
 // them.
 //
-// Fixtures are compressed here rather than checked in, because .NET's one-shot TryCompress writes
+// Fixtures are compressed here rather than checked in, because Vorticity.Zstd's compressor writes
 // the frame content size into the header -- which is exactly what the decoder's
 // validate_frame_content_size check reads back.
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
-using System.IO.Compression;
 using System.Text;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Types;
+using Vorticity.Zstd;
 using Xunit;
 
 namespace Vorticity.Tests.Arrays.Decoders.Compressed;
@@ -227,8 +227,7 @@ public sealed class ZstdDecoderTests
             "repeated repeated repeated repeated repeated repeated repeated repeated");
         byte[] stream = ValueStream(["repeated repeated", "repeated"]);
 
-        using ZstandardDictionary dictionary = ZstandardDictionary.Create(dictionaryBytes);
-        byte[] frame = CompressWith(stream, dictionary);
+        byte[] frame = CompressWith(stream, dictionaryBytes);
 
         TestNode root = new TestNode("vortex.zstd")
             .WithMetadata(TestMetadata.Zstd(
@@ -290,6 +289,29 @@ public sealed class ZstdDecoderTests
         using DecodeHarness harness = DecodeHarness.Load(root, [1, 2, 3], Compress(stream));
         DType utf8 = harness.Types.Utf8(Nullability.NonNullable);
         Assert.Throws<VortexFormatException>(() => harness.DecodeRoot(utf8, 1));
+    }
+
+    [Fact]
+    public void ADictionaryWithTheZstdMagicButNoTablesIsRejected()
+    {
+        // The magic number makes it a zstd-format dictionary rather than raw content, and its
+        // entropy tables are garbage: the frame cannot decompress with it, a format error.
+        byte[] dictionary = new byte[64];
+        BinaryPrimitives.WriteUInt32LittleEndian(dictionary, 0xEC30A437);
+        BinaryPrimitives.WriteUInt32LittleEndian(dictionary.AsSpan(4), 7);
+        dictionary.AsSpan(8).Fill(0xFF);
+        byte[] stream = ValueStream(["value"]);
+
+        TestNode root = new TestNode("vortex.zstd")
+            .WithMetadata(TestMetadata.Zstd(
+                (uint)dictionary.Length, new ZstdFrameMetadata((ulong)stream.Length, 1)))
+            .WithBuffer(0)
+            .WithBuffer(1);
+
+        using DecodeHarness harness = DecodeHarness.Load(root, dictionary, Compress(stream));
+        DType utf8 = harness.Types.Utf8(Nullability.NonNullable);
+        VortexFormatException e = Assert.Throws<VortexFormatException>(() => harness.DecodeRoot(utf8, 1));
+        Assert.Contains("did not decompress", e.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -583,20 +605,16 @@ public sealed class ZstdDecoderTests
         return stream;
     }
 
-    private static byte[] Compress(ReadOnlySpan<byte> data)
-    {
-        byte[] destination = new byte[(int)ZstandardEncoder.GetMaxCompressedLength(data.Length) + 16];
-        Assert.True(ZstandardEncoder.TryCompress(data, destination, out int written));
-        return destination.AsSpan(0, written).ToArray();
-    }
+    private static byte[] Compress(ReadOnlySpan<byte> data) => Frame(new ZstdCompressor(), data);
 
-    private static byte[] CompressWith(ReadOnlySpan<byte> data, ZstandardDictionary dictionary)
+    private static byte[] CompressWith(ReadOnlySpan<byte> data, byte[] dictionary) =>
+        Frame(new ZstdCompressor(ZstdCompressor.DefaultLevel, dictionary), data);
+
+    private static byte[] Frame(ZstdCompressor compressor, ReadOnlySpan<byte> data)
     {
-        // The trailing int is windowLog2, NOT a compression level, and it must be at least 10.
-        const int WindowLog2 = 21;
-        byte[] destination = new byte[(int)ZstandardEncoder.GetMaxCompressedLength(data.Length) + 64];
-        Assert.True(
-            ZstandardEncoder.TryCompress(data, destination, out int written, dictionary, WindowLog2));
+        byte[] destination = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
+        Assert.Equal(
+            System.Buffers.OperationStatus.Done, compressor.Compress(data, destination, out _, out int written));
         return destination.AsSpan(0, written).ToArray();
     }
 

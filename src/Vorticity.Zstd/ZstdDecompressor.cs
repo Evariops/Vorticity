@@ -19,15 +19,39 @@ namespace Vorticity.Zstd;
 /// libzstd enforces this when it streams and only partly in one shot; Vorticity.Zstd always does.
 /// </para>
 /// <para>
-/// <see cref="Decompress"/> decodes one whole frame per call, from the start of the source into the
-/// start of the destination. When the source ends before the frame does, or the destination cannot
-/// hold it, it reports so without consuming or writing anything: call again with the whole frame, or
-/// with a larger destination.
+/// <see cref="Decompress(ReadOnlySpan{byte}, Span{byte}, out int, out int)"/> decodes one whole frame
+/// per call, from the start of the source into the start of the destination. When the source ends
+/// before the frame does, or the destination cannot hold it, it reports so without consuming or
+/// writing anything: call again with the whole frame, or with a larger destination.
+/// </para>
+/// <para>
+/// A dictionary is given to the constructor, which copies it and builds its tables once, or with
+/// each frame (<see cref="Decompress(ReadOnlySpan{byte}, Span{byte}, ReadOnlySpan{byte}, out int, out int)"/>):
+/// one decompressor then serves frames of any dictionary, building a dictionary's tables once for
+/// as long as the frames give the same.
 /// </para>
 /// </remarks>
 public sealed partial class ZstdDecompressor
 {
     private readonly DecoderDictionary? _dictionary;
+
+    /// <summary>The tables of the dictionaries given with frames, rebuilt in place when the dictionary changes.</summary>
+    private DictionaryEntropy? _callEntropy;
+
+    /// <summary>The bytes <see cref="_callEntropy"/> was built from: magic number, identifier, tables and repeat offsets.</summary>
+    private byte[] _callEntropyKey = [];
+
+    /// <summary>How many of <see cref="_callEntropyKey"/>'s bytes are its; -1 while <see cref="_callEntropy"/> holds no usable tables.</summary>
+    private int _callEntropyLength = -1;
+
+    /// <summary>The length of the dictionary <see cref="_callEntropy"/> was built from, whose content its repeat offsets were checked against.</summary>
+    private int _callDictionaryLength;
+
+    /// <summary>
+    /// The dictionary given with the frame being decoded, copied with <see cref="DecoderDictionary.Margin"/>
+    /// bytes of room after it, as the constructor's is: grown, never shrunk.
+    /// </summary>
+    private byte[] _callHistory = [];
 
     /// <summary>Creates a decoder without a dictionary.</summary>
     public ZstdDecompressor()
@@ -75,7 +99,18 @@ public sealed partial class ZstdDecompressor
         bytesWritten = 0;
         try
         {
-            int written = DecompressFrame(source, destination, out int consumed);
+            int written;
+            int consumed;
+            DecoderDictionary? dictionary = _dictionary;
+            if (dictionary is null)
+            {
+                written = DecompressFrame(source, destination, default, null, 0, out consumed);
+            }
+            else
+            {
+                written = DecompressFrame(source, destination, dictionary.Content, dictionary.Entropy, dictionary.Id, out consumed);
+            }
+
             bytesConsumed = consumed;
             bytesWritten = written;
             LastError = ZstdError.None;
@@ -83,19 +118,56 @@ public sealed partial class ZstdDecompressor
         }
         catch (ZstdException e)
         {
-            LastError = e.Error;
-            return e.Error switch
-            {
-                ZstdError.Truncated => OperationStatus.NeedMoreData,
-                ZstdError.DestinationTooSmall => OperationStatus.DestinationTooSmall,
-                _ => OperationStatus.InvalidData,
-            };
+            return Refuse(e);
         }
     }
 
     /// <summary>
-    /// Forgets the frame in progress. <see cref="Decompress"/> decodes whole frames, so there is never
-    /// one in progress: the method exists for callers written against a streaming decoder.
+    /// Decompresses the frame that starts <paramref name="source"/> into the start of
+    /// <paramref name="destination"/>, with <paramref name="dictionary"/> in place of the dictionary
+    /// the decompressor was created with, if any.
+    /// </summary>
+    /// <param name="source">A zstd or skippable frame, possibly followed by other data, which is left alone.</param>
+    /// <param name="destination">Where the frame's content is written.</param>
+    /// <param name="dictionary">
+    /// A dictionary in the zstd format, or any other bytes as raw content; empty for none. It is
+    /// copied for the call and not kept, but the tables built from it are, for the next calls that
+    /// give the same dictionary: once they are built, a frame costs a copy of its dictionary and
+    /// nothing else, and another dictionary rebuilds them without allocating.
+    /// </param>
+    /// <param name="bytesConsumed">The size of the frame, once it is decoded; otherwise 0.</param>
+    /// <param name="bytesWritten">The size of the frame's content, once it is decoded; otherwise 0.</param>
+    /// <returns>
+    /// <see cref="OperationStatus.Done"/> once the frame is decoded;
+    /// <see cref="OperationStatus.NeedMoreData"/> when the source ends inside the frame;
+    /// <see cref="OperationStatus.DestinationTooSmall"/> when the content does not fit;
+    /// <see cref="OperationStatus.InvalidData"/> when the frame is not valid zstd, names another
+    /// dictionary, or when the dictionary has the zstd format but invalid tables.
+    /// </returns>
+    public OperationStatus Decompress(
+        ReadOnlySpan<byte> source, Span<byte> destination, ReadOnlySpan<byte> dictionary, out int bytesConsumed, out int bytesWritten)
+    {
+        bytesConsumed = 0;
+        bytesWritten = 0;
+        try
+        {
+            ReadOnlySpan<byte> history = UseDictionary(dictionary, out DictionaryEntropy? entropy, out uint id);
+            int written = DecompressFrame(source, destination, history, entropy, id, out int consumed);
+            bytesConsumed = consumed;
+            bytesWritten = written;
+            LastError = ZstdError.None;
+            return OperationStatus.Done;
+        }
+        catch (ZstdException e)
+        {
+            return Refuse(e);
+        }
+    }
+
+    /// <summary>
+    /// Forgets the frame in progress. <see cref="Decompress(ReadOnlySpan{byte}, Span{byte}, out int, out int)"/>
+    /// decodes whole frames, so there is never one in progress: the method exists for callers written
+    /// against a streaming decoder.
     /// </summary>
     public void Reset() => LastError = ZstdError.None;
 
@@ -129,9 +201,112 @@ public sealed partial class ZstdDecompressor
         return true;
     }
 
+    /// <summary>The status a refusal reports, which it records.</summary>
+    private OperationStatus Refuse(ZstdException e)
+    {
+        LastError = e.Error;
+        return e.Error switch
+        {
+            ZstdError.Truncated => OperationStatus.NeedMoreData,
+            ZstdError.DestinationTooSmall => OperationStatus.DestinationTooSmall,
+            _ => OperationStatus.InvalidData,
+        };
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_decompress_usingDict</c>, without its tables for the same dictionary again:
+    /// <paramref name="dictionary"/> made the history of the next frame.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The dictionary is copied, where the constructor's is: with <see cref="DecoderDictionary.Margin"/>
+    /// bytes after it, which the fast sequence loops read past the end of a match that ends near its
+    /// end, copying it 32 bytes at a time. A dictionary read in place would need those loops to check
+    /// for it, and they are sensitive to the least change of their code. The copy costs what the
+    /// dictionary weighs: Vortex writers train a hundredth of the data it serves, 100 KiB at most.
+    /// </para>
+    /// <para>
+    /// The entropy tables are a function of the dictionary's first bytes, up to its repeat offsets,
+    /// and of its length, which they are checked against: when both are those of the dictionary they
+    /// were built from, they are taken as they are.
+    /// </para>
+    /// </remarks>
+    /// <returns>The history: the copy of the dictionary.</returns>
+    private ReadOnlySpan<byte> UseDictionary(ReadOnlySpan<byte> dictionary, out DictionaryEntropy? entropy, out uint id)
+    {
+        entropy = null;
+        id = 0;
+        if (dictionary.IsEmpty)
+        {
+            return default;
+        }
+
+        if (DictionaryEntropy.IsZstdFormat(dictionary))
+        {
+            entropy = LoadCallEntropy(dictionary);
+            id = entropy.Id;
+        }
+
+        if (_callHistory.Length < dictionary.Length + DecoderDictionary.Margin)
+        {
+            _callHistory = new byte[dictionary.Length + DecoderDictionary.Margin];
+        }
+
+        dictionary.CopyTo(_callHistory);
+        return _callHistory.AsSpan(0, dictionary.Length);
+    }
+
+    /// <summary>
+    /// The tables of <paramref name="dictionary"/>, a zstd-format one: the ones built last when it is
+    /// the same, else rebuilt in place.
+    /// </summary>
+    private DictionaryEntropy LoadCallEntropy(ReadOnlySpan<byte> dictionary)
+    {
+        DictionaryEntropy? entropy = _callEntropy;
+        int length = _callEntropyLength;
+        if (entropy is not null && length >= 0 && dictionary.Length == _callDictionaryLength
+            && dictionary.StartsWith(_callEntropyKey.AsSpan(0, length)))
+        {
+            return entropy;
+        }
+
+        // The sets let go of the tables first: they know a table by its reference, and would take
+        // the rebuilt ones for those they hold copies of.
+        entropy ??= _callEntropy = new DictionaryEntropy();
+        _callEntropyLength = -1;
+        _sequenceTables.Forget();
+        _pairTables?.Forget();
+        try
+        {
+            length = entropy.Load(dictionary);
+        }
+        catch (ZstdException)
+        {
+            Throw.Error(ZstdError.DictionaryCorrupted);
+        }
+
+        if (_callEntropyKey.Length < length)
+        {
+            _callEntropyKey = new byte[length];
+        }
+
+        dictionary.Slice(0, length).CopyTo(_callEntropyKey);
+        _callEntropyLength = length;
+        _callDictionaryLength = dictionary.Length;
+        return entropy;
+    }
+
     /// <summary>Decodes one frame; throws <see cref="ZstdException"/> on anything but success.</summary>
+    /// <param name="source">The frame.</param>
+    /// <param name="destination">Where its content goes.</param>
+    /// <param name="history">What precedes the frame: the dictionary's content, if any.</param>
+    /// <param name="entropy">The dictionary's tables, if it has them.</param>
+    /// <param name="dictionaryId">The identifier of the dictionary; 0 for none, or for raw content.</param>
+    /// <param name="consumed">The size of the frame.</param>
     /// <returns>The size of the content.</returns>
-    private int DecompressFrame(ReadOnlySpan<byte> source, Span<byte> destination, out int consumed)
+    private int DecompressFrame(
+        ReadOnlySpan<byte> source, Span<byte> destination, ReadOnlySpan<byte> history, DictionaryEntropy? entropy, uint dictionaryId,
+        out int consumed)
     {
         consumed = 0;
         if (source.Length < 4)
@@ -157,8 +332,7 @@ public sealed partial class ZstdDecompressor
             Throw.Error(headerError);
         }
 
-        uint expectedDictionary = _dictionary?.Id ?? 0;
-        if (header.DictionaryId != 0 && header.DictionaryId != expectedDictionary)
+        if (header.DictionaryId != 0 && header.DictionaryId != dictionaryId)
         {
             Throw.Error(ZstdError.DictionaryMismatch);
         }
@@ -168,8 +342,7 @@ public sealed partial class ZstdDecompressor
             Throw.Error(ZstdError.DestinationTooSmall);
         }
 
-        BeginFrame();
-        ReadOnlySpan<byte> history = _dictionary is null ? default : _dictionary.Content;
+        BeginFrame(entropy);
 
         int ip = header.HeaderSize;
         int op = 0;
@@ -325,9 +498,9 @@ public sealed partial class ZstdDecompressor
 
     /// <summary>
     /// libzstd's <c>ZSTD_decompressBegin_usingDDict</c>: the state every frame starts from, the
-    /// dictionary's when there is one.
+    /// dictionary's tables and repeat offsets when it has them.
     /// </summary>
-    private void BeginFrame()
+    private void BeginFrame(DictionaryEntropy? entropy)
     {
         _rep0 = 1;
         _rep1 = 4;
@@ -338,21 +511,20 @@ public sealed partial class ZstdDecompressor
 
         // A reference is written only when it changes: each write is a call to the GC's write
         // barrier, and frame after frame with one dictionary the references stay the same.
-        DecoderDictionary? dictionary = _dictionary;
-        HuffmanTable huffman = dictionary is not null && dictionary.HasEntropy ? dictionary.Huffman! : _huffman;
+        HuffmanTable huffman = entropy is not null ? entropy.Huffman : _huffman;
         if (!ReferenceEquals(_currentHuffman, huffman))
         {
             _currentHuffman = huffman;
         }
 
-        if (dictionary is not null && dictionary.HasEntropy)
+        if (entropy is not null)
         {
             _literalEntropy = true;
             _sequenceEntropy = true;
-            _sequenceTables.BeginFrame(dictionary.LiteralLengths, dictionary.Offsets, dictionary.MatchLengths);
-            _rep0 = dictionary.Rep0;
-            _rep1 = dictionary.Rep1;
-            _rep2 = dictionary.Rep2;
+            _sequenceTables.BeginFrame(entropy.LiteralLengths, entropy.Offsets, entropy.MatchLengths);
+            _rep0 = entropy.Rep0;
+            _rep1 = entropy.Rep1;
+            _rep2 = entropy.Rep2;
         }
     }
 }
