@@ -19,7 +19,7 @@ not a dependency choice: **a version bump is a corpus regeneration**, and the ve
 produced a corpus is recorded in `manifest.json` and in every file record.
 
 0.86.1 is the release [docs/design/99-sources.md](../../docs/design/99-sources.md) derived the specification
-against, and the newest at the time of writing. It can target every frozen core edition through
+against. It can target every frozen core edition through
 `core2026.08.3`, so the corpus reaches every component in scope. It needs rustc ≥ 1.95
 (built here with 1.98.1).
 
@@ -206,12 +206,12 @@ Lines, in order: `header`, `dtype`, `layout`, `metadata`, `file_stats`, one `zon
 `vortex.zoned` layout with its zone table decoded, then the values in `rows` batches of 128, then
 `null_counts` per field path.
 
-What format/2 added, and why each one was a hole:
+What each part of a sidecar catches:
 
-* **`header.entry_id` / `path` / `sha256`.** A sidecar now names the `.vortex` it describes and
-  carries its hash. Pairing used to be filename convention only, so a partially regenerated corpus
-  was undetectable from inside a sidecar. A loader should check the hash before trusting anything
-  else in the file.
+* **`header.entry_id` / `path` / `sha256`.** A sidecar names the `.vortex` it describes and carries
+  its hash. Paired by filename convention alone, a partially regenerated corpus would be
+  undetectable from inside a sidecar. A loader should check the hash before trusting anything else
+  in the file.
 * **`layout.array_tree`.** Every `vortex.flat` node carries the *array* encoding tree serialized
   inside it — `{id, nchildren, nbuffers, metadata_len, metadata_b64, children}`, child order
   preserved. The manifest's flat per-file id set cannot see structure: `map(listview(struct(...)))`
@@ -220,15 +220,14 @@ What format/2 added, and why each one was a hole:
   to a column, which for a 30-column struct meant 19 ids with no column attribution at all.
   `metadata_b64` is the raw metadata protobuf, which is where `vortex.bool`'s bit offset lives.
 * **The `metadata` line.** User metadata segment payloads, base64, in stored order, with `""` for a
-  present-but-empty segment. The manifest listed keys only, so a reader that returned the wrong
-  bytes, truncated the 256-byte binary payload, or conflated `conformance.empty` with an absent key
-  passed every check in the corpus — the null-vs-empty trap, in the one place the sidecar fell into
-  it.
+  present-but-empty segment. With the keys alone, a reader that returned the wrong bytes, truncated
+  the 256-byte binary payload, or conflated `conformance.empty` with an absent key would pass every
+  check in the corpus: the null-vs-empty trap.
 * **`zone_map.aggregate_details`.** Per aggregate, a `precision`: `exact` for
   `vortex.min/max/null_count/nan_count`, `bound` for `vortex.bounded_min/bounded_max`. The zone map
-  is the pruning input and it carried no precision at all, so a reader that treated
-  `vortex.bounded_min(64)` as an exact minimum — and therefore pruned a zone that does contain
-  matching rows — compared equal against every zone_map line in the corpus.
+  is the pruning input: without a precision, a reader that treated `vortex.bounded_min(64)` as an
+  exact minimum — and therefore pruned a zone that does contain matching rows — would compare equal
+  against every zone_map line in the corpus.
 * **`zones.distinct_zones`.** Whether that map's zones actually differ from one another. A zone map
   whose zones carry identical bounds proves it can be parsed and nothing more.
 
@@ -237,7 +236,7 @@ footer statistic covering it (min, max, sum, `nan_count`, `null_count`), zero di
 a statistic is a bound rather than a value, the reader marks it `inexact` and the check honours
 that.
 
-## Coverage gate## Coverage gate
+## Coverage gate
 
 docs/design/04-conformance.md §3: *the union of `array_specs` and `layout_specs` across the corpus must
 cover every component we claim to support.* Two readings of that, both computed and both
@@ -263,26 +262,24 @@ Result against [docs/design/90-registry.md](../../docs/design/90-registry.md):
 | extension dtypes | 4 | **4** | — |
 | zone-map aggregates | 6 | **6** | — |
 
-The 35 include the registry's five late arrivals (`vortex.map`, `vortex.pco`, `vortex.variant`,
-`vortex.parquet.variant`, `vortex.zstd_buffers`), first left out of scope and brought in since:
-they gate like the other thirty.
+The 35 include `vortex.map`, `vortex.pco`, `vortex.variant`, `vortex.parquet.variant` and
+`vortex.zstd_buffers`, which gate like the other thirty.
 
 Two ids appear that the registry lists nowhere: `fastlanes.delta` and `vortex.patched`. Both are
 deliberate forward-compatibility fixtures, written with edition enforcement off — see below. The
-unclaimed-observed check now runs over **layouts, aggregates and extension dtypes** as well as
-arrays: through manifest format/1 it covered arrays only, which is how `vortex.list` sat in the
-corpus as a layout the registry's six-layout table does not list while the manifest declared full
-coverage. `vortex.list` is reachable only under `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1` and belongs to
+unclaimed-observed check runs over **layouts, aggregates and extension dtypes** as well as arrays:
+over arrays alone, `vortex.list` would sit in the corpus as a layout the registry's six-layout table
+does not list while the manifest declared full coverage. `vortex.list` is reachable only under `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1` and belongs to
 no edition, exactly as `vortex.patched` does on the array side; it is listed in
 `manifest::EXPERIMENTAL_LAYOUTS` and named in its entry's `notes`, so the report stays a signal
 rather than a permanent known-noise line.
 
 ## Shape gate
 
-The coverage gate answers *is every claimed component present somewhere*. It passed on a corpus
-where every `vortex.bool` bit offset was 0, every dict had `u16` non-nullable codes, every ALP
-array had patches with chunk offsets, every zone map had two zones with identical bounds, every
-Utf8 value was ASCII, and three of the six decimal storage widths never appeared. None of those is
+The coverage gate answers *is every claimed component present somewhere*. It would pass on a corpus
+where every `vortex.bool` bit offset is 0, every dict has `u16` non-nullable codes, every ALP array
+has patches with chunk offsets, every zone map has two zones with identical bounds, every Utf8
+value is ASCII, and three of the six decimal storage widths never appear. None of those is
 expressible as a component id, so each gets a named check of its own — 17 in all, evaluated from
 `manifest.json` and printed by the generator:
 
@@ -322,7 +319,7 @@ each is a `SkipRecord` in `manifest.json` with the source reference that establi
 | Zstd-compressed *segments* | The format reserves per-segment compression; the 0.86.1 writer hard-codes it off — `PostscriptSegment::write_flatbuffer` passes `_compression: None` (`footer/postscript.rs:251`) and `FileLayout` passes `compression_specs: None` (`footer/file_layout.rs:75`). No public API sets either. `containers/zstd_arrays_in_segments` is the closest reachable variant: array-level, not segment-level. |
 | LZ4-compressed buffer | Same mechanism, and additionally no LZ4 codec is registered anywhere in 0.86.1 — no `lz4` dependency in any `vortex-*` crate. |
 | postscript near the 65527-byte ceiling | The writer's own ceiling is two orders of magnitude lower: four segment locators plus at most `MAX_METADATA_SEGMENTS` (16) entries with keys capped at `MAX_METADATA_KEY_BYTES` (64) (`footer/mod.rs:44,51`) — about 1 KiB of key budget. `containers/postscript_max_metadata` is the largest postscript actually achievable. |
-| deliberately false min/max | docs/design/04-conformance.md §3 already says this one must be forged. The forged-fixture set now exists, but this fixture is not in it: a zone's min/max live inside a compressed, encoded stats array, so inverting one is a re-encode rather than a byte patch. `negative/unknown_encoding_id` is the one forged fixture this release ships. |
+| deliberately false min/max | docs/design/04-conformance.md §3 says this one must be forged. The forged-fixture set does not hold it: a zone's min/max live inside a compressed, encoded stats array, so inverting one is a re-encode rather than a byte patch. `negative/unknown_encoding_id` is the one forged fixture this release ships. |
 | **row-encoding golden vectors** (docs/design/04 §7) | There is no `vortex-row` crate. `cargo info vortex-row` reports it is not in the crates.io index, and `RowSortField` / `row_encode` / `RowEncoding` appear nowhere in the sources of `vortex-0.86.1` or any `vortex-*` crate at that version. §7 assigns byte-exactness of the row encoder to this crate on the assumption that such a crate exists; it does not, so the row encoder of docs/design/06-row-encoding.md has **no cross-implementation anchor in this release** and its property tests remain self-consistent only. Re-check when the crate is published; the fixture shape §7 asks for is unchanged. |
 | `vortex.chunked` LAYOUT with one chunk | `ChunkedLayoutStrategy::write_stream` collapses a single-child layout into that child — `if child_layouts.len() == 1 { return child }` (`layouts/chunked/writer.rs:86`). The equivalent array shape is in the corpus as `encodings/chunked_one_chunk`. |
 | `vortex.chunked` LAYOUT with a zero-row chunk | The file writer filters empty chunks out of the write stream before any layout strategy sees them — `.try_filter(\|chunk\| ready(!chunk.is_empty()))` (`vortex-file-0.86.1/src/writer.rs:270`); verified empirically with a 100/0/100 stream, which produces a two-child layout. The equivalent array shape is in the corpus as `encodings/chunked_empty_chunks`. |
@@ -332,8 +329,7 @@ each is a `SkipRecord` in `manifest.json` with the source reference that establi
 | `preview2026.08.0` edition | Preview editions are not frozen, so a file written against one carries no read-forever guarantee and has no place in an interoperability-regression corpus. |
 | Vortex 0.36.0 floor files | This crate is pinned to exactly 0.86.1. Floor files need a separately pinned generator; `editions/core2025.05.0` is the closest this one gets. |
 
-Two entries that were previously on this list are **not** gaps and are now generated:
-`fastlanes.delta` and `vortex.zstd_buffers`. Both belong to no *core* edition, but "no core
+`fastlanes.delta` and `vortex.zstd_buffers` are **not** gaps: they are generated. Both belong to no *core* edition, but "no core
 edition contains it" is a weaker claim than "this release cannot write one", and the corpus
 should not assert the stronger one — `encodings/fastlanes_delta` and `encodings/zstd_buffers`
 write them with `disable_editions()`, and both round-trip through the Rust reader to their exact
@@ -344,9 +340,8 @@ carrying an encoding a conformant reader may legitimately not know.
 
 **Two runs produce byte-identical output**, `.vortex`, sidecars, `manifest.json` and `SIDECAR.md`
 alike — verified over all 1640 files by SHA-256, across separate processes and different output
-paths, and previously across `TZ=Asia/Tokyo` / `TZ=Pacific/Kiritimati`, `LC_ALL=tr_TR.UTF-8` /
-`LC_ALL=C`, and ten-way CPU contention. No nondeterministic dimension was found in the 0.86.1
-writer.
+paths, across `TZ=Asia/Tokyo` / `TZ=Pacific/Kiritimati`, `LC_ALL=tr_TR.UTF-8` / `LC_ALL=C`, and
+ten-way CPU contention. The 0.86.1 writer has no nondeterministic dimension.
 
 Three things make that true, all recorded in `manifest.json`:
 
@@ -390,5 +385,5 @@ IEEE equality, so a 15-value dictionary survives `0.0 == -0.0` and `NaN != NaN`;
 | `src/forged.rs` | the forged-fixture set: byte patches no writer can produce, with their provenance |
 | `examples/verify_corpus.rs` | independent coverage re-derivation, sharing no code with `emit` |
 | `examples/verify_forged.rs` | asserts the forged manifest's expectations against the Rust reader |
-| `API-NOTES.md` | the 0.86.1 API reconnaissance this generator is built on |
+| `API-NOTES.md` | the 0.86.1 API, as this generator uses it |
 | `examples/api_experiments.rs` | the runnable proof behind API-NOTES §3 |

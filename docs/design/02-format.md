@@ -236,7 +236,7 @@ them).
 This protects the read-forever promise. Upstream may add an *optional* field to a metadata message
 without it being a reader-visible evolution: old readers ignore it and the semantics are unchanged,
 so upstream need not mint a new id. A parser that rejected unknown fields would fail on legal files,
-and a corpus pinned to today's version would not notice until its next regeneration.
+and a corpus pinned to one version would not notice until its next regeneration.
 
 The distinction to keep sharp:
 

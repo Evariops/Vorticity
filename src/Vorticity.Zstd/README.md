@@ -19,8 +19,8 @@ with Meta.
 ## Requirements
 
 Vorticity.Zstd targets .NET 11 (`net11.0`). Its only dependency is `System.IO.Hashing`, for the XXH64 frame
-checksums. It is released with Vorticity, which reads and writes `vortex.zstd` through it, at the
-same version; until the next release, reference `src/Vorticity.Zstd/Vorticity.Zstd.csproj` directly.
+checksums. It ships with Vorticity, which reads and writes `vortex.zstd` through it, at the same
+version; from source, reference `src/Vorticity.Zstd/Vorticity.Zstd.csproj`.
 
 ## Usage
 

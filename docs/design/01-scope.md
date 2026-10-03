@@ -42,7 +42,7 @@ other package the core references is the first-party `System.IO.Hashing`
   component of the core editions up to `core2026.08.3`, `vortex.zstd_buffers` from the draft
   `zstd2026.02.0` edition, and the three Rust writes outside every edition when an upstream flag
   asks for them: `fastlanes.delta`, `vortex.patched` and the experimental `vortex.list` layout.
-- **Every file from Rust 0.36.0 to the version the conformance corpus is pinned to**, 0.86.1 today,
+- **Every file from Rust 0.36.0 to the version the conformance corpus is pinned to**, 0.86.1,
   value for value ([04-conformance.md](04-conformance.md)).
 - **Lazily.** An id this library does not know fails only the read that needs it: an unprojected
   column may use one, and a zone-map aggregate nobody knows only disables its pruning
@@ -54,7 +54,7 @@ other package the core references is the first-party `System.IO.Hashing`
 ## 4. What it writes
 
 - **Files every Rust reader of the target edition opens.** The target is `VortexEditions.Default`,
-  `core2026.08.3` today, read by Vortex Rust from 0.85.0; lower targets are honoured by dropping
+  `core2026.08.3`, read by Vortex Rust from 0.85.0; lower targets are honoured by dropping
   what they cannot carry, and refused where a column needs a component the target lacks
   ([90-registry.md](90-registry.md)). The reference reads every file this writer produces, value
   for value, in CI.

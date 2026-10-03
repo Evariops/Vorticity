@@ -1,6 +1,6 @@
 # Benchmarks on x64
 
-[The benchmark page](benchmarks.md) measured again on an x64 machine: an AMD Ryzen 9 7950X (Zen 4,
+[The benchmark page](benchmarks.md) on an x64 machine: an AMD Ryzen 9 7950X (Zen 4,
 16 cores and 32 threads, AVX-512) under Windows 11, against the same Vortex Rust 0.86.1 built the
 same way for that machine. The instruments, the files, the rows and the rules are that page's own,
 section for section; what changes is the processor, the operating system and the file system under
@@ -10,14 +10,11 @@ instrument measures; [bench/README.md](../../bench/README.md) how to run them.
 Vortex™ is a trademark of LF Projects, LLC. Vorticity is an independent implementation,
 not affiliated with or endorsed by the Vortex project or LF Projects, LLC.
 
-**Every comparison with Rust on this page is withdrawn** until an x64 machine measures it again.
-Its figures were taken on 2026-09-27, before the harness stopped charging Rust for work Vorticity
-did not do ([05-benchmarks.md](../design/05-benchmarks.md) §1), and favoured Vorticity. What stands
-are the sections that compare Vorticity with itself: the encodings column by column, the advice,
-and the kernels against the loops they replaced, measured then with each scan pass taking over the
-mapping the previous one left, which [the benchmark page](benchmarks.md) no longer does. The kernel
-tables printed BenchmarkDotNet's ratio then; their speedups were computed on 2026-10-02 from the
-Mean column of the same run.
+**The sections that compare Vorticity with Rust are not measured on x64**: each says which
+arguments write it. The sections that compare Vorticity with itself are: the encodings column by
+column, the advice, and the kernels against their baselines, measured with each scan pass
+taking over the mapping the previous one left, where [the benchmark page](benchmarks.md) maps the
+file anew at every call. The kernel tables' speedups are computed from the Mean column of their run.
 
 * **The two sides.** Vorticity as a Native AOT binary built for the machine's instruction set,
   with the workstation garbage collector, where a section says so, and on the JIT otherwise. Vortex
@@ -45,66 +42,41 @@ Release bench/Vorticity.Benchmarks.Runner`): an older one times older code.
 | [In one process](#in-one-process-after-warm-up) | `--ratio-check --out docs/guide/benchmarks-x64.md` |
 | [Taking rows](#taking-rows-per-encoding), [writing](#writing-per-encoding), per encoding | `--throughput --take --out docs/guide/benchmarks-x64.md`, and `--write` |
 | [Encodings, column by column](#encodings-column-by-column), [what the advice picks](#what-the-advice-picks) | `--tradeoffs --out docs/guide/benchmarks-x64.md`, and `--advise`, under `DOTNET_TieredCompilation=0` |
-| [Kernels](#kernels-against-what-they-replaced) | `--out docs/guide/benchmarks-x64.md`, or a class name before it |
+| [Kernels](#kernels-against-their-baselines) | `--out docs/guide/benchmarks-x64.md`, or a class name before it |
 
 <!-- results: scenarios -->
 ## Reading and writing a table, process against process
 
-*Withdrawn on 2026-10-02.* Measured on 2026-09-27 at commit b5104f2 with a harness that charged Rust
-for work Vorticity did not do: its reader copied the file where ours read a mapping a previous round
-had left it, it expanded constant columns ours keeps whole, its writer filled a growing `Vec<u8>`
-where ours discarded its bytes, and it read the per-encoding files under a split that decoded each
-of them ten times ([05-benchmarks.md](../design/05-benchmarks.md) §1 lists every difference). The
-figures favoured Vorticity, by more than an order of magnitude on some rows, and are not quoted
-until an x64 machine measures this section again with the arguments above.
+*Not measured on x64.* This section compares Vorticity with Rust; the arguments above write it
+on an x64 machine.
 <!-- /results: scenarios -->
 
 <!-- results: decoding -->
 ## Decoding, per encoding
 
-*Withdrawn on 2026-10-02.* Measured on 2026-09-27 at commit b5104f2 with a harness that charged Rust
-for work Vorticity did not do: its reader copied the file where ours read a mapping a previous round
-had left it, it expanded constant columns ours keeps whole, its writer filled a growing `Vec<u8>`
-where ours discarded its bytes, and it read the per-encoding files under a split that decoded each
-of them ten times ([05-benchmarks.md](../design/05-benchmarks.md) §1 lists every difference). The
-figures favoured Vorticity, by more than an order of magnitude on some rows, and are not quoted
-until an x64 machine measures this section again with the arguments above.
+*Not measured on x64.* This section compares Vorticity with Rust; the arguments above write it
+on an x64 machine.
 <!-- /results: decoding -->
 
 <!-- results: in-process -->
 ## In one process, after warm-up
 
-*Withdrawn on 2026-10-02.* Measured on 2026-09-27 at commit b5104f2 with a harness that charged Rust
-for work Vorticity did not do: its reader copied the file where ours read a mapping a previous round
-had left it, it expanded constant columns ours keeps whole, its writer filled a growing `Vec<u8>`
-where ours discarded its bytes, and it read the per-encoding files under a split that decoded each
-of them ten times ([05-benchmarks.md](../design/05-benchmarks.md) §1 lists every difference). The
-figures favoured Vorticity, by more than an order of magnitude on some rows, and are not quoted
-until an x64 machine measures this section again with the arguments above.
+*Not measured on x64.* This section compares Vorticity with Rust; the arguments above write it
+on an x64 machine.
 <!-- /results: in-process -->
 
 <!-- results: take -->
 ## Taking rows, per encoding
 
-*Withdrawn on 2026-10-02.* Measured on 2026-09-27 at commit b5104f2 with a harness that charged Rust
-for work Vorticity did not do: its reader copied the file where ours read a mapping a previous round
-had left it, it expanded constant columns ours keeps whole, its writer filled a growing `Vec<u8>`
-where ours discarded its bytes, and it read the per-encoding files under a split that decoded each
-of them ten times ([05-benchmarks.md](../design/05-benchmarks.md) §1 lists every difference). The
-figures favoured Vorticity, by more than an order of magnitude on some rows, and are not quoted
-until an x64 machine measures this section again with the arguments above.
+*Not measured on x64.* This section compares Vorticity with Rust; the arguments above write it
+on an x64 machine.
 <!-- /results: take -->
 
 <!-- results: write -->
 ## Writing, per encoding
 
-*Withdrawn on 2026-10-02.* Measured on 2026-09-27 at commit b5104f2 with a harness that charged Rust
-for work Vorticity did not do: its reader copied the file where ours read a mapping a previous round
-had left it, it expanded constant columns ours keeps whole, its writer filled a growing `Vec<u8>`
-where ours discarded its bytes, and it read the per-encoding files under a split that decoded each
-of them ten times ([05-benchmarks.md](../design/05-benchmarks.md) §1 lists every difference). The
-figures favoured Vorticity, by more than an order of magnitude on some rows, and are not quoted
-until an x64 machine measures this section again with the arguments above.
+*Not measured on x64.* This section compares Vorticity with Rust; the arguments above write it
+on an x64 machine.
 <!-- /results: write -->
 
 <!-- results: tradeoffs -->
@@ -489,9 +461,9 @@ It keeps the writer's choice under every goal on the 10 other columns.
 *Measured on AMD Ryzen 9 7950X 16-Core Processor (X64), 32 processors, Microsoft Windows 10.0.26200; .NET 11.0.0-rc.1.26425.128; commit b5104f2 with uncommitted changes, 2026-09-27 03:01 UTC.*
 <!-- /results: advice -->
 
-## Kernels, against what they replaced
+## Kernels, against their baselines
 
-Each hot loop of the library against the loop it replaced, or against the floor of the work it
+Each hot loop of the library against a baseline, the plain loop it stands in for or the floor of the work it
 does, measured by BenchmarkDotNet in one process on one clock, both checked to give the same result
 before any is timed. A **Speedup** column is the mean time of the row's baseline, the row whose
 `MannWhitney(5%)` cell reads `Baseline`, over the row's own: above 1.00x, the row took less. These
@@ -554,13 +526,8 @@ Benchmarks with issues:
 <!-- results: kernel:LanesBenchmarks -->
 ### `LanesBenchmarks`
 
-*Withdrawn on 2026-10-02.* Measured on 2026-09-27 at commit b5104f2 with a harness that charged Rust
-for work Vorticity did not do: its reader copied the file where ours read a mapping a previous round
-had left it, it expanded constant columns ours keeps whole, its writer filled a growing `Vec<u8>`
-where ours discarded its bytes, and it read the per-encoding files under a split that decoded each
-of them ten times ([05-benchmarks.md](../design/05-benchmarks.md) §1 lists every difference). The
-figures favoured Vorticity, by more than an order of magnitude on some rows, and are not quoted
-until an x64 machine measures this section again with the arguments above.
+*Not measured on x64.* This section compares Vorticity with Rust; the arguments above write it
+on an x64 machine.
 <!-- /results: kernel:LanesBenchmarks -->
 
 ## What this does not measure

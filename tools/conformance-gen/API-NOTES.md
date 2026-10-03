@@ -1,35 +1,33 @@
-# Vortex 0.86.1 Rust API — reconnaissance notes
+# Vortex 0.86.1 Rust API — notes for the corpus generator
 
-Everything here was verified by compiling and running against `vortex = "=0.86.1"` on
+Everything here is verified by compiling and running against `vortex = "=0.86.1"` on
 rustc 1.98.1 (macOS aarch64). Two runnable artefacts back these notes:
 
 | what | how to run |
 | --- | --- |
 | `examples/api_experiments.rs` — proves every write-control claim in §3 | `cargo run --release -j 6 --example api_experiments` |
-| `src/` — the corpus generator these notes were written for (see README.md) | `cargo run --release -j 6 -- --list` |
+| `src/` — the corpus generator these notes serve (see README.md) | `cargo run --release -j 6 -- --list` |
 
-§6 records how each of the reconnaissance pass's open questions turned out once the generator was
-actually built. `src/main.rs` was the throwaway probe when these notes were written; it is now the
-generator's CLI.
+§6 settles, from the generator itself, what the API leaves open.
 
 Source paths below are relative to the crates.io checkout under the cargo registry,
 `$CARGO_HOME/registry/src/index.crates.io-<hash>/`.
 
-Where I could not find something, it says **NOT FOUND** and what I tried. Do not read past that
+Where something is not in the source, the notes say **NOT FOUND** and where they looked. Do not read past that
 into an assumption.
 
 ---
 
 ## 0. Dependencies and the runtime — no tokio needed
 
-`Cargo.toml` now carries exactly two Vortex deps:
+`Cargo.toml` carries exactly two Vortex deps:
 
 ```toml
 vortex = "=0.86.1"
 vortex-btrblocks = "=0.86.1"   # only to name individual compression schemes (see §3.2)
 ```
 
-**No async runtime crate was added, and none is needed.** `vortex-io` ships its own runtimes and
+**No async runtime crate is needed.** `vortex-io` ships its own runtimes and
 is re-exported as `vortex::io`. On native targets without the `tokio` feature,
 `Handle::find()` returns `None` (`vortex-io-0.86.1/src/runtime/platform/native.rs:12`), so
 `VortexSession::default()` has **no runtime handle** and the first write panics with
@@ -60,10 +58,9 @@ everything on the calling thread. Alternatives, all in `vortex-io-0.86.1/src/run
 The `vortex` facade's default features are `["files", "wasm-bindgen", "zstd"]`
 (`vortex-0.86.1/Cargo.toml:46`), so `vortex::file` and the zstd schemes are available out of the box.
 
-**Byte determinism**: three consecutive runs of `cargo run --release` produced the identical
-SHA-256 for `probe.vortex`. The writer deliberately pre-populates the array context so segment
-bytes do not vary run to run (`vortex-file-0.86.1/src/writer.rs:391`, `NOTE(os)`). Good news for a
-golden corpus.
+**Byte determinism**: the writer deliberately pre-populates the array context so segment bytes do
+not vary run to run (`vortex-file-0.86.1/src/writer.rs:391`, `NOTE(os)`), and two runs of the
+generator write byte-identical files (README.md, *Determinism*). Good news for a golden corpus.
 
 ---
 
@@ -94,14 +91,14 @@ fn build_column(dtype: &DType, rows: usize, f: impl Fn(usize) -> Scalar) -> Vort
 `ArrayBuilder` also has `append_null()`, `append_nulls(n)`, `append_zeros(n)`,
 `append_defaults(n)` (`.../builders/mod.rs:120-165`). `append_nulls` **asserts** the builder dtype
 is nullable — it panics, it does not error. Nulls via `append_scalar(&Scalar::null(dtype))` work
-the same way and are what `src/main.rs` uses.
+the same way and are what `src/schema.rs` uses.
 
 `builder_with_capacity` (no `_in`) is deprecated in 0.86.1 — use the `_in` form.
 
 ### 1.2 dtype construction, verified
 
-All of these are exercised in `src/main.rs::build_probe_array` and the resulting file reads back
-correctly (see `== values ==` in the program output).
+All of these are built by `src/schema.rs::build_column`, and every corpus file holding them reads
+back: its sidecar's values are read out of the written bytes.
 
 | logical type | `DType` value | scalar |
 | --- | --- | --- |
@@ -127,8 +124,8 @@ correctly (see `== values ==` in the program output).
 - `Date` accepts only `TimeUnit::Days` (storage `i32`) and `TimeUnit::Milliseconds` (storage
   `i64`). Anything else errors: `.../extension/datetime/date.rs:30`.
 - `Timestamp` has `new`, `new_with_tz(unit, tz, nullability)`, and
-  `new_with_options(TimestampOptions, nullability)` (`.../datetime/timestamp.rs:33`, `:38`, `:54`). Only the
-  no-timezone form is exercised here.
+  `new_with_options(TimestampOptions, nullability)` (`.../datetime/timestamp.rs:33`, `:38`, `:54`). The
+  corpus uses `new` and `new_with_tz` (§6).
 - `TimeUnit` = `Nanoseconds Microseconds Milliseconds Seconds Days`
   (`.../datetime/unit.rs:17`).
 
@@ -143,10 +140,10 @@ Read straight off `.../builders/mod.rs:462-465`:
 - `DType::Union(..)` → `todo!("TODO(connor)[Union]: unimplemented")`
 - `DType::Variant(_)` → `unimplemented!()`
 
-`DType::Map` **does** have a builder (`MapBuilder<u64, u64>`), but I did not exercise it.
-For Union/Variant the array constructors (`UnionArray`, `VariantArray`) exist in
-`vortex-array-0.86.1/src/arrays/`, so a corpus entry is probably reachable by building the array
-directly rather than through a builder — **I did not verify this**.
+`DType::Map` **does** have a builder (`MapBuilder<u64, u64>`), and the corpus writes maps through
+it. For Union/Variant the array constructors (`UnionArray`, `VariantArray`) exist in
+`vortex-array-0.86.1/src/arrays/`: a `VariantArray` built directly writes and reads back, and
+`vortex.union` is in no core edition (§6).
 
 ### 1.4 Canonical encodings you get, and how to get the other ones
 
@@ -226,8 +223,8 @@ yourself (§3.4, experiment 09).
 Second governing fact, from `vortex-compressor-0.86.1/src/compressor/mod.rs:34`: the
 compressor "compresses with the best scheme **and verifies the result is smaller**". Restricting
 the scheme set therefore makes an encoding *possible*, never *guaranteed*. Confirmed
-experimentally: with only `FoRScheme` enabled and 64 rows, nothing was encoded; the same
-configuration on 4096 rows produced `fastlanes.for` + `fastlanes.bitpacked`. **If the corpus
+experimentally: with only `FoRScheme` enabled and 64 rows, nothing is encoded; the same
+configuration on 4096 rows produces `fastlanes.for` + `fastlanes.bitpacked`. **If the corpus
 needs an encoding to be present with certainty, use §3.5, not a compressor allowlist.**
 
 ### 3.1 Completely uncompressed
@@ -278,13 +275,13 @@ any one of its `produced_encodings()` is missing from the set, and some schemes 
 encodings. `BitPackingScheme` declares `fastlanes.bitpacked` plus `vortex.patched`, the latter only
 when `VORTEX_EXPERIMENTAL_PATCHED_ARRAY=1` (`.../schemes/integer/bitpacking.rs:43-49`). Experiment
 `10-allowlist-bitpacking-with-patches` adds the patch encodings to the set and produces output
-identical to `03a`, which is consistent with patches being off by default — I did **not** verify the
-drop behaviour with an experiment, only read it off `builder.rs:207-212`.
+identical to `03a`, since patches are off by default; the drop itself is read off
+`builder.rs:207-212`, and §6 demonstrates it with patches on.
 
 **(b) By scheme.** `SchemeId` is opaque outside `vortex-compressor`
 (`vortex-compressor-0.86.1/src/scheme/mod.rs:47`: `pub(super) name`), and the `vortex` facade
 re-exports `Scheme`/`SchemeId` but **not** `vortex_btrblocks::schemes`. So naming a scheme needs a
-direct `vortex-btrblocks = "=0.86.1"` dependency (added):
+direct `vortex-btrblocks = "=0.86.1"` dependency, which `Cargo.toml` carries:
 
 ```rust
 use vortex_btrblocks::SchemeExt;
@@ -398,8 +395,8 @@ session.write_options()
 edition ids are *serialized* ids, `retain_allowed_encodings` wants *plugin* ids.)
 
 **The edition is not recorded in the file.** It is purely a write-time policy; what lands in the
-bytes is the array/layout spec lists. There is no `Footer::edition()` — **NOT FOUND**, and I read
-all of `vortex-file-0.86.1/src/footer/`. Record the edition in your own sidecar.
+bytes is the array/layout spec lists. There is no `Footer::edition()` — **NOT FOUND**
+anywhere in `vortex-file-0.86.1/src/footer/`. Record the edition in your own sidecar.
 
 ### 3.5 Forcing an exact encoding, deterministically
 
@@ -424,8 +421,8 @@ Result (`06-forced-dict`): array ids are exactly `{vortex.dict, vortex.primitive
 vortex.varbinview}` and layout ids exactly `{vortex.flat}`. The same array through the *default*
 strategy (`06b`) comes back with array ids `{vortex.bool, vortex.constant, vortex.fsst,
 vortex.primitive, vortex.struct}` and layout ids `{vortex.dict, vortex.flat, vortex.zoned}` — the
-array-level dict was canonicalized away and the writer re-derived its own dictionary, as a *dict
-layout* this time. Nothing about the input encoding survived. This contrast is the whole argument
+array-level dict is canonicalized away and the writer derives its own dictionary, as a *dict
+layout* instead. Nothing about the input encoding survives. This contrast is the whole argument
 for using `verbatim_strategy` in the corpus generator.
 
 Note `verbatim_strategy` writes a non-struct root directly. For a struct root wrap it in
@@ -452,7 +449,7 @@ coalescing target merges the four 1024-row blocks straight back into one.
 
 ### 3.7 Environment-variable format switches (corpus-relevant variants)
 
-Found by grepping `env::var(` across the vortex crates. Each is a `LazyLock`, so it is read once
+Every `env::var(` across the vortex crates. Each is a `LazyLock`, so it is read once
 per process — set it before the first Vortex call, and use a separate process per variant.
 
 | var | effect | source |
@@ -462,7 +459,7 @@ per process — set it before the first Vortex call, and use a separate process 
 | `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1` | enables `ListLayoutStrategy` (also `WriteStrategyBuilder::with_list_layout()`) | `vortex-layout-0.86.1/src/layouts/table.rs:43` |
 | `VORTEX_MAX_LAYOUT_TABLES`, `VORTEX_MAX_LAYOUT_DEPTH` | flatbuffer verifier limits on read | `vortex-layout-0.86.1/src/flatbuffers.rs:33` |
 
-I did not run any of these.
+The generator runs the first three, each in a process of its own (§6).
 
 ---
 
@@ -527,14 +524,15 @@ for layout in file.footer().layout().depth_first_traversal() {   // vortex-layou
 }
 ```
 
-`probe.vortex` → `{vortex.flat, vortex.struct, vortex.zoned}`.
+On a 16-row file of 14 columns covering the dtypes of §1.2, written with the default options:
+`{vortex.flat, vortex.struct, vortex.zoned}`.
 
 ### 4.3 Array encoding ids actually in the file — the coverage gate
 
 **Do not use the footer's array-spec list for this.** `Footer` interns *every id the enabled
 editions permit*, not the ids used: `new_array_context` pre-populates the context with
 `session.enabled_component_ids(ComponentKind::Array)` for byte determinism
-(`vortex-file-0.86.1/src/writer.rs:387-417`). Measured: `probe.vortex` declares **34** array ids —
+(`vortex-file-0.86.1/src/writer.rs:387-417`). Measured: that file declares **34** array ids —
 exactly the count of `core2026.08.3`'s array members — while only 15 are actually used.
 
 The honest answer walks the serialized array trees. Each `vortex.flat` leaf carries the segment id
@@ -559,11 +557,11 @@ for layout in file.footer().layout().depth_first_traversal() {
 }
 ```
 
-`src/main.rs::array_encoding_ids` and `examples/api_experiments.rs::array_ids` are the working
+`src/sidecar.rs::array_trees` and `examples/api_experiments.rs::array_ids` are working
 implementations. This covers zone-map and dictionary sub-layouts too, because they are flat leaves
 in the same tree.
 
-`probe.vortex` → `{vortex.bool, vortex.constant, vortex.datetimeparts, vortex.decimal,
+That file → `{vortex.bool, vortex.constant, vortex.datetimeparts, vortex.decimal,
 vortex.decimal_byte_parts, vortex.ext, vortex.fixed_size_list, vortex.fsst, vortex.list,
 vortex.masked, vortex.null, vortex.primitive, vortex.sequence, vortex.struct, vortex.varbin}`.
 
@@ -582,7 +580,7 @@ println!("{}", file.footer().layout().display_tree());              // layout.rs
 println!("{}", file.footer().layout().display_tree_verbose(true));  // + metadata size + row counts
 ```
 
-Verbose output for `probe.vortex` (excerpt):
+Verbose output for that file (excerpt):
 
 ```
 vortex.struct, dtype: {null=null, bool=bool?, …}, children: 14, rows: 16
@@ -627,11 +625,10 @@ A `.table_display()` for tabular value dumps sits behind the `vortex/pretty` fea
 
 ---
 
-## 6. Open questions — resolved by the corpus generator
+## 6. What the corpus generator settles
 
-The reconnaissance pass left seven questions open. All seven were settled while building
-`src/` (the generator); the answers are reproduced here so this document stays the single place
-to look, and each is also recorded in `manifest.json`'s `skipped` list where it is a corpus gap.
+What the signatures leave open, answered by building the corpus with `src/`. An answer that is a
+corpus gap is also recorded in `manifest.json`'s `skipped` list.
 
 1. **Writing a `vortex.stats` (legacy zone map) layout — NOT POSSIBLE.** Confirmed: no writer path
    constructs it, and `ZonedMetadata::metadata` *panics outright* on the legacy schema
@@ -650,9 +647,9 @@ to look, and each is also recorded in `manifest.json`'s `skipped` list where it 
    `DType::Map` to `MapBuilder<u64, u64>` and `Scalar::try_map` builds the values. The corpus has
    `map(utf8, i64?)` across the whole row-count sweep, and `vortex.map` appears in the bytes.
 
-4. **Recovering the target edition from a written file — still NOT POSSIBLE.** Re-confirmed
-   against `vortex-file-0.86.1/src/footer/`. The corpus records it per file in `manifest.json`'s
-   `target_edition`, which is the sidecar the note anticipated.
+4. **Recovering the target edition from a written file — NOT POSSIBLE** (§3.4,
+   `vortex-file-0.86.1/src/footer/`). The corpus records it per file in `manifest.json`'s
+   `target_edition`: the sidecar §3.4 calls for.
 
 5. **`vortex.uuid` — POSSIBLE.**
    `ExtDType::<Uuid>::try_new(UuidMetadata::default(), FixedSizeList(u8, 16, n))` builds the dtype
@@ -667,14 +664,14 @@ to look, and each is also recorded in `manifest.json`'s `skipped` list where it 
    microseconds panics with `"Invalid time scalar: adding duration to time overflowed"`. Use
    `ExtDTypeRef::metadata_opt::<AnyTemporal>()` to branch on the actual unit.
 
-7. **§4.3's array-encoding enumeration.** Still true for every file this generator produces, now
-   including the `FLAT_LAYOUT_INLINE_ARRAY_NODE` variant. The correct leaf reader is
+7. **§4.3's array-encoding enumeration.** True for every file this generator produces, the
+   `FLAT_LAYOUT_INLINE_ARRAY_NODE` variant included. The correct leaf reader is
    `SerializedArray::from_flatbuffer_and_segment(tree, segment)`, **not** `from_array_tree(tree)`:
    the latter returns a buffer-less tree, which is fine for walking ids and fails the moment
    anything is decoded (`"buffer indices 0..1 out of range for 0 buffers"`).
 
-8. **The `retain_allowed_encodings` all-or-nothing rule — NOW DEMONSTRATED.** Experiment 10 was
-   inconclusive because patches were off. With `VORTEX_EXPERIMENTAL_PATCHED_ARRAY=1`,
+8. **The `retain_allowed_encodings` all-or-nothing rule — DEMONSTRATED.** Experiment 10 cannot show
+   it, since patches are off by default. With `VORTEX_EXPERIMENTAL_PATCHED_ARRAY=1`,
    `BitPackingScheme` really does declare `vortex.patched`, that id is in no core edition, and the
    whole scheme is dropped: `containers/experimental_patched_array` writes its bit-packable column
    completely uncompressed (21 352 bytes, array ids `{vortex.constant, vortex.primitive,
@@ -685,7 +682,7 @@ to look, and each is also recorded in `manifest.json`'s `skipped` list where it 
    the generator re-execs itself. `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1` additionally needs
    `disable_editions()`: the `vortex.list` *layout* id belongs to no core edition either.
 
-### Two writer limitations found while building the corpus
+### Writer limitations
 
 * **A nullable top-level struct cannot be written at all.** `write_internal` always calls
   `accumulate_stats`, whose `FileStatsAccumulator::new` panics on one before looking at the

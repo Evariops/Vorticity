@@ -125,8 +125,8 @@ Comments cite things like `BENCH-AUDIT.md B19`, `PERF-AUDIT-v2.md Z1b`, `WRITE-A
 
 **These are not links, and the files are not in this repository.** They are the maintainers'
 engineering journals — measurement sessions, profiles, the argument behind a decision — written in
-French and kept out of the published tree. A reference of that shape dates a decision and names
-where its evidence was recorded. Read the comment around it: it is written to stand on its own, and
+French and kept out of the published tree. A reference of that shape names where the evidence
+behind a decision is recorded. Read the comment around it: it is written to stand on its own, and
 the reference is there so that whoever has the journals can find the measurement, not so that you
 can follow a link.
 

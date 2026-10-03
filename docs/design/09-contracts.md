@@ -64,8 +64,8 @@ its API and the format it understands.
 
 The default write edition is `VortexEditions.Default`, and it is not the newest by definition: it is
 the edition the most deployed Rust reader accepts, chosen per release and named in the release
-notes beside the minimum Rust version that reads it (`VortexEditions.MinimumRustVersion`). Today
-it is `core2026.08.3`, read from Vortex Rust 0.85.0: the first edition with `vortex.uuid`, without
+notes beside the minimum Rust version that reads it (`VortexEditions.MinimumRustVersion`). It is
+`core2026.08.3`, read from Vortex Rust 0.85.0: the first edition with `vortex.uuid`, without
 which a `Guid` column cannot be written.
 
 **The row encoding ships apart**, in `Vorticity.RowEncoding`, versioned `0.x` and marked
