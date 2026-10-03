@@ -10,8 +10,8 @@ using Xunit;
 namespace Vorticity.Zstd.Tests.Differential;
 
 /// <summary>
-/// zstd's own golden files (tests/golden-* at v1.5.7): frames that must decode, frames that must be
-/// refused, and inputs whose compression once broke a decoder.
+/// zstd's own golden files (tests/golden-* at v1.5.7, written by tools/native-ref/testdata.sh): frames
+/// that must decode, frames that must be refused, and inputs whose compression once broke a decoder.
 /// </summary>
 public sealed class GoldenTests
 {
@@ -25,6 +25,7 @@ public sealed class GoldenTests
     [MemberData(nameof(Valid))]
     public void Decodes_like_libzstd(string file)
     {
+        TestData.Require("golden-decompression");
         byte[] frame = TestData.Read(Path.Combine("golden-decompression", file));
         byte[] expected = new byte[1 << 20];
         Assert.Equal(OperationStatus.Done, NativeZstd.Decompress(frame, expected, null, out int nativeConsumed, out int nativeWritten));
@@ -42,6 +43,7 @@ public sealed class GoldenTests
     [MemberData(nameof(Invalid))]
     public void Refuses_like_libzstd(string file)
     {
+        TestData.Require("golden-decompression-errors");
         byte[] frame = TestData.Read(Path.Combine("golden-decompression-errors", file));
         byte[] output = new byte[1 << 20];
         Assert.NotEqual(OperationStatus.Done, NativeZstd.Decompress(frame, output, null, out _, out _));
@@ -67,6 +69,7 @@ public sealed class GoldenTests
     [MemberData(nameof(CompressionInputs))]
     public void Decodes_golden_inputs_at_every_level(string file)
     {
+        TestData.Require("golden-compression");
         byte[] data = TestData.Read(Path.Combine("golden-compression", file));
         foreach (int level in new[] { -7, -1, 1, 2, 3, 5, 7, 9, 12, 16, 19, 22 })
         {
@@ -82,6 +85,8 @@ public sealed class GoldenTests
     [Fact]
     public void Decodes_with_a_dictionary_missing_symbols()
     {
+        TestData.Require("golden-dictionaries");
+        TestData.Require("golden-compression");
         byte[] dictionary = TestData.Read(Path.Combine("golden-dictionaries", "http-dict-missing-symbols"));
         byte[] data = TestData.Read(Path.Combine("golden-compression", "http"));
         using var native = ZstandardDictionary.Create(dictionary);
@@ -105,9 +110,9 @@ public sealed class GoldenTests
     private static TheoryData<string> Files(string directory)
     {
         var data = new TheoryData<string>();
-        foreach (string path in Directory.GetFiles(TestData.PathOf(directory)).Order(StringComparer.Ordinal))
+        foreach (string file in TestData.Files(directory))
         {
-            data.Add(Path.GetFileName(path));
+            data.Add(file);
         }
 
         return data;

@@ -12,7 +12,7 @@ dotnet test Vorticity.slnx -c Release
 dotnet publish tools/vxdump -c Release -r <rid>      # Native AOT, ~5 MB, no trim warning
 ```
 
-Two things are not in the repository, both deliberately, and each one refuses with the command
+Three things are not in the repository, all deliberately, and each one refuses with the command
 that produces it rather than with a stack trace.
 
 **The Rust shim, for anything that compares against the reference.** `--ffi-check` and
@@ -32,6 +32,15 @@ is not the place for half a gigabyte that a script reproduces.
 ```
 bench/gen-throughput.sh                              # once; or point VORTICITY_THROUGHPUT_CORPUS
                                                      # at a directory that already holds them
+```
+
+**Vorticity.Zstd's test data**: zstd's golden files and a corpus of frames from zstd's decodecorpus,
+binary files written from zstd 1.5.7's sources rather than committed. The tests that read them are
+skipped without them, and fail in CI, whose workflow writes them first.
+The script needs `curl`, `tar` and a C compiler.
+
+```
+tools/native-ref/testdata.sh                         # once
 ```
 
 ## What to run before a change is done

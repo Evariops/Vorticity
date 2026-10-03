@@ -5,37 +5,16 @@
 #                       C program would ship, and the speed this project aims for.
 #   zd                  the timing harness (zd.c): compresses the reference frame with the first
 #                       library, writes it out, and times ZSTD_decompressDCtx in each library given.
-#   decodecorpus        zstd's own generator of random VALID frames, which exercises the modes an
-#                       encoder almost never emits (RLE and repeat sequence tables, treeless
-#                       literals, direct Huffman weights...). Used to build the test corpus.
 #   libzstd_mt.dylib    the same library with ZSTD_MULTITHREAD: zstdmt, what libzstd writes with
 #                       ZSTD_c_nbWorkers >= 1, the oracle of the parallel compressor. `build.sh mt`
 #                       builds it alone.
 #
-# The sources are the zstd 1.5.7 release tarball, downloaded once and checked against its SHA-256;
-# ZSTD_SRC=<dir> points at an already extracted tree instead.
+# The sources are the zstd 1.5.7 release tarball (zstd-source.sh). macOS: the libraries are dylibs,
+# and zd times with mach_absolute_time. The test data comes from testdata.sh, which runs anywhere.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-out="$here/out"
-mkdir -p "$out"
-
-version=1.5.7
-sha256=eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
-
-if [[ -n "${ZSTD_SRC:-}" ]]; then
-  src="$ZSTD_SRC"
-else
-  src="$out/zstd-$version"
-  if [[ ! -d "$src" ]]; then
-    tarball="$out/zstd-$version.tar.gz"
-    if [[ ! -f "$tarball" ]]; then
-      curl -fsSL -o "$tarball" "https://github.com/facebook/zstd/releases/download/v$version/zstd-$version.tar.gz"
-    fi
-    echo "$sha256  $tarball" | shasum -a 256 -c - >/dev/null
-    tar -xzf "$tarball" -C "$out"
-  fi
-fi
+source "$here/zstd-source.sh"
 
 lib="$src/lib"
 cc="${CC:-cc}"
@@ -76,18 +55,5 @@ rm -rf "$objs" && mkdir -p "$objs"
 # zd: the timing harness.
 $cc -O2 -o "$out/zd" "$here/zd.c"
 
-# decodecorpus, as zstd's tests/Makefile builds it: the whole library plus the dictionary builder.
-$cc -O2 -DZSTD_MULTITHREAD=0 \
-  -I"$lib" -I"$lib/common" -I"$lib/compress" -I"$lib/dictBuilder" -I"$lib/decompress" -I"$src/programs" \
-  -o "$out/decodecorpus" \
-  "$src/tests/decodecorpus.c" "$src/programs/util.c" "$src/programs/timefn.c" \
-  "$lib"/common/*.c "$lib"/compress/zstdmt_compress.c "$lib"/compress/hist.c \
-  "$lib"/compress/huf_compress.c "$lib"/compress/fse_compress.c \
-  "$lib"/compress/zstd_compress_literals.c "$lib"/compress/zstd_compress_sequences.c \
-  "$lib"/compress/zstd_compress_superblock.c "$lib"/compress/zstd_double_fast.c \
-  "$lib"/compress/zstd_fast.c "$lib"/compress/zstd_lazy.c "$lib"/compress/zstd_ldm.c \
-  "$lib"/compress/zstd_opt.c "$lib"/compress/zstd_preSplit.c \
-  "$lib"/decompress/*.c "$lib"/dictBuilder/*.c -lm
-
 build_mt
-echo "built: $out/libzstd_ref.dylib $out/zd $out/decodecorpus"
+echo "built: $out/libzstd_ref.dylib $out/zd"

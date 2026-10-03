@@ -220,11 +220,14 @@ internal sealed class FuzzCorpus
         AddDecodeCorpus("small", 120);
         AddDecodeCorpus("dict", 40);
 
-        // zstd's golden frames.
-        foreach (string path in Directory.GetFiles(TestData.PathOf("golden-decompression")))
+        // zstd's golden frames, when tools/native-ref/testdata.sh has written them.
+        if (TestData.Has("golden-decompression"))
         {
-            byte[] frame = File.ReadAllBytes(path);
-            Frames.Add(new FuzzFrame(Path.GetFileName(path), frame, 1 << 18, -1));
+            foreach (string path in Directory.GetFiles(TestData.PathOf("golden-decompression")))
+            {
+                byte[] frame = File.ReadAllBytes(path);
+                Frames.Add(new FuzzFrame(Path.GetFileName(path), frame, 1 << 18, -1));
+            }
         }
     }
 
@@ -241,8 +244,14 @@ internal sealed class FuzzCorpus
         Frames.Add(new FuzzFrame(name, @case.Compress(data), data.Length, dictionary));
     }
 
+    /// <summary>The first frames of a decodecorpus set, when tools/native-ref/testdata.sh has written it.</summary>
     private void AddDecodeCorpus(string set, int count)
     {
+        if (!TestData.Has(Path.Combine("decodecorpus", set)))
+        {
+            return;
+        }
+
         int dictionary = -1;
         string dictionaryPath = TestData.PathOf(Path.Combine("decodecorpus", set, "dictionary"));
         if (File.Exists(dictionaryPath))

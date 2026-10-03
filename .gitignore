@@ -96,9 +96,11 @@ bench/.ab/
 tests/.impact/
 AUDIT-SRC-2026-09-25.md
 
-# ---- Vorticity.Zstd: what its native tools build and the corpora its benchmarks download ----
-# libzstd 1.5.7 and decodecorpus (tools/native-ref/build.sh), the hardware counters library
-# (tools/pmu/build.sh), zstd's benchmark data (bench/zstd-corpus.sh).
+# ---- Vorticity.Zstd: what its native tools build and the data its tests and benchmarks read ----
+# libzstd 1.5.7 and the harness (tools/native-ref/build.sh), the hardware counters library
+# (tools/pmu/build.sh); the test data, zstd's golden files and a decodecorpus corpus
+# (tools/native-ref/testdata.sh), and zstd's benchmark data (bench/zstd-corpus.sh): binary files,
+# written rather than kept.
 tools/native-ref/out/
 tools/pmu/out/
-tests/Vorticity.Zstd.Tests/testdata/corpus/
+tests/Vorticity.Zstd.Tests/testdata/

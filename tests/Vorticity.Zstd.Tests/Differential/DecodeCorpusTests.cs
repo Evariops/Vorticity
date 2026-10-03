@@ -10,15 +10,21 @@ using Xunit;
 namespace Vorticity.Zstd.Tests.Differential;
 
 /// <summary>
-/// Frames from zstd's decodecorpus (tools/native-ref/gen-decodecorpus.sh): random but valid, and
-/// built to reach the modes an encoder seldom emits. Each must decode to the original its manifest
-/// describes, and to what the platform's libzstd decodes.
+/// Frames from zstd's decodecorpus (tools/native-ref/testdata.sh): random but valid, and built to reach
+/// the modes an encoder seldom emits. Each must decode to the original its manifest describes, and to
+/// what the platform's libzstd decodes.
 /// </summary>
 public sealed class DecodeCorpusTests
 {
     public static TheoryData<string> Frames()
     {
         var data = new TheoryData<string>();
+        if (!TestData.Has("decodecorpus"))
+        {
+            data.Add(TestData.Missing);
+            return data;
+        }
+
         foreach (string set in new[] { "small", "plain", "large", "dict" })
         {
             foreach (string line in File.ReadAllLines(TestData.PathOf(Path.Combine("decodecorpus", set, "manifest.txt"))))
@@ -34,6 +40,8 @@ public sealed class DecodeCorpusTests
     [MemberData(nameof(Frames))]
     public void Decodes_to_the_original(string entry)
     {
+        TestData.Require("decodecorpus");
+
         // "set/name size sha256"
         string[] parts = entry.Split(' ');
         string set = parts[0][..parts[0].IndexOf('/', StringComparison.Ordinal)];

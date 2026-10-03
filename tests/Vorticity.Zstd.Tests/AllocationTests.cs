@@ -15,7 +15,7 @@ public sealed class AllocationTests
 
     public static TheoryData<string> Frames() =>
     [
-        "reference",
+        CorpusCase.Name("walk64", 512 << 10, 3),
         CorpusCase.Name("text", 400_000, 3),
         CorpusCase.Name("json", 131073, 19, "chk"),
         CorpusCase.Name("repeats", 400_000, 1),
@@ -32,23 +32,11 @@ public sealed class AllocationTests
 #if DEBUG
         Assert.Skip("allocations are a property of the optimized build");
 #endif
-        byte[] frame;
-        byte[]? dictionary = null;
-        int size;
-        if (name == "reference")
-        {
-            frame = TestData.Read("reference.zst");
-            Assert.True(ZstdDecompressor.TryGetFrameContentSize(frame, out ulong declared));
-            size = (int)declared;
-        }
-        else
-        {
-            CorpusCase @case = CorpusCase.Parse(name);
-            byte[] data = @case.Data;
-            frame = @case.Compress(data);
-            dictionary = @case.GetDictionary()?.Bytes;
-            size = data.Length;
-        }
+        CorpusCase @case = CorpusCase.Parse(name);
+        byte[] data = @case.Data;
+        byte[] frame = @case.Compress(data);
+        byte[]? dictionary = @case.GetDictionary()?.Bytes;
+        int size = data.Length;
 
         var decoder = dictionary is null ? new ZstdDecompressor() : new ZstdDecompressor(dictionary);
         byte[] output = new byte[size];

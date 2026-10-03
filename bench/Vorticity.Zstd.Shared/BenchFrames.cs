@@ -8,9 +8,10 @@ using Vorticity.Zstd.Tests.Support;
 namespace Vorticity.Zstd.Bench;
 
 /// <summary>
-/// The frames the benchmarks decode. <c>reference</c> is the frame the native harness writes
-/// (tools/native-ref): 65,536 f64 of a random walk, level 3. The others are generated
-/// deterministically and compressed with the platform's libzstd, so they are the same bytes run after run.
+/// The frames the benchmarks decode. <c>reference</c> is 65,536 f64 of a random walk at level 3: the
+/// frame the native harness writes (tools/native-ref) when it has, otherwise one made here (see
+/// <see cref="Reference"/>). The others are generated deterministically and compressed with the
+/// platform's libzstd, so they are the same bytes run after run.
 /// </summary>
 internal static class BenchFrames
 {
@@ -21,7 +22,7 @@ internal static class BenchFrames
 
     public static byte[] Load(string name) => name switch
     {
-        "reference" => File.ReadAllBytes(Path.Combine(RepositoryRoot, "tests", "Vorticity.Zstd.Tests", "testdata", "reference.zst")),
+        "reference" => Reference(),
         "text-L3" => Compress("text", 1 << 20, 3),
         "json-L19" => Compress("json", 256 << 10, 19),
         "urls-L1" => Compress("urls", 1 << 20, 1),
@@ -105,6 +106,17 @@ internal static class BenchFrames
         int dash = name.LastIndexOf("-L", StringComparison.Ordinal);
         int level = dash > 0 && int.TryParse(name.AsSpan(dash + 2), out int parsed) ? parsed : 3;
         return (content, level);
+    }
+
+    /// <summary>
+    /// The native harness's frame when it has written one (`zd -o tools/native-ref/out ...`), so that both
+    /// sides time the same bytes; otherwise the same kind of frame, made here: 512 KiB of a random walk of
+    /// f64, at level 3. The harness's frame is a binary file, written rather than kept.
+    /// </summary>
+    private static byte[] Reference()
+    {
+        string native = Path.Combine(RepositoryRoot, "tools", "native-ref", "out", "reference.zst");
+        return File.Exists(native) ? File.ReadAllBytes(native) : Compress("walk64", 512 << 10, 3);
     }
 
     /// <summary>The content size a frame declares: every benchmark frame declares one.</summary>

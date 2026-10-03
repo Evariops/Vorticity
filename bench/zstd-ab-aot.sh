@@ -24,8 +24,10 @@ work="$root/artifacts/ab"
 mkdir -p "$work"
 rm -rf "$work/tree"
 git -C "$root" worktree add --detach "$work/tree" "$ref" > /dev/null 2>&1 || { git -C "$root" worktree prune; git -C "$root" worktree add --detach "$work/tree" "$ref" > /dev/null; }
-# The worktree has no testdata outside git and no native reference: point it at the main tree's.
+# The worktree has neither the native reference nor the data git does not keep (the test data, the
+# benchmark corpora): point it at the main tree's.
 ln -sfn "$root/tools/native-ref/out" "$work/tree/tools/native-ref/out"
+[[ -e "$work/tree/tests/Vorticity.Zstd.Tests/testdata" ]] || ln -s "$root/tests/Vorticity.Zstd.Tests/testdata" "$work/tree/tests/Vorticity.Zstd.Tests/testdata"
 dotnet publish "$work/tree/bench/Vorticity.Zstd.Perf/Vorticity.Zstd.Perf.csproj" -c Release -o "$work/before" > /dev/null
 dotnet publish "$root/bench/Vorticity.Zstd.Perf/Vorticity.Zstd.Perf.csproj" -c Release -o "$work/after" > /dev/null
 git -C "$root" worktree remove --force "$work/tree"

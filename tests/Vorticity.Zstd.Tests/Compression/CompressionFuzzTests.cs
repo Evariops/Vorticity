@@ -186,11 +186,11 @@ public sealed class GoldenCompressionTests
     public static TheoryData<string, int> Inputs()
     {
         var data = new TheoryData<string, int>();
-        foreach (string file in Directory.GetFiles(TestData.PathOf("golden-compression")))
+        foreach (string file in TestData.Files("golden-compression"))
         {
             foreach (int level in new[] { -5, -1, 1, 2, 3, 4 })
             {
-                data.Add(Path.GetFileName(file), level);
+                data.Add(file, level);
             }
         }
 
@@ -201,6 +201,7 @@ public sealed class GoldenCompressionTests
     [MemberData(nameof(Inputs))]
     public void Compresses_like_libzstd(string file, int level)
     {
+        TestData.Require("golden-compression");
         byte[] data = TestData.Read(Path.Combine("golden-compression", file));
         var compressor = new ZstdCompressor(level);
         byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];

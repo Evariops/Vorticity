@@ -237,6 +237,11 @@ Correctness is checked against libzstd itself:
 - **zstd's golden files** for decompression, decompression errors and dictionaries.
 - **A decodecorpus corpus**: random valid frames from zstd's own generator. They exercise the modes an
   encoder rarely emits, such as RLE and repeated tables, treeless literals and direct Huffman weights.
+
+The golden files and the decodecorpus corpus are binary files, written rather than kept in the
+repository: `tools/native-ref/testdata.sh` writes them, from zstd 1.5.7's sources, into
+`tests/Vorticity.Zstd.Tests/testdata/`. The tests that read them are skipped without them, and fail in
+CI, which writes them first.
 - **Fuzzing**, with buffers placed against guard pages.
 - **Multithreaded compression** checked against libzstd built with threads. These tests are skipped
   until `tools/native-ref/build.sh mt` has built that library.
@@ -244,13 +249,15 @@ Correctness is checked against libzstd itself:
 ## Building
 
 ```sh
+tools/native-ref/testdata.sh
 dotnet build -c Release
 dotnet test
 ```
 
-The SDK version is pinned in `global.json`. The native reference in `tools/native-ref` is needed only
-for the multithreaded-compression tests and for the benchmarks. `build.sh` downloads the zstd 1.5.7
-sources, checks their SHA-256 and builds them with the system C compiler. The scripts target macOS.
+The SDK version is pinned in `global.json`. `testdata.sh` downloads the zstd 1.5.7 sources once, checks
+their SHA-256, builds zstd's `decodecorpus` with the system C compiler and writes the test data; it
+runs on macOS and Linux. The native reference that `tools/native-ref/build.sh` builds is needed only
+for the multithreaded-compression tests and for the benchmarks; that script targets macOS.
 
 ## Repository layout
 
@@ -261,8 +268,8 @@ sources, checks their SHA-256 and builds them with the system C compiler. The sc
 | `bench/Vorticity.Zstd.Perf` | Native AOT benchmarks against libzstd and the platform, in turns (`--corpus`, `--compress`) |
 | `bench/Vorticity.Zstd.Benchmarks` | BenchmarkDotNet benchmarks |
 | `bench/zstd-corpus.sh` | downloads the benchmark data into `tests/Vorticity.Zstd.Tests/testdata/corpus` |
-| `tools/native-ref` | the native reference: libzstd 1.5.7 built from source, its timing harness, `decodecorpus` |
-| `testdata` | zstd's golden files, the decodecorpus corpus, the reference frame |
+| `tools/native-ref` | the native reference, libzstd 1.5.7 built from source and its timing harness (`build.sh`), and the test data's generator (`testdata.sh`) |
+| `tests/Vorticity.Zstd.Tests/testdata` | written, not kept: zstd's golden files and the decodecorpus corpus (`testdata.sh`), the benchmark data (`zstd-corpus.sh`) |
 
 ## License
 
