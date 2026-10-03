@@ -2,6 +2,7 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using static Vorticity.Zstd.Internal.MatchFinder;
 
 namespace Vorticity.Zstd.Internal;
@@ -99,6 +100,7 @@ internal static unsafe class LazyMatchFinder
         }
 
         state.LazySkipping = false;
+        TSearch.Prepare(ref state);
         if (TSearch.UsesRows)
         {
             TSearch.FillHashCache(ref state, state.NextToUpdate, ilimit);
@@ -294,6 +296,9 @@ internal unsafe interface ILazySearch
     /// <summary>Whether this is the row-based match finder, whose hash cache the parser fills.</summary>
     static abstract bool UsesRows { get; }
 
+    /// <summary>What the search needs in the match state before a block.</summary>
+    static abstract void Prepare(ref MatchState state);
+
     /// <summary>
     /// The longest match at <paramref name="ip"/>, the positions before it inserted first: its length
     /// (3 when there is none of 4 bytes), its offset code into <paramref name="offBase"/> when found.
@@ -313,6 +318,10 @@ internal readonly unsafe struct HashChainSearch<THash> : ILazySearch
     where THash : IMatchHash
 {
     public static bool UsesRows => false;
+
+    public static void Prepare(ref MatchState state)
+    {
+    }
 
     public static void FillHashCache(ref MatchState state, uint index, byte* limit)
     {
@@ -435,49 +444,87 @@ internal readonly struct Row64 : IRowLog
 /// The first byte of each row of tags is the row's head, the newest entry's place: the entries fill
 /// places rowEntries - 1 down to 1 and wrap, place 0 never holding one.
 /// </para>
+/// <para>
+/// libzstd prefetches the rows of the position eight ahead, whose hash its cache computes, and the
+/// candidates before it compares them. .NET has no prefetch on arm64: those bytes are read instead,
+/// summed into <see cref="MatchState.Touched"/>, which keeps the loads alive and the lines on their way.
+/// </para>
 /// </remarks>
 internal readonly unsafe struct RowSearch<THash, TRow> : ILazySearch
     where THash : IMatchHash
     where TRow : IRowLog
 {
+    /// <summary>libzstd's <c>kSkipThreshold</c>: past this many positions to insert, most are skipped.</summary>
+    private const uint SkipThreshold = 384;
+
     public static bool UsesRows => true;
+
+    public static void Prepare(ref MatchState state)
+    {
+        state.RowHashMultiplier = THash.Multiplier;
+        state.RowHashShift = 64 - (state.RowHashLog + LazyMatchFinder.RowHashTagBits);
+        state.RowAttempts = 1u << Math.Min(state.Parameters.SearchLog, TRow.Log);
+    }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     public static nuint FindBestMatch(ref MatchState state, byte* ip, byte* end, ref nuint offBase)
     {
         int rowLog = TRow.Log;
-        uint rowMask = (1u << rowLog) - 1;
+        nuint rowMask = ((nuint)1 << rowLog) - 1;
         byte* @base = state.Base;
+        uint* hashTable = state.HashTable;
+        byte* tagTable = state.TagTable;
         uint current = (uint)(ip - @base);
-        uint lowLimit = state.LowestMatchIndex(current);
-        uint attempts = 1u << Math.Min(state.Parameters.SearchLog, rowLog);
-        nuint bestLength = 4 - 1;
+        uint read = 0;
 
-        // The positions before ip inserted, then ip's hash; while skipping, ip's alone.
-        uint hash;
+        // libzstd's ZSTD_row_update_internal: the positions before ip into their rows, then ip's
+        // hash, from the cache; while skipping, ip's hash alone.
+        nuint hash;
         if (!state.LazySkipping)
         {
-            Update(ref state, ip);
-            hash = NextCachedHash(ref state, current);
+            uint index = state.NextToUpdate;
+            if (current - index > SkipThreshold)
+            {
+                index = UpdateAfterLongMatch(ref state, index, ip);
+            }
+
+            uint* cache = state.HashCache;
+            ulong multiplier = state.RowHashMultiplier;
+            int shift = state.RowHashShift;
+            for (; index < current; index++)
+            {
+                nuint indexHash = NextCachedHash(cache, @base, index, multiplier, shift, tagTable, hashTable, ref read);
+                Insert(tagTable, hashTable, indexHash, index);
+            }
+
+            state.NextToUpdate = current;
+            hash = NextCachedHash(cache, @base, current, multiplier, shift, tagTable, hashTable, ref read);
         }
         else
         {
-            hash = Hash(ip, state.RowHashLog);
+            hash = (nuint)((Read64(ip) * state.RowHashMultiplier) >> state.RowHashShift);
             state.NextToUpdate = current;
         }
 
-        uint relativeRow = (hash >> LazyMatchFinder.RowHashTagBits) << rowLog;
+        nuint relativeRow = RowOf(hash);
         byte tag = (byte)hash;
-        uint* row = state.HashTable + relativeRow;
-        byte* tagRow = state.TagTable + relativeRow;
-        uint head = tagRow[0] & rowMask;
+        uint* row = hashTable + relativeRow;
+        byte* tagRow = tagTable + relativeRow;
+        uint head = tagRow[0] & (uint)rowMask;
+        uint lowLimit = state.LowestMatchIndex(current);
+        uint attempts = state.RowAttempts;
 
-        // The candidates, newest first, up to the attempts allowed or the first below the window.
-        // libzstd gathers them, inserts ip, then compares them: ip's insertion changes neither, so
-        // they are compared as they come.
-        for (ulong matches = MatchMask(tagRow, tag, head); (matches != 0) & (attempts > 0); matches &= matches - 1)
+        // The candidates, newest first, up to the attempts allowed or the first below the window,
+        // gathered before they are compared, as libzstd does, so that their misses overlap. Into
+        // the compressor's buffer: one on the stack brought a probe and a cookie to every search.
+        uint* candidates = state.Candidates;
+        nuint count = 0;
+        nuint headGrouped = (nuint)head << MaskGroupShift;
+        ulong matches = MatchMask(tagRow, tag, head);
+        while (matches != 0)
         {
-            uint matchPosition = (head + (uint)BitOperations.TrailingZeroCount(matches)) & rowMask;
+            nuint matchPosition = ((headGrouped + (nuint)(uint)BitOperations.TrailingZeroCount(matches)) >> MaskGroupShift) & rowMask;
+            matches &= matches - 1;
             if (matchPosition == 0)
             {
                 continue;
@@ -489,32 +536,47 @@ internal readonly unsafe struct RowSearch<THash, TRow> : ILazySearch
                 break;
             }
 
-            attempts--;
-            byte* match = @base + matchIndex;
-            nuint length = 0;
-            if (Read32(match + bestLength - 3) == Read32(ip + bestLength - 3))
+            candidates[count] = matchIndex;
+            count++;
+            read += @base[matchIndex];
+            if (--attempts == 0)
             {
-                length = Count(ip, match, end);
+                break;
+            }
+        }
+
+        state.Touched += read;
+
+        // ip itself, in its row.
+        {
+            nuint position = NextIndex(tagRow);
+            tagRow[position] = tag;
+            row[position] = state.NextToUpdate++;
+        }
+
+        nuint bestLength = 4 - 1;
+        for (nuint k = 0; k < count; k++)
+        {
+            uint matchIndex = candidates[k];
+            byte* match = @base + matchIndex;
+
+            // The four bytes that end one past the best length: a longer match has them.
+            if (Read32(match + bestLength - 3) != Read32(ip + bestLength - 3))
+            {
+                continue;
             }
 
+            nuint length = Count(ip, match, end);
             if (length > bestLength)
             {
                 bestLength = length;
                 offBase = OffsetToOffBase(current - matchIndex);
                 if (ip + length == end)
                 {
-                    // libzstd stops comparing here, its gathering already done: the remaining
-                    // candidates only count against the attempts, which no longer matter.
+                    // The longest possible, and reading further would pass the end.
                     break;
                 }
             }
-        }
-
-        // ip itself, in its row.
-        {
-            uint position = NextIndex(tagRow, rowMask);
-            tagRow[position] = tag;
-            row[position] = state.NextToUpdate++;
         }
 
         return bestLength;
@@ -524,94 +586,152 @@ internal readonly unsafe struct RowSearch<THash, TRow> : ILazySearch
     {
         byte* @base = state.Base;
         uint* cache = state.HashCache;
-        int hashLog = state.RowHashLog;
+        ulong multiplier = state.RowHashMultiplier;
+        int shift = state.RowHashShift;
+        uint read = 0;
         uint available = @base + index > limit ? 0 : (uint)(limit - (@base + index) + 1);
         uint end = index + Math.Min(LazyMatchFinder.RowHashCacheSize, available);
         for (; index < end; index++)
         {
-            cache[index & (LazyMatchFinder.RowHashCacheSize - 1)] = Hash(@base + index, hashLog);
+            nuint hash = (nuint)((Read64(@base + index) * multiplier) >> shift);
+            cache[index & (LazyMatchFinder.RowHashCacheSize - 1)] = (uint)hash;
+            nuint relativeRow = RowOf(hash);
+            read += state.TagTable[relativeRow] + state.HashTable[relativeRow];
         }
+
+        state.Touched += read;
     }
 
     /// <summary>
-    /// libzstd's <c>ZSTD_row_update_internal</c> with its cache: the positions up to <paramref name="ip"/>
-    /// (excluded) into their rows; after a long match only its first 96 and its last 32.
+    /// The rare part of libzstd's <c>ZSTD_row_update_internal</c>, after a match so long that most of
+    /// its positions are skipped: its first 96 inserted, the cache filled again at its last 32.
     /// </summary>
-    private static void Update(ref MatchState state, byte* ip)
+    /// <returns>The first of the last 32, where the insertion resumes.</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static uint UpdateAfterLongMatch(ref MatchState state, uint index, byte* ip)
     {
-        const uint SkipThreshold = 384;
         const uint MaxMatchStartPositionsToUpdate = 96;
         const uint MaxMatchEndPositionsToUpdate = 32;
-        uint index = state.NextToUpdate;
-        uint target = (uint)(ip - state.Base);
-        if (target - index > SkipThreshold)
+        byte* @base = state.Base;
+        uint* cache = state.HashCache;
+        ulong multiplier = state.RowHashMultiplier;
+        int shift = state.RowHashShift;
+        uint read = 0;
+        for (uint end = index + MaxMatchStartPositionsToUpdate; index < end; index++)
         {
-            UpdateRange(ref state, index, index + MaxMatchStartPositionsToUpdate);
-            index = target - MaxMatchEndPositionsToUpdate;
-            FillHashCache(ref state, index, ip + 1);
+            nuint hash = NextCachedHash(cache, @base, index, multiplier, shift, state.TagTable, state.HashTable, ref read);
+            Insert(state.TagTable, state.HashTable, hash, index);
         }
 
-        UpdateRange(ref state, index, target);
-        state.NextToUpdate = target;
+        state.Touched += read;
+        uint resume = (uint)(ip - @base) - MaxMatchEndPositionsToUpdate;
+        FillHashCache(ref state, resume, ip + 1);
+        return resume;
     }
 
-    /// <summary>libzstd's <c>ZSTD_row_update_internalImpl</c> with its cache.</summary>
-    private static void UpdateRange(ref MatchState state, uint index, uint end)
+    /// <summary>libzstd's <c>ZSTD_row_update_internalImpl</c> for one position.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Insert(byte* tagTable, uint* hashTable, nuint hash, uint index)
     {
-        int rowLog = TRow.Log;
-        uint rowMask = (1u << rowLog) - 1;
-        uint* hashTable = state.HashTable;
-        byte* tagTable = state.TagTable;
-        for (; index < end; index++)
-        {
-            uint hash = NextCachedHash(ref state, index);
-            uint relativeRow = (hash >> LazyMatchFinder.RowHashTagBits) << rowLog;
-            byte* tagRow = tagTable + relativeRow;
-            uint position = NextIndex(tagRow, rowMask);
-            tagRow[position] = (byte)hash;
-            hashTable[relativeRow + position] = index;
-        }
+        nuint relativeRow = RowOf(hash);
+        byte* tagRow = tagTable + relativeRow;
+        nuint position = NextIndex(tagRow);
+        tagRow[position] = (byte)hash;
+        hashTable[relativeRow + position] = index;
     }
 
     /// <summary>
     /// libzstd's <c>ZSTD_row_nextCachedHash</c>: the hash of <paramref name="index"/>, from the cache,
-    /// which takes the hash of the position eight further in its place.
+    /// which takes the hash of the position eight further in its place, and reads its rows ahead
+    /// (see the remarks).
     /// </summary>
+    /// <remarks>Hashes are native integers, the shift leaving them 32 bits: no extension before their rows.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint NextCachedHash(ref MatchState state, uint index)
+    private static nuint NextCachedHash(
+        uint* cache, byte* @base, uint index, ulong multiplier, int shift, byte* tagTable, uint* hashTable, ref uint read)
     {
-        uint* slot = state.HashCache + (index & (LazyMatchFinder.RowHashCacheSize - 1));
-        uint hash = *slot;
-        *slot = Hash(state.Base + index + LazyMatchFinder.RowHashCacheSize, state.RowHashLog);
+        uint* slot = cache + (index & (LazyMatchFinder.RowHashCacheSize - 1));
+        nuint hash = *slot;
+        nuint next = (nuint)((Read64(@base + index + LazyMatchFinder.RowHashCacheSize) * multiplier) >> shift);
+        *slot = (uint)next;
+        nuint nextRow = RowOf(next);
+        read += tagTable[nextRow] + hashTable[nextRow];
         return hash;
     }
 
-    /// <summary>libzstd's <c>ZSTD_hashPtrSalted</c> unsalted (see the remarks): the row and the tag in one.</summary>
+    /// <summary>
+    /// The first entry of a hash's row: its bits above the tag, times the entries of a row, as one
+    /// shift and one mask.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint Hash(byte* p, int rowHashLog) =>
-        (uint)THash.Hash(Read64(p), rowHashLog + LazyMatchFinder.RowHashTagBits);
+    private static nuint RowOf(nuint hash) =>
+        (hash >> (LazyMatchFinder.RowHashTagBits - TRow.Log)) & ~(((nuint)1 << TRow.Log) - 1);
 
     /// <summary>
     /// libzstd's <c>ZSTD_row_nextIndex</c>: the place of a new entry, one below the head, wrapping past
     /// place 0 (the head's own byte); it becomes the head.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint NextIndex(byte* tagRow, uint rowMask)
+    private static nuint NextIndex(byte* tagRow)
     {
-        uint next = (uint)(tagRow[0] - 1) & rowMask;
-        next += next == 0 ? rowMask : 0;
+        // Past place 0 by the sign of next - 1: as a select, a branch in a loop.
+        nuint rowMask = ((nuint)1 << TRow.Log) - 1;
+        nuint next = ((nuint)tagRow[0] - 1) & rowMask;
+        next += rowMask & (nuint)((nint)(next - 1) >> 63);
         tagRow[0] = (byte)next;
         return next;
     }
 
     /// <summary>
-    /// libzstd's <c>ZSTD_row_getMatchMask</c>: a bit for each entry whose tag is <paramref name="tag"/>,
-    /// rotated so that bit k is the entry k places from the head, the newest first.
+    /// The bits of <see cref="MatchMask"/> per entry, as a shift: libzstd's
+    /// <c>ZSTD_row_matchMaskGroupWidth</c>, 4 for rows of 16 entries on arm64.
+    /// </summary>
+    private static int MaskGroupShift
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => TRow.Log == 4 && AdvSimd.IsSupported ? 2 : 0;
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_row_getMatchMask</c>: a group of bits for each entry whose tag is
+    /// <paramref name="tag"/>, its lowest set, rotated so that group k is the entry k places from
+    /// the head, the newest first. A row of 16 on arm64 is libzstd's NEON one: the compare narrowed
+    /// to four bits an entry, 5 instructions where extracting a bit per byte takes 9. Rows of 32
+    /// and 64 take a bit an entry, from pairwise sums.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static ulong MatchMask(byte* tagRow, byte tag, uint head)
     {
         Vector128<byte> tags = Vector128.Create(tag);
+        if (TRow.Log == 4 && AdvSimd.IsSupported)
+        {
+            Vector128<byte> equal = AdvSimd.CompareEqual(AdvSimd.LoadVector128(tagRow), tags);
+            ulong nibbles = AdvSimd.ShiftRightLogicalNarrowingLower(equal.AsUInt16(), 4).AsUInt64().ToScalar();
+            return BitOperations.RotateRight(nibbles, (int)(head << 2)) & 0x1111111111111111;
+        }
+
+        if (TRow.Log >= 5 && AdvSimd.Arm64.IsSupported)
+        {
+            // A bit an entry: each compare weighed by its bit within its group of eight, then
+            // pairwise sums, which carry nothing, fold the groups into bytes of the mask.
+            Vector128<byte> weights = Vector128.Create((byte)1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128);
+            Vector128<byte> first = AdvSimd.And(AdvSimd.CompareEqual(AdvSimd.LoadVector128(tagRow), tags), weights);
+            Vector128<byte> second = AdvSimd.And(AdvSimd.CompareEqual(AdvSimd.LoadVector128(tagRow + 16), tags), weights);
+            Vector128<byte> pairs = AdvSimd.Arm64.AddPairwise(first, second);
+            if (TRow.Log == 5)
+            {
+                pairs = AdvSimd.Arm64.AddPairwise(pairs, pairs);
+                pairs = AdvSimd.Arm64.AddPairwise(pairs, pairs);
+                return BitOperations.RotateRight(pairs.AsUInt32().ToScalar(), (int)head);
+            }
+
+            Vector128<byte> third = AdvSimd.And(AdvSimd.CompareEqual(AdvSimd.LoadVector128(tagRow + 32), tags), weights);
+            Vector128<byte> fourth = AdvSimd.And(AdvSimd.CompareEqual(AdvSimd.LoadVector128(tagRow + 48), tags), weights);
+            Vector128<byte> quads = AdvSimd.Arm64.AddPairwise(pairs, AdvSimd.Arm64.AddPairwise(third, fourth));
+            quads = AdvSimd.Arm64.AddPairwise(quads, quads);
+            return BitOperations.RotateRight(quads.AsUInt64().ToScalar(), (int)head);
+        }
+
         if (TRow.Log == 4)
         {
             uint mask = Vector128.Equals(Vector128.Load(tagRow), tags).ExtractMostSignificantBits();

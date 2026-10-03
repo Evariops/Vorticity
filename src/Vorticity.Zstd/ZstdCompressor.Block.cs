@@ -33,6 +33,7 @@ public sealed unsafe partial class ZstdCompressor
     private uint[] _chainTable = [];
     private byte[] _tagTable = [];
     private readonly uint[] _hashCache = GC.AllocateArray<uint>(LazyMatchFinder.RowHashCacheSize, pinned: true);
+    private readonly uint[] _candidates = GC.AllocateArray<uint>(64, pinned: true);
     private MatchState _matchState;
     private CompressionParameters _parameters;
     private bool _isFirstBlock;
@@ -97,6 +98,7 @@ public sealed unsafe partial class ZstdCompressor
             ChainTable = _chainTable.Length == 0 ? null : (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_chainTable)),
             TagTable = _tagTable.Length == 0 ? null : (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_tagTable)),
             HashCache = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_hashCache)),
+            Candidates = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_candidates)),
             RowHashLog = parameters.HashLog - Math.Clamp(parameters.SearchLog, 4, 6),
             Parameters = parameters,
         };

@@ -12,7 +12,7 @@ namespace Vorticity.Zstd.Perf;
 /// block are taken from the frame itself, then each step is timed alone, many times over.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|cmatch|centropy|cliterals|chist|csequences [--frames a,b] [--repeat N]
+/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|cmatch|nmatch|centropy|cliterals|chist|csequences [--frames a,b] [--repeat N]
 /// [--pcprofile file]</c>, the repeats for a profiler to attach; <c>--pcprofile</c> samples the
 /// timed loops' program counters (see <see cref="PcSampler"/>). Prints the median time
 /// of one operation, and its cycles at the clock the M4 Pro's performance cores run (4.44 GHz).
@@ -145,6 +145,7 @@ internal static class Micro
                 }
 
                 case "cmatch":
+                case "nmatch":
                 case "centropy":
                 case "cliterals":
                 case "chist":
@@ -169,6 +170,16 @@ internal static class Micro
                             Report(name, $"match finding, {sequences} sequences, {content.Length} bytes, per sequence", sequences, content.Length,
                                 () => compressor.FindSequencesOnly(content, records));
                             break;
+                        case "nmatch":
+                        {
+                            // libzstd's match finding, per Vorticity.Zstd's sequences (the same, block splits aside).
+                            NativeReference native = NativeReference.TryLoad() ?? throw new InvalidOperationException("no " + NativeReference.LibraryPath);
+                            PcSampler.Libraries.Add((NativeReference.LibraryPath, "_ZSTD_versionNumber", native.VersionAddress));
+                            byte[] collected = new byte[16 * ((content.Length / 3) + 1024)];
+                            Report(name, $"libzstd match finding, {sequences} sequences, {content.Length} bytes, per sequence", sequences, content.Length,
+                                () => native.GenerateSequences(content, level, collected));
+                            break;
+                        }
                         case "centropy":
                             Report(name, $"entropy coding, {sequences} sequences, {content.Length} bytes, per sequence", sequences, content.Length,
                                 () => compressor.EntropyOnly(records, level, literals: true, sequences: true));
@@ -191,7 +202,7 @@ internal static class Micro
                 }
 
                 default:
-                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, cmatch, centropy, cliterals, chist, csequences");
+                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, cmatch, nmatch, centropy, cliterals, chist, csequences");
                     return 1;
             }
         }

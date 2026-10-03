@@ -44,8 +44,29 @@ internal unsafe struct MatchState
     /// <summary>libzstd's <c>rowHashLog</c>: the hash log less the row log, the bits that pick a row.</summary>
     public int RowHashLog;
 
+    /// <summary>
+    /// The row hash's multiplier, for the minimum length: a field the JIT cannot fold into a
+    /// constant, which it rebuilt in three instructions at every position of a loop.
+    /// </summary>
+    public ulong RowHashMultiplier;
+
+    /// <summary>The row hash's shift: 64 less its bits, the row's and the tag's.</summary>
+    public int RowHashShift;
+
+    /// <summary>The candidates a row search compares at most: 2^searchLog, capped at the row's entries.</summary>
+    public uint RowAttempts;
+
+    /// <summary>Room for a row search's candidates, 64 at most.</summary>
+    public uint* Candidates;
+
     /// <summary>libzstd's <c>lazySkipping</c>: the lazy parser inserts only the positions it searches.</summary>
     public bool LazySkipping;
+
+    /// <summary>
+    /// Where the row-based match finder's reads ahead end up, in place of libzstd's prefetches: kept,
+    /// so that the JIT keeps the loads.
+    /// </summary>
+    public uint Touched;
 
     public CompressionParameters Parameters;
 
@@ -101,6 +122,9 @@ internal unsafe struct MatchState
 /// </summary>
 internal unsafe interface IMatchHash
 {
+    /// <summary>The prime, shifted so that the hash is the top bits of the eight bytes times it.</summary>
+    static abstract ulong Multiplier { get; }
+
     static abstract nuint Hash(ulong bytes, int hashLog);
 }
 
@@ -111,8 +135,10 @@ internal unsafe interface IMatchHash
 /// </summary>
 internal readonly struct Hash4 : IMatchHash
 {
+    public static ulong Multiplier => 2654435761UL << 32;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * (2654435761UL << 32)) >> (64 - hashLog));
+    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * Multiplier) >> (64 - hashLog));
 }
 
 /// <summary>
@@ -121,29 +147,37 @@ internal readonly struct Hash4 : IMatchHash
 /// </summary>
 internal readonly struct Hash5 : IMatchHash
 {
+    public static ulong Multiplier => 889523592379UL << 24;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * (889523592379UL << 24)) >> (64 - hashLog));
+    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * Multiplier) >> (64 - hashLog));
 }
 
 /// <summary>libzstd's <c>ZSTD_hash6Ptr</c>, the shift folded into the prime as for <see cref="Hash5"/>.</summary>
 internal readonly struct Hash6 : IMatchHash
 {
+    public static ulong Multiplier => 227718039650203UL << 16;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * (227718039650203UL << 16)) >> (64 - hashLog));
+    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * Multiplier) >> (64 - hashLog));
 }
 
 /// <summary>libzstd's <c>ZSTD_hash7Ptr</c>, the shift folded into the prime as for <see cref="Hash5"/>.</summary>
 internal readonly struct Hash7 : IMatchHash
 {
+    public static ulong Multiplier => 58295818150454627UL << 8;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * (58295818150454627UL << 8)) >> (64 - hashLog));
+    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * Multiplier) >> (64 - hashLog));
 }
 
 /// <summary>libzstd's <c>ZSTD_hash8Ptr</c>.</summary>
 internal readonly struct Hash8 : IMatchHash
 {
+    public static ulong Multiplier => 0xCF1BBCDCB7A56463UL;
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * 0xCF1BBCDCB7A56463UL) >> (64 - hashLog));
+    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * Multiplier) >> (64 - hashLog));
 }
 
 /// <summary>What the match finders share.</summary>
@@ -157,6 +191,27 @@ internal static unsafe class MatchFinder
 
     /// <summary>libzstd's <c>REPCODE1_TO_OFFBASE</c>.</summary>
     public const uint RepeatCode1 = 1;
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_count</c> for <paramref name="ip"/> 16 bytes or more before
+    /// <paramref name="end"/>: the first 16 bytes compared without a branch, two words whose first
+    /// difference each gives a length, the second's added when the first is whole; then
+    /// <see cref="Count"/> past them. A search measures several candidates whose lengths vary, and
+    /// the loop's exit, mispredicted, cost more than the words.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint MatchLength(byte* ip, byte* match, byte* end)
+    {
+        nuint first = (nuint)BitOperations.TrailingZeroCount(Read64(ip) ^ Read64(match)) >> 3;
+        nuint second = (nuint)BitOperations.TrailingZeroCount(Read64(ip + 8) ^ Read64(match + 8)) >> 3;
+        nuint length = first + (second & (0 - (first >> 3)));
+        if (length == 16)
+        {
+            length += Count(ip + 16, match + 16, end);
+        }
+
+        return length;
+    }
 
     /// <summary>libzstd's <c>ZSTD_REP_NUM</c>: offset codes up to it are repeat codes.</summary>
     public const uint RepeatCodeCount = 3;

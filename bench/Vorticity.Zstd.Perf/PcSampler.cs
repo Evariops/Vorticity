@@ -11,9 +11,11 @@ namespace Vorticity.Zstd.Perf;
 /// <summary>
 /// A sampling profiler at the instruction, for the micro-benchmarks (<c>--pcprofile file</c>): a
 /// thread suspends the measured one about every 100 microseconds, reads its program counter through
-/// Mach's <c>thread_get_state</c>, and counts the addresses, the executable's slide taken off, so that
-/// they match its dSYM (<c>bench/zstd-pcprofile.py</c> resolves and annotates them). The address of a
-/// suspended thread is the next instruction to retire: one that waits, or the one after it.
+/// Mach's <c>thread_get_state</c>, and counts the addresses as they are, after a header that places
+/// the images: the executable's slide, and where a symbol of each native library registered loaded
+/// (<c>bench/zstd-pcprofile.py</c> resolves them, against the executable's dSYM or the library's symbols,
+/// and annotates them). The address of a suspended thread is the next instruction to retire: one
+/// that waits, or the one after it.
 /// </summary>
 internal static unsafe class PcSampler
 {
@@ -23,6 +25,9 @@ internal static unsafe class PcSampler
 
     /// <summary>The file the samples are appended to, or null when not profiling.</summary>
     public static string? Path { get; set; }
+
+    /// <summary>Native libraries to place: their path, a symbol, and where it is loaded.</summary>
+    public static List<(string Library, string Symbol, nint Address)> Libraries { get; } = [];
 
     [DllImport("libSystem.dylib")]
     private static extern uint mach_thread_self();
@@ -61,13 +66,15 @@ internal static unsafe class PcSampler
         {
             _stop = true;
             _thread.Join();
-            File.AppendAllLines(_path, _counts.Select(entry => $"{entry.Key:x} {entry.Value}"));
+            var lines = new List<string> { $"# slide {(ulong)_dyld_get_image_vmaddr_slide(0):x}" };
+            lines.AddRange(Libraries.Select(library => $"# library {library.Library} {library.Symbol} {(ulong)library.Address:x}"));
+            lines.AddRange(_counts.Select(entry => $"{entry.Key:x} {entry.Value}"));
+            File.AppendAllLines(_path, lines);
         }
 
         private void Run()
         {
             uint* state = stackalloc uint[ArmThreadState64Count];
-            ulong slide = (ulong)_dyld_get_image_vmaddr_slide(0);
             long interval = Stopwatch.Frequency / 10_000;
             while (!_stop)
             {
@@ -77,7 +84,7 @@ internal static unsafe class PcSampler
                     uint count = ArmThreadState64Count;
                     if (thread_get_state(_target, ArmThreadState64, state, &count) == 0)
                     {
-                        ulong pc = *(ulong*)(state + PcOffset) - slide;
+                        ulong pc = *(ulong*)(state + PcOffset);
                         _counts[pc] = _counts.GetValueOrDefault(pc) + 1;
                     }
 
