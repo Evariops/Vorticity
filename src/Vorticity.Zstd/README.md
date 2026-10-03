@@ -8,8 +8,9 @@ in fully managed C#.
 - **The same frames as libzstd.** At every compression level, Vorticity.Zstd writes exactly the bytes that
   libzstd 1.5.7 writes. That holds with dictionaries, with long-distance matching and in multithreaded
   compression.
-- **Fast.** Decompression is 1.10–1.21× as fast as libzstd on the Silesia corpus. Compression of large
-  inputs is within a few percent of libzstd. See [Performance](#performance).
+- **Fast.** Decompression is 1.11–1.21× as fast as libzstd on the Silesia corpus, and 1.36–1.52× on
+  small frames with a dictionary. Compression of large inputs is within a few percent of libzstd. See
+  [Performance](#performance).
 - **Allocation-free.** A warm compressor or decompressor allocates nothing.
 
 Vorticity.Zstd is an independent implementation of the format. It is not affiliated with the zstd project or
@@ -117,15 +118,14 @@ including dictionaries and long-distance matching.
 
 | speedup over libzstd 1.5.7 | Vorticity.Zstd | .NET 11 `System.IO.Compression` |
 |:--|--:|--:|
-| decompression, silesia.tar | 1.10–1.21× | 0.82–0.86× |
-| decompression, small records | 1.16–1.34× | 0.92–0.95× |
-| decompression, small records with a dictionary | 0.56–0.62× | 0.75–0.80× |
-| compression, silesia.tar | 0.94–1.08× | 0.97–1.01× |
-| compression, small records | 0.88–1.01× | 0.90–0.99× |
-| compression, small records with a dictionary | 0.87–1.27× | 0.96–1.00× |
+| decompression, silesia.tar | 1.11–1.21× | 0.83–0.86× |
+| decompression, small records | 1.17–1.37× | 0.91–0.94× |
+| decompression, small records with a dictionary | 1.36–1.52× | 0.74–0.79× |
+| compression, silesia.tar | 0.96–1.07× | 0.97–1.01× |
+| compression, small records | 0.87–1.00× | 0.89–0.98× |
+| compression, small records with a dictionary | 0.87–1.26× | 0.95–1.00× |
 
-The ranges span compression levels 1 to 19. Vorticity.Zstd decodes small frames that use a dictionary more
-slowly than libzstd, at every level.
+The ranges span compression levels 1 to 19.
 
 The measurements use the data of zstd's own benchmarks, which `bench/zstd-corpus.sh` downloads:
 
@@ -160,51 +160,51 @@ checks, so one ratio holds for all of them. Decompression decodes libzstd's fram
 
 | corpus | implementation | 1 | 3 | 5 | 7 | 9 | 13 | 16 | 19 |
 |:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|
-| silesia.tar | libzstd 1.5.7 (native) | 777 | 459 | 239 | 150 | 115 | 21.9 | 9.89 | 4.74 |
-|  | .NET 11 (System.IO.Compression) | 768 | 454 | 239 | 150 | 114 | 22.0 | 9.86 | 4.61 |
-|  | Vorticity.Zstd (Native AOT) | 768 | 465 | 232 | 146 | 109 | 23.6 | 10.3 | 4.72 |
-| github | libzstd 1.5.7 (native) | 316 | 303 | 208 | 201 | 154 | 39.4 | 15.4 | 12.5 |
-|  | .NET 11 (System.IO.Compression) | 302 | 289 | 199 | 194 | 145 | 38.9 | 13.9 | 11.5 |
-|  | Vorticity.Zstd (Native AOT) | 294 | 265 | 182 | 176 | 143 | 39.6 | 14.2 | 11.3 |
-| github + dict | libzstd 1.5.7 (native) | 1187 | 1135 | 440 | 230 | 141 | 68.7 | 6.11 | 5.95 |
-|  | .NET 11 (System.IO.Compression) | 1141 | 1092 | 438 | 227 | 139 | 68.9 | 5.90 | 5.72 |
-|  | Vorticity.Zstd (Native AOT) | 1151 | 1078 | 397 | 201 | 130 | 86.6 | 7.74 | 7.41 |
+| silesia.tar | libzstd 1.5.7 (native) | 786 | 460 | 239 | 153 | 118 | 23.6 | 10.6 | 5.12 |
+|  | .NET 11 (System.IO.Compression) | 774 | 460 | 241 | 154 | 117 | 23.3 | 10.5 | 4.97 |
+|  | Vorticity.Zstd (Native AOT) | 773 | 467 | 237 | 149 | 113 | 25.2 | 10.9 | 5.09 |
+| github | libzstd 1.5.7 (native) | 323 | 306 | 212 | 203 | 155 | 39.9 | 15.4 | 12.6 |
+|  | .NET 11 (System.IO.Compression) | 308 | 291 | 204 | 196 | 147 | 39.2 | 14.1 | 11.2 |
+|  | Vorticity.Zstd (Native AOT) | 300 | 268 | 185 | 178 | 144 | 39.9 | 14.3 | 11.4 |
+| github + dict | libzstd 1.5.7 (native) | 1188 | 1134 | 444 | 232 | 145 | 70.3 | 6.19 | 6.27 |
+|  | .NET 11 (System.IO.Compression) | 1149 | 1096 | 439 | 230 | 143 | 70.6 | 5.92 | 5.98 |
+|  | Vorticity.Zstd (Native AOT) | 1133 | 1035 | 395 | 202 | 133 | 88.7 | 7.82 | 7.80 |
 
 **Compression, speedup over libzstd 1.5.7 (native)**
 
 | corpus | implementation | 1 | 3 | 5 | 7 | 9 | 13 | 16 | 19 |
 |:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|
-| silesia.tar | .NET 11 (System.IO.Compression) | 0.99× | 0.99× | 1.00× | 1.00× | 0.99× | 1.01× | 1.00× | 0.97× |
-|  | Vorticity.Zstd (Native AOT) | 0.99× | 1.01× | 0.97× | 0.97× | 0.94× | 1.08× | 1.04× | 1.00× |
-| github | .NET 11 (System.IO.Compression) | 0.96× | 0.95× | 0.96× | 0.96× | 0.94× | 0.99× | 0.90× | 0.92× |
-|  | Vorticity.Zstd (Native AOT) | 0.93× | 0.88× | 0.88× | 0.88× | 0.93× | 1.01× | 0.92× | 0.91× |
-| github + dict | .NET 11 (System.IO.Compression) | 0.96× | 0.96× | 1.00× | 0.99× | 0.98× | 1.00× | 0.96× | 0.96× |
-|  | Vorticity.Zstd (Native AOT) | 0.97× | 0.95× | 0.90× | 0.87× | 0.92× | 1.26× | 1.27× | 1.24× |
+| silesia.tar | .NET 11 (System.IO.Compression) | 0.99× | 1.00× | 1.01× | 1.01× | 1.00× | 0.99× | 0.99× | 0.97× |
+|  | Vorticity.Zstd (Native AOT) | 0.98× | 1.01× | 0.99× | 0.98× | 0.96× | 1.07× | 1.03× | 0.99× |
+| github | .NET 11 (System.IO.Compression) | 0.95× | 0.95× | 0.96× | 0.96× | 0.95× | 0.98× | 0.92× | 0.89× |
+|  | Vorticity.Zstd (Native AOT) | 0.93× | 0.88× | 0.87× | 0.88× | 0.93× | 1.00× | 0.93× | 0.90× |
+| github + dict | .NET 11 (System.IO.Compression) | 0.97× | 0.97× | 0.99× | 0.99× | 0.99× | 1.00× | 0.96× | 0.95× |
+|  | Vorticity.Zstd (Native AOT) | 0.95× | 0.91× | 0.89× | 0.87× | 0.92× | 1.26× | 1.26× | 1.25× |
 
 **Decompression, MB/s**
 
 | corpus | implementation | 1 | 3 | 5 | 7 | 9 | 13 | 16 | 19 |
 |:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|
-| silesia.tar | libzstd 1.5.7 (native) | 2148 | 2006 | 1995 | 2170 | 2231 | 2314 | 2227 | 2030 |
-|  | .NET 11 (System.IO.Compression) | 1837 | 1669 | 1641 | 1810 | 1863 | 1936 | 1851 | 1682 |
-|  | Vorticity.Zstd (Native AOT) | 2371 | 2401 | 2413 | 2601 | 2634 | 2700 | 2538 | 2432 |
-| github | libzstd 1.5.7 (native) | 760 | 521 | 529 | 525 | 528 | 535 | 539 | 528 |
-|  | .NET 11 (System.IO.Compression) | 697 | 493 | 498 | 496 | 499 | 503 | 504 | 497 |
-|  | Vorticity.Zstd (Native AOT) | 1022 | 613 | 615 | 618 | 621 | 628 | 633 | 625 |
-| github + dict | libzstd 1.5.7 (native) | 3582 | 3716 | 3961 | 3175 | 3063 | 3240 | 3867 | 3900 |
-|  | .NET 11 (System.IO.Compression) | 2777 | 2857 | 2954 | 2504 | 2453 | 2566 | 2929 | 2973 |
-|  | Vorticity.Zstd (Native AOT) | 2128 | 2149 | 2227 | 1969 | 1913 | 1971 | 2200 | 2226 |
+| silesia.tar | libzstd 1.5.7 (native) | 2166 | 2022 | 2027 | 2190 | 2250 | 2332 | 2243 | 2100 |
+|  | .NET 11 (System.IO.Compression) | 1873 | 1680 | 1675 | 1824 | 1874 | 1956 | 1871 | 1751 |
+|  | Vorticity.Zstd (Native AOT) | 2415 | 2423 | 2446 | 2637 | 2668 | 2745 | 2584 | 2538 |
+| github | libzstd 1.5.7 (native) | 774 | 537 | 542 | 542 | 541 | 539 | 547 | 549 |
+|  | .NET 11 (System.IO.Compression) | 706 | 503 | 510 | 510 | 507 | 506 | 511 | 514 |
+|  | Vorticity.Zstd (Native AOT) | 1060 | 628 | 637 | 636 | 634 | 635 | 641 | 645 |
+| github + dict | libzstd 1.5.7 (native) | 3613 | 3743 | 3984 | 3207 | 3067 | 3258 | 3919 | 3908 |
+|  | .NET 11 (System.IO.Compression) | 2781 | 2849 | 2961 | 2520 | 2431 | 2556 | 2946 | 2982 |
+|  | Vorticity.Zstd (Native AOT) | 4993 | 5361 | 5820 | 4439 | 4210 | 4425 | 5913 | 5930 |
 
 **Decompression, speedup over libzstd 1.5.7 (native)**
 
 | corpus | implementation | 1 | 3 | 5 | 7 | 9 | 13 | 16 | 19 |
 |:--|:--|--:|--:|--:|--:|--:|--:|--:|--:|
-| silesia.tar | .NET 11 (System.IO.Compression) | 0.86× | 0.83× | 0.82× | 0.83× | 0.83× | 0.84× | 0.83× | 0.83× |
-|  | Vorticity.Zstd (Native AOT) | 1.10× | 1.20× | 1.21× | 1.20× | 1.18× | 1.17× | 1.14× | 1.20× |
-| github | .NET 11 (System.IO.Compression) | 0.92× | 0.95× | 0.94× | 0.94× | 0.95× | 0.94× | 0.94× | 0.94× |
-|  | Vorticity.Zstd (Native AOT) | 1.34× | 1.18× | 1.16× | 1.18× | 1.18× | 1.17× | 1.17× | 1.18× |
-| github + dict | .NET 11 (System.IO.Compression) | 0.78× | 0.77× | 0.75× | 0.79× | 0.80× | 0.79× | 0.76× | 0.76× |
-|  | Vorticity.Zstd (Native AOT) | 0.59× | 0.58× | 0.56× | 0.62× | 0.62× | 0.61× | 0.57× | 0.57× |
+| silesia.tar | .NET 11 (System.IO.Compression) | 0.86× | 0.83× | 0.83× | 0.83× | 0.83× | 0.84× | 0.83× | 0.83× |
+|  | Vorticity.Zstd (Native AOT) | 1.11× | 1.20× | 1.21× | 1.20× | 1.19× | 1.18× | 1.15× | 1.21× |
+| github | .NET 11 (System.IO.Compression) | 0.91× | 0.94× | 0.94× | 0.94× | 0.94× | 0.94× | 0.93× | 0.94× |
+|  | Vorticity.Zstd (Native AOT) | 1.37× | 1.17× | 1.17× | 1.17× | 1.17× | 1.18× | 1.17× | 1.17× |
+| github + dict | .NET 11 (System.IO.Compression) | 0.77× | 0.76× | 0.74× | 0.79× | 0.79× | 0.78× | 0.75× | 0.76× |
+|  | Vorticity.Zstd (Native AOT) | 1.38× | 1.43× | 1.46× | 1.38× | 1.37× | 1.36× | 1.51× | 1.52× |
 
 To reproduce the measurements (macOS, .NET 11 SDK):
 
