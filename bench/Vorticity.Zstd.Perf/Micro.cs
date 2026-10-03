@@ -12,7 +12,7 @@ namespace Vorticity.Zstd.Perf;
 /// block are taken from the frame itself, then each step is timed alone, many times over.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|cmatch|nmatch|centropy|cliterals|chist|csequences [--frames a,b] [--repeat N]
+/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|compress|ncompress|cmatch|nmatch|centropy|cliterals|chist|csequences [--frames a,b] [--repeat N]
 /// [--pcprofile file]</c>, the repeats for a profiler to attach; <c>--pcprofile</c> samples the
 /// timed loops' program counters (see <see cref="PcSampler"/>). Prints the median time
 /// of one operation, and its cycles at the clock the M4 Pro's performance cores run (4.44 GHz).
@@ -144,6 +144,8 @@ internal static class Micro
                     break;
                 }
 
+                case "compress":
+                case "ncompress":
                 case "cmatch":
                 case "nmatch":
                 case "centropy":
@@ -166,6 +168,24 @@ internal static class Micro
 
                     switch (what)
                     {
+                        case "compress":
+                        {
+                            byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
+                            Report(name, $"compression, {sequences} sequences, {content.Length} bytes, per sequence", sequences, content.Length,
+                                () => compressor.Compress(content, frame, out _, out _));
+                            break;
+                        }
+
+                        case "ncompress":
+                        {
+                            NativeReference native = NativeReference.TryLoad() ?? throw new InvalidOperationException("no " + NativeReference.LibraryPath);
+                            PcSampler.Libraries.Add((NativeReference.LibraryPath, "_ZSTD_versionNumber", native.VersionAddress));
+                            byte[] frame = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
+                            Report(name, $"libzstd compression, {sequences} sequences, {content.Length} bytes, per sequence", sequences, content.Length,
+                                () => native.Compress(content, frame, level));
+                            break;
+                        }
+
                         case "cmatch":
                             Report(name, $"match finding, {sequences} sequences, {content.Length} bytes, per sequence", sequences, content.Length,
                                 () => compressor.FindSequencesOnly(content, records));
@@ -202,7 +222,7 @@ internal static class Micro
                 }
 
                 default:
-                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, cmatch, nmatch, centropy, cliterals, chist, csequences");
+                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, compress, ncompress, cmatch, nmatch, centropy, cliterals, chist, csequences");
                     return 1;
             }
         }

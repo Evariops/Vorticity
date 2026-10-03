@@ -198,6 +198,7 @@ internal sealed unsafe class SequenceStore
     public SequenceSection Whole => new(LiteralsStart, LiteralCount, SequencesStart, SequenceCount, Counts);
 
     /// <summary>A record's literal length: its code's baseline, plus its extra bits.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint LiteralLengthOf(SequenceRecord* record)
     {
         int code = (int)(record->Codes & 0xFF);
@@ -206,6 +207,7 @@ internal sealed unsafe class SequenceStore
     }
 
     /// <summary>A record's match length: its code's baseline, plus its extra bits, plus 3.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint MatchLengthOf(SequenceRecord* record)
     {
         int literalLengthBits = LiteralLengthBits[(int)(record->Codes & 0xFF)];

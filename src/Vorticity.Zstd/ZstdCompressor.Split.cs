@@ -23,6 +23,8 @@ public sealed unsafe partial class ZstdCompressor
     private readonly uint[] _splitCounts = GC.AllocateArray<uint>((3 * SequenceStore.AllCodes) + 256, pinned: true);
     private readonly uint[] _partitions = GC.AllocateArray<uint>(MaxBlockSplits + 1, pinned: true);
     private readonly byte[] _splitScratch = GC.AllocateArray<byte>(1024, pinned: true);
+    private uint[] _literalPrefix = [];
+    private uint[] _sourcePrefix = [];
     private int _splitCount;
 
     /// <summary>
@@ -58,6 +60,29 @@ public sealed unsafe partial class ZstdCompressor
             Record(source, blockSize, 2);
         }
 
+        // The literals, and the source bytes, before each sequence: libzstd counts them again for
+        // each part it derives.
+        if (_literalPrefix.Length < SequenceStore.MaxSequences + 1)
+        {
+            _literalPrefix = GC.AllocateArray<uint>(SequenceStore.MaxSequences + 1, pinned: true);
+            _sourcePrefix = GC.AllocateArray<uint>(SequenceStore.MaxSequences + 1, pinned: true);
+        }
+
+        uint literalTotal = 0;
+        uint sourceTotalBytes = 0;
+        for (nuint n = 0; n < sequenceCount; n++)
+        {
+            _literalPrefix[n] = literalTotal;
+            _sourcePrefix[n] = sourceTotalBytes;
+            SequenceRecord* record = _store.SequencesStart + n;
+            uint literalLength = SequenceStore.LiteralLengthOf(record);
+            literalTotal += literalLength;
+            sourceTotalBytes += literalLength + SequenceStore.MatchLengthOf(record);
+        }
+
+        _literalPrefix[sequenceCount] = literalTotal;
+        _sourcePrefix[sequenceCount] = sourceTotalBytes;
+
         // The offset histories of the compression (cRep) and of the decompression (dRep): a part
         // emitted raw or RLE leaves the decoder's behind, and a repeat code that then means another
         // offset to it is replaced by the offset it meant.
@@ -83,7 +108,8 @@ public sealed unsafe partial class ZstdCompressor
         for (int i = 0; i <= splits; i++)
         {
             bool last = i == splits;
-            nuint sourceBytes = LiteralBytes(current) + MatchBytes(current);
+            nuint start = i == 0 ? 0 : partitions[i - 1];
+            nuint sourceBytes = _sourcePrefix[partitions[i]] - _sourcePrefix[start];
             sourceTotal += sourceBytes;
             if (last)
             {
@@ -123,52 +149,12 @@ public sealed unsafe partial class ZstdCompressor
     private SequenceSection Section(nuint start, nuint end, uint* counts)
     {
         SequenceRecord* sequences = _store.SequencesStart;
-        byte* literals = _store.LiteralsStart;
-        for (nuint n = 0; n < start; n++)
-        {
-            literals += SequenceStore.LiteralLengthOf(sequences + n);
-        }
-
-        nuint literalCount;
-        if (end == _store.SequenceCount)
-        {
-            literalCount = (nuint)(_store.Literals - literals);
-        }
-        else
-        {
-            literalCount = 0;
-            for (nuint n = start; n < end; n++)
-            {
-                literalCount += SequenceStore.LiteralLengthOf(sequences + n);
-            }
-        }
-
+        byte* literals = _store.LiteralsStart + _literalPrefix[start];
+        nuint literalCount = end == _store.SequenceCount
+            ? (nuint)(_store.Literals - literals)
+            : _literalPrefix[end] - _literalPrefix[start];
         SequenceStore.CountCodes(sequences + start, end - start, counts);
         return new SequenceSection(literals, literalCount, sequences + start, end - start, counts);
-    }
-
-    /// <summary>libzstd's <c>ZSTD_countSeqStoreLiteralsBytes</c>: the literals of a part's sequences, not its last literals.</summary>
-    private static nuint LiteralBytes(in SequenceSection section)
-    {
-        nuint bytes = 0;
-        for (nuint n = 0; n < section.SequenceCount; n++)
-        {
-            bytes += SequenceStore.LiteralLengthOf(section.SequencesStart + n);
-        }
-
-        return bytes;
-    }
-
-    /// <summary>libzstd's <c>ZSTD_countSeqStoreMatchBytes</c>.</summary>
-    private static nuint MatchBytes(in SequenceSection section)
-    {
-        nuint bytes = 0;
-        for (nuint n = 0; n < section.SequenceCount; n++)
-        {
-            bytes += SequenceStore.MatchLengthOf(section.SequencesStart + n);
-        }
-
-        return bytes;
     }
 
     /// <summary>

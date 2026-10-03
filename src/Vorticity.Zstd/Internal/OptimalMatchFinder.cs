@@ -349,9 +349,11 @@ internal static unsafe class OptimalParser<TLength, TLevel>
                 {
                     uint offBase = matches[matchIndex].OffBase;
                     uint end = matches[matchIndex].Length;
+                    uint offCode = (uint)BitOperations.Log2(offBase);
+                    uint offsetPrice = OffsetPrice(optimal, offBase);
                     for (; position <= end; position++)
                     {
-                        int matchPrice = (int)MatchPrice(optimal, offBase, position);
+                        int matchPrice = (int)(offsetPrice + MatchLengthPrice(optimal, offCode, position));
                         int sequencePrice = opt[0].Price + matchPrice;
                         opt[position].MatchLength = position;
                         opt[position].OffBase = offBase;
@@ -454,10 +456,12 @@ internal static unsafe class OptimalParser<TLength, TLevel>
                         uint offBase = matches[matchIndex].OffBase;
                         uint lastLength = matches[matchIndex].Length;
                         uint startLength = matchIndex > 0 ? matches[matchIndex - 1].Length + 1 : minMatch;
+                        uint offCode = (uint)BitOperations.Log2(offBase);
+                        uint offsetPrice = OffsetPrice(optimal, offBase);
                         for (uint length = lastLength; length >= startLength; length--)
                         {
                             uint position = cur + length;
-                            int price = basePrice + (int)MatchPrice(optimal, offBase, length);
+                            int price = basePrice + (int)(offsetPrice + MatchLengthPrice(optimal, offCode, length));
                             if ((position > lastPosition) || (price < opt[position].Price))
                             {
                                 while (lastPosition < position)
@@ -718,6 +722,7 @@ internal static unsafe class OptimalParser<TLength, TLevel>
     }
 
     /// <summary>libzstd's <c>ZSTD_litLengthPrice</c>: libzstd's <c>LL_PRICE</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int LiteralLengthPrice(OptimalState optimal, uint literalLength)
     {
         if (optimal.Predefined)
@@ -743,15 +748,23 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         LiteralLengthPrice(optimal, literalLength) - LiteralLengthPrice(optimal, literalLength - 1);
 
     /// <summary>libzstd's <c>ZSTD_getMatchPrice</c>: the offset and match length of a sequence.</summary>
-    private static uint MatchPrice(OptimalState optimal, uint offBase, uint matchLength)
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint MatchPrice(OptimalState optimal, uint offBase, uint matchLength) =>
+        OffsetPrice(optimal, offBase) + MatchLengthPrice(optimal, (uint)BitOperations.Log2(offBase), matchLength);
+
+    /// <summary>
+    /// The offset's part of <see cref="MatchPrice"/>, which a match's lengths share; with fixed prices,
+    /// nothing (it takes the code with the length).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint OffsetPrice(OptimalState optimal, uint offBase)
     {
-        uint offCode = (uint)BitOperations.Log2(offBase);
-        uint matchLengthBase = matchLength - 3;
         if (optimal.Predefined)
         {
-            return Weight(matchLengthBase) + ((16 + offCode) * BitCostMultiplier);
+            return 0;
         }
 
+        uint offCode = (uint)BitOperations.Log2(offBase);
         uint price = (offCode * BitCostMultiplier) + (optimal.OffCodeSumBasePrice - Weight(optimal.OffCodeFrequencies[offCode]));
         if ((TLevel.Level < 2) && (offCode >= 20))
         {
@@ -759,12 +772,27 @@ internal static unsafe class OptimalParser<TLength, TLevel>
             price += (offCode - 19) * 2 * BitCostMultiplier;
         }
 
+        return price;
+    }
+
+    /// <summary>
+    /// The match length's part of <see cref="MatchPrice"/>, and the bias against sequences; with fixed
+    /// prices, the whole price. Sums of 32-bit prices wrap as libzstd's do: in any order, the same.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint MatchLengthPrice(OptimalState optimal, uint offCode, uint matchLength)
+    {
+        uint matchLengthBase = matchLength - 3;
+        if (optimal.Predefined)
+        {
+            return Weight(matchLengthBase) + ((16 + offCode) * BitCostMultiplier);
+        }
+
         uint code = MatchLengthCode(matchLengthBase);
-        price += (MatchLengthBits[(int)code] * (uint)BitCostMultiplier) + (optimal.MatchLengthSumBasePrice - Weight(optimal.MatchLengthFrequencies[code]));
+        uint price = (MatchLengthBits[(int)code] * (uint)BitCostMultiplier) + (optimal.MatchLengthSumBasePrice - Weight(optimal.MatchLengthFrequencies[code]));
 
         // Fewer sequences favored, for decompression speed.
-        price += BitCostMultiplier / 5;
-        return price;
+        return price + (BitCostMultiplier / 5);
     }
 
     /// <summary>libzstd's <c>ZSTD_updateStats</c>: a sequence chosen, its symbols counted.</summary>
@@ -939,20 +967,10 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         uint* hashTable = state.HashTable;
         nuint hash = TLength.Hash(Read64(ip), state.Parameters.HashLog);
         uint matchIndex = hashTable[hash];
-        uint* tree = state.ChainTable;
-        uint treeMask = (1u << (state.Parameters.ChainLog - 1)) - 1;
-        nuint commonLengthSmaller = 0;
-        nuint commonLengthLarger = 0;
         uint dictLimit = state.DictLimit;
-        uint treeLow = treeMask >= current ? 0 : current - treeMask;
         uint windowLow = state.LowestMatchIndex(current);
         uint matchLow = windowLow != 0 ? windowLow : 1;
-        uint* smallerPtr = tree + (2 * (current & treeMask));
-        uint* largerPtr = smallerPtr + 1;
-        uint matchEndIndex = current + 8 + 1;
-        uint dummy;
         uint count = 0;
-        uint compares = 1u << state.Parameters.SearchLog;
         nuint bestLength = lengthToBeat - 1;
 
         // The repeat offsets: with literals before, the three; without, the last two and the first less one.
@@ -1009,6 +1027,36 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         }
 
         hashTable[hash] = current;
+        return WalkTree(matches, count, bestLength, ref state, ip, end, matchIndex, matchLow);
+    }
+
+    /// <summary>
+    /// The tree part of <see cref="GetAllMatches"/>: ip inserted into its hash's tree as the tree is
+    /// walked, each longer match recorded.
+    /// </summary>
+    /// <remarks>
+    /// A method of its own: inside the whole search, the JIT kept nearly every value of this loop on
+    /// the stack. The indices it follows from node to node are native integers, so that each step's
+    /// address is one instruction on the dependent chain.
+    /// </remarks>
+    /// <returns>The number of matches.</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static uint WalkTree(
+        OptimalMatch* matches, uint count, nuint bestLength, ref MatchState state, byte* ip, byte* end, nuint matchIndex, nuint matchLow)
+    {
+        byte* @base = state.Base;
+        uint* tree = state.ChainTable;
+        nuint treeMask = (1u << (state.Parameters.ChainLog - 1)) - 1;
+        nuint current = (nuint)(ip - @base);
+        nuint treeLow = treeMask >= current ? 0 : current - treeMask;
+        uint* smallerPtr = tree + (2 * (current & treeMask));
+        uint* largerPtr = smallerPtr + 1;
+        nuint matchEndIndex = current + 8 + 1;
+        nuint commonLengthSmaller = 0;
+        nuint commonLengthLarger = 0;
+        uint compares = 1u << state.Parameters.SearchLog;
+        uint dummy;
+
         for (; (compares != 0) && (matchIndex >= matchLow); compares--)
         {
             uint* nextPtr = tree + (2 * (matchIndex & treeMask));
@@ -1020,11 +1068,11 @@ internal static unsafe class OptimalParser<TLength, TLevel>
             {
                 if (matchLength > matchEndIndex - matchIndex)
                 {
-                    matchEndIndex = matchIndex + (uint)matchLength;
+                    matchEndIndex = matchIndex + matchLength;
                 }
 
                 bestLength = matchLength;
-                matches[count].OffBase = OffsetToOffBase(current - matchIndex);
+                matches[count].OffBase = OffsetToOffBase((uint)(current - matchIndex));
                 matches[count].Length = (uint)matchLength;
                 count++;
                 if ((matchLength > OptNum) | (ip + matchLength == end))
@@ -1036,7 +1084,7 @@ internal static unsafe class OptimalParser<TLength, TLevel>
 
             if (match[matchLength] < ip[matchLength])
             {
-                *smallerPtr = matchIndex;
+                *smallerPtr = (uint)matchIndex;
                 commonLengthSmaller = matchLength;
                 if (matchIndex <= treeLow)
                 {
@@ -1049,7 +1097,7 @@ internal static unsafe class OptimalParser<TLength, TLevel>
             }
             else
             {
-                *largerPtr = matchIndex;
+                *largerPtr = (uint)matchIndex;
                 commonLengthLarger = matchLength;
                 if (matchIndex <= treeLow)
                 {
@@ -1065,7 +1113,7 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         *smallerPtr = *largerPtr = 0;
 
         // Past a repetitive match, its positions are not inserted.
-        state.NextToUpdate = matchEndIndex - 8;
+        state.NextToUpdate = (uint)(matchEndIndex - 8);
         return count;
     }
 }
