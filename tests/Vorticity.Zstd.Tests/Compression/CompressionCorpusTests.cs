@@ -18,15 +18,11 @@ public static class CompressionCorpus
 {
     private static readonly int[] SmallSizes = [0, 1, 2, 6, 7, 8, 31, 32, 33, 64, 100, 255, 256, 1023, 1024, 4095, 4096, 16384, 16385];
     private static readonly int[] BlockSizes = [70_000, 131_071, 131_072, 131_073, 262_145, 400_000];
-    private static readonly int[] ExactLevels = [-131072, -50, -5, -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-    private static readonly int[] StrongLevels = [16, 19, 22];
+    private static readonly int[] ExactLevels = [-131072, -50, -5, -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
 
     public static TheoryData<string> Small() => Cases(SmallSizes, ExactLevels);
 
     public static TheoryData<string> Blocks() => Cases(BlockSizes, ExactLevels);
-
-    /// <summary>The levels whose strategies cascade for now: round trips only, on smaller sources.</summary>
-    public static TheoryData<string> Strong() => Cases([0, 100, 4096, 70_000, 131_073], StrongLevels);
 
     /// <summary>Several megabytes: many blocks, split before their match finding, and windows that slide.</summary>
     public static TheoryData<string> Large()
@@ -34,7 +30,7 @@ public static class CompressionCorpus
         var data = new TheoryData<string>();
         foreach (string kind in DataKinds.All)
         {
-            foreach (int level in new[] { -1, 1, 3, 4, 5, 8, 12, 15 })
+            foreach (int level in new[] { -1, 1, 3, 4, 5, 8, 12, 15, 16, 19, 22 })
             {
                 data.Add(CorpusCase.Name(kind, 3_000_000, level));
             }
@@ -159,13 +155,6 @@ public sealed class LargeCompressionTests
     [Theory]
     [MemberData(nameof(CompressionCorpus.Large), MemberType = typeof(CompressionCorpus))]
     public void Compresses_like_libzstd(string name) => CompressionCorpus.Check(name);
-}
-
-public sealed class StrongLevelTests
-{
-    [Theory]
-    [MemberData(nameof(CompressionCorpus.Strong), MemberType = typeof(CompressionCorpus))]
-    public void Round_trips(string name) => CompressionCorpus.Check(name);
 }
 
 public sealed class ChecksumCompressionTests

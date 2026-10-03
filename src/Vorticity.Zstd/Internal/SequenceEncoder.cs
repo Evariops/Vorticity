@@ -93,9 +93,9 @@ internal static unsafe class SequenceEncoder
     /// <summary>libzstd's <c>DefaultMaxOff</c>: the largest offset code the predefined table has.</summary>
     public const int DefaultMaxOffset = 28;
 
-    private const int LiteralLengthDefaultNormLog = 6;
-    private const int MatchLengthDefaultNormLog = 6;
-    private const int OffsetDefaultNormLog = 5;
+    internal const int LiteralLengthDefaultNormLog = 6;
+    internal const int MatchLengthDefaultNormLog = 6;
+    internal const int OffsetDefaultNormLog = 5;
 
     /// <summary>libzstd's <c>LONGNBSEQ</c>.</summary>
     private const int LongNumberOfSequences = 0x7F00;
@@ -196,7 +196,7 @@ internal static unsafe class SequenceEncoder
     /// libzstd's <c>ZSTD_fseBitCost</c>: the bits the distribution takes with <paramref name="table"/>,
     /// or <see cref="nuint.MaxValue"/> (libzstd's error) when the table lacks a symbol.
     /// </summary>
-    private static nuint FseBitCost(FseCTable table, uint* count, uint max)
+    internal static nuint FseBitCost(FseCTable table, uint* count, uint max)
     {
         const int AccuracyLog = 8;
         if (table.MaxSymbolValue < max)
@@ -227,7 +227,7 @@ internal static unsafe class SequenceEncoder
     }
 
     /// <summary>libzstd's <c>ZSTD_crossEntropyCost</c>: the bits the distribution takes with a normalized one.</summary>
-    private static nuint CrossEntropyCost(ReadOnlySpan<short> norm, uint accuracyLog, uint* count, uint max)
+    internal static nuint CrossEntropyCost(ReadOnlySpan<short> norm, uint accuracyLog, uint* count, uint max)
     {
         int shift = 8 - (int)accuracyLog;
         nuint cost = 0;
@@ -365,7 +365,7 @@ internal static unsafe class SequenceEncoder
     /// libzstd's <c>ZSTD_buildSequencesStatistics</c> on the codes the store counted: for each code its
     /// mode, its table in <paramref name="next"/> and its description at <paramref name="destination"/>.
     /// </summary>
-    public static Statistics BuildStatistics(SequenceStore store, BlockState previous, BlockState next, byte* destination, Strategy strategy)
+    public static Statistics BuildStatistics(in SequenceSection store, BlockState previous, BlockState next, byte* destination, Strategy strategy)
     {
         nuint sequenceCount = store.SequenceCount;
         byte* op = destination;

@@ -32,6 +32,8 @@ public sealed unsafe partial class ZstdCompressor
     private uint[] _hashTable = [];
     private uint[] _chainTable = [];
     private byte[] _tagTable = [];
+    private uint[] _hashTable3 = [];
+    private OptimalState? _optimal;
     private readonly uint[] _hashCache = GC.AllocateArray<uint>(LazyMatchFinder.RowHashCacheSize, pinned: true);
     private readonly uint[] _candidates = GC.AllocateArray<uint>(64, pinned: true);
     private MatchState _matchState;
@@ -49,11 +51,18 @@ public sealed unsafe partial class ZstdCompressor
     private void BeginFrame(CompressionParameters parameters, byte* source, int sourceSize)
     {
         _parameters = parameters;
-        bool restart = (ulong)_nextIndex + (ulong)sourceSize > IndexLimit;
+        // btultra2 moves the window past its first block once (OptimalMatchFinder): the frame may
+        // reach a block's indices further than its size.
+        uint shift = parameters.Strategy == Strategy.BinaryTreeUltra2 ? (uint)FrameFormat.MaxBlockSize : 0;
+        bool restart = (ulong)_nextIndex + (ulong)sourceSize + shift > IndexLimit;
         bool rows = parameters.UsesRowMatchFinder;
         int hashSize = 1 << parameters.HashLog;
         int chainSize = parameters.Strategy == Strategy.Fast || rows ? 0 : 1 << parameters.ChainLog;
         int tagSize = rows ? hashSize : 0;
+        int hashLog3 = parameters.Strategy >= Strategy.BinaryTreeOptimal && parameters.MinMatch == 3
+            ? Math.Min(OptimalMatchFinder.HashLog3Max, parameters.WindowLog)
+            : 0;
+        int hashSize3 = hashLog3 == 0 ? 0 : 1 << hashLog3;
         if (_hashTable.Length < hashSize)
         {
             _hashTable = GC.AllocateArray<uint>(hashSize, pinned: true);
@@ -81,6 +90,22 @@ public sealed unsafe partial class ZstdCompressor
             Array.Clear(_tagTable);
         }
 
+        if (_hashTable3.Length < hashSize3)
+        {
+            _hashTable3 = GC.AllocateArray<uint>(hashSize3, pinned: true);
+        }
+        else if (restart)
+        {
+            Array.Clear(_hashTable3);
+        }
+
+        if (parameters.Strategy >= Strategy.BinaryTreeOptimal)
+        {
+            // libzstd's ZSTD_invalidateMatchState: the optimal parser's statistics start over.
+            _optimal ??= new OptimalState();
+            _optimal.LiteralLengthSum = 0;
+        }
+
         if (restart)
         {
             _nextIndex = WindowStartIndex;
@@ -97,13 +122,15 @@ public sealed unsafe partial class ZstdCompressor
             HashTable = _hashTable.Length == 0 ? null : (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_hashTable)),
             ChainTable = _chainTable.Length == 0 ? null : (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_chainTable)),
             TagTable = _tagTable.Length == 0 ? null : (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_tagTable)),
+            HashTable3 = _hashTable3.Length == 0 ? null : (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_hashTable3)),
+            HashLog3 = hashLog3,
             HashCache = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_hashCache)),
             Candidates = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_candidates)),
             RowHashLog = parameters.HashLog - Math.Clamp(parameters.SearchLog, 4, 6),
             Parameters = parameters,
         };
 
-        _nextIndex = start + (uint)sourceSize;
+        _nextIndex = start + (uint)sourceSize + shift;
         _previous.Reset();
         _isFirstBlock = true;
     }
@@ -132,9 +159,25 @@ public sealed unsafe partial class ZstdCompressor
                 _matchState.NextToUpdate = _matchState.LowLimit;
             }
 
+            int blockTotal;
+            if (PostSplitterEnabled)
+            {
+                blockTotal = CompressSplitBlock(ip, blockSize, lastBlock, destination + op, capacity - op);
+                if (blockTotal < 0)
+                {
+                    return -1;
+                }
+
+                savings += blockSize - blockTotal;
+                ip += blockSize;
+                remaining -= blockSize;
+                op += blockTotal;
+                _isFirstBlock = false;
+                continue;
+            }
+
             byte* compressed = _blockStart + FrameFormat.BlockHeaderSize;
             nuint size = CompressBlock(compressed, BlockBufferSize - FrameFormat.BlockHeaderSize, ip, blockSize);
-            int blockTotal;
             if (size == 0)
             {
                 // Raw: the block as it is.
@@ -221,7 +264,7 @@ public sealed unsafe partial class ZstdCompressor
         else
         {
             FindSequences(source, size);
-            compressedSize = EntropyCompress(destination, capacity, (nuint)size);
+            compressedSize = EntropyCompress(_store.Whole, destination, capacity, (nuint)size);
             if (!_isFirstBlock && compressedSize < RleMaxLength && IsRle(source, size))
             {
                 // libzstd never makes the first block RLE: zstd up to 1.4.3 refused such frames.
@@ -271,7 +314,8 @@ public sealed unsafe partial class ZstdCompressor
         {
             Strategy.Fast => FastMatchFinder.CompressBlock(ref _matchState, _store, rep, source, (nuint)size),
             Strategy.DoubleFast => DoubleFastMatchFinder.CompressBlock(ref _matchState, _store, rep, source, (nuint)size),
-            _ => LazyMatchFinder.CompressBlock(ref _matchState, _store, rep, source, (nuint)size),
+            < Strategy.BinaryTreeOptimal => LazyMatchFinder.CompressBlock(ref _matchState, _store, rep, source, (nuint)size),
+            _ => OptimalMatchFinder.CompressBlock(ref _matchState, _optimal!, _store, rep, source, (nuint)size),
         };
 
         _store.StoreLastLiterals(source + size - (nint)lastLiterals, lastLiterals);
@@ -294,18 +338,18 @@ public sealed unsafe partial class ZstdCompressor
     /// libzstd's <c>ZSTD_entropyCompressSeqStore</c>: the literals section, then the sequences section.
     /// </summary>
     /// <returns>The size of the compressed block, or 0 when it is not worth it.</returns>
-    private nuint EntropyCompress(byte* destination, nuint capacity, nuint blockSize)
+    private nuint EntropyCompress(in SequenceSection section, byte* destination, nuint capacity, nuint blockSize)
     {
         Strategy strategy = _parameters.Strategy;
         byte* op = destination;
         byte* oend = destination + capacity;
-        nuint sequenceCount = _store.SequenceCount;
-        nuint literalCount = _store.LiteralCount;
+        nuint sequenceCount = section.SequenceCount;
+        nuint literalCount = section.LiteralCount;
 
         // ---- literals; suspected incompressible from their ratio to the sequences
         bool suspectUncompressible = sequenceCount == 0 || literalCount / sequenceCount >= SuspectUncompressibleLiteralRatio;
         bool literalCompressionDisabled = strategy == Strategy.Fast && _parameters.TargetLength > 0;
-        op += CompressLiterals(op, capacity, _store.LiteralsStart, literalCount, literalCompressionDisabled, suspectUncompressible);
+        op += CompressLiterals(op, capacity, section.LiteralsStart, literalCount, literalCompressionDisabled, suspectUncompressible);
 
         // ---- the sequences section's header, then its tables and bitstream
         if (oend - op < 3 + 1)
@@ -322,12 +366,12 @@ public sealed unsafe partial class ZstdCompressor
         else
         {
             byte* modes = op++;
-            SequenceEncoder.Statistics stats = SequenceEncoder.BuildStatistics(_store, _previous, _next, op, strategy);
+            SequenceEncoder.Statistics stats = SequenceEncoder.BuildStatistics(section, _previous, _next, op, strategy);
             *modes = (byte)(((int)stats.LiteralLengths << 6) + ((int)stats.Offsets << 4) + ((int)stats.MatchLengths << 2));
             op += stats.Size;
 
             nuint bitstreamSize = SequenceEncoder.EncodeSequences(
-                op, (nuint)(oend - op), _next.LiteralLengths, _next.Offsets, _next.MatchLengths, _store.SequencesStart, sequenceCount);
+                op, (nuint)(oend - op), _next.LiteralLengths, _next.Offsets, _next.MatchLengths, section.SequencesStart, sequenceCount);
             if (bitstreamSize == 0)
             {
                 return 0;

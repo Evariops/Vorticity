@@ -38,6 +38,12 @@ internal unsafe struct MatchState
     /// <summary>The row-based match finder's tags, a byte beside each entry of <see cref="HashTable"/>.</summary>
     public byte* TagTable;
 
+    /// <summary>libzstd's <c>hashTable3</c>: the optimal parser's 3-byte hashes, for a minimum length of 3.</summary>
+    public uint* HashTable3;
+
+    /// <summary>libzstd's <c>hashLog3</c>.</summary>
+    public int HashLog3;
+
     /// <summary>libzstd's <c>hashCache</c>: the row hashes of the next positions.</summary>
     public uint* HashCache;
 

@@ -194,6 +194,86 @@ internal sealed unsafe class SequenceStore
         sequence++;
     }
 
+    /// <summary>The whole store, as a section the entropy coding takes.</summary>
+    public SequenceSection Whole => new(LiteralsStart, LiteralCount, SequencesStart, SequenceCount, Counts);
+
+    /// <summary>A record's literal length: its code's baseline, plus its extra bits.</summary>
+    public static uint LiteralLengthOf(SequenceRecord* record)
+    {
+        int code = (int)(record->Codes & 0xFF);
+        int bits = LiteralLengthBits[code];
+        return LiteralLengthBaselines[code] + (uint)(record->Extras & ~(ulong.MaxValue << bits));
+    }
+
+    /// <summary>A record's match length: its code's baseline, plus its extra bits, plus 3.</summary>
+    public static uint MatchLengthOf(SequenceRecord* record)
+    {
+        int literalLengthBits = LiteralLengthBits[(int)(record->Codes & 0xFF)];
+        int code = (int)(((record->Codes >> 16) & 0xFF) - MatchLengthCodes);
+        int bits = MatchLengthBits[code];
+        return MatchLengthBaselines[code] + (uint)((record->Extras >> literalLengthBits) & ~(ulong.MaxValue << bits)) + 3;
+    }
+
+    /// <summary>
+    /// A record's offset code replaced, its lengths kept: its codes and extra bits computed again. The
+    /// counts are not changed: whoever replaces counts the codes again.
+    /// </summary>
+    public static void ReplaceOffBase(SequenceRecord* record, uint offBase)
+    {
+        nuint literalLength = LiteralLengthOf(record);
+        nuint matchLength = MatchLengthOf(record);
+        uint* scratch = stackalloc uint[AllCodes];
+        SequenceRecord* sequence = record;
+        StoreOnly(ref sequence, scratch, literalLength, offBase, matchLength);
+    }
+
+    /// <summary>The codes of <paramref name="count"/> records counted into <paramref name="counts"/>, cleared first.</summary>
+    public static void CountCodes(SequenceRecord* records, nuint count, uint* counts)
+    {
+        new Span<uint>(counts, AllCodes).Clear();
+        for (nuint n = 0; n < count; n++)
+        {
+            uint codes = records[n].Codes;
+            counts[codes & 0xFF]++;
+            counts[(codes >> 8) & 0xFF]++;
+            counts[(codes >> 16) & 0xFF]++;
+        }
+    }
+
+    /// <summary>libzstd's <c>LL_bits</c>.</summary>
+    public static ReadOnlySpan<byte> LiteralLengthBits =>
+    [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12,
+        13, 14, 15, 16,
+    ];
+
+    /// <summary>libzstd's <c>ML_bits</c>.</summary>
+    public static ReadOnlySpan<byte> MatchLengthBits =>
+    [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11,
+        12, 13, 14, 15, 16,
+    ];
+
+    /// <summary>The literal length each code starts at.</summary>
+    private static ReadOnlySpan<uint> LiteralLengthBaselines =>
+    [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        16, 18, 20, 22, 24, 28, 32, 40, 48, 64, 0x80, 0x100, 0x200, 0x400, 0x800, 0x1000,
+        0x2000, 0x4000, 0x8000, 0x10000,
+    ];
+
+    /// <summary>The match length less 3 each code starts at.</summary>
+    private static ReadOnlySpan<uint> MatchLengthBaselines =>
+    [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        32, 34, 36, 38, 40, 44, 48, 56, 64, 80, 96, 0x80, 0x100, 0x200, 0x400, 0x800,
+        0x1000, 0x2000, 0x4000, 0x8000, 0x10000,
+    ];
+
     /// <summary>libzstd's <c>LL_Code</c> and <c>LL_bits</c> below 64: <c>code | bits &lt;&lt; 8</c>.</summary>
     private static ReadOnlySpan<ushort> LiteralLengthCodeTable =>
     [
@@ -283,4 +363,31 @@ internal sealed unsafe class SequenceStore
             *destination++ = *source++;
         }
     }
+}
+
+/// <summary>
+/// Sequences and their literals that the entropy coding takes as a block: a whole store, or a part
+/// of it, which libzstd's post-block splitter emits as a block of its own.
+/// </summary>
+internal readonly unsafe struct SequenceSection
+{
+    public SequenceSection(byte* literalsStart, nuint literalCount, SequenceRecord* sequencesStart, nuint sequenceCount, uint* counts)
+    {
+        LiteralsStart = literalsStart;
+        LiteralCount = literalCount;
+        SequencesStart = sequencesStart;
+        SequenceCount = sequenceCount;
+        Counts = counts;
+    }
+
+    public byte* LiteralsStart { get; }
+
+    public nuint LiteralCount { get; }
+
+    public SequenceRecord* SequencesStart { get; }
+
+    public nuint SequenceCount { get; }
+
+    /// <summary>The codes of the sequences counted, at their places (<see cref="SequenceStore.Counts"/>).</summary>
+    public uint* Counts { get; }
 }

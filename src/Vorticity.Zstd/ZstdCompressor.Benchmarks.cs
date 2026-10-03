@@ -125,7 +125,7 @@ public sealed unsafe partial class ZstdCompressor
             block.Counts.CopyTo(new Span<uint>(_store.Counts, SequenceStore.AllCodes));
             if (literals && sequences)
             {
-                total += (long)EntropyCompress(destination, capacity, (nuint)block.Size);
+                total += (long)EntropyCompress(_store.Whole, destination, capacity, (nuint)block.Size);
                 if (block.Compressed)
                 {
                     (_previous, _next) = (_next, _previous);
@@ -149,7 +149,7 @@ public sealed unsafe partial class ZstdCompressor
 
             if (sequences && _store.SequenceCount > 0)
             {
-                SequenceEncoder.Statistics stats = SequenceEncoder.BuildStatistics(_store, _previous, _next, destination, _parameters.Strategy);
+                SequenceEncoder.Statistics stats = SequenceEncoder.BuildStatistics(_store.Whole, _previous, _next, destination, _parameters.Strategy);
                 total += (long)stats.Size;
                 total += (long)SequenceEncoder.EncodeSequences(
                     destination + stats.Size, capacity - stats.Size, _next.LiteralLengths, _next.Offsets, _next.MatchLengths,

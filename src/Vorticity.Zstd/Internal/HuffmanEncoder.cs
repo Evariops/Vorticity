@@ -494,7 +494,10 @@ internal static unsafe class HuffmanEncoder
     /// libzstd's <c>HUF_writeCTable_wksp</c>: the tree as the weights of all symbols but the last,
     /// FSE-compressed when that is shorter than half of them, otherwise four bits each.
     /// </summary>
-    /// <returns>The size of the description.</returns>
+    /// <returns>
+    /// The size of the description; 0 for libzstd's error, when the weights do not compress and are
+    /// too many for four bits each.
+    /// </returns>
     public static nuint WriteCTable(byte* destination, nuint capacity, HuffmanCTable table, uint maxSymbolValue, uint huffLog, FseCTable weightsTable)
     {
         byte* bitsToWeight = stackalloc byte[HuffmanTable.MaxTableLog + 1];
@@ -519,7 +522,7 @@ internal static unsafe class HuffmanEncoder
 
         if (maxSymbolValue > 256 - 128)
         {
-            throw new InvalidOperationException("HUF_writeCTable: too many weights for the direct form");
+            return 0;
         }
 
         destination[0] = (byte)(128 + (maxSymbolValue - 1));
@@ -603,6 +606,11 @@ internal static unsafe class HuffmanEncoder
             }
 
             nuint headerSize = WriteCTable(description, HuffmanTable.MaxSymbols + 64, workspace.Table, maxSymbolValue, maxBits, workspace.Weights);
+            if (headerSize == 0)
+            {
+                continue;
+            }
+
             nuint newSize = EstimateCompressedSize(workspace.Table, count, maxSymbolValue) + headerSize;
             if (newSize > optimalSize + 1)
             {
@@ -955,6 +963,12 @@ internal static unsafe class HuffmanEncoder
         huffLog = BuildCTable(table, count, maxSymbolValue, huffLog);
 
         nuint headerSize = WriteCTable(op, capacity, table, maxSymbolValue, huffLog, workspace.Weights);
+        if (headerSize == 0)
+        {
+            // libzstd's error, which its caller turns into raw literals.
+            return 0;
+        }
+
         if (repeat != HuffmanRepeat.None)
         {
             // The previous tree, unless the new one saves more than its description.

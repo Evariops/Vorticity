@@ -43,7 +43,8 @@ public sealed class CompressionFuzzTests
             {
                 0 => -random.Next(1, 20),
                 1 or 2 => random.Next(1, 5),
-                _ => random.Next(5, 16),
+                3 or 4 => random.Next(5, 16),
+                _ => random.Next(16, 23),
             };
 
             byte[] data = Generate(random, size);
@@ -131,7 +132,7 @@ public sealed class CompressionFuzzTests
 /// <summary>A compressor reused for frames of every kind and size writes each one as a fresh libzstd context would.</summary>
 public sealed class CompressorReuseTests
 {
-    public static TheoryData<int> Levels() => [-5, 1, 2, 3, 4, 5, 6, 8, 10, 12, 13, 15];
+    public static TheoryData<int> Levels() => [-5, 1, 2, 3, 4, 5, 6, 8, 10, 12, 13, 15, 16, 18, 19, 22];
 
     [Theory]
     [MemberData(nameof(Levels))]
