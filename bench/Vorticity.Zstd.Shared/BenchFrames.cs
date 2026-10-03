@@ -31,7 +31,10 @@ internal static class BenchFrames
         _ => Generic(name),
     };
 
-    /// <summary>Any other kind at any level, 1 MiB: <c>kind-L&lt;level&gt;</c>.</summary>
+    /// <summary>
+    /// Any other kind at any level, 1 MiB: <c>kind-L&lt;level&gt;</c>; 16 KiB with a <c>small-</c>
+    /// prefix, the size up to which libzstd's lazy levels search hash chains rather than rows.
+    /// </summary>
     private static byte[] Generic(string name)
     {
         int dash = name.LastIndexOf("-L", StringComparison.Ordinal);
@@ -40,7 +43,10 @@ internal static class BenchFrames
             throw new ArgumentException("unknown frame " + name, nameof(name));
         }
 
-        return Compress(name[..dash], 1 << 20, level);
+        string kind = name[..dash];
+        return kind.StartsWith("small-", StringComparison.Ordinal)
+            ? Compress(kind["small-".Length..], 16 << 10, level)
+            : Compress(kind, 1 << 20, level);
     }
 
     /// <summary>

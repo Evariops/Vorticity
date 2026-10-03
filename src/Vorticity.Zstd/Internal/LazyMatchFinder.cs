@@ -332,34 +332,34 @@ internal readonly unsafe struct HashChainSearch<THash> : ILazySearch
     {
         uint* chainTable = state.ChainTable;
         uint chainSize = 1u << state.Parameters.ChainLog;
-        uint chainMask = chainSize - 1;
+        nuint chainMask = chainSize - 1;
         byte* @base = state.Base;
         uint current = (uint)(ip - @base);
-        uint lowLimit = state.LowestMatchIndex(current);
-        uint minChain = current > chainSize ? current - chainSize : 0;
+        nuint lowLimit = state.LowestMatchIndex(current);
+        nuint minChain = current > chainSize ? current - chainSize : 0;
         uint attempts = 1u << state.Parameters.SearchLog;
-        nuint bestLength = 4 - 1;
 
-        uint matchIndex = InsertAndFindFirstIndex(ref state, ip);
+        // The chain's indices are native integers, read from the table as such: as 32-bit ones, the
+        // JIT zero-extended and scaled each in an instruction of its own, on the walk's dependent chain.
+        nuint matchIndex = InsertAndFindFirstIndex(ref state, ip);
+        nuint bestLength = 4 - 1;
         for (; (matchIndex >= lowLimit) & (attempts > 0); attempts--)
         {
-            nuint length = 0;
             byte* match = @base + matchIndex;
 
             // The four bytes that end one past the best length: a longer match has them.
             if (Read32(match + bestLength - 3) == Read32(ip + bestLength - 3))
             {
-                length = Count(ip, match, end);
-            }
-
-            if (length > bestLength)
-            {
-                bestLength = length;
-                offBase = OffsetToOffBase(current - matchIndex);
-                if (ip + length == end)
+                nuint length = Count(ip, match, end);
+                if (length > bestLength)
                 {
-                    // The longest possible, and reading further would pass the end.
-                    break;
+                    bestLength = length;
+                    offBase = OffsetToOffBase(current - (uint)matchIndex);
+                    if (ip + length == end)
+                    {
+                        // The longest possible, and reading further would pass the end.
+                        break;
+                    }
                 }
             }
 
@@ -377,7 +377,9 @@ internal readonly unsafe struct HashChainSearch<THash> : ILazySearch
     /// <summary>
     /// libzstd's <c>ZSTD_insertAndFindFirstIndex_internal</c>: the positions up to <paramref name="ip"/>
     /// (excluded) into the chains, only one when skipping; the head of <paramref name="ip"/>'s chain.
+    /// Inlined: across a call, the search's best length lived on the stack.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static uint InsertAndFindFirstIndex(ref MatchState state, byte* ip)
     {
         uint* hashTable = state.HashTable;
