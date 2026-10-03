@@ -50,13 +50,29 @@ internal sealed unsafe class HuffmanCTable
 }
 
 /// <summary>The tables a Huffman compression builds before it knows whether it keeps them.</summary>
-internal sealed class HuffmanWorkspace
+internal sealed unsafe class HuffmanWorkspace
 {
+    /// <summary>
+    /// The room for one of four streams: a quarter of the largest block at 12 bits a symbol, and the
+    /// eight bytes a flush writes past the stream's end. One stream of a whole block fits the four.
+    /// </summary>
+    public const int StreamCapacity = (((FrameFormat.MaxBlockSize / 4) * HuffmanTable.MaxTableLog) / 8) + 64;
+
     /// <summary>libzstd's <c>table->CTable</c>: the new tree.</summary>
     public readonly HuffmanCTable Table = new();
 
     /// <summary>The encoding table of the tree's weights.</summary>
     public readonly FseCTable Weights = new(HuffmanEncoder.WeightsMaxTableLog, HuffmanTable.MaxTableLog);
+
+    private readonly byte[] _streams = GC.AllocateUninitializedArray<byte>(4 * StreamCapacity, pinned: true);
+
+    public HuffmanWorkspace()
+    {
+        Streams = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_streams));
+    }
+
+    /// <summary>Four streams of <see cref="StreamCapacity"/> bytes, which the streams are encoded into.</summary>
+    public byte* Streams { get; }
 }
 
 /// <summary>libzstd's <c>huf_compress.c</c>: the Huffman trees and streams of the literals.</summary>
@@ -608,77 +624,252 @@ internal static unsafe class HuffmanEncoder
     /// that the decoder reads them from the first.
     /// </summary>
     /// <returns>The size of the stream, or 0 when it does not fit.</returns>
-    public static nuint Compress1X(byte* destination, nuint capacity, byte* source, nuint size, HuffmanCTable table)
+    public static nuint Compress1X(byte* destination, nuint capacity, byte* source, nuint size, HuffmanCTable table, HuffmanWorkspace workspace)
     {
-        if (capacity < 8)
+        byte* stream = workspace.Streams;
+        nuint bits = EncodeStream(source, size, table.Elements, stream);
+        nuint compressed = StreamSize(bits, capacity);
+        if (compressed != 0)
         {
-            return 0;
+            Buffer.MemoryCopy(stream, destination, compressed, compressed);
         }
 
-        var bits = new HuffmanWriter(destination, capacity);
-        if (!bits.IsValid)
-        {
-            return 0;
-        }
-
-        ulong* elements = table.Elements;
-        for (nuint n = size; n > 0;)
-        {
-            bits.Add(elements[source[--n]]);
-            if (bits.BitPosition > 64 - HuffmanTable.MaxTableLog)
-            {
-                bits.Flush();
-            }
-        }
-
-        return bits.Close();
+        return compressed;
     }
 
     /// <summary>
     /// libzstd's <c>HUF_compress4X_usingCTable_internal</c>: a jump table of three sizes, then four
     /// streams, each a quarter of the symbols rounded up, the last taking what remains.
     /// </summary>
+    /// <remarks>
+    /// The four streams are encoded together (see <see cref="EncodeFourStreams"/>), each into its own
+    /// buffer, then copied after the jump table: written in place, a stream's last flushes, eight
+    /// bytes wide, would overwrite the start of the next one, written long before. libzstd's
+    /// decisions follow from the exact size of each stream: one that does not fit the capacity left
+    /// for it, or exceeds 64 KiB, makes the section incompressible.
+    /// </remarks>
     /// <returns>The size of the section, or 0 when it does not fit or a stream exceeds 64 KiB.</returns>
-    public static nuint Compress4X(byte* destination, nuint capacity, byte* source, nuint size, HuffmanCTable table)
+    public static nuint Compress4X(byte* destination, nuint capacity, byte* source, nuint size, HuffmanCTable table, HuffmanWorkspace workspace)
     {
-        nuint segmentSize = (size + 3) / 4;
-        byte* ip = source;
-        byte* iend = source + size;
-        byte* oend = destination + capacity;
-        byte* op = destination;
         if (capacity < 6 + 1 + 1 + 1 + 8 || size < 12)
         {
             return 0;
         }
 
-        op += 6;
-        for (int stream = 0; stream < 4; stream++)
+        nuint segment = (size + 3) / 4;
+        nuint* bits = stackalloc nuint[4];
+        byte* streams = workspace.Streams;
+        EncodeFourStreams(source, segment, size - (3 * segment), table.Elements, streams, bits);
+
+        byte* op = destination + 6;
+        byte* oend = destination + capacity;
+        nuint* sizes = stackalloc nuint[4];
+        for (int k = 0; k < 4; k++)
         {
-            nuint length = stream < 3 ? segmentSize : (nuint)(iend - ip);
-            nuint compressed = Compress1X(op, (nuint)(oend - op), ip, length, table);
+            nuint compressed = StreamSize(bits[k], (nuint)(oend - op));
             if (compressed == 0 || compressed > 65535)
             {
                 return 0;
             }
 
-            if (stream < 3)
+            sizes[k] = compressed;
+            op += compressed;
+        }
+
+        op = destination + 6;
+        for (int k = 0; k < 4; k++)
+        {
+            if (k < 3)
             {
-                Unsafe.WriteUnaligned(destination + (2 * stream), (ushort)compressed);
+                Unsafe.WriteUnaligned(destination + (2 * k), (ushort)sizes[k]);
             }
 
-            op += compressed;
-            ip += length;
+            Buffer.MemoryCopy(streams + ((nuint)k * HuffmanWorkspace.StreamCapacity), op, sizes[k], sizes[k]);
+            op += sizes[k];
         }
 
         return (nuint)(op - destination);
     }
 
+    /// <summary>
+    /// What libzstd's one-stream encoder returns for a stream of <paramref name="bits"/> bits (its end
+    /// marker included) given <paramref name="capacity"/> bytes: its size in bytes, or 0 when the
+    /// capacity is under eight bytes, or when the stream reaches the last eight (where libzstd's
+    /// writer stops and reports the overflow).
+    /// </summary>
+    private static nuint StreamSize(nuint bits, nuint capacity)
+    {
+        if (capacity <= 8 || (bits >> 3) + 8 >= capacity)
+        {
+            return 0;
+        }
+
+        return (bits + 7) >> 3;
+    }
+
+    /// <summary>
+    /// One stream of <paramref name="size"/> symbols into <paramref name="output"/>, from the last
+    /// symbol: libzstd's <c>HUF_compress1X_usingCTable_internal_body</c> with its fast adds.
+    /// </summary>
+    /// <returns>The number of bits of the stream, its end marker included.</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static nuint EncodeStream(byte* source, nuint size, ulong* elements, byte* output)
+    {
+        ulong container = 0;
+        nuint position = 0;
+        byte* ptr = output;
+        byte* p = source + size;
+        while (p >= source + 4)
+        {
+            p -= 4;
+            Add(ref container, ref position, elements[p[3]]);
+            Add(ref container, ref position, elements[p[2]]);
+            Add(ref container, ref position, elements[p[1]]);
+            Add(ref container, ref position, elements[p[0]]);
+            Flush(ref container, ref position, ref ptr);
+        }
+
+        while (p > source)
+        {
+            Add(ref container, ref position, elements[*--p]);
+        }
+
+        return Close(ref container, ref position, ref ptr, output);
+    }
+
+    /// <summary>
+    /// The four streams of <see cref="Compress4X"/> together: four containers, each symbol a shift, an
+    /// or and an add on its stream's chain, so that the four chains run side by side. Stream k takes
+    /// the symbols of segment k from its last, into the buffer at k x
+    /// <see cref="HuffmanWorkspace.StreamCapacity"/>; the three first segments are one to three
+    /// symbols longer than the last, which their streams take first.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void EncodeFourStreams(byte* source, nuint segment, nuint lastLength, ulong* elements, byte* output, nuint* bits)
+    {
+        byte* out0 = output;
+        byte* out1 = output + HuffmanWorkspace.StreamCapacity;
+        byte* out2 = output + (2 * HuffmanWorkspace.StreamCapacity);
+        byte* out3 = output + (3 * HuffmanWorkspace.StreamCapacity);
+        byte* ptr0 = out0;
+        byte* ptr1 = out1;
+        byte* ptr2 = out2;
+        byte* ptr3 = out3;
+        ulong c0 = 0;
+        ulong c1 = 0;
+        ulong c2 = 0;
+        ulong c3 = 0;
+        nuint b0 = 0;
+        nuint b1 = 0;
+        nuint b2 = 0;
+        nuint b3 = 0;
+
+        // Each stream from the end of its segment.
+        byte* p0 = source + segment;
+        byte* p1 = p0 + segment;
+        byte* p2 = p1 + segment;
+        byte* end3 = p2;
+        byte* p3 = end3 + lastLength;
+        for (nuint extra = segment - lastLength; extra > 0; extra--)
+        {
+            Add(ref c0, ref b0, elements[*--p0]);
+            Add(ref c1, ref b1, elements[*--p1]);
+            Add(ref c2, ref b2, elements[*--p2]);
+        }
+
+        // Up to 36 bits: out before the rounds add 48. With none, the flushes write nothing that stays.
+        Flush(ref c0, ref b0, ref ptr0);
+        Flush(ref c1, ref b1, ref ptr1);
+        Flush(ref c2, ref b2, ref ptr2);
+        // The symbols at fixed offsets from cursors moved once a round.
+        while (p3 >= end3 + 4)
+        {
+            p0 -= 4;
+            p1 -= 4;
+            p2 -= 4;
+            p3 -= 4;
+            Add(ref c0, ref b0, elements[p0[3]]);
+            Add(ref c1, ref b1, elements[p1[3]]);
+            Add(ref c2, ref b2, elements[p2[3]]);
+            Add(ref c3, ref b3, elements[p3[3]]);
+            Add(ref c0, ref b0, elements[p0[2]]);
+            Add(ref c1, ref b1, elements[p1[2]]);
+            Add(ref c2, ref b2, elements[p2[2]]);
+            Add(ref c3, ref b3, elements[p3[2]]);
+            Add(ref c0, ref b0, elements[p0[1]]);
+            Add(ref c1, ref b1, elements[p1[1]]);
+            Add(ref c2, ref b2, elements[p2[1]]);
+            Add(ref c3, ref b3, elements[p3[1]]);
+            Add(ref c0, ref b0, elements[p0[0]]);
+            Add(ref c1, ref b1, elements[p1[0]]);
+            Add(ref c2, ref b2, elements[p2[0]]);
+            Add(ref c3, ref b3, elements[p3[0]]);
+            Flush(ref c0, ref b0, ref ptr0);
+            Flush(ref c1, ref b1, ref ptr1);
+            Flush(ref c2, ref b2, ref ptr2);
+            Flush(ref c3, ref b3, ref ptr3);
+        }
+
+        while (p3 > end3)
+        {
+            Add(ref c0, ref b0, elements[*--p0]);
+            Add(ref c1, ref b1, elements[*--p1]);
+            Add(ref c2, ref b2, elements[*--p2]);
+            Add(ref c3, ref b3, elements[*--p3]);
+        }
+
+        bits[0] = Close(ref c0, ref b0, ref ptr0, out0);
+        bits[1] = Close(ref c1, ref b1, ref ptr1, out1);
+        bits[2] = Close(ref c2, ref b2, ref ptr2, out2);
+        bits[3] = Close(ref c3, ref b3, ref ptr3, out3);
+    }
+
+    /// <summary>
+    /// libzstd's <c>HUF_addBits</c> in its fast form: the container shifts right by the element, whose
+    /// low six bits are the code's length, and takes the element whole, the code in its top bits and
+    /// the length in its low byte, where it lands below the bits in use. The position adds the element
+    /// whole too, of which only the low byte is read. Four codes of 12 bits at most, after at most 7
+    /// bits left by a flush, keep the bits in use clear of the low byte.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Add(ref ulong container, ref nuint position, ulong element)
+    {
+        container = (container >> (int)element) | element;
+        position += (nuint)element;
+    }
+
+    /// <summary>libzstd's <c>HUF_flushBits</c>: the whole bytes out, from the top of the container.</summary>
+    /// <remarks>
+    /// The count of bits is the low byte of the position, 63 at most: the shift by its negation, which
+    /// takes the low six bits, is the shift by 64 minus the count. With no bits, the container is
+    /// written whole and the cursor stays: the next flush writes over it.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void Flush(ref ulong container, ref nuint position, ref byte* ptr)
+    {
+        Unsafe.WriteUnaligned(ptr, container >> (int)(0 - position));
+        ptr += (position >> 3) & 0x1F;
+        position &= 7;
+    }
+
+    /// <summary>libzstd's <c>HUF_closeCStream</c>: the end marker, then the last bytes.</summary>
+    /// <returns>The number of bits of the stream.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static nuint Close(ref ulong container, ref nuint position, ref byte* ptr, byte* start)
+    {
+        Flush(ref container, ref position, ref ptr);
+        Add(ref container, ref position, 1UL | (1UL << 63));
+        Flush(ref container, ref position, ref ptr);
+        return ((nuint)(ptr - start) * 8) + (position & 7);
+    }
+
     /// <summary>libzstd's <c>HUF_compressCTable_internal</c>: refused unless it saves two bytes or more.</summary>
-    private static nuint CompressWithTable(byte* start, byte* op, byte* end, byte* source, nuint size, bool singleStream, HuffmanCTable table)
+    private static nuint CompressWithTable(
+        byte* start, byte* op, byte* end, byte* source, nuint size, bool singleStream, HuffmanCTable table, HuffmanWorkspace workspace)
     {
         nuint compressed = singleStream
-            ? Compress1X(op, (nuint)(end - op), source, size, table)
-            : Compress4X(op, (nuint)(end - op), source, size, table);
+            ? Compress1X(op, (nuint)(end - op), source, size, table, workspace)
+            : Compress4X(op, (nuint)(end - op), source, size, table, workspace);
         if (compressed == 0)
         {
             return 0;
@@ -720,7 +911,7 @@ internal static unsafe class HuffmanEncoder
         // A valid previous tree for a small input.
         if (preferRepeat && repeat == HuffmanRepeat.Valid)
         {
-            return CompressWithTable(destination, op, end, source, size, singleStream, previous);
+            return CompressWithTable(destination, op, end, source, size, singleStream, previous, workspace);
         }
 
         uint* count = stackalloc uint[HuffmanTable.MaxSymbols];
@@ -756,7 +947,7 @@ internal static unsafe class HuffmanEncoder
 
         if (preferRepeat && repeat != HuffmanRepeat.None)
         {
-            return CompressWithTable(destination, op, end, source, size, singleStream, previous);
+            return CompressWithTable(destination, op, end, source, size, singleStream, previous, workspace);
         }
 
         HuffmanCTable table = workspace.Table;
@@ -771,7 +962,7 @@ internal static unsafe class HuffmanEncoder
             nuint newSize = EstimateCompressedSize(table, count, maxSymbolValue);
             if (oldSize <= headerSize + newSize || headerSize + 12 >= size)
             {
-                return CompressWithTable(destination, op, end, source, size, singleStream, previous);
+                return CompressWithTable(destination, op, end, source, size, singleStream, previous, workspace);
             }
         }
 
@@ -783,74 +974,6 @@ internal static unsafe class HuffmanEncoder
         op += headerSize;
         repeat = HuffmanRepeat.None;
         previous.CopyFrom(table);
-        return CompressWithTable(destination, op, end, source, size, singleStream, table);
-    }
-}
-
-/// <summary>
-/// libzstd's <c>HUF_CStream_t</c>, one container: codes added at the top as the container shifts
-/// right, flushed from the top. The bytes are those of a <see cref="BitWriter"/> adding each code.
-/// </summary>
-internal unsafe struct HuffmanWriter
-{
-    private ulong _container;
-    private int _bitPosition;
-    private readonly byte* _start;
-    private byte* _ptr;
-    private readonly byte* _end;
-
-    public HuffmanWriter(byte* start, nuint capacity)
-    {
-        _start = start;
-        _ptr = start;
-        _end = start + capacity - sizeof(ulong);
-        IsValid = capacity > sizeof(ulong);
-    }
-
-    public readonly bool IsValid { get; }
-
-    public readonly int BitPosition => _bitPosition;
-
-    /// <summary>libzstd's <c>HUF_addBits</c>: a code, from its <see cref="HuffmanCTable"/> element.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Add(ulong element)
-    {
-        int nbBits = (int)(element & 0xFF);
-        _container = (_container >> nbBits) | (element & ~0xFFUL);
-        _bitPosition += nbBits;
-    }
-
-    /// <summary>libzstd's <c>HUF_flushBits</c>: the whole bytes out, never past <see cref="_end"/>.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Flush()
-    {
-        int nbBits = _bitPosition;
-        if (nbBits == 0)
-        {
-            return;
-        }
-
-        Unsafe.WriteUnaligned(_ptr, _container >> (64 - nbBits));
-        _ptr += nbBits >> 3;
-        if (_ptr > _end)
-        {
-            _ptr = _end;
-        }
-
-        _bitPosition &= 7;
-    }
-
-    /// <summary>libzstd's <c>HUF_closeCStream</c>: the end marker, then the last bytes.</summary>
-    /// <returns>The size of the stream, or 0 when it did not fit.</returns>
-    public nuint Close()
-    {
-        Add(1UL | (1UL << 63));
-        Flush();
-        if (_ptr >= _end)
-        {
-            return 0;
-        }
-
-        return (nuint)(_ptr - _start) + (_bitPosition > 0 ? 1u : 0u);
+        return CompressWithTable(destination, op, end, source, size, singleStream, table, workspace);
     }
 }

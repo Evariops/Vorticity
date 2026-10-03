@@ -12,7 +12,7 @@ namespace Vorticity.Zstd.Perf;
 /// block are taken from the frame itself, then each step is timed alone, many times over.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|cmatch|centropy|cliterals|csequences [--frames a,b] [--repeat N]</c>, the repeats
+/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|cmatch|centropy|cliterals|chist|csequences [--frames a,b] [--repeat N]</c>, the repeats
 /// for a profiler to attach. Prints the median time
 /// of one operation, and its cycles at the clock the M4 Pro's performance cores run (4.44 GHz).
 /// </remarks>
@@ -146,6 +146,7 @@ internal static class Micro
                 case "cmatch":
                 case "centropy":
                 case "cliterals":
+                case "chist":
                 case "csequences":
                 {
                     // Compression's stages alone, on the blocks a real compression of the frame's
@@ -175,6 +176,10 @@ internal static class Micro
                             Report(name, $"literals, {literals} literals, per sequence", sequences, literals,
                                 () => compressor.EntropyOnly(records, level, literals: true, sequences: false));
                             break;
+                        case "chist":
+                            Report(name, $"literal histograms, {literals} literals, per sequence", sequences, literals,
+                                () => HistogramsOnly(records));
+                            break;
                         default:
                             Report(name, $"sequences section, {sequences} sequences, per sequence", sequences, sequences,
                                 () => compressor.EntropyOnly(records, level, literals: false, sequences: true));
@@ -185,12 +190,28 @@ internal static class Micro
                 }
 
                 default:
-                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, cmatch, centropy, cliterals, csequences");
+                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, cmatch, centropy, cliterals, chist, csequences");
                     return 1;
             }
         }
 
         return 0;
+    }
+
+    /// <summary>The histogram of each block's literals, as literals compression counts them.</summary>
+    private static unsafe uint HistogramsOnly(List<ZstdCompressor.BlockRecord> records)
+    {
+        uint* count = stackalloc uint[256];
+        uint total = 0;
+        foreach (ZstdCompressor.BlockRecord record in records)
+        {
+            fixed (byte* literals = record.Literals)
+            {
+                total += Histogram.CountFast(count, out _, literals, (nuint)record.Literals.Length);
+            }
+        }
+
+        return total;
     }
 
     private static void Report(string frame, string what, int operations, int cells, Action body)

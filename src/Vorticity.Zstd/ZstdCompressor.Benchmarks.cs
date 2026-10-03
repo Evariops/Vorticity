@@ -115,7 +115,11 @@ public sealed unsafe partial class ZstdCompressor
 
             _store.Reset();
             block.Literals.CopyTo(new Span<byte>(_store.LiteralsStart, block.Literals.Length));
-            block.Sequences.CopyTo(new Span<SequenceRecord>(_store.SequencesStart, block.Sequences.Length));
+            if (sequences)
+            {
+                block.Sequences.CopyTo(new Span<SequenceRecord>(_store.SequencesStart, block.Sequences.Length));
+            }
+
             _store.Literals = _store.LiteralsStart + block.Literals.Length;
             _store.Sequences = _store.SequencesStart + block.Sequences.Length;
             block.Counts.CopyTo(new Span<uint>(_store.Counts, SequenceStore.AllCodes));
