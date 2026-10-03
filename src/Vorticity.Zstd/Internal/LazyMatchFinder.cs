@@ -1294,12 +1294,13 @@ internal readonly struct Row64 : IRowLog
 /// </summary>
 /// <remarks>
 /// <para>
-/// libzstd salts its hash with a value that changes at every reset of a context, so that the entries
-/// left by earlier frames seldom match. The salt is XORed into the hash before its shift: it relabels
-/// the rows and the tags, without changing which positions share them, and an entry from an earlier
-/// frame is older than any of the frame's own in its row, where the search stops at the first entry
-/// below the window. The frames are the same without it, as libzstd's own are from a fresh context
-/// and a reused one.
+/// The hash is salted, as libzstd salts it (<c>ZSTD_hashPtrSalted</c>), with a value that changes at
+/// every frame (<see cref="MatchState.RowHashSalt"/>), XORed in before its shift: it relabels the rows
+/// and the tags, without changing which positions share them, so the frames are the same whatever
+/// the salt. What it changes is where the entries of earlier frames lie: without it, a frame of the
+/// same content as the last finds the last's entry of each position in its row, under its tag, and
+/// reads it before it stops there (it is below the window); with it, they are scattered over other
+/// rows and tags.
 /// </para>
 /// <para>
 /// The first byte of each row of tags is the row's head, the newest entry's place: the entries fill
@@ -1329,11 +1330,12 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
         Prepare(ref state);
         byte* @base = state.Base;
         ulong multiplier = state.RowHashMultiplier;
+        ulong salt = state.RowHashSalt;
         int shift = state.RowHashShift;
         uint target = (uint)(ip - @base);
         for (uint index = state.NextToUpdate; index < target; index++)
         {
-            Insert(state.TagTable, state.HashTable, (nuint)((Read64(@base + index) * multiplier) >> shift), index);
+            Insert(state.TagTable, state.HashTable, (nuint)(((Read64(@base + index) * multiplier) ^ salt) >> shift), index);
         }
 
         state.NextToUpdate = target;
@@ -1381,19 +1383,20 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
 
             uint* cache = state.HashCache;
             ulong multiplier = state.RowHashMultiplier;
+            ulong salt = state.RowHashSalt;
             int shift = state.RowHashShift;
             for (; index < current; index++)
             {
-                nuint indexHash = NextCachedHash(cache, @base, index, multiplier, shift, tagTable, hashTable, ref read);
+                nuint indexHash = NextCachedHash(cache, @base, index, multiplier, salt, shift, tagTable, hashTable, ref read);
                 Insert(tagTable, hashTable, indexHash, index);
             }
 
             state.NextToUpdate = current;
-            hash = NextCachedHash(cache, @base, current, multiplier, shift, tagTable, hashTable, ref read);
+            hash = NextCachedHash(cache, @base, current, multiplier, salt, shift, tagTable, hashTable, ref read);
         }
         else
         {
-            hash = (nuint)((Read64(ip) * state.RowHashMultiplier) >> state.RowHashShift);
+            hash = (nuint)(((Read64(ip) * state.RowHashMultiplier) ^ state.RowHashSalt) >> state.RowHashShift);
             state.NextToUpdate = current;
         }
 
@@ -1566,13 +1569,14 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
         byte* @base = state.Base;
         uint* cache = state.HashCache;
         ulong multiplier = state.RowHashMultiplier;
+        ulong salt = state.RowHashSalt;
         int shift = state.RowHashShift;
         uint read = 0;
         uint available = @base + index > limit ? 0 : (uint)(limit - (@base + index) + 1);
         uint end = index + Math.Min(LazyMatchFinder.RowHashCacheSize, available);
         for (; index < end; index++)
         {
-            nuint hash = (nuint)((Read64(@base + index) * multiplier) >> shift);
+            nuint hash = (nuint)(((Read64(@base + index) * multiplier) ^ salt) >> shift);
             cache[index & (LazyMatchFinder.RowHashCacheSize - 1)] = (uint)hash;
             nuint relativeRow = RowOf(hash);
             read += state.TagTable[relativeRow] + state.HashTable[relativeRow];
@@ -1594,11 +1598,12 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
         byte* @base = state.Base;
         uint* cache = state.HashCache;
         ulong multiplier = state.RowHashMultiplier;
+        ulong salt = state.RowHashSalt;
         int shift = state.RowHashShift;
         uint read = 0;
         for (uint end = index + MaxMatchStartPositionsToUpdate; index < end; index++)
         {
-            nuint hash = NextCachedHash(cache, @base, index, multiplier, shift, state.TagTable, state.HashTable, ref read);
+            nuint hash = NextCachedHash(cache, @base, index, multiplier, salt, shift, state.TagTable, state.HashTable, ref read);
             Insert(state.TagTable, state.HashTable, hash, index);
         }
 
@@ -1627,11 +1632,11 @@ internal readonly unsafe struct RowSearch<THash, TRow, TDictionary> : ILazySearc
     /// <remarks>Hashes are native integers, the shift leaving them 32 bits: no extension before their rows.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static nuint NextCachedHash(
-        uint* cache, byte* @base, uint index, ulong multiplier, int shift, byte* tagTable, uint* hashTable, ref uint read)
+        uint* cache, byte* @base, uint index, ulong multiplier, ulong salt, int shift, byte* tagTable, uint* hashTable, ref uint read)
     {
         uint* slot = cache + (index & (LazyMatchFinder.RowHashCacheSize - 1));
         nuint hash = *slot;
-        nuint next = (nuint)((Read64(@base + index + LazyMatchFinder.RowHashCacheSize) * multiplier) >> shift);
+        nuint next = (nuint)(((Read64(@base + index + LazyMatchFinder.RowHashCacheSize) * multiplier) ^ salt) >> shift);
         *slot = (uint)next;
         nuint nextRow = RowOf(next);
         read += tagTable[nextRow] + hashTable[nextRow];

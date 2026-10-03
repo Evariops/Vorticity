@@ -205,7 +205,9 @@ public sealed unsafe partial class ZstdCompressor
 
         if (parameters.UsesRowMatchFinder)
         {
+            // The dictionary's rows and tags, hashed without salt: the frame's hashes find them so.
             Buffer.MemoryCopy(prepared->TagTable, _matchState.TagTable, hashSize, hashSize);
+            _matchState.RowHashSalt = 0;
         }
 
         if (_matchState.HashLog3 != 0)

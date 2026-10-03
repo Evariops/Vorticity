@@ -78,6 +78,13 @@ internal unsafe struct MatchState
     /// </summary>
     public ulong RowHashMultiplier;
 
+    /// <summary>
+    /// libzstd's <c>hashSalt</c>: XORed into the row hashes before their shift, a new one each frame
+    /// (see <see cref="RowSearch{THash, TRow, TDictionary}"/>); 0 for a prepared dictionary's tables
+    /// and for a frame that copies them.
+    /// </summary>
+    public ulong RowHashSalt;
+
     /// <summary>The row hash's shift: 64 less its bits, the row's and the tag's.</summary>
     public int RowHashShift;
 

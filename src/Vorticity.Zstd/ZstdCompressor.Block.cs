@@ -56,6 +56,9 @@ public sealed unsafe partial class ZstdCompressor
     /// <summary>The index the next frame starts at: where the last one ended.</summary>
     private uint _nextIndex = WindowStartIndex;
 
+    /// <summary>The last frame's <see cref="MatchState.RowHashSalt"/>, of which the next frame's is drawn.</summary>
+    private ulong _rowHashSalt;
+
     /// <summary>
     /// libzstd's <c>ZSTD_resetCCtx_internal</c> for a frame: the tables sized for its parameters, the
     /// window placed after the last frame's (restarting, tables cleared, only near the index limit),
@@ -115,6 +118,7 @@ public sealed unsafe partial class ZstdCompressor
         }
 
         Array.Clear(_hashCache);
+        _rowHashSalt = NextSalt(_rowHashSalt);
         uint start = Math.Max(_nextIndex, minimumStart);
         _matchState = new MatchState
         {
@@ -131,12 +135,25 @@ public sealed unsafe partial class ZstdCompressor
             HashCache = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_hashCache)),
             Candidates = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_candidates)),
             RowHashLog = parameters.HashLog - Math.Clamp(parameters.SearchLog, 4, 6),
+            RowHashSalt = _rowHashSalt,
             Parameters = parameters,
         };
 
         _nextIndex = start + (uint)sourceSize + shift;
         _previous.Reset();
         _isFirstBlock = true;
+    }
+
+    /// <summary>
+    /// The salt of a frame's row hashes after <paramref name="salt"/>, the last one's: a step of
+    /// SplitMix64, whose every bit changes, those the rows and tags take with them.
+    /// </summary>
+    private static ulong NextSalt(ulong salt)
+    {
+        ulong z = salt + 0x9E3779B97F4A7C15;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EB;
+        return z ^ (z >> 31);
     }
 
     /// <summary>
