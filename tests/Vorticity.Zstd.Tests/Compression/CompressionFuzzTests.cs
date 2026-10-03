@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using Vorticity.Zstd.Internal;
 using Vorticity.Zstd.Tests.Differential;
 using Vorticity.Zstd.Tests.Support;
 using Xunit;
@@ -13,7 +14,8 @@ namespace Vorticity.Zstd.Tests.Compression;
 /// Random content, built to exercise the match finders (copies from every distance, runs, noise,
 /// text), compressed at random levels by compressors that are reused from frame to frame, from
 /// sources placed against inaccessible pages: any read past the source faults. Every frame must be
-/// libzstd's wherever the level is implemented, and must decode to its content.
+/// libzstd's wherever the level is implemented, and must decode to its content. A third of the
+/// optimal parsers' frames are made with the long-distance matcher asked for.
 /// </summary>
 /// <remarks><c>VORTICITY_ZSTD_FUZZ_ITERATIONS</c> sets the number of frames per seed (default 300).</remarks>
 public sealed class CompressionFuzzTests
@@ -28,7 +30,7 @@ public sealed class CompressionFuzzTests
     public void Random_content_compresses_like_libzstd(int seed)
     {
         var random = new Random(seed);
-        var compressors = new Dictionary<int, ZstdCompressor>();
+        var compressors = new Dictionary<(int, bool), ZstdCompressor>();
         using var source = new GuardedBuffer(1 << 20);
         for (int iteration = 0; iteration < Iterations; iteration++)
         {
@@ -47,24 +49,25 @@ public sealed class CompressionFuzzTests
                 _ => random.Next(16, 23),
             };
 
+            bool longDistance = CompressionParameters.LibzstdStrategy(level, size) >= Strategy.BinaryTreeOptimal && random.Next(3) == 0;
             byte[] data = Generate(random, size);
             Span<byte> src = random.Next(2) == 0 ? source.AtEnd(size) : source.AtStart(size);
             data.CopyTo(src);
 
-            if (!compressors.TryGetValue(level, out ZstdCompressor? compressor))
+            if (!compressors.TryGetValue((level, longDistance), out ZstdCompressor? compressor))
             {
-                compressor = new ZstdCompressor(level);
-                compressors.Add(level, compressor);
+                compressor = new ZstdCompressor(level) { LongDistanceMatching = longDistance };
+                compressors.Add((level, longDistance), compressor);
             }
 
             byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(size)];
             OperationStatus status = compressor.Compress(src, output, out int consumed, out int written);
-            string name = $"seed {seed}, iteration {iteration}: {size} bytes at level {level}";
+            string name = $"seed {seed}, iteration {iteration}: {size} bytes at level {level}{(longDistance ? " with ldm" : string.Empty)}";
             Assert.True(status == OperationStatus.Done, name);
             Assert.Equal(size, consumed);
             if (CompressionCorpus.IsByteExact(level, size))
             {
-                Corpus.AssertSameBytes(CompressionCorpus.Libzstd(data, level, checksum: false), output.AsSpan(0, written), name);
+                Corpus.AssertSameBytes(CompressionCorpus.Libzstd(data, level, checksum: false, longDistance), output.AsSpan(0, written), name);
             }
 
             CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name);

@@ -157,7 +157,11 @@ internal struct CompressionParameters
     /// </summary>
     /// <param name="level">A level from <see cref="MinLevel"/> to <see cref="MaxLevel"/>; 0 is the default.</param>
     /// <param name="sourceSize">The size of the frame's content.</param>
-    public static CompressionParameters ForFrame(int level, long sourceSize)
+    /// <param name="longDistanceMatching">
+    /// Whether the long-distance matcher is asked for, as by <c>ZSTD_c_enableLongDistanceMatching</c>,
+    /// rather than left to libzstd (<see cref="LongDistanceMatcher.EnabledFor"/>).
+    /// </param>
+    public static CompressionParameters ForFrame(int level, long sourceSize, bool longDistanceMatching = false)
     {
         ulong size = (ulong)sourceSize;
         int table = (size <= 256 << 10 ? 1 : 0) + (size <= 128 << 10 ? 1 : 0) + (size <= 16 << 10 ? 1 : 0);
@@ -180,6 +184,13 @@ internal struct CompressionParameters
         }
 
         parameters.Adjust(sourceSize);
+        if (longDistanceMatching)
+        {
+            // libzstd's ZSTD_getCParamsFromCCtxParams: the matcher's window, then the adjustments again.
+            parameters.WindowLog = LongDistanceMatcher.DefaultWindowLog;
+            parameters.Adjust(sourceSize);
+        }
+
         return parameters;
     }
 

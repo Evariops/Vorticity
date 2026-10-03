@@ -24,9 +24,8 @@ OperationStatus status = compressor.Compress(content, frame, out int consumed, o
 `Compress` writes one whole frame per call, which declares its content size (and, with
 `AppendChecksum`, ends with a checksum): the frame libzstd 1.5.7's `ZSTD_compress` writes at the same
 level, byte for byte, at every level from -131072 to 22 (libzstd's nine strategies, its pre- and
-post-block splitters), with one exception: libzstd's long-distance matching, which it turns on at
-level 22 for sources over 64 MiB, is not implemented yet, and those frames are not libzstd's. A warm
-compressor allocates nothing. It is not thread-safe.
+post-block splitters, and the long-distance matching it turns on at level 22 for sources over
+64 MiB). A warm compressor allocates nothing. It is not thread-safe.
 
 ## Layout
 

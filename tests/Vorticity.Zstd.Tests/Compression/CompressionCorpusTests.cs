@@ -75,11 +75,17 @@ public static class CompressionCorpus
     public static bool IsByteExact(int level, int size) =>
         CompressionParameters.LibzstdStrategy(level, size) <= CompressionParameters.StrongestImplemented;
 
-    /// <summary>The platform's frame: libzstd's <c>ZSTD_compress</c> at the level, with or without a checksum.</summary>
-    public static byte[] Libzstd(ReadOnlySpan<byte> data, int level, bool checksum)
+    /// <summary>
+    /// The platform's frame: libzstd's <c>ZSTD_compress</c> at the level, with or without a checksum,
+    /// with or without its long-distance matcher asked for.
+    /// </summary>
+    public static byte[] Libzstd(ReadOnlySpan<byte> data, int level, bool checksum, bool longDistance = false)
     {
         byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
-        using var encoder = new ZstandardEncoder(new ZstandardCompressionOptions { Quality = level, AppendChecksum = checksum });
+        using var encoder = new ZstandardEncoder(new ZstandardCompressionOptions
+        {
+            Quality = level, AppendChecksum = checksum, EnableLongDistanceMatching = longDistance,
+        });
         OperationStatus status = encoder.Compress(data, output, out int consumed, out int written, isFinalBlock: true);
         Assert.Equal(OperationStatus.Done, status);
         Assert.Equal(data.Length, consumed);

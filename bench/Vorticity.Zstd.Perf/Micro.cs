@@ -35,7 +35,10 @@ internal static class Micro
         for (int r = 0; r < repeat; r++)
         foreach (string name in frames)
         {
-            Blocks blocks = Parse(BenchFrames.Load(name));
+            // A name ending in -ldm compresses with the long-distance matcher on.
+            bool longDistance = name.EndsWith("-ldm", StringComparison.Ordinal);
+            string frameName = longDistance ? name[..^4] : name;
+            Blocks blocks = Parse(BenchFrames.Load(frameName));
             switch (what)
             {
                 case "tables":
@@ -155,8 +158,8 @@ internal static class Micro
                 {
                     // Compression's stages alone, on the blocks a real compression of the frame's
                     // content cuts: a cycle count per sequence, and per byte (per literal for cliterals).
-                    (byte[] content, int level) = BenchFrames.LoadContent(name);
-                    var compressor = new ZstdCompressor(level);
+                    (byte[] content, int level) = BenchFrames.LoadContent(frameName);
+                    var compressor = new ZstdCompressor(level) { LongDistanceMatching = longDistance };
                     List<ZstdCompressor.BlockRecord> records = compressor.RecordBlocks(content);
                     int sequences = 0;
                     int literals = 0;

@@ -89,6 +89,9 @@ internal sealed unsafe class OptimalState
 
     /// <summary>libzstd's <c>zop_predef</c>: prices from fixed estimates, for a first block of 8 bytes or less.</summary>
     public bool Predefined;
+
+    /// <summary>The block's long-distance matches (libzstd's <c>ldmSeqStore</c>), none unless the matcher is on.</summary>
+    public LongDistanceCursor LongDistance;
 }
 
 /// <summary>The minimum length of the optimal parser's matches: libzstd's <c>mls</c>, 3 to 6.</summary>
@@ -148,9 +151,25 @@ internal readonly struct OptimalLevel2 : IOptimalLevel
     public static int Level => 2;
 }
 
+/// <summary>Whether the optimal parser weighs the block's long-distance matches too.</summary>
+internal interface IOptimalLongDistance
+{
+    static abstract bool Enabled { get; }
+}
+
+internal readonly struct WithoutLongDistance : IOptimalLongDistance
+{
+    public static bool Enabled => false;
+}
+
+internal readonly struct WithLongDistance : IOptimalLongDistance
+{
+    public static bool Enabled => true;
+}
+
 /// <summary>
-/// libzstd's optimal parser (zstd_opt.c) without a dictionary or long-distance matches: the btopt,
-/// btultra and btultra2 strategies.
+/// libzstd's optimal parser (zstd_opt.c) without a dictionary: the btopt, btultra and btultra2
+/// strategies, which weigh the long-distance matcher's matches too when it is on.
 /// </summary>
 internal static unsafe class OptimalMatchFinder
 {
@@ -273,9 +292,18 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     ];
 
-    /// <summary>libzstd's <c>ZSTD_compressBlock_opt_generic</c> without a dictionary.</summary>
+    /// <summary>
+    /// libzstd's <c>ZSTD_compressBlock_opt_generic</c> without a dictionary. A block without
+    /// long-distance matches is parsed as if the matcher were off, which it then is to libzstd too.
+    /// </summary>
     /// <returns>The size of the literals after the last sequence.</returns>
-    public static nuint CompressBlock(ref MatchState state, OptimalState optimal, SequenceStore store, uint* rep, byte* source, nuint size)
+    public static nuint CompressBlock(ref MatchState state, OptimalState optimal, SequenceStore store, uint* rep, byte* source, nuint size) =>
+        optimal.LongDistance.Count == 0
+            ? CompressBlock<WithoutLongDistance>(ref state, optimal, store, rep, source, size)
+            : CompressBlock<WithLongDistance>(ref state, optimal, store, rep, source, size);
+
+    private static nuint CompressBlock<TLongDistance>(ref MatchState state, OptimalState optimal, SequenceStore store, uint* rep, byte* source, nuint size)
+        where TLongDistance : struct, IOptimalLongDistance
     {
         byte* istart = source;
         byte* ip = istart;
@@ -295,6 +323,11 @@ internal static unsafe class OptimalParser<TLength, TLevel>
         SequenceRecord* sequence = store.Sequences;
         uint* counts = store.Counts;
 
+        if (TLongDistance.Enabled)
+        {
+            optimal.LongDistance.Begin((uint)size);
+        }
+
         RescaleFrequencies(optimal, source, size);
         ip += ip == prefixStart ? 1 : 0;
 
@@ -308,6 +341,11 @@ internal static unsafe class OptimalParser<TLength, TLevel>
                 uint literalLength = (uint)(ip - anchor);
                 uint ll0 = literalLength == 0 ? 1u : 0u;
                 uint matchCount = GetAllMatches(matches, ref state, ref nextToUpdate3, ip, iend, rep, ll0, minMatch);
+                if (TLongDistance.Enabled)
+                {
+                    matchCount = optimal.LongDistance.Process(matches, matchCount, (uint)(ip - istart), (uint)(iend - ip), minMatch);
+                }
+
                 if (matchCount == 0)
                 {
                     ip++;
@@ -435,6 +473,11 @@ internal static unsafe class OptimalParser<TLength, TLevel>
                     int basePrice = previousPrice + LiteralLengthPrice(optimal, 0);
                     uint* curRep = &opt[cur].Rep0;
                     uint matchCount = GetAllMatches(matches, ref state, ref nextToUpdate3, inr, iend, curRep, ll0, minMatch);
+                    if (TLongDistance.Enabled)
+                    {
+                        matchCount = optimal.LongDistance.Process(matches, matchCount, (uint)(inr - istart), (uint)(iend - inr), minMatch);
+                    }
+
                     if (matchCount == 0)
                     {
                         continue;

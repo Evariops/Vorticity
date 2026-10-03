@@ -168,21 +168,23 @@ public static class Program
 
     /// <summary>
     /// Compression of a frame's content by each candidate: Vorticity.Zstd must write the platform's frame,
-    /// byte for byte, wherever its level is implemented; each frame's size is shown.
+    /// byte for byte, wherever its level is implemented; each frame's size is shown. A name ending in
+    /// <c>-ldm</c> turns the long-distance matcher on, and leaves the reference build out.
     /// </summary>
     private static bool RunCompress(string name, int passes, int reps, string? only, bool ab)
     {
-        (byte[] content, int level) = BenchFrames.LoadContent(name);
+        bool longDistance = name.EndsWith("-ldm", StringComparison.Ordinal);
+        (byte[] content, int level) = BenchFrames.LoadContent(longDistance ? name[..^4] : name);
         byte[] expected = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length)];
-        if (!ZstandardEncoder.TryCompress(content, expected, out int expectedSize, level, 0))
+        var platform = new ZstandardEncoder(new ZstandardCompressionOptions { Quality = level, EnableLongDistanceMatching = longDistance });
+        if (platform.Compress(content, expected, out _, out int expectedSize, isFinalBlock: true) != System.Buffers.OperationStatus.Done)
         {
             Console.WriteLine($"{name}: the platform could not compress");
             return false;
         }
 
-        var zstd = new ZstdCompressor(level);
-        var platform = new ZstandardEncoder(level);
-        NativeReference? native = NativeReference.TryLoad();
+        var zstd = new ZstdCompressor(level) { LongDistanceMatching = longDistance };
+        NativeReference? native = longDistance ? null : NativeReference.TryLoad();
         var candidates = new List<Candidate>
         {
             new("zstd", (s, o) => { zstd.Compress(s, o, out _, out int w); return w; }),
@@ -195,7 +197,7 @@ public static class Program
 
         if (ab)
         {
-            var before = new ZstdCompressor(level);
+            var before = new ZstdCompressor(level) { LongDistanceMatching = longDistance };
             candidates.Insert(1, new("before", (s, o) =>
             {
                 AbSwitch.Set(legacy: true);
@@ -240,25 +242,29 @@ public static class Program
             passMedians[c] = new double[passes];
         }
 
-        // Warm-up: tiering and caches.
-        for (int i = 0; i < 50; i++)
+        // Warm-up: tiering and caches; one round when a round takes seconds.
+        bool slow = false;
+        for (int i = 0; i < 50 && !slow; i++)
         {
+            long round = Stopwatch.GetTimestamp();
             foreach (Candidate candidate in candidates)
             {
                 candidate.Decode(frame, buffer);
             }
+
+            slow = Stopwatch.GetElapsedTime(round).TotalSeconds > 1;
         }
 
         // A sample times enough decodes back to back to last some 50 us: a small frame's single
         // decode is a few timer ticks, too coarse a measure.
         long probe = Stopwatch.GetTimestamp();
-        for (int i = 0; i < 10; i++)
+        for (int i = 0; i < (slow ? 0 : 10); i++)
         {
             candidates[0].Decode(frame, buffer);
         }
 
         double probeUs = Stopwatch.GetElapsedTime(probe).TotalMicroseconds / 10;
-        int batch = Batch ?? Math.Max(1, (int)(50 / Math.Max(probeUs, 0.01)));
+        int batch = Batch ?? (slow ? 1 : Math.Max(1, (int)(50 / Math.Max(probeUs, 0.01))));
         double tick = 1_000_000.0 / Stopwatch.Frequency / batch;
         for (int p = 0; p < passes; p++)
         {

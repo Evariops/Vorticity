@@ -34,6 +34,8 @@ public sealed unsafe partial class ZstdCompressor
     private byte[] _tagTable = [];
     private uint[] _hashTable3 = [];
     private OptimalState? _optimal;
+    private LongDistanceMatcher? _longDistanceMatcher;
+    private bool _longDistance;
     private readonly uint[] _hashCache = GC.AllocateArray<uint>(LazyMatchFinder.RowHashCacheSize, pinned: true);
     private readonly uint[] _candidates = GC.AllocateArray<uint>(64, pinned: true);
     private MatchState _matchState;
@@ -46,9 +48,9 @@ public sealed unsafe partial class ZstdCompressor
     /// <summary>
     /// libzstd's <c>ZSTD_resetCCtx_internal</c> for a frame: the tables sized for its parameters, the
     /// window placed after the last frame's (restarting, tables cleared, only near the index limit),
-    /// and the block state every frame starts from.
+    /// the long-distance matcher started afresh when on, and the block state every frame starts from.
     /// </summary>
-    private void BeginFrame(CompressionParameters parameters, byte* source, int sourceSize)
+    private void BeginFrame(CompressionParameters parameters, byte* source, int sourceSize, bool longDistance)
     {
         _parameters = parameters;
         // btultra2 moves the window past its first block once (OptimalMatchFinder): the frame may
@@ -104,6 +106,15 @@ public sealed unsafe partial class ZstdCompressor
             // libzstd's ZSTD_invalidateMatchState: the optimal parser's statistics start over.
             _optimal ??= new OptimalState();
             _optimal.LiteralLengthSum = 0;
+            _optimal.LongDistance.Count = 0;
+        }
+
+        _longDistance = longDistance;
+        if (longDistance)
+        {
+            _longDistanceMatcher ??= new LongDistanceMatcher();
+            _longDistanceMatcher.BeginFrame(parameters, source);
+            _optimal!.LongDistance.Sequences = _longDistanceMatcher.Sequences;
         }
 
         if (restart)
@@ -310,6 +321,13 @@ public sealed unsafe partial class ZstdCompressor
         rep[0] = _previous.Rep[0];
         rep[1] = _previous.Rep[1];
         rep[2] = _previous.Rep[2];
+        if (_longDistance)
+        {
+            // libzstd's ZSTD_ldm_blockCompress for the optimal parsers: the block's long-distance
+            // matches are only offered to the parser, which weighs them with its own.
+            _optimal!.LongDistance.Count = _longDistanceMatcher!.GenerateSequences(source, (nuint)size);
+        }
+
         nuint lastLiterals = _parameters.Strategy switch
         {
             Strategy.Fast => FastMatchFinder.CompressBlock(ref _matchState, _store, rep, source, (nuint)size),

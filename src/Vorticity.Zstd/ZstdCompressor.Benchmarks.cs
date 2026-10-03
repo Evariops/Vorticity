@@ -64,8 +64,8 @@ public sealed unsafe partial class ZstdCompressor
         int total = 0;
         fixed (byte* src = source)
         {
-            CompressionParameters parameters = CompressionParameters.ForFrame(Level, source.Length);
-            BeginFrame(parameters, src, source.Length);
+            CompressionParameters parameters = CompressionParameters.ForFrame(Level, source.Length, LongDistanceMatching);
+            BeginFrame(parameters, src, source.Length, LongDistanceMatching || LongDistanceMatcher.EnabledFor(parameters));
             foreach (BlockRecord block in blocks)
             {
                 byte* ip = src + block.Start;

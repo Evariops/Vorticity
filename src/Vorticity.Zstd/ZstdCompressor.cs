@@ -14,9 +14,8 @@ namespace Vorticity.Zstd;
 /// <remarks>
 /// <para>
 /// The frames are those libzstd 1.5.7 writes at the same level (<c>ZSTD_compress</c>), byte for byte:
-/// the same parameters, match finders, block splits and entropy decisions, at every level. One
-/// libzstd feature is not implemented yet: its long-distance matching, which it turns on at level 22
-/// for sources over 64 MiB; those frames differ from libzstd's.
+/// the same parameters, match finders, block splits and entropy decisions, at every level, long-distance
+/// matching included (libzstd turns it on at level 22 for sources over 64 MiB).
 /// </para>
 /// <para>
 /// An instance keeps its tables and buffers from one frame to the next, so that a warm compressor
@@ -75,6 +74,13 @@ public sealed unsafe partial class ZstdCompressor
     public bool AppendChecksum { get; set; }
 
     /// <summary>
+    /// Turns libzstd's long-distance matcher on whatever the source, as <c>ZSTD_c_enableLongDistanceMatching</c>
+    /// does, so that the tests compare it with libzstd's on small sources. Only the optimal parsers
+    /// (levels 16 and up) take long-distance matches.
+    /// </summary>
+    internal bool LongDistanceMatching { get; set; }
+
+    /// <summary>
     /// The largest frame <see cref="Compress"/> writes for <paramref name="sourceLength"/> bytes:
     /// libzstd's <c>ZSTD_compressBound</c>.
     /// </summary>
@@ -125,8 +131,13 @@ public sealed unsafe partial class ZstdCompressor
     /// <returns>The size of the frame, or -1 when it does not fit.</returns>
     private int CompressFrame(byte* source, int sourceSize, byte* destination, int capacity)
     {
-        CompressionParameters parameters = CompressionParameters.ForFrame(Level, sourceSize);
-        BeginFrame(parameters, source, sourceSize);
+        CompressionParameters parameters = CompressionParameters.ForFrame(Level, sourceSize, LongDistanceMatching);
+        if (LongDistanceMatching && parameters.Strategy < Strategy.BinaryTreeOptimal)
+        {
+            throw new NotSupportedException("Long-distance matching is implemented for the optimal parsers only.");
+        }
+
+        BeginFrame(parameters, source, sourceSize, LongDistanceMatching || LongDistanceMatcher.EnabledFor(parameters));
 
         byte* header = stackalloc byte[FrameHeaderSizeMax];
         int headerSize = WriteFrameHeader(header, parameters.WindowLog, (ulong)sourceSize, AppendChecksum);
