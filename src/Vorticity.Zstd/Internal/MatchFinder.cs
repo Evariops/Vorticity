@@ -35,6 +35,18 @@ internal unsafe struct MatchState
     /// <summary>The second table: the short hashes of the double-fast strategy, the chains of the lazy ones.</summary>
     public uint* ChainTable;
 
+    /// <summary>The row-based match finder's tags, a byte beside each entry of <see cref="HashTable"/>.</summary>
+    public byte* TagTable;
+
+    /// <summary>libzstd's <c>hashCache</c>: the row hashes of the next positions.</summary>
+    public uint* HashCache;
+
+    /// <summary>libzstd's <c>rowHashLog</c>: the hash log less the row log, the bits that pick a row.</summary>
+    public int RowHashLog;
+
+    /// <summary>libzstd's <c>lazySkipping</c>: the lazy parser inserts only the positions it searches.</summary>
+    public bool LazySkipping;
+
     public CompressionParameters Parameters;
 
     /// <summary>
@@ -46,6 +58,17 @@ internal unsafe struct MatchState
     {
         uint maxDistance = 1u << Parameters.WindowLog;
         return current - DictLimit > maxDistance ? current - maxDistance : DictLimit;
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_getLowestMatchIndex</c> without a dictionary: as
+    /// <see cref="LowestPrefixIndex"/>, from <see cref="LowLimit"/>, as the lazy searches have it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public readonly uint LowestMatchIndex(uint current)
+    {
+        uint maxDistance = 1u << Parameters.WindowLog;
+        return current - LowLimit > maxDistance ? current - maxDistance : LowLimit;
     }
 
     /// <summary>
@@ -134,6 +157,9 @@ internal static unsafe class MatchFinder
 
     /// <summary>libzstd's <c>REPCODE1_TO_OFFBASE</c>.</summary>
     public const uint RepeatCode1 = 1;
+
+    /// <summary>libzstd's <c>ZSTD_REP_NUM</c>: offset codes up to it are repeat codes.</summary>
+    public const uint RepeatCodeCount = 3;
 
     /// <summary>libzstd's <c>OFFSET_TO_OFFBASE</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

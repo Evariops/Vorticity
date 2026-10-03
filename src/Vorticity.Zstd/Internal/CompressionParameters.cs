@@ -184,7 +184,7 @@ internal struct CompressionParameters
     }
 
     /// <summary>The strongest strategy implemented so far: the stronger ones cascade down to it.</summary>
-    public const Strategy StrongestImplemented = Strategy.DoubleFast;
+    public const Strategy StrongestImplemented = Strategy.Lazy2;
 
     /// <summary>
     /// The strategy libzstd uses for <paramref name="level"/> and a source of <paramref name="sourceSize"/>
@@ -235,6 +235,12 @@ internal struct CompressionParameters
             HashLog = Math.Min(HashLog, 24 + rowLog);
         }
     }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_resolveRowMatchFinderMode</c> on a machine with 128-bit vectors (arm64, x64):
+    /// the lazy strategies search rows once the window passes 16 KiB, hash chains below.
+    /// </summary>
+    public readonly bool UsesRowMatchFinder => Strategy is >= Strategy.Greedy and <= Strategy.Lazy2 && WindowLog > 14;
 
     /// <summary>The largest block of the frame: libzstd's <c>blockSizeMax</c>.</summary>
     public readonly int BlockSizeMax(long sourceSize) =>

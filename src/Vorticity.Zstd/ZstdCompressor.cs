@@ -15,8 +15,8 @@ namespace Vorticity.Zstd;
 /// <para>
 /// The frames are those libzstd 1.5.7 writes at the same level (<c>ZSTD_compress</c>), byte for byte:
 /// the same parameters, match finders, block splits and entropy decisions. The levels whose match
-/// finders are not written yet (above 4) cascade down to the strongest that is, as a libzstd built
-/// without them does.
+/// finders are not written yet (above 12: libzstd's binary trees and optimal parsers) cascade down to
+/// the strongest that is, as a libzstd built without them does.
 /// </para>
 /// <para>
 /// An instance keeps its tables and buffers from one frame to the next, so that a warm compressor

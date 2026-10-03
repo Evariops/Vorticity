@@ -31,6 +31,8 @@ public sealed unsafe partial class ZstdCompressor
     private BlockState _next = new();
     private uint[] _hashTable = [];
     private uint[] _chainTable = [];
+    private byte[] _tagTable = [];
+    private readonly uint[] _hashCache = GC.AllocateArray<uint>(LazyMatchFinder.RowHashCacheSize, pinned: true);
     private MatchState _matchState;
     private CompressionParameters _parameters;
     private bool _isFirstBlock;
@@ -47,8 +49,10 @@ public sealed unsafe partial class ZstdCompressor
     {
         _parameters = parameters;
         bool restart = (ulong)_nextIndex + (ulong)sourceSize > IndexLimit;
+        bool rows = parameters.UsesRowMatchFinder;
         int hashSize = 1 << parameters.HashLog;
-        int chainSize = parameters.Strategy == Strategy.Fast ? 0 : 1 << parameters.ChainLog;
+        int chainSize = parameters.Strategy == Strategy.Fast || rows ? 0 : 1 << parameters.ChainLog;
+        int tagSize = rows ? hashSize : 0;
         if (_hashTable.Length < hashSize)
         {
             _hashTable = GC.AllocateArray<uint>(hashSize, pinned: true);
@@ -67,11 +71,21 @@ public sealed unsafe partial class ZstdCompressor
             Array.Clear(_chainTable);
         }
 
+        if (_tagTable.Length < tagSize)
+        {
+            _tagTable = GC.AllocateArray<byte>(tagSize, pinned: true);
+        }
+        else if (restart)
+        {
+            Array.Clear(_tagTable);
+        }
+
         if (restart)
         {
             _nextIndex = WindowStartIndex;
         }
 
+        Array.Clear(_hashCache);
         uint start = _nextIndex;
         _matchState = new MatchState
         {
@@ -81,6 +95,9 @@ public sealed unsafe partial class ZstdCompressor
             NextToUpdate = start,
             HashTable = _hashTable.Length == 0 ? null : (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_hashTable)),
             ChainTable = _chainTable.Length == 0 ? null : (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_chainTable)),
+            TagTable = _tagTable.Length == 0 ? null : (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_tagTable)),
+            HashCache = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_hashCache)),
+            RowHashLog = parameters.HashLog - Math.Clamp(parameters.SearchLog, 4, 6),
             Parameters = parameters,
         };
 
@@ -251,7 +268,8 @@ public sealed unsafe partial class ZstdCompressor
         nuint lastLiterals = _parameters.Strategy switch
         {
             Strategy.Fast => FastMatchFinder.CompressBlock(ref _matchState, _store, rep, source, (nuint)size),
-            _ => DoubleFastMatchFinder.CompressBlock(ref _matchState, _store, rep, source, (nuint)size),
+            Strategy.DoubleFast => DoubleFastMatchFinder.CompressBlock(ref _matchState, _store, rep, source, (nuint)size),
+            _ => LazyMatchFinder.CompressBlock(ref _matchState, _store, rep, source, (nuint)size),
         };
 
         _store.StoreLastLiterals(source + size - (nint)lastLiterals, lastLiterals);
