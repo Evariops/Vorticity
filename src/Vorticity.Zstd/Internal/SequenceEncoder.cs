@@ -116,32 +116,6 @@ internal static unsafe class SequenceEncoder
         return table;
     }
 
-    /// <summary>libzstd's <c>LL_Code</c>: the code of a literal length below 64.</summary>
-    private static ReadOnlySpan<byte> LiteralLengthCodes =>
-    [
-        0, 1, 2, 3, 4, 5, 6, 7,
-        8, 9, 10, 11, 12, 13, 14, 15,
-        16, 16, 17, 17, 18, 18, 19, 19,
-        20, 20, 20, 20, 21, 21, 21, 21,
-        22, 22, 22, 22, 22, 22, 22, 22,
-        23, 23, 23, 23, 23, 23, 23, 23,
-        24, 24, 24, 24, 24, 24, 24, 24,
-        24, 24, 24, 24, 24, 24, 24, 24,
-    ];
-
-    /// <summary>libzstd's <c>ML_Code</c>: the code of a match length minus 3, below 128.</summary>
-    private static ReadOnlySpan<byte> MatchLengthCodes =>
-    [
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-        32, 32, 33, 33, 34, 34, 35, 35, 36, 36, 36, 36, 37, 37, 37, 37,
-        38, 38, 38, 38, 38, 38, 38, 38, 39, 39, 39, 39, 39, 39, 39, 39,
-        40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40,
-        41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41, 41,
-        42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
-        42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42, 42,
-    ];
-
     /// <summary>libzstd's <c>kInverseProbabilityLog256</c>: -log2(x / 256) in 1/256 of a bit, 0 for 0.</summary>
     private static ReadOnlySpan<ushort> InverseProbabilityLog256 =>
     [
@@ -169,40 +143,21 @@ internal static unsafe class SequenceEncoder
         5, 4, 2, 1,
     ];
 
-    /// <summary>libzstd's <c>ZSTD_LLcode</c>.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static uint LiteralLengthCode(uint litLength) =>
-        litLength > 63 ? (uint)BitOperations.Log2(litLength) + 19 : LiteralLengthCodes[(int)litLength];
-
-    /// <summary>libzstd's <c>ZSTD_MLcode</c>, from the match length minus 3.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static uint MatchLengthCode(uint matchLengthBase) =>
-        matchLengthBase > 127 ? (uint)BitOperations.Log2(matchLengthBase) + 36 : MatchLengthCodes[(int)matchLengthBase];
-
-    /// <summary>libzstd's <c>ZSTD_seqToCodes</c>: the three codes of every sequence.</summary>
-    public static void SequencesToCodes(SequenceStore store)
+    /// <summary>The largest symbol counted, and the largest count: what a histogram of codes returns.</summary>
+    private static uint LargestCount(uint* count, ref uint max)
     {
-        SequenceRecord* sequences = store.SequencesStart;
-        byte* llCodes = store.LiteralLengthCodes;
-        byte* ofCodes = store.OffsetCodes;
-        byte* mlCodes = store.MatchLengthCodes;
-        nuint count = store.SequenceCount;
-        for (nuint u = 0; u < count; u++)
+        while (count[max] == 0)
         {
-            llCodes[u] = (byte)LiteralLengthCode(sequences[u].LitLength);
-            ofCodes[u] = (byte)BitOperations.Log2(sequences[u].OffBase);
-            mlCodes[u] = (byte)MatchLengthCode(sequences[u].MatchLengthBase);
+            max--;
         }
 
-        if (store.LongLengthType == LongLengthType.LiteralLength)
+        uint largest = 0;
+        for (uint s = 0; s <= max; s++)
         {
-            llCodes[store.LongLengthPosition] = SequenceCodes.MaxLiteralLength;
+            largest = Math.Max(largest, count[s]);
         }
 
-        if (store.LongLengthType == LongLengthType.MatchLength)
-        {
-            mlCodes[store.LongLengthPosition] = SequenceCodes.MaxMatchLength;
-        }
+        return largest;
     }
 
     /// <summary>libzstd's <c>ZSTD_useLowProbCount</c>: -1 for the rare symbols of the larger blocks only.</summary>
@@ -357,14 +312,14 @@ internal static unsafe class SequenceEncoder
     /// </summary>
     /// <returns>The size of the description.</returns>
     public static nuint BuildCTable(
-        byte* destination, FseCTable next, uint fseLog, SymbolEncodingType type, uint* count, uint max, byte* codeTable, nuint sequenceCount,
-        FseCTable defaultTable, FseCTable previous)
+        byte* destination, FseCTable next, uint fseLog, SymbolEncodingType type, uint* count, uint max, uint firstCode, uint lastCode,
+        nuint sequenceCount, FseCTable defaultTable, FseCTable previous)
     {
         switch (type)
         {
             case SymbolEncodingType.Rle:
                 FseEncoder.BuildCTableRle(next, (byte)max);
-                *destination = codeTable[0];
+                *destination = (byte)firstCode;
                 return 1;
 
             case SymbolEncodingType.Repeat:
@@ -380,9 +335,9 @@ internal static unsafe class SequenceEncoder
                 short* normalized = stackalloc short[SequenceCodes.MaxMatchLength + 1];
                 nuint total = sequenceCount;
                 uint tableLog = FseEncoder.OptimalTableLog(fseLog, sequenceCount, max);
-                if (count[codeTable[sequenceCount - 1]] > 1)
+                if (count[lastCode] > 1)
                 {
-                    count[codeTable[sequenceCount - 1]]--;
+                    count[lastCode]--;
                     total--;
                 }
 
@@ -407,27 +362,28 @@ internal static unsafe class SequenceEncoder
     }
 
     /// <summary>
-    /// libzstd's <c>ZSTD_buildSequencesStatistics</c>: the codes, then for each code its histogram (in
-    /// <paramref name="count"/>, 256 counters), its mode, its table in <paramref name="next"/> and its
-    /// description at <paramref name="destination"/>.
+    /// libzstd's <c>ZSTD_buildSequencesStatistics</c> on the codes the store counted: for each code its
+    /// mode, its table in <paramref name="next"/> and its description at <paramref name="destination"/>.
     /// </summary>
-    public static Statistics BuildStatistics(SequenceStore store, BlockState previous, BlockState next, byte* destination, Strategy strategy, uint* count)
+    public static Statistics BuildStatistics(SequenceStore store, BlockState previous, BlockState next, byte* destination, Strategy strategy)
     {
         nuint sequenceCount = store.SequenceCount;
         byte* op = destination;
         Statistics stats = default;
-        SequencesToCodes(store);
+        uint first = store.SequencesStart[0].Codes;
+        uint last = store.SequencesStart[sequenceCount - 1].Codes;
 
         // ---- literal lengths
         {
             uint max = SequenceCodes.MaxLiteralLength;
-            nuint mostFrequent = Histogram.CountCodes(count, ref max, store.LiteralLengthCodes, sequenceCount);
+            uint* llCount = store.Counts;
+            nuint mostFrequent = LargestCount(llCount, ref max);
             next.LiteralLengthRepeat = previous.LiteralLengthRepeat;
             stats.LiteralLengths = SelectEncodingType(
-                ref next.LiteralLengthRepeat, count, max, mostFrequent, sequenceCount, LiteralLengthFseLog, previous.LiteralLengths,
+                ref next.LiteralLengthRepeat, llCount, max, mostFrequent, sequenceCount, LiteralLengthFseLog, previous.LiteralLengths,
                 SequenceCodes.LiteralLengthDefaultNorm, LiteralLengthDefaultNormLog, isDefaultAllowed: true, strategy);
             nuint countSize = BuildCTable(
-                op, next.LiteralLengths, LiteralLengthFseLog, stats.LiteralLengths, count, max, store.LiteralLengthCodes, sequenceCount,
+                op, next.LiteralLengths, LiteralLengthFseLog, stats.LiteralLengths, llCount, max, first & 0x7F, last & 0x7F, sequenceCount,
                 DefaultLiteralLengths, previous.LiteralLengths);
             if (stats.LiteralLengths == SymbolEncodingType.Compressed)
             {
@@ -440,14 +396,15 @@ internal static unsafe class SequenceEncoder
         // ---- offsets: the predefined table only has codes up to 28
         {
             uint max = SequenceCodes.MaxOffset;
-            nuint mostFrequent = Histogram.CountCodes(count, ref max, store.OffsetCodes, sequenceCount);
+            uint* ofCount = store.Counts + SequenceStore.OffsetCodes;
+            nuint mostFrequent = LargestCount(ofCount, ref max);
             bool defaultAllowed = max <= DefaultMaxOffset;
             next.OffsetRepeat = previous.OffsetRepeat;
             stats.Offsets = SelectEncodingType(
-                ref next.OffsetRepeat, count, max, mostFrequent, sequenceCount, OffsetFseLog, previous.Offsets,
+                ref next.OffsetRepeat, ofCount, max, mostFrequent, sequenceCount, OffsetFseLog, previous.Offsets,
                 SequenceCodes.OffsetDefaultNorm, OffsetDefaultNormLog, defaultAllowed, strategy);
             nuint countSize = BuildCTable(
-                op, next.Offsets, OffsetFseLog, stats.Offsets, count, max, store.OffsetCodes, sequenceCount,
+                op, next.Offsets, OffsetFseLog, stats.Offsets, ofCount, max, ((first >> 8) & 0x7F) - SequenceStore.OffsetCodes, ((last >> 8) & 0x7F) - SequenceStore.OffsetCodes, sequenceCount,
                 DefaultOffsets, previous.Offsets);
             if (stats.Offsets == SymbolEncodingType.Compressed)
             {
@@ -460,13 +417,15 @@ internal static unsafe class SequenceEncoder
         // ---- match lengths
         {
             uint max = SequenceCodes.MaxMatchLength;
-            nuint mostFrequent = Histogram.CountCodes(count, ref max, store.MatchLengthCodes, sequenceCount);
+            uint* mlCount = store.Counts + SequenceStore.MatchLengthCodes;
+            nuint mostFrequent = LargestCount(mlCount, ref max);
             next.MatchLengthRepeat = previous.MatchLengthRepeat;
             stats.MatchLengths = SelectEncodingType(
-                ref next.MatchLengthRepeat, count, max, mostFrequent, sequenceCount, MatchLengthFseLog, previous.MatchLengths,
+                ref next.MatchLengthRepeat, mlCount, max, mostFrequent, sequenceCount, MatchLengthFseLog, previous.MatchLengths,
                 SequenceCodes.MatchLengthDefaultNorm, MatchLengthDefaultNormLog, isDefaultAllowed: true, strategy);
             nuint countSize = BuildCTable(
-                op, next.MatchLengths, MatchLengthFseLog, stats.MatchLengths, count, max, store.MatchLengthCodes, sequenceCount,
+                op, next.MatchLengths, MatchLengthFseLog, stats.MatchLengths, mlCount, max, ((first >> 16) & 0x7F) - SequenceStore.MatchLengthCodes, ((last >> 16) & 0x7F) - SequenceStore.MatchLengthCodes,
+                sequenceCount,
                 DefaultMatchLengths, previous.MatchLengths);
             if (stats.MatchLengths == SymbolEncodingType.Compressed)
             {
@@ -515,64 +474,96 @@ internal static unsafe class SequenceEncoder
     /// <returns>The size of the bitstream, or 0 when it does not fit.</returns>
     [MethodImpl(MethodImplOptions.NoInlining)]
     public static nuint EncodeSequences(
-        byte* destination, nuint capacity, FseCTable matchLengthTable, byte* mlCodes, FseCTable offsetTable, byte* ofCodes,
-        FseCTable literalLengthTable, byte* llCodes, SequenceRecord* sequences, nuint sequenceCount)
+        byte* destination, nuint capacity, FseCTable literalLengthTable, FseCTable offsetTable, FseCTable matchLengthTable,
+        SequenceRecord* sequences, nuint sequenceCount)
     {
         if (capacity <= sizeof(ulong))
         {
             return 0;
         }
 
+        // The three tables in two arrays: the transforms by code at the codes' places, the states one
+        // table after the other, each transform's next-state offset moved by its table's place. The
+        // loop then holds two table pointers instead of six.
+        const int StatesSize = (1 << LiteralLengthFseLog) + (1 << OffsetFseLog) + (1 << MatchLengthFseLog);
+        FseSymbolTransform* transforms = stackalloc FseSymbolTransform[SequenceStore.AllCodes];
+        ushort* states = stackalloc ushort[StatesSize + 2];
+        Gather(literalLengthTable, transforms, states, 0);
+        Gather(offsetTable, transforms + SequenceStore.OffsetCodes, states, 1 << LiteralLengthFseLog);
+        Gather(matchLengthTable, transforms + SequenceStore.MatchLengthCodes, states, (1 << LiteralLengthFseLog) + (1 << OffsetFseLog));
+
         byte* ptr = destination;
         byte* end = destination + capacity - sizeof(ulong);
-        ulong container = 0;
-        nint bitPosition = 0;
+        ulong container;
+        nint bitPosition;
 
-        // Static data in the image: it never moves.
-        byte* llBitsTable = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(SequenceCodes.LiteralLengthBits));
-        byte* mlBitsTable = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(SequenceCodes.MatchLengthBits));
-        ushort* mlStates = matchLengthTable.StateTable;
-        FseSymbolTransform* mlSymbols = matchLengthTable.Symbols;
-        ushort* ofStates = offsetTable.StateTable;
-        FseSymbolTransform* ofSymbols = offsetTable.Symbols;
-        ushort* llStates = literalLengthTable.StateTable;
-        FseSymbolTransform* llSymbols = literalLengthTable.Symbols;
-
-        // ---- the last sequence: its states start the stream
-        nuint last = sequenceCount - 1;
-        nint mlState = InitialState(mlStates, mlSymbols, mlCodes[last]);
-        nint ofState = InitialState(ofStates, ofSymbols, ofCodes[last]);
-        nint llState = InitialState(llStates, llSymbols, llCodes[last]);
-        AddBits(ref container, ref bitPosition, sequences[last].LitLength, llBitsTable[llCodes[last]]);
-        AddBits(ref container, ref bitPosition, sequences[last].MatchLengthBase, mlBitsTable[mlCodes[last]]);
-        AddBits(ref container, ref bitPosition, sequences[last].OffBase, ofCodes[last]);
+        // ---- the last sequence: its states start the stream, then its extra bits
+        SequenceRecord* last = sequences + sequenceCount - 1;
+        nint lastCodes = (nint)last->Codes;
+        nint mlState = InitialState(states, transforms, (lastCodes >> 16) & 0x7F);
+        nint ofState = InitialState(states, transforms, (lastCodes >> 8) & 0x7F);
+        nint llState = InitialState(states, transforms, lastCodes & 0x7F);
+        container = last->Extras;
+        bitPosition = lastCodes >> 24;
         Flush(ref container, ref bitPosition, ref ptr, end);
 
-        for (nuint n = sequenceCount - 2; n < sequenceCount; n--)
+        for (SequenceRecord* sequence = last - 1; sequence >= sequences; sequence--)
         {
-            nint llCode = llCodes[n];
-            nint ofCode = ofCodes[n];
-            nint mlCode = mlCodes[n];
-            nint llBits = llBitsTable[llCode];
-            nint mlBits = mlBitsTable[mlCode];
-            Encode(ref container, ref bitPosition, ref ofState, ofStates, ofSymbols, ofCode);
-            Encode(ref container, ref bitPosition, ref mlState, mlStates, mlSymbols, mlCode);
-            Encode(ref container, ref bitPosition, ref llState, llStates, llSymbols, llCode);
-            nint extraBits = ofCode + mlBits + llBits;
+            // ---- the three states first, the longest chains: each state's low bits out, then its
+            // successor; their bits gathered apart from the container, in the stream's order
+            // (offset, match length, literal length)
+            nint codes = (nint)sequence->Codes;
+            FseSymbolTransform ofTransform = transforms[(codes >> 8) & 0x7F];
+            FseSymbolTransform mlTransform = transforms[(codes >> 16) & 0x7F];
+            FseSymbolTransform llTransform = transforms[codes & 0x7F];
+
+            // A state's high part indexes its successor; its low part, the state less the high part
+            // shifted back, is what it outputs: no mask to build. The sums stay below 2^32, so 64-bit
+            // arithmetic gives libzstd's 32-bit results without zero-extensions.
+            nint ofNb = (ofState + (nint)ofTransform.DeltaNbBits) >> 16;
+            nint mlNb = (mlState + (nint)mlTransform.DeltaNbBits) >> 16;
+            nint llNb = (llState + (nint)llTransform.DeltaNbBits) >> 16;
+            nint ofHigh = ofState >> (int)ofNb;
+            nint mlHigh = mlState >> (int)mlNb;
+            nint llHigh = llState >> (int)llNb;
+
+            // A shift by nb + 64, nb modulo 64: Roslyn masks every count with 63, and the JIT, sharing
+            // one mask between this shift and the one above, would keep it on the states' chain.
+            ulong ofLow = (ulong)(ofState - (ofHigh << (int)(ofNb + 64)));
+            ulong mlLow = (ulong)(mlState - (mlHigh << (int)(mlNb + 64)));
+            ulong llLow = (ulong)(llState - (llHigh << (int)(llNb + 64)));
+            ofState = states[ofHigh + ofTransform.DeltaFindState];
+            mlState = states[mlHigh + mlTransform.DeltaFindState];
+            llState = states[llHigh + llTransform.DeltaFindState];
+            ulong stateBits = ofLow | (mlLow << (int)(ofNb + 64)) | (llLow << (int)(ofNb + mlNb));
+
+            // ---- into the container: libzstd's flushes, which keep it within 64 bits
+            container |= stateBits << (int)bitPosition;
+            bitPosition += ofNb + mlNb + llNb;
+            nint extraBits = codes >> 24;
             if (extraBits >= 64 - 7 - (LiteralLengthFseLog + MatchLengthFseLog + OffsetFseLog))
             {
                 Flush(ref container, ref bitPosition, ref ptr, end);
             }
 
-            SequenceRecord sequence = sequences[n];
-            AddBits(ref container, ref bitPosition, sequence.LitLength, llBits);
-            AddBits(ref container, ref bitPosition, sequence.MatchLengthBase, mlBits);
-            if (extraBits > 56)
+            ulong extras = sequence->Extras;
+            if (extraBits <= 56)
             {
+                container |= extras << (int)bitPosition;
+                bitPosition += extraBits;
+            }
+            else
+            {
+                // The lengths' bits, then a flush, then the offset's.
+                nint ofBits = (nint)BitOperations.Log2(sequence->OffBase);
+                nint lengthBits = extraBits - ofBits;
+                container |= LowBits(extras, lengthBits) << (int)bitPosition;
+                bitPosition += lengthBits;
                 Flush(ref container, ref bitPosition, ref ptr, end);
+                container |= (extras >> (int)lengthBits) << (int)bitPosition;
+                bitPosition += ofBits;
             }
 
-            AddBits(ref container, ref bitPosition, sequence.OffBase, ofCode);
             Flush(ref container, ref bitPosition, ref ptr, end);
         }
 
@@ -591,6 +582,17 @@ internal static unsafe class SequenceEncoder
         }
 
         return (nuint)(ptr - destination) + (bitPosition > 0 ? 1u : 0u);
+
+        static void Gather(FseCTable table, FseSymbolTransform* transforms, ushort* states, int place)
+        {
+            int size = Math.Max(2, 1 << table.TableLog);
+            new ReadOnlySpan<ushort>(table.StateTable, size).CopyTo(new Span<ushort>(states + place, size));
+            for (int s = 0; s <= table.MaxSymbolValue; s++)
+            {
+                transforms[s].DeltaNbBits = table.Symbols[s].DeltaNbBits;
+                transforms[s].DeltaFindState = table.Symbols[s].DeltaFindState + place;
+            }
+        }
     }
 
     /// <summary>libzstd's <c>FSE_initCState2</c>: see <see cref="FseState"/>.</summary>
@@ -603,15 +605,9 @@ internal static unsafe class SequenceEncoder
         return states[(nint)(value >> (int)nbBitsOut) + transform.DeltaFindState];
     }
 
-    /// <summary>libzstd's <c>FSE_encodeSymbol</c>: the state's low bits out, then its next state.</summary>
+    /// <summary>The low <paramref name="count"/> bits (0 to 63) of <paramref name="value"/>: a shift and a bit clear.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void Encode(ref ulong container, ref nint bitPosition, ref nint state, ushort* states, FseSymbolTransform* symbols, nint symbol)
-    {
-        FseSymbolTransform transform = symbols[symbol];
-        nint nbBitsOut = (nint)((uint)(state + transform.DeltaNbBits) >> 16);
-        AddBits(ref container, ref bitPosition, (ulong)state, nbBitsOut);
-        state = states[(state >> (int)nbBitsOut) + transform.DeltaFindState];
-    }
+    private static ulong LowBits(ulong value, nint count) => value & ~(ulong.MaxValue << (int)count);
 
     /// <summary>libzstd's <c>BIT_addBits</c>: the low <paramref name="count"/> bits (0 to 31) of <paramref name="value"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

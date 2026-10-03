@@ -1,38 +1,47 @@
 using System;
 using System.Diagnostics;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 
 namespace Vorticity.Zstd.Internal;
 
-/// <summary>libzstd's <c>SeqDef</c>: one sequence as a block stores it before encoding.</summary>
+/// <summary>
+/// One sequence of a block, as its encoding wants it: libzstd's <c>SeqDef</c> and what
+/// <c>ZSTD_seqToCodes</c> derives from it, computed when the match finder stores the sequence (see
+/// <see cref="SequenceStore.StoreOnly(ref SequenceRecord*, uint*, nuint, uint, nuint)"/>).
+/// </summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct SequenceRecord
 {
-    /// <summary>A repeat code from 1 to 3, or the offset plus 3.</summary>
+    /// <summary>The extra bits, in the stream's order: the literal length's, the match length's, the offset's.</summary>
+    public ulong Extras;
+
+    /// <summary>
+    /// The codes, at their places in the sequence tables' common arrays: the literal length code, the
+    /// offset code plus <see cref="SequenceStore.OffsetCodes"/> and the match length code plus
+    /// <see cref="SequenceStore.MatchLengthCodes"/>, a byte each; then the number of extra bits.
+    /// </summary>
+    public uint Codes;
+
+    /// <summary>libzstd's <c>offBase</c>: a repeat code from 1 to 3, or the offset plus 3.</summary>
     public uint OffBase;
-
-    /// <summary>The literal length, modulo 2^16 for the one long length a block may have.</summary>
-    public ushort LitLength;
-
-    /// <summary>The match length minus 3, modulo 2^16 for the one long length a block may have.</summary>
-    public ushort MatchLengthBase;
-}
-
-/// <summary>libzstd's <c>ZSTD_longLengthType_e</c>: which length of the long sequence exceeds 16 bits.</summary>
-internal enum LongLengthType
-{
-    None,
-    LiteralLength,
-    MatchLength,
 }
 
 /// <summary>
-/// libzstd's <c>SeqStore_t</c>: a block's sequences as the match finder finds them, its literals
-/// copied out, and the codes of the sequences once they are encoded.
+/// libzstd's <c>SeqStore_t</c>: a block's sequences as the match finder finds them, with their codes
+/// and the codes' counts, and its literals copied out.
 /// </summary>
-/// <remarks>The buffers are pinned for the compressor's lifetime.</remarks>
+/// <remarks>
+/// <para>
+/// The codes are computed as each sequence is stored, rather than in passes of their own as libzstd
+/// does: the match finders wait on their loads and mispredictions, and have the issue slots to spare.
+/// Computed from the full lengths, a length over 16 bits gets the largest code and its low 16 bits
+/// as extra bits, which is what libzstd's long-length fix-up gives.
+/// </para>
+/// <para>The buffers are pinned for the compressor's lifetime.</para>
+/// </remarks>
 internal sealed unsafe class SequenceStore
 {
     /// <summary>libzstd's <c>WILDCOPY_OVERLENGTH</c>: how far past their end the literal copies may write.</summary>
@@ -41,19 +50,29 @@ internal sealed unsafe class SequenceStore
     /// <summary>libzstd's <c>ZSTD_maxNbSeq</c> for the largest block and the shortest match.</summary>
     public const int MaxSequences = FrameFormat.MaxBlockSize / 3;
 
+    /// <summary>Where the offset codes start in the common arrays: after the 36 literal length codes.</summary>
+    public const int OffsetCodes = SequenceCodes.MaxLiteralLength + 1;
+
+    /// <summary>Where the match length codes start in the common arrays: after the 32 offset codes.</summary>
+    public const int MatchLengthCodes = OffsetCodes + SequenceCodes.MaxOffset + 1;
+
+    /// <summary>The size of the common arrays: the 53 match length codes last.</summary>
+    public const int AllCodes = MatchLengthCodes + SequenceCodes.MaxMatchLength + 1;
+
     private readonly byte[] _literals = GC.AllocateUninitializedArray<byte>(FrameFormat.MaxBlockSize + WildCopyOverlength, pinned: true);
     private readonly SequenceRecord[] _sequences = GC.AllocateUninitializedArray<SequenceRecord>(MaxSequences + 1, pinned: true);
-    private readonly byte[] _codes = GC.AllocateUninitializedArray<byte>(3 * (MaxSequences + 1), pinned: true);
+    private readonly uint[] _counts = GC.AllocateArray<uint>(AllCodes, pinned: true);
 
     public SequenceStore()
     {
         LiteralsStart = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_literals));
         SequencesStart = (SequenceRecord*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_sequences));
-        LiteralLengthCodes = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_codes));
-        OffsetCodes = LiteralLengthCodes + MaxSequences + 1;
-        MatchLengthCodes = OffsetCodes + MaxSequences + 1;
+        Counts = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_counts));
         Reset();
     }
+
+    /// <summary>The counts of the codes, at their places in the common arrays.</summary>
+    public uint* Counts { get; }
 
     public byte* LiteralsStart { get; }
 
@@ -65,27 +84,17 @@ internal sealed unsafe class SequenceStore
     /// <summary>Where the next sequence goes.</summary>
     public SequenceRecord* Sequences;
 
-    public byte* LiteralLengthCodes { get; }
-
-    public byte* OffsetCodes { get; }
-
-    public byte* MatchLengthCodes { get; }
-
-    public LongLengthType LongLengthType;
-
-    /// <summary>The index of the sequence whose length <see cref="LongLengthType"/> designates.</summary>
-    public uint LongLengthPosition;
 
     public nuint SequenceCount => (nuint)(Sequences - SequencesStart);
 
     public nuint LiteralCount => (nuint)(Literals - LiteralsStart);
 
-    /// <summary>libzstd's <c>ZSTD_resetSeqStore</c>.</summary>
+    /// <summary>libzstd's <c>ZSTD_resetSeqStore</c>, and the counts cleared.</summary>
     public void Reset()
     {
         Literals = LiteralsStart;
         Sequences = SequencesStart;
-        LongLengthType = LongLengthType.None;
+        Unsafe.InitBlockUnaligned(Counts, 0, AllCodes * sizeof(uint));
     }
 
     /// <summary>
@@ -95,9 +104,24 @@ internal sealed unsafe class SequenceStore
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Store(nuint litLength, byte* literals, byte* literalsLimit, uint offBase, nuint matchLength)
     {
+        byte* lit = Literals;
+        SequenceRecord* sequence = Sequences;
+        Store(ref lit, ref sequence, Counts, litLength, literals, literalsLimit, offBase, matchLength);
+        Literals = lit;
+        Sequences = sequence;
+    }
+
+    /// <summary>
+    /// <see cref="Store(nuint, byte*, byte*, uint, nuint)"/> on cursors a match finder holds (<see cref="Literals"/>,
+    /// <see cref="Sequences"/>, written back once per block), and the store's <see cref="Counts"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void Store(
+        ref byte* lit, ref SequenceRecord* sequence, uint* counts, nuint litLength, byte* literals, byte* literalsLimit,
+        uint offBase, nuint matchLength)
+    {
         byte* limitWild = literalsLimit - WildCopyOverlength;
         byte* end = literals + litLength;
-        byte* lit = Literals;
         if (end <= limitWild)
         {
             Copy16(lit, literals);
@@ -111,37 +135,91 @@ internal sealed unsafe class SequenceStore
             SafeCopyLiterals(lit, literals, end, limitWild);
         }
 
-        Literals = lit + litLength;
-        StoreOnly(litLength, offBase, matchLength);
+        lit += litLength;
+        StoreOnly(ref sequence, counts, litLength, offBase, matchLength);
     }
 
-    /// <summary>libzstd's <c>ZSTD_storeSeqOnly</c>: the sequence, its literals copied already.</summary>
+    /// <summary>
+    /// libzstd's <c>ZSTD_storeSeqOnly</c>, and its codes: those of the two lengths from tables below 64
+    /// and 128, from their logarithms above (libzstd's <c>ZSTD_LLcode</c>, <c>ZSTD_MLcode</c>), the
+    /// offset's from its logarithm; the extra bits gathered in the stream's order; the codes counted.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void StoreOnly(nuint litLength, uint offBase, nuint matchLength)
+    public static void StoreOnly(ref SequenceRecord* sequence, uint* counts, nuint litLength, uint offBase, nuint matchLength)
     {
-        Debug.Assert(SequenceCount < MaxSequences);
-        Debug.Assert(matchLength >= 3);
-        SequenceRecord* sequence = Sequences;
-        if (litLength > 0xFFFF)
-        {
-            Debug.Assert(LongLengthType == LongLengthType.None);
-            LongLengthType = LongLengthType.LiteralLength;
-            LongLengthPosition = (uint)(sequence - SequencesStart);
-        }
-
+        Debug.Assert(matchLength >= 3 && litLength <= FrameFormat.MaxBlockSize);
         nuint matchLengthBase = matchLength - 3;
-        if (matchLengthBase > 0xFFFF)
+        nuint llCode;
+        nuint llBits;
+        if (litLength < 64)
         {
-            Debug.Assert(LongLengthType == LongLengthType.None);
-            LongLengthType = LongLengthType.MatchLength;
-            LongLengthPosition = (uint)(sequence - SequencesStart);
+            nuint entry = ((ushort*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(LiteralLengthCodeTable)))[litLength];
+            llCode = entry & 0x3F;
+            llBits = entry >> 8;
+        }
+        else
+        {
+            llBits = (nuint)BitOperations.Log2(litLength);
+            llCode = llBits + 19;
         }
 
-        sequence->LitLength = (ushort)litLength;
-        sequence->OffBase = offBase;
-        sequence->MatchLengthBase = (ushort)matchLengthBase;
-        Sequences = sequence + 1;
+        nuint mlCode;
+        nuint mlBits;
+        if (matchLengthBase < 128)
+        {
+            nuint entry = ((ushort*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(MatchLengthCodeTable)))[matchLengthBase];
+            mlCode = entry & 0x3F;
+            mlBits = entry >> 8;
+        }
+        else
+        {
+            mlBits = (nuint)BitOperations.Log2(matchLengthBase);
+            mlCode = mlBits + 36;
+        }
+
+        nuint ofCode = (nuint)BitOperations.Log2(offBase);
+        ulong extras = ((ulong)litLength & ~(ulong.MaxValue << (int)llBits))
+            | (((ulong)matchLengthBase & ~(ulong.MaxValue << (int)mlBits)) << (int)llBits)
+            | ((ulong)(offBase ^ (1u << (int)ofCode)) << (int)(llBits + mlBits));
+        nuint codes = llCode | ((ofCode + OffsetCodes) << 8) | ((mlCode + MatchLengthCodes) << 16) | ((llBits + mlBits + ofCode) << 24);
+        sequence->Extras = extras;
+        *(ulong*)&sequence->Codes = codes | ((ulong)offBase << 32);
+        counts[llCode]++;
+        counts[OffsetCodes + ofCode]++;
+        counts[MatchLengthCodes + mlCode]++;
+        sequence++;
     }
+
+    /// <summary>libzstd's <c>LL_Code</c> and <c>LL_bits</c> below 64: <c>code | bits &lt;&lt; 8</c>.</summary>
+    private static ReadOnlySpan<ushort> LiteralLengthCodeTable =>
+    [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        0x110, 0x110, 0x111, 0x111, 0x112, 0x112, 0x113, 0x113,
+        0x214, 0x214, 0x214, 0x214, 0x215, 0x215, 0x215, 0x215,
+        0x316, 0x316, 0x316, 0x316, 0x316, 0x316, 0x316, 0x316,
+        0x317, 0x317, 0x317, 0x317, 0x317, 0x317, 0x317, 0x317,
+        0x418, 0x418, 0x418, 0x418, 0x418, 0x418, 0x418, 0x418,
+        0x418, 0x418, 0x418, 0x418, 0x418, 0x418, 0x418, 0x418,
+    ];
+
+    /// <summary>libzstd's <c>ML_Code</c> and <c>ML_bits</c> below 128 (a match length minus 3): <c>code | bits &lt;&lt; 8</c>.</summary>
+    private static ReadOnlySpan<ushort> MatchLengthCodeTable =>
+    [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        0x120, 0x120, 0x121, 0x121, 0x122, 0x122, 0x123, 0x123,
+        0x224, 0x224, 0x224, 0x224, 0x225, 0x225, 0x225, 0x225,
+        0x326, 0x326, 0x326, 0x326, 0x326, 0x326, 0x326, 0x326,
+        0x327, 0x327, 0x327, 0x327, 0x327, 0x327, 0x327, 0x327,
+        0x428, 0x428, 0x428, 0x428, 0x428, 0x428, 0x428, 0x428,
+        0x428, 0x428, 0x428, 0x428, 0x428, 0x428, 0x428, 0x428,
+        0x429, 0x429, 0x429, 0x429, 0x429, 0x429, 0x429, 0x429,
+        0x429, 0x429, 0x429, 0x429, 0x429, 0x429, 0x429, 0x429,
+        0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A,
+        0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A,
+        0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A,
+        0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A, 0x52A,
+    ];
 
     /// <summary>libzstd's <c>ZSTD_storeLastLiterals</c>: the literals after the last sequence.</summary>
     public void StoreLastLiterals(byte* anchor, nuint size)

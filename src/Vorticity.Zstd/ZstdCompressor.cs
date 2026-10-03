@@ -66,8 +66,6 @@ public sealed unsafe partial class ZstdCompressor
         Level = level == 0 ? DefaultLevel : level;
         _blockBuffer = GC.AllocateUninitializedArray<byte>(BlockBufferSize, pinned: true);
         _blockStart = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_blockBuffer));
-        _counts = GC.AllocateArray<uint>(HuffmanTable.MaxSymbols, pinned: true);
-        _countsStart = (uint*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_counts));
     }
 
     /// <summary>The compression level.</summary>

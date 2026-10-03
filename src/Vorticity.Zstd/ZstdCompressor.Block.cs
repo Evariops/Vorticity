@@ -25,8 +25,6 @@ public sealed unsafe partial class ZstdCompressor
 
     private readonly byte[] _blockBuffer;
     private readonly byte* _blockStart;
-    private readonly uint[] _counts;
-    private readonly uint* _countsStart;
     private readonly SequenceStore _store = new();
     private readonly HuffmanWorkspace _huffmanWorkspace = new();
     private BlockState _previous = new();
@@ -213,6 +211,11 @@ public sealed unsafe partial class ZstdCompressor
             }
         }
 
+        if (Recorder is not null)
+        {
+            Record(source, size, compressedSize);
+        }
+
         if (compressedSize > 1)
         {
             (_previous, _next) = (_next, _previous);
@@ -299,13 +302,12 @@ public sealed unsafe partial class ZstdCompressor
         else
         {
             byte* modes = op++;
-            SequenceEncoder.Statistics stats = SequenceEncoder.BuildStatistics(_store, _previous, _next, op, strategy, _countsStart);
+            SequenceEncoder.Statistics stats = SequenceEncoder.BuildStatistics(_store, _previous, _next, op, strategy);
             *modes = (byte)(((int)stats.LiteralLengths << 6) + ((int)stats.Offsets << 4) + ((int)stats.MatchLengths << 2));
             op += stats.Size;
 
             nuint bitstreamSize = SequenceEncoder.EncodeSequences(
-                op, (nuint)(oend - op), _next.MatchLengths, _store.MatchLengthCodes, _next.Offsets, _store.OffsetCodes,
-                _next.LiteralLengths, _store.LiteralLengthCodes, _store.SequencesStart, sequenceCount);
+                op, (nuint)(oend - op), _next.LiteralLengths, _next.Offsets, _next.MatchLengths, _store.SequencesStart, sequenceCount);
             if (bitstreamSize == 0)
             {
                 return 0;

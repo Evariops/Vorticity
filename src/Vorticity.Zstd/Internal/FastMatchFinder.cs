@@ -51,9 +51,36 @@ internal static unsafe class FastMatchFinder
         };
 
     /// <summary>
+    /// What the search loop does not touch, in memory the JIT does not promote (stack allocated):
+    /// in registers, these values pushed the loop's own out, the hash multiplier among them.
+    /// </summary>
+    private struct Cold
+    {
+        public byte* Anchor;
+        public byte* Lit;
+        public SequenceRecord* Sequence;
+        public uint* Counts;
+        public uint RepOffset2;
+        public uint Saved1;
+        public uint Saved2;
+    }
+
+    /// <summary>
     /// libzstd's <c>ZSTD_compressBlock_fast_noDict_generic</c>: the search pipelined over four
     /// positions, two of them searched a round; a repeat offset tried at the third.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// libzstd's four positions are two here: <c>ip1</c> is <c>ip0 + 1</c> and <c>ip3</c> is
+    /// <c>ip2 + 1</c> at the top of every round, and its two halves are written out, the second at
+    /// <c>ip0 + 1</c>. The table is read and written in libzstd's order, which the results depend
+    /// on when two positions share a hash.
+    /// </para>
+    /// <para>
+    /// The loop keeps fifteen values; those it does not use are in <see cref="Cold"/>, read and
+    /// written once a sequence, and <c>current0</c> is set where the loop exits.
+    /// </para>
+    /// </remarks>
     private static nuint CompressBlock<THash>(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size)
         where THash : IMatchHash
     {
@@ -65,21 +92,23 @@ internal static unsafe class FastMatchFinder
         byte* istart = source;
         uint endIndex = (uint)(istart - @base + (nint)size);
         uint prefixStartIndex = state.LowestPrefixIndex(endIndex);
-        byte* prefixStart = @base + prefixStartIndex;
         byte* iend = istart + size;
         byte* ilimit = iend - HashReadSize;
 
-        byte* anchor = istart;
-        byte* ip0 = istart;
-        byte* ip1;
-        byte* ip2;
-        byte* ip3;
-        uint current0;
+        byte* coldBytes = stackalloc byte[sizeof(Cold)];
+        Cold* cold = (Cold*)coldBytes;
+        cold->Anchor = istart;
+        cold->Lit = store.Literals;
+        cold->Sequence = store.Sequences;
+        cold->Counts = store.Counts;
+        cold->Saved1 = 0;
+        cold->Saved2 = 0;
 
+        byte* ip0 = istart;
+        byte* ip2;
+        uint current0;
         uint repOffset1 = rep[0];
-        uint repOffset2 = rep[1];
-        uint offsetSaved1 = 0;
-        uint offsetSaved2 = 0;
+        cold->RepOffset2 = rep[1];
 
         nuint hash0;
         nuint hash1;
@@ -88,7 +117,7 @@ internal static unsafe class FastMatchFinder
         byte* match0;
         nuint matchLength;
 
-        // ip0 and ip1 are adjacent; the step separates the pairs, ip0 from ip2.
+        // ip0 + 1 is the second position of a round; the step separates the rounds.
         nuint step;
         byte* nextStep;
         const nuint StepIncrement = 1 << (SearchStrength - 1);
@@ -97,20 +126,20 @@ internal static unsafe class FastMatchFinder
         ulong dummy = 0x78563412;
         byte* dummyAddress = (byte*)&dummy;
 
-        ip0 += ip0 == prefixStart ? 1 : 0;
+        ip0 += ip0 == @base + prefixStartIndex ? 1 : 0;
         {
             uint current = (uint)(ip0 - @base);
             uint windowLow = state.LowestPrefixIndex(current);
             uint maxRep = current - windowLow;
-            if (repOffset2 > maxRep)
+            if (cold->RepOffset2 > maxRep)
             {
-                offsetSaved2 = repOffset2;
-                repOffset2 = 0;
+                cold->Saved2 = cold->RepOffset2;
+                cold->RepOffset2 = 0;
             }
 
             if (repOffset1 > maxRep)
             {
-                offsetSaved1 = repOffset1;
+                cold->Saved1 = repOffset1;
                 repOffset1 = 0;
             }
         }
@@ -118,26 +147,27 @@ internal static unsafe class FastMatchFinder
     Start:
         step = stepSize;
         nextStep = ip0 + StepIncrement;
-        ip1 = ip0 + 1;
         ip2 = ip0 + step;
-        ip3 = ip2 + 1;
-        if (ip3 >= ilimit)
+        if (ip2 + 1 >= ilimit)
         {
             goto Cleanup;
         }
 
         hash0 = THash.Hash(ip0, hashLog);
-        hash1 = THash.Hash(ip1, hashLog);
+        hash1 = THash.Hash(ip0 + 1, hashLog);
         matchIndex = hashTable[hash0];
 
         do
         {
-            // The repeat offset at ip2.
+            // ---- ip0, and the repeat offset at ip2
             uint repValue = Read32(ip2 - repOffset1);
-            current0 = (uint)(ip0 - @base);
-            hashTable[hash0] = current0;
+            hashTable[hash0] = (uint)(ip0 - @base);
             if ((Read32(ip2) == repValue) & (repOffset1 > 0))
             {
+                current0 = (uint)(ip0 - @base);
+
+                // ip0 + 1 is before the repeat match: its entry is safe to write.
+                hashTable[hash1] = current0 + 1;
                 ip0 = ip2;
                 match0 = ip0 - repOffset1;
                 matchLength = ip0[-1] == match0[-1] ? 1u : 0u;
@@ -145,83 +175,88 @@ internal static unsafe class FastMatchFinder
                 match0 -= matchLength;
                 offBase = RepeatCode1;
                 matchLength += 4;
-
-                // ip1 is before the repeat match: its entry is safe to write.
-                hashTable[hash1] = (uint)(ip1 - @base);
                 goto Match;
             }
 
             if (MatchFound(ip0, @base, matchIndex, prefixStartIndex, dummyAddress))
             {
-                // ip1 = ip0 + 1, where the search resumes at the earliest.
-                hashTable[hash1] = (uint)(ip1 - @base);
+                // ip0 + 1, where the search resumes at the earliest.
+                current0 = (uint)(ip0 - @base);
+                hashTable[hash1] = current0 + 1;
                 goto Offset;
             }
 
+            // ---- ip0 + 1
             matchIndex = hashTable[hash1];
-            hash0 = hash1;
-            hash1 = THash.Hash(ip2, hashLog);
-            ip0 = ip1;
-            ip1 = ip2;
-            ip2 = ip3;
-
-            current0 = (uint)(ip0 - @base);
-            hashTable[hash0] = current0;
-            if (MatchFound(ip0, @base, matchIndex, prefixStartIndex, dummyAddress))
+            hash0 = THash.Hash(ip2, hashLog);
+            hashTable[hash1] = (uint)(ip0 + 1 - @base);
+            if (MatchFound(ip0 + 1, @base, matchIndex, prefixStartIndex, dummyAddress))
             {
                 // Not past where the search resumes: a match is four bytes at least.
                 if (step <= 4)
                 {
-                    hashTable[hash1] = (uint)(ip1 - @base);
+                    hashTable[hash0] = (uint)(ip2 - @base);
                 }
 
+                ip0++;
+                current0 = (uint)(ip0 - @base);
                 goto Offset;
             }
 
-            matchIndex = hashTable[hash1];
-            hash0 = hash1;
-            hash1 = THash.Hash(ip2, hashLog);
-            ip0 = ip1;
-            ip1 = ip2;
+            // ---- the next round, from ip2
+            matchIndex = hashTable[hash0];
+            hash1 = THash.Hash(ip2 + 1, hashLog);
+            ip0 = ip2;
             ip2 = ip0 + step;
-            ip3 = ip1 + step;
-
             if (ip2 >= nextStep)
             {
                 step++;
                 nextStep += StepIncrement;
             }
         }
-        while (ip3 < ilimit);
+        while (ip2 + 1 < ilimit);
 
     Cleanup:
-        // A repeat offset invalid at the start of the block, and never replaced, is restored for the
-        // next one; when the first was replaced, the second becomes the old first.
-        offsetSaved2 = offsetSaved1 != 0 && repOffset1 != 0 ? offsetSaved1 : offsetSaved2;
-        rep[0] = repOffset1 != 0 ? repOffset1 : offsetSaved1;
-        rep[1] = repOffset2 != 0 ? repOffset2 : offsetSaved2;
-        return (nuint)(iend - anchor);
+        {
+            // A repeat offset invalid at the start of the block, and never replaced, is restored for
+            // the next one; when the first was replaced, the second becomes the old first.
+            uint offsetSaved1 = cold->Saved1;
+            uint offsetSaved2 = offsetSaved1 != 0 && repOffset1 != 0 ? offsetSaved1 : cold->Saved2;
+            rep[0] = repOffset1 != 0 ? repOffset1 : offsetSaved1;
+            rep[1] = cold->RepOffset2 != 0 ? cold->RepOffset2 : offsetSaved2;
+            store.Literals = cold->Lit;
+            store.Sequences = cold->Sequence;
+            return (nuint)(iend - cold->Anchor);
+        }
 
     Offset:
         match0 = @base + matchIndex;
-        repOffset2 = repOffset1;
+        cold->RepOffset2 = repOffset1;
         repOffset1 = (uint)(ip0 - match0);
         offBase = OffsetToOffBase(repOffset1);
         matchLength = 4;
 
         // The match extended backward.
-        while (((ip0 > anchor) & (match0 > prefixStart)) && ip0[-1] == match0[-1])
         {
-            ip0--;
-            match0--;
-            matchLength++;
+            byte* anchor = cold->Anchor;
+            byte* prefixStart = @base + prefixStartIndex;
+            while (((ip0 > anchor) & (match0 > prefixStart)) && ip0[-1] == match0[-1])
+            {
+                ip0--;
+                match0--;
+                matchLength++;
+            }
         }
 
     Match:
         matchLength += Count(ip0 + matchLength, match0 + matchLength, iend);
-        store.Store((nuint)(ip0 - anchor), anchor, iend, offBase, matchLength);
+        {
+            byte* anchor = cold->Anchor;
+            SequenceStore.Store(ref cold->Lit, ref cold->Sequence, cold->Counts, (nuint)(ip0 - anchor), anchor, iend, offBase, matchLength);
+        }
+
         ip0 += matchLength;
-        anchor = ip0;
+        cold->Anchor = ip0;
 
         if (ip0 <= ilimit)
         {
@@ -229,6 +264,7 @@ internal static unsafe class FastMatchFinder
             hashTable[THash.Hash(@base + current0 + 2, hashLog)] = current0 + 2;
             hashTable[THash.Hash(ip0 - 2, hashLog)] = (uint)(ip0 - 2 - @base);
 
+            uint repOffset2 = cold->RepOffset2;
             if (repOffset2 > 0)
             {
                 while (ip0 <= ilimit && Read32(ip0) == Read32(ip0 - repOffset2))
@@ -237,9 +273,11 @@ internal static unsafe class FastMatchFinder
                     (repOffset1, repOffset2) = (repOffset2, repOffset1);
                     hashTable[THash.Hash(ip0, hashLog)] = (uint)(ip0 - @base);
                     ip0 += repLength;
-                    store.Store(0, anchor, iend, RepeatCode1, repLength);
-                    anchor = ip0;
+                    SequenceStore.StoreOnly(ref cold->Sequence, cold->Counts, 0, RepeatCode1, repLength);
+                    cold->Anchor = ip0;
                 }
+
+                cold->RepOffset2 = repOffset2;
             }
         }
 

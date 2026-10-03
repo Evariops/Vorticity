@@ -101,22 +101,4 @@ internal static unsafe class Histogram
         maxSymbolValue = max;
         return largest;
     }
-
-    /// <summary>
-    /// libzstd's <c>HIST_countFast_wksp</c> on a code table, whose symbols are known to be at most
-    /// <paramref name="maxSymbolValue"/>: the counters cleared up to it, which then becomes the
-    /// largest symbol present.
-    /// </summary>
-    /// <returns>The largest count.</returns>
-    public static uint CountCodes(uint* count, ref uint maxSymbolValue, byte* source, nuint size)
-    {
-        if (size < 1500)
-        {
-            return CountSimple(count, ref maxSymbolValue, source, size);
-        }
-
-        uint largest = CountFast(count, out uint max, source, size);
-        maxSymbolValue = max;
-        return largest;
-    }
 }

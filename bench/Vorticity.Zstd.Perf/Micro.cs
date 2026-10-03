@@ -12,7 +12,7 @@ namespace Vorticity.Zstd.Perf;
 /// block are taken from the frame itself, then each step is timed alone, many times over.
 /// </summary>
 /// <remarks>
-/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build [--frames a,b] [--repeat N]</c>, the repeats
+/// Usage: <c>Vorticity.Zstd.Perf --micro tables|ncount|tree|weights|x1|x2|x2build|cmatch|centropy|cliterals|csequences [--frames a,b] [--repeat N]</c>, the repeats
 /// for a profiler to attach. Prints the median time
 /// of one operation, and its cycles at the clock the M4 Pro's performance cores run (4.44 GHz).
 /// </remarks>
@@ -143,8 +143,49 @@ internal static class Micro
                     break;
                 }
 
+                case "cmatch":
+                case "centropy":
+                case "cliterals":
+                case "csequences":
+                {
+                    // Compression's stages alone, on the blocks a real compression of the frame's
+                    // content cuts: a cycle count per sequence, and per byte (per literal for cliterals).
+                    (byte[] content, int level) = BenchFrames.LoadContent(name);
+                    var compressor = new ZstdCompressor(level);
+                    List<ZstdCompressor.BlockRecord> records = compressor.RecordBlocks(content);
+                    int sequences = 0;
+                    int literals = 0;
+                    foreach (ZstdCompressor.BlockRecord record in records)
+                    {
+                        sequences += record.Sequences.Length;
+                        literals += record.Literals.Length;
+                    }
+
+                    switch (what)
+                    {
+                        case "cmatch":
+                            Report(name, $"match finding, {sequences} sequences, {content.Length} bytes, per sequence", sequences, content.Length,
+                                () => compressor.FindSequencesOnly(content, records));
+                            break;
+                        case "centropy":
+                            Report(name, $"entropy coding, {sequences} sequences, {content.Length} bytes, per sequence", sequences, content.Length,
+                                () => compressor.EntropyOnly(records, level, literals: true, sequences: true));
+                            break;
+                        case "cliterals":
+                            Report(name, $"literals, {literals} literals, per sequence", sequences, literals,
+                                () => compressor.EntropyOnly(records, level, literals: true, sequences: false));
+                            break;
+                        default:
+                            Report(name, $"sequences section, {sequences} sequences, per sequence", sequences, sequences,
+                                () => compressor.EntropyOnly(records, level, literals: false, sequences: true));
+                            break;
+                    }
+
+                    break;
+                }
+
                 default:
-                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights");
+                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, cmatch, centropy, cliterals, csequences");
                     return 1;
             }
         }
