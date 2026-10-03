@@ -114,11 +114,8 @@ public sealed partial class ZstdDecompressor
                     Throw.Error(ZstdError.RepeatWithoutTable);
                 }
 
-                if (previous is null)
-                {
-                    tables.Repeat(code);
-                }
-                else
+                // In the same set, the table is the one the previous block left there.
+                if (previous is not null)
                 {
                     tables.RepeatFrom(previous, code);
                 }

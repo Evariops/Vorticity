@@ -111,13 +111,18 @@ internal enum SequenceCode
 
 /// <summary>
 /// A table shared between decoders, the predefined ones and a dictionary's: built for the slot of its
-/// code, and copied into a decoder's <see cref="SequenceTableSet"/> when one uses it.
+/// code. A block whose three tables are those of one family (the predefined tables, a dictionary's)
+/// decodes from the family's <see cref="Family"/>, the three in their slots; a block that mixes them
+/// with others copies it into its decoder's <see cref="SequenceTableSet"/>.
 /// </summary>
 internal sealed class SeqTable
 {
     public readonly SeqSymbol[] Entries;
     public readonly int TableLog;
     public readonly SequenceCode Code;
+
+    /// <summary>The three tables of the family this one belongs to, each in its slot; null for none.</summary>
+    public SeqSymbol[]? Family { get; private set; }
 
     /// <summary>Twice the value a state of the table stands for on average (see <see cref="SequenceCodes.BuildTable"/>).</summary>
     public readonly nint ExpectedTimes2;
@@ -128,6 +133,20 @@ internal sealed class SeqTable
         TableLog = tableLog;
         Entries = new SeqSymbol[2 << tableLog];
         ExpectedTimes2 = SequenceCodes.BuildTable(code, Entries, norm, tableLog);
+    }
+
+    /// <summary>
+    /// Makes the three tables a family: one array that holds them in their slots, which a block that
+    /// takes all three decodes from as it is, as libzstd points at a dictionary's tables.
+    /// </summary>
+    public static void Join(SeqTable literalLengths, SeqTable offsets, SeqTable matchLengths)
+    {
+        var family = new SeqSymbol[SequenceTableSet.Size];
+        foreach (SeqTable table in new[] { literalLengths, offsets, matchLengths })
+        {
+            table.Entries.CopyTo(family.AsSpan(SequenceTableSet.Slot(table.Code)));
+            table.Family = family;
+        }
     }
 }
 
@@ -142,10 +161,12 @@ internal sealed class SeqTable
 /// copy, with two shifts where <c>n</c> alone, which may be 0, takes three.
 /// </para>
 /// <para>
-/// A slot holds the table its code currently decodes with: built there (FSE and RLE modes), or copied
-/// there from a shared table (predefined mode, a dictionary's), which the repeat mode then keeps. A
-/// shared table is copied only when the slot does not hold it already, and a dictionary's only once a
-/// block repeats it.
+/// A slot holds the table its code currently decodes with when the set's own array is the one decoded
+/// from: built there (FSE and RLE modes), or copied there from a shared table (predefined mode, a
+/// dictionary's), which the repeat mode then keeps. A block whose three codes all take the shared
+/// tables of one family decodes from the family's array instead (see <see cref="Prepare"/>), and
+/// copies nothing. A shared table is copied only when a block needs it in the set's own array and the
+/// slot does not hold it already.
 /// </para>
 /// </remarks>
 internal sealed class SequenceTableSet
@@ -206,18 +227,33 @@ internal sealed class SequenceTableSet
         }
     }
 
-    /// <summary>A shared table, copied into the slot unless it is there already.</summary>
+    /// <summary>A shared table, copied into the slot when a block needs it there (see <see cref="Prepare"/>).</summary>
     public void Use(SeqTable table)
     {
         int code = (int)table.Code;
         _current[code] = table;
         _tableLog[code] = table.TableLog;
         _expectedTimes2[code] = table.ExpectedTimes2;
-        Materialize(table.Code);
     }
 
-    /// <summary>The table the previous block used, for the repeat mode.</summary>
-    public void Repeat(SequenceCode code) => Materialize(code);
+    /// <summary>
+    /// The array a block decodes its sequences from, once its three tables are chosen: the family's
+    /// when the three are the shared tables of one family, the set's own otherwise, the shared tables
+    /// among them copied into their slots unless there already.
+    /// </summary>
+    public SeqSymbol[] Prepare()
+    {
+        SeqSymbol[]? family = _current[0]?.Family;
+        if (family is not null && ReferenceEquals(_current[1]?.Family, family) && ReferenceEquals(_current[2]?.Family, family))
+        {
+            return family;
+        }
+
+        Materialize(SequenceCode.LiteralLength);
+        Materialize(SequenceCode.Offset);
+        Materialize(SequenceCode.MatchLength);
+        return Entries;
+    }
 
     /// <summary>
     /// The repeat mode of a block decoded alongside the one before it, whose tables are in
@@ -265,9 +301,9 @@ internal sealed class SequenceTableSet
     private void Materialize(SequenceCode code)
     {
         SeqTable? table = _current[(int)code];
-        if (!ReferenceEquals(table, _held[(int)code]))
+        if (table is not null && !ReferenceEquals(table, _held[(int)code]))
         {
-            table!.Entries.CopyTo(Entries.AsSpan(Slot(code)));
+            table.Entries.CopyTo(Entries.AsSpan(Slot(code)));
             _held[(int)code] = table;
         }
     }
@@ -375,6 +411,8 @@ internal static class SequenceCodes
     public static readonly SeqTable DefaultLiteralLengths = new(SequenceCode.LiteralLength, LiteralLengthDefaultNorm, 6);
     public static readonly SeqTable DefaultOffsets = new(SequenceCode.Offset, OffsetDefaultNorm, 5);
     public static readonly SeqTable DefaultMatchLengths = new(SequenceCode.MatchLength, MatchLengthDefaultNorm, 6);
+
+    static SequenceCodes() => SeqTable.Join(DefaultLiteralLengths, DefaultOffsets, DefaultMatchLengths);
 
     /// <summary>The largest symbol of a code.</summary>
     public static int MaxSymbol(SequenceCode code) => code switch

@@ -42,6 +42,13 @@ public sealed partial class ZstdDecompressor
         /// <summary>The sequences left, a pending one included.</summary>
         public nint NbSeq;
 
+        /// <summary>
+        /// The end of what precedes the frame (the dictionary's content), and its length: where a
+        /// match that starts before the frame is.
+        /// </summary>
+        public ref byte HistoryEnd;
+        public nint HistoryLength;
+
         /// <summary>A sequence the fast loop decoded but did not execute.</summary>
         public bool Pending;
         public nint LitLength;
@@ -71,7 +78,9 @@ public sealed partial class ZstdDecompressor
     /// destination does, and its literals before the last literal: a 16-byte copy that overruns stays
     /// inside the destination, and inside <paramref name="literals"/>, which has
     /// <see cref="LiteralsMargin"/> readable bytes after the last literal.</item>
-    /// <item>Its match lies wholly within this frame's output, before the write position.</item>
+    /// <item>Its match lies wholly within this frame's output, before the write position; or wholly
+    /// within the dictionary's content, whose buffer has <see cref="DecoderDictionary.Margin"/>
+    /// readable bytes after it for a copy 16 bytes at a time that reads past the end.</item>
     /// <item>The bitstream is read eight bytes at a time at a position that never goes below its
     /// start: the common path reloads only from <see cref="FastLoopMinPtr"/> bytes, the general path
     /// clamps. A stream under eight bytes is first copied into eight.</item>
@@ -156,7 +165,7 @@ public sealed partial class ZstdDecompressor
         state.Ptr = ptr;
         state.Consumed = bc;
         state.Container = container;
-        state.Tables = ref MemoryMarshal.GetArrayDataReference(tables.Entries);
+        state.Tables = ref MemoryMarshal.GetArrayDataReference(tables.Prepare());
         state.LiteralLengthState = llState;
         state.MatchLengthState = mlState;
         state.OffsetState = ofState;
@@ -177,6 +186,8 @@ public sealed partial class ZstdDecompressor
     {
         if (state.NbSeq > 1 && !state.Pending)
         {
+            state.HistoryEnd = ref Unsafe.Add(ref MemoryMarshal.GetReference(history), history.Length);
+            state.HistoryLength = history.Length;
             ref byte frameStart = ref MemoryMarshal.GetReference(destination);
             nint fastRoom = Math.Min((nint)blockStart + blockSizeMax, destination.Length - WildCopyOverlength);
             ExecuteSequencesFast(
@@ -359,10 +370,34 @@ public sealed partial class ZstdDecompressor
             ref byte matchStart = ref Unsafe.Add(ref dst, litLength);
             ref byte matchEnd = ref Unsafe.Add(ref matchStart, matchLength);
             if (Unsafe.IsAddressGreaterThan(ref matchEnd, ref fastLimit)
-                | Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd)
-                | (offset > (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart)))
+                | Unsafe.IsAddressGreaterThan(ref litAfter, ref litEnd))
             {
                 goto Pending;
+            }
+
+            nuint prefix = (nuint)Unsafe.ByteOffset(ref frameStart, ref matchStart);
+            if (offset > prefix)
+            {
+                // ---- a match that starts in the dictionary, libzstd's extDict case: copied from
+                // there 16 bytes at a time, when it ends there too (the last copy may read into the
+                // margin after the content). One that runs on into the frame is the careful path's,
+                // as an offset beyond the dictionary is.
+                nuint back = offset - prefix;
+                if ((back > (nuint)s.HistoryLength) | ((nint)back < matchLength))
+                {
+                    goto Pending;
+                }
+
+                WildCopy16(ref dst, ref lit, litLength);
+                WildCopy16(ref matchStart, ref Unsafe.Subtract(ref s.HistoryEnd, back), matchLength);
+                dst = ref matchEnd;
+                lit = ref litAfter;
+                if (--beforeLast != 0)
+                {
+                    goto Loop;
+                }
+
+                goto Stop;
             }
 
             ref byte match = ref Unsafe.Subtract(ref matchStart, offset);

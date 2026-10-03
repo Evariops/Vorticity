@@ -14,13 +14,23 @@ namespace Vorticity.Zstd.Internal;
 /// </remarks>
 internal sealed class DecoderDictionary
 {
-    private DecoderDictionary(byte[] content)
+    /// <summary>
+    /// Readable bytes after the content: the fast sequence loop copies a match out of the dictionary
+    /// 16 bytes at a time, and the last copy of one that ends near its end reads past it.
+    /// </summary>
+    public const int Margin = 32;
+
+    /// <summary>The content, then <see cref="Margin"/> bytes nothing reads as content.</summary>
+    private readonly byte[] _buffer;
+
+    private DecoderDictionary(ReadOnlySpan<byte> content)
     {
-        Content = content;
+        _buffer = new byte[content.Length + Margin];
+        content.CopyTo(_buffer);
     }
 
-    /// <summary>The bytes before the first byte of every frame.</summary>
-    public byte[] Content { get; }
+    /// <summary>The bytes before the first byte of every frame, <see cref="Margin"/> readable bytes after them.</summary>
+    public ReadOnlySpan<byte> Content => _buffer.AsSpan(0, _buffer.Length - Margin);
 
     /// <summary>The identifier a frame names it by; 0 for raw content.</summary>
     public uint Id { get; private set; }
@@ -43,7 +53,7 @@ internal sealed class DecoderDictionary
     /// <exception cref="System.IO.InvalidDataException">A zstd-format dictionary whose tables are invalid.</exception>
     public static DecoderDictionary Load(ReadOnlySpan<byte> buffer)
     {
-        var dictionary = new DecoderDictionary(buffer.ToArray());
+        var dictionary = new DecoderDictionary(buffer);
         if (buffer.Length < 8 || BinaryPrimitives.ReadUInt32LittleEndian(buffer) != FrameFormat.DictionaryMagic)
         {
             return dictionary;
@@ -99,6 +109,7 @@ internal sealed class DecoderDictionary
             reps[i] = rep;
         }
 
+        SeqTable.Join(LiteralLengths, Offsets, MatchLengths);
         Huffman = huffman;
         Rep0 = reps[0];
         Rep1 = reps[1];

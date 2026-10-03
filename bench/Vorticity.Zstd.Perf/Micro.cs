@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
@@ -41,6 +42,12 @@ internal static class Micro
             bool longDistance = name.EndsWith("-ldm", StringComparison.Ordinal);
             bool withDictionary = name.EndsWith("-dict", StringComparison.Ordinal);
             string frameName = longDistance ? name[..^4] : withDictionary ? name[..^5] : name;
+            if (what is "dcorpus" or "ndcorpus" or "dcorpusab")
+            {
+                DecodeCorpus(what, name);
+                continue;
+            }
+
             Blocks blocks = Parse(BenchFrames.Load(frameName));
             switch (what)
             {
@@ -249,12 +256,72 @@ internal static class Micro
                 }
 
                 default:
-                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, compress, ncompress, cmatch, nmatch, compressab, cmatchab, centropy, cliterals, chist, csequences");
+                    Console.WriteLine($"unknown micro-benchmark {what}: tables, ncount, tree, weights, x1, x2, x2build, compress, ncompress, cmatch, nmatch, compressab, cmatchab, centropy, cliterals, chist, csequences, dcorpus, ndcorpus, dcorpusab");
                     return 1;
             }
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// The decoding of a corpus of <see cref="Corpus"/> (<c>--frames github-dict-L3</c>: the set, then
+    /// the level its frames are compressed at), every frame once per run, on one decoder: Vorticity.Zstd
+    /// (dcorpus, dcorpusab with the legacy switches on one side) or libzstd (ndcorpus). Per frame, and
+    /// per byte of content.
+    /// </summary>
+    private static void DecodeCorpus(string what, string name)
+    {
+        int dash = name.LastIndexOf("-L", StringComparison.Ordinal);
+        int level = int.Parse(name.AsSpan(dash + 2), CultureInfo.InvariantCulture);
+        (byte[] content, int[] offsets, byte[]? dictionary) = Corpus.LoadSet(name[..dash]);
+        int records = offsets.Length - 1;
+        var compressor = dictionary is null ? new ZstdCompressor(level) : new ZstdCompressor(level, dictionary);
+        byte[] frames = new byte[ZstdCompressor.GetMaxCompressedLength(content.Length) + (records * 64)];
+        int[] frameOffsets = new int[records + 1];
+        for (int i = 0; i < records; i++)
+        {
+            compressor.Compress(content.AsSpan(offsets[i], offsets[i + 1] - offsets[i]), frames.AsSpan(frameOffsets[i]), out _, out int written);
+            frameOffsets[i + 1] = frameOffsets[i] + written;
+        }
+
+        byte[] output = new byte[content.Length];
+        SpanCodec decode;
+        if (what == "ndcorpus")
+        {
+            NativeReference native = NativeReference.TryLoad() ?? throw new InvalidOperationException("no " + NativeReference.LibraryPath);
+            PcSampler.Libraries.Add((NativeReference.LibraryPath, "_ZSTD_versionNumber", native.VersionAddress));
+            decode = dictionary is null ? native.Decompress : native.DecompressorWith(dictionary);
+        }
+        else
+        {
+            var decompressor = dictionary is null ? new ZstdDecompressor() : new ZstdDecompressor(dictionary);
+            decode = (s, d) => decompressor.Decompress(s, d, out _, out int written) == OperationStatus.Done ? written : -1;
+        }
+
+        void Body()
+        {
+            for (int i = 0; i < records; i++)
+            {
+                decode(frames.AsSpan(frameOffsets[i], frameOffsets[i + 1] - frameOffsets[i]), output.AsSpan(offsets[i], offsets[i + 1] - offsets[i]));
+            }
+        }
+
+        Body();
+        if (!output.AsSpan().SequenceEqual(content))
+        {
+            throw new InvalidOperationException(what + " gave back other content");
+        }
+
+        string title = $"{(what == "ndcorpus" ? "libzstd " : string.Empty)}decoding, {records} frames, {frameOffsets[^1]} -> {content.Length} bytes, per frame";
+        if (what == "dcorpusab")
+        {
+            ReportAb(name, title, records, Body);
+        }
+        else
+        {
+            Report(name, title, records, content.Length, Body);
+        }
     }
 
     /// <summary>The histogram of each block's literals, as literals compression counts them.</summary>

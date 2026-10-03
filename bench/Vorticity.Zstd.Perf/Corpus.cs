@@ -440,6 +440,13 @@ internal static class Corpus
     private static string Speed(double mbPerSecond) =>
         mbPerSecond.ToString(mbPerSecond >= 100 ? "F0" : mbPerSecond >= 10 ? "F1" : "F2", CultureInfo.InvariantCulture);
 
+    /// <summary>A data set's content, where each record starts, and its dictionary: for the micro-benchmarks.</summary>
+    public static (byte[] Content, int[] Offsets, byte[]? Dictionary) LoadSet(string name)
+    {
+        DataSet set = Load(name);
+        return (set.Content, set.Offsets, set.Dictionary);
+    }
+
     private static DataSet Load(string name)
     {
         string directory = Path.Combine(BenchFrames.RepositoryRoot, "tests", "Vorticity.Zstd.Tests", "testdata", "corpus");
