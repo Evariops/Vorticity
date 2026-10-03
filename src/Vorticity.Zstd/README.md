@@ -36,8 +36,9 @@ included. A warm compressor allocates nothing. It is not thread-safe.
 the source cut into jobs of four windows (1 MiB to 1 GiB, each but the first loading the end of the one
 before), compressed on the thread pool, up to the degree of parallelism at a time, by compressors the
 instance keeps for them. The frame is the same whatever the degree, and up to 512 KiB it is the one
-`Compress` writes. It is checked against libzstd built with threads (`tools/native-ref/build.sh mt`).
-Long-distance matching is not implemented yet in jobs.
+`Compress` writes. Dictionaries and long-distance matching take part as in libzstd (the first job takes
+the dictionary; one matcher runs over the whole frame, the jobs in order). It is checked against
+libzstd built with threads (`tools/native-ref/build.sh mt`).
 
 ## Layout
 

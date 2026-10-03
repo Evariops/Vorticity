@@ -47,6 +47,11 @@ public sealed partial class ZstdCompressor
         bool fits = true;
         using MemoryHandle pin = source.Pin();
         nint address = AddressOf(pin);
+        if (plan.LongDistance)
+        {
+            BeginJobsMatcher(plan, address);
+        }
+
         try
         {
             for (int flushed = 0; flushed < plan.Count; flushed++)
@@ -57,7 +62,11 @@ public sealed partial class ZstdCompressor
                 while (started < plan.Count && started < flushed + (2 * degree))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    jobs[started] = RunJobAsync(slots, plan, address, started);
+                    int job = started;
+                    (RawSequence[]? sequences, int count) = plan.LongDistance
+                        ? await Task.Run(() => GenerateJobSequences(plan, address, job), CancellationToken.None).ConfigureAwait(false)
+                        : (null, 0);
+                    jobs[job] = RunJobAsync(slots, plan, address, job, sequences, count);
                     started++;
                 }
 
@@ -105,17 +114,30 @@ public sealed partial class ZstdCompressor
         return fits ? written : throw new ArgumentException("The frame does not fit in the destination.", nameof(destination));
     }
 
-    /// <summary>A job on the thread pool once one of the <paramref name="slots"/> is free, in the order asked.</summary>
-    private async Task<(byte[] Buffer, int Size)> RunJobAsync(SemaphoreSlim slots, JobPlan plan, nint address, int job)
+    /// <summary>
+    /// A job on the thread pool once one of the <paramref name="slots"/> is free, in the order asked, its
+    /// long-distance sequences (if any) returned after.
+    /// </summary>
+    private async Task<(byte[] Buffer, int Size)> RunJobAsync(SemaphoreSlim slots, JobPlan plan, nint address, int job, RawSequence[]? sequences, int count)
     {
-        await slots.WaitAsync().ConfigureAwait(false);
         try
         {
-            return await Task.Run(() => RunJob(plan, address, job)).ConfigureAwait(false);
+            await slots.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                return await Task.Run(() => RunJob(plan, address, job, sequences, count)).ConfigureAwait(false);
+            }
+            finally
+            {
+                slots.Release();
+            }
         }
         finally
         {
-            slots.Release();
+            if (sequences is not null)
+            {
+                ArrayPool<RawSequence>.Shared.Return(sequences);
+            }
         }
     }
 }

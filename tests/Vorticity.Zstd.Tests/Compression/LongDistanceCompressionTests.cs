@@ -1,6 +1,8 @@
 using System;
 using System.Buffers;
+using System.Globalization;
 using System.IO.Compression;
+using System.Threading.Tasks;
 using Vorticity.Zstd.Internal;
 using Vorticity.Zstd.Tests.Differential;
 using Vorticity.Zstd.Tests.Support;
@@ -222,6 +224,79 @@ public sealed class LongDistanceCompressionTests
         byte[] decoded = new byte[data.Length];
         Assert.Equal(OperationStatus.Done, new ZstdDecompressor(dictionary).Decompress(output.AsSpan(0, written), decoded, out _, out int decodedSize));
         Corpus.AssertSameBytes(data, decoded.AsSpan(0, decodedSize), "far-walk64/" + Size + "/L22/dict=raw");
+    }
+
+    public static TheoryData<string> JobCases()
+    {
+        var data = new TheoryData<string>();
+        foreach (string kind in FarRepeats.Kinds)
+        {
+            foreach (int level in Levels)
+            {
+                foreach (int jobSize in new[] { 0, 512 << 10 })
+                {
+                    foreach (string dictionary in new[] { "none", "raw", "trained" })
+                    {
+                        data.Add(string.Create(CultureInfo.InvariantCulture, $"{kind}/{level}/{jobSize}/{dictionary}"));
+                    }
+                }
+            }
+        }
+
+        return data;
+    }
+
+    /// <summary>
+    /// libzstd with workers runs one matcher for the frame, the jobs' sections in order by chunks of
+    /// 1 MiB, and gives each job its sequences, which its blocks consume in turn: against libzstd built
+    /// with threads, one job of the default size, or many small ones; a dictionary, which the first
+    /// job takes, never reaches the matcher.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(JobCases))]
+    public async Task Compresses_in_jobs_like_libzstd_with_workers(string name)
+    {
+        LibzstdMt? libzstd = LibzstdMt.Instance;
+        Assert.SkipWhen(libzstd is null, "libzstd with threads is not built: tools/native-ref/build.sh mt");
+        string[] parts = name.Split('/');
+        int level = int.Parse(parts[1], CultureInfo.InvariantCulture);
+        int jobSize = int.Parse(parts[2], CultureInfo.InvariantCulture);
+        byte[]? dictionary = parts[3] == "none" ? null : Dictionaries.Get(FarRepeats.Content(parts[0]), parts[3]).Bytes;
+        byte[] data = dictionary is null ? FarRepeats.Generate(parts[0], 3_000_000) : FarRepeats.Generate(parts[0], 3_000_000, dictionary);
+        byte[] expected = libzstd!.Compress(data, level, workers: 2, longDistance: true, dictionary: dictionary, jobSize: jobSize);
+
+        ZstdCompressor compressor = dictionary is null ? new ZstdCompressor(level) : new ZstdCompressor(level, dictionary);
+        compressor.LongDistanceMatching = true;
+        compressor.JobSizeOverride = jobSize;
+        byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
+        Assert.Equal(OperationStatus.Done, compressor.CompressInJobs(data, output, out int written));
+        Corpus.AssertSameBytes(expected, output.AsSpan(0, written), name);
+        byte[] decoded = new byte[data.Length];
+        var decoder = dictionary is null ? new ZstdDecompressor() : new ZstdDecompressor(dictionary);
+        Assert.Equal(OperationStatus.Done, decoder.Decompress(output.AsSpan(0, written), decoded, out _, out int decodedSize));
+        Corpus.AssertSameBytes(data, decoded.AsSpan(0, decodedSize), name);
+
+        Array.Clear(output);
+        int parallel = await compressor.CompressAsync(data, output, 3, TestContext.Current.CancellationToken);
+        Corpus.AssertSameBytes(expected, output.AsSpan(0, parallel), name + " in parallel");
+    }
+
+    /// <summary>
+    /// Level 22 over 64 MiB with workers: the matcher turns itself on, and its jobs are sized by the
+    /// match finder's cycle (512 MiB here), so the frame is one job, its sequences made by chunks of
+    /// 1 MiB: not the frame without workers.
+    /// </summary>
+    [Fact]
+    public async Task Turns_itself_on_in_jobs_like_libzstd_with_workers()
+    {
+        LibzstdMt? libzstd = LibzstdMt.Instance;
+        Assert.SkipWhen(libzstd is null, "libzstd with threads is not built: tools/native-ref/build.sh mt");
+        const int Size = (64 << 20) + 300_000;
+        byte[] data = FarRepeats.Generate("far-walk64", Size);
+        byte[] expected = libzstd!.Compress(data, 22, workers: 2);
+        byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
+        int written = await new ZstdCompressor(22).CompressAsync(data, output, 4, TestContext.Current.CancellationToken);
+        Corpus.AssertSameBytes(expected, output.AsSpan(0, written), "far-walk64/" + Size + "/L22 in jobs");
     }
 
     /// <summary>The platform's frame, with or without its long-distance matcher.</summary>

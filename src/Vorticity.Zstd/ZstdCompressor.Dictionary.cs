@@ -72,15 +72,21 @@ public sealed unsafe partial class ZstdCompressor
     /// parameters decide, takes the parameters of the frame's tables and starts afresh at the source;
     /// a frame that loads a raw-content dictionary loads it into the matcher too.
     /// </summary>
+    /// <param name="source">The frame's content.</param>
+    /// <param name="sourceSize">Its size.</param>
+    /// <param name="inJob">
+    /// Whether the frame is started by its first job, which leaves the long-distance matcher to the
+    /// frame's (zstdmt's serial state).
+    /// </param>
     /// <returns>The frame's parameters: its window.</returns>
-    private CompressionParameters BeginDictionaryFrame(byte* source, int sourceSize)
+    private CompressionParameters BeginDictionaryFrame(byte* source, int sourceSize, bool inJob = false)
     {
         CompressionDictionary dictionary = _dictionary!;
         ulong size = (ulong)sourceSize;
         CompressionParameters prepared = dictionary.Parameters;
         bool attach = size <= AttachCutoff(prepared.Strategy);
         CompressionParameters frame = CompressionParameters.ForFrame(dictionary.Level, sourceSize, dictionary.Size, attach, LongDistanceMatching);
-        bool longDistance = LongDistanceMatching || LongDistanceMatcher.EnabledFor(frame);
+        bool longDistance = !inJob && (LongDistanceMatching || LongDistanceMatcher.EnabledFor(frame));
         bool usePreparedTables = size < PreparedTablesCutoff || size < (ulong)dictionary.Size * LoadDictionaryMultiplier;
         CompressionParameters tables = !usePreparedTables ? frame
             : attach ? prepared.ForAttachedSource(sourceSize, dictionary.Size, frame.WindowLog)

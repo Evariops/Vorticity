@@ -43,6 +43,15 @@ public sealed unsafe partial class ZstdCompressor
     /// <summary>The compressors that run the jobs of <see cref="CompressAsync"/>, kept from one call to the next.</summary>
     private readonly Stack<ZstdCompressor> _idleWorkers = new();
 
+    /// <summary>zstdmt's serial long-distance matcher: the jobs' sequences, made in their order.</summary>
+    private LongDistanceMatcher? _jobsMatcher;
+
+    /// <summary>The long-distance sequences of the job being compressed (libzstd's <c>externSeqStore</c>).</summary>
+    private RawSequence* _jobSequences;
+
+    /// <summary>How many there are; 0 outside a job with the matcher on.</summary>
+    private nuint _jobSequenceCount;
+
     /// <summary>A compressor for jobs, with the settings of <paramref name="owner"/> and its prepared dictionary.</summary>
     private ZstdCompressor(ZstdCompressor owner)
         : this(owner.Level)
@@ -57,7 +66,7 @@ public sealed unsafe partial class ZstdCompressor
     /// the last, each but the first preceded by <see cref="Overlap"/> bytes of the one before; none up
     /// to <see cref="MinJobsSourceSize"/>.
     /// </summary>
-    private readonly record struct JobPlan(CompressionParameters Parameters, int FrameSize, int JobSize, int Overlap)
+    private readonly record struct JobPlan(CompressionParameters Parameters, int FrameSize, int JobSize, int Overlap, bool LongDistance)
     {
         public int Count => FrameSize <= MinJobsSourceSize ? 0 : (int)(((long)FrameSize + JobSize - 1) / JobSize);
 
@@ -77,12 +86,37 @@ public sealed unsafe partial class ZstdCompressor
         CompressionParameters parameters = _dictionary is null
             ? CompressionParameters.ForFrame(Level, sourceSize, LongDistanceMatching)
             : CompressionParameters.ForFrame(_dictionary.Level, sourceSize, _dictionary.Size, attached: false, LongDistanceMatching);
-        if (sourceSize > MinJobsSourceSize && (LongDistanceMatching || LongDistanceMatcher.EnabledFor(parameters)))
+        bool longDistance = LongDistanceMatching || LongDistanceMatcher.EnabledFor(parameters);
+        if (longDistance && parameters.Strategy < Strategy.BinaryTreeOptimal)
         {
-            throw new NotSupportedException("Jobs are not implemented yet with the long-distance matcher.");
+            throw new NotSupportedException("Long-distance matching is implemented for the optimal parsers only.");
         }
 
-        return new JobPlan(parameters, sourceSize, JobSize(parameters), OverlapSize(parameters));
+        return new JobPlan(parameters, sourceSize, JobSize(parameters, longDistance), OverlapSize(parameters, longDistance), longDistance);
+    }
+
+    /// <summary>
+    /// The start of zstdmt's serial long-distance matcher for a frame (<c>ZSTDMT_serialState_reset</c>):
+    /// the frame's parameters, its window at the source. A dictionary is never loaded into it.
+    /// </summary>
+    private void BeginJobsMatcher(in JobPlan plan, byte* source)
+    {
+        _jobsMatcher ??= new LongDistanceMatcher();
+        _jobsMatcher.BeginFrame(plan.Parameters, source);
+    }
+
+    /// <summary>
+    /// A job's long-distance sequences (<c>ZSTDMT_serialState_genSequences</c>), the jobs before it done:
+    /// into a rented buffer, returned by the caller.
+    /// </summary>
+    private (RawSequence[] Sequences, int Count) GenerateJobSequences(in JobPlan plan, byte* source, int job)
+    {
+        nuint size = (nuint)plan.Size(job);
+        RawSequence[] sequences = ArrayPool<RawSequence>.Shared.Rent((int)_jobsMatcher!.MaxJobSequences(size));
+        fixed (RawSequence* buffer = sequences)
+        {
+            return (sequences, (int)_jobsMatcher.GenerateJob(source + plan.Start(job), size, buffer));
+        }
     }
 
     private ZstdCompressor RentWorker()
@@ -110,7 +144,7 @@ public sealed unsafe partial class ZstdCompressor
     /// A job of <paramref name="plan"/>, run on a worker into a buffer of its own (rented, returned by
     /// the caller once copied out): libzstd's job with its <c>dstBuff</c>.
     /// </summary>
-    private (byte[] Buffer, int Size) RunJob(in JobPlan plan, nint source, int job)
+    private (byte[] Buffer, int Size) RunJob(in JobPlan plan, nint source, int job, RawSequence[]? sequences, int sequenceCount)
     {
         int size = plan.Size(job);
         int capacity = GetMaxCompressedLength(size) + FrameHeaderSizeMax;
@@ -120,8 +154,11 @@ public sealed unsafe partial class ZstdCompressor
         {
             int written;
             fixed (byte* destination = buffer)
+            fixed (RawSequence* jobSequences = sequences)
             {
-                written = worker.CompressJob(plan.Parameters, (byte*)source, plan.FrameSize, plan.Start(job), size, plan.PrefixSize(job), destination, capacity, AppendChecksum);
+                written = worker.CompressJob(
+                    plan.Parameters, (byte*)source, plan.FrameSize, plan.Start(job), size, plan.PrefixSize(job), destination, capacity, AppendChecksum,
+                    jobSequences, (nuint)sequenceCount);
             }
 
             if (written < 0)
@@ -142,6 +179,11 @@ public sealed unsafe partial class ZstdCompressor
         }
     }
 
+    private void BeginJobsMatcher(in JobPlan plan, nint source) => BeginJobsMatcher(plan, (byte*)source);
+
+    private (RawSequence[] Sequences, int Count) GenerateJobSequences(in JobPlan plan, nint source, int job) =>
+        GenerateJobSequences(plan, (byte*)source, job);
+
     /// <summary>The address of pinned memory, for the jobs (which may not take pointers across their awaits).</summary>
     private static nint AddressOf(in System.Buffers.MemoryHandle pin) => (nint)pin.Pointer;
 
@@ -151,21 +193,29 @@ public sealed unsafe partial class ZstdCompressor
 
     /// <summary>
     /// libzstd's <c>targetSectionSize</c> (<c>ZSTDMT_initCStream_internal</c>): the size of every job but
-    /// the last, four windows by default (<c>ZSTDMT_computeTargetJobLog</c>), never under the overlap.
+    /// the last, never under the overlap.
     /// </summary>
-    internal int JobSize(in CompressionParameters parameters)
+    internal int JobSize(in CompressionParameters parameters, bool longDistance) =>
+        Math.Max(JobSizeOverride != 0 ? Math.Max(JobSizeOverride, MinJobsSourceSize) : 1 << JobLog(parameters, longDistance), OverlapSize(parameters, longDistance));
+
+    /// <summary>
+    /// libzstd's <c>ZSTDMT_computeTargetJobLog</c>: four windows, 1 MiB at least; with the long-distance
+    /// matcher, whose window is oversized, eight cycles of the match finder's table, 2 MiB at least.
+    /// </summary>
+    private static int JobLog(in CompressionParameters parameters, bool longDistance)
     {
-        int size = JobSizeOverride != 0
-            ? Math.Max(JobSizeOverride, MinJobsSourceSize)
-            : 1 << Math.Min(Math.Max(20, parameters.WindowLog + 2), JobLogMax);
-        return Math.Max(size, OverlapSize(parameters));
+        int log = longDistance
+            ? Math.Max(21, parameters.ChainLog - (parameters.Strategy >= Strategy.BinaryTreeLazy2 ? 1 : 0) + 3)
+            : Math.Max(20, parameters.WindowLog + 2);
+        return Math.Min(log, JobLogMax);
     }
 
     /// <summary>
     /// libzstd's <c>ZSTDMT_computeOverlapSize</c>: the bytes a job loads from before its section, a
-    /// fraction of the window by the strategy (<c>ZSTDMT_overlapLog_default</c>), none at overlapLog 1.
+    /// fraction of the window by the strategy (<c>ZSTDMT_overlapLog_default</c>), none at overlapLog 1;
+    /// with the long-distance matcher, a fraction of a quarter job at most, even at overlapLog 1.
     /// </summary>
-    internal int OverlapSize(in CompressionParameters parameters)
+    internal int OverlapSize(in CompressionParameters parameters, bool longDistance)
     {
         int overlapLog = OverlapLogOverride != 0 ? OverlapLogOverride : parameters.Strategy switch
         {
@@ -175,7 +225,9 @@ public sealed unsafe partial class ZstdCompressor
             _ => 6,
         };
         int reductionLog = 9 - overlapLog;
-        int log = reductionLog >= 8 ? 0 : parameters.WindowLog - reductionLog;
+        int log = longDistance
+            ? Math.Min(parameters.WindowLog, JobLog(parameters, longDistance) - 2) - reductionLog
+            : reductionLog >= 8 ? 0 : parameters.WindowLog - reductionLog;
         return log == 0 ? 0 : 1 << log;
     }
 
@@ -211,11 +263,28 @@ public sealed unsafe partial class ZstdCompressor
             return CompressFrame(source, sourceSize, destination, capacity);
         }
 
+        if (plan.LongDistance)
+        {
+            BeginJobsMatcher(plan, source);
+        }
+
         int op = 0;
         for (int job = 0; job < plan.Count; job++)
         {
-            int written = CompressJob(
-                plan.Parameters, source, sourceSize, plan.Start(job), plan.Size(job), plan.PrefixSize(job), destination + op, capacity - op, AppendChecksum);
+            (RawSequence[]? sequences, int count) = plan.LongDistance ? GenerateJobSequences(plan, source, job) : (null, 0);
+            int written;
+            fixed (RawSequence* jobSequences = sequences)
+            {
+                written = CompressJob(
+                    plan.Parameters, source, sourceSize, plan.Start(job), plan.Size(job), plan.PrefixSize(job), destination + op, capacity - op, AppendChecksum,
+                    jobSequences, (nuint)count);
+            }
+
+            if (sequences is not null)
+            {
+                ArrayPool<RawSequence>.Shared.Return(sequences);
+            }
+
             if (written < 0)
             {
                 return -1;
@@ -243,11 +312,13 @@ public sealed unsafe partial class ZstdCompressor
     /// <paramref name="frameSize"/> bytes starts at <paramref name="start"/>, its prefix the
     /// <paramref name="prefixSize"/> bytes before it. The first writes the frame's header (declaring a
     /// checksum when <paramref name="checksum"/>), starting from the dictionary when there is one; the
-    /// last flags its last block. The checksum itself is the frame's to write.
+    /// last flags its last block. The checksum itself is the frame's to write. The job's long-distance
+    /// sequences, made by the frame's matcher, are offered to its blocks in turn.
     /// </summary>
     /// <returns>The size of the job's output, or -1 when it does not fit.</returns>
     private int CompressJob(
-        in CompressionParameters parameters, byte* source, int frameSize, int start, int size, int prefixSize, byte* destination, int capacity, bool checksum)
+        in CompressionParameters parameters, byte* source, int frameSize, int start, int size, int prefixSize, byte* destination, int capacity, bool checksum,
+        RawSequence* sequences, nuint sequenceCount)
     {
         byte* section = source + start;
         bool last = start + size == frameSize;
@@ -264,7 +335,7 @@ public sealed unsafe partial class ZstdCompressor
             }
             else
             {
-                BeginDictionaryFrame(source, frameSize);
+                BeginDictionaryFrame(source, frameSize, inJob: true);
                 dictionaryId = _dictionary.Id;
             }
 
@@ -285,6 +356,10 @@ public sealed unsafe partial class ZstdCompressor
             blockSizeMax = parameters.BlockSizeMax(size);
         }
 
+        // ZSTD_referenceExternalSequences: the job's sequences, from the first.
+        _jobSequences = sequences;
+        _jobSequenceCount = sequenceCount;
+
         // ZSTD_compressContinue by four blocks: each call cuts its own blocks, the savings carried
         // from call to call as libzstd's consumed and produced sizes, the first job's header with them.
         long consumed = 0;
@@ -304,6 +379,7 @@ public sealed unsafe partial class ZstdCompressor
             produced = op;
         }
 
+        _jobSequenceCount = 0;
         return op;
     }
 

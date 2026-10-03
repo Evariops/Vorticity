@@ -29,6 +29,16 @@ internal unsafe struct LongDistanceCursor
     /// <summary>The number of <see cref="Sequences"/>; 0 when the matcher is off.</summary>
     public nuint Count;
 
+    /// <summary>
+    /// Where the block's sequences start: libzstd's store position, and the bytes already consumed of
+    /// that sequence. A frame's blocks each have sequences of their own, from the first; a job's blocks
+    /// share the job's, each starting where the one before stopped (<see cref="Advance"/>).
+    /// </summary>
+    public nuint Start;
+
+    /// <summary>The bytes of the sequence at <see cref="Start"/> consumed before the block.</summary>
+    public uint StartInSequence;
+
     private nuint _position;
     private uint _positionInSequence;
     private uint _start;
@@ -38,12 +48,41 @@ internal unsafe struct LongDistanceCursor
     /// <summary>The cursor at the start of a block of <paramref name="size"/> bytes, on its first match.</summary>
     public void Begin(uint size)
     {
-        _position = 0;
-        _positionInSequence = 0;
+        _position = Start;
+        _positionInSequence = StartInSequence;
         _start = 0;
         _end = 0;
         _offset = 0;
         Next(0, size);
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_ldm_skipRawSeqStoreBytes</c> on the sequences a job's blocks share: the start
+    /// moved past a block of <paramref name="bytes"/>, whatever the parser took of them.
+    /// </summary>
+    public void Advance(uint bytes, nuint count)
+    {
+        uint position = StartInSequence + bytes;
+        while (position != 0 && Start < count)
+        {
+            RawSequence* sequence = Sequences + Start;
+            uint length = sequence->LiteralLength + sequence->MatchLength;
+            if (position >= length)
+            {
+                position -= length;
+                Start++;
+            }
+            else
+            {
+                StartInSequence = position;
+                break;
+            }
+        }
+
+        if (position == 0 || Start == count)
+        {
+            StartInSequence = 0;
+        }
     }
 
     /// <summary>
@@ -317,10 +356,52 @@ internal sealed unsafe class LongDistanceMatcher
     /// distance, then the block's sequences, relative to its start.
     /// </summary>
     /// <returns>The number of sequences, in <see cref="Sequences"/>.</returns>
-    public nuint GenerateSequences(byte* source, nuint size)
+    public nuint GenerateSequences(byte* source, nuint size) => GenerateChunk(source, size, Sequences, out _);
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_ldm_generateSequences</c> over a job, as zstdmt's serial state runs it, the
+    /// jobs in order: by chunks of 1 MiB, the window kept within its distance at each one's end, the
+    /// literals after a chunk's last sequence counted in the next one's first.
+    /// </summary>
+    /// <param name="source">The job's section, past the sections before it.</param>
+    /// <param name="size">Its size.</param>
+    /// <param name="sequences">Room for <paramref name="size"/> over the minimum match length, plus one per chunk.</param>
+    /// <returns>The number of sequences.</returns>
+    public nuint GenerateJob(byte* source, nuint size, RawSequence* sequences)
     {
-        // libzstd's ZSTD_window_enforceMaxDist, at the block's end here: a dictionary's content stays
-        // whole until the block ends a window past it.
+        const nuint ChunkSize = 1 << 20;
+        nuint count = 0;
+        nuint leftover = 0;
+        for (nuint chunkStart = 0; chunkStart < size; chunkStart += ChunkSize)
+        {
+            nuint chunk = Math.Min(ChunkSize, size - chunkStart);
+            nuint generated = GenerateChunk(source + chunkStart, chunk, sequences + count, out nuint left);
+            if (generated != 0)
+            {
+                sequences[count].LiteralLength += (uint)leftover;
+                leftover = left;
+            }
+            else
+            {
+                leftover += chunk;
+            }
+
+            count += generated;
+        }
+
+        return count;
+    }
+
+    /// <summary>The longest of a job's sequences, for its buffer: a sequence covers a whole minimum match.</summary>
+    public nuint MaxJobSequences(nuint size) => (size / (nuint)_minMatchLength) + (size >> 20) + 2;
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_window_enforceMaxDist</c> at the chunk's end, then its sequences
+    /// (<c>ZSTD_ldm_generateSequences_internal</c>).
+    /// </summary>
+    private nuint GenerateChunk(byte* source, nuint size, RawSequence* sequences, out nuint leftover)
+    {
+        // A dictionary's content stays whole until the chunk ends a window past it.
         uint blockEndIndex = (uint)(source + size - _base);
         uint maxDistance = 1u << _windowLog;
         if (blockEndIndex > maxDistance + _loadedDictEnd)
@@ -340,15 +421,16 @@ internal sealed unsafe class LongDistanceMatcher
         }
 
         return _lowLimit < _dictLimit
-            ? GenerateBlock<ExtDictionary>(source, size, Sequences)
-            : GenerateBlock<NoDictionary>(source, size, Sequences);
+            ? GenerateBlock<ExtDictionary>(source, size, sequences, out leftover)
+            : GenerateBlock<NoDictionary>(source, size, sequences, out leftover);
     }
 
     /// <summary>
     /// libzstd's <c>ZSTD_ldm_generateSequences_internal</c>, a dictionary's content below the source
-    /// (<see cref="ExtDictionary"/>) or not.
+    /// (<see cref="ExtDictionary"/>) or not: the sequences, and the literals after the last
+    /// (<paramref name="leftover"/>).
     /// </summary>
-    private nuint GenerateBlock<TDictionary>(byte* istart, nuint size, RawSequence* sequences)
+    private nuint GenerateBlock<TDictionary>(byte* istart, nuint size, RawSequence* sequences, out nuint leftover)
         where TDictionary : IDictionaryMode
     {
         nuint count = 0;
@@ -366,6 +448,7 @@ internal sealed unsafe class LongDistanceMatcher
         ulong* table = (ulong*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_table));
         if (size < minMatchLength)
         {
+            leftover = size;
             return 0;
         }
 
@@ -447,6 +530,7 @@ internal sealed unsafe class LongDistanceMatcher
         }
 
         _touched += touched;
+        leftover = (nuint)(iend - anchor);
         return count;
     }
 

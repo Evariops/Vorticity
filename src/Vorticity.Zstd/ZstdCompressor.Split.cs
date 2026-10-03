@@ -45,6 +45,7 @@ public sealed unsafe partial class ZstdCompressor
         if (blockSize < MinCompressedBlockSize + FrameFormat.BlockHeaderSize + 1 + 1)
         {
             // ZSTD_buildSeqStore's ZSTDbss_noCompress: too small to try.
+            SkipJobSequences(blockSize);
             if (_previous.OffsetRepeat == FseRepeat.Valid)
             {
                 _previous.OffsetRepeat = FseRepeat.Check;

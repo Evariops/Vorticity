@@ -95,7 +95,11 @@ public sealed unsafe partial class ZstdCompressor
             _optimal ??= new OptimalState();
             _optimal.LiteralLengthSum = 0;
             _optimal.LongDistance.Count = 0;
+            _optimal.LongDistance.Start = 0;
+            _optimal.LongDistance.StartInSequence = 0;
         }
+
+        _jobSequenceCount = 0;
 
         _longDistance = longDistance;
         if (longDistance)
@@ -274,6 +278,7 @@ public sealed unsafe partial class ZstdCompressor
         {
             // Too small to try.
             compressedSize = 0;
+            SkipJobSequences(size);
         }
         else
         {
@@ -356,6 +361,13 @@ public sealed unsafe partial class ZstdCompressor
             // matches are only offered to the parser, which weighs them with its own.
             _optimal!.LongDistance.Count = _longDistanceMatcher!.GenerateSequences(source, (nuint)size);
         }
+        else if (_jobSequenceCount != 0)
+        {
+            // A job's sequences (libzstd's externSeqStore), offered the same way while some are left,
+            // from where the block before stopped.
+            _optimal!.LongDistance.Sequences = _jobSequences;
+            _optimal.LongDistance.Count = _optimal.LongDistance.Start < _jobSequenceCount ? _jobSequenceCount : 0;
+        }
 
         if (_matchState.LowLimit < _matchState.DictLimit || _matchState.Dictionary != null)
         {
@@ -363,6 +375,7 @@ public sealed unsafe partial class ZstdCompressor
             // attached dictionary.
             nuint dictionaryLiterals = FindSequencesWithDictionary(source, size, rep);
             _store.StoreLastLiterals(source + size - (nint)dictionaryLiterals, dictionaryLiterals);
+            SkipJobSequences(size);
             return;
         }
 
@@ -375,6 +388,19 @@ public sealed unsafe partial class ZstdCompressor
         };
 
         _store.StoreLastLiterals(source + size - (nint)lastLiterals, lastLiterals);
+        SkipJobSequences(size);
+    }
+
+    /// <summary>
+    /// libzstd's <c>ZSTD_ldm_skipRawSeqStoreBytes</c> on a job's sequences after each block, searched
+    /// or too small to: the next one starts past it.
+    /// </summary>
+    private void SkipJobSequences(int size)
+    {
+        if (_jobSequenceCount != 0)
+        {
+            _optimal!.LongDistance.Advance((uint)size, _jobSequenceCount);
+        }
     }
 
     /// <summary>libzstd's <c>ZSTD_isRLE</c>: whether every byte equals the first.</summary>
