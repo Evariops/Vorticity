@@ -362,10 +362,6 @@ public sealed unsafe partial class ZstdCompressor
         {
             byte* tables = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(_splitScratch));
             statistics = SequenceEncoder.BuildStatistics(section, _previous, _next, tables, _parameters.Strategy);
-
-            // The tables took one off the last code's count, as libzstd does to its histogram; the
-            // estimate counts afresh, as libzstd's does.
-            SequenceStore.CountCodes(section.SequencesStart, section.SequenceCount, section.Counts);
         }
         else
         {

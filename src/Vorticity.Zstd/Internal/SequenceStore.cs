@@ -230,15 +230,19 @@ internal sealed unsafe class SequenceStore
     }
 
     /// <summary>The codes of <paramref name="count"/> records counted into <paramref name="counts"/>, cleared first.</summary>
+    /// <remarks>
+    /// Every code is below 128 (<see cref="AllCodes"/>): 7-bit fields, each one ubfx, where the JIT
+    /// narrows an 8-bit one with uxtb before scaling it.
+    /// </remarks>
     public static void CountCodes(SequenceRecord* records, nuint count, uint* counts)
     {
         new Span<uint>(counts, AllCodes).Clear();
         for (nuint n = 0; n < count; n++)
         {
-            uint codes = records[n].Codes;
-            counts[codes & 0xFF]++;
-            counts[(codes >> 8) & 0xFF]++;
-            counts[(codes >> 16) & 0xFF]++;
+            nuint codes = records[n].Codes;
+            counts[codes & 0x7F]++;
+            counts[(codes >> 8) & 0x7F]++;
+            counts[(codes >> 16) & 0x7F]++;
         }
     }
 

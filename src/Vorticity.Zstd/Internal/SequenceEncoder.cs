@@ -308,7 +308,8 @@ internal static unsafe class SequenceEncoder
     /// <summary>
     /// libzstd's <c>ZSTD_buildCTable</c>: the table of a code in its mode, and its description when
     /// it has one. A new table leaves out the last sequence's symbol once, which the state that
-    /// starts the bitstream encodes for free.
+    /// starts the bitstream encodes for free; libzstd takes it off its histogram, which it counts
+    /// again for its estimates, where it is put back here.
     /// </summary>
     /// <returns>The size of the description.</returns>
     public static nuint BuildCTable(
@@ -335,13 +336,11 @@ internal static unsafe class SequenceEncoder
                 short* normalized = stackalloc short[SequenceCodes.MaxMatchLength + 1];
                 nuint total = sequenceCount;
                 uint tableLog = FseEncoder.OptimalTableLog(fseLog, sequenceCount, max);
-                if (count[lastCode] > 1)
-                {
-                    count[lastCode]--;
-                    total--;
-                }
-
+                uint taken = count[lastCode] > 1 ? 1u : 0u;
+                count[lastCode] -= taken;
+                total -= taken;
                 FseEncoder.NormalizeCount(normalized, tableLog, count, total, max, UseLowProbCount(total));
+                count[lastCode] += taken;
                 nuint size = FseEncoder.WriteNCount(destination, normalized, max, tableLog);
                 FseEncoder.BuildCTable(next, normalized, max, tableLog);
                 return size;
