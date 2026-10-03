@@ -263,6 +263,12 @@ public sealed partial class ZstdDecompressor
             nint ofBits = SeqEntry.OffsetExtraBits(ofEntry);
             nint mlBits = SeqEntry.LengthExtraBits(mlEntry);
             nint llBits = SeqEntry.LengthExtraBits(llEntry);
+            if ((ofBits + mlBits + llBits < 57 - (SequenceCodes.LiteralLengthMaxLog + SequenceCodes.MatchLengthMaxLog + SequenceCodes.OffsetMaxLog))
+                & (ptr >= FastLoopMinPtr))
+            {
+                goto ExtraDecode;
+            }
+
             nuint raw = SeqEntry.OffsetBase(ofEntry) + ReadBits(container, bc, ofBits);
             bc += ofBits;
             if (ofBits > 1)
@@ -288,6 +294,32 @@ public sealed partial class ZstdDecompressor
             bc += llBits;
             NextStates(llEntry, mlEntry, ofEntry, container, ref bc, ref llState, ref mlState, ref ofState);
             ReloadClamped(ref bits, ref ptr, ref bc, ref container);
+            goto Execute;
+        }
+
+    // ---- lengths with extra bits, which take no reload inside the sequence: every position from
+    // the entries, as on the common path, the states first
+    ExtraDecode:
+        {
+            nint bcBefore = bc;
+            ulong containerBefore = container;
+            nint consumed = ExtraNextStates(llEntry, mlEntry, ofEntry, bc, container, ref llState, ref mlState, ref ofState, out nint mlAt, out nint llAt);
+            ptr -= (consumed >> 3) & 0x1F;
+            bc = consumed & 7;
+            container = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref bits, ptr));
+            nuint raw = SeqEntry.OffsetBase(ofEntry) + ReadBits(containerBefore, bcBefore, (nint)ofEntry);
+            matchLength = (nint)SeqEntry.LengthBase(mlEntry) + (nint)ReadBits(containerBefore, mlAt, (nint)(mlEntry >> 8));
+            litLength = (nint)SeqEntry.LengthBase(llEntry) + (nint)ReadBits(containerBefore, llAt, (nint)(llEntry >> 8));
+            if ((ofEntry & 0x1E) != 0)
+            {
+                offset = raw;
+                rep2 = rep1;
+                rep1 = rep0;
+                rep0 = raw;
+                goto Execute;
+            }
+
+            offset = ResolveOffset(raw, SeqEntry.LengthBase(llEntry) == 0, ref rep0, ref rep1, ref rep2);
             goto Execute;
         }
 
@@ -389,7 +421,7 @@ public sealed partial class ZstdDecompressor
                 }
 
                 WildCopy16(ref dst, ref lit, litLength);
-                WildCopy16(ref matchStart, ref Unsafe.Subtract(ref s.HistoryEnd, back), matchLength);
+                WildCopy32(ref matchStart, ref Unsafe.Subtract(ref s.HistoryEnd, back), matchLength);
                 dst = ref matchEnd;
                 lit = ref litAfter;
                 if (--beforeLast != 0)
@@ -516,6 +548,36 @@ public sealed partial class ZstdDecompressor
     }
 
     /// <summary>
+    /// The three states after a sequence whose extra bits all come from the container before it
+    /// (fewer than 31: libzstd reloads inside a sequence only from 31), and the positions of the
+    /// lengths' extra bits. As <see cref="CommonNextStates"/>, every position adds the raw entries,
+    /// whose low byte (the second, shifted down, for a length's extra bits) is the count it needs and
+    /// whose other bits only add multiples of 256, which no shift sees; the sum is a tree, the states
+    /// first.
+    /// </summary>
+    /// <returns>The position in the container after the sequence, in the low byte: at most 64.</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static nint ExtraNextStates(
+        ulong llEntry, ulong mlEntry, ulong ofEntry, nint bc, ulong container, ref nint llState, ref nint mlState, ref nint ofState,
+        out nint mlAt, out nint llAt)
+    {
+        nint lengthsExtra = (nint)(mlEntry >> 8) + (nint)(llEntry >> 8);
+        mlAt = bc + (nint)ofEntry;
+        nint statesAt = mlAt + lengthsExtra;
+        nint llMlNb = (nint)llEntry + (nint)mlEntry;
+        nint mlStateAt = statesAt + (nint)llEntry;
+        nint ofStateAt = statesAt + llMlNb;
+        nint ofNb = SeqEntry.OffsetNbBits(ofEntry);
+        ofState = SeqEntry.NextState(ofEntry) + (nint)ReadStateBits(container, ofStateAt, ofNb);
+        mlState = SeqEntry.NextState(mlEntry) + (nint)ReadStateBits(container, mlStateAt, (nint)mlEntry);
+        llState = SeqEntry.NextState(llEntry) + (nint)ReadStateBits(container, statesAt, (nint)llEntry);
+        llAt = mlAt + (nint)(mlEntry >> 8);
+        nint consumed = ofStateAt + ofNb;
+        Debug.Assert((consumed & 0xFF) <= 64);
+        return consumed;
+    }
+
+    /// <summary>
     /// Whether a common sequence fits the room proven for copies past their end, and takes one
     /// 16-byte copy of literals and one of match, 16 or more apart: one condition, the comparisons
     /// combined with <c>&amp;</c>, which the JIT turns into one chain of conditional compares and one
@@ -583,6 +645,29 @@ public sealed partial class ZstdDecompressor
             i += 16;
         }
         while (i < length);
+    }
+
+    /// <summary>
+    /// Copies <paramref name="length"/> bytes 32 at a time, one block at least, from another buffer:
+    /// writing, and reading, up to 31 past the end. A dictionary's matches are long (more than 48 bytes
+    /// for most of those of zstd's github records): half the iterations, and the exits that mispredict,
+    /// of <see cref="WildCopy16"/>. The two halves are loaded, then stored, side by side from one base,
+    /// which pairs them (ldp, stp).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void WildCopy32(ref byte dst, ref byte src, nint length)
+    {
+        ref byte end = ref Unsafe.Add(ref dst, length);
+        do
+        {
+            Vector128<byte> low = Unsafe.ReadUnaligned<Vector128<byte>>(ref src);
+            Vector128<byte> high = Unsafe.ReadUnaligned<Vector128<byte>>(ref Unsafe.Add(ref src, 16));
+            Unsafe.WriteUnaligned(ref dst, low);
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref dst, 16), high);
+            dst = ref Unsafe.Add(ref dst, 32);
+            src = ref Unsafe.Add(ref src, 32);
+        }
+        while (Unsafe.IsAddressLessThan(ref dst, ref end));
     }
 
     /// <summary>
