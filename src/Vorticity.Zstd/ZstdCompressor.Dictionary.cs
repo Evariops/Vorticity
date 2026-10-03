@@ -35,7 +35,7 @@ public sealed unsafe partial class ZstdCompressor
     /// (<c>ZSTD_createCDict</c>, then <c>ZSTD_CCtx_refCDict</c>), byte for byte: the dictionary's level
     /// is the frames' level. The dictionary is prepared once, here.
     /// <para>
-    /// Work in progress: only the levels of libzstd's double-fast strategy take a dictionary so far;
+    /// Work in progress: only the levels of libzstd's fast and double-fast strategies take a dictionary so far;
     /// the others throw <see cref="NotSupportedException"/>.
     /// </para>
     /// </remarks>
@@ -162,6 +162,9 @@ public sealed unsafe partial class ZstdCompressor
         bool extDict = _matchState.LowLimit < _matchState.DictLimit;
         return _parameters.Strategy switch
         {
+            Strategy.Fast => extDict
+                ? FastMatchFinder.CompressBlockExtDict(ref _matchState, _store, rep, source, (nuint)size)
+                : FastMatchFinder.CompressBlockAttached(ref _matchState, _store, rep, source, (nuint)size),
             Strategy.DoubleFast => extDict
                 ? DoubleFastMatchFinder.CompressBlockExtDict(ref _matchState, _store, rep, source, (nuint)size)
                 : DoubleFastMatchFinder.CompressBlockAttached(ref _matchState, _store, rep, source, (nuint)size),

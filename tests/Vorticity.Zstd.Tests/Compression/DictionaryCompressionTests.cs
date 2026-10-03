@@ -18,7 +18,7 @@ public sealed class DictionaryCompressionTests
 {
     private static readonly int[] Sizes = [0, 1, 100, 1000, 4096, 8192, 8193, 16384, 16385, 50_000, 98_000, 131_071, 131_072, 200_000, 400_000];
 
-    private static readonly int[] Levels = [3];
+    private static readonly int[] Levels = [-5, -1, 1, 2, 3];
 
     public static TheoryData<string> Cases()
     {

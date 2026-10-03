@@ -7,7 +7,7 @@ namespace Vorticity.Zstd.Internal;
 /// libzstd's <c>ZSTD_compressBlock_fast</c> without a dictionary: one hash table of the last
 /// position of each hash, searched at every position, a step that grows while nothing matches.
 /// </summary>
-internal static unsafe class FastMatchFinder
+internal static unsafe partial class FastMatchFinder
 {
     /// <summary>
     /// libzstd's <c>ZSTD_fillHashTableForCCtx</c> in its fast mode: every third position of a

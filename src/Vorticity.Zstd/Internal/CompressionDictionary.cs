@@ -38,8 +38,10 @@ internal sealed unsafe class CompressionDictionary
 
     private CompressionDictionary(ReadOnlySpan<byte> dictionary, int level)
     {
-        _buffer = GC.AllocateArray<byte>(dictionary.Length, pinned: true);
+        // A little past the content, for the reads of four bytes at its last indices.
+        _buffer = GC.AllocateArray<byte>(dictionary.Length + 8, pinned: true);
         dictionary.CopyTo(_buffer);
+        Size = dictionary.Length;
         Level = level == 0 ? CompressionParameters.DefaultLevel : level;
         Parameters = CompressionParameters.ForDictionary(level, dictionary.Length);
     }
@@ -51,7 +53,7 @@ internal sealed unsafe class CompressionDictionary
     public uint Id { get; private set; }
 
     /// <summary>libzstd's <c>dictContentSize</c>: the whole buffer, header and tables included.</summary>
-    public int Size => _buffer.Length;
+    public int Size { get; }
 
     /// <summary>The parameters of its tables, for small sources of unknown size.</summary>
     public CompressionParameters Parameters { get; }
@@ -113,17 +115,17 @@ internal sealed unsafe class CompressionDictionary
             Parameters = parameters,
         };
 
-        if (_buffer.Length < 8)
+        if (Size < 8)
         {
             return;
         }
 
         byte* content = buffer;
-        nuint contentSize = (nuint)_buffer.Length;
+        nuint contentSize = (nuint)Size;
         if (BinaryPrimitives.ReadUInt32LittleEndian(_buffer) == FrameFormat.DictionaryMagic)
         {
             Id = BinaryPrimitives.ReadUInt32LittleEndian(_buffer.AsSpan(4));
-            int entropySize = LoadEntropy(Entropy, _buffer);
+            int entropySize = LoadEntropy(Entropy, _buffer.AsSpan(0, Size));
             content += entropySize;
             contentSize -= (nuint)entropySize;
         }
@@ -296,6 +298,17 @@ internal sealed unsafe class CompressionDictionary
 
         switch (parameters.Strategy)
         {
+            case Strategy.Fast:
+                if (preparedDictionary)
+                {
+                    FastMatchFinder.FillTaggedHashTable(ref state, end);
+                }
+                else
+                {
+                    FastMatchFinder.FillHashTable(ref state, end);
+                }
+
+                break;
             case Strategy.DoubleFast:
                 if (preparedDictionary)
                 {
