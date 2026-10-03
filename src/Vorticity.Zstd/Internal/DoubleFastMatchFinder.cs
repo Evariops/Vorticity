@@ -1,3 +1,4 @@
+using System;
 using static Vorticity.Zstd.Internal.MatchFinder;
 
 namespace Vorticity.Zstd.Internal;
@@ -37,8 +38,9 @@ internal static unsafe class DoubleFastMatchFinder
             for (; ip + FillStep - 1 <= iend; ip += FillStep)
             {
                 uint current = (uint)(ip - @base);
-                hashSmall[THash.Hash(ip, hashLogSmall)] = current;
-                hashLarge[Hash8.Hash(ip, hashLogLarge)] = current;
+                ulong bytes = Read64(ip);
+                hashSmall[THash.Hash(bytes, hashLogSmall)] = current;
+                hashLarge[Hash8.Hash(bytes, hashLogLarge)] = current;
             }
         }
     }
@@ -54,7 +56,36 @@ internal static unsafe class DoubleFastMatchFinder
             _ => CompressBlock<Hash4>(ref state, store, rep, source, size),
         };
 
+    /// <summary>
+    /// What the search loop does not touch, in memory the JIT does not promote (stack allocated): in
+    /// registers, these values pushed the loop's own out, both hash multipliers among them.
+    /// </summary>
+    private struct Cold
+    {
+        public byte* Anchor;
+        public byte* Lit;
+        public SequenceRecord* Sequence;
+        public uint* Counts;
+        public uint Offset2;
+        public uint Saved1;
+        public uint Saved2;
+        public uint Current;
+    }
+
     /// <summary>libzstd's <c>ZSTD_compressBlock_doubleFast_noDict_generic</c>.</summary>
+    /// <remarks>
+    /// <para>
+    /// libzstd tests a candidate as <c>read(safe) == read(ip) &amp;&amp; safe == candidate</c>, the
+    /// safe address dummy bytes for a candidate below the window: the second test is the window test.
+    /// Here a candidate below the window is read at the window's start instead, which is in the
+    /// source, and the two tests are one condition, combined with <c>&amp;</c> into one chain of
+    /// compares: no select, no branch on the window.
+    /// </para>
+    /// <para>
+    /// The values the search loop uses are locals; those it does not are in <see cref="Cold"/>, read
+    /// and written once a sequence.
+    /// </para>
+    /// </remarks>
     private static nuint CompressBlock<THash>(ref MatchState state, SequenceStore store, uint* rep, byte* source, nuint size)
         where THash : IMatchHash
     {
@@ -64,20 +95,25 @@ internal static unsafe class DoubleFastMatchFinder
         int hashLogSmall = state.Parameters.ChainLog;
         byte* @base = state.Base;
         byte* istart = source;
-        byte* anchor = istart;
         uint endIndex = (uint)(istart - @base + (nint)size);
         uint prefixLowestIndex = state.LowestPrefixIndex(endIndex);
-        byte* prefixLowest = @base + prefixLowestIndex;
         byte* iend = istart + size;
         byte* ilimit = iend - HashReadSize;
+
+        byte* coldBytes = stackalloc byte[sizeof(Cold)];
+        Cold* cold = (Cold*)coldBytes;
+        cold->Anchor = istart;
+        cold->Lit = store.Literals;
+        cold->Sequence = store.Sequences;
+        cold->Counts = store.Counts;
+        cold->Saved1 = 0;
+        cold->Saved2 = 0;
+
         uint offset1 = rep[0];
-        uint offset2 = rep[1];
-        uint offsetSaved1 = 0;
-        uint offsetSaved2 = 0;
+        cold->Offset2 = rep[1];
 
         nuint matchLength;
         uint offset;
-        uint current;
 
         // How many positions to search before the step grows, and where it grows next.
         const nuint StepIncrement = 1 << SearchStrength;
@@ -88,124 +124,117 @@ internal static unsafe class DoubleFastMatchFinder
         nuint hashLong1;
         uint indexLong0;
         uint indexLong1;
-        byte* matchLong0;
-        byte* matchShort0;
-        byte* matchLong1;
+        byte* match;
 
         byte* ip = istart;
         byte* ip1;
 
-        // Bytes that match no candidate stand for the candidates below the window.
-        byte* dummy = stackalloc byte[] { 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0xe2, 0xb4 };
-
-        ip += ip - prefixLowest == 0 ? 1 : 0;
+        ip += ip == @base + prefixLowestIndex ? 1 : 0;
         {
             uint start = (uint)(ip - @base);
             uint windowLow = state.LowestPrefixIndex(start);
             uint maxRep = start - windowLow;
-            if (offset2 > maxRep)
+            if (cold->Offset2 > maxRep)
             {
-                offsetSaved2 = offset2;
-                offset2 = 0;
+                cold->Saved2 = cold->Offset2;
+                cold->Offset2 = 0;
             }
 
             if (offset1 > maxRep)
             {
-                offsetSaved1 = offset1;
+                cold->Saved1 = offset1;
                 offset1 = 0;
             }
         }
 
-        // ---- one iteration per sequence stored
-        while (true)
+    // ---- one round per sequence stored
+    Start:
+        step = 1;
+        nextStep = ip + StepIncrement;
+        ip1 = ip + step;
+        if (ip1 > ilimit)
         {
-            step = 1;
-            nextStep = ip + StepIncrement;
-            ip1 = ip + step;
-            if (ip1 > ilimit)
+            goto Cleanup;
+        }
+
+        // The eight bytes at ip, read once for its two hashes and its two compares.
+        ulong ipBytes = Read64(ip);
+        hashLong0 = Hash8.Hash(ipBytes, hashLogLong);
+        indexLong0 = hashLong[hashLong0];
+
+        // ---- one round per position searched
+        do
+        {
+            nuint hashShort0 = THash.Hash(ipBytes, hashLogSmall);
+            uint indexShort0 = hashSmall[hashShort0];
+            uint current = (uint)(ip - @base);
+            hashLong[hashLong0] = hashSmall[hashShort0] = current;
+
+            // The repeat offset at ip + 1.
+            if ((offset1 > 0) & (Read32(ip + 1 - offset1) == (uint)(ipBytes >> 8)))
             {
-                goto Cleanup;
+                cold->Current = current;
+                matchLength = Count(ip + 1 + 4, ip + 1 + 4 - offset1, iend) + 4;
+                ip++;
+                byte* anchor = cold->Anchor;
+                SequenceStore.Store(ref cold->Lit, ref cold->Sequence, cold->Counts, (nuint)(ip - anchor), anchor, iend, RepeatCode1, matchLength);
+                goto MatchStored;
             }
 
-            hashLong0 = Hash8.Hash(ip, hashLogLong);
-            indexLong0 = hashLong[hashLong0];
-            matchLong0 = @base + indexLong0;
+            ulong ip1Bytes = Read64(ip1);
+            hashLong1 = Hash8.Hash(ip1Bytes, hashLogLong);
 
-            // ---- one iteration per position searched
-            do
+            // A long match at ip. A candidate below the window is read at its start: see the remarks.
+            match = @base + ClampToWindow(indexLong0, prefixLowestIndex);
+            if ((Read64(match) == ipBytes) & (indexLong0 >= prefixLowestIndex))
             {
-                nuint hashShort0 = THash.Hash(ip, hashLogSmall);
-                uint indexShort0 = hashSmall[hashShort0];
-                current = (uint)(ip - @base);
-                matchShort0 = @base + indexShort0;
-                hashLong[hashLong0] = hashSmall[hashShort0] = current;
-
-                // The repeat offset at ip + 1.
-                if ((offset1 > 0) & (Read32(ip + 1 - offset1) == Read32(ip + 1)))
-                {
-                    matchLength = Count(ip + 1 + 4, ip + 1 + 4 - offset1, iend) + 4;
-                    ip++;
-                    store.Store((nuint)(ip - anchor), anchor, iend, RepeatCode1, matchLength);
-                    goto MatchStored;
-                }
-
-                hashLong1 = Hash8.Hash(ip1, hashLogLong);
-
-                // A long match at ip.
-                {
-                    byte* matchLong0Safe = indexLong0 >= prefixLowestIndex ? matchLong0 : dummy;
-                    if (Read64(matchLong0Safe) == Read64(ip) && matchLong0Safe == matchLong0)
-                    {
-                        matchLength = Count(ip + 8, matchLong0 + 8, iend) + 8;
-                        offset = (uint)(ip - matchLong0);
-                        while (((ip > anchor) & (matchLong0 > prefixLowest)) && ip[-1] == matchLong0[-1])
-                        {
-                            ip--;
-                            matchLong0--;
-                            matchLength++;
-                        }
-
-                        goto MatchFound;
-                    }
-                }
-
-                indexLong1 = hashLong[hashLong1];
-                matchLong1 = @base + indexLong1;
-
-                // A short match at ip.
-                {
-                    byte* matchShort0Safe = indexShort0 >= prefixLowestIndex ? matchShort0 : dummy;
-                    if (Read32(matchShort0Safe) == Read32(ip) && matchShort0Safe == matchShort0)
-                    {
-                        goto SearchNextLong;
-                    }
-                }
-
-                if (ip1 >= nextStep)
-                {
-                    step++;
-                    nextStep += StepIncrement;
-                }
-
-                ip = ip1;
-                ip1 += step;
-
-                hashLong0 = hashLong1;
-                indexLong0 = indexLong1;
-                matchLong0 = matchLong1;
+                cold->Current = current;
+                matchLength = Count(ip + 8, match + 8, iend) + 8;
+                offset = (uint)(ip - match);
+                goto ExtendBackward;
             }
-            while (ip1 <= ilimit);
 
-        Cleanup:
-            offsetSaved2 = offsetSaved1 != 0 && offset1 != 0 ? offsetSaved1 : offsetSaved2;
+            indexLong1 = hashLong[hashLong1];
+
+            // A short match at ip.
+            match = @base + ClampToWindow(indexShort0, prefixLowestIndex);
+            if ((Read32(match) == (uint)ipBytes) & (indexShort0 >= prefixLowestIndex))
+            {
+                cold->Current = current;
+                goto SearchNextLong;
+            }
+
+            if (ip1 >= nextStep)
+            {
+                step++;
+                nextStep += StepIncrement;
+            }
+
+            ip = ip1;
+            ip1 += step;
+            ipBytes = ip1Bytes;
+            hashLong0 = hashLong1;
+            indexLong0 = indexLong1;
+        }
+        while (ip1 <= ilimit);
+
+    Cleanup:
+        {
+            uint offsetSaved1 = cold->Saved1;
+            uint offsetSaved2 = offsetSaved1 != 0 && offset1 != 0 ? offsetSaved1 : cold->Saved2;
             rep[0] = offset1 != 0 ? offset1 : offsetSaved1;
-            rep[1] = offset2 != 0 ? offset2 : offsetSaved2;
-            return (nuint)(iend - anchor);
+            rep[1] = cold->Offset2 != 0 ? cold->Offset2 : offsetSaved2;
+            store.Literals = cold->Lit;
+            store.Sequences = cold->Sequence;
+            return (nuint)(iend - cold->Anchor);
+        }
 
-        SearchNextLong:
-            // A short match: a long one at ip + 1 may be better.
-            matchLength = Count(ip + 4, matchShort0 + 4, iend) + 4;
-            offset = (uint)(ip - matchShort0);
+    SearchNextLong:
+        // A short match: a long one at ip + 1 may be better.
+        matchLength = Count(ip + 4, match + 4, iend) + 4;
+        offset = (uint)(ip - match);
+        {
+            byte* matchLong1 = @base + indexLong1;
             if (indexLong1 > prefixLowestIndex && Read64(matchLong1) == Read64(ip1))
             {
                 nuint length1 = Count(ip1 + 8, matchLong1 + 8, iend) + 8;
@@ -214,19 +243,23 @@ internal static unsafe class DoubleFastMatchFinder
                     ip = ip1;
                     matchLength = length1;
                     offset = (uint)(ip - matchLong1);
-                    matchShort0 = matchLong1;
+                    match = matchLong1;
                 }
             }
+        }
 
-            while (((ip > anchor) & (matchShort0 > prefixLowest)) && ip[-1] == matchShort0[-1])
+    ExtendBackward:
+        {
+            byte* anchor = cold->Anchor;
+            byte* prefixLowest = @base + prefixLowestIndex;
+            while (((ip > anchor) & (match > prefixLowest)) && ip[-1] == match[-1])
             {
                 ip--;
-                matchShort0--;
+                match--;
                 matchLength++;
             }
 
-        MatchFound:
-            offset2 = offset1;
+            cold->Offset2 = offset1;
             offset1 = offset;
             if (step < 4)
             {
@@ -234,32 +267,39 @@ internal static unsafe class DoubleFastMatchFinder
                 hashLong[hashLong1] = (uint)(ip1 - @base);
             }
 
-            store.Store((nuint)(ip - anchor), anchor, iend, OffsetToOffBase(offset), matchLength);
-
-        MatchStored:
-            ip += matchLength;
-            anchor = ip;
-
-            if (ip <= ilimit)
-            {
-                // Complementary insertions, then the second repeat offset tried at once.
-                uint indexToInsert = current + 2;
-                hashLong[Hash8.Hash(@base + indexToInsert, hashLogLong)] = indexToInsert;
-                hashLong[Hash8.Hash(ip - 2, hashLogLong)] = (uint)(ip - 2 - @base);
-                hashSmall[THash.Hash(@base + indexToInsert, hashLogSmall)] = indexToInsert;
-                hashSmall[THash.Hash(ip - 1, hashLogSmall)] = (uint)(ip - 1 - @base);
-
-                while (ip <= ilimit && ((offset2 > 0) & (Read32(ip) == Read32(ip - offset2))))
-                {
-                    nuint repLength = Count(ip + 4, ip + 4 - offset2, iend) + 4;
-                    (offset1, offset2) = (offset2, offset1);
-                    hashSmall[THash.Hash(ip, hashLogSmall)] = (uint)(ip - @base);
-                    hashLong[Hash8.Hash(ip, hashLogLong)] = (uint)(ip - @base);
-                    store.Store(0, anchor, iend, RepeatCode1, repLength);
-                    ip += repLength;
-                    anchor = ip;
-                }
-            }
+            SequenceStore.Store(ref cold->Lit, ref cold->Sequence, cold->Counts, (nuint)(ip - anchor), anchor, iend, OffsetToOffBase(offset), matchLength);
         }
+
+    MatchStored:
+        ip += matchLength;
+        cold->Anchor = ip;
+
+        if (ip <= ilimit)
+        {
+            // Complementary insertions, then the second repeat offset tried at once.
+            uint indexToInsert = cold->Current + 2;
+            ulong insertBytes = Read64(@base + indexToInsert);
+            hashLong[Hash8.Hash(insertBytes, hashLogLong)] = indexToInsert;
+            hashLong[Hash8.Hash(Read64(ip - 2), hashLogLong)] = (uint)(ip - 2 - @base);
+            hashSmall[THash.Hash(insertBytes, hashLogSmall)] = indexToInsert;
+            hashSmall[THash.Hash(Read64(ip - 1), hashLogSmall)] = (uint)(ip - 1 - @base);
+
+            uint offset2 = cold->Offset2;
+            while (ip <= ilimit && ((offset2 > 0) & (Read32(ip) == Read32(ip - offset2))))
+            {
+                nuint repLength = Count(ip + 4, ip + 4 - offset2, iend) + 4;
+                (offset1, offset2) = (offset2, offset1);
+                ulong repBytes = Read64(ip);
+                hashSmall[THash.Hash(repBytes, hashLogSmall)] = (uint)(ip - @base);
+                hashLong[Hash8.Hash(repBytes, hashLogLong)] = (uint)(ip - @base);
+                SequenceStore.StoreOnly(ref cold->Sequence, cold->Counts, 0, RepeatCode1, repLength);
+                ip += repLength;
+                cold->Anchor = ip;
+            }
+
+            cold->Offset2 = offset2;
+        }
+
+        goto Start;
     }
 }

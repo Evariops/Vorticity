@@ -34,7 +34,7 @@ internal static unsafe class FastMatchFinder
             const int FillStep = 3;
             for (; ip + FillStep < iend + 2; ip += FillStep)
             {
-                hashTable[THash.Hash(ip, hashLog)] = (uint)(ip - @base);
+                hashTable[THash.Hash(Read64(ip), hashLog)] = (uint)(ip - @base);
             }
         }
     }
@@ -122,10 +122,6 @@ internal static unsafe class FastMatchFinder
         byte* nextStep;
         const nuint StepIncrement = 1 << (SearchStrength - 1);
 
-        // A byte that matches no candidate stands for the candidates below the window.
-        ulong dummy = 0x78563412;
-        byte* dummyAddress = (byte*)&dummy;
-
         ip0 += ip0 == @base + prefixStartIndex ? 1 : 0;
         {
             uint current = (uint)(ip0 - @base);
@@ -153,8 +149,8 @@ internal static unsafe class FastMatchFinder
             goto Cleanup;
         }
 
-        hash0 = THash.Hash(ip0, hashLog);
-        hash1 = THash.Hash(ip0 + 1, hashLog);
+        hash0 = THash.Hash(Read64(ip0), hashLog);
+        hash1 = THash.Hash(Read64(ip0 + 1), hashLog);
         matchIndex = hashTable[hash0];
 
         do
@@ -178,7 +174,7 @@ internal static unsafe class FastMatchFinder
                 goto Match;
             }
 
-            if (MatchFound(ip0, @base, matchIndex, prefixStartIndex, dummyAddress))
+            if (MatchFound(ip0, @base, matchIndex, prefixStartIndex))
             {
                 // ip0 + 1, where the search resumes at the earliest.
                 current0 = (uint)(ip0 - @base);
@@ -188,9 +184,9 @@ internal static unsafe class FastMatchFinder
 
             // ---- ip0 + 1
             matchIndex = hashTable[hash1];
-            hash0 = THash.Hash(ip2, hashLog);
+            hash0 = THash.Hash(Read64(ip2), hashLog);
             hashTable[hash1] = (uint)(ip0 + 1 - @base);
-            if (MatchFound(ip0 + 1, @base, matchIndex, prefixStartIndex, dummyAddress))
+            if (MatchFound(ip0 + 1, @base, matchIndex, prefixStartIndex))
             {
                 // Not past where the search resumes: a match is four bytes at least.
                 if (step <= 4)
@@ -205,7 +201,7 @@ internal static unsafe class FastMatchFinder
 
             // ---- the next round, from ip2
             matchIndex = hashTable[hash0];
-            hash1 = THash.Hash(ip2 + 1, hashLog);
+            hash1 = THash.Hash(Read64(ip2 + 1), hashLog);
             ip0 = ip2;
             ip2 = ip0 + step;
             if (ip2 >= nextStep)
@@ -261,8 +257,8 @@ internal static unsafe class FastMatchFinder
         if (ip0 <= ilimit)
         {
             // Two positions of the match into the table, and the second repeat offset tried at once.
-            hashTable[THash.Hash(@base + current0 + 2, hashLog)] = current0 + 2;
-            hashTable[THash.Hash(ip0 - 2, hashLog)] = (uint)(ip0 - 2 - @base);
+            hashTable[THash.Hash(Read64(@base + current0 + 2), hashLog)] = current0 + 2;
+            hashTable[THash.Hash(Read64(ip0 - 2), hashLog)] = (uint)(ip0 - 2 - @base);
 
             uint repOffset2 = cold->RepOffset2;
             if (repOffset2 > 0)
@@ -271,7 +267,7 @@ internal static unsafe class FastMatchFinder
                 {
                     nuint repLength = Count(ip0 + 4, ip0 + 4 - repOffset2, iend) + 4;
                     (repOffset1, repOffset2) = (repOffset2, repOffset1);
-                    hashTable[THash.Hash(ip0, hashLog)] = (uint)(ip0 - @base);
+                    hashTable[THash.Hash(Read64(ip0), hashLog)] = (uint)(ip0 - @base);
                     ip0 += repLength;
                     SequenceStore.StoreOnly(ref cold->Sequence, cold->Counts, 0, RepeatCode1, repLength);
                     cold->Anchor = ip0;
@@ -286,13 +282,11 @@ internal static unsafe class FastMatchFinder
 
     /// <summary>
     /// libzstd's <c>ZSTD_match4Found_cmov</c>: whether the candidate at <paramref name="matchIndex"/>,
-    /// within the window, starts with the same four bytes. A candidate below the window reads from
-    /// <paramref name="dummy"/> instead.
+    /// within the window, starts with the same four bytes. A candidate below the window is read at
+    /// the window's start instead (see <see cref="MatchFinder.ClampToWindow"/>), and the window test
+    /// joins the compare in one condition.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool MatchFound(byte* current, byte* @base, uint matchIndex, uint lowLimit, byte* dummy)
-    {
-        byte* address = matchIndex >= lowLimit ? @base + matchIndex : dummy;
-        return (Read32(current) == Read32(address)) & (matchIndex >= lowLimit);
-    }
+    private static bool MatchFound(byte* current, byte* @base, uint matchIndex, uint lowLimit) =>
+        (Read32(current) == Read32(@base + ClampToWindow(matchIndex, lowLimit))) & (matchIndex >= lowLimit);
 }

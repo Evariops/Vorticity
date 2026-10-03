@@ -72,45 +72,51 @@ internal unsafe struct MatchState
     }
 }
 
-/// <summary>A hash of the next bytes of the source: libzstd's <c>ZSTD_hashPtr</c> for one length.</summary>
+/// <summary>
+/// A hash of the next bytes of the source: libzstd's <c>ZSTD_hashPtr</c> for one length, from the
+/// eight bytes there, read once by the match finder for every use it has of them.
+/// </summary>
 internal unsafe interface IMatchHash
 {
-    static abstract nuint Hash(byte* p, int hashLog);
+    static abstract nuint Hash(ulong bytes, int hashLog);
 }
 
 /// <summary>libzstd's <c>ZSTD_hash4Ptr</c>.</summary>
-internal readonly unsafe struct Hash4 : IMatchHash
+internal readonly struct Hash4 : IMatchHash
 {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(byte* p, int hashLog) => (Unsafe.ReadUnaligned<uint>(p) * 2654435761u) >> (32 - hashLog);
+    public static nuint Hash(ulong bytes, int hashLog) => ((uint)bytes * 2654435761u) >> (32 - hashLog);
 }
 
-/// <summary>libzstd's <c>ZSTD_hash5Ptr</c>.</summary>
-internal readonly unsafe struct Hash5 : IMatchHash
+/// <summary>
+/// libzstd's <c>ZSTD_hash5Ptr</c>: <c>(u &lt;&lt; 24) * prime</c>, as <c>u * (prime &lt;&lt; 24)</c>, equal
+/// modulo 2^64 and a shift shorter (clang finds it; the JIT does not).
+/// </summary>
+internal readonly struct Hash5 : IMatchHash
 {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(byte* p, int hashLog) => (nuint)(((Unsafe.ReadUnaligned<ulong>(p) << 24) * 889523592379UL) >> (64 - hashLog));
+    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * (889523592379UL << 24)) >> (64 - hashLog));
 }
 
-/// <summary>libzstd's <c>ZSTD_hash6Ptr</c>.</summary>
-internal readonly unsafe struct Hash6 : IMatchHash
+/// <summary>libzstd's <c>ZSTD_hash6Ptr</c>, the shift folded into the prime as for <see cref="Hash5"/>.</summary>
+internal readonly struct Hash6 : IMatchHash
 {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(byte* p, int hashLog) => (nuint)(((Unsafe.ReadUnaligned<ulong>(p) << 16) * 227718039650203UL) >> (64 - hashLog));
+    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * (227718039650203UL << 16)) >> (64 - hashLog));
 }
 
-/// <summary>libzstd's <c>ZSTD_hash7Ptr</c>.</summary>
-internal readonly unsafe struct Hash7 : IMatchHash
+/// <summary>libzstd's <c>ZSTD_hash7Ptr</c>, the shift folded into the prime as for <see cref="Hash5"/>.</summary>
+internal readonly struct Hash7 : IMatchHash
 {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(byte* p, int hashLog) => (nuint)(((Unsafe.ReadUnaligned<ulong>(p) << 8) * 58295818150454627UL) >> (64 - hashLog));
+    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * (58295818150454627UL << 8)) >> (64 - hashLog));
 }
 
 /// <summary>libzstd's <c>ZSTD_hash8Ptr</c>.</summary>
-internal readonly unsafe struct Hash8 : IMatchHash
+internal readonly struct Hash8 : IMatchHash
 {
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static nuint Hash(byte* p, int hashLog) => (nuint)((Unsafe.ReadUnaligned<ulong>(p) * 0xCF1BBCDCB7A56463UL) >> (64 - hashLog));
+    public static nuint Hash(ulong bytes, int hashLog) => (nuint)((bytes * 0xCF1BBCDCB7A56463UL) >> (64 - hashLog));
 }
 
 /// <summary>What the match finders share.</summary>
@@ -128,6 +134,19 @@ internal static unsafe class MatchFinder
     /// <summary>libzstd's <c>OFFSET_TO_OFFBASE</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint OffsetToOffBase(uint offset) => offset + 3;
+
+    /// <summary>
+    /// An index, raised to <paramref name="low"/> when below it: where a candidate outside the window
+    /// can be read harmlessly. By the sign of their 64-bit difference, without a branch: the JIT does
+    /// not turn a select into <c>csel</c> inside a loop, and whether a table entry is in the window is
+    /// unpredictable while those of earlier frames remain.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static nuint ClampToWindow(uint index, uint low)
+    {
+        long below = (long)index - low;
+        return (nuint)(index - (below & (below >> 63)));
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint Read32(byte* p) => Unsafe.ReadUnaligned<uint>(p);
