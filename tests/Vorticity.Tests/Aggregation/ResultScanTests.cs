@@ -206,6 +206,92 @@ public sealed partial class ResultScanTests
     }
 
     [Fact]
+    public async Task AResultsKeysAreWalkedInKeyOrderFromMemory()
+    {
+        (Visit[] rows, string path) = await WriteAsync();
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            List<CityDayCount> delivered = await ListAsync(Daily(file));
+
+            // The counts in order, a count's groups by their place in the result: the place Rows reads.
+            (long Key, long Row)[] expected = [.. delivered.Select((g, i) => (g.Count, (long)i)).OrderBy(e => e.Item1).ThenBy(e => e.Item2)];
+            await using (KeyCursor<long> counts = await Daily(file).Keys(g => g.Count).OpenAsync(Ct))
+            {
+                List<(long, long)> walked = [];
+                for (bool on = await counts.SeekFirstAsync(Ct); on; on = await counts.NextAsync(Ct))
+                {
+                    walked.Add((counts.Key, counts.Row));
+                }
+
+                Assert.Equal(expected, walked);
+
+                long middle = expected[expected.Length / 2].Key;
+                Assert.True(await counts.SeekAsync(middle, SeekOp.Exact, Ct));
+                Assert.Equal(expected.First(e => e.Key == middle).Row, counts.Row);
+                Assert.Equal(expected.Count(e => e.Key == middle), await counts.KeyCountAsync(Ct));
+                Assert.Equal(expected.Count(e => e.Key < middle), await counts.RankAsync(middle, Ct));
+                Assert.True(await counts.SeekAsync(middle, SeekOp.Before, Ct));
+                Assert.Equal(expected.Last(e => e.Key < middle), (counts.Key, counts.Row));
+                Assert.True(await counts.SeekAsync(middle, SeekOp.After, Ct));
+                Assert.Equal(expected.First(e => e.Key > middle), (counts.Key, counts.Row));
+                Assert.False(await counts.SeekAsync(expected[^1].Key, SeekOp.After, Ct));
+                Assert.False(await counts.SeekAsync(-1, SeekOp.Exact, Ct));
+
+                // Backwards a key at a time, each on its last entry.
+                List<(long, long)> lasts = [];
+                for (bool on = await counts.SeekLastAsync(Ct); on; on = await counts.PrevKeyAsync(Ct))
+                {
+                    lasts.Add((counts.Key, counts.Row));
+                }
+
+                Assert.Equal(expected.GroupBy(e => e.Key).Select(g => g.Last()).Reverse(), lasts);
+            }
+
+            // Text, each key once: its entry's row is a row of the result that holds it.
+            await using (KeyCursor<string> cities = await Daily(file).Keys(g => g.City).Distinct().OpenAsync(Ct))
+            {
+                List<string> walked = [];
+                for (bool on = await cities.SeekFirstAsync(Ct); on; on = await cities.NextAsync(Ct))
+                {
+                    walked.Add(cities.Key);
+                    Assert.Equal(cities.Key, delivered[(int)cities.Row].City);
+                    Assert.Equal(delivered.FindIndex(g => g.City == cities.Key), cities.Row);
+                }
+
+                Assert.Equal(delivered.Select(g => g.City).Distinct().Order(StringComparer.Ordinal), walked);
+                Assert.True(await cities.SeekAsync("Caen", SeekOp.Exact, Ct));
+                Assert.Equal(delivered.Count(g => g.City == "Caen"), await cities.KeyCountAsync(Ct));
+            }
+
+            // Floats, from a result that arrives in no order of theirs.
+            Scan<CityMean> means = file.Scan<Visit>().GroupBy(r => r.City).Select(g => (g.Key, g.Average(x => x.Pages))).As<CityMean>();
+            await using (KeyCursor<double?> mean = await means.Keys(g => g.Mean).OpenAsync(Ct))
+            {
+                List<double> walked = [];
+                for (bool on = await mean.SeekFirstAsync(Ct); on; on = await mean.NextAsync(Ct))
+                {
+                    walked.Add(mean.Key!.Value);
+                }
+
+                double[] expectedMeans = [.. rows.GroupBy(r => r.City).Select(g => g.Average(r => r.Pages)).Order()];
+                Assert.Equal(expectedMeans.Length, walked.Count);
+                for (int i = 0; i < walked.Count; i++)
+                {
+                    Assert.Equal(expectedMeans[i], walked[i], 9);
+                }
+            }
+
+            KeyPlan plan = await Daily(file).Keys(g => g.Day).ExplainAsync(Ct);
+            Assert.Equal((KeySourceKind.InMemory, 1, true), (plan.Source, plan.Runs, plan.HasRows));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task AResultsScanIsSingleUse()
     {
         (_, string path) = await WriteAsync();
@@ -275,6 +361,9 @@ public sealed partial class ResultScanTests
 
     [VortexRecord]
     public partial record struct CityPlainMean(string City, double Mean);
+
+    [VortexRecord]
+    public partial record struct CityMean(string City, double? Mean);
 
     [VortexRecord]
     public partial record struct Totals(long Count, int Pages, string? LastCity, double? MeanSeconds);

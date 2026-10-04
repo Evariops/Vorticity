@@ -113,6 +113,16 @@ celsius: source None
 a dictionary can serve it, since it needs keys without rows; on the sorted `Day` column it stops
 1 000 times and still knows its rows (`HasRows` is true).
 
+## Over a result
+
+The scan of a query's result, such as a group by read through `As<TRecord>()`
+([aggregates.md](aggregates.md)), has no zone map and no index. Its cursor is the one that sorts:
+`OpenAsync` runs the query, keeps the column's non-null values, and sorts them in memory unless they
+already arrive in order, as they do from a group by that streams on that key. The plan's source is
+`InMemory`. `Row` is a position in the order the result is delivered, which `Rows(...)` on a scan
+of the same result reads. A bool or a decimal column has no key order and throws
+`NotSupportedException`.
+
 ## Batches in key order
 
 ```csharp

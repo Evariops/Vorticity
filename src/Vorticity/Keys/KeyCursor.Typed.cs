@@ -41,7 +41,7 @@ namespace Vorticity.Keys
 
 namespace Vorticity
 {
-    /// <summary>Builds a cursor over the keys of one column, from the file's key source.</summary>
+    /// <summary>Builds a cursor over the keys of one column, from the file's key source or a result's values held in memory.</summary>
     /// <typeparam name="TKey">The key column's type.</typeparam>
     public sealed class KeyCursorBuilder<TKey>
     {
@@ -69,6 +69,7 @@ namespace Vorticity
         /// <param name="cancellationToken">Cancels the reads of the key source.</param>
         /// <returns>The cursor; the caller disposes it.</returns>
         /// <exception cref="VortexUnsupportedException">The column is neither sorted nor indexed; the message names the index the writer would have to build.</exception>
+        /// <exception cref="NotSupportedException">A result's column has no key order: a bool or a decimal.</exception>
         public async ValueTask<KeyCursor<TKey>> OpenAsync(CancellationToken cancellationToken = default)
         {
             IKeyWalker walker = await _source.OpenKeysAsync(_column.Field.Path, _distinct, _indexes, cancellationToken).ConfigureAwait(false);
@@ -112,7 +113,7 @@ namespace Vorticity
         /// <exception cref="InvalidOperationException">The cursor is not positioned.</exception>
         public TKey Key => LiteralValues.ToValue<TKey>(Positioned().Key, _column.Type)!;
 
-        /// <summary>The current entry's file row; then <c>Rows(row)</c> on a scan reads it.</summary>
+        /// <summary>The current entry's row, in the file or in the order a result is delivered; then <c>Rows(row)</c> on a scan reads it.</summary>
         /// <exception cref="InvalidOperationException">The cursor is not positioned, or it walks distinct keys without rows.</exception>
         public long Row => Positioned().Row;
 

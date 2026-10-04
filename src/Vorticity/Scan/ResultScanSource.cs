@@ -139,11 +139,46 @@ internal sealed class ResultScanSource : ScanSource
 
     internal override bool MayMatch(VortexExpr filter) => true;
 
-    internal override ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
-        throw new NotSupportedException("A result's scan has no key source yet: order its query with OrderBy before the Select.");
+    /// <summary>The keys of a result's column, read whole as the query runs and sorted in memory unless they arrive in order.</summary>
+    internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken)
+    {
+        if (Unordered(path, out FilterLiteralKind kind) is { } reason)
+        {
+            throw new NotSupportedException($"'{path}' has no key cursor: {reason}.");
+        }
+
+        MemoryKeySource source = await MemoryKeySource.ReadAsync(_query.Batches(cancellationToken), new FieldExpr(path), kind, cancellationToken).ConfigureAwait(false);
+        return new KeyCursor(source, distinct);
+    }
 
     internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
-        throw new NotSupportedException("A result's scan has no key source yet: order its query with OrderBy before the Select.");
+        new ValueTask<KeyPlan>(Unordered(path, out _) is { } reason
+            ? new KeyPlan(path, KeySourceKind.None, 0, null, HasRows: false, [new KeySourceRejection(KeySourceKind.InMemory, reason)])
+            : new KeyPlan(path, KeySourceKind.InMemory, 1, null, HasRows: true, []));
+
+    /// <summary>Why the result's column at <paramref name="path"/> has no key order, or null with its key domain.</summary>
+    private string? Unordered(string path, out FilterLiteralKind kind)
+    {
+        kind = FilterLiteralKind.Null;
+        DType column = VortexTypes.ToDType(Schema, new DTypeArena());
+        foreach (string name in path.Split('.'))
+        {
+            while (column.Kind == DTypeKind.Extension)
+            {
+                column = column.StorageType;
+            }
+
+            int index = column.Kind == DTypeKind.Struct ? column.IndexOfField(name) : -1;
+            if (index < 0)
+            {
+                return "the result has no such column";
+            }
+
+            column = column.GetField(index);
+        }
+
+        return SortedColumnSource.TryKeyKind(column, out kind) ? null : $"a {column.Kind} column has no key order a cursor can walk";
+    }
 
     /// <summary>The batches of <paramref name="spec"/> left whole, with a selection of the rows kept: what a count or an extreme reads.</summary>
     private Stream SelectedAsync(ScanSpec spec) => new Stream(this, spec with { Options = spec.Options with { Compact = false } });

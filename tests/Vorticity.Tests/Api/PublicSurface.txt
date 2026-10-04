@@ -989,6 +989,7 @@ Vorticity:     property int Runs { get; init; }
 Vorticity:     property string Path { get; init; }
 Vorticity: enum Vorticity.KeySourceKind
 Vorticity:     const KeySourceKind Dictionary = 4
+Vorticity:     const KeySourceKind InMemory = 5
 Vorticity:     const KeySourceKind None = 0
 Vorticity:     const KeySourceKind Postings = 3
 Vorticity:     const KeySourceKind SortedColumn = 1
