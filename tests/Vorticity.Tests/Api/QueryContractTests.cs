@@ -38,15 +38,16 @@ public sealed class QueryContractTests
             await using VortexFile file = await VortexSession.Default.OpenAsync(source, cancellationToken: TestContext.Current.CancellationToken);
             int opened = source.Reads;
 
-            Aggregation<(string, int, long, double?)> query = file.Scan<Grouped>()
+            Scan<CityDay> query = file.Scan<Grouped>()
                 .Where(r => r.Day >= 10)
                 .OrderBy(r => r.Day)
                 .GroupBy(r => (r.City, r.Day))
-                .Select(g => (g.Key.City, g.Key.Day, g.Count(), g.Average(r => r.Score)));
+                .Select(g => (g.Key.City, g.Key.Day, g.Count(), g.Average(r => r.Score)))
+                .As<CityDay>();
             Assert.Equal(opened, source.Reads);
 
             long groups = 0;
-            await foreach ((string, int, long, double?) _ in query.WithCancellation(TestContext.Current.CancellationToken))
+            await foreach (CityDay _ in query.ToRecordsAsync(TestContext.Current.CancellationToken))
             {
                 groups++;
             }

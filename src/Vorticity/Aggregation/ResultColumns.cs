@@ -113,9 +113,10 @@ internal static class ResultTypes
             case AggregateKind.Min:
             case AggregateKind.Max:
             {
-                // The column's own type: a minimum is one of its values.
+                // The column's own type: a minimum is one of its values, and null only where the
+                // column holds nulls, or where a value type says so.
                 VortexType input = aggregate.Input!.Type;
-                return MayBeNull<T>() ? input.Nullable : input.NonNullable;
+                return input.IsNullable || Nullable.GetUnderlyingType(typeof(T)) is not null ? input.Nullable : input.NonNullable;
             }
 
             case AggregateKind.Sum:
@@ -143,7 +144,7 @@ internal static class ResultTypes
                 ClrKind.Bool => VortexType.Bool,
                 ClrKind.String => VortexType.Utf8,
                 ClrKind.Binary => VortexType.Binary,
-                ClrKind.Decimal => VortexType.Decimal(38, 18),
+                ClrKind.Decimal => VortexType.Decimal(28, 10),
                 ClrKind.VortexDecimal => VortexType.Decimal(76, 38),
                 ClrKind.DateOnly => VortexType.Date,
                 ClrKind.TimeOnly => VortexType.Time(TimeUnit.Nanoseconds),
@@ -159,6 +160,8 @@ internal static class ResultTypes
             };
         }
 
+        // A record that is a value type is a struct column of no null; a string, a class or a
+        // nullable value may be null.
         return MayBeNull<T>() ? type.Nullable : type;
     }
 
@@ -169,7 +172,7 @@ internal static class ResultTypes
         return shape.Kind switch
         {
             // A decimal sum keeps the column's scale; its digits are what the type it is delivered as holds.
-            ClrKind.Decimal => VortexType.Decimal(38, input.Scale),
+            ClrKind.Decimal => VortexType.Decimal(28, input.Scale),
             ClrKind.VortexDecimal => VortexType.Decimal(76, input.Scale),
             _ => Of<T>(null, "a sum"),
         };

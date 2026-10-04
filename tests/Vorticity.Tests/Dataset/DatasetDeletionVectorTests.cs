@@ -652,7 +652,8 @@ public sealed class DatasetDeletionVectorTests
         await foreach ((string city, long rows, long keys) in dataset.Scan<ChangeRow>()
             .GroupBy(r => r.City)
             .Select(g => (g.Key, g.Count(), g.Sum(r => r.Key)))
-            .WithCancellation(ct))
+            .As<CityRowsKeys>()
+            .ToRecordsAsync(ct))
         {
             groups.Add((city, rows, keys));
         }
@@ -795,3 +796,7 @@ public sealed class DatasetDeletionVectorTests
 
     private static List<ChangeRow> Sorted(IEnumerable<ChangeRow> rows) => [.. rows.OrderBy(row => row.Key).ThenBy(row => row.Measure)];
 }
+
+/// <summary>A city, its rows and the sum of their keys.</summary>
+[VortexRecord]
+public partial record struct CityRowsKeys(string City, long Rows, long Keys);

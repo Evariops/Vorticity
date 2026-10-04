@@ -55,7 +55,7 @@ public sealed class DecimalAggregateTests
 
         // In one pass: the answers a single scan computes together are the ones computed apart.
         (VortexDecimal? min, VortexDecimal? max, long distinct, double? mean) = await file.Scan<AllTypes>()
-            .AggAsync(a => (a.Min(r => r.Wide256), a.Max(r => r.Wide256), a.CountDistinct(r => r.Wide256), a.Average(r => r.Wide256)), ct);
+            .AggAsync<WideSummary>(a => (a.Min(r => r.Wide256), a.Max(r => r.Wide256), a.CountDistinct(r => r.Wide256), a.Average(r => r.Wide256)), ct);
         List<BigInteger> wide = rows.Wide256.Select(v => Unscaled(v!.Value, 10)).ToList();
         Assert.Equal(wide.Min(), Unscaled(min!.Value, 10));
         Assert.Equal(wide.Max(), Unscaled(max!.Value, 10));
@@ -65,11 +65,12 @@ public sealed class DecimalAggregateTests
         // Per group, keyed by the enum: every group's sum and maximum, or its overflow.
         Dictionary<Status, List<VortexDecimal>> groups = rows.State.Zip(rows.Wide128, (state, value) => (state, value!.Value))
             .GroupBy(r => r.state).ToDictionary(g => g.Key, g => g.Select(r => r.Item2).ToList());
-        var byState = file.Scan<AllTypes>()
+        Scan<StateWide> byState = file.Scan<AllTypes>()
             .GroupBy(r => r.State)
-            .Select(g => (g.Key, g.Max(r => r.Wide128), g.Average(r => r.Wide128)));
+            .Select(g => (g.Key, g.Max(r => r.Wide128), g.Average(r => r.Wide128)))
+            .As<StateWide>();
         int seen = 0;
-        await foreach ((Status state, VortexDecimal groupMax, double? groupMean) in byState.WithCancellation(ct))
+        await foreach ((Status state, VortexDecimal groupMax, double? groupMean) in byState.ToRecordsAsync(ct))
         {
             List<BigInteger> values = groups[state].Select(v => Unscaled(v, 6)).ToList();
             Assert.Equal(values.Max(), Unscaled(groupMax, 6));
@@ -84,7 +85,7 @@ public sealed class DecimalAggregateTests
         int keys = 0;
         await foreach ((VortexDecimal key, long count) in file.Scan<AllTypes>()
             .GroupBy(r => r.Wide256)
-            .Select(g => (g.Key, g.Count())).WithCancellation(ct))
+            .Select(g => (g.Key, g.Count())).As<WideDecimalCount>().ToRecordsAsync(ct))
         {
             BigInteger unscaled = Unscaled(key, 10);
             Assert.Equal(occurrences[unscaled], count);
@@ -217,3 +218,15 @@ public sealed class DecimalAggregateTests
             : unscaled / BigInteger.Pow(10, value.Scale - scale);
     }
 }
+
+/// <summary>The answers over a decimal of 76 digits, in one pass.</summary>
+[VortexRecord]
+public partial record struct WideSummary(
+    [VortexColumn(Precision = 76, Scale = 10)] VortexDecimal? Min,
+    [VortexColumn(Precision = 76, Scale = 10)] VortexDecimal? Max,
+    long Distinct,
+    double? Mean);
+
+/// <summary>A state, the largest decimal of its rows and their mean.</summary>
+[VortexRecord]
+public partial record struct StateWide(Status State, [VortexColumn(Precision = 38, Scale = 6)] VortexDecimal Max, double? Mean);

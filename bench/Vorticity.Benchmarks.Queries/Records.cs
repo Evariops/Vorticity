@@ -87,7 +87,8 @@ public readonly struct Welford<T> : IEncodedAggregator<T, WelfordState>
 }
 
 /// <summary>What the fold keeps: the count, the mean and the sum of squared deviations.</summary>
-public struct WelfordState
+[VortexRecord]
+public partial struct WelfordState
 {
     public long Count;
     public double Mean;
@@ -107,3 +108,23 @@ public struct WelfordState
         Count = count;
     }
 }
+
+/// <summary>A city's rows and their mean.</summary>
+[VortexRecord]
+public partial record struct CityStats(string City, long Count, double? Mean);
+
+/// <summary>A day's rows and their mean.</summary>
+[VortexRecord]
+public partial record struct DayStats(int Day, long Count, double? Mean);
+
+/// <summary>A city's day: its rows and their mean.</summary>
+[VortexRecord]
+public partial record struct CityDayStats(string City, int Day, long Count, double? Mean);
+
+/// <summary>An endpoint's requests and their mean latency.</summary>
+[VortexRecord]
+public partial record struct EndpointStats(string Endpoint, long Count, double? Mean);
+
+/// <summary>A user's requests and their mean latency.</summary>
+[VortexRecord]
+public partial record struct UserStats(int User, long Count, double? Mean);

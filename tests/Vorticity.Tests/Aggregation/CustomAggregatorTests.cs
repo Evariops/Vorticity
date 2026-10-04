@@ -47,7 +47,8 @@ public sealed class CustomAggregatorTests
                     g.Aggregate<double, EncodedSum, SumCount>(r => r.Coded),
                     g.Aggregate<double, EncodedSum, SumCount>(r => r.Runs),
                     g.Aggregate<double, PlainSum, SumCount>(r => r.Coded)))
-                .WithCancellation(TestContext.Current.CancellationToken))
+                .As<KeyFolds>()
+                .ToRecordsAsync(TestContext.Current.CancellationToken))
             {
                 folded.Add(key, (plain, coded, runs, canonical));
             }
@@ -154,11 +155,16 @@ public sealed class CustomAggregatorTests
 [VortexRecord]
 public partial record struct Folded(int Key, double? Plain, double? Coded, double Runs);
 
-public struct SumCount
+[VortexRecord]
+public partial struct SumCount
 {
     public double Sum;
     public long Count;
 }
+
+/// <summary>A key and four folds of its rows, each a state of two columns.</summary>
+[VortexRecord]
+public partial record struct KeyFolds(int Key, SumCount Plain, SumCount Coded, SumCount Runs, SumCount Canonical);
 
 /// <summary>A sum and a count that read every encoded form, and take only the rows they are handed.</summary>
 public readonly struct EncodedSum : IEncodedAggregator<double, SumCount>

@@ -27,10 +27,11 @@ internal static class EncodedForms
         await BestOfThreeAsync("GroupBy(r => r.City)", async () =>
         {
             grouped.Clear();
-            Aggregation<(string, double)> byCity = file.Scan<Reading>()
+            Scan<CityTotal> byCity = file.Scan<Reading>()
                 .GroupBy(r => r.City)
-                .Select(g => (g.Key, g.Sum(r => r.Celsius)));
-            await foreach ((string city, double total) in byCity)
+                .Select(g => (g.Key, g.Sum(r => r.Celsius)))
+                .As<CityTotal>();
+            await foreach ((string city, double total) in byCity.ToRecordsAsync())
             {
                 grouped[city] = total;
             }
@@ -55,10 +56,11 @@ internal static class EncodedForms
         await BestOfThreeAsync("GroupBy(v => v.Referrer)", async () =>
         {
             byGroup.Clear();
-            Aggregation<(string?, long, int)> byReferrer = visitFile.Scan<Visit>()
+            Scan<ReferrerVisits> byReferrer = visitFile.Scan<Visit>()
                 .GroupBy(v => v.Referrer)
-                .Select(g => (g.Key, g.Count(), g.Sum(v => v.DurationMs)));
-            await foreach ((string? referrer, long count, int duration) in byReferrer)
+                .Select(g => (g.Key, g.Count(), g.Sum(v => v.DurationMs)))
+                .As<ReferrerVisits>();
+            await foreach ((string? referrer, long count, int duration) in byReferrer.ToRecordsAsync())
             {
                 byGroup[referrer ?? "(null)"] = (count, duration);
             }
@@ -262,3 +264,11 @@ internal static class EncodedForms
         }
     }
 }
+
+/// <summary>A city and the sum of its readings.</summary>
+[VortexRecord]
+public partial record struct CityTotal(string City, double Total);
+
+/// <summary>A referrer, its visits and their total duration.</summary>
+[VortexRecord]
+public partial record struct ReferrerVisits(string? Referrer, long Visits, int Duration);

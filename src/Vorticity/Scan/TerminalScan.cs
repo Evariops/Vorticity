@@ -784,7 +784,7 @@ internal sealed class TerminalScan
     }
 
     /// <summary>Keeps <paramref name="candidate"/> when it beats <paramref name="best"/>, or when there is no best yet.</summary>
-    private static void Keep(ref FilterLiteral best, FilterLiteral candidate, bool wantMin, bool numeric = false)
+    internal static void Keep(ref FilterLiteral best, FilterLiteral candidate, bool wantMin, bool numeric = false)
     {
         if (candidate.Kind == FilterLiteralKind.Null)
         {

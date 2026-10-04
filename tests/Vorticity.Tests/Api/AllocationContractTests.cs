@@ -142,12 +142,12 @@ public sealed class AllocationContractTests
         [
             ("SumAsync", all, async scan => await scan.SumAsync(r => r.Day)),
             ("AverageAsync", all, async scan => await scan.AverageAsync(r => r.Celsius)),
-            ("AggAsync", all, async scan => await scan.AggAsync(a => (a.Sum(r => r.Celsius), a.Count()))),
+            ("AggAsync", all, async scan => await scan.AggAsync<SumAndCount>(a => (a.Sum(r => r.Celsius), a.Count()))),
             ("GroupBy", all, async scan =>
             {
-                await foreach ((string, long) group in scan.GroupBy(r => r.City).Select(g => (g.Key, g.Count())))
+                await foreach (CityCount group in scan.GroupBy(r => r.City).Select(g => (g.Key, g.Count())).As<CityCount>().ToRecordsAsync())
                 {
-                    GC.KeepAlive(group.Item1);
+                    GC.KeepAlive(group.City);
                 }
             }),
             ("CountAsync", filtered, async scan => await scan.CountAsync()),

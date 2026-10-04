@@ -134,7 +134,7 @@ internal static class Threads
     private static async Task<long> GroupAsync(Scan<Reading> scan)
     {
         long groups = 0;
-        await foreach ((string city, double? mean) in scan.GroupBy(r => r.City).Select(g => (g.Key, g.Average(r => r.Celsius))))
+        await foreach ((string city, double? mean) in scan.GroupBy(r => r.City).Select(g => (g.Key, g.Average(r => r.Celsius))).As<CityMean>().ToRecordsAsync())
         {
             groups += city.Length > 0 && mean > 0 ? 1 : 0;
         }
@@ -166,3 +166,7 @@ internal static class Threads
 
     private static string Ms(TimeSpan elapsed) => $"{elapsed.TotalMilliseconds:F1} ms";
 }
+
+/// <summary>A city and its mean reading.</summary>
+[VortexRecord]
+public partial record struct CityMean(string City, double? Mean);

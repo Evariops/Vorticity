@@ -27,6 +27,7 @@ internal static class Scenarios
         yield return ("requests", new Scenario("group by endpoint (dictionary), count avg", GroupByEndpointAsync));
         yield return ("requests", new Scenario("hand loop endpoint (dictionary), count sum", HandEndpointAsync));
         yield return ("requests", new Scenario("group by user (1M groups), count avg", GroupByUserAsync, 100_000));
+        yield return ("requests", new Scenario("group by user (1M groups), as records", GroupByUserRecordsAsync, 100_000));
         yield return ("readings", new Scenario("first batch, full scan", FirstBatchAsync));
         yield return ($"readings-{large}", new Scenario($"first batch, full scan, {large / 1_000_000}M", FirstBatchAsync));
         yield return ("readings", new Scenario("first batch, scan filtered everywhere", FirstFilteredBatchAsync));
@@ -38,12 +39,13 @@ internal static class Scenarios
     private static async Task<long> GroupByCityAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach ((string city, long count, double? mean) in file.Scan<Reading>()
+        await foreach (Columns<CityStats> groups in file.Scan<Reading>()
             .GroupBy(r => r.City)
-            .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius))))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius)))
+            .As<CityStats>())
         {
             run.Answer();
-            rows += count + (city.Length > 0 && mean > 0 ? 0 : 1);
+            rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
         }
 
         return rows;
@@ -52,12 +54,12 @@ internal static class Scenarios
     private static async Task<long> GroupByCityWelfordAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach ((string city, WelfordState state) in file.Scan<Reading>()
+        await foreach (WelfordState state in file.Scan<Reading>()
             .GroupBy(r => r.City)
-            .Select(g => (g.Key, g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))))
+            .Select(g => g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)))
         {
             run.Answer();
-            rows += state.Count + (city.Length > 0 ? 0 : 1);
+            rows += state.Count;
         }
 
         return rows;
@@ -119,12 +121,13 @@ internal static class Scenarios
     private static async Task<long> GroupByDayAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach ((int day, long count, double? mean) in file.Scan<Reading>()
+        await foreach (Columns<DayStats> groups in file.Scan<Reading>()
             .GroupBy(r => r.Day)
-            .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius))))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius)))
+            .As<DayStats>())
         {
             run.Answer();
-            rows += count + (day >= 0 && mean > 0 ? 0 : 1);
+            rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
         }
 
         return rows;
@@ -133,12 +136,13 @@ internal static class Scenarios
     private static async Task<long> GroupByCityDayAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach ((string city, int day, long count, double? mean) in file.Scan<Reading>()
+        await foreach (Columns<CityDayStats> groups in file.Scan<Reading>()
             .GroupBy(r => (r.City, r.Day))
-            .Select(g => (g.Key.City, g.Key.Day, g.Count(), g.Average(r => r.Celsius))))
+            .Select(g => (g.Key.City, g.Key.Day, g.Count(), g.Average(r => r.Celsius)))
+            .As<CityDayStats>())
         {
             run.Answer();
-            rows += count + (city.Length > 0 && day >= 0 && mean > 0 ? 0 : 1);
+            rows += Sum(groups.Column<long>(2).Values) + (groups.Column<double?>(3).NullCount == 0 ? 0 : 1);
         }
 
         return rows;
@@ -147,12 +151,13 @@ internal static class Scenarios
     private static async Task<long> GroupByEndpointAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach ((string endpoint, long count, double? mean) in file.Scan<Request>()
+        await foreach (Columns<EndpointStats> groups in file.Scan<Request>()
             .GroupBy(r => r.Endpoint)
-            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency))))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency)))
+            .As<EndpointStats>())
         {
             run.Answer();
-            rows += count + (endpoint.Length > 0 && mean > 0 ? 0 : 1);
+            rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
         }
 
         return rows;
@@ -220,12 +225,30 @@ internal static class Scenarios
     private static async Task<long> GroupByUserAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach ((int user, long count, double? mean) in file.Scan<Request>()
+        await foreach (Columns<UserStats> groups in file.Scan<Request>()
             .GroupBy(r => r.UserId)
-            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency))))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency)))
+            .As<UserStats>())
         {
             run.Answer();
-            rows += count + (user >= 0 && mean >= 0 ? 0 : 1);
+            rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
+        }
+
+        return rows;
+    }
+
+    /// <summary>The same groups as records: a row per group, the path a caller pays a record and its fields for.</summary>
+    private static async Task<long> GroupByUserRecordsAsync(VortexFile file, Run run)
+    {
+        long rows = 0;
+        await foreach (UserStats group in file.Scan<Request>()
+            .GroupBy(r => r.UserId)
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency)))
+            .As<UserStats>()
+            .ToRecordsAsync())
+        {
+            run.Answer();
+            rows += group.Count + (group.User >= 0 && group.Mean >= 0 ? 0 : 1);
         }
 
         return rows;
@@ -256,15 +279,26 @@ internal static class Scenarios
 
     private static async Task<long> FirstDayGroupAsync(VortexFile file, Run run)
     {
-        await foreach ((int day, long count) in file.Scan<Reading>()
+        await foreach (long count in file.Scan<Reading>()
             .GroupBy(r => r.Day)
-            .Select(g => (g.Key, g.Count())))
+            .Select(g => g.Count()))
         {
             run.Answer();
-            return count + day;
+            return count;
         }
 
         return 0;
+    }
+
+    private static long Sum(ReadOnlySpan<long> values)
+    {
+        long sum = 0;
+        foreach (long value in values)
+        {
+            sum += value;
+        }
+
+        return sum;
     }
 
     private static readonly byte[][] CityNames = [.. Array.ConvertAll(Fixtures.Cities, Encoding.UTF8.GetBytes)];

@@ -15,9 +15,9 @@ internal static class Aggregates
         await BestOfThreeAsync("AggAsync, four answers", async () =>
         {
             Scan<Reading> recent = file.Scan<Reading>().Where(r => r.Day >= 900);
-            (double? min, double? max, long n, long cities) = await recent
-                .AggAsync(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
-            return $"min {min}, max {max}, {n} rows, {cities} cities; {recent.Statistics.BlocksDecoded} blocks decoded";
+            Summary s = await recent
+                .AggAsync<Summary>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
+            return $"min {s.Min}, max {s.Max}, {s.Rows} rows, {s.Cities} cities; {recent.Statistics.BlocksDecoded} blocks decoded";
         });
 
         string[] lines = [];
@@ -25,12 +25,13 @@ internal static class Aggregates
         {
             lines = new string[Demo.Cities.Length];
             int line = 0;
-            Aggregation<(string, double?, WelfordState)> byCity = file.Scan<Reading>()
+            Scan<CitySpread> byCity = file.Scan<Reading>()
                 .GroupBy(r => r.City)
-                .Select(g => (g.Key, g.Average(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)));
-            await foreach ((string city, double? mean, WelfordState state) in byCity)
+                .Select(g => (g.Key, g.Average(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)))
+                .As<CitySpread>();
+            await foreach (CitySpread city in byCity.ToRecordsAsync())
             {
-                lines[line++] = $"  {city,-10} mean {mean:F4}  variance {state.Variance:F4}";
+                lines[line++] = $"  {city.City,-10} mean {city.Mean:F4}  variance {city.State.Variance:F4}";
             }
 
             return $"{line} groups";
@@ -99,7 +100,9 @@ internal static class Aggregates
         (string City, int Day, double Variance) widest = default;
         await foreach (var (city, day, total, state) in file.Scan<Reading>()
             .GroupBy(r => (r.City, r.Day))
-            .Select(g => (g.Key.City, g.Key.Day, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))))
+            .Select(g => (g.Key.City, g.Key.Day, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)))
+            .As<CityDaySpread>()
+            .ToRecordsAsync())
         {
             groups++;
             if (state.Variance > widest.Variance && total > 0)
@@ -214,13 +217,15 @@ public readonly struct CanonicalWelford<T> : IAggregator<T, WelfordState>
     public static void Merge(ref WelfordState into, in WelfordState other) => Welford<T>.Merge(ref into, in other);
 }
 
-/// <summary>What the fold keeps: the count, the mean and the sum of squared deviations.</summary>
-public struct WelfordState
+/// <summary>What the fold keeps: the count, the mean and the sum of squared deviations; a record, so that a result holds it as a column of three.</summary>
+[VortexRecord]
+public partial struct WelfordState
 {
     public long Count;
     public double Mean;
     public double M2;
 
+    [VortexIgnore]
     public readonly double Variance => Count > 1 ? M2 / (Count - 1) : double.NaN;
 
     public void Add(double value, long weight)
@@ -237,3 +242,15 @@ public struct WelfordState
         Count = count;
     }
 }
+
+/// <summary>The answers of one pass over the scan.</summary>
+[VortexRecord]
+public partial record struct Summary(double? Min, double? Max, long Rows, long Cities);
+
+/// <summary>A city's mean and the state of its variance.</summary>
+[VortexRecord]
+public partial record struct CitySpread(string City, double? Mean, WelfordState State);
+
+/// <summary>A city's day: its total and the state of its variance.</summary>
+[VortexRecord]
+public partial record struct CityDaySpread(string City, int Day, double Total, WelfordState State);

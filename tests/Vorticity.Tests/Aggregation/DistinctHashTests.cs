@@ -164,10 +164,11 @@ public sealed class DistinctHashTests
 
             await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
             Dictionary<long, long> counts = [];
-            Aggregation<(long, long)> distinct = file.Scan<Grouped>()
+            Scan<KeyCount> distinct = file.Scan<Grouped>()
                 .GroupBy(r => r.Group)
-                .Select(g => (g.Key, g.CountDistinct(r => r.Value)));
-            await foreach ((long group, long count) in distinct.WithCancellation(TestContext.Current.CancellationToken))
+                .Select(g => (g.Key, g.CountDistinct(r => r.Value)))
+                .As<KeyCount>();
+            await foreach ((long group, long count) in distinct.ToRecordsAsync(TestContext.Current.CancellationToken))
             {
                 counts.Add(group, count);
             }

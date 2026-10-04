@@ -32,6 +32,19 @@ internal static class Queries
         }
     }
 
+    // Several values have no .NET type until a record gives them one: As<TRecord>() reads them.
+    internal static async Task EnumerateSeveralValues(VortexFile file)
+    {
+        await foreach (var group in file.Scan<Reading>().GroupBy(r => r.City).Select(g => (g.Key, g.Count()))) // expect: CS8411
+        {
+            _ = group;
+        }
+    }
+
+    // The answers of a whole scan, several of them, go into the record AggAsync<TResult> names.
+    internal static async Task<object> SeveralAnswersWithoutARecord(VortexFile file) =>
+        await file.Scan<Reading>().AggAsync(a => (a.Count(), a.Max(r => r.Day))); // expect: CS0411
+
     // Computing with results is C# after the sink, not the plan's.
     internal static object ArithmeticOnAResult(VortexFile file) =>
         file.Scan<Reading>().GroupBy(r => r.City).Select(g => (g.Key, g.Count() * 2)); // expect: CS0619

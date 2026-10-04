@@ -23,7 +23,7 @@ public sealed partial class Scan<TRecord>
     where TRecord : IVortexRecord<TRecord>
 {
     private readonly ScanSource _source;
-    private readonly ScanMetrics _metrics = new ScanMetrics();
+    private readonly ScanMetrics _metrics;
     private RecordBinding? _binding;
     private Predicate _filter = Predicate.All;
     private RowRange? _rows;
@@ -36,8 +36,15 @@ public sealed partial class Scan<TRecord>
     private int _used;
 
     internal Scan(ScanSource source)
+        : this(source, new ScanMetrics())
+    {
+    }
+
+    /// <summary>A scan that reports <paramref name="metrics"/> as its own: a result's, whose reads are its query's.</summary>
+    internal Scan(ScanSource source, ScanMetrics metrics)
     {
         _source = source;
+        _metrics = metrics;
     }
 
     internal RecordBinding Binding => _binding ??= RecordBinding.For<TRecord>(_source.Schema, _source.Session.Options.Extensions);

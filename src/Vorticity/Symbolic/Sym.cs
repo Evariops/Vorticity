@@ -24,6 +24,8 @@ public readonly struct Sym<T> : ISymbol
 
     SymNode ISymbol.Node => Node;
 
+    Aggregating.IResultNode ISymbol.Result(SymNode[] components) => Aggregating.AggregationPlan.Result(this, components);
+
     internal ColumnSym Column =>
         Node as ColumnSym ?? throw new InvalidOperationException("Only a column can be compared; an aggregate or a group key is a result, not a filter.");
 
@@ -153,6 +155,10 @@ internal abstract class SymNode
 internal interface ISymbol
 {
     SymNode Node { get; }
+
+    /// <summary>The result this symbol stands for in a selection: an aggregate, or a component of the key among <paramref name="components"/>.</summary>
+    /// <exception cref="InvalidOperationException">The symbol is neither.</exception>
+    Aggregating.IResultNode Result(SymNode[] components);
 }
 
 /// <summary>A column of the scanned file, with the type the file gives it.</summary>

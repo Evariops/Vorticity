@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
 
@@ -14,14 +15,21 @@ namespace Vorticity.Aggregating;
 /// per element of its <c>select</c>. Every reading of the result, values, records or batches, is a
 /// stream of <see cref="GroupBatches"/>.
 /// </summary>
-internal sealed class AggregationQuery
+internal sealed class AggregationQuery : ResultQuery
 {
     private VortexSchema? _schema;
 
-    internal AggregationQuery(AggregationHost host, AggregationPlan plan, ResultColumn[] columns)
+    internal AggregationQuery(AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys)
+        : this(host, plan, nodes, keys, Natural(nodes, keys))
+    {
+    }
+
+    private AggregationQuery(AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, ResultColumn[] columns)
     {
         Host = host;
         Plan = plan;
+        Nodes = nodes;
+        Keys = keys;
         Columns = columns;
     }
 
@@ -29,10 +37,16 @@ internal sealed class AggregationQuery
 
     internal AggregationPlan Plan { get; }
 
+    /// <summary>The elements of the selection, in order.</summary>
+    internal IResultNode[] Nodes { get; }
+
+    /// <summary>The columns of the group key; none for the aggregates of a whole scan.</summary>
+    internal ColumnShape[] Keys { get; }
+
     internal ResultColumn[] Columns { get; }
 
     /// <summary>The result's columns, by name and type.</summary>
-    internal VortexSchema Schema
+    internal override VortexSchema Schema
     {
         get
         {
@@ -51,8 +65,50 @@ internal sealed class AggregationQuery
         }
     }
 
+    internal override VortexSession Session => Host.Source.Session;
+
+    internal override ScanMetrics Metrics => Host.Metrics;
+
+    /// <summary>The same query, its result's columns named and typed by the members of a record, in order.</summary>
+    /// <param name="record">The record's schema.</param>
+    /// <param name="type">The record's type, for a message.</param>
+    /// <exception cref="VortexSchemaException">The record has another number of members, or a member does not take its element.</exception>
+    internal AggregationQuery As(VortexSchema record, Type type)
+    {
+        if (record.Count != Nodes.Length)
+        {
+            throw new VortexSchemaException(
+                $"{type.Name} has {record.Count} members and the selection {Nodes.Length} elements: a record takes the elements in order, one member each.");
+        }
+
+        ResultColumn[] columns = new ResultColumn[Nodes.Length];
+        for (int i = 0; i < columns.Length; i++)
+        {
+            columns[i] = Nodes[i].Column(record[i], Keys, i, type);
+        }
+
+        return new AggregationQuery(Host, Plan, Nodes, Keys, columns);
+    }
+
     /// <summary>The result's batches: the query runs when the first is asked for.</summary>
-    internal GroupBatches Batches(CancellationToken cancellationToken) => new GroupBatches(this, cancellationToken);
+    internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => Groups(cancellationToken);
+
+    /// <summary>The result's batches, as the stream that knows the run they come from.</summary>
+    internal GroupBatches Groups(CancellationToken cancellationToken) => new GroupBatches(this, cancellationToken);
+
+    internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => Host.ExplainAsync(Plan, cancellationToken);
+
+    /// <summary>Each element's column of its own type, named <c>Item1</c> and on as a tuple's elements are.</summary>
+    private static ResultColumn[] Natural(IResultNode[] nodes, ColumnShape[] keys)
+    {
+        ResultColumn[] columns = new ResultColumn[nodes.Length];
+        for (int i = 0; i < columns.Length; i++)
+        {
+            columns[i] = nodes[i].Column($"Item{i + 1}", keys);
+        }
+
+        return columns;
+    }
 }
 
 /// <summary>
