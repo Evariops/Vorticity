@@ -9,16 +9,15 @@ namespace Vorticity.Zstd.Tests.Differential;
 /// <summary>
 /// Every frame of the corpus is decoded by Vorticity.Zstd and by the platform's libzstd, and both must
 /// give back the original bytes. The corpus is split across classes so that xUnit runs them in parallel.
+/// Frames across the block boundaries are the compression corpus's, which makes libzstd's own and
+/// decodes them; the frames of several blocks here are the large ones and the encoder options'.
 /// </summary>
 public static class Corpus
 {
     private static readonly int[] SmallSizes = [0, 1, 2, 127, 4096];
-    private static readonly int[] BlockSizes = [131071, 131072, 131073, 400_000];
     private static readonly int[] AllLevels = [-5, -1, 1, 3, 9, 19, 22];
 
     public static TheoryData<string> Small() => Cases(SmallSizes, AllLevels);
-
-    public static TheoryData<string> Blocks() => Cases(BlockSizes, AllLevels);
 
     /// <summary>Several megabytes: many blocks, long offsets, every level that stays quick.</summary>
     public static TheoryData<string> Large()
@@ -199,13 +198,6 @@ public sealed class SmallFrameTests
 {
     [Theory]
     [MemberData(nameof(Corpus.Small), MemberType = typeof(Corpus))]
-    public void Decodes_like_libzstd(string name) => Corpus.Check(name);
-}
-
-public sealed class BlockBoundaryTests
-{
-    [Theory]
-    [MemberData(nameof(Corpus.Blocks), MemberType = typeof(Corpus))]
     public void Decodes_like_libzstd(string name) => Corpus.Check(name);
 }
 
