@@ -474,6 +474,10 @@ structure; it sets the page cap, the inlining, the one-object commit, the in-pro
 immutable headers, pages, tails and fences, and the parallel requests. Hedged requests belong to the
 store library.
 
+A scan in the tree's order opens the next object ahead once its consumer reads past the first batch
+([16-queries.md](16-queries.md) §2.6): an object's tail and its first data request wait on each
+other, not on the object before it, and a scan that stops at its first batch opens one object.
+
 ### 9.2 Held by a counting store
 
 - **One file, any size**: opening a file and answering a count through a sorted run in fence pages, a

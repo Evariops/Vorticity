@@ -104,6 +104,22 @@ internal abstract class ScanSource
 
     /// <summary>The rows of the whole source, whatever a scan keeps of them; -1 when they are not known before it is read.</summary>
     internal virtual long RowBound => -1;
+
+    /// <summary>
+    /// The ranges of rows a pass of <paramref name="degree"/> lanes reads side by side, each a range
+    /// of <see cref="ScanSpec.Rows"/> the source reads alone: the objects of a dataset, or parts of a
+    /// large one. Null when the source has none of its own; a file's are cut by the engine, at its
+    /// chunks.
+    /// </summary>
+    internal virtual ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken) => default;
+
+    /// <summary>
+    /// Whether a scan that asks for the order of <paramref name="column"/> (<see cref="ScanSpec.OrderPath"/>)
+    /// brings its rows in it at a cost a stream can bear: a dataset on the first column of its
+    /// clustering key, whose objects a key-ordered read opens as the order reaches them. A file
+    /// whose statistics say a column is sorted needs no asking.
+    /// </summary>
+    internal virtual bool OrdersOnAsking(FieldExpr column) => false;
 }
 
 /// <summary>A scan over one open file, compiled to the engine's builder.</summary>

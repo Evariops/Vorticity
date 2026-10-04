@@ -37,6 +37,9 @@ Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Fu
     ["names"] = () => Fixtures.NamesAsync(2_000_000),
     ["skewed"] = () => Fixtures.SkewedAsync(4_000_000),
     ["medium"] = () => Fixtures.MediumAsync(4_000_000),
+    ["readings-1"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 1, deleted: false),
+    ["readings-16"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: false),
+    ["readings-16-deleted"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: true),
 };
 Dictionary<string, string> files = new Dictionary<string, string>(StringComparer.Ordinal);
 
@@ -70,6 +73,40 @@ foreach (int degree in degrees)
 
         Console.WriteLine(
             $"{scenario.Name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Result,12}");
+    }
+
+    // The datasets: their directories written once as the files are, each opened by the session.
+    foreach ((string datasetName, DatasetScenario scenario) in DatasetScenarios.All())
+    {
+        if (only.Length > 0 && !only.Any(word => scenario.Name.Contains(word, StringComparison.OrdinalIgnoreCase)))
+        {
+            continue;
+        }
+
+        if (!files.TryGetValue(datasetName, out string? path))
+        {
+            path = await fixtures[datasetName]().ConfigureAwait(false);
+            files[datasetName] = path;
+        }
+
+        // The store's requests a query makes, which an object store in the cloud bills and waits on:
+        // the warm-up's and the memory probe's counted with the rounds'.
+        await using Vorticity.Dataset.FileObjectStore directory = new Vorticity.Dataset.FileObjectStore(path);
+        await using Vorticity.Dataset.CountingObjectStore store = new Vorticity.Dataset.CountingObjectStore(directory);
+        await using Vorticity.Dataset.VortexDataset dataset = await Vorticity.Dataset.VortexDataset
+            .OpenAsync(store, new Vorticity.Dataset.DatasetOptions { Session = session }).ConfigureAwait(false);
+        long opening = store.Requests;
+        Measurement m = await Measure.RunAsync(run => scenario.Query(dataset, run), rounds, scenario.ProbeEvery).ConfigureAwait(false);
+        double requests = (store.Requests - opening) / (double)(rounds + 2);
+        string key = degree == 1 ? scenario.Name : $"{scenario.Name}, degree {degree}";
+        measured[key] = m;
+        if (m.Engine is not null)
+        {
+            engines.Add((key, m));
+        }
+
+        Console.WriteLine(
+            $"{scenario.Name,-62} {degree,6} {m.Millis,9:F2} {m.FirstMillis,9:F2} {m.Allocated / 1048576.0,10:F2} {m.Live / 1048576.0,9:F2} {m.Result,12} {requests,9:F1} requests");
     }
 }
 

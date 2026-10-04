@@ -892,8 +892,12 @@ internal static class AggregationEngine
             pass = pass with { Pruned = true, Live = live };
         }
 
+        // A file's rows are cut here, at its chunks; another source cuts its own, a dataset at its objects.
         AggregationPartition[] partitions;
-        RowRange[]? ranges = Ranges(source, pass, degree);
+        RowRange[]? ranges = Ranges(source, pass, degree)
+            ?? (degree > 1 && pass.Take is null && !pass.MatchesNothing && source is not FileScanSource
+                ? await source.PiecesAsync(pass, degree, cancellationToken).ConfigureAwait(false)
+                : null);
         if (ranges is null)
         {
             AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts);

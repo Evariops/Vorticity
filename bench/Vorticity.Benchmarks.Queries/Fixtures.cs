@@ -139,6 +139,47 @@ internal static class Fixtures
     internal static ValueTask<string> NamesAsync(int rows) => WriteOnceAsync($"names-{rows}.vortex", rows, canonical: true, row =>
         new Named(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"user-{(long)row * 7_919 % 1_000_000:D7}"), (long)(Mix((ulong)row) % 1_000)));
 
+    /// <summary>
+    /// The readings of the readings file of <paramref name="rows"/> rows as a dataset of
+    /// <paramref name="objects"/> objects of equal rows, written on first use in a directory; with
+    /// <paramref name="deleted"/>, Paris's rows deleted, an eighth of every object.
+    /// </summary>
+    internal static async ValueTask<string> ReadingsDatasetAsync(int rows, int objects, bool deleted)
+    {
+        string path = Path.Combine(Directory, $"readings-{rows}-{objects}{(deleted ? "-deleted" : string.Empty)}.dataset");
+        if (System.IO.Directory.Exists(path))
+        {
+            return path;
+        }
+
+        string partial = path + ".partial";
+        if (System.IO.Directory.Exists(partial))
+        {
+            System.IO.Directory.Delete(partial, recursive: true);
+        }
+
+        string file = await ReadingsAsync(rows).ConfigureAwait(false);
+        await using (Vorticity.Dataset.FileObjectStore store = new Vorticity.Dataset.FileObjectStore(partial))
+        {
+            await using Vorticity.Dataset.VortexDataset dataset = await Vorticity.Dataset.VortexDataset.CreateAsync(
+                store, Reading.Schema, new Vorticity.Dataset.DatasetOptions()).ConfigureAwait(false);
+            await using VortexFile open = await VortexFile.OpenAsync(file).ConfigureAwait(false);
+            for (int o = 0; o < objects; o++)
+            {
+                RowRange slice = new RowRange(rows * (long)o / objects, rows * (long)(o + 1) / objects);
+                await dataset.AppendAsync(open.Scan<Reading>().Rows(slice).ToBatchesAsync()).ConfigureAwait(false);
+            }
+
+            if (deleted)
+            {
+                await dataset.DeleteAsync<Reading>(r => r.City == "Paris").ConfigureAwait(false);
+            }
+        }
+
+        System.IO.Directory.Move(partial, path);
+        return path;
+    }
+
     /// <summary>The file <paramref name="name"/> of <paramref name="rows"/> rows made by <paramref name="row"/>, written on first use; every column canonical when <paramref name="canonical"/>.</summary>
     private static async ValueTask<string> WriteOnceAsync<T>(string name, int rows, bool canonical, Func<int, T> row)
         where T : IVortexRecord<T>

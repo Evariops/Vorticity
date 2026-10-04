@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Expressions;
 using Vorticity.Keys;
+using Vorticity.Layouts;
 using Vorticity.Scanning;
 
 namespace Vorticity.Dataset;
@@ -64,6 +65,113 @@ internal sealed class DatasetScanSource : ScanSource
 
     internal override ValueTask<KeyPlan> ExplainKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         DatasetKeyCursor.ExplainAsync(_version, path, indexes, cancellationToken);
+
+    /// <summary>
+    /// On the first column of the clustering key, or a function of it: the key-ordered read opens an
+    /// object once it could hold the next row, so a group of it is final once a greater key is read.
+    /// </summary>
+    internal override bool OrdersOnAsking(FieldExpr column) =>
+        _version.Schema.Key is { } key && key.Paths.Count > 0 && string.Equals(key.Paths[0], column.Path, System.StringComparison.Ordinal);
+
+    /// <summary>The rows a range takes at least: below, opening its scan costs more than the rows it reads.</summary>
+    private const long PieceRows = 8_192;
+
+    /// <summary>
+    /// The objects the summaries keep, each a range of the dataset's rows, an object of two shares of
+    /// the rows or more cut between its chunks into ranges of a share or more: about four a lane, so
+    /// that a lane on a slow core takes fewer and no lane waits on a large object the others finished
+    /// beside.
+    /// </summary>
+    internal override async ValueTask<RowRange[]?> PiecesAsync(ScanSpec spec, int degree, CancellationToken cancellationToken)
+    {
+        if (spec.OrderPath is not null || spec.Take is not null)
+        {
+            return null;
+        }
+
+        SummaryPruner? pruner = spec.Options.Pruning && spec.Filter is { } filter ? new SummaryPruner(Compute.FunctionFieldExpr.Ranges(filter)) : null;
+        long from = spec.Rows?.Start ?? 0;
+        long to = spec.Rows?.End ?? long.MaxValue;
+        List<(PositionedObject Held, RowRange Rows)> objects = [];
+        long total = 0;
+        await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
+        {
+            long start = System.Math.Max(from, held.FirstRow);
+            long end = System.Math.Min(to, held.FirstRow + held.Entry.Rows);
+            if (end > start)
+            {
+                objects.Add((held, new RowRange(start, end)));
+                total += end - start;
+            }
+        }
+
+        // The objects to cut are opened side by side to read where their chunks end; the scan finds
+        // them open after. Each cut gives its object back, whatever another one's open did.
+        long share = System.Math.Max(PieceRows, total / (degree * 4L));
+        Task<RowRange[]>?[] cuts = new Task<RowRange[]>?[objects.Count];
+        List<Task> cutting = [];
+        for (int o = 0; o < objects.Count; o++)
+        {
+            if (objects[o].Rows.Length >= 2 * share)
+            {
+                cuts[o] = CutAsync(objects[o].Held, objects[o].Rows, share, spec.Projection, cancellationToken);
+                cutting.Add(cuts[o]!);
+            }
+        }
+
+        await Task.WhenAll(cutting).ConfigureAwait(false);
+        List<RowRange> pieces = [];
+        for (int o = 0; o < objects.Count; o++)
+        {
+            if (cuts[o] is { } cut)
+            {
+                pieces.AddRange(await cut.ConfigureAwait(false));
+            }
+            else
+            {
+                pieces.Add(objects[o].Rows);
+            }
+        }
+
+        return pieces.Count > 1 ? [.. pieces] : null;
+    }
+
+    /// <summary>
+    /// The rows <paramref name="rows"/> of an object cut between its chunks, as a file's are, into
+    /// ranges of <paramref name="share"/> rows or more: a cut inside a chunk would have both ranges
+    /// decode it. A deleted row counts for none, and a chunk of deleted rows alone is in no range.
+    /// </summary>
+    private async Task<RowRange[]> CutAsync(PositionedObject held, RowRange rows, long share, FieldMask? projection, CancellationToken cancellationToken)
+    {
+        ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+        await using (lease.ConfigureAwait(false))
+        {
+            // The projection names the version's columns, where an object of an earlier schema need
+            // not hold them: its chunks are read whole for every column.
+            FieldMask mask = projection is { } named && _version.Schema.ColumnsOf(lease.File.DType, held.Entry.Key) is null ? named : FieldMask.All;
+            DeletionVector deletions = held.Entry.Deletions;
+            long lower = rows.Start - held.FirstRow;
+            long upper = rows.End - held.FirstRow;
+            RowRange physical = deletions.IsEmpty ? new RowRange(lower, upper) : new RowRange(deletions.Physical(lower), deletions.Physical(upper - 1) + 1);
+            LayoutTree tree = lease.File.LayoutTree;
+            SplitPlan plan = SplitPlan.Compute(tree, physical, in mask, SplitPlan.NaturalBatchRows(tree));
+            long parts = rows.Length / share;
+            List<RowRange> pieces = [];
+            long start = rows.Start;
+            for (int b = 0; b < plan.BoundaryCount && pieces.Count < parts - 1; b++)
+            {
+                long at = held.FirstRow + deletions.Logical(plan.BoundaryAt(b));
+                if (at - start >= share && at < rows.End)
+                {
+                    pieces.Add(new RowRange(start, at));
+                    start = at;
+                }
+            }
+
+            pieces.Add(new RowRange(start, rows.End));
+            return [.. pieces];
+        }
+    }
 
     /// <summary>The engine's scan for <paramref name="spec"/>, adding what the objects' scans count to <paramref name="counters"/>.</summary>
     internal DatasetScanBuilder Builder(ScanSpec spec, ScanMetrics? counters)

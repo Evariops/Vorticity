@@ -40,8 +40,9 @@ internal sealed class DatasetScanMetrics
     public long ObjectsCounted { get; internal set; }
 
     /// <summary>
-    /// The most data objects the scan read at once: one in the tree's order, and under
-    /// <see cref="DatasetScanBuilder.InKeyOrder(string, bool)"/> the inputs the merge held open.
+    /// The most data objects the scan read at once: one in the tree's order, two once a prefetch
+    /// opens the next object ahead, and under <see cref="DatasetScanBuilder.InKeyOrder(string, bool)"/>
+    /// the inputs the merge held open.
     /// </summary>
     public int Cursors { get; internal set; }
 }
@@ -246,6 +247,12 @@ internal sealed class DatasetScanBuilder
     }
 
     /// <summary>The batches of every object the scan did not skip, in key order, borrowed: each is valid until the next is asked for.</summary>
+    /// <remarks>
+    /// With a prefetch, once the consumer reads past the scan's first batch, the next object is
+    /// opened, and its first batch read and decoded, while the consumer reads the one before it: an
+    /// object's open, its first request and its first decode then wait on nothing the consumer does.
+    /// Two objects are open at once at most, and a consumer that stops at the first batch opens one.
+    /// </remarks>
     public async IAsyncEnumerable<RecordBatch> ExecuteAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -259,38 +266,138 @@ internal sealed class DatasetScanBuilder
             yield break;
         }
 
-        RecordBatch? view = null;
-        await foreach (PositionedObject held in WalkAsync(cancellationToken).ConfigureAwait(false))
+        IAsyncEnumerator<PositionedObject> walk = WalkAsync(cancellationToken).GetAsyncEnumerator(cancellationToken);
+        await using (walk.ConfigureAwait(false))
         {
+            using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            bool prefetch = _options.Prefetch > 0;
+            bool readOn = false;
+            ObjectBatches? current = null;
+            Task<ObjectBatches?>? ahead = null;
+            try
+            {
+                current = await NextObjectAsync(walk, 1, stopped.Token).ConfigureAwait(false);
+                while (current is { } reading)
+                {
+                    if (readOn && prefetch)
+                    {
+                        ahead ??= NextObjectAsync(walk, 2, stopped.Token);
+                    }
+
+                    for (bool more = reading.Any; more; more = await reading.Batches.MoveNextAsync().ConfigureAwait(false))
+                    {
+                        yield return reading.Batches.Current;
+                        if (!readOn)
+                        {
+                            // Past the scan's first batch, the consumer reads on: the next object opens ahead.
+                            readOn = true;
+                            if (prefetch)
+                            {
+                                ahead ??= NextObjectAsync(walk, 2, stopped.Token);
+                            }
+                        }
+                    }
+
+                    current = null;
+                    await reading.Batches.DisposeAsync().ConfigureAwait(false);
+                    if (ahead is { } next)
+                    {
+                        ahead = null;
+                        current = await next.ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        current = await NextObjectAsync(walk, 1, stopped.Token).ConfigureAwait(false);
+                    }
+                }
+            }
+            finally
+            {
+                if (current is { } left)
+                {
+                    await left.Batches.DisposeAsync().ConfigureAwait(false);
+                }
+
+                if (ahead is { } late)
+                {
+                    // The consumer stopped, or a failure is on its way out: the object opened ahead
+                    // holds rows nobody asked for, and whatever its open met is not this scan's answer.
+                    await stopped.CancelAsync().ConfigureAwait(false);
+                    try
+                    {
+                        if (await late.ConfigureAwait(false) is { } unread)
+                        {
+                            await unread.Batches.DisposeAsync().ConfigureAwait(false);
+                        }
+                    }
+                    catch (Exception) when (late.IsFaulted || late.IsCanceled)
+                    {
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>An object being read: its batches as the dataset's rows, positioned on the first one when <paramref name="Any"/>.</summary>
+    private readonly record struct ObjectBatches(IAsyncEnumerator<RecordBatch> Batches, bool Any);
+
+    /// <summary>
+    /// The next object the scan covers, opened and positioned on its first batch, or none past the
+    /// last; <paramref name="open"/> is how many objects are open with it.
+    /// </summary>
+    private async Task<ObjectBatches?> NextObjectAsync(IAsyncEnumerator<PositionedObject> walk, int open, CancellationToken cancellationToken)
+    {
+        while (await walk.MoveNextAsync().ConfigureAwait(false))
+        {
+            PositionedObject held = walk.Current;
             if (Covered(held) == 0)
             {
                 continue;
             }
 
-            ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
-            await using (lease.ConfigureAwait(false))
+            IAsyncEnumerator<RecordBatch> batches = ObjectAsync(held, open, cancellationToken).GetAsyncEnumerator(cancellationToken);
+            try
             {
-                RecordOpen(lease);
-                ObjectColumns? columns = ColumnsOf(lease, held.Entry);
-                if (columns is null && !held.Entry.HasDeletions)
-                {
-                    // The object's own scan, which every object of the version's schema with no row
-                    // marked is read by, rebased into one view for the whole scan.
-                    await foreach (RecordBatch batch in Of(lease.File, held).ExecuteAsync()
-                        .WithCancellation(cancellationToken).ConfigureAwait(false))
-                    {
-                        yield return InDataset(batch, held.FirstRow, ref view);
-                    }
+                return new ObjectBatches(batches, await batches.MoveNextAsync().ConfigureAwait(false));
+            }
+            catch
+            {
+                await batches.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+        }
 
-                    continue;
+        return null;
+    }
+
+    /// <summary>One object's batches as the dataset's rows, its lease held until the last is read.</summary>
+    private async IAsyncEnumerable<RecordBatch> ObjectAsync(
+        PositionedObject held, int open, [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+        await using (lease.ConfigureAwait(false))
+        {
+            RecordOpen(lease, open);
+            ObjectColumns? columns = ColumnsOf(lease, held.Entry);
+            if (columns is null && !held.Entry.HasDeletions)
+            {
+                // The object's own scan, which every object of the version's schema with no row
+                // marked is read by, rebased into one view for the whole object.
+                RecordBatch? view = null;
+                await foreach (RecordBatch batch in Of(lease.File, held).ExecuteAsync()
+                    .WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    yield return InDataset(batch, held.FirstRow, ref view);
                 }
 
-                if (BatchesOfAsync(lease.File, held, PartOf(columns, _mask), held.FirstRow, _options.Compact, cancellationToken) is { } batches)
+                yield break;
+            }
+
+            if (BatchesOfAsync(lease.File, held, PartOf(columns, _mask), held.FirstRow, _options.Compact, cancellationToken) is { } batches)
+            {
+                await foreach (RecordBatch batch in batches.ConfigureAwait(false))
                 {
-                    await foreach (RecordBatch batch in batches.ConfigureAwait(false))
-                    {
-                        yield return batch;
-                    }
+                    yield return batch;
                 }
             }
         }
@@ -750,8 +857,9 @@ internal sealed class DatasetScanBuilder
 
     /// <summary>
     /// The most objects the scan will hold open at once, stated before any is read: one in the
-    /// tree's order; key-ordered on the clustering key, level 0's objects and one per level above
-    /// it; on any other column every object, the summaries giving no disjointness to lean on.
+    /// tree's order, two with a prefetch, which opens the next object ahead; key-ordered on the
+    /// clustering key, level 0's objects and one per level above it; on any other column every
+    /// object, the summaries giving no disjointness to lean on.
     /// </summary>
     private long CursorBound(long objects, List<long> keptByLevel)
     {
@@ -762,7 +870,7 @@ internal sealed class DatasetScanBuilder
 
         if (_orderPaths is not { } paths)
         {
-            return 1;
+            return objects > 1 && _options.Prefetch > 0 ? 2 : 1;
         }
 
         if (!_summaries || !RidesDisjointLevels(paths))
@@ -796,12 +904,12 @@ internal sealed class DatasetScanBuilder
     private IAsyncEnumerable<PositionedObject> WalkAsync(CancellationToken cancellationToken) =>
         _version.WalkAsync(Pruner(), _from, _to, _metrics, cancellationToken);
 
-    private void RecordOpen(ObjectLease lease)
+    private void RecordOpen(ObjectLease lease, int open = 1)
     {
         if (_metrics is { } metrics)
         {
             metrics.ObjectsOpened++;
-            metrics.Cursors = Math.Max(metrics.Cursors, 1);
+            metrics.Cursors = Math.Max(metrics.Cursors, open);
             if (lease.WasCached)
             {
                 metrics.CacheHits++;
@@ -832,7 +940,7 @@ internal sealed class DatasetScanBuilder
             _descending,
             rankedTies: true,
             (lease, entry) => OrderedBatchesAsync(lease, entry, paths, drop, cancellationToken),
-            RecordOpen,
+            lease => RecordOpen(lease),
             cancellationToken);
         RecordBatch? view = null;
         await using (merge.ConfigureAwait(false))
@@ -1501,9 +1609,9 @@ internal readonly record struct PositionedObject(ObjectEntry Entry, long FirstRo
 /// <param name="SubtreesSkipped">Child pages a node's summaries refuted, unread.</param>
 /// <param name="Order">The column a key-ordered scan delivers its rows by, or null for the tree's order.</param>
 /// <param name="Cursors">
-/// The most objects the scan will hold open at once: one in the tree's order; key-ordered on the
-/// clustering key, level 0's objects and one per level above it; on any other column, every object
-/// it would open.
+/// The most objects the scan will hold open at once: one in the tree's order, two with a prefetch,
+/// which opens the next object ahead; key-ordered on the clustering key, level 0's objects and one
+/// per level above it; on any other column, every object it would open.
 /// </param>
 internal sealed record DatasetPlan(
     ulong Version,

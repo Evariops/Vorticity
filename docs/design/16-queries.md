@@ -176,8 +176,11 @@ So, on such a key:
 
 A group by does not stream on a key with no such component, under a descending order of it or an
 order by an aggregate, on a sorted column that holds a NaN, which is not sorted at all
-([12-index-reads.md](12-index-reads.md) §3.4), or on a dataset whose objects' statistics do not
-prove their order. The null group of the streaming component is final at the end, and comes last.
+([12-index-reads.md](12-index-reads.md) §3.4), or on a dataset, on any column but the first of its
+clustering key: on that one, or a function of it, the dataset reads its rows in the key's order,
+merging the objects and opening one once it may hold the next row
+([13-dataset.md](13-dataset.md) §6.6). The null group of the streaming component is final at the end,
+and comes last.
 The plan says which component streams, or why none does (§10).
 
 ### 2.4 Stopping early
@@ -208,9 +211,12 @@ it holds goes out before its input ends, so it has no order to keep while it run
   rather than over the whole file before the first batch: those of the first window first, those of
   the rest in one coalesced read behind them. The plan is unchanged and each segment is still read
   once ([14-public-api.md](14-public-api.md) §9); only when moves, for one request more.
-* **A dataset.** Its objects are opened ahead of the one being read, within the window, and read
-  side by side at a degree above one; the first batch waits for the first object, and no object
-  boundary stalls the stream ([13-dataset.md](13-dataset.md)).
+* **A dataset.** The first batch waits for the first object alone. Once the consumer reads past it,
+  under a prefetch, the next object is opened, and its first batch read and decoded, while the one
+  before it is read: an object's open, its first request and its first decode wait on nothing the
+  consumer does, two objects at most are open, and a consumer that stops at the first batch opens
+  one. A group by reads the objects side by side at a degree above one (§9.4)
+  ([13-dataset.md](13-dataset.md)).
 * **A result.** It is a stream itself (§7.1); its first batch is its query's first.
 
 ## 3. Value expressions
@@ -353,7 +359,9 @@ exactness. A NaN is skipped; a sum holding +∞ and not −∞ is +∞, one hold
 gives. An average is that sum over the count; a variance comes from the reproducible sums of
 `x − c` and `(x − c)²`, `c` the midpoint of the column's bounds over the whole source where its
 statistics hold them, a file's, and zero where they do not, fixed per query: the nearer `c` lies to
-a group's mean, the fewer digits the difference of the two sums cancels.
+a group's mean, the fewer digits the difference of the two sums cancels. A dataset's `c` is zero:
+the bounds of its entries, which a deletion loosens and a compaction tightens, would move `c`, and
+the bits with it, from one compaction to the next.
 
 Every answer of §5 is therefore the same bits at every degree and in every cut, but those that
 depend on the order of rows by definition: `First`, `Last`, and a tie of `MinBy` or `MaxBy`.
@@ -653,9 +661,11 @@ space is cut by the top bits of a hash of the keys seeded for the merge, apart f
 each part merged from every range by a task the query awaits, never a thread blocked on others, and
 the parts are read as one, without a copy; a composite's indexes of its columns merge once, first.
 With few groups, or too few lanes for the parts to pay, the ranges merge in series into the one
-holding the most. A chosen row and a tie keep the earlier range's. On a dataset, a range is an object, or a part of a large one, and an object's statistics
-settle what a file's would ([13-dataset.md](13-dataset.md)). A group by that streams runs as §2.5
-says.
+holding the most. A chosen row and a tie keep the earlier range's. On a dataset, a range is an
+object, and one of two shares of the rows or more is cut between its chunks, as a file's rows are,
+so that no chunk is read by two ranges; the objects cut are opened side by side to learn where
+their chunks end, and the ranges then find them open. No object settles (§9.3)
+([13-dataset.md](13-dataset.md)). A group by that streams runs as §2.5 says.
 
 ### 9.5 Memory
 

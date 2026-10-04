@@ -111,6 +111,15 @@ last one seeks every object again at the current entry. Walking down, an object 
 opens only once the walk could reach its keys, and level 0's all open at the seek, since nothing
 bounds them from above. See [keys-in-order.md](keys-in-order.md).
 
+A scan reads the objects one after another in the tree's order. Once the consumer reads past the
+first batch, the next object is opened, and its first batch read and decoded, while the one before
+it is read: two objects at most are open, and a scan that stops at its first batch opens one.
+`ScanOptions.Prefetch` governs it, 1 by default; 0 opens each object only when the scan reaches it.
+A group by at a degree above one reads the objects side by side, each a range of the lanes' queue
+and a large one cut between its chunks. On the first column of the clustering key, or a function
+of it, a group by streams: the dataset reads its rows in the key's order. See
+[aggregates.md](aggregates.md).
+
 ## Versions
 
 ```

@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Compute;
+using Vorticity.Expressions;
 using Vorticity.Types;
 using Vorticity.Writing;
 
@@ -85,15 +86,17 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// The component of a query's key its groups stream on, or -1: the first the statistics say is
-    /// sorted, and no order but one that starts with it, ascending.
+    /// sorted, or the source reads in its order when asked, and no order but one that starts with
+    /// it, ascending.
     /// </summary>
     internal static int Streaming(AggregationQuery query)
     {
         ColumnShape[] keys = query.Plan.Keys;
+        ScanSource source = query.Host.Source;
         int streaming = -1;
         for (int c = 0; c < keys.Length && streaming < 0; c++)
         {
-            streaming = AggregationEngine.IsSorted(query.Host.Source, keys[c]) ? c : -1;
+            streaming = AggregationEngine.IsSorted(source, keys[c]) || source.OrdersOnAsking(keys[c].Column.Field) ? c : -1;
         }
 
         if (streaming < 0)
@@ -210,6 +213,14 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
         int streaming = Streaming(_query);
+
+        // A source that brings the rows in the component's order when asked is asked: a dataset's
+        // key-ordered read.
+        FieldExpr ordered = plan.Keys[streaming].Column.Field;
+        if (!AggregationEngine.IsSorted(host.Source, plan.Keys[streaming]) && host.Source.OrdersOnAsking(ordered))
+        {
+            pass = pass with { OrderPath = ordered.Path, Descending = false };
+        }
 
         // The streaming component is sorted, which its part of a composite key reads as runs.
         KeyFacts facts = AggregationEngine.Facts(host.Source, plan.Keys);

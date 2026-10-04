@@ -45,5 +45,13 @@ internal static class References
         // the margin is the line's own gate, 15 % at most.
         ("streaming against blocking, (City, Day), degree N", "group by city day (composite), count avg, degree N", "group by city day (composite), count avg, blocking, degree N", 1.000),
         ("streaming against blocking, Welford, degree N", "group by day (sorted), welford, degree N", "group by day (sorted), welford, blocking, degree N", 1.000),
+
+        // A dataset against the file of its rows (6e): a group by on sixteen objects within 15 % of
+        // the file's on every lane, where an object is a range of the queue, and on one lane, where
+        // each object opens ahead of the one read; the first batch flat from one object to sixteen.
+        // Measured at 0.81 to 0.85, 1.06 to 1.09 and 0.72 to 0.75: 1.0 is the lines' own gates.
+        ("dataset of 16 objects against its file, degree N", "dataset group by city, count avg, 16 objects, degree N", "group by city (run-end), count avg, degree N", 1.000),
+        ("dataset of 16 objects against its file", "dataset group by city, count avg, 16 objects", "group by city (run-end), count avg", 1.093),
+        ("first batch of a dataset, 16 objects against 1", "dataset first batch, full scan, 16 objects", "dataset first batch, full scan, 1 object", 1.000),
     ];
 }

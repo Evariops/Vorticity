@@ -379,7 +379,7 @@ internal static class Scenarios
         return 0;
     }
 
-    private static long Sum(ReadOnlySpan<long> values)
+    internal static long Sum(ReadOnlySpan<long> values)
     {
         long sum = 0;
         foreach (long value in values)
