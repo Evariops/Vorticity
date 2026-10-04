@@ -9,6 +9,7 @@
 // are the values compared, and only then the null counts, which are a whole-file aggregate and
 // cannot localize anything on their own.
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Threading;
@@ -80,13 +81,20 @@ internal sealed class FileResult
 /// <summary>Reads one corpus file and compares it, value for value, to its sidecar.</summary>
 internal static class ConformanceRunner
 {
-    /// <summary>Runs the whole comparison for one in-scope entry.</summary>
+    /// <summary>The comparison of each entry with its own sidecar, made once a run.</summary>
+    private static readonly ConcurrentDictionary<string, Lazy<Task<FileResult>>> Compared = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Runs the whole comparison for one in-scope entry, once a run: the per-file theory and the
+    /// whole-corpus report read each file once between them, and share what it read.
+    /// </summary>
     /// <param name="entry">The corpus entry.</param>
-    /// <param name="cancellationToken">Cancels the scan.</param>
+    /// <param name="cancellationToken">Ignored: no caller's cancellation ends a comparison others wait for.</param>
     /// <returns>What matched and what did not.</returns>
     internal static Task<FileResult> CompareAsync(
         CorpusEntry entry, CancellationToken cancellationToken = default) =>
-        CompareAsync(entry, entry.FullSidecarPath, checkPairing: true, cancellationToken);
+        Compared.GetOrAdd(entry.Id, _ => new Lazy<Task<FileResult>>(
+            () => CompareAsync(entry, entry.FullSidecarPath, checkPairing: true, CancellationToken.None))).Value;
 
     /// <summary>
     /// The same comparison against a caller-chosen sidecar. Exists for the harness's own self-test,
