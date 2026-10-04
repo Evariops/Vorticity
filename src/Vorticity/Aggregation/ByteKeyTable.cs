@@ -76,6 +76,14 @@ internal sealed class ByteKeyTable
         return number;
     }
 
+    /// <summary>Forgets every key, keeping the buffers and the seed.</summary>
+    internal void Clear()
+    {
+        Count = 0;
+        _used = 0;
+        Array.Clear(_slots);
+    }
+
     /// <summary>The bytes of key <paramref name="index"/>.</summary>
     internal ReadOnlySpan<byte> KeyOf(int index) => _bytes.AsSpan(_offsets[index], _lengths[index]);
 

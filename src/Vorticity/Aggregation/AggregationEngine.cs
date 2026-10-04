@@ -170,6 +170,24 @@ internal sealed class AggregationPartition
 
     internal GroupKeys? Keys { get; }
 
+    /// <summary>The group of the last row read whose key is not null, or -1: the group a key that streams keeps open.</summary>
+    internal int LastValueGroup { get; private set; } = -1;
+
+    /// <summary>
+    /// Keeps the groups <paramref name="groups"/> alone, keys and states, numbered again from 0 in
+    /// their order: what a streaming group by does once it has delivered the groups it closed.
+    /// </summary>
+    internal void Keep(ReadOnlySpan<int> groups)
+    {
+        Keys!.Keep(groups);
+        foreach (AggregateSlot slot in Slots)
+        {
+            slot.Keep(groups);
+        }
+
+        LastValueGroup = groups.IndexOf(LastValueGroup);
+    }
+
     internal void Process(RecordBatch batch)
     {
         int rows = batch.RowCount;
@@ -210,6 +228,7 @@ internal sealed class AggregationPartition
         _ranges.Clear();
         bool ranged = Keys.Assign(arena, _nodes.AsSpan(0, _keyCount), rows, selection, _rowGroups, _ranges);
         int groups = Keys.Count;
+        LastValueGroup = LastValue(ranged, rows, selection, LastValueGroup);
         for (int i = 0; i < Slots.Length; i++)
         {
             Slots[i].EnsureGroups(groups);
@@ -248,6 +267,34 @@ internal sealed class AggregationPartition
                 slot.StepRange(input, _ranges.StartAt(r), _ranges.EndAt(r), _ranges.GroupAt(r));
             }
         }
+    }
+
+    /// <summary>The group of the batch's last selected row whose key is not null; <paramref name="previous"/> when every one is null.</summary>
+    private int LastValue(bool ranged, int rows, ReadOnlySpan<ulong> selection, int previous)
+    {
+        int nullGroup = Keys!.NullNumber;
+        if (ranged)
+        {
+            for (int r = _ranges.Count - 1; r >= 0; r--)
+            {
+                if (_ranges.GroupAt(r) != nullGroup)
+                {
+                    return _ranges.GroupAt(r);
+                }
+            }
+
+            return previous;
+        }
+
+        for (int row = rows - 1; row >= 0; row--)
+        {
+            if ((selection.IsEmpty || ((selection[row >> 6] >> (row & 63)) & 1) != 0) && _rowGroups[row] != nullGroup)
+            {
+                return _rowGroups[row];
+            }
+        }
+
+        return previous;
     }
 
     /// <summary>Folds another partition into this one, its groups mapped onto this one's by key.</summary>
@@ -495,7 +542,7 @@ internal static class AggregationEngine
     }
 
     /// <summary>Whether the statistics say the key column is sorted, so that its rows come in runs of one key.</summary>
-    private static bool IsSorted(ScanSource source, ColumnShape key)
+    internal static bool IsSorted(ScanSource source, ColumnShape key)
     {
         if (source is not FileScanSource file || !file.File.HasFileStatistics || key.Column.FieldPath.Length != 1 || !file.File.Schema.RootIsStruct)
         {

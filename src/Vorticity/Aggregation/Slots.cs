@@ -48,6 +48,12 @@ internal abstract class AggregateSlot
 
     /// <summary>Merges the same aggregate of another partition, whose group <c>g</c> is this one's <c>map[g]</c>.</summary>
     internal abstract void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map);
+
+    /// <summary>
+    /// Keeps the states of <paramref name="groups"/> alone, group <c>groups[i]</c> becoming group
+    /// <c>i</c>: the groups a streaming group by has not closed. <paramref name="groups"/> ascend.
+    /// </summary>
+    internal abstract void Keep(ReadOnlySpan<int> groups);
 }
 
 /// <summary>An aggregate whose answer per group is a <typeparamref name="TResult"/>.</summary>
@@ -85,6 +91,10 @@ internal sealed class SettledSlot<TResult> : AggregateSlot<TResult>
     }
 
     internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    {
+    }
+
+    internal override void Keep(ReadOnlySpan<int> groups)
     {
     }
 
@@ -130,6 +140,17 @@ internal sealed class CountSlot : AggregateSlot<long>
     }
 
     internal override long Result(int group) => _counts[group];
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _counts[i] = _counts[groups[i]];
+        }
+
+        _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
+        _groups = groups.Length;
+    }
 
     internal override void Results(ReadOnlySpan<int> groups, Span<long> into)
     {

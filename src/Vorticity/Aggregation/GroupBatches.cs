@@ -43,6 +43,9 @@ internal sealed class AggregationQuery : ResultQuery
     /// <summary>The conjuncts of the filters on groups that name only the key: they filter the rows.</summary>
     internal VortexExpr? RowFilter { get; }
 
+    /// <summary>The most groups the last run held at once: every group of a blocking one, the open ones and a batch's closed ones of a streaming one.</summary>
+    internal long PeakGroups { get; set; }
+
     /// <summary>What follows the group by before its <c>Select</c>, in the order written.</summary>
     internal GroupOperator[] Operators { get; }
 
@@ -119,8 +122,9 @@ internal sealed class AggregationQuery : ResultQuery
     /// <summary>The result's batches: the query runs when the first is asked for.</summary>
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => Groups(cancellationToken);
 
-    /// <summary>The result's batches, as the stream that knows the run they come from.</summary>
-    internal GroupBatches Groups(CancellationToken cancellationToken) => new GroupBatches(this, cancellationToken);
+    /// <summary>The result's batches: as the groups close, on a key that streams; once the pass has run, on any other.</summary>
+    internal IAsyncEnumerator<RecordBatch> Groups(CancellationToken cancellationToken) =>
+        StreamingGroupBatches.Streams(this) ? new StreamingGroupBatches(this, cancellationToken) : new GroupBatches(this, cancellationToken);
 
     internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => Host.ExplainAsync(Plan, cancellationToken, RowFilter);
 
@@ -199,6 +203,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     private async ValueTask<bool> RunAsync()
     {
         _outcome = await _query.Host.RunAsync(_query.Plan, _cancellationToken, _query.RowFilter).ConfigureAwait(false);
+        _query.PeakGroups = _outcome.Keys?.Count ?? 1;
         (_groups, _count) = GroupSelection.Apply(_query, _outcome, _cancellationToken);
         return Next();
     }
@@ -471,7 +476,7 @@ internal static class GroupSelection
     }
 
     /// <summary>The groups the filter keeps, evaluated on the columns of the results it reads, a window of groups at a time.</summary>
-    private static (int[] Groups, int Count) Filter(
+    internal static (int[] Groups, int Count) Filter(
         AggregationQuery query, AggregationOutcome outcome, GroupFilter filter, int[] groups, int count, CancellationToken cancellationToken)
     {
         ResultColumn[] columns = new ResultColumn[filter.Fields.Length];

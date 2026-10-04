@@ -199,6 +199,17 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
 
     internal override TResult Result(int group) => _finish(_states[group]);
 
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _states[i] = _states[groups[i]];
+        }
+
+        // The groups past them are seeded again when they are made.
+        _groups = groups.Length;
+    }
+
     /// <summary>
     /// Folds the rows of [start, end) the mask holds: a run of words of <see cref="WordFold.Dense"/>
     /// rows or more at once, as a dense span where the run is full and selected where it is not; a
@@ -414,6 +425,35 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
     }
 
     internal override long Result(int group) => _counts[group];
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        int[] renumbered = new int[_groups];
+        Array.Fill(renumbered, -1);
+        for (int i = 0; i < groups.Length; i++)
+        {
+            renumbered[groups[i]] = i;
+            _counts[i] = _counts[groups[i]];
+        }
+
+        List<DistinctEntry<TValue>> kept = [];
+        foreach (DistinctEntry<TValue> entry in _seen)
+        {
+            if (renumbered[entry.Group] >= 0)
+            {
+                kept.Add(new DistinctEntry<TValue>(renumbered[entry.Group], entry.Value));
+            }
+        }
+
+        _seen.Clear();
+        foreach (DistinctEntry<TValue> entry in kept)
+        {
+            _seen.Add(entry);
+        }
+
+        _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
+        _groups = groups.Length;
+    }
 
     /// <summary>The values of a range of fewer rows than its dictionary has codes, each once.</summary>
     /// <remarks>Each walk of a dictionary range is a method of its own, so that neither loop takes its shape from the other.</remarks>

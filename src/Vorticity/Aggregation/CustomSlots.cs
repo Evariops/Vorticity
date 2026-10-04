@@ -67,6 +67,17 @@ internal sealed class CustomSlot<T, TAggregator, TState> : AggregateSlot<TState>
     }
 
     internal override TState Result(int group) => _states[group];
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _states[i] = _states[groups[i]];
+        }
+
+        // The groups past them are seeded again when they are made.
+        _groups = groups.Length;
+    }
 }
 
 /// <summary>A caller's aggregator that reads the encoded forms: a constant, a run-end or a dictionary block reaches it undecoded.</summary>
@@ -248,4 +259,15 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<
     }
 
     internal override TState Result(int group) => _states[group];
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _states[i] = _states[groups[i]];
+        }
+
+        // The groups past them are seeded again when they are made.
+        _groups = groups.Length;
+    }
 }

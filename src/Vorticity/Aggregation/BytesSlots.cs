@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
@@ -231,6 +232,18 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
         }
     }
 
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _best[i] = _best[groups[i]];
+            _lengths[i] = _lengths[groups[i]];
+        }
+
+        // The groups past them are emptied again when they are made.
+        _groups = groups.Length;
+    }
+
     internal override TResult Result(int group) =>
         _lengths[group] < 0 ? default! : StorageValues.BytesToClr<TResult>(_best[group].AsSpan(0, _lengths[group]), _shape);
 
@@ -309,6 +322,44 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
     }
 
     internal override long Result(int group) => _counts[group];
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        int[] renumbered = new int[_groups];
+        Array.Fill(renumbered, -1);
+        for (int i = 0; i < groups.Length; i++)
+        {
+            renumbered[groups[i]] = i;
+        }
+
+        // The pairs of the groups kept, numbered again, in a table emptied of the others.
+        List<byte[]> kept = [];
+        for (int entry = 0; entry < _seen.Count; entry++)
+        {
+            ReadOnlySpan<byte> key = _seen.KeyOf(entry);
+            int group = renumbered[BinaryPrimitives.ReadInt32LittleEndian(key)];
+            if (group >= 0)
+            {
+                byte[] copy = key.ToArray();
+                BinaryPrimitives.WriteInt32LittleEndian(copy, group);
+                kept.Add(copy);
+            }
+        }
+
+        _seen.Clear();
+        foreach (byte[] key in kept)
+        {
+            _seen.GetOrAdd(key, out _);
+        }
+
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _counts[i] = _counts[groups[i]];
+        }
+
+        _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
+        _groups = groups.Length;
+    }
 
     private void Add(int group, ReadOnlySpan<byte> value)
     {

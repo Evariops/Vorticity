@@ -90,6 +90,18 @@ internal abstract class GroupKeys
     /// </summary>
     internal abstract void Append(int component, ColumnStore store, ReadOnlySpan<int> groups);
 
+    /// <summary>
+    /// Keeps the keys of <paramref name="groups"/> alone, group <c>groups[i]</c> becoming group
+    /// <c>i</c>: the groups a streaming group by has not closed. <paramref name="groups"/> ascend.
+    /// </summary>
+    internal abstract void Keep(ReadOnlySpan<int> groups);
+
+    /// <summary>The group of the null key, or -1 when there is none: of a key of one column.</summary>
+    internal virtual int NullNumber => -1;
+
+    /// <summary>Forgets the groups the codes of the last dictionary were given: they were numbered again.</summary>
+    private protected void Renumbered() => _codeOrigin = default;
+
     private protected void Saw(ColumnEncoding encoding)
     {
         if (encoding == ColumnEncoding.Dictionary)
@@ -269,6 +281,31 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     }
 
     internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted);
+
+    internal override int NullNumber => _null;
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        int nullGroup = -1;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            nullGroup = groups[i] == _null ? i : nullGroup;
+            _keys[i] = _keys[groups[i]];
+        }
+
+        _index.Clear();
+        for (int i = 0; i < groups.Length; i++)
+        {
+            if (i != nullGroup)
+            {
+                _index.Slot(_keys[i], out _) = i;
+            }
+        }
+
+        _null = nullGroup;
+        Count = groups.Length;
+        Renumbered();
+    }
 
     internal override void MergeInto(GroupKeys target, Span<int> map)
     {
@@ -556,6 +593,45 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new BytesKeys(_shape, _sorted);
 
+    internal override int NullNumber => _null;
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        // The kept keys copied out before the table is emptied and filled with them again.
+        byte[][] kept = new byte[groups.Length][];
+        int nullGroup = -1;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            if (groups[i] == _null)
+            {
+                nullGroup = i;
+                kept[i] = [];
+            }
+            else
+            {
+                kept[i] = _table.KeyOf(_entryOfGroup[groups[i]]).ToArray();
+            }
+        }
+
+        _table.Clear();
+        for (int i = 0; i < groups.Length; i++)
+        {
+            if (i == nullGroup)
+            {
+                _entryOfGroup[i] = -1;
+                continue;
+            }
+
+            int entry = _table.GetOrAdd(kept[i], out _);
+            _groupOfEntry[entry] = i;
+            _entryOfGroup[i] = entry;
+        }
+
+        _null = nullGroup;
+        Count = groups.Length;
+        Renumbered();
+    }
+
     internal override void MergeInto(GroupKeys target, Span<int> map)
     {
         BytesKeys into = (BytesKeys)target;
@@ -694,6 +770,20 @@ internal sealed class BoolKeys : GroupKeys
     }
 
     internal override GroupKeys Fresh() => new BoolKeys(_shape);
+
+    internal override int NullNumber => _groups[2];
+
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        _groups.AsSpan().Fill(-1);
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _keyOf[i] = _keyOf[groups[i]];
+            _groups[_keyOf[i]] = i;
+        }
+
+        Count = groups.Length;
+    }
 
     internal override void MergeInto(GroupKeys target, Span<int> map)
     {

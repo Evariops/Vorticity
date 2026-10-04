@@ -434,6 +434,9 @@ public sealed class Aggregation<TResult>
     /// <summary>What the aggregation computes, for the tests that hold two spellings of a query to one plan.</summary>
     internal AggregationPlan Plan => ((AggregationQuery)_query).Plan;
 
+    /// <summary>The query, for the tests that read what its run held.</summary>
+    internal ResultQuery Query => _query;
+
     /// <summary>Makes <paramref name="cancellationToken"/> cancel the enumeration, as <c>WithCancellation</c> does a stream's.</summary>
     /// <param name="cancellationToken">Cancels the scan at a batch boundary.</param>
     /// <returns>This aggregation.</returns>
@@ -509,6 +512,9 @@ public sealed class Aggregation
     private readonly ResultQuery _query;
 
     internal Aggregation(ResultQuery query) => _query = query;
+
+    /// <summary>The query, for the tests that read what its run held.</summary>
+    internal ResultQuery Query => _query;
 
     /// <summary>What the scan did; valid once the result has been read.</summary>
     public ScanStatistics Statistics => ScanStatistics.From(_query.Metrics);

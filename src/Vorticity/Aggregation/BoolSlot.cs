@@ -182,6 +182,17 @@ internal sealed class BoolSlot<TResult> : AggregateSlot<TResult>
 
     internal override TResult Result(int group) => _finish(_flags[group]);
 
+    internal override void Keep(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _flags[i] = _flags[groups[i]];
+        }
+
+        _flags.AsSpan(groups.Length, _groups - groups.Length).Clear();
+        _groups = groups.Length;
+    }
+
     /// <summary>The block's values and validity, copied once per batch whatever the number of ranges folded.</summary>
     private ReadOnlySpan<ulong> Load(in BatchInput input, out ReadOnlySpan<ulong> validity)
     {
