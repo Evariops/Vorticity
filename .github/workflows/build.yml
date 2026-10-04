@@ -23,17 +23,79 @@ env:
   DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
 
+# The checks run side by side, each job on a Linux x64 runner of its own that builds what it needs:
+# a build takes under two minutes, and one runner for everything would run the suites one after
+# the other, twenty minutes on four vCPUs the tests keep busy. The
+# library's one OS-specific path, the file identity behind the mapping cache, answers that it
+# cannot tell where it has no binding.
 jobs:
-  ci:
-    # One job on one Linux x64 runner, so the solution is built once and every check reuses it. The
-    # library's one OS-specific path, the file identity behind the mapping cache, answers that it
-    # cannot tell where it has no binding.
-    name: build, test and cross-check
+  test:
+    name: test ${{ matrix.name }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Vorticity
+            projects: tests/Vorticity.Tests
+          - name: Vorticity.Zstd and the conformance corpus
+            projects: tests/Vorticity.Zstd.Tests tests/Vorticity.Conformance
+            zstd-data: true
+          # Every SIMD kernel has a scalar fallback, and the fallback is only real if it is
+          # exercised: the classes tests/scalar-pass.txt names, which reach every fallback the
+          # whole suite does, and the conformance corpus run again with intrinsics disabled.
+          # Vorticity.Zstd's suite does not: its only vector paths are Arm's, which an x64 runner
+          # never takes, so the run above already took every one of its fallbacks.
+          - name: Vorticity's fallbacks and the conformance corpus, intrinsics disabled
+            projects: tests/Vorticity.Tests tests/Vorticity.Conformance
+            scalar-pass: true
     steps:
-      # Nothing here pushes to git, and a release run uploads an artifact: the token is not left
-      # on disk.
+      # Nothing here pushes to git: the token is not left on disk.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        env:
+          PROJECTS: ${{ matrix.projects }}
+        run: |
+          for project in $PROJECTS; do
+            dotnet build "$project" -c Release
+          done
+
+      # Vorticity.Zstd's tests read zstd's golden files and a corpus of frames from zstd's
+      # decodecorpus, which the repository does not keep: written here from zstd 1.5.7's release,
+      # checked against its SHA-256. The tests that read them fail in CI without them.
+      - name: Write Vorticity.Zstd's test data
+        if: matrix.zstd-data
+        run: bash tools/native-ref/testdata.sh
+
+      - name: Test
+        if: ${{ !matrix.scalar-pass }}
+        env:
+          PROJECTS: ${{ matrix.projects }}
+        run: |
+          status=0
+          for project in $PROJECTS; do
+            dotnet test --project "$project" --no-build -c Release || status=1
+          done
+          exit $status
+
+      - name: Test the scalar fallbacks
+        if: ${{ matrix.scalar-pass }}
+        run: bash tests/scalar-pass.sh --no-build
+
+  package:
+    name: pack, publish vxdump as Native AOT, fuzz the parser
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # A release run uploads an artifact; nothing pushes to git.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -61,27 +123,6 @@ jobs:
 
       - name: Build
         run: dotnet build Vorticity.slnx --no-restore -c Release ${VERSION_PROPERTY:+"$VERSION_PROPERTY"}
-
-      # Vorticity.Zstd's tests read zstd's golden files and a corpus of frames from zstd's
-      # decodecorpus, which the repository does not keep: written here from zstd 1.5.7's release,
-      # checked against its SHA-256. The tests that read them fail in CI without them.
-      - name: Write Vorticity.Zstd's test data
-        run: bash tools/native-ref/testdata.sh
-
-      # The variable also has the suite write the corpus out for the Rust cross-check below; the
-      # test that writes it skips when the variable is unset.
-      - name: Test
-        run: dotnet test Vorticity.slnx --no-build -c Release
-        env:
-          VORTICITY_WRITE_CORPUS: ${{ runner.temp }}/written
-
-      # Every SIMD kernel has a scalar fallback, and the fallback is only real if it is exercised.
-      # Running the whole suite with intrinsics disabled is the cheapest way to keep that honest as
-      # kernels land.
-      - name: Test (intrinsics disabled)
-        run: dotnet test Vorticity.slnx --no-build -c Release
-        env:
-          DOTNET_EnableHWIntrinsic: '0'
 
       # The five packages are what a consumer gets, and nothing else here builds them. Most of
       # what can go wrong is visible at pack time and nowhere else: a readme or a NOTICE that stops
@@ -114,8 +155,8 @@ jobs:
             exit 1
           fi
 
-      # A release's packages are kept for the publish job, which pushes them only once every check
-      # below has passed on the same build.
+      # A release's packages are kept for the publish job, which pushes them only once every job of
+      # the run has passed: the tests ran the same commit, built without the release's number.
       - name: Gather the packages of a release
         if: github.event_name == 'release'
         run: |
@@ -138,6 +179,13 @@ jobs:
         run: |
           dotnet run --project tests/Vorticity.Fuzz -c Release --no-build -- \
             tests/Vorticity.Conformance/corpus 100000 20260912
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: fuzz-findings
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
 
       # A library cannot prove it is AOT-clean; an executable that opens a file and walks its
       # layout tree can, because a reflection-shaped mistake is a trim warning at publish or a
@@ -192,6 +240,31 @@ jobs:
           test "$crashed" = 0
           test "$scanned" -ge 800
 
+  crosscheck:
+    name: cross-check with the reference
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+
+      - name: Build
+        run: dotnet build tests/Vorticity.Tests -c Release
+
+      # The one test that writes the corpus out for the reference, which skips unless the variable
+      # names a directory.
+      - name: Write the corpus with this writer
+        run: |
+          dotnet test --project tests/Vorticity.Tests --no-build -c Release \
+            --filter-method '*WritesTheCorpusOutForTheRustCrossCheck*'
+        env:
+          VORTICITY_WRITE_CORPUS: ${{ runner.temp }}/written
+
       # The runner image ships rustup, and its stable can trail the minimum the pinned crates need.
       - name: Update the Rust toolchain
         id: rust
@@ -201,8 +274,8 @@ jobs:
 
       # Building the reference's crates is the longest step of the job, so their build is kept
       # from one run to the next until the lock file or the compiler changes. A release run builds
-      # them from scratch: nothing restored from a cache runs in the job that makes its packages,
-      # which zizmor cannot see through the condition.
+      # them from scratch: nothing restored from a cache runs in a release run, which zizmor cannot
+      # see through the condition.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
         if: github.event_name != 'release'
         with:
@@ -220,13 +293,6 @@ jobs:
         run: |
           cargo run --release --example verify_written -- \
             ../../tests/Vorticity.Conformance/corpus "${{ runner.temp }}/written"
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: failure()
-        with:
-          name: fuzz-findings
-          path: fuzz/artifacts/
-          if-no-files-found: ignore
 
       # A change here is a format change, not a dependency bump: it must be reviewed against the
       # component registry and the conformance corpus regenerated. It is reported as a warning,
@@ -249,7 +315,7 @@ jobs:
   # environment: renaming either stops the push.
   publish:
     name: push the packages to nuget.org
-    needs: ci
+    needs: [test, package, crosscheck]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -1,0 +1,26 @@
+# The test classes of Vorticity.Tests that run again with intrinsics disabled, one xunit class
+# filter a line; a trailing * takes a namespace and what it holds.
+#
+# Every kernel with a vector path has a scalar fallback, and the fallback is only real if it is
+# exercised. These classes run every method that branches on the hardware, and with intrinsics
+# disabled they cover every line those methods' fallbacks cover when the whole suite does: the rest
+# of the suite reaches the same fallbacks through the same kernels. The conformance corpus runs
+# whole beside them, through the scalar decoders.
+#
+# The namespaces of the kernels' own tests run whole, so that a test added there joins the pass. A
+# kernel tested from anywhere else, or a method that branches on the hardware and that only a class
+# elsewhere reaches, joins it here, by the class's name.
+Vorticity.Tests.Arrays.*
+Vorticity.Tests.Compute.*
+Vorticity.Tests.Aggregation.*
+Vorticity.Tests.RowEncoding.*
+Vorticity.Tests.Api.SinkContractTests
+Vorticity.Tests.Dataset.DatasetLockedStoreTests
+Vorticity.Tests.Indexes.BloomKernelTests
+Vorticity.Tests.Layouts.WindowedChunkTests
+Vorticity.Tests.Scan.BlockPruningDecodeTests
+Vorticity.Tests.Writing.AlpEncoderTests
+Vorticity.Tests.Writing.DateTimePartsPlanTests
+Vorticity.Tests.Writing.DistinctTableTests
+Vorticity.Tests.Writing.PlanSeedTests
+Vorticity.Tests.Writing.ZstdFramesTests

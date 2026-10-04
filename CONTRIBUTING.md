@@ -50,10 +50,10 @@ Pick the row that matches what moved; doing more is always allowed, doing less i
 
 | what moved | run |
 |---|---|
-| a decoder, a canonical form, the scan, the filter | the suite in both intrinsic modes · `bench/gate.sh` · `--throughput --check` |
+| a decoder, a canonical form, the scan, the filter | the suite · `tests/scalar-pass.sh` · `bench/gate.sh` · `--throughput --check` |
 | the compressor, a plan, the blob, the writer, with no intent to change a byte | the same · `bench/crosscheck.sh` · `--throughput --write --check` |
 | bytes on disk, deliberately | the same, plus the corpus byte count before and after in the commit message |
-| indexes, keys, the dataset | the suite in both modes · `bench/gate.sh` |
+| indexes, keys, the dataset | the suite · `tests/scalar-pass.sh` · `bench/gate.sh` |
 | a public signature, a visibility, an XML summary | the suite · a Release build with no warning · the public surface record updated in the same commit |
 | the bench or the tools | `bench/gate.sh`, and the command you touched, once |
 | documents and comments only | a Release build, so the `<see cref>` links still resolve |
@@ -61,8 +61,8 @@ Pick the row that matches what moved; doing more is always allowed, doing less i
 What each command costs, so you can choose knowingly:
 
 ```
-dotnet test Vorticity.slnx -c Release                                             ~1 min
-DOTNET_EnableHWIntrinsic=0 dotnet test Vorticity.slnx -c Release                  ~1 min
+dotnet test Vorticity.slnx -c Release                                           ~1.5 min
+bash tests/scalar-pass.sh                                                          ~10 s
 bash bench/gate.sh                                                                  ~70 s
 bash bench/crosscheck.sh                                                            ~80 s
 dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput --check  ~55 s
@@ -84,6 +84,18 @@ reference keeps, so the ratio gates are red by construction and mean nothing the
 `bench/crosscheck.sh` is the only oracle that catches a fault our reader and our writer share: it
 writes the corpus with this library and has Vortex Rust read it back, scalar by scalar. Needs
 `cargo`.
+
+## Tests run side by side
+
+Every test runs beside every other, and each row of a theory is a test of its own:
+`tests/xunit.runner.json` sets xunit's `parallelMode` to `all` and pre-enumerates theories, for
+the three test projects. A test therefore owns what it writes, a temporary file of its own or a
+file of `SharedFiles`, which a run writes once and its tests only read, and changes nothing another
+test reads.
+
+A test that measures the process rather than its own work, such as its allocations, the blocks
+finalized anywhere, its live memory or a JIT that has settled, joins one of the collections that
+run alone, one test at a time: `AllocationCollection`, `FinalizerCollection`, `AdviceCollection`.
 
 ## The ratchet rule
 

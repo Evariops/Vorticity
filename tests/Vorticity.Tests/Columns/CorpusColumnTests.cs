@@ -1,9 +1,8 @@
-// Real files, written by Vortex 0.86.1, read through the public column API and compared against
-// their sidecars. Agreeing with our own fixtures proves nothing; this is the part that does not.
-//
-// The set is every corpus entry whose layout tree uses only the three encodings the test walker
-// understands (vortex.flat, vortex.struct, vortex.zoned), whose array encodings this build decodes,
-// and whose root dtype is in scope. dict and chunked layouts are read by the layout tests.
+// Real files, written by Vortex 0.86.1, read through the public column API, each for a contract
+// the column accessors keep: a non-struct root, field names, nesting, UUIDs, units, bit offsets,
+// null counts. The files are walked by the test walker, which understands vortex.flat,
+// vortex.struct and vortex.zoned; every in-scope file's values are compared with its sidecar by the
+// conformance suite.
 using System;
 using System.Text;
 using System.Threading.Tasks;
@@ -16,44 +15,6 @@ namespace Vorticity.Tests.Columns;
 
 public sealed class CorpusColumnTests
 {
-    public static TheoryData<string> WalkableEntries
-    {
-        get
-        {
-            TheoryData<string> data = [];
-            foreach (string entry in CorpusColumns.Entries())
-            {
-                if (SidecarValues.IsWalkable(entry))
-                {
-                    data.Add(entry);
-                }
-            }
-
-            return data;
-        }
-    }
-
-    [Fact]
-    public void TheCorpusSweepIsNotEmpty()
-    {
-        // A helper that silently matched nothing would turn this whole file into a no-op.
-        Assert.True(WalkableEntries.Count > 400, $"only {WalkableEntries.Count} entries matched");
-    }
-
-    [Theory]
-    [MemberData(nameof(WalkableEntries))]
-    public async Task EveryValueMatchesItsSidecar(string entry)
-    {
-        await using CorpusColumns corpus = await CorpusColumns.LoadAsync(entry);
-
-        Assert.Equal(SidecarValues.RowCount(entry), corpus.Batch.RowCount);
-        Assert.Equal(SidecarValues.RootKind(entry) == "struct", corpus.Batch.IsTabular);
-        Assert.Equal(corpus.Schema.Kind == DTypeKind.Struct, corpus.Batch.IsTabular);
-
-        int compared = SidecarValues.AssertRows(corpus.Batch, entry);
-        Assert.Equal(corpus.Batch.RowCount, compared);
-    }
-
     [Fact]
     public async Task ANonStructRootIsExposedAsItself()
     {

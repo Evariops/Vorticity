@@ -23,7 +23,6 @@ namespace Vorticity.Tests.Scan;
 /// rows it kept: a split it keeps nothing of decodes no other column, one it keeps a few rows of
 /// decodes those rows alone, and one it keeps most of is read whole and gathered.
 /// </summary>
-[Collection(nameof(AllocationCollection))]
 public sealed class FilterOwnPassTests
 {
     private const int Rows = 12 * 8_192;

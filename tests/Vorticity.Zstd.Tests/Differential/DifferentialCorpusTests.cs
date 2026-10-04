@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Linq;
 using Vorticity.Zstd.Tests.Support;
 using Xunit;
 
@@ -9,16 +10,23 @@ namespace Vorticity.Zstd.Tests.Differential;
 /// <summary>
 /// Every frame of the corpus is decoded by Vorticity.Zstd and by the platform's libzstd, and both must
 /// give back the original bytes. The corpus is split across classes so that xUnit runs them in parallel.
+/// Frames across the block boundaries are the compression corpus's, which makes libzstd's own and
+/// decodes them; the frames of several blocks here are the large ones and the encoder options'.
 /// </summary>
 public static class Corpus
 {
     private static readonly int[] SmallSizes = [0, 1, 2, 127, 4096];
-    private static readonly int[] BlockSizes = [131071, 131072, 131073, 400_000];
     private static readonly int[] AllLevels = [-5, -1, 1, 3, 9, 19, 22];
 
-    public static TheoryData<string> Small() => Cases(SmallSizes, AllLevels);
+    /// <summary>The kinds of content, a theory row each.</summary>
+    public static TheoryData<string> Kinds() => [.. DataKinds.All];
 
-    public static TheoryData<string> Blocks() => Cases(BlockSizes, AllLevels);
+    /// <summary>A kind and a type of dictionary, a theory row each.</summary>
+    public static MatrixTheoryData<string, string> KindsAndDictionaries() => new(DataKinds.All, ["trained", "raw"]);
+
+    /// <summary>Frames of a few bytes to a few kilobytes, of <paramref name="kind"/>, at every level.</summary>
+    public static IEnumerable<string> Small(string kind) =>
+        from size in SmallSizes from level in AllLevels select CorpusCase.Name(kind, size, level);
 
     /// <summary>Several megabytes: many blocks, long offsets, every level that stays quick.</summary>
     public static TheoryData<string> Large()
@@ -37,33 +45,34 @@ public static class Corpus
         return data;
     }
 
-    public static TheoryData<string> Options()
+    /// <summary>A content checksum, a frame written as a stream, small blocks and small windows, of <paramref name="kind"/>.</summary>
+    public static IEnumerable<string> Options(string kind)
     {
-        var data = new TheoryData<string>();
-        foreach (string kind in DataKinds.All)
+        // Content checksum.
+        foreach (int size in new[] { 0, 127, 131073 })
         {
-            // Content checksum.
-            foreach (int size in new[] { 0, 127, 131073 })
-            {
-                data.Add(CorpusCase.Name(kind, size, 1, "chk"));
-                data.Add(CorpusCase.Name(kind, size, 19, "chk"));
-            }
-
-            // No content size: the frame is written as a stream.
-            foreach (int size in new[] { 0, 1, 131073, 400_000 })
-            {
-                data.Add(CorpusCase.Name(kind, size, 3, "nofcs"));
-                data.Add(CorpusCase.Name(kind, size, 19, "nofcs", "chk"));
-            }
-
-            // Small target blocks: many compressed blocks, and small windows.
-            data.Add(CorpusCase.Name(kind, 131073, 3, "block=1340"));
-            data.Add(CorpusCase.Name(kind, 131073, 19, "block=4096"));
-            data.Add(CorpusCase.Name(kind, 70_000, 3, "wlog=10"));
-            data.Add(CorpusCase.Name(kind, 70_000, 19, "wlog=10"));
+            yield return CorpusCase.Name(kind, size, 1, "chk");
+            yield return CorpusCase.Name(kind, size, 19, "chk");
         }
 
-        // Long windows, long-distance matching: offsets far back.
+        // No content size: the frame is written as a stream.
+        foreach (int size in new[] { 0, 1, 131073, 400_000 })
+        {
+            yield return CorpusCase.Name(kind, size, 3, "nofcs");
+            yield return CorpusCase.Name(kind, size, 19, "nofcs", "chk");
+        }
+
+        // Small target blocks: many compressed blocks, and small windows.
+        yield return CorpusCase.Name(kind, 131073, 3, "block=1340");
+        yield return CorpusCase.Name(kind, 131073, 19, "block=4096");
+        yield return CorpusCase.Name(kind, 70_000, 3, "wlog=10");
+        yield return CorpusCase.Name(kind, 70_000, 19, "wlog=10");
+    }
+
+    /// <summary>Long windows, long-distance matching: offsets far back, over several megabytes.</summary>
+    public static TheoryData<string> LongWindows()
+    {
+        var data = new TheoryData<string>();
         foreach (string kind in new[] { "repeats", "mixed", "text" })
         {
             data.Add(CorpusCase.Name(kind, 3_000_000, 3, "wlog=24"));
@@ -75,43 +84,18 @@ public static class Corpus
         return data;
     }
 
-    public static TheoryData<string> Dictionaries()
+    /// <summary>Frames with a dictionary of <paramref name="type"/>, of <paramref name="kind"/>.</summary>
+    public static IEnumerable<string> Dictionaries(string kind, string type)
     {
-        var data = new TheoryData<string>();
-        foreach (string kind in DataKinds.All)
+        foreach (int size in new[] { 1, 127, 4096, 131073 })
         {
-            foreach (string type in new[] { "trained", "raw" })
+            foreach (int level in new[] { 1, 3, 19 })
             {
-                foreach (int size in new[] { 1, 127, 4096, 131073 })
-                {
-                    foreach (int level in new[] { 1, 3, 19 })
-                    {
-                        data.Add(CorpusCase.Name(kind, size, level, "dict=" + type));
-                    }
-                }
-
-                data.Add(CorpusCase.Name(kind, 4096, 3, "dict=" + type, "chk", "nofcs"));
+                yield return CorpusCase.Name(kind, size, level, "dict=" + type);
             }
         }
 
-        return data;
-    }
-
-    private static TheoryData<string> Cases(int[] sizes, int[] levels)
-    {
-        var data = new TheoryData<string>();
-        foreach (string kind in DataKinds.All)
-        {
-            foreach (int size in sizes)
-            {
-                foreach (int level in levels)
-                {
-                    data.Add(CorpusCase.Name(kind, size, level));
-                }
-            }
-        }
-
-        return data;
+        yield return CorpusCase.Name(kind, 4096, 3, "dict=" + type, "chk", "nofcs");
     }
 
     /// <summary>Decodes the case both ways and checks everything the API promises about it.</summary>
@@ -198,15 +182,8 @@ public static class Corpus
 public sealed class SmallFrameTests
 {
     [Theory]
-    [MemberData(nameof(Corpus.Small), MemberType = typeof(Corpus))]
-    public void Decodes_like_libzstd(string name) => Corpus.Check(name);
-}
-
-public sealed class BlockBoundaryTests
-{
-    [Theory]
-    [MemberData(nameof(Corpus.Blocks), MemberType = typeof(Corpus))]
-    public void Decodes_like_libzstd(string name) => Corpus.Check(name);
+    [MemberData(nameof(Corpus.Kinds), MemberType = typeof(Corpus))]
+    public void Decodes_like_libzstd(string kind) => Cases.CheckAll(Corpus.Small(kind), Corpus.Check);
 }
 
 public sealed class LargeFrameTests
@@ -219,13 +196,17 @@ public sealed class LargeFrameTests
 public sealed class EncoderOptionTests
 {
     [Theory]
-    [MemberData(nameof(Corpus.Options), MemberType = typeof(Corpus))]
-    public void Decodes_like_libzstd(string name) => Corpus.Check(name);
+    [MemberData(nameof(Corpus.Kinds), MemberType = typeof(Corpus))]
+    public void Decodes_like_libzstd(string kind) => Cases.CheckAll(Corpus.Options(kind), Corpus.Check);
+
+    [Theory]
+    [MemberData(nameof(Corpus.LongWindows), MemberType = typeof(Corpus))]
+    public void Long_windows_decode_like_libzstd(string name) => Corpus.Check(name);
 }
 
 public sealed class DictionaryTests
 {
     [Theory]
-    [MemberData(nameof(Corpus.Dictionaries), MemberType = typeof(Corpus))]
-    public void Decodes_like_libzstd(string name) => Corpus.Check(name);
+    [MemberData(nameof(Corpus.KindsAndDictionaries), MemberType = typeof(Corpus))]
+    public void Decodes_like_libzstd(string kind, string type) => Cases.CheckAll(Corpus.Dictionaries(kind, type), Corpus.Check);
 }

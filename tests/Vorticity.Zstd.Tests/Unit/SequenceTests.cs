@@ -14,24 +14,15 @@ namespace Vorticity.Zstd.Tests.Unit;
 /// </summary>
 public sealed class SequenceTests
 {
-    public static TheoryData<int> Seeds()
-    {
-        var data = new TheoryData<int>();
-        for (int i = 0; i < 300; i++)
-        {
-            data.Add(i);
-        }
-
-        return data;
-    }
-
     /// <summary>
     /// Random valid sequences, one block each, half of them repeat codes: every rule of the repeated
     /// offsets, with and without literals before the match, and offsets from 1 up.
     /// </summary>
-    [Theory]
-    [MemberData(nameof(Seeds))]
-    public void Random_sequences_follow_the_rfc(int seed)
+    [Fact]
+    public void Random_sequences_follow_the_rfc() =>
+        Cases.CheckAll(Enumerable.Range(0, 300), RandomSequencesFollowTheRfc, seed => $"seed {seed}");
+
+    private static void RandomSequencesFollowTheRfc(int seed)
     {
         var random = new Random(seed);
         byte[]? dictionary = seed % 3 == 0 ? RandomBytes(random, 1 + random.Next(3000)) : null;

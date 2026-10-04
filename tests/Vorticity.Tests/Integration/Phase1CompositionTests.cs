@@ -30,6 +30,7 @@ using Vorticity.Serialization.Schemas;
 using Vorticity.Tests.Arrays;
 using Vorticity.Tests.File;
 using Vorticity.Types;
+using Vorticity.Tests.Scan;
 using Xunit;
 
 namespace Vorticity.Tests.Integration;
@@ -251,8 +252,8 @@ public sealed class Phase1CompositionTests
     private static async Task<int> SweepOneAsync(string entry)
     {
         SidecarLayout expectedRoot = SidecarLayoutTree(entry);
-        await using VortexFile file = await VortexFile.OpenAsync(
-            CorpusBlobs.Path(entry, ".vortex"), OpenOptionsFor(entry), CancellationToken.None);
+        string path = CorpusBlobs.Path(entry, ".vortex");
+        await using VortexFile file = await VortexFile.OpenAsync(path, await CorpusSweep.OpenOptionsForAsync(path), CancellationToken.None);
 
         Assert.Equal((long)expectedRoot.RowCount, file.RowCount);
 
@@ -389,35 +390,6 @@ public sealed class Phase1CompositionTests
             WalkLayout(file, node.GetChild(i), expected.Children[i], leaves, depth + 1);
         }
     }
-
-    /// <summary>
-    /// <c>types/no_dtype_segment</c> is the corpus's only out-of-band-schema file: with no dtype
-    /// segment and no supplied DType the open is a <c>VortexFormatException</c>,
-    /// so the sweep supplies the schema the way a caller would. The donor is a real file with the
-    /// identical schema, not 33 hand-written arena calls.
-    /// </summary>
-    private static VortexOpenOptions OpenOptionsFor(string entry) =>
-        CorpusManifest.Find(entry).HasDTypeSegment
-            ? VortexOpenOptions.Default
-            : new VortexOpenOptions { DType = OutOfBandSchema.Value };
-
-    private static readonly Lazy<DType> OutOfBandSchema = new Lazy<DType>(static () =>
-    {
-        VortexFile donor = VortexFile
-            .OpenAsync(
-                CorpusBlobs.Path("types/user_metadata_segments", ".vortex"),
-                VortexOpenOptions.Default,
-                CancellationToken.None)
-            .AsTask()
-            .GetAwaiter()
-            .GetResult();
-
-        // The arena the DType handle points into outlives the file object, so the schema stays
-        // usable after the donor is closed.
-        DType schema = donor.DType;
-        donor.DisposeAsync().AsTask().GetAwaiter().GetResult();
-        return schema;
-    });
 
     private static int CountFlatLeaves(SidecarLayout node)
     {

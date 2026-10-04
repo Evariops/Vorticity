@@ -87,6 +87,12 @@ public sealed partial class MustNotCompileTests
         return markers;
     }
 
+    /// <summary>
+    /// One build at a time: each project builds the library it references into the library's own
+    /// directories, and two builds copying it there at once fail each other.
+    /// </summary>
+    private static readonly SemaphoreSlim Building = new SemaphoreSlim(1, 1);
+
     /// <summary>What the build reports, keyed like the markers, and its whole output for the failure message.</summary>
     private static async Task<(Dictionary<string, string> Reported, string Output)> BuildAsync(string directory, CancellationToken cancellationToken)
     {
@@ -106,11 +112,20 @@ public sealed partial class MustNotCompileTests
         start.Environment["DOTNET_CLI_UI_LANGUAGE"] = "en";
         start.Environment["DOTNET_NOLOGO"] = "1";
 
-        using Process process = Process.Start(start) ?? throw new InvalidOperationException("dotnet did not start.");
-        Task<string> error = process.StandardError.ReadToEndAsync(cancellationToken);
-        string output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
-        output += await error;
+        string output;
+        await Building.WaitAsync(cancellationToken);
+        try
+        {
+            using Process process = Process.Start(start) ?? throw new InvalidOperationException("dotnet did not start.");
+            Task<string> error = process.StandardError.ReadToEndAsync(cancellationToken);
+            output = await process.StandardOutput.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken);
+            output += await error;
+        }
+        finally
+        {
+            Building.Release();
+        }
 
         Dictionary<string, string> reported = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (string line in output.Split('\n'))

@@ -252,8 +252,8 @@ append truncates the file back to the length it had.
 
 ## 4. Kernels
 
-`Vector128` everywhere, wider vectors where the hardware has them, and a scalar twin the suite runs
-with intrinsics disabled ([03-architecture.md](03-architecture.md) §1). In the statistics pass:
+`Vector128` everywhere, wider vectors where the hardware has them, and a scalar twin whose tests run
+again with intrinsics disabled ([03-architecture.md](03-architecture.md) §1). In the statistics pass:
 minimum and maximum per lane, with validity folded in as a mask; null counts by population count
 per 64-bit word; run boundaries by comparing a vector with itself shifted by one; order and
 progressions by lane-wise subtraction against a broadcast step, exact because the progression's

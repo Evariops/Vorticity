@@ -194,7 +194,8 @@ Each is a test, not a guideline:
    (`LeafDecoderTests.PrimitiveReadsValuesZeroCopy`).
 3. **No per-row dispatch** in decode and write loops: every kernel is generic and specialized
    (`PerRowDispatchTests`).
-4. **Scalar fallback**: CI runs the whole suite again with hardware intrinsics disabled.
+4. **Scalar fallback**: CI runs again with hardware intrinsics disabled the test classes that reach
+   every scalar fallback the suite does (`tests/scalar-pass.txt`), and the conformance corpus.
 5. **Native AOT**: CI publishes `vxdump` ahead of time and runs it over the corpus.
 
 ## 5. Error handling

@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.IO.Compression;
+using System.Linq;
 using Vorticity.Zstd.Tests.Differential;
 using Vorticity.Zstd.Tests.Support;
 using Xunit;
@@ -20,29 +21,17 @@ public sealed class DictionaryCompressionTests
 
     private static readonly int[] Levels = [-5, -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
 
-    public static TheoryData<string> Cases()
-    {
-        var data = new TheoryData<string>();
-        foreach (string kind in new[] { "text", "json", "walk64", "mixed", "zeros", "urls" })
-        {
-            foreach (string type in new[] { "trained", "raw" })
-            {
-                foreach (int level in Levels)
-                {
-                    foreach (int size in Sizes)
-                    {
-                        data.Add(CorpusCase.Name(kind, size, level, "dict=" + type));
-                    }
-                }
-            }
-        }
+    private static readonly string[] Kinds = ["text", "json", "walk64", "mixed", "zeros", "urls"];
 
-        return data;
-    }
+    /// <summary>A kind and a type of dictionary, a theory row each; the row checks every level and size.</summary>
+    public static MatrixTheoryData<string, string> KindsAndTypes() => new(Kinds, ["trained", "raw"]);
 
     [Theory]
-    [MemberData(nameof(Cases))]
-    public void Compresses_like_libzstd(string name)
+    [MemberData(nameof(KindsAndTypes))]
+    public void Compresses_like_libzstd(string kind, string type) =>
+        Cases.CheckAll(from level in Levels from size in Sizes select CorpusCase.Name(kind, size, level, "dict=" + type), Check);
+
+    private static void Check(string name)
     {
         CorpusCase @case = CorpusCase.Parse(name);
         byte[] data = @case.Data;
@@ -56,14 +45,11 @@ public sealed class DictionaryCompressionTests
         Assert.Equal(OperationStatus.Done, compressor.Compress(data, output, out _, out int written));
         Corpus.AssertSameBytes(expected, output.AsSpan(0, written), name);
 
-        // Decoded with the dictionary, by Vorticity.Zstd and by libzstd.
+        // Decoded with the dictionary by Vorticity.Zstd: the frame is libzstd's own, so libzstd decodes it.
         byte[] decoded = new byte[data.Length];
         var decoder = new ZstdDecompressor(dictionary);
         Assert.Equal(OperationStatus.Done, decoder.Decompress(output.AsSpan(0, written), decoded, out _, out int decodedSize));
         Corpus.AssertSameBytes(data, decoded.AsSpan(0, decodedSize), name);
-        byte[] nativeDecoded = new byte[Math.Max(1, data.Length)];
-        Assert.Equal(OperationStatus.Done, NativeZstd.Decompress(output.AsSpan(0, written), nativeDecoded, native, out _, out int nativeSize));
-        Corpus.AssertSameBytes(data, nativeDecoded.AsSpan(0, nativeSize), name);
 
         // Again on the same compressor, whose tables carry over from frame to frame.
         Assert.Equal(OperationStatus.Done, compressor.Compress(data, output, out _, out int again));

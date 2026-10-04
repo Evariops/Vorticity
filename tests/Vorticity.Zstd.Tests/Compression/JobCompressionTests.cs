@@ -90,7 +90,7 @@ public sealed class JobCompressionTests
         byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(size)];
         Assert.Equal(OperationStatus.Done, compressor.CompressInJobs(data, output, out int written));
         Corpus.AssertSameBytes(expected, output.AsSpan(0, written), name);
-        CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name);
+        CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name, libzstds: true);
 
         // Again on the same compressor, whose tables carry over from job to job and frame to frame.
         Assert.Equal(OperationStatus.Done, compressor.CompressInJobs(data, output, out int again));

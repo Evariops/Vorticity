@@ -144,7 +144,7 @@ public sealed class WrittenSizeTests
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
             long reference = new FileInfo(entry.Path).Length;
-            long written = await Rewrite(entry);
+            long written = new FileInfo(await CorpusSweep.RewriteAsync(entry.Path)).Length;
             ours += written;
             theirs += reference;
             files++;
@@ -266,7 +266,7 @@ public sealed class WrittenSizeTests
         {
             int batches = 0;
             await using (VortexFile source = await VortexFile.OpenAsync(
-                entry.Path, OpenOptionsFor(entry), CancellationToken.None))
+                entry.Path, await CorpusSweep.OpenOptionsForAsync(entry.Path), CancellationToken.None))
             await using (VortexFileWriter writer =
                 VortexFileWriter.Create(written, source.DType, options))
             {
@@ -331,60 +331,4 @@ public sealed class WrittenSizeTests
 
         return most;
     }
-
-    /// <summary>Writes one corpus file out and returns how many bytes it took.</summary>
-    private static async Task<long> Rewrite(CorpusEntry entry)
-    {
-        string written = Path.Combine(Path.GetTempPath(), $"vorticity-size-{Guid.NewGuid():N}.vortex");
-        try
-        {
-            await using (VortexFile source = await VortexFile.OpenAsync(
-                entry.Path, OpenOptionsFor(entry), CancellationToken.None))
-            await using (VortexFileWriter writer = VortexFileWriter.Create(written, source.DType))
-            {
-                await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
-                    .WithCancellation(CancellationToken.None))
-                {
-                    await writer.WriteAsync(batch, CancellationToken.None);
-                }
-
-                await writer.CompleteAsync(CancellationToken.None);
-            }
-
-            return new FileInfo(written).Length;
-        }
-        finally
-        {
-            if (System.IO.File.Exists(written))
-            {
-                System.IO.File.Delete(written);
-            }
-        }
-    }
-
-    /// <summary>Open options for one entry: the schema out of band when the file has none.</summary>
-    /// <param name="entry">The corpus entry about to be opened.</param>
-    /// <remarks>
-    /// <c>types/no_dtype_segment</c> is in scope and carries no DType segment. Opening it without a
-    /// DType is a <c>VortexFormatException</c> by contract, so the donor is a real corpus file with
-    /// the identical schema.
-    /// </remarks>
-    private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
-        entry.HasDTypeSegment
-            ? VortexOpenOptions.Default
-            : new VortexOpenOptions { DType = OutOfBandSchema.Value };
-
-    private static readonly Lazy<Vorticity.Types.DType> OutOfBandSchema =
-        new Lazy<Vorticity.Types.DType>(static () =>
-        {
-            VortexFile donor = VortexFile
-                .OpenAsync(
-                    CorpusManifest.Get("types/user_metadata_segments").Path,
-                    VortexOpenOptions.Default,
-                    CancellationToken.None)
-                .AsTask()
-                .GetAwaiter()
-                .GetResult();
-            return donor.DType;
-        });
 }

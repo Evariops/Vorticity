@@ -7,7 +7,7 @@
 // with exactly the blocks it killed, bytes to read below the file's. And the metrics of the scan
 // that follows agree with what a caller counts by hand -- rows and batches exactly, requests and
 // bytes at least the plan's (a segment is asked for once per batch that needs it, the plan counts
-// it once), decoded values equal to the reader's own process-wide counter.
+// it once), and values decoded for every row delivered.
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -27,7 +27,6 @@ using Xunit;
 
 namespace Vorticity.Tests.Scan;
 
-[Collection(nameof(AllocationCollection))]
 public sealed class ScanExplainTests
 {
     /// <summary>65536 rows in 64 zones of 1024, over {monotone, banded, strs, nulls, nans}.</summary>

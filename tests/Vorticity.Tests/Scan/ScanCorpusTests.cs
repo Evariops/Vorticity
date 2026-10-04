@@ -85,7 +85,7 @@ public sealed class ScanCorpusTests
             try
             {
                 await using VortexFile file = await VortexFile.OpenAsync(
-                    entry.Path, OpenOptionsFor(entry), CancellationToken.None);
+                    entry.Path, await CorpusSweep.OpenOptionsForAsync(entry.Path), CancellationToken.None);
                 await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
                 {
                     Assert.True(batch.RowCount > 0);
@@ -124,7 +124,7 @@ public sealed class ScanCorpusTests
     private static async Task ScanOne(CorpusEntry entry)
     {
         await using VortexFile file = await VortexFile.OpenAsync(
-            entry.Path, OpenOptionsFor(entry), CancellationToken.None);
+            entry.Path, await CorpusSweep.OpenOptionsForAsync(entry.Path), CancellationToken.None);
         Assert.Equal(entry.RowCount, file.RowCount);
 
         long rows = 0;
@@ -284,30 +284,4 @@ public sealed class ScanCorpusTests
         Assert.Equal(8193, rows);
         Assert.True(batches >= 9, "8193 rows capped at 1000 needs at least nine batches");
     }
-
-    /// <summary>Open options for one entry: the schema out of band when the file has none.</summary>
-    /// <param name="entry">The corpus entry about to be opened.</param>
-    /// <remarks>
-    /// <c>types/no_dtype_segment</c> reached this sweep only when <c>vortex.map</c> gained a decoder
-    /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c>,
-    /// so the donor is a real corpus file with the identical schema.
-    /// </remarks>
-    private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
-        entry.HasDTypeSegment
-            ? VortexOpenOptions.Default
-            : new VortexOpenOptions { DType = OutOfBandSchema.Value };
-
-    private static readonly Lazy<Vorticity.Types.DType> OutOfBandSchema =
-        new Lazy<Vorticity.Types.DType>(static () =>
-        {
-            VortexFile donor = VortexFile
-                .OpenAsync(
-                    CorpusManifest.Get("types/user_metadata_segments").Path,
-                    VortexOpenOptions.Default,
-                    CancellationToken.None)
-                .AsTask()
-                .GetAwaiter()
-                .GetResult();
-            return donor.DType;
-        });
 }

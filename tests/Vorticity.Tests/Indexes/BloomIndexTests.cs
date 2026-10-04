@@ -648,25 +648,21 @@ public sealed class BloomIndexTests
         /// </remarks>
         internal static async Task<Written> CreateAsync(WritePolicy policy, int budgetPerMille = 1_000_000, bool textBounds = true)
         {
-            string path = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(), $"vorticity-bloom-{Guid.NewGuid():N}.vortex");
-            WriteReport report = await WriteAsync(path, new VortexWriteOptions
-            {
-                RowBlockSize = Block,
-                DataBlockTargetBytes = null,
-                WritePolicy = policy,
-                IndexBudgetPerMille = budgetPerMille,
-                StringBoundBytes = textBounds ? new VortexWriteOptions().StringBoundBytes : 0,
-            });
+            (string path, WriteReport report) = await SharedFiles.GetAsync(
+                $"{nameof(BloomIndexTests)}/{SharedFiles.Describe(policy)}/{budgetPerMille}/{textBounds}",
+                file => WriteAsync(file, new VortexWriteOptions
+                {
+                    RowBlockSize = Block,
+                    DataBlockTargetBytes = null,
+                    WritePolicy = policy,
+                    IndexBudgetPerMille = budgetPerMille,
+                    StringBoundBytes = textBounds ? new VortexWriteOptions().StringBoundBytes : 0,
+                }));
             long length = new System.IO.FileInfo(path).Length;
             return new Written(path, await VortexFile.OpenAsync(path), report, length);
         }
 
-        public async ValueTask DisposeAsync()
-        {
-            await File.DisposeAsync();
-            System.IO.File.Delete(Path);
-        }
+        public ValueTask DisposeAsync() => File.DisposeAsync();
 
         private static async Task<WriteReport> WriteAsync(string path, VortexWriteOptions options)
         {

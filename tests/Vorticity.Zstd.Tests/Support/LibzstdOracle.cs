@@ -16,16 +16,22 @@ internal sealed unsafe class LibzstdOracle
     private readonly delegate* unmanaged<byte*, nuint, nuint> _findFrameCompressedSize;
     private readonly delegate* unmanaged<nuint, uint> _isError;
     private readonly delegate* unmanaged<byte*, nuint, nint> _createDDict;
-    private readonly nint _context;
+    private readonly delegate* unmanaged<nint> _createDCtx;
+
+    /// <summary>
+    /// This thread's decompression context, never freed (tests are short-lived): a context decodes
+    /// one frame at a time, and the tests that ask the oracle run side by side.
+    /// </summary>
+    [ThreadStatic]
+    private static nint t_context;
 
     private LibzstdOracle(nint library)
     {
-        var create = (delegate* unmanaged<nint>)NativeLibrary.GetExport(library, "ZSTD_createDCtx");
+        _createDCtx = (delegate* unmanaged<nint>)NativeLibrary.GetExport(library, "ZSTD_createDCtx");
         _decompressUsingDDict = (delegate* unmanaged<nint, byte*, nuint, byte*, nuint, nint, nuint>)NativeLibrary.GetExport(library, "ZSTD_decompress_usingDDict");
         _findFrameCompressedSize = (delegate* unmanaged<byte*, nuint, nuint>)NativeLibrary.GetExport(library, "ZSTD_findFrameCompressedSize");
         _isError = (delegate* unmanaged<nuint, uint>)NativeLibrary.GetExport(library, "ZSTD_isError");
         _createDDict = (delegate* unmanaged<byte*, nuint, nint>)NativeLibrary.GetExport(library, "ZSTD_createDDict");
-        _context = create();
     }
 
     private static readonly Lazy<LibzstdOracle?> Shared = new(Load);
@@ -65,7 +71,12 @@ internal sealed unsafe class LibzstdOracle
             }
 
             frameSize = (int)size;
-            nuint result = _decompressUsingDDict(_context, dst, (nuint)destination.Length, src, size, dictionary);
+            if (t_context == 0)
+            {
+                t_context = _createDCtx();
+            }
+
+            nuint result = _decompressUsingDDict(t_context, dst, (nuint)destination.Length, src, size, dictionary);
             return _isError(result) != 0 ? -1 : (int)result;
         }
     }

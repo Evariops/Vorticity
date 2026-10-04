@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -38,7 +40,9 @@ public sealed class WindowedCorpusTests
         StringBuilder failures = new StringBuilder();
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
-            List<string> plain = await ReadAsync(entry.Path, windowed: false, degree: 1, take: null);
+            // Compared by the digests of their rows against the plain scan's, and described only
+            // where they differ.
+            List<UInt128> plain = await CorpusSweep.PlainAsync(entry.Path);
             if (plain.Count < 2)
             {
                 continue;
@@ -46,17 +50,9 @@ public sealed class WindowedCorpusTests
 
             files++;
             rows += plain.Count;
-            Compare(entry.Id, "one lane", plain, await ReadAsync(entry.Path, windowed: true, degree: 1, take: null), failures);
-            Compare(entry.Id, "four lanes", plain, await ReadAsync(entry.Path, windowed: true, degree: 4, take: null), failures);
-
-            long[] wanted = Indices(plain.Count);
-            List<string> expected = [];
-            foreach (long index in wanted)
-            {
-                expected.Add(plain[(int)index]);
-            }
-
-            Compare(entry.Id, "a take", expected, await ReadAsync(entry.Path, windowed: true, degree: 1, take: wanted), failures);
+            await Compare(entry, "one lane", plain, degree: 1, take: null, failures);
+            await Compare(entry, "four lanes", plain, degree: 4, take: null, failures);
+            await Compare(entry, "a take", plain, degree: 1, take: CorpusSweep.TakeIndices(plain.Count), failures);
         }
 
         Console.Out.WriteLine(
@@ -66,36 +62,37 @@ public sealed class WindowedCorpusTests
         Assert.Equal(string.Empty, failures.ToString());
     }
 
-    private static void Compare(string id, string how, List<string> expected, List<string> actual, StringBuilder failures)
+    /// <summary>
+    /// A windowed read of the file against the plain scan's rows, or those of them a take names: by
+    /// digest, then, where a row differs, by the lines both reads describe.
+    /// </summary>
+    private static async Task Compare(CorpusEntry entry, string how, List<UInt128> plain, int degree, long[]? take, StringBuilder failures)
     {
+        List<UInt128> expected = take is null ? plain : [.. take.Select(index => plain[(int)index])];
+        List<UInt128> actual = await ReadAsync<UInt128>(entry.Path, degree, take, Values.DigestRows);
         if (expected.Count != actual.Count)
         {
-            failures.Append(id).Append(", ").Append(how).Append(": ").Append(actual.Count)
+            failures.Append(entry.Id).Append(", ").Append(how).Append(": ").Append(actual.Count)
                 .Append(" rows, expected ").Append(expected.Count).Append('\n');
             return;
         }
 
-        for (int i = 0; i < expected.Count; i++)
+        int row = CollectionsMarshal.AsSpan(expected).CommonPrefixLength(CollectionsMarshal.AsSpan(actual));
+        if (row < expected.Count)
         {
-            if (expected[i] != actual[i])
-            {
-                failures.Append(id).Append(", ").Append(how).Append(": row ").Append(i)
-                    .Append(" is ").Append(actual[i]).Append(", expected ").Append(expected[i]).Append('\n');
-                return;
-            }
+            List<string> lines = await CorpusSweep.DescribeAsync(entry.Path);
+            List<string> read = await ReadAsync<string>(entry.Path, degree, take, Values.DescribeRows);
+            failures.Append(entry.Id).Append(", ").Append(how).Append(": row ").Append(row)
+                .Append(" is ").Append(read[row]).Append(", expected ").Append(lines[take is null ? row : (int)take[row]]).Append('\n');
         }
     }
 
-    private static async Task<List<string>> ReadAsync(string path, bool windowed, int degree, long[]? take)
+    /// <summary>The file read in windows, on <paramref name="degree"/> lanes, every row or those of a take.</summary>
+    private static async Task<List<T>> ReadAsync<T>(string path, int degree, long[]? take, Action<RecordBatch, List<T>> read)
     {
-        List<string> values = [];
-        await using VortexFile file = await VortexFile.OpenAsync(path, OpenOptionsFor(path), CancellationToken.None);
-        ScanBuilder scan = file.ScanBuilder();
-        if (windowed)
-        {
-            scan = scan.WithMaxBatchRows(BatchRows).WithWindowRows(WindowRows).WithDegreeOfParallelism(degree);
-        }
-
+        List<T> values = [];
+        await using VortexFile file = await VortexFile.OpenAsync(path, await CorpusSweep.OpenOptionsForAsync(path), CancellationToken.None);
+        ScanBuilder scan = file.ScanBuilder().WithMaxBatchRows(BatchRows).WithWindowRows(WindowRows).WithDegreeOfParallelism(degree);
         if (take is not null)
         {
             scan = scan.Take(take);
@@ -103,50 +100,9 @@ public sealed class WindowedCorpusTests
 
         await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(CancellationToken.None))
         {
-            Values.DescribeRows(batch, values);
+            read(batch, values);
         }
 
         return values;
     }
-
-    /// <summary>The first and last rows, both sides of a FastLanes block boundary, and a prime stride between.</summary>
-    private static long[] Indices(int rowCount)
-    {
-        SortedSet<long> wanted = [0, rowCount - 1];
-        foreach (long boundary in (ReadOnlySpan<long>)[1023, 1024, 1025, 2047, 2048])
-        {
-            if (boundary < rowCount)
-            {
-                wanted.Add(boundary);
-            }
-        }
-
-        for (long i = 7; i < rowCount; i += 331)
-        {
-            wanted.Add(i);
-        }
-
-        long[] indices = new long[wanted.Count];
-        wanted.CopyTo(indices);
-        return indices;
-    }
-
-    /// <summary>Open options for a corpus path: the schema out of band when the file has none.</summary>
-    private static VortexOpenOptions OpenOptionsFor(string path) =>
-        path.Contains("no_dtype_segment", StringComparison.Ordinal)
-            ? new VortexOpenOptions { DType = OutOfBandSchema.Value }
-            : VortexOpenOptions.Default;
-
-    private static readonly Lazy<DType> OutOfBandSchema = new Lazy<DType>(static () =>
-    {
-        VortexFile donor = VortexFile
-            .OpenAsync(
-                CorpusManifest.Get("types/user_metadata_segments").Path,
-                VortexOpenOptions.Default,
-                CancellationToken.None)
-            .AsTask()
-            .GetAwaiter()
-            .GetResult();
-        return donor.DType;
-    });
 }

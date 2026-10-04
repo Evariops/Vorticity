@@ -24,8 +24,8 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// are consecutive and aligned to the lane count at each of the four element widths, so both ends
 /// are plain contiguous loads and stores with no gather anywhere. The index function is a
 /// permutation, so every element is still touched exactly once whichever order the loops run in,
-/// which is what lets the vector form interchange them. The scalar path stays reachable and the
-/// suite runs once with hardware intrinsics disabled, so it is exercised rather than merely
+/// which is what lets the vector form interchange them. The scalar path stays reachable, and its
+/// tests run again with hardware intrinsics disabled, so it is exercised rather than merely
 /// present.
 /// </remarks>
 internal static partial class FastLanes

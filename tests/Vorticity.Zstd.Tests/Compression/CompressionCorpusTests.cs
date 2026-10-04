@@ -1,6 +1,8 @@
 using System;
 using System.Buffers;
+using System.Collections.Generic;
 using System.IO.Compression;
+using System.Linq;
 using Vorticity.Zstd.Internal;
 using Vorticity.Zstd.Tests.Differential;
 using Vorticity.Zstd.Tests.Support;
@@ -20,9 +22,19 @@ public static class CompressionCorpus
     private static readonly int[] BlockSizes = [70_000, 131_071, 131_072, 131_073, 262_145, 400_000];
     private static readonly int[] ExactLevels = [-131072, -50, -5, -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
 
-    public static TheoryData<string> Small() => Cases(SmallSizes, ExactLevels);
+    /// <summary>The kinds of content, a theory row each.</summary>
+    public static TheoryData<string> Kinds() => [.. DataKinds.All];
 
-    public static TheoryData<string> Blocks() => Cases(BlockSizes, ExactLevels);
+    /// <summary>A kind and a size around the block boundary, a theory row each.</summary>
+    public static MatrixTheoryData<string, int> KindsAndBlockSizes() => new(DataKinds.All, BlockSizes);
+
+    /// <summary>Every size of a few kilobytes at most, of <paramref name="kind"/>, at every level.</summary>
+    public static IEnumerable<string> Small(string kind) =>
+        from size in SmallSizes from level in ExactLevels select CorpusCase.Name(kind, size, level);
+
+    /// <summary>One size around the block boundary, of <paramref name="kind"/>, at every level.</summary>
+    public static IEnumerable<string> Blocks(string kind, int size) =>
+        from level in ExactLevels select CorpusCase.Name(kind, size, level);
 
     /// <summary>Several megabytes: many blocks, split before their match finding, and windows that slide.</summary>
     public static TheoryData<string> Large()
@@ -39,37 +51,9 @@ public static class CompressionCorpus
         return data;
     }
 
-    public static TheoryData<string> Checksums()
-    {
-        var data = new TheoryData<string>();
-        foreach (string kind in DataKinds.All)
-        {
-            foreach (int size in new[] { 0, 127, 131_073 })
-            {
-                data.Add(CorpusCase.Name(kind, size, 1, "chk"));
-                data.Add(CorpusCase.Name(kind, size, 3, "chk"));
-            }
-        }
-
-        return data;
-    }
-
-    private static TheoryData<string> Cases(int[] sizes, int[] levels)
-    {
-        var data = new TheoryData<string>();
-        foreach (string kind in DataKinds.All)
-        {
-            foreach (int size in sizes)
-            {
-                foreach (int level in levels)
-                {
-                    data.Add(CorpusCase.Name(kind, size, level));
-                }
-            }
-        }
-
-        return data;
-    }
+    /// <summary>A content checksum, of <paramref name="kind"/>, over one block, a single one and none.</summary>
+    public static IEnumerable<string> Checksums(string kind) =>
+        from size in new[] { 0, 127, 131_073 } from level in new[] { 1, 3 } select CorpusCase.Name(kind, size, level, "chk");
 
     /// <summary>Whether Vorticity.Zstd implements the strategy libzstd uses for this level and size.</summary>
     public static bool IsByteExact(int level, int size) =>
@@ -92,40 +76,79 @@ public static class CompressionCorpus
         return output.AsSpan(0, written).ToArray();
     }
 
-    /// <summary>Compresses the case both ways and checks everything the API promises about it.</summary>
+    /// <summary>
+    /// Compresses the case both ways and checks what the API promises about it. Wherever the level is
+    /// implemented, libzstd's frame says how long ours must be: compressed straight into that much
+    /// room, the tightest a caller can give, it must be the same bytes, and one byte less must be
+    /// refused whole. Up to two blocks, that is, and whatever the size when the frame ends in a run,
+    /// whose refusal has a path of its own: past two blocks any other frame is refused at its last
+    /// block as a frame of two is, and compressing a megabyte again to reach it costs as much as the
+    /// case.
+    /// </summary>
     public static void Check(string name)
     {
         CorpusCase @case = CorpusCase.Parse(name);
         byte[] data = @case.Data;
         var compressor = new ZstdCompressor(@case.Level) { AppendChecksum = @case.Checksum };
-        byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
-        OperationStatus status = compressor.Compress(data, output, out int consumed, out int written);
-        Assert.Equal(OperationStatus.Done, status);
-        Assert.Equal(data.Length, consumed);
-        ReadOnlySpan<byte> frame = output.AsSpan(0, written);
-
-        if (IsByteExact(@case.Level, data.Length))
+        if (!IsByteExact(@case.Level, data.Length))
         {
-            Corpus.AssertSameBytes(Libzstd(data, @case.Level, @case.Checksum), frame, name);
+            byte[] bounded = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
+            Assert.Equal(OperationStatus.Done, compressor.Compress(data, bounded, out int read, out int length));
+            Assert.Equal(data.Length, read);
+            AssertDecodes(bounded.AsSpan(0, length), data, name, libzstds: false);
+            return;
         }
 
-        AssertDecodes(frame, data, name);
+        byte[] expected = Libzstd(data, @case.Level, @case.Checksum);
+        byte[] output = new byte[expected.Length];
+        OperationStatus status = compressor.Compress(data, output, out int consumed, out int written);
+        if (status != OperationStatus.Done)
+        {
+            // Longer than libzstd's: the bytes say where it parted.
+            byte[] bounded = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
+            Assert.Equal(OperationStatus.Done, new ZstdCompressor(@case.Level) { AppendChecksum = @case.Checksum }.Compress(data, bounded, out _, out int length));
+            Corpus.AssertSameBytes(expected, bounded.AsSpan(0, length), name);
+        }
 
-        // An exact destination, on the same compressor, which carries its tables over.
-        byte[] exact = new byte[written];
-        Assert.Equal(OperationStatus.Done, compressor.Compress(data, exact, out consumed, out int again));
-        Assert.Equal(written, again);
-        Corpus.AssertSameBytes(frame, exact, name);
+        Assert.Equal(data.Length, consumed);
+        Corpus.AssertSameBytes(expected, output.AsSpan(0, written), name);
+        AssertDecodes(output, data, name, libzstds: true);
 
-        // One byte short.
-        status = compressor.Compress(data, new byte[written - 1], out consumed, out again);
-        Assert.Equal(OperationStatus.DestinationTooSmall, status);
-        Assert.Equal(0, consumed);
-        Assert.Equal(0, again);
+        // One byte short, on the same compressor: refused, nothing consumed, nothing written.
+        if (data.Length <= ShortChecked || EndsInARun(expected, @case.Checksum))
+        {
+            status = compressor.Compress(data, new byte[written - 1], out consumed, out int again);
+            Assert.Equal(OperationStatus.DestinationTooSmall, status);
+            Assert.Equal(0, consumed);
+            Assert.Equal(0, again);
+        }
     }
 
-    /// <summary>The frame decodes to <paramref name="data"/>, with Vorticity.Zstd and with the platform's libzstd.</summary>
-    public static void AssertDecodes(ReadOnlySpan<byte> frame, ReadOnlySpan<byte> data, string name)
+    /// <summary>The largest source whose one-byte-short refusal is checked: a frame of two blocks.</summary>
+    private const int ShortChecked = 131_073;
+
+    /// <summary>
+    /// Whether the frame may end in a run, a block of one byte repeated, whose header and byte are
+    /// then its last four before the checksum. A frame whose last bytes only look like one is taken
+    /// too, which costs a compression and misses nothing.
+    /// </summary>
+    private static bool EndsInARun(ReadOnlySpan<byte> frame, bool checksum)
+    {
+        int at = frame.Length - (checksum ? 8 : 4);
+        if (at < 0)
+        {
+            return false;
+        }
+
+        int header = frame[at] | (frame[at + 1] << 8) | (frame[at + 2] << 16);
+        return (header & 1) == 1 && ((header >> 1) & 3) == 1;
+    }
+
+    /// <summary>
+    /// The frame decodes to <paramref name="data"/> with Vorticity.Zstd, and with libzstd unless
+    /// <paramref name="libzstds"/> says the frame is libzstd's own, compared byte for byte already.
+    /// </summary>
+    public static void AssertDecodes(ReadOnlySpan<byte> frame, ReadOnlySpan<byte> data, string name, bool libzstds)
     {
         byte[] decoded = new byte[data.Length];
         var decoder = new ZstdDecompressor();
@@ -133,6 +156,10 @@ public static class CompressionCorpus
         Assert.True(status == OperationStatus.Done, $"{name}: Vorticity.Zstd's decoder says {status} ({decoder.LastError})");
         Assert.Equal(frame.Length, consumed);
         Corpus.AssertSameBytes(data, decoded.AsSpan(0, written), name);
+        if (libzstds)
+        {
+            return;
+        }
 
         byte[] native = new byte[Math.Max(1, data.Length)];
         status = NativeZstd.Decompress(frame, native, null, out consumed, out written);
@@ -145,15 +172,15 @@ public static class CompressionCorpus
 public sealed class SmallCompressionTests
 {
     [Theory]
-    [MemberData(nameof(CompressionCorpus.Small), MemberType = typeof(CompressionCorpus))]
-    public void Compresses_like_libzstd(string name) => CompressionCorpus.Check(name);
+    [MemberData(nameof(CompressionCorpus.Kinds), MemberType = typeof(CompressionCorpus))]
+    public void Compresses_like_libzstd(string kind) => Cases.CheckAll(CompressionCorpus.Small(kind), CompressionCorpus.Check);
 }
 
 public sealed class BlockCompressionTests
 {
     [Theory]
-    [MemberData(nameof(CompressionCorpus.Blocks), MemberType = typeof(CompressionCorpus))]
-    public void Compresses_like_libzstd(string name) => CompressionCorpus.Check(name);
+    [MemberData(nameof(CompressionCorpus.KindsAndBlockSizes), MemberType = typeof(CompressionCorpus))]
+    public void Compresses_like_libzstd(string kind, int size) => Cases.CheckAll(CompressionCorpus.Blocks(kind, size), CompressionCorpus.Check);
 }
 
 public sealed class LargeCompressionTests
@@ -166,6 +193,6 @@ public sealed class LargeCompressionTests
 public sealed class ChecksumCompressionTests
 {
     [Theory]
-    [MemberData(nameof(CompressionCorpus.Checksums), MemberType = typeof(CompressionCorpus))]
-    public void Compresses_like_libzstd(string name) => CompressionCorpus.Check(name);
+    [MemberData(nameof(CompressionCorpus.Kinds), MemberType = typeof(CompressionCorpus))]
+    public void Compresses_like_libzstd(string kind) => Cases.CheckAll(CompressionCorpus.Checksums(kind), CompressionCorpus.Check);
 }

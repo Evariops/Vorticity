@@ -53,11 +53,16 @@ public sealed class LongDistanceCompressionTests
         byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
         Assert.Equal(OperationStatus.Done, compressor.Compress(data, output, out _, out int written));
         Corpus.AssertSameBytes(expected, output.AsSpan(0, written), name);
-        CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name);
+        CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name, libzstds: true);
 
-        // A second frame on the same compressor, whose tables carry over but whose matcher starts afresh.
-        Assert.Equal(OperationStatus.Done, compressor.Compress(data, output, out _, out int again));
-        Corpus.AssertSameBytes(expected, output.AsSpan(0, again), name);
+        // A second frame on the same compressor, whose tables carry over but whose matcher starts afresh:
+        // on the far repeats, whose frames the matcher's own matches fill, so that a matcher that
+        // carried over would show; the other kinds give it little to find.
+        if (@case.Kind.StartsWith("far-", StringComparison.Ordinal))
+        {
+            Assert.Equal(OperationStatus.Done, compressor.Compress(data, output, out _, out int again));
+            Corpus.AssertSameBytes(expected, output.AsSpan(0, again), name);
+        }
     }
 
     /// <summary>
@@ -200,7 +205,7 @@ public sealed class LongDistanceCompressionTests
         byte[] output = new byte[ZstdCompressor.GetMaxCompressedLength(data.Length)];
         Assert.Equal(OperationStatus.Done, new ZstdCompressor(22).Compress(data, output, out _, out int written));
         Corpus.AssertSameBytes(expected, output.AsSpan(0, written), "far-walk64/" + Size + "/L22");
-        CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, "far-walk64/" + Size + "/L22");
+        CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, "far-walk64/" + Size + "/L22", libzstds: true);
     }
 
     /// <summary>

@@ -300,24 +300,20 @@ public sealed class TrigramIndexTests
 
         internal static async Task<Written> CreateAsync(WritePolicy policy)
         {
-            string path = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(), $"vorticity-trigram-{Guid.NewGuid():N}.vortex");
             WritePolicy withNumber = policy.For("n", policy.Of("url"));
-            WriteReport report = await WriteAsync(path, new VortexWriteOptions
-            {
-                RowBlockSize = Block,
-                DataBlockTargetBytes = null,
-                WritePolicy = withNumber,
-                IndexBudgetPerMille = 1_000_000,
-            });
+            (string path, WriteReport report) = await SharedFiles.GetAsync(
+                $"{nameof(TrigramIndexTests)}/{SharedFiles.Describe(withNumber)}",
+                file => WriteAsync(file, new VortexWriteOptions
+                {
+                    RowBlockSize = Block,
+                    DataBlockTargetBytes = null,
+                    WritePolicy = withNumber,
+                    IndexBudgetPerMille = 1_000_000,
+                }));
             return new Written(path, await VortexFile.OpenAsync(path), report);
         }
 
-        public async ValueTask DisposeAsync()
-        {
-            await File.DisposeAsync();
-            System.IO.File.Delete(Path);
-        }
+        public ValueTask DisposeAsync() => File.DisposeAsync();
 
         private static async Task<WriteReport> WriteAsync(string path, VortexWriteOptions options)
         {

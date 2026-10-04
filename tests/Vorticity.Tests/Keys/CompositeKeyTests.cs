@@ -273,11 +273,8 @@ public sealed class CompositeKeyTests
 
     private sealed class Written : IAsyncDisposable
     {
-        private readonly string _path;
-
-        private Written(string path, VortexFile file, WriteReport report)
+        private Written(VortexFile file, WriteReport report)
         {
-            _path = path;
             File = file;
             Report = report;
         }
@@ -288,17 +285,12 @@ public sealed class CompositeKeyTests
 
         internal static async Task<Written> CreateAsync(bool withEncoder)
         {
-            string path = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(), $"vorticity-composite-{Guid.NewGuid():N}.vortex");
-            WriteReport report = await WriteAsync(path, withEncoder);
-            return new Written(path, await VortexFile.OpenAsync(path, CancellationToken.None), report);
+            (string path, WriteReport report) = await SharedFiles.GetAsync(
+                $"{nameof(CompositeKeyTests)}/{withEncoder}", file => WriteAsync(file, withEncoder));
+            return new Written(await VortexFile.OpenAsync(path, CancellationToken.None), report);
         }
 
-        public async ValueTask DisposeAsync()
-        {
-            await File.DisposeAsync();
-            System.IO.File.Delete(_path);
-        }
+        public ValueTask DisposeAsync() => File.DisposeAsync();
 
         private static async Task<WriteReport> WriteAsync(string path, bool withEncoder)
         {
