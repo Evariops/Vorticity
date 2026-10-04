@@ -162,6 +162,12 @@ public sealed partial class DatasetGroupTests
             ticks.Where(t => t.Value != 0).GroupBy(t => t.Day).OrderBy(g => g.Key).Select(g => new DayTotal(g.Key, g.Count(), g.Sum(t => t.Value))),
             days);
         Assert.True(((AggregationQuery)byDay.Query).PeakGroups < days.Count, $"{((AggregationQuery)byDay.Query).PeakGroups} groups held");
+
+        // The last days first, under a take: the objects merged in the key's order backwards.
+        Vorticity.Aggregation lastDays = dataset.Scan<Tick>().GroupBy(r => r.Day).OrderByDescending(g => g.Key).Take(5).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value)));
+        Assert.True(StreamingGroupBatches.Streaming((AggregationQuery)lastDays.Query) >= 0);
+        Assert.Equal(days.AsEnumerable().Reverse().Take(5), await ListAsync(lastDays.As<DayTotal>()));
+        Assert.True(((AggregationQuery)lastDays.Query).PeakGroups < 10, $"{((AggregationQuery)lastDays.Query).PeakGroups} groups held");
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;

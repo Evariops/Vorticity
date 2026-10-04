@@ -36,6 +36,11 @@ internal static class References
         ("first batch of a filtered scan, 16M against 1M", "first batch, scan filtered everywhere, 16M", "first batch, scan filtered everywhere", 1.221),
         ("first group of a sorted key, 16M against 1M", "first group, group by day (sorted), 16M", "first group, group by day (sorted)", 1.254),
 
+        // The seven greatest days (6o): the splits read last one first, the read stopped once the
+        // seventh is out, flat from a million rows to sixteen. Measured at 1.25 to 1.67 on
+        // hundredths of a millisecond; the blocking pass read the whole file, a ratio of 10.5.
+        ("seven greatest days of a sorted key, 16M against 1M", "last seven days, group by day (sorted) descending, 16M", "last seven days, group by day (sorted) descending", 1.667),
+
         // At equal work: a count and an integer sum on both sides, where the axes above also pay
         // for the reproducible float sums of the operator.
         ("run-end key, an int sum against the hand loop", "group by city (run-end), count sum of an int", "hand loop city (run-end), count sum of an int", 0.510),

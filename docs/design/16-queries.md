@@ -174,13 +174,23 @@ So, on such a key:
   followed by `Take(7)` reads seven days of a year;
 * `Where` and `Skip` on the groups stream with it.
 
-A group by does not stream on a key with no such component, under a descending order of it or an
-order by an aggregate, on a sorted column that holds a NaN, which is not sorted at all
+A group by does not stream on a key with no such component, under an order by an aggregate, on a
+sorted column that holds a NaN, which is not sorted at all
 ([12-index-reads.md](12-index-reads.md) §3.4), or on a dataset, on any column but the first of its
 clustering key: on that one, or a function of it, the dataset reads its rows in the key's order,
 merging the objects and opening one once it may hold the next row
 ([13-dataset.md](13-dataset.md) §6.6). The null group of the streaming component is final at the end,
 and comes last.
+
+Under a descending order of the component, a group by streams backwards when a window follows the
+order, which stops the read: `orderby g.Key descending take 7` reads the last seven days of a year,
+not the year. A sorted column's splits come last one first, each in file order, which is all a group
+by needs: the group a split leaves open is that of its first row, the others are final, and the
+groups closed together are sorted. A dataset reads its rows in the key's order backwards. Nothing
+before the order may read an order — a window, a first or last row, a tie, a custom aggregate —
+since backwards the rows of a group come last first and a window would take the groups from the
+other end. Without a window, a descending order is the blocking pass's, on every lane and with the
+blocks the zone maps settle (§9.3).
 The plan says which component streams, or why none does (§10).
 
 ### 2.4 Stopping early

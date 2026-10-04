@@ -154,11 +154,59 @@ public sealed partial class StreamingGroupTests
             Assert.Equal(rows.Where(r => r.Hour is not null).GroupBy(r => r.Hour).OrderBy(g => g.Key).Take(3).Select(g => (long)g.Count()), await three.ToListAsync(Ct));
             Assert.True(three.Statistics.Batches <= 2, $"{three.Statistics.Batches} batches read for three groups of {batches}");
 
-            // A filter and an order on the key stream with it; the order the other way does not, and agrees.
+            // A filter and an order on the key stream with it; the order the other way, under a take,
+            // streams too, the rows read backwards.
             List<int?> kept = await file.Scan<Tick>().GroupBy(r => r.Hour).Where(g => g.Count() > 3_000).OrderBy(g => g.Key).Skip(2).Take(4).Select(g => g.Key).ToListAsync(Ct);
             Assert.Equal(rows.Where(r => r.Hour is not null).GroupBy(r => r.Hour).Where(g => g.Count() > 3_000).OrderBy(g => g.Key).Skip(2).Take(4).Select(g => g.Key), kept);
             List<int?> descending = await file.Scan<Tick>().GroupBy(r => r.Hour).OrderByDescending(g => g.Key).Take(3).Select(g => g.Key).ToListAsync(Ct);
             Assert.Equal(rows.Where(r => r.Hour is not null).Select(r => r.Hour).Distinct().OrderDescending().Take(3), descending);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task ADescendingOrderUnderATakeReadsTheRowsBackwardsAndStopsOnceServed(int degree)
+    {
+        (Tick[] rows, string path) = await WriteAsync();
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            IGrouping<int?, Tick>[] hours = [.. rows.Where(r => r.Hour is not null).GroupBy(r => r.Hour).OrderByDescending(g => g.Key)];
+
+            // The last seven hours, greatest first, the open groups alone held, the read stopped once
+            // they are out; the same bits as the blocking pass.
+            Scan<Tick> scan = file.Scan<Tick>();
+            Vorticity.Aggregation last = scan.GroupBy(r => r.Hour).OrderByDescending(g => g.Key).Take(7).Select(g => (g.Key, g.Count(), g.Average(x => x.Price)));
+            Assert.True(StreamingGroupBatches.Streaming((AggregationQuery)last.Query) >= 0);
+            List<HourStats> read = await ListAsync(last.As<HourStats>());
+            Assert.Equal(hours.Take(7).Select(g => (g.Key, (long)g.Count())), read.Select(h => (h.Hour, h.Count)));
+            Assert.True(((AggregationQuery)last.Query).PeakGroups <= 2, $"{((AggregationQuery)last.Query).PeakGroups} groups held");
+            Assert.True(scan.Statistics.Rows < Rows / 2, $"{scan.Statistics.Rows} rows read for seven hours of {Rows}");
+
+            Vorticity.Aggregation blocking = file.Scan<Tick>().GroupBy(r => r.Hour).OrderByDescending(g => g.Key).Take(7).Select(g => (g.Key, g.Count(), g.Average(x => x.Price)));
+            ((AggregationQuery)blocking.Query).Plan.Blocking = true;
+            Assert.Equal(await ListAsync(blocking.As<HourStats>()), read);
+
+            // A composite key, descending on its sorted component and the desks ascending within it.
+            Vorticity.Aggregation pairs = file.Scan<Tick>().GroupBy(r => (r.Hour, r.Desk))
+                .OrderByDescending(g => g.Key.Hour).ThenBy(g => g.Key.Desk).Take(12).Select(g => (g.Key.Hour, g.Key.Desk, g.Count()));
+            Assert.True(StreamingGroupBatches.Streaming((AggregationQuery)pairs.Query) >= 0);
+            Assert.Equal(
+                rows.Where(r => r.Hour is not null).GroupBy(r => (r.Hour, r.Desk))
+                    .OrderByDescending(g => g.Key.Hour).ThenBy(g => g.Key.Desk, StringComparer.Ordinal).Take(12)
+                    .Select(g => new HourDesk(g.Key.Hour, g.Key.Desk, g.Count())),
+                await ListAsync(pairs.As<HourDesk>()));
+
+            // Read whole, a window before the order, a row chosen by its place: the blocking pass.
+            Assert.Equal(-1, StreamingGroupBatches.Streaming((AggregationQuery)file.Scan<Tick>().GroupBy(r => r.Hour).OrderByDescending(g => g.Key).Select(g => g.Count()).Query));
+            Assert.Equal(-1, StreamingGroupBatches.Streaming((AggregationQuery)file.Scan<Tick>().GroupBy(r => r.Hour).Take(9).OrderByDescending(g => g.Key).Select(g => g.Count()).Query));
+            Assert.Equal(-1, StreamingGroupBatches.Streaming((AggregationQuery)file.Scan<Tick>().GroupBy(r => r.Hour).OrderByDescending(g => g.Key).Take(7).Select(g => g.First().Price).Query));
         }
         finally
         {

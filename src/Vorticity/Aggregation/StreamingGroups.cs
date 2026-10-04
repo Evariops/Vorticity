@@ -86,9 +86,16 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>
     /// The component of a query's key its groups stream on, or -1: the first the statistics say is
-    /// sorted, or the source reads in its order when asked, and no order but one that starts with
-    /// it, ascending.
+    /// sorted, or the source reads in its order when asked, and no order but those that start with
+    /// it, all one way. Descending, the rows are read in the component's order backwards.
     /// </summary>
+    /// <remarks>
+    /// Backwards, a group's rows come last first and a window before the order would take the groups
+    /// from the other end, so a descending order streams only where nothing before it reads an order:
+    /// no window, no first or last row, no tie, no custom aggregate. And only under a window after it,
+    /// which stops the read: that is what the backward read is for, where a whole read is the
+    /// blocking pass's, on every lane and with the blocks the zone maps settle.
+    /// </remarks>
     internal static int Streaming(AggregationQuery query)
     {
         ColumnShape[] keys = query.Plan.Keys;
@@ -104,15 +111,56 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             return -1;
         }
 
+        bool? descending = null;
+        bool windowFirst = false;
+        bool bounded = query.Take != long.MaxValue;
         foreach (GroupOperator op in query.Operators)
         {
-            if (op is GroupOrder order && (order.Keys[0].Field.Component != streaming || order.Keys[0].Descending))
+            if (op is GroupWindow window)
             {
-                return -1;
+                windowFirst |= descending is null;
+                bounded |= descending is not null && window.Take != long.MaxValue;
+            }
+            else if (op is GroupOrder order)
+            {
+                if (order.Keys[0].Field.Component != streaming || (descending is { } way && way != order.Keys[0].Descending))
+                {
+                    return -1;
+                }
+
+                descending = order.Keys[0].Descending;
             }
         }
 
-        return streaming;
+        return descending == true && (windowFirst || !bounded || !OrderFree(query.Plan)) ? -1 : streaming;
+    }
+
+    /// <summary>Whether every aggregate of the plan gives the same answer whatever the order its rows come in.</summary>
+    private static bool OrderFree(AggregationPlan plan)
+    {
+        foreach (IAggregateNode aggregate in plan.Aggregates)
+        {
+            if (aggregate.Kind is AggregateKind.First or AggregateKind.Last or AggregateKind.MinBy or AggregateKind.MaxBy or AggregateKind.Custom)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Whether a query that streams orders its groups on the streaming component descending: its rows are then read backwards.</summary>
+    internal static bool Descends(AggregationQuery query)
+    {
+        foreach (GroupOperator op in query.Operators)
+        {
+            if (op is GroupOrder order)
+            {
+                return order.Keys[0].Descending;
+            }
+        }
+
+        return false;
     }
 
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
@@ -214,23 +262,36 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
         int streaming = Streaming(_query);
 
-        // A source that brings the rows in the component's order when asked is asked: a dataset's
-        // key-ordered read.
+        // A source that brings the rows in the component's order when asked is asked, backwards
+        // when descending: a dataset's key-ordered read. A sorted column read descending has its
+        // splits come last one first, each in file order, which is all a group by needs: the group
+        // a batch leaves open is that of its first row, and its other groups are final.
         FieldExpr ordered = plan.Keys[streaming].Column.Field;
-        if (!AggregationEngine.IsSorted(host.Source, plan.Keys[streaming]) && host.Source.OrdersOnAsking(ordered))
+        bool descending = Descends(_query);
+        bool sorted = AggregationEngine.IsSorted(host.Source, plan.Keys[streaming]);
+        if (!sorted && host.Source.OrdersOnAsking(ordered))
         {
-            pass = pass with { OrderPath = ordered.Path, Descending = false };
+            pass = pass with { OrderPath = ordered.Path, Descending = descending };
+        }
+        else if (descending)
+        {
+            pass = pass with { Backward = true };
         }
 
         // The streaming component is sorted, which its part of a composite key reads as runs.
         KeyFacts facts = AggregationEngine.Facts(host.Source, plan.Keys);
         facts.Sorted[streaming] = true;
         _partition = new AggregationPartition(
-            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, streaming, host.Source, facts);
+            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, streaming, host.Source, facts)
+        {
+            Backward = pass.Backward,
+        };
 
         // The blocks the zone maps settle are folded in the order of the rows, which the groups
-        // close in.
-        ZoneSettling? settling = await ZoneSettling.PlanAsync(host.Source, pass, plan, host.Metrics, _cancellationToken).ConfigureAwait(false);
+        // close in: forward only, as the ranges grouped side by side are.
+        ZoneSettling? settling = descending
+            ? null
+            : await ZoneSettling.PlanAsync(host.Source, pass, plan, host.Metrics, _cancellationToken).ConfigureAwait(false);
         if (settling is not null)
         {
             pass = settling.Pass(pass);
@@ -238,7 +299,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
         _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
         int degree = pass.Options.DegreeOfParallelism > 0 ? pass.Options.DegreeOfParallelism : host.Source.Session.Options.MaxDegreeOfParallelism;
-        if (AggregationEngine.StreamingRanges(host.Source, pass, degree) is not { } ranges)
+        if (descending || AggregationEngine.StreamingRanges(host.Source, pass, degree) is not { } ranges)
         {
             if (settling is not null)
             {
@@ -369,10 +430,11 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 case GroupWindow:
                     count = Window(ref _skips[o], ref _takes[o], count);
                     break;
-                case GroupOrder order when _query.Plan.Keys.Length > 1 || order.Keys.Length > 1:
+                case GroupOrder order when _query.Plan.Keys.Length > 1 || order.Keys.Length > 1 || order.Keys[0].Descending:
                 {
                     // An order that starts with the streaming component: the groups closed together
                     // hold every group of their values of it, so sorting them is sorting the result.
+                    // Descending, the batches come greatest first, and the groups of one ascend.
                     (int[] sorted, int sortedCount) = GroupSelection.Order(_query, _outcome!, order, _closed, count, long.MaxValue, _cancellationToken);
                     sorted.AsSpan(0, sortedCount).CopyTo(_closed);
                     count = sortedCount;

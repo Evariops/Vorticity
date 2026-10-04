@@ -39,6 +39,8 @@ internal static class Scenarios
         yield return ($"readings-{large}", new Scenario($"first batch, scan filtered everywhere, {large / 1_000_000}M", FirstFilteredBatchAsync));
         yield return ("readings", new Scenario("first group, group by day (sorted)", FirstDayGroupAsync));
         yield return ($"readings-{large}", new Scenario($"first group, group by day (sorted), {large / 1_000_000}M", FirstDayGroupAsync));
+        yield return ("readings", new Scenario("last seven days, group by day (sorted) descending", LastDaysAsync));
+        yield return ($"readings-{large}", new Scenario($"last seven days, group by day (sorted) descending, {large / 1_000_000}M", LastDaysAsync));
     }
 
     private static async Task<long> GroupByCityAsync(VortexFile file, Run run)
@@ -377,6 +379,23 @@ internal static class Scenarios
         }
 
         return 0;
+    }
+
+    /// <summary>The seven greatest days and their counts: a top-k ordered on a sorted key, which reads the rows backwards and stops.</summary>
+    private static async Task<long> LastDaysAsync(VortexFile file, Run run)
+    {
+        long rows = 0;
+        await foreach (long count in file.Scan<Reading>()
+            .GroupBy(r => r.Day)
+            .OrderByDescending(g => g.Key)
+            .Take(7)
+            .Select(g => g.Count()))
+        {
+            run.Answer();
+            rows += count;
+        }
+
+        return rows;
     }
 
     internal static long Sum(ReadOnlySpan<long> values)

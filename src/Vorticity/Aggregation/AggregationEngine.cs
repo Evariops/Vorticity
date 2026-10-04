@@ -374,9 +374,17 @@ internal sealed class AggregationPartition
 
     /// <summary>
     /// The group of the last row read whose key is not null, or -1: the group a key that streams
-    /// keeps open; on a composite key, the group of the streaming component's value.
+    /// keeps open; on a composite key, the group of the streaming component's value. Read
+    /// <see cref="Backward"/>, the group of the batch's first such row, its smallest key.
     /// </summary>
     internal int LastValueGroup { get; private set; } = -1;
+
+    /// <summary>
+    /// Whether the batches come last one first, each in file order, on a key sorted ascending: the
+    /// group a batch leaves open is then that of its first row, whose key the batches before it in
+    /// the file may still hold.
+    /// </summary>
+    internal bool Backward { get; init; }
 
     /// <summary>The value of the streaming component a group holds, as the number <see cref="LastValueGroup"/> is: the group itself on a key of one column.</summary>
     internal int ComponentOf(int group) => _componentKeys is null ? group : _componentOf[group];
@@ -600,6 +608,7 @@ internal sealed class AggregationPartition
         _componentOf.AsSpan(before, groups - before).Fill(-1);
         int nullComponent = components.NullNumber;
         int last = LastValueGroup;
+        int first = -1;
         RowCursor cursor = new RowCursor(selection, 0, rows);
         while (cursor.Next(out int row))
         {
@@ -610,20 +619,26 @@ internal sealed class AggregationPartition
                 _componentOf[group] = component;
             }
 
-            last = component != components.NullNumber ? component : last;
+            if (component != nullComponent)
+            {
+                last = component;
+                first = first < 0 ? component : first;
+            }
         }
 
-        return nullComponent == last ? LastValueGroup : last;
+        int open = Backward ? first : last;
+        return open < 0 || nullComponent == open ? LastValueGroup : open;
     }
 
-    /// <summary>The group of the batch's last selected row whose key is not null; <paramref name="previous"/> when every one is null.</summary>
+    /// <summary>The group of the batch's last selected row whose key is not null, its first when read <see cref="Backward"/>; <paramref name="previous"/> when every one is null.</summary>
     private int LastValue(bool ranged, int rows, ReadOnlySpan<ulong> selection, int previous)
     {
         int nullGroup = Keys!.NullNumber;
         if (ranged)
         {
-            for (int r = _ranges.Count - 1; r >= 0; r--)
+            for (int at = 0; at < _ranges.Count; at++)
             {
+                int r = Backward ? at : _ranges.Count - 1 - at;
                 if (_ranges.GroupAt(r) != nullGroup)
                 {
                     return _ranges.GroupAt(r);
@@ -633,8 +648,9 @@ internal sealed class AggregationPartition
             return previous;
         }
 
-        for (int row = rows - 1; row >= 0; row--)
+        for (int at = 0; at < rows; at++)
         {
+            int row = Backward ? at : rows - 1 - at;
             if ((selection.IsEmpty || ((selection[row >> 6] >> (row & 63)) & 1) != 0) && _rowGroups[row] != nullGroup)
             {
                 return _rowGroups[row];

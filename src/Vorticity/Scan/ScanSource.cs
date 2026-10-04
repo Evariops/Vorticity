@@ -30,6 +30,13 @@ internal sealed record ScanSpec
 
     internal bool Descending { get; init; }
 
+    /// <summary>
+    /// Whether the splits come last one first, each still in file order, on one lane: a stream on a
+    /// sorted column read from its greatest values down, which needs the order of the splits and
+    /// not that of the rows inside one.
+    /// </summary>
+    internal bool Backward { get; init; }
+
     internal ScanOptions Options { get; init; } = ScanOptions.Default;
 
     /// <summary>Whether the decoders may deliver dictionary and run-end columns in their encoded form, for a consumer that reads it.</summary>
@@ -295,6 +302,10 @@ internal sealed class FileScanSource : ScanSource
         if (spec.OrderPath is { } order)
         {
             builder.InKeyOrder(order, spec.Descending);
+        }
+        else if (spec.Backward)
+        {
+            builder.InReverse();
         }
 
         ScanOptions options = spec.Options;
