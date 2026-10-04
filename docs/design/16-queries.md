@@ -18,7 +18,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > |---|---|---|
 > | 0 | the measures: time to first batch, peak memory, allocations, a group-by matrix, and their baselines | §13 |
 > | 1 ✅ | `Select` on a grouped scan, its overloads by arity kept until stage 2, named keys, `Average` and `AverageAsync`, `OrderByDescending` on a scan, aggregates deduplicated by structure, the naming rule | §1, §4, §5.5 |
-> | 2 | results as batches: a query's result is a stream of batches, `As<TRecord>` a `Scan<TRecord>` over it; one value comes as itself, several into a record, and the overloads by arity go; `Select`, `Distinct` and `Take` on a scan; the writer takes a scan | §2.1, §6.1, §7, §8 |
+> | 2 (2a ✅, 2b ✅) | results as batches: a query's result is a stream of batches, `As<TRecord>` a `Scan<TRecord>` over it; one value comes as itself, several into a record, and the overloads by arity go; `Select`, `Distinct` and `Take` on a scan; the writer takes a scan | §2.1, §6.1, §7, §8 |
 > | 3 | after the group by: `Where`, `OrderBy`, `ThenBy`, `Skip`, `Take`, the top-k; the group by and the `Distinct` that stream; groups in the order asked for | §2.2–§2.4, §6 |
 > | 4 | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
@@ -389,6 +389,12 @@ public static class WelfordAggregates
 
 A range of rows of one group costs the aggregator its rows, not its batch's: a range of fewer rows
 than its batch has words of selection is folded row by row (§9.1).
+
+A state is a result like any other, so its type is one a column holds: a number, a decimal, text, a
+date or a time, a uuid, a bool, or a `[VortexRecord]`, which a result holds as a struct column of
+its members and which a record of the selection declares as a member of that type. `Select` refuses
+a state of another type with `VortexSchemaException`; `AggregateAsync`, one answer of a whole
+scan, delivers any state as it is.
 
 ### 5.5 One aggregate, wherever it is written
 
