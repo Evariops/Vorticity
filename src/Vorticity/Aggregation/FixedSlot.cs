@@ -100,40 +100,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
             {
                 int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
                 ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
-                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
-                if (end - start < dictionary.Length)
-                {
-                    // Fewer rows than distinct values: counting per code would cost more than it saves.
-                    RowCursor few = new RowCursor(rows, start, end);
-                    while (few.Next(out int row))
-                    {
-                        int code = (int)codes[row];
-                        if (StorageValues.IsValid(valid, code))
-                        {
-                            TOp.Add(ref state, dictionary[code]);
-                        }
-                    }
-
-                    return;
-                }
-
-                Scratch.Grow(ref _counts, dictionary.Length);
-                Span<int> counts = _counts.AsSpan(0, dictionary.Length);
-                counts.Clear();
-                RowCursor all = new RowCursor(rows, start, end);
-                while (all.Next(out int row))
-                {
-                    counts[(int)codes[row]]++;
-                }
-
-                for (int code = 0; code < counts.Length; code++)
-                {
-                    if (counts[code] > 0 && StorageValues.IsValid(valid, code))
-                    {
-                        TOp.AddWeighted(ref state, dictionary[code], counts[code]);
-                    }
-                }
-
+                FoldCodes(ref state, codes, dictionary, valid, _rows.And(input, input.Selection, ArenaWords.Validity(arena, node)), start, end);
                 return;
             }
 
@@ -142,6 +109,47 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                 ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
                 Accumulate(ref state, values, _rows.And(input, input.Selection, valid), start, end);
                 return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Folds the rows of [start, end) the mask holds, of a dictionary block: a value a row when the
+    /// range has fewer rows than the dictionary has values, a weighted value per code met otherwise.
+    /// </summary>
+    private void FoldCodes(
+        ref TState state, ReadOnlySpan<uint> codes, ReadOnlySpan<TValue> dictionary, ReadOnlySpan<ulong> valid, ReadOnlySpan<ulong> rows, int start, int end)
+    {
+        if (end - start < dictionary.Length)
+        {
+            // Fewer rows than distinct values: counting per code would cost more than it saves.
+            RowCursor few = new RowCursor(rows, start, end);
+            while (few.Next(out int row))
+            {
+                int code = (int)codes[row];
+                if (StorageValues.IsValid(valid, code))
+                {
+                    TOp.Add(ref state, dictionary[code]);
+                }
+            }
+
+            return;
+        }
+
+        Scratch.Grow(ref _counts, dictionary.Length);
+        Span<int> counts = _counts.AsSpan(0, dictionary.Length);
+        counts.Clear();
+        RowCursor all = new RowCursor(rows, start, end);
+        while (all.Next(out int row))
+        {
+            counts[(int)codes[row]]++;
+        }
+
+        for (int code = 0; code < counts.Length; code++)
+        {
+            if (counts[code] > 0 && StorageValues.IsValid(valid, code))
+            {
+                TOp.AddWeighted(ref state, dictionary[code], counts[code]);
             }
         }
     }
@@ -189,6 +197,107 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
                 while (rows.Next(out int row))
                 {
                     TOp.Add(ref states[groups[row]], values[row]);
+                }
+
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// A run-end or a constant column folds a range as a weighted value per run it overlaps, where
+    /// its rows would expand the column first: ranges however short. A dictionary or a canonical
+    /// one costs a value per row either way, and a range of a few rows its setup on top.
+    /// </summary>
+    internal override bool FoldsRanges(in BatchInput input) =>
+        FixedReader.EncodingOf(input.Arena, input.Node, _kind) is ColumnEncoding.RunEnd or ColumnEncoding.Constant;
+
+    internal override void StepRanges(in BatchInput input, GroupRanges ranges)
+    {
+        TState[] states = _states;
+        CanonicalArena arena = input.Arena;
+        int node = input.Node;
+        ReadOnlySpan<int> starts = ranges.Starts;
+        ReadOnlySpan<int> ends = ranges.Ends;
+        ReadOnlySpan<int> groups = ranges.Groups;
+        switch (FixedReader.EncodingOf(arena, node, _kind))
+        {
+            case ColumnEncoding.Constant:
+            {
+                TValue value = FixedReader.Constant<TValue>(arena, node, _kind);
+                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
+                for (int r = 0; r < starts.Length; r++)
+                {
+                    int count = RowMasks.Count(rows, starts[r], ends[r]);
+                    if (count > 0)
+                    {
+                        TOp.AddWeighted(ref states[groups[r]], value, count);
+                    }
+                }
+
+                return;
+            }
+
+            case ColumnEncoding.RunEnd:
+            {
+                // The value's runs and the key's ranges both ascend: walked together, each range
+                // folds the runs it overlaps, a weighted value each.
+                int runs = EncodedForms.RunEnd(arena, node, out ReadOnlySpan<uint> runEnds);
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, runs, _kind, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
+                int run = 0;
+                int runStart = 0;
+                for (int r = 0; r < starts.Length; r++)
+                {
+                    int start = starts[r];
+                    int end = ends[r];
+                    while (run < runEnds.Length && (int)runEnds[run] <= start)
+                    {
+                        runStart = (int)runEnds[run++];
+                    }
+
+                    ref TState state = ref states[groups[r]];
+                    int at = run;
+                    int atStart = runStart;
+                    for (; at < runEnds.Length && atStart < end; at++)
+                    {
+                        int atEnd = Math.Min((int)runEnds[at], input.Rows);
+                        if (StorageValues.IsValid(valid, at))
+                        {
+                            int count = RowMasks.Count(rows, Math.Max(atStart, start), Math.Min(atEnd, end));
+                            if (count > 0)
+                            {
+                                TOp.AddWeighted(ref state, values[at], count);
+                            }
+                        }
+
+                        atStart = atEnd;
+                    }
+                }
+
+                return;
+            }
+
+            case ColumnEncoding.Dictionary:
+            {
+                int entries = EncodedForms.Dictionary(arena, node, out ReadOnlySpan<uint> codes);
+                ReadOnlySpan<TValue> dictionary = _values.Of(arena, input.Batch, entries, _kind, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
+                for (int r = 0; r < starts.Length; r++)
+                {
+                    FoldCodes(ref states[groups[r]], codes, dictionary, valid, rows, starts[r], ends[r]);
+                }
+
+                return;
+            }
+
+            default:
+            {
+                ReadOnlySpan<TValue> values = _values.Of(arena, input.Batch, node, _kind, out ReadOnlySpan<ulong> valid);
+                ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, valid);
+                for (int r = 0; r < starts.Length; r++)
+                {
+                    Accumulate(ref states[groups[r]], values, rows, starts[r], ends[r]);
                 }
 
                 return;

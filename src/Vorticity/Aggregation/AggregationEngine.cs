@@ -498,19 +498,6 @@ internal sealed class AggregationPartition
             Slots[i].EnsureGroups(groups);
         }
 
-        if (ranged && (long)_ranges.Count * ShortRange > batch.SelectedRows)
-        {
-            // Ranges this short cost more to dispatch, one call per aggregate and per range, than
-            // to fold row by row: a key in runs of seven rows is a per-row key, and folds as one.
-            Span<int> rowGroups = _rowGroups.AsSpan(0, rows);
-            for (int r = 0; r < _ranges.Count; r++)
-            {
-                rowGroups[_ranges.StartAt(r).._ranges.EndAt(r)].Fill(_ranges.GroupAt(r));
-            }
-
-            ranged = false;
-        }
-
         if (!ranged)
         {
             ReadOnlySpan<int> rowGroups = _rowGroups.AsSpan(0, rows);
@@ -525,6 +512,10 @@ internal sealed class AggregationPartition
             return;
         }
 
+        // An aggregate folds a batch's ranges in one call. Ranges this short, a key in runs of
+        // seven rows, are folded row by row by an aggregate a range costs more than its rows.
+        bool shortRanges = (long)_ranges.Count * ShortRange > batch.SelectedRows;
+        bool filled = false;
         for (int i = 0; i < Slots.Length; i++)
         {
             if (!Folds(i))
@@ -534,10 +525,24 @@ internal sealed class AggregationPartition
 
             AggregateSlot slot = Slots[i];
             BatchInput input = Input(number, arena, i, rows, selection);
-            for (int r = 0; r < _ranges.Count; r++)
+            if (!shortRanges || slot.FoldsRanges(input))
             {
-                slot.StepRange(input, _ranges.StartAt(r), _ranges.EndAt(r), _ranges.GroupAt(r));
+                slot.StepRanges(input, _ranges);
+                continue;
             }
+
+            if (!filled)
+            {
+                Span<int> fill = _rowGroups.AsSpan(0, rows);
+                for (int r = 0; r < _ranges.Count; r++)
+                {
+                    fill[_ranges.StartAt(r).._ranges.EndAt(r)].Fill(_ranges.GroupAt(r));
+                }
+
+                filled = true;
+            }
+
+            slot.StepRows(input, _rowGroups.AsSpan(0, rows));
         }
     }
 

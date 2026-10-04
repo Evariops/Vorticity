@@ -50,6 +50,22 @@ internal abstract class AggregateSlot
     /// <summary>Folds each selected row into the group <paramref name="groups"/> gives it.</summary>
     internal abstract void StepRows(in BatchInput input, ReadOnlySpan<int> groups);
 
+    /// <summary>
+    /// Whether <see cref="StepRanges"/> folds ranges of a few rows of <paramref name="input"/> for
+    /// less than a group per row: in one call, its column's form read once, and in less work per
+    /// range than its rows would cost. Otherwise ranges that short are folded row by row.
+    /// </summary>
+    internal virtual bool FoldsRanges(in BatchInput input) => false;
+
+    /// <summary>Folds the selected rows of each range into its group, the ranges ascending.</summary>
+    internal virtual void StepRanges(in BatchInput input, GroupRanges ranges)
+    {
+        for (int r = 0; r < ranges.Count; r++)
+        {
+            StepRange(input, ranges.StartAt(r), ranges.EndAt(r), ranges.GroupAt(r));
+        }
+    }
+
     /// <summary>Merges the same aggregate of another partition, whose group <c>g</c> is this one's <c>map[g]</c>.</summary>
     internal abstract void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map);
 
@@ -167,6 +183,32 @@ internal sealed class CountSlot : AggregateSlot<long>
         while (rows.Next(out int row))
         {
             counts[groups[row]]++;
+        }
+    }
+
+    /// <summary>A range's count is its length, or its selected rows: a word or two whatever its rows.</summary>
+    internal override bool FoldsRanges(in BatchInput input) => true;
+
+    internal override void StepRanges(in BatchInput input, GroupRanges ranges)
+    {
+        long[] counts = _counts;
+        ReadOnlySpan<int> starts = ranges.Starts;
+        ReadOnlySpan<int> ends = ranges.Ends;
+        ReadOnlySpan<int> groups = ranges.Groups;
+        ReadOnlySpan<ulong> selection = input.Selection;
+        if (selection.IsEmpty)
+        {
+            for (int r = 0; r < starts.Length; r++)
+            {
+                counts[groups[r]] += ends[r] - starts[r];
+            }
+
+            return;
+        }
+
+        for (int r = 0; r < starts.Length; r++)
+        {
+            counts[groups[r]] += RowMasks.Count(selection, starts[r], ends[r]);
         }
     }
 

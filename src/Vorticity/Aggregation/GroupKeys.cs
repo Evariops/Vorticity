@@ -17,6 +17,15 @@ internal sealed class GroupRanges
 
     internal int Count { get; private set; }
 
+    /// <summary>The ranges' first rows, ascending: a range starts where the one before it ends, or past it.</summary>
+    internal ReadOnlySpan<int> Starts => _starts.AsSpan(0, Count);
+
+    /// <summary>The rows past the ranges.</summary>
+    internal ReadOnlySpan<int> Ends => _ends.AsSpan(0, Count);
+
+    /// <summary>The ranges' groups.</summary>
+    internal ReadOnlySpan<int> Groups => _groups.AsSpan(0, Count);
+
     internal int StartAt(int index) => _starts[index];
 
     internal int EndAt(int index) => _ends[index];
