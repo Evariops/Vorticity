@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -409,57 +410,112 @@ internal static class GroupSelection
     private static long Saturated(long skip, long take) => take == long.MaxValue || skip > long.MaxValue - take ? long.MaxValue : skip + take;
 
     /// <summary>
-    /// The groups in the order's order, the first <paramref name="keep"/> at most: the columns of the
-    /// results it reads, and of the key, which breaks every tie, built for every group at once.
+    /// The groups in the order's order, the first <paramref name="keep"/> at most. The results it
+    /// reads are read into arrays of the pool when they are numbers, built into columns otherwise;
+    /// the key, which breaks every tie, is read from the groups' index where it orders the keys as
+    /// their column would, built otherwise.
     /// </summary>
+    /// <remarks>
+    /// A top-k ranks on the order's own columns first: what they put before the k-th group needs no
+    /// tie-break, and the groups tied with it are ranked by the key alone. On a high-cardinality
+    /// text key whose groups share their count, that is every comparison, which would otherwise
+    /// copy a million keys to keep a hundred.
+    /// </remarks>
     internal static (int[] Groups, int Count) Order(
         AggregationQuery query, AggregationOutcome outcome, GroupOrder order, int[] groups, int count, long keep, CancellationToken cancellationToken)
     {
         ColumnShape[] keys = query.Keys;
+        GroupKeys? index = outcome.Keys;
         int width = order.Keys.Length + keys.Length;
-        ResultColumn[] columns = new ResultColumn[width];
-        VortexField[] fields = new VortexField[width];
-        for (int i = 0; i < order.Keys.Length; i++)
-        {
-            columns[i] = order.Keys[i].Field.Column(keys);
-        }
-
-        for (int k = 0; k < keys.Length; k++)
-        {
-            columns[order.Keys.Length + k] = new KeyResultColumn($"$tie{k}", keys[k].Type, k);
-        }
-
-        for (int i = 0; i < width; i++)
-        {
-            fields[i] = new VortexField($"${i}", columns[i].Type);
-        }
-
-        VortexSessionOptions options = query.Session.Options;
-        StructStore store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
-        CanonicalArena arena = new CanonicalArena(64, options.EnginePool);
+        ReadOnlySpan<int> all = groups.AsSpan(0, count);
+        ColumnOrder?[] ready = new ColumnOrder?[width];
+        int[] positions = ArrayPool<int>.Shared.Rent(count);
+        StructStore? store = null;
+        CanonicalArena? arena = null;
         try
         {
-            ReadOnlySpan<int> all = groups.AsSpan(0, count);
-            for (int c = 0; c < width; c++)
+            // Each column of the chain: ordered already, read into the pool or from the index, or
+            // built, at its place in the store.
+            List<ResultColumn> built = [];
+            int[] place = new int[width];
+            for (int i = 0; i < order.Keys.Length; i++)
             {
-                columns[c].Append(outcome, store.Children[c], all);
+                ResultColumn column = order.Keys[i].Field.Column(keys);
+                ready[i] = column.OrderOf(outcome, all, order.Keys[i].Descending);
+                if (ready[i] is null)
+                {
+                    place[i] = built.Count;
+                    built.Add(column);
+                }
             }
 
-            int root = store.Build(arena, count);
-            CanonicalNode structure = arena.GetNode(root);
+            bool indexed = index is not null;
+            for (int k = 0; k < keys.Length; k++)
+            {
+                if (index is not null && index.Orders(k))
+                {
+                    ready[order.Keys.Length + k] = ColumnOrder.ForKeys(index, groups, k);
+                    continue;
+                }
+
+                indexed = false;
+                place[order.Keys.Length + k] = built.Count;
+                built.Add(new KeyResultColumn($"$tie{k}", keys[k].Type, k));
+            }
+
+            CanonicalNode structure = default;
+            if (built.Count > 0)
+            {
+                VortexField[] fields = new VortexField[built.Count];
+                for (int i = 0; i < fields.Length; i++)
+                {
+                    fields[i] = new VortexField($"${i}", built[i].Type);
+                }
+
+                VortexSessionOptions options = query.Session.Options;
+                store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
+                arena = new CanonicalArena(64, options.EnginePool);
+                for (int c = 0; c < built.Count; c++)
+                {
+                    built[c].Append(outcome, store.Children[c], all);
+                }
+
+                structure = arena.GetNode(store.Build(arena, count));
+            }
+
             ColumnOrder[] orders = new ColumnOrder[width];
             for (int c = 0; c < width; c++)
             {
-                orders[c] = ColumnOrder.For(arena, structure.GetFieldIndex(c), columns[c].Type, c < order.Keys.Length && order.Keys[c].Descending);
+                orders[c] = ready[c]
+                    ?? ColumnOrder.For(arena!, structure.GetFieldIndex(place[c]), built[place[c]].Type, c < order.Keys.Length && order.Keys[c].Descending);
             }
 
-            int[] positions = new int[count];
             for (int i = 0; i < count; i++)
             {
                 positions[i] = i;
             }
 
-            int kept = GroupSort.Sort(positions, count, new ChainOrder(orders), keep, cancellationToken);
+            int kept;
+            if (keep < count && order.Keys.Length > 0)
+            {
+                // The groups the order's columns put before the k-th, ranked by the whole chain;
+                // then, of those tied with it, the first by the key alone.
+                // An order of one column ranks in a loop typed on its values when it holds them.
+                (int before, int tied) = order.Keys.Length == 1
+                    ? orders[0].TopTied(positions, count, (int)keep, cancellationToken)
+                    : GroupSort.TopTied(positions, count, new ChainOrder(orders[..order.Keys.Length]), (int)keep, cancellationToken);
+                positions.AsSpan(0, before).Sort(new ChainOrder(orders));
+                Span<int> ties = positions.AsSpan(before, tied);
+                int need = (int)keep - before;
+                kept = before + (indexed
+                    ? GroupSort.TopK(ties, new IndexOrder(index!, groups, keys.Length), need, cancellationToken)
+                    : GroupSort.TopK(ties, new ChainOrder(orders[order.Keys.Length..]), need, cancellationToken));
+            }
+            else
+            {
+                kept = GroupSort.Sort(positions, count, new ChainOrder(orders), keep, cancellationToken);
+            }
+
             int[] ordered = new int[kept];
             for (int i = 0; i < kept; i++)
             {
@@ -470,8 +526,15 @@ internal static class GroupSelection
         }
         finally
         {
-            store.Release();
-            arena.Reset();
+            // What the chain read into the pool goes back; the orders over the store hold none of it.
+            foreach (ColumnOrder? read in ready)
+            {
+                read?.Release();
+            }
+
+            ArrayPool<int>.Shared.Return(positions);
+            store?.Release();
+            arena?.Reset();
         }
     }
 

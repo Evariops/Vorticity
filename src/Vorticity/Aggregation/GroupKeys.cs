@@ -99,6 +99,19 @@ internal abstract class GroupKeys
     /// <summary>The group of the null key, or -1 when there is none: of a key of one column.</summary>
     internal virtual int NullNumber => -1;
 
+    /// <summary>
+    /// Whether <see cref="CompareKeys"/> orders the groups by component <paramref name="component"/>
+    /// of their keys as the column of those keys would, so that an order breaks its ties without the
+    /// keys built: an integer's, a decimal's, a text's, a boolean's; not a float's, whose NaN and
+    /// zeros the column orders apart from their values' comparison, nor a composite's parts.
+    /// </summary>
+    internal virtual bool Orders(int component) => false;
+
+    /// <summary>Two groups by component <paramref name="component"/> of their keys, ascending, the null group last.</summary>
+    /// <exception cref="NotSupportedException">The keys are not ordered here (<see cref="Orders"/>).</exception>
+    internal virtual int CompareKeys(int a, int b, int component) =>
+        throw new NotSupportedException("These keys are ordered by the column of their values.");
+
     /// <summary>Forgets the groups the codes of the last dictionary were given: they were numbered again.</summary>
     private protected void Renumbered() => _codeOrigin = default;
 
@@ -283,6 +296,21 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted);
 
     internal override int NullNumber => _null;
+
+    /// <summary>A float orders its NaN last and its zeros together, which its comparison does not.</summary>
+    private static readonly bool Floats = typeof(TValue) == typeof(double) || typeof(TValue) == typeof(float) || typeof(TValue) == typeof(Half);
+
+    internal override bool Orders(int component) => !Floats;
+
+    internal override int CompareKeys(int a, int b, int component)
+    {
+        if (a == _null || b == _null)
+        {
+            return a == b ? 0 : a == _null ? 1 : -1;
+        }
+
+        return _keys[a].CompareTo(_keys[b]);
+    }
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
@@ -595,6 +623,10 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override int NullNumber => _null;
 
+    internal override bool Orders(int component) => true;
+
+    internal override int CompareKeys(int a, int b, int component) => Compare(a, b);
+
     internal override void Keep(ReadOnlySpan<int> groups)
     {
         // The entries of the kept keys, which ascend with their groups, the null group having none:
@@ -771,6 +803,11 @@ internal sealed class BoolKeys : GroupKeys
     internal override GroupKeys Fresh() => new BoolKeys(_shape);
 
     internal override int NullNumber => _groups[2];
+
+    internal override bool Orders(int component) => true;
+
+    /// <summary>False, true, then null: the order of their codes.</summary>
+    internal override int CompareKeys(int a, int b, int component) => _keyOf[a].CompareTo(_keyOf[b]);
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {

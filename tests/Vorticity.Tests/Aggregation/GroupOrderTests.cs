@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 using Xunit;
 
 namespace Vorticity.Tests.Aggregation;
@@ -20,6 +21,12 @@ public sealed partial class GroupOrderTests
     private static readonly string[] Cities = ["Arles", "Brest", "Caen", "Dax", "Évry", "Foix", "Gap", "Hyères", "Ivry"];
 
     private static readonly double?[] Readings = [double.NaN, -0.0, 0.0, double.PositiveInfinity, double.NegativeInfinity, null, 1.5, -2.5];
+
+    /// <summary>Floats as a column orders them: NaN after +∞, the null last.</summary>
+    private static readonly Comparer<double?> Floats = Comparer<double?>.Create((a, b) =>
+        a is null || b is null ? (a is null).CompareTo(b is null)
+        : double.IsNaN(a.Value) || double.IsNaN(b.Value) ? double.IsNaN(a.Value).CompareTo(double.IsNaN(b.Value))
+        : a.Value.CompareTo(b.Value));
 
     [Fact]
     public async Task GroupsComeInTheOrderOfAnAggregateThenOfTheirKey()
@@ -86,6 +93,18 @@ public sealed partial class GroupOrderTests
             Assert.Equal(
                 rows.Where(r => r.City != "Ivry").GroupBy(r => r.City).OrderBy(g => g.Average(r => r.Score)).Select(g => g.Key),
                 byMeanUp.SkipLast(1));
+
+            // An aggregate's floats, thousands of groups to each: the zeros as one, the nulls last in
+            // both directions (a maximum skips NaN: of NaNs alone, it is null), ties by key; top-ks
+            // that end inside a run of them.
+            Comparer<double?> downward = Comparer<double?>.Create((a, b) => a is null || b is null ? Floats.Compare(a, b) : Floats.Compare(b, a));
+            List<long> up = [.. rows.GroupBy(r => r.Id).OrderBy(g => Max(g), Floats).ThenBy(g => g.Key).Select(g => g.Key)];
+            List<long> down = [.. rows.GroupBy(r => r.Id).OrderBy(g => Max(g), downward).ThenBy(g => g.Key).Select(g => g.Key)];
+            foreach (int take in (int[])[100, 40_000, 80_000, 90_000])
+            {
+                Assert.Equal(up.Take(take), await file.Scan<Visit>().GroupBy(r => r.Id).OrderBy(g => g.Max(r => r.Reading)).Take(take).Select(g => g.Key).ToListAsync(Ct));
+                Assert.Equal(down.Take(take), await file.Scan<Visit>().GroupBy(r => r.Id).OrderByDescending(g => g.Max(r => r.Reading)).Take(take).Select(g => g.Key).ToListAsync(Ct));
+            }
         }
         finally
         {
@@ -118,6 +137,69 @@ public sealed partial class GroupOrderTests
         {
             System.IO.File.Delete(path);
         }
+    }
+
+    [Fact]
+    public async Task ATopKKeepsWhatTheFullSortPutsFirstTiesIncluded()
+    {
+        Draw[] rows = Draws();
+        string path = await WriteAsync(rows);
+        try
+        {
+            // Four counts shared by thousands of groups each: the k-th group ties with thousands of
+            // others, which the key alone ranks, read from the index (text, integers) or built (a
+            // float's, whose NaN and null the column orders).
+            List<string> byName = [.. rows.GroupBy(r => r.Name).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.Ordinal).Select(g => g.Key)];
+            List<long> byId = [.. rows.GroupBy(r => r.Id).OrderBy(g => g.Count()).ThenBy(g => g.Key).Select(g => g.Key)];
+            List<double?> byScore = [.. rows.GroupBy(r => r.Score).OrderByDescending(g => g.Count()).ThenBy(g => g.Key, Floats).Select(g => g.Key)];
+            List<string> byMean = [.. rows.GroupBy(r => r.Name).OrderByDescending(g => g.Average(r => r.Value)).ThenBy(g => g.Key, StringComparer.Ordinal).Select(g => g.Key)];
+            List<string> byCountThenMean = [.. rows.GroupBy(r => r.Name)
+                .OrderByDescending(g => g.Count()).ThenBy(g => g.Average(r => r.Value), Floats).ThenBy(g => g.Key, StringComparer.Ordinal).Select(g => g.Key)];
+            int boundary = rows.GroupBy(r => r.Name).Count(g => g.Count() == 4);
+            foreach (int degree in (int[])[1, 4])
+            {
+                await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+                await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+                Assert.Equal(byName.Take(100), await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Take(100).Select(g => g.Key).ToListAsync(Ct));
+
+                // Across two counts: those of the first sorted whole, the ties of the second ranked by key.
+                Assert.Equal(
+                    byName.Skip(boundary - 10).Take(20),
+                    await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Select(g => g.Key).Skip(boundary - 10).Take(20).ToListAsync(Ct));
+                Assert.Equal(byId.Take(100), await file.Scan<Draw>().GroupBy(r => r.Id).OrderBy(g => g.Count()).Take(100).Select(g => g.Key).ToListAsync(Ct));
+                Assert.Equal(byScore.Take(50), await file.Scan<Draw>().GroupBy(r => r.Score).OrderByDescending(g => g.Count()).Take(50).Select(g => g.Key).ToListAsync(Ct));
+
+                // A mean many groups share, null for some: the nulls last.
+                Assert.Equal(byMean.Take(100), await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Average(r => r.Value)).Take(100).Select(g => g.Key).ToListAsync(Ct));
+                Assert.Equal(byMean.TakeLast(30), await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Average(r => r.Value)).Select(g => g.Key).Skip(byMean.Count - 30).ToListAsync(Ct));
+                Assert.Equal(
+                    byCountThenMean.Take(100),
+                    await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).ThenBy(g => g.Average(r => r.Value)).Take(100).Select(g => g.Key).ToListAsync(Ct));
+
+                // More than the groups: the full sort.
+                Assert.Equal(byId, await file.Scan<Draw>().GroupBy(r => r.Id).OrderBy(g => g.Count()).Take(rows.Length).Select(g => g.Key).ToListAsync(Ct));
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void AnAggregatesNumbersRankAsTheirColumnInBothDirections()
+    {
+        // Read into the pool for an order, integers and floats rank as keys of 64 bits: the
+        // direction folded in, the extremes kept apart, a float's zeros as one and NaN after +∞,
+        // a null last whichever the direction.
+        Comparer<long?> integers = Comparer<long?>.Create((a, b) => a is null || b is null ? (a is null).CompareTo(b is null) : a.Value.CompareTo(b.Value));
+        RanksAs<long>([5, -3, long.MaxValue, long.MinValue, 0, 5, -1, long.MaxValue - 1], Comparer<long>.Default);
+        RanksAs<long?>([5, null, long.MaxValue, long.MinValue, 0, null, 5], integers);
+        RanksAs<long?>([5, -3, long.MaxValue, long.MinValue, 0, 5], integers);
+        double?[] floats =
+            [double.NaN, -0.0, 0.0, double.PositiveInfinity, double.NegativeInfinity, null, 1.5, -2.5, double.MaxValue, double.MinValue, double.Epsilon, -double.Epsilon, null, double.NaN, 1.5];
+        RanksAs(floats, Floats);
+        RanksAs([.. floats.OfType<double>()], Comparer<double>.Create((a, b) => Floats.Compare(a, b)));
     }
 
     [Fact]
@@ -164,6 +246,86 @@ public sealed partial class GroupOrderTests
     /// <summary>A zero whatever its sign, which an order holds equal.</summary>
     private static double? Zero(double? value) => value == 0 ? 0.0 : value;
 
+    /// <summary>
+    /// Positions ranked by the order of <paramref name="values"/> read into the pool, as
+    /// <paramref name="ascending"/> ranks them, and reversed with the nulls still last; and a top-k
+    /// of each size split, as a full sort would, between what comes before its last and what ties
+    /// with it.
+    /// </summary>
+    private static void RanksAs<T>(T[] values, Comparer<T> ascending)
+    {
+        foreach (bool descending in (bool[])[false, true])
+        {
+            Comparer<T> expected = descending ? Comparer<T>.Create((a, b) => a is null || b is null ? ascending.Compare(a, b) : ascending.Compare(b, a)) : ascending;
+            int[] ranked = [.. Enumerable.Range(0, values.Length).OrderBy(i => values[i], expected)];
+            long[] keys = ValuesOrder.Rent<T>(values.Length);
+            values.CopyTo(ValuesOrder.Values<T>(keys, values.Length));
+            ColumnOrder order = ValuesOrder.Over<T>(keys, values.Length, descending);
+            try
+            {
+                int[] sorted = [.. Enumerable.Range(0, values.Length)];
+                Array.Sort(sorted, (a, b) => order.Compare(a, b) is int c && c != 0 ? c : a.CompareTo(b));
+                Assert.Equal(ranked, sorted);
+                for (int keep = 1; keep < values.Length; keep++)
+                {
+                    int[] positions = [.. Enumerable.Range(0, values.Length)];
+                    (int before, int tied) = order.TopTied(positions, values.Length, keep, Ct);
+                    T last = values[ranked[keep - 1]];
+                    Assert.Equal(values.Count(v => expected.Compare(v, last) < 0), before);
+                    Assert.Equal(values.Count(v => expected.Compare(v, last) == 0), tied);
+                    Assert.All(positions[..before], p => Assert.True(expected.Compare(values[p], last) < 0));
+                    Assert.All(positions[before..(before + tied)], p => Assert.Equal(0, expected.Compare(values[p], last)));
+                }
+            }
+            finally
+            {
+                order.Release();
+            }
+        }
+    }
+
+    /// <summary>The maximum of a group's readings as the aggregate takes it: NaN skipped, null when nothing is left.</summary>
+    private static double? Max(IEnumerable<Visit> group) =>
+        group.Where(r => r.Reading is double value && !double.IsNaN(value)).Max(r => r.Reading);
+
+    /// <summary>
+    /// 40 000 names seen one to four times each, scattered: a count each shares with thousands. A
+    /// score per name, NaN or null for some, which 8 names share; a value whose mean many share,
+    /// null for a seventh of the names.
+    /// </summary>
+    private static Draw[] Draws()
+    {
+        List<Draw> rows = [];
+        for (int n = 0; n < 40_000; n++)
+        {
+            int repeats = 1 + (int)((uint)(n * 2_654_435_761u) >> 30);
+            int bucket = n % 5_000;
+            double? score = bucket == 7 ? double.NaN : bucket == 11 ? null : bucket * 0.5;
+            for (int r = 0; r < repeats; r++)
+            {
+                rows.Add(new Draw($"name-{(n * 7_919) % 40_000:x5}-{n}", n, score, n % 7 == 0 ? null : (n % 13) + (r % 2)));
+            }
+        }
+
+        Draw[] draws = [.. rows];
+        new Random(42).Shuffle(draws);
+        return draws;
+    }
+
+    private static async Task<string> WriteAsync(Draw[] rows)
+    {
+        string directory = Path.Combine(AppContext.BaseDirectory, "group-orders");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"draws-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Draw>(path))
+        {
+            await writer.WriteAsync<Draw>(rows, Ct);
+            await writer.CompleteAsync(Ct);
+        }
+
+        return path;
+    }
+
     private static async Task<List<T>> ListAsync<T>(Scan<T> scan)
         where T : IVortexRecord<T>
     {
@@ -207,4 +369,7 @@ public sealed partial class GroupOrderTests
 
     [VortexRecord]
     public partial record struct CityReading(string City, double? Reading);
+
+    [VortexRecord]
+    public partial record struct Draw(string Name, long Id, double? Score, int? Value);
 }

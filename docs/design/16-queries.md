@@ -473,9 +473,11 @@ surface delivered key order when the key was a dictionary or sorted; an order is
 
 As in LINQ: after an order, the groups past the first `Skip` ones, `Take` of them; without an order,
 some groups. Written before or after the `select`, the result is the same. Under an order the groups
-are ranked in a heap of `Skip + Take`: the others are compared and never delivered, a cost of
-`G log k` and a memory of `k` groups. Under no order, or an order a streaming group by already
-delivers, a `Take` stops the read once it is served (§2.4).
+are ranked in a heap of `Skip + Take` on the order's results alone: the others are compared and never
+delivered, a cost of `G log k` and a memory of `k` groups. The groups that tie with the last one kept
+are then ranked by their key, read from the groups' index where it orders as the key's column would:
+a top-k on a count that a million text keys share copies none of them. Under no order, or an order a
+streaming group by already delivers, a `Take` stops the read once it is served (§2.4).
 
 The operators apply in the order written, as in LINQ: a `Where` after a `Take` filters the groups
 taken.

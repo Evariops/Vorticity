@@ -25,6 +25,13 @@ internal abstract class ResultColumn
 
     /// <summary>Appends the values of <paramref name="groups"/>, in order, to <paramref name="store"/>, a store of <see cref="Type"/>.</summary>
     internal abstract void Append(AggregationOutcome outcome, ColumnStore store, ReadOnlySpan<int> groups);
+
+    /// <summary>
+    /// The order of the values of <paramref name="groups"/>, position <c>i</c> being group
+    /// <c>groups[i]</c>, read into an array of the pool rather than built into a column, when they are
+    /// numbers a column would order the same; null otherwise. Released, it gives the array back.
+    /// </summary>
+    internal virtual ColumnOrder? OrderOf(AggregationOutcome outcome, ReadOnlySpan<int> groups, bool descending) => null;
 }
 
 /// <summary>A component of the key, in a column of the key column's own type: its values written as the index holds them.</summary>
@@ -66,6 +73,31 @@ internal sealed class ValueResultColumn<T> : ResultColumn
 
     internal override void Append(AggregationOutcome outcome, ColumnStore store, ReadOnlySpan<int> groups)
     {
+        if (_values.Length < groups.Length)
+        {
+            _values = new T[Scratch.Capacity(groups.Length, _values.Length)];
+        }
+
+        Read(outcome, groups, _values.AsSpan(0, groups.Length));
+        ResultValues.Append(store, _values, groups.Length, _record);
+    }
+
+    internal override ColumnOrder? OrderOf(AggregationOutcome outcome, ReadOnlySpan<int> groups, bool descending)
+    {
+        if (_record is not null || !ValuesOrder.Orders<T>())
+        {
+            return null;
+        }
+
+        // Read straight into the array of their keys, which they become where they lie.
+        long[] keys = ValuesOrder.Rent<T>(groups.Length);
+        Read(outcome, groups, ValuesOrder.Values<T>(keys, groups.Length));
+        return ValuesOrder.Over<T>(keys, groups.Length, descending);
+    }
+
+    /// <summary>The values of <paramref name="groups"/>, from the aggregate's slot or through its reader.</summary>
+    private void Read(AggregationOutcome outcome, ReadOnlySpan<int> groups, Span<T> values)
+    {
         if (!ReferenceEquals(outcome, _outcome))
         {
             // Bound once per run, not per batch: the slot lookup and the reader are the same for every batch.
@@ -74,25 +106,16 @@ internal sealed class ValueResultColumn<T> : ResultColumn
             _read = _slot is null ? _node.Bind(outcome) : null;
         }
 
-        if (_values.Length < groups.Length)
-        {
-            _values = new T[Scratch.Capacity(groups.Length, _values.Length)];
-        }
-
-        Span<T> values = _values.AsSpan(0, groups.Length);
         if (_slot is not null)
         {
             _slot.Results(groups, values);
-        }
-        else
-        {
-            for (int i = 0; i < groups.Length; i++)
-            {
-                values[i] = _read!(groups[i]);
-            }
+            return;
         }
 
-        ResultValues.Append(store, _values, groups.Length, _record);
+        for (int i = 0; i < groups.Length; i++)
+        {
+            values[i] = _read!(groups[i]);
+        }
     }
 }
 

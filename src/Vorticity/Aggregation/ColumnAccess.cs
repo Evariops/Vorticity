@@ -373,6 +373,10 @@ internal readonly ref struct BytesBlock
         return new BytesBlock(arena, record.BufferA.Span, record.DataBufferStart, record.DataBufferCount, record.Length);
     }
 
+    /// <summary>A canonical block over its views and data buffers, resolved once by a caller that compares many of its values.</summary>
+    internal static BytesBlock Over(CanonicalArena arena, ReadOnlySpan<byte> views, int dataStart, int dataCount, int length) =>
+        new BytesBlock(arena, views, dataStart, dataCount, length);
+
     /// <summary>The one value of a constant node.</summary>
     internal static ReadOnlySpan<byte> Constant(CanonicalArena arena, int node)
     {
