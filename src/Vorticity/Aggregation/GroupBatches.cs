@@ -119,11 +119,12 @@ internal sealed class AggregationQuery : ResultQuery
 /// </summary>
 internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
 {
-    /// <summary>The groups of a batch, as many as the rows of a scan's batch.</summary>
+    /// <summary>The groups of a batch, as many as the rows of a scan's batch, unless the scan's options say otherwise.</summary>
     internal const int BatchRows = 65_536;
 
     private readonly AggregationQuery _query;
     private readonly CancellationToken _cancellationToken;
+    private readonly int _batchRows;
     private AggregationOutcome? _outcome;
     private int _next;
     private StructStore? _store;
@@ -135,6 +136,8 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     {
         _query = query;
         _cancellationToken = cancellationToken;
+        int asked = query.Host.Spec().Options.BatchRows;
+        _batchRows = asked > 0 ? asked : BatchRows;
     }
 
     /// <summary>The current batch, valid until the next <see cref="MoveNextAsync"/>.</summary>
@@ -182,7 +185,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _cancellationToken.ThrowIfCancellationRequested();
-        int count = Math.Min(BatchRows, order.Length - _next);
+        int count = Math.Min(_batchRows, order.Length - _next);
         ReadOnlySpan<int> groups = order.AsSpan(_next, count);
         StructStore store = Store();
         store.Truncate(0);

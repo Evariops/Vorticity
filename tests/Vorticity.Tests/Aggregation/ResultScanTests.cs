@@ -141,6 +141,9 @@ public sealed partial class ResultScanTests
             Assert.Equal(expected.Max(g => g.Count), await Daily(file).MaxAsync(g => g.Count, Ct));
             Assert.Equal(expected.Min(g => g.City), await Daily(file).MinAsync(g => g.City, Ct));
             Assert.Equal(expected.Sum(g => g.Count), await Daily(file).SumAsync(g => g.Count, Ct));
+            Assert.Equal(
+                new GroupsAndRows(expected.Length, expected.Sum(g => g.Count)),
+                await Daily(file).AggAsync<GroupsAndRows>(a => (a.Count(), a.Sum(x => x.Count)), Ct));
 
             // Rows by their position in the order the result is delivered.
             List<CityDayCount> all = await ListAsync(Daily(file));
@@ -266,6 +269,9 @@ public sealed partial class ResultScanTests
 
     [VortexRecord]
     public partial record struct CityNarrowCount(string City, int Count);
+
+    [VortexRecord]
+    public partial record struct GroupsAndRows(long Groups, long Rows);
 
     [VortexRecord]
     public partial record struct CityPlainMean(string City, double Mean);
