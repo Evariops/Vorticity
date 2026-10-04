@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Buffers;
 using Vorticity.File;
+using Vorticity.IO;
 using Vorticity.Layouts;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
@@ -73,6 +74,52 @@ internal static class WrittenAs
 
         using SegmentOwner whole = await file.Segments.ReadRangeAsync(end - 4 - length, length + 4, 1, cancellationToken).ConfigureAwait(false);
         return Of(whole.Buffer.Span, encodings, dtype);
+    }
+
+    /// <summary>
+    /// What each of <paramref name="chunks"/> holds, as <see cref="ReadAsync"/> reads one: the
+    /// trees no layout inlines are read from the tails of their segments in one request, which a
+    /// source may serve in parallel, rather than one request after the other.
+    /// </summary>
+    internal static async ValueTask<string[]> ReadManyAsync(
+        VortexFile file, IReadOnlyList<(LayoutNode Flat, DType DType)> chunks, IReadOnlyList<string> encodings,
+        CancellationToken cancellationToken)
+    {
+        string[] labels = new string[chunks.Count];
+        int[] slots = new int[chunks.Count];
+        using SegmentRequestSet requests = new SegmentRequestSet(Math.Max(chunks.Count, 1));
+        for (int i = 0; i < chunks.Count; i++)
+        {
+            (LayoutNode flat, DType dtype) = chunks[i];
+            Arrays.Metadata.FlatLayoutMetadata metadata = Arrays.Metadata.FlatLayoutMetadata.Read(flat.Metadata);
+            if (metadata.HasArrayEncodingTree)
+            {
+                labels[i] = OfTree(metadata.ArrayEncodingTree, encodings, dtype);
+                slots[i] = -1;
+                continue;
+            }
+
+            SegmentSpec spec = file.SegmentSpecs[checked((int)flat.Segments[0])];
+            long end = (long)spec.Offset + spec.Length;
+            uint window = (uint)Math.Min(spec.Length, 1024);
+            slots[i] = requests.Add(new SegmentSpec((ulong)(end - window), window, 0, 0, 0));
+        }
+
+        if (requests.Count > 0)
+        {
+            await file.Segments.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+        }
+
+        for (int i = 0; i < chunks.Count; i++)
+        {
+            if (slots[i] >= 0 && !Fits(requests.GetBuffer(slots[i]), out labels[i]!, encodings, chunks[i].DType))
+            {
+                // A tree longer than the window, read whole as one chunk's is.
+                labels[i] = await ReadAsync(file, chunks[i].Flat, chunks[i].DType, encodings, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        return labels;
     }
 
     /// <summary>The label of a segment's tail when the tail holds the whole tree.</summary>

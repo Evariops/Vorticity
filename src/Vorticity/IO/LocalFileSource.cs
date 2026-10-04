@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -171,6 +172,11 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
         }
 
         MappedFileOwner? mapping = Borrow();
+        if (mapping is null && Pending(requests) >= ParallelBatch)
+        {
+            return ReadManyInParallelAsync(requests, cancellationToken);
+        }
+
         try
         {
             if (mapping is null)
@@ -239,6 +245,99 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation
         Interlocked.Exchange(ref _mapping, null)?.Release();
         _handle?.Dispose();
         return ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// A batch of this many reads before a mapping is read on several threads at once: a cold file
+    /// serves each read at the device's latency, which reads one after another add up and reads in
+    /// flight together share. An append that keeps a file's chunks reads the end of each chunk's
+    /// every segment, hundreds of them, before anything maps the file.
+    /// </summary>
+    private const int ParallelBatch = 16;
+
+    /// <summary>The reads of such a batch in flight at once.</summary>
+    private const int ReadLanes = 8;
+
+    /// <summary>The slots not yet filled.</summary>
+    private static int Pending(SegmentRequestSet requests)
+    {
+        int pending = 0;
+        for (int slot = 0; slot < requests.Count; slot++)
+        {
+            pending += requests.IsFilled(slot) ? 0 : 1;
+        }
+
+        return pending;
+    }
+
+    /// <summary>
+    /// Every slot not yet filled, as <see cref="ReadManyPositionally"/> reads them, by
+    /// <see cref="ReadLanes"/> threads that take the next read as each finishes one: the buffers go
+    /// to their slots once every read is in, and back to the pool if any read failed.
+    /// </summary>
+    private async ValueTask ReadManyInParallelAsync(SegmentRequestSet requests, CancellationToken cancellationToken)
+    {
+        List<(int Slot, long Offset, int Length)> reads = new List<(int, long, int)>(requests.Count);
+        try
+        {
+            for (int slot = 0; slot < requests.Count; slot++)
+            {
+                if (requests.IsFilled(slot))
+                {
+                    continue;
+                }
+
+                SegmentSpec spec = requests.GetSpec(slot);
+                SegmentIo.ValidateSpec(in spec, out long offset, out int length);
+                SegmentIo.CheckInFile(offset, length, Length);
+                reads.Add((slot, offset, length));
+            }
+        }
+        catch
+        {
+            requests.AbandonPending();
+            throw;
+        }
+
+        SegmentOwner?[] owners = new SegmentOwner?[reads.Count];
+        int next = -1;
+        try
+        {
+            Task[] lanes = new Task[Math.Min(ReadLanes, reads.Count)];
+            for (int lane = 0; lane < lanes.Length; lane++)
+            {
+                lanes[lane] = Task.Run(
+                    () =>
+                    {
+                        for (int i = Interlocked.Increment(ref next); i < reads.Count; i = Interlocked.Increment(ref next))
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            (_, long offset, int length) = reads[i];
+                            owners[i] = length == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, length);
+                        }
+                    },
+                    cancellationToken);
+            }
+
+            await Task.WhenAll(lanes).ConfigureAwait(false);
+            for (int i = 0; i < reads.Count; i++)
+            {
+                requests.SetResult(reads[i].Slot, owners[i]!);
+                owners[i] = null;
+            }
+
+            requests.Complete();
+        }
+        catch
+        {
+            foreach (SegmentOwner? owner in owners)
+            {
+                owner?.Dispose();
+            }
+
+            requests.AbandonPending();
+            throw;
+        }
     }
 
     /// <summary>Every slot not yet filled, each segment in a buffer of its own that the slot takes over.</summary>
