@@ -117,7 +117,7 @@ public sealed class DecimalAggregateTests
 
     private static Columns ColumnsOf(Shape shape)
     {
-        AllTypes[] rows = MatrixRows.Build(shape);
+        AllTypes[] rows = MatrixRows.Shared(shape);
         return new Columns(
             [.. rows.Select(r => (decimal?)r.Dec8)], [.. rows.Select(r => (decimal?)r.Dec16)], [.. rows.Select(r => (decimal?)r.Dec32)],
             [.. rows.Select(r => (decimal?)r.Dec64)], [.. rows.Select(r => (decimal?)r.Dec128)], [.. rows.Select(r => r.Dec128N)],

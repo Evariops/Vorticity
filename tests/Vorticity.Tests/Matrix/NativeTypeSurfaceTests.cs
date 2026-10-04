@@ -19,7 +19,7 @@ public sealed class NativeTypeSurfaceTests
     {
         Decoders.EnsureRegistered();
         CancellationToken ct = TestContext.Current.CancellationToken;
-        AllTypes[] rows = MatrixRows.Build(Shape.Spread);
+        AllTypes[] rows = MatrixRows.Shared(Shape.Spread);
         (string path, _) = await TypeEncodingMatrixTests.WrittenAsync(Shape.Spread, EncodingHint.Auto);
         await using VortexFile file = await VortexFile.OpenAsync(path, ct);
         AllTypes probe = rows[4_321];
@@ -53,7 +53,7 @@ public sealed class NativeTypeSurfaceTests
     {
         Decoders.EnsureRegistered();
         CancellationToken ct = TestContext.Current.CancellationToken;
-        AllTypes[] rows = MatrixRows.Build(Shape.Spread);
+        AllTypes[] rows = MatrixRows.Shared(Shape.Spread);
         (string path, _) = await TypeEncodingMatrixTests.WrittenAsync(Shape.Spread, EncodingHint.Auto);
         await using VortexFile file = await VortexFile.OpenAsync(path, ct);
 
@@ -114,7 +114,7 @@ public sealed class NativeTypeSurfaceTests
     {
         Decoders.EnsureRegistered();
         CancellationToken ct = TestContext.Current.CancellationToken;
-        AllTypes[] rows = MatrixRows.Build(Shape.Runs);
+        AllTypes[] rows = MatrixRows.Shared(Shape.Runs);
         (string path, _) = await TypeEncodingMatrixTests.WrittenAsync(Shape.Runs, EncodingHint.Canonical);
         await using VortexFile file = await VortexFile.OpenAsync(path, ct);
         int offset = 0;

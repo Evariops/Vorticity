@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -37,6 +38,29 @@ internal static class MatrixRows
     internal const int Count = 20_000;
 
     private static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
+
+    /// <summary>
+    /// The rows of <paramref name="shape"/>, one array for every caller while any of them still holds
+    /// it: the matrix writes a shape under every hint side by side, and building the rows costs as
+    /// much as a write. Held weakly, so that no shape outlives the tests reading it; the callers only
+    /// read it.
+    /// </summary>
+    internal static AllTypes[] Shared(Shape shape)
+    {
+        WeakReference<AllTypes[]> held = Held.GetOrAdd(shape, _ => new WeakReference<AllTypes[]>(null!));
+        lock (held)
+        {
+            if (!held.TryGetTarget(out AllTypes[]? rows))
+            {
+                rows = Build(shape);
+                held.SetTarget(rows);
+            }
+
+            return rows;
+        }
+    }
+
+    private static readonly ConcurrentDictionary<Shape, WeakReference<AllTypes[]>> Held = new();
 
     internal static AllTypes[] Build(Shape shape, int count = Count)
     {

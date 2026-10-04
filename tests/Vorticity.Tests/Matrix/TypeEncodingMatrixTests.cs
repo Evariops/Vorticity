@@ -108,7 +108,7 @@ public sealed class TypeEncodingMatrixTests
     internal static Task<(string Path, WriteReport Report)> WrittenAsync(Shape shape, EncodingHint hint) =>
         SharedFiles.GetAsync(
             $"{nameof(TypeEncodingMatrixTests)}/{shape}/{hint}",
-            path => WriteAsync(path, MatrixRows.Build(shape), hint, CancellationToken.None));
+            path => WriteAsync(path, MatrixRows.Shared(shape), hint, CancellationToken.None));
 
     /// <summary>
     /// The read-back of one distinct file, shared by the cases that write it: no case's cancellation
@@ -174,7 +174,7 @@ public sealed class TypeEncodingMatrixTests
     private static Task<UInt128[]> ExpectedAsync(Shape shape) =>
         Expectations.GetOrAdd(shape, key => new Lazy<Task<UInt128[]>>(() => Task.Run(() =>
         {
-            AllTypes[] rows = MatrixRows.Build(key);
+            AllTypes[] rows = MatrixRows.Shared(key);
             UInt128[] digests = new UInt128[rows.Length];
             StringBuilder text = new StringBuilder();
             XxHash128 hash = new XxHash128();
