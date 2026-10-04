@@ -372,7 +372,8 @@ internal sealed class ZstdDecoder : ArrayDecoder
 
     /// <summary>
     /// Decides which frames carry values <c>[firstValue, firstValue + valueCount)</c> and how many
-    /// bytes they decompress to.
+    /// bytes they decompress to: the last one only as far as the last value wanted, when the values
+    /// have a fixed width.
     /// </summary>
     /// <param name="frames">The frame table.</param>
     /// <param name="dtype">The array's dtype, for a message.</param>
@@ -424,6 +425,13 @@ internal sealed class ZstdDecoder : ArrayDecoder
             if (usedFrames == 0)
             {
                 skipped = (int)(firstValue - covered);
+            }
+
+            // A fixed width says where the last value wanted ends: the frame that holds it is decoded
+            // that far, and the values after it are never produced.
+            if (isPrimitive && covered + frameValues > end)
+            {
+                uncompressed = (end - covered) * byteWidth;
             }
 
             total += uncompressed;
@@ -537,10 +545,14 @@ internal sealed class ZstdDecoder : ArrayDecoder
             RequireDeclaredContentSize(frame, frames[firstFrame + i].UncompressedSize, firstFrame + i);
 
             // Bounded by what is left of the planned total, so a frame that expands further
-            // than advertised is refused by the decoder rather than overrunning.
+            // than advertised is refused by the decoder rather than overrunning. The last frame may
+            // be planned short of its content, as far as the last value wanted: only its start is
+            // decoded then.
             Span<byte> region = destination[written..];
-            System.Buffers.OperationStatus status =
-                decoder.Decompress(frame, region, dictionary, out _, out int produced);
+            int produced;
+            System.Buffers.OperationStatus status = frames[firstFrame + i].UncompressedSize > (ulong)region.Length
+                ? decoder.DecompressPrefix(frame, region, dictionary, out produced)
+                : decoder.Decompress(frame, region, dictionary, out _, out produced);
             if (status != System.Buffers.OperationStatus.Done)
             {
                 CompressedThrow.Format(
