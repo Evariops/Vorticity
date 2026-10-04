@@ -95,7 +95,7 @@ public sealed partial class ZstdDecompressor
         Debug.Assert(literals.Length - literalCount >= LiteralsMargin);
         if (nbSeq == 0)
         {
-            return FinishBlock(literals, 0, literalCount, destination, op, op, blockSizeMax);
+            return FinishBlock(literals, 0, literalCount, destination, op, op, blockSizeMax, _prefix);
         }
 
         _sequenceEntropy = true;
@@ -706,6 +706,13 @@ public sealed partial class ZstdDecompressor
 
         while (true)
         {
+            if (_prefix && o + litLength + matchLength > oend && oend < blockEnd)
+            {
+                // The destination ends in this sequence, and the call wants nothing past it.
+                ExecutePartially(ref frameStart, o, ref lit, litPtr, litLength, matchLength, offset, oend, literalCount, history);
+                return (int)(oend - blockStart);
+            }
+
             ExecuteCarefully(ref frameStart, ref o, ref lit, ref litPtr, litLength, matchLength, offset, oend, blockEnd, literalCount, history);
             if (--nbSeq == 0)
             {
@@ -723,7 +730,53 @@ public sealed partial class ZstdDecompressor
         _rep0 = (uint)state.Rep0;
         _rep1 = (uint)state.Rep1;
         _rep2 = (uint)state.Rep2;
-        return FinishBlock(literals, (int)litPtr, literalCount, destination, blockStart, (int)o, blockSizeMax);
+        return FinishBlock(literals, (int)litPtr, literalCount, destination, blockStart, (int)o, blockSizeMax, _prefix);
+    }
+
+    /// <summary>
+    /// The sequence the destination ends in, for a call that wants only the start of the content:
+    /// its literals, then its match, copied as far as <paramref name="oend"/>, each checked as
+    /// <see cref="ExecuteCarefully"/> checks it.
+    /// </summary>
+    private static void ExecutePartially(
+        ref byte frameStart, nint o, ref byte lit, nint litPtr, nint litLength, nint matchLength, nuint offset,
+        nint oend, int literalCount, ReadOnlySpan<byte> history)
+    {
+        if (litPtr + litLength > literalCount)
+        {
+            Throw.Error(ZstdError.LiteralsOverrun);
+        }
+
+        nint literals = Math.Min(litLength, oend - o);
+        CopyForward(ref frameStart, o, ref lit, litPtr, literals);
+        o += literals;
+        matchLength = Math.Min(matchLength, oend - o);
+        if (matchLength == 0)
+        {
+            return;
+        }
+
+        nint matchFrom;
+        if (offset > (nuint)o)
+        {
+            if (offset > (nuint)(o + history.Length))
+            {
+                Throw.Error(ZstdError.OffsetTooLarge);
+            }
+
+            nint h = history.Length - (nint)(offset - (nuint)o);
+            nint fromHistory = Math.Min(matchLength, history.Length - h);
+            CopyForward(ref frameStart, o, ref MemoryMarshal.GetReference(history), h, fromHistory);
+            o += fromHistory;
+            matchLength -= fromHistory;
+            matchFrom = 0;
+        }
+        else
+        {
+            matchFrom = o - (nint)offset;
+        }
+
+        CopyForward(ref frameStart, o, ref frameStart, matchFrom, matchLength);
     }
 
     /// <summary>
@@ -815,16 +868,26 @@ public sealed partial class ZstdDecompressor
         }
     }
 
-    /// <summary>The literals after the last sequence: the end of every compressed block.</summary>
+    /// <summary>
+    /// The literals after the last sequence: the end of every compressed block, or as many of them
+    /// as the destination holds when <paramref name="prefix"/> says the call wants only the start of
+    /// the content and the destination ends in them.
+    /// </summary>
     private static int FinishBlock(
-        ReadOnlySpan<byte> literals, int literal, int literalCount, Span<byte> destination, int blockStart, int position, int blockSizeMax)
+        ReadOnlySpan<byte> literals, int literal, int literalCount, Span<byte> destination, int blockStart, int position, int blockSizeMax,
+        bool prefix)
     {
         int last = literalCount - literal;
         long blockEnd = (long)blockStart + blockSizeMax;
         long oend = Math.Min(blockEnd, destination.Length);
         if (last > oend - position)
         {
-            Throw.Error((long)position + last > blockEnd ? ZstdError.BlockTooLarge : ZstdError.DestinationTooSmall);
+            if (!prefix || oend == blockEnd)
+            {
+                Throw.Error((long)position + last > blockEnd ? ZstdError.BlockTooLarge : ZstdError.DestinationTooSmall);
+            }
+
+            last = (int)(oend - position);
         }
 
         CopyExact(

@@ -20,6 +20,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Vorticity" />
     <InternalsVisibleTo Include="Vorticity.Zstd.Tests" />
     <InternalsVisibleTo Include="Vorticity.Zstd.Benchmarks" />
     <InternalsVisibleTo Include="Vorticity.Zstd.Perf" />

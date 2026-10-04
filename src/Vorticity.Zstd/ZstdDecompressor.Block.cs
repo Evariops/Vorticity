@@ -37,8 +37,10 @@ public sealed partial class ZstdDecompressor
         ReadOnlySpan<byte> source, int blockStart, int blockSize, Span<byte> destination, int op, int blockSizeMax, ReadOnlySpan<byte> history)
     {
         int capacity = destination.Length - op;
+        // The start of a frame's content may end inside these literals: they are bounded by the block.
         int literalsSize = DecodeLiterals(
-            source, blockStart, blockSize, blockSizeMax, Math.Min(blockSizeMax, capacity), _literals, out ReadOnlySpan<byte> literals, out int literalCount);
+            source, blockStart, blockSize, blockSizeMax, _prefix ? blockSizeMax : Math.Min(blockSizeMax, capacity), _literals,
+            out ReadOnlySpan<byte> literals, out int literalCount);
         ReadOnlySpan<byte> sequences = source.Slice(blockStart + literalsSize, blockSize - literalsSize);
 
         int nbSeq = DecodeSequencesHeader(sequences, _sequenceTables, null, out int headerSize);
