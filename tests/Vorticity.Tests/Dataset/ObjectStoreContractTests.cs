@@ -326,9 +326,11 @@ public sealed class ObjectStoreContractTests : IDisposable
 
         // A reader may meet a key a put has not finished, since the commit protocol reads the newest
         // key it lists: it finds the object absent, or waits for its last byte, and never reads a part.
+        // The writer waits until the store has taken what it gave, so the read starts on an object
+        // whose first half is stored and whose second is not.
         await using IObjectStore store = Open(kind);
         const string key = "commit/00000000000000000001.vxc";
-        Pipe pipe = new Pipe();
+        Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 1, resumeWriterThreshold: 1));
         ValueTask<PutOutcome> put = store.PutIfAbsentAsync(key, pipe.Reader, 8, ct);
         await pipe.Writer.WriteAsync(Bytes("half"), ct);
 
