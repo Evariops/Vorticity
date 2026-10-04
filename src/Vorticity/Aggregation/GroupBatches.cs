@@ -52,8 +52,16 @@ internal sealed class AggregationQuery : ResultQuery
     /// </summary>
     internal int ChosenReader { get; }
 
-    /// <summary>The most groups the last run held at once: every group of a blocking one, the open ones and a batch's closed ones of a streaming one.</summary>
-    internal long PeakGroups { get; set; }
+    /// <summary>
+    /// The most groups the last run held at once: every group of a blocking one, the open ones and a
+    /// batch's closed ones of a streaming one. Kept with the plan, which the query a record's columns
+    /// read it through (<c>As</c>) shares.
+    /// </summary>
+    internal long PeakGroups
+    {
+        get => Plan.PeakGroups;
+        set => Plan.PeakGroups = value;
+    }
 
     /// <summary>What follows the group by before its <c>Select</c>, in the order written.</summary>
     internal GroupOperator[] Operators { get; }
@@ -131,9 +139,15 @@ internal sealed class AggregationQuery : ResultQuery
     /// <summary>The result's batches: the query runs when the first is asked for.</summary>
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => Groups(cancellationToken);
 
-    /// <summary>The result's batches: as the groups close, on a key that streams; once the pass has run, on any other.</summary>
+    /// <summary>
+    /// The result's batches: as the groups close, on a key that streams, or one its zones prove final
+    /// as the read goes when they nearly sort; once the pass has run, on any other.
+    /// </summary>
     internal IAsyncEnumerator<RecordBatch> Groups(CancellationToken cancellationToken) =>
-        !Plan.Blocking && StreamingGroupBatches.Streaming(this) >= 0 ? new StreamingGroupBatches(this, cancellationToken) : new GroupBatches(this, cancellationToken);
+        Plan.Blocking ? new GroupBatches(this, cancellationToken)
+        : StreamingGroupBatches.Streaming(this) >= 0 ? new StreamingGroupBatches(this, cancellationToken)
+        : ZoneFinality.Candidate(this) ? new ZoneDecidedGroups(this, cancellationToken)
+        : new GroupBatches(this, cancellationToken);
 
     internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => Host.ExplainAsync(Plan, cancellationToken, RowFilter);
 

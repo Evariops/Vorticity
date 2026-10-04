@@ -155,6 +155,22 @@ internal abstract class GroupKeys
     internal virtual bool Narrow(
         CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int frontier, bool descending, Span<ulong> narrowed) => false;
 
+    /// <summary>
+    /// Whether group <paramref name="group"/>'s key, an integer, lies below <paramref name="bound"/>:
+    /// the groups a floor the zones give proves final. False for the null group, and for keys these
+    /// do not read as integers.
+    /// </summary>
+    internal virtual bool Below(int group, long bound) => false;
+
+    /// <summary>Sorts <paramref name="groups"/>, the null group not among them, by their keys, compared as <see cref="CompareKeys(GroupKeys, int, int, int)"/> compares them.</summary>
+    internal virtual void SortByKey(Span<int> groups) => groups.Sort(new KeyComparer(this));
+
+    /// <summary>Groups of one index by their keys, a call to the index a comparison.</summary>
+    private sealed class KeyComparer(GroupKeys keys) : IComparer<int>
+    {
+        public int Compare(int x, int y) => keys.CompareKeys(keys, x, y, 0);
+    }
+
     /// <summary>The group of the null key, or -1 when there is none: of a key of one column.</summary>
     internal virtual int NullNumber => -1;
 
@@ -295,6 +311,107 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private static readonly bool Integers =
         typeof(TValue) == typeof(sbyte) || typeof(TValue) == typeof(short) || typeof(TValue) == typeof(int) || typeof(TValue) == typeof(long)
         || typeof(TValue) == typeof(byte) || typeof(TValue) == typeof(ushort) || typeof(TValue) == typeof(uint) || typeof(TValue) == typeof(ulong);
+
+    /// <summary>
+    /// Integers within a span of four times as many as there are groups placed at their value less the
+    /// least, one key a group, and read back in order; any other keys copied beside the groups and
+    /// sorted with them, by the values' own order: no call to an index a comparison.
+    /// </summary>
+    internal override void SortByKey(Span<int> groups)
+    {
+        if (Integers && typeof(TValue) != typeof(ulong) && TryPlace(groups))
+        {
+            return;
+        }
+
+        TValue[] keys = System.Buffers.ArrayPool<TValue>.Shared.Rent(groups.Length);
+        try
+        {
+            Span<TValue> values = keys.AsSpan(0, groups.Length);
+            for (int i = 0; i < groups.Length; i++)
+            {
+                values[i] = _keys[groups[i]];
+            }
+
+            values.Sort(groups);
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<TValue>.Shared.Return(keys);
+        }
+    }
+
+    /// <summary>The groups placed by their key less the least, when the keys' span is narrow enough to pay; false otherwise.</summary>
+    private bool TryPlace(Span<int> groups)
+    {
+        long least = long.MaxValue;
+        long most = long.MinValue;
+        foreach (int group in groups)
+        {
+            long key = AsLong(_keys[group]);
+            least = Math.Min(least, key);
+            most = Math.Max(most, key);
+        }
+
+        if ((ulong)(most - least) >= 4UL * (ulong)groups.Length)
+        {
+            return false;
+        }
+
+        int span = (int)(most - least) + 1;
+        int[] places = System.Buffers.ArrayPool<int>.Shared.Rent(span);
+        try
+        {
+            Span<int> at = places.AsSpan(0, span);
+            at.Fill(-1);
+            foreach (int group in groups)
+            {
+                at[(int)(AsLong(_keys[group]) - least)] = group;
+            }
+
+            int next = 0;
+            foreach (int group in at)
+            {
+                if (group >= 0)
+                {
+                    groups[next++] = group;
+                }
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<int>.Shared.Return(places);
+        }
+
+        return true;
+    }
+
+    /// <summary>An integer key of any type but <see cref="ulong"/> as a long, which holds every one of them.</summary>
+    private static long AsLong(TValue key) =>
+        typeof(TValue) == typeof(long) ? Unsafe.As<TValue, long>(ref key)
+        : typeof(TValue) == typeof(int) ? Unsafe.As<TValue, int>(ref key)
+        : typeof(TValue) == typeof(short) ? Unsafe.As<TValue, short>(ref key)
+        : typeof(TValue) == typeof(sbyte) ? Unsafe.As<TValue, sbyte>(ref key)
+        : typeof(TValue) == typeof(uint) ? Unsafe.As<TValue, uint>(ref key)
+        : typeof(TValue) == typeof(ushort) ? Unsafe.As<TValue, ushort>(ref key)
+        : Unsafe.As<TValue, byte>(ref key);
+
+    internal override bool Below(int group, long bound)
+    {
+        if (group == _null)
+        {
+            return false;
+        }
+
+        TValue key = _keys[group];
+        return typeof(TValue) == typeof(long) ? Unsafe.As<TValue, long>(ref key) < bound
+            : typeof(TValue) == typeof(int) ? Unsafe.As<TValue, int>(ref key) < bound
+            : typeof(TValue) == typeof(short) ? Unsafe.As<TValue, short>(ref key) < bound
+            : typeof(TValue) == typeof(sbyte) ? Unsafe.As<TValue, sbyte>(ref key) < bound
+            : typeof(TValue) == typeof(uint) ? Unsafe.As<TValue, uint>(ref key) < bound
+            : typeof(TValue) == typeof(ushort) ? Unsafe.As<TValue, ushort>(ref key) < bound
+            : typeof(TValue) == typeof(byte) && Unsafe.As<TValue, byte>(ref key) < bound;
+    }
 
     /// <summary>
     /// A column of integers read as it is, whose order is their values': the encoded forms, which

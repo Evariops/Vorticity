@@ -53,6 +53,12 @@ internal static class References
         ("streaming against blocking, (City, Day), degree N", "group by city day (composite), count avg, degree N", "group by city day (composite), count avg, blocking, degree N", 1.000),
         ("streaming against blocking, Welford, degree N", "group by day (sorted), welford, degree N", "group by day (sorted), welford, blocking, degree N", 1.000),
 
+        // A key its zones prove final as the read goes (6g) against the same query forced to block:
+        // the first answer after 2 to 3 ms rather than 10 to 33, a tenth to a third of the memory, for
+        // a pass 5 to 23 % longer, which the ranges followed in series into one partition cost.
+        // Measured at 1.13 and 1.23; the higher is the reference.
+        ("zones against blocking, nearly sorted key, degree N", "group by nearly sorted key (1M keys, late by 2 500), count sum, degree N", "group by nearly sorted key (1M keys, late by 2 500), count sum, blocking, degree N", 1.230),
+
         // A dataset against the file of its rows (6e): a group by on sixteen objects within 15 % of
         // the file's on every lane, where an object is a range of the queue, and on one lane, where
         // each object opens ahead of the one read; the first batch flat from one object to sixteen.

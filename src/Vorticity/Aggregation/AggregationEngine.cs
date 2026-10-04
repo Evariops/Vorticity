@@ -110,6 +110,9 @@ internal sealed class AggregationPlan
     /// <summary>What the plan's last run did, lane by lane, and its merge; null before one.</summary>
     internal AggregationRun? LastRun { get; set; }
 
+    /// <summary>The most groups the plan's last run held at once (<see cref="AggregationQuery.PeakGroups"/>).</summary>
+    internal long PeakGroups { get; set; }
+
     /// <summary>The result a symbol stands for.</summary>
     /// <exception cref="InvalidOperationException">The symbol is a column, not an aggregate or a key.</exception>
     internal static ResultNode<T> Result<T>(Sym<T> symbol) => Result(symbol, []);

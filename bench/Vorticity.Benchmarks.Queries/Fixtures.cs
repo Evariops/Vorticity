@@ -135,6 +135,16 @@ internal static class Fixtures
         return new Keyed((int)((mix >> 8) % 200_000), (long)((mix >> 32) % 1_000));
     });
 
+    /// <summary>
+    /// A key that rises with the rows, a value four rows, each up to 2 500 late: zones that overlap
+    /// their neighbours, a key nearly sorted that the statistics do not say is, stored canonical.
+    /// </summary>
+    internal static ValueTask<string> LateAsync(int rows) => WriteOnceAsync($"late-{rows}.vortex", rows, canonical: true, row =>
+    {
+        ulong mix = Mix((ulong)row);
+        return new Keyed((row / 4) + (int)(mix % 2_500), (long)((mix >> 32) % 1_000));
+    });
+
     /// <summary>A text key of a million values, each as often as the others, in a scattered order, stored canonical.</summary>
     internal static ValueTask<string> NamesAsync(int rows) => WriteOnceAsync($"names-{rows}.vortex", rows, canonical: true, row =>
         new Named(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"user-{(long)row * 7_919 % 1_000_000:D7}"), (long)(Mix((ulong)row) % 1_000)));

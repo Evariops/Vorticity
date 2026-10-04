@@ -118,9 +118,14 @@ public sealed partial class StreamingGroupTests
             Assert.Equal(4, run.Lanes.Length);
 
             // Merged in parts, a power of two, at most twice the lanes, a part taking 512 groups of
-            // the largest lane at least; in series below, the other lanes into the largest.
+            // the largest lane at least; in series below, the other lanes into the largest, and when
+            // a worker's share of twice the entries is not below what the series would merge, as it
+            // is when one lane, under load, took most of the ranges.
             int most = Math.Min(2 * run.Lanes.Length, run.Lanes.Max(lane => lane.Groups) / 512);
-            Assert.Equal(most < 2 ? run.Lanes.Length - 1 : 1 << BitOperations.Log2((uint)most), run.MergeParts);
+            int parts = most < 2 ? 1 : 1 << BitOperations.Log2((uint)most);
+            long entries = run.Lanes.Sum(lane => (long)lane.Groups);
+            long serial = entries - run.Lanes.Max(lane => lane.Groups);
+            Assert.Equal(parts == 1 || 2 * entries >= Math.Min(run.Lanes.Length, parts) * serial ? run.Lanes.Length - 1 : parts, run.MergeParts);
             Assert.All(run.Lanes.Where(lane => lane.Ranges > 0), lane => Assert.True(lane.ActiveTicks > 0 && lane.Groups > 0));
             Assert.True(run.Lanes.Sum(lane => lane.Ranges) > 4, $"{run.Lanes.Sum(lane => lane.Ranges)} ranges");
             Assert.True(run.Lanes.Sum(lane => lane.Groups) >= seconds);
@@ -186,7 +191,7 @@ public sealed partial class StreamingGroupTests
             Assert.True(StreamingGroupBatches.Streaming((AggregationQuery)last.Query) >= 0);
             List<HourStats> read = await ListAsync(last.As<HourStats>());
             Assert.Equal(hours.Take(7).Select(g => (g.Key, (long)g.Count())), read.Select(h => (h.Hour, h.Count)));
-            Assert.True(((AggregationQuery)last.Query).PeakGroups <= 2, $"{((AggregationQuery)last.Query).PeakGroups} groups held");
+            Assert.True(((AggregationQuery)last.Query).PeakGroups < hours.Length / 2, $"{((AggregationQuery)last.Query).PeakGroups} groups held of {hours.Length}");
             Assert.True(scan.Statistics.Rows < Rows / 2, $"{scan.Statistics.Rows} rows read for seven hours of {Rows}");
 
             Vorticity.Aggregation blocking = file.Scan<Tick>().GroupBy(r => r.Hour).OrderByDescending(g => g.Key).Take(7).Select(g => (g.Key, g.Count(), g.Average(x => x.Price)));

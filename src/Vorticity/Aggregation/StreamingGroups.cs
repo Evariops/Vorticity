@@ -63,10 +63,18 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private List<AggregationRun.Lane>? _lanes;
     private long _mergeTicks;
 
-    internal StreamingGroupBatches(AggregationQuery query, CancellationToken cancellationToken)
+    // On a key its zones prove final as the read goes: the floors, the first row not read yet, and
+    // the ranges' rows when they go side by side.
+    private readonly ZoneFinality? _zones;
+    private long _nextRow;
+    private RowRange[] _rangeRows = [];
+    private int _followed;
+
+    internal StreamingGroupBatches(AggregationQuery query, CancellationToken cancellationToken, ZoneFinality? zones = null)
     {
         _query = query;
         _cancellationToken = cancellationToken;
+        _zones = zones;
         int asked = query.Host.Spec().Options.BatchRows;
         _batchRows = asked > 0 ? asked : GroupBatches.BatchRows;
         _skips = new long[query.Operators.Length];
@@ -207,6 +215,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 long merging = Stopwatch.GetTimestamp();
                 _partition!.Follow(range);
                 _mergeTicks += Stopwatch.GetTimestamp() - merging;
+                _nextRow = _rangeRows[_followed++].End;
                 (_lanes ??= []).Add(new AggregationRun.Lane(range.ActiveTicks, range.Ranges, range.GroupsAtEnd));
                 _query.PeakGroups = Math.Max(_query.PeakGroups, _partition.Keys!.Count);
                 await CloseAsync(all: false).ConfigureAwait(false);
@@ -221,7 +230,9 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 continue;
             }
 
-            _partition!.Process(_inner.Current);
+            RecordBatch batch = _inner.Current;
+            _partition!.Process(batch);
+            _nextRow = Math.Max(_nextRow, batch.StartRow + batch.RowCount);
             _query.PeakGroups = Math.Max(_query.PeakGroups, _partition.Keys!.Count);
             await CloseAsync(all: false).ConfigureAwait(false);
         }
@@ -257,10 +268,11 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         host.Begin();
         _begun = true;
         _started = Stopwatch.GetTimestamp();
+        _query.PeakGroups = 0;
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
-        int streaming = Streaming(_query);
+        int streaming = _zones is null ? Streaming(_query) : 0;
 
         // A source that brings the rows in the component's order when asked is asked, backwards
         // when descending: a dataset's key-ordered read. A sorted column read descending has its
@@ -278,18 +290,24 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             pass = pass with { Backward = true };
         }
 
-        // The streaming component is sorted, which its part of a composite key reads as runs.
+        // The streaming component is sorted, which its part of a composite key reads as runs; a key
+        // its zones prove final is not, and is grouped as any other.
         KeyFacts facts = AggregationEngine.Facts(host.Source, plan.Keys);
-        facts.Sorted[streaming] = true;
+        bool runs = _zones is null && plan.Keys.Length == 1;
+        if (_zones is null)
+        {
+            facts.Sorted[streaming] = true;
+        }
+
         _partition = new AggregationPartition(
-            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, streaming, host.Source, facts)
+            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: runs, streaming, host.Source, facts)
         {
             Backward = pass.Backward,
         };
 
         // The blocks the zone maps settle are folded in the order of the rows, which the groups
-        // close in: forward only, as the ranges grouped side by side are.
-        ZoneSettling? settling = descending
+        // close in: forward only, as the ranges grouped side by side are, and on a sorted key.
+        ZoneSettling? settling = descending || _zones is not null
             ? null
             : await ZoneSettling.PlanAsync(host.Source, pass, plan, host.Metrics, _cancellationToken).ConfigureAwait(false);
         if (settling is not null)
@@ -322,6 +340,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _pass = pass;
+        _rangeRows = ranges;
         ScanSpec lane = pass with { Options = pass.Options with { DegreeOfParallelism = 1, Prefetch = 0 } };
         _ranges = new StreamingRanges(
             ranges,
@@ -329,7 +348,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             async (rows, token) =>
             {
                 AggregationPartition range = new AggregationPartition(
-                    plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, streaming, host.Source, facts);
+                    plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: runs, streaming, host.Source, facts);
                 if (settling is not null)
                 {
                     range.Settle(settling, rows);
@@ -348,9 +367,13 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private void Close(bool all)
     {
         AggregationPartition partition = _partition!;
-        int count = partition.Keys!.Count;
+        GroupKeys keys = partition.Keys!;
+        int count = keys.Count;
         int nullComponent = partition.ComponentNull;
         int last = all ? -1 : partition.LastValueGroup;
+
+        // On a key its zones prove final: the groups below the smallest key a row to come can hold.
+        long floor = all ? long.MaxValue : _zones?.Floor(_nextRow) ?? long.MinValue;
         Scratch.Grow(ref _closed, count);
         Scratch.Grow(ref _open, count);
         _closedCount = 0;
@@ -358,7 +381,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         for (int g = 0; g < count; g++)
         {
             int component = partition.ComponentOf(g);
-            if (component == nullComponent || component == last)
+            if (_zones is null ? component == nullComponent || component == last : !keys.Below(g, floor))
             {
                 // Open, and at the end the groups of the null component, which go out last.
                 _open[_openCount++] = g;
@@ -366,6 +389,12 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             }
 
             _closed[_closedCount++] = g;
+        }
+
+        if (_zones is not null && _closedCount > 1)
+        {
+            // Final together, they go out in the order of their keys, which the stream is in.
+            keys.SortByKey(_closed.AsSpan(0, _closedCount));
         }
 
         if (all)

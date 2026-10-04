@@ -123,8 +123,9 @@ public sealed partial class ChosenRowTests
         string path = await WriteAsync(rows);
         try
         {
+            // In batches of a thousand rows, twenty minutes: the stream holds those, not the file's.
             await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
-            Vorticity.Aggregation byMinute = file.Scan<Trade>()
+            Vorticity.Aggregation byMinute = file.Scan<Trade>().With(new ScanOptions { BatchRows = 1_024 })
                 .GroupBy(r => r.Minute)
                 .Where(g => g.First().Size > 10)
                 .Select(g => (g.Key, g.First().Venue, g.Last().Symbol, g.MaxBy(x => x.Size).Size));
@@ -134,7 +135,7 @@ public sealed partial class ChosenRowTests
                 .Where(g => g.First().Size > 10)
                 .Select(g => new MinuteEnds(g.Key, g.First().Venue, g.Last().Symbol, g.Max(r => r.Size)))];
             Assert.Equal(expected, minutes);
-            Assert.True(((AggregationQuery)byMinute.Query).PeakGroups < expected.Count, $"the streaming group by held {((AggregationQuery)byMinute.Query).PeakGroups} groups");
+            Assert.True(((AggregationQuery)byMinute.Query).PeakGroups < expected.Count / 4, $"the streaming group by held {((AggregationQuery)byMinute.Query).PeakGroups} groups");
         }
         finally
         {

@@ -164,6 +164,13 @@ groups of the previous value go out, in key order, and their states are reused. 
 maps cover, it is as soon as every block still to come has bounds above the group's value, which
 holds for data appended roughly in order of time without being sorted: the groups below the
 smallest bound to come go out, in key order, and the memory is the groups the overlap keeps open.
+The zone maps are read before the pass, for a key of one column of integers as they are stored, a
+timestamp's among them, under no order but the key's ascending; the groups stream when no value
+waits past its own block more than an eighth of the blocks, and go out once the pass has run
+otherwise. Against the blocking pass, a nearly sorted key of a million values over four million
+rows answers first after 2 ms rather than 30, holds a fifteenth of the memory on one lane and a
+third on fourteen, and runs 5 to 23 % longer, the ranges of the lanes followed into one partition in
+the order of the rows.
 
 So, on such a key:
 

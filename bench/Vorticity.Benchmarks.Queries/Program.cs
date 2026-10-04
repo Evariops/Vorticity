@@ -37,6 +37,7 @@ Dictionary<string, Func<ValueTask<string>>> fixtures = new Dictionary<string, Fu
     ["names"] = () => Fixtures.NamesAsync(2_000_000),
     ["skewed"] = () => Fixtures.SkewedAsync(4_000_000),
     ["medium"] = () => Fixtures.MediumAsync(4_000_000),
+    ["late"] = () => Fixtures.LateAsync(4_000_000),
     ["readings-1"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 1, deleted: false),
     ["readings-16"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: false),
     ["readings-16-deleted"] = () => Fixtures.ReadingsDatasetAsync(1_000_000, 16, deleted: true),
