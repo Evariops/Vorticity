@@ -74,7 +74,7 @@ top of that:
 | capability | where |
 |---|---|
 | rows by index, decoding only the rows asked for where the encoding allows it | [90-registry.md](90-registry.md) |
-| aggregates and group by on the encoded form: a dictionary by code, a run by its length | [14-public-api.md](14-public-api.md) §5.5 |
+| queries in the shape of LINQ — projections, group by, aggregates — on the encoded form, a dictionary by code, a run by its length, flowing as batches as soon as they are final, with sums exact whatever the cut | [16-queries.md](16-queries.md) |
 | counts, existence, minimum and maximum answered from the structures before any decode | [12-index-reads.md](12-index-reads.md) §4 |
 | a key cursor that seeks, steps, ranks and counts, and batches in key order | [12-index-reads.md](12-index-reads.md) |
 | parallel decode on a session's threads, batches still in file order | [09-contracts.md](09-contracts.md) §2 |

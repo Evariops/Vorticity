@@ -12,7 +12,8 @@ is [14-public-api.md](14-public-api.md); what each column type becomes in .NET i
 | **No third-party dependency** | FlatBuffers and Protobuf are read and written by runtimes of this repository, hand-written against the five schemas; no `Google.FlatBuffers`, `protobuf-net` or `Apache.Arrow`. Two packages are referenced: `System.IO.Hashing` from `dotnet/runtime`, for XXH3, which the shared framework does not carry, and `Vorticity.Zstd`, this repository's managed Zstandard, rather than the libzstd the runtime ships |
 | **No allocation on the hot path** | no LINQ, no `foreach` over interfaces, no capturing closures, no boxing, no `params` array (only `params ReadOnlySpan<T>`); aligned native buffers, pools for transients, `ref struct` views |
 | **SIMD with a scalar twin** | `System.Runtime.Intrinsics`: `Vector128` everywhere, `Vector256` and `Vector512` where the hardware has them, and a scalar path that the suite runs under `DOTNET_EnableHWIntrinsic=0` and compares bit for bit |
-| **Async only, where there is I/O** | `ValueTask` and `ConfigureAwait(false)` throughout; no blocking public call and no synchronous twin of an asynchronous one. A source whose reads complete at once, a mapped file or bytes in memory, pays for a completed `ValueTask`, not for a second path. Pure CPU work stays synchronous: filling a builder, row encoding, decode kernels |
+| **Async only, where there is I/O** | `ValueTask` and `ConfigureAwait(false)` throughout; no blocking public call and no synchronous twin of an asynchronous one. A source whose reads complete at once, a mapped file or bytes in memory, pays for a completed `ValueTask`, not for a second path. Pure CPU work stays synchronous: filling a builder, row encoding, decode kernels, a merge or a sort cut into parts the caller awaits. A builder never reads |
+| **Streaming, bounded** | every source, operator and sink exchanges batches, pulled by its consumer: the async boundary is the batch, and every loop inside one is synchronous. Read-ahead is a bounded window, an operator holds its open state and never its input, a result is a stream of batches like a file's, and a consumer that stops stops the reads. What a query costs before its first answer, and holds while it runs, is measured ([16-queries.md](16-queries.md) §2) |
 
 **One target framework, `net11.0`.** A single target means no `#if`, no API surface that differs by
 target, no test matrix, and no kernel that could diverge between legs. The price is reach:
@@ -170,7 +171,11 @@ materialization decides what to fetch.
 A compiler-generated `async` enumerator allocates its state machine and possibly more per
 `MoveNextAsync`. One allocation per scan is acceptable; one per batch is not. The scan's enumerator
 is therefore written by hand over `ManualResetValueTaskSourceCore<bool>`, the pattern
-`System.Threading.Channels` uses.
+`System.Threading.Channels` uses, and so is every enumerator of a query's flow: an operator's
+stream of batches, a result's, the scan over a result, a dataset's walk of its objects. A view of
+rows over those batches — values, records — steps synchronously within a batch and awaits only at
+the next one: an `await` per batch, never per row, which is also what lets a batch be borrowed, a
+span never crossing an `await`.
 
 ### 3.8 The write sink
 
@@ -197,6 +202,16 @@ Each is a test, not a guideline:
 4. **Scalar fallback**: CI runs again with hardware intrinsics disabled the test classes that reach
    every scalar fallback the suite does (`tests/scalar-pass.txt`), and the conformance corpus.
 5. **Native AOT**: CI publishes `vxdump` ahead of time and runs it over the corpus.
+6. **The first batch waits for the first split**: the time to first batch of every streaming query
+   — a scan, a projection, a `Distinct`, a group by on a key that streams — does not grow with the
+   file or the dataset, locally and over a source with latency
+   ([16-queries.md](16-queries.md) §13).
+7. **Memory is the window and the open state**: a streaming group by's peak stays flat as its
+   groups grow, a top-k's follows `k`, a blocking group by's follows its groups and not the degree
+   times them (`LiveMemoryTests`).
+8. **Answers do not depend on the cut**: every aggregate that does not depend on the order of rows
+   by definition, float sums included, is the same bits at every degree, in every order of rows,
+   and under every cut into chunks, files or objects.
 
 ## 5. Error handling
 

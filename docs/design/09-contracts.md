@@ -11,6 +11,7 @@ each is not deduced differently at each call site.
 | `VortexFile` | **Thread-safe.** Concurrent scans of one open file are expected; its footer, layout tree, index directory and the runs it caches are immutable or published once |
 | `ISegmentSource` | implementations **must** be thread-safe; the built-in ones are |
 | `Scan<TRecord>`, `Scan` | **Single use, one thread.** Composition returns the same builder; build it on one thread, then run one sink. A second sink throws `InvalidOperationException`; `ExplainAsync` may be asked before the sink |
+| `GroupedScan<TRecord, TKey>`, `Aggregation<T>`, `Aggregation`, `Projection<T>`, `Projection`, the `Scan<TRecord>` of a result | **Single use, one thread**, like the scan they are built on: enumerating one runs its query once, and a second sink throws `InvalidOperationException` |
 | the scan's enumerator | one consumer, as the language requires |
 | `Columns<TRecord>`, `Column<T>`, `BatchView` | **Bound to the loop body**, enforced by the compiler: `ref struct`s valid until the next `MoveNextAsync` or `DisposeAsync`, which cannot be stored, captured or carried across an `await`. The one escape the compiler does not see, a span copied into a variable declared outside the loop, is analyzer VX1001's |
 | `RecordBatch` | **Owned by its consumer**, not thread-safe: it may be handed to another thread, through a channel for instance, and disposed there; its spans die with it |
@@ -36,8 +37,13 @@ fanning out. So:
 - **A scan** decodes its splits side by side, each on a context and arenas of its own, nothing
   shared, and still delivers its batches in row order. A take, whose splits are many and small,
   keeps up to three a lane decoded ahead of its consumer, so the lanes that finish first do not
-  wait for the slowest; its degree still bounds how many decode at once. An aggregate keeps a
-  state per chunk and merges them at the end. **A writer** summarizes its columns and compresses a
+  wait for the slowest; its degree still bounds how many decode at once. **A query** that streams
+  runs on that ordered stream of batches, its decode parallel; a blocking aggregation keeps a state
+  per group per range of rows and merges them part by part, as tasks it awaits, or, when keys
+  rarely repeat, partitions its rows by key among its lanes so that every group has one state
+  ([16-queries.md](16-queries.md) §9.4). Its answers are the same bits at every degree, float sums
+  included. **A dataset** opens its objects ahead of the one being read and reads them side by
+  side. **A writer** summarizes its columns and compresses a
   column's zstd frames on its threads, and chooses and writes the encodings on the calling one; the
   file is the same bytes at any degree.
 - **I/O concurrency is separate and always on**: the batch read of the seam issues overlapping reads

@@ -9,23 +9,36 @@ them: it gives the rules they follow and the decisions behind them. The engine u
 [03-architecture.md](03-architecture.md), the type mapping [07-dotnet-mapping.md](07-dotnet-mapping.md),
 the meaning of a predicate [08-semantics.md](08-semantics.md).
 
-Five rules decide every signature:
+Seven rules decide every signature:
 
 1. **A type is a schema, not a row.** A record declares which columns exist and how they are typed;
-   reading it yields columns. Rows are a sink a caller asks for, and pays for.
+   reading it yields columns. Rows are a sink a caller asks for, and pays for. A query's result of
+   several values is a record's schema too: the record a scan reads from, the record a result is
+   read as.
 2. **The compiler holds the lifetimes.** Everything borrowed from a scan is a `ref struct`: no
    `Dispose` on the hot path, nothing to forget.
-3. **The plan lives under the API.** A scan is described by ordinary lambdas over a symbolic probe,
-   run once. What cannot be pushed down does not compile. No expression tree, no string column name
-   and no untyped value on the typed path.
+3. **The plan lives under the API.** A query is described by ordinary lambdas over a symbolic probe,
+   run once, in the shape of LINQ: its method names, and its query syntax. What cannot be pushed
+   down does not compile. No expression tree, no string column name and no untyped value on the
+   typed path.
 4. **Generic, specialized, BCL first**: `INumber<T>`, static abstract members, intrinsics,
    `System.IO.Pipelines`, `System.Diagnostics.Metrics`; nothing virtual per value.
 5. **A session, not a static.** Pools, caches, I/O concurrency, parallelism and extension registries
    live on a `VortexSession`.
+6. **`Async` names what runs.** A method that starts the work — an awaitable, or a stream that ends
+   the query — ends in `Async`: `CountAsync`, `AverageAsync`, `ToRecordsAsync`. A method that only
+   describes the query does not: `Where`, `GroupBy`, `Select`, `Take`, whose result is run by
+   `await foreach`. A builder never reads: what it checks is in the schema the open read.
+7. **Batches flow.** Every source, operator and sink exchanges batches, pulled by its consumer and
+   decoded ahead within a bounded window. A query answers as soon as its first batch is final, holds
+   what is still open rather than what it read, stops reading when its consumer stops, and
+   allocates nothing per batch; a result is a stream of batches like a file's, and a scan of its
+   own. Time to first batch, peak memory and allocations are promises with gates (§9).
 
-What the surface is not: a DataFrame, a SQL engine, a join, a bridge to another columnar library. An
-owned `RecordBatch` is where a bridge would attach, and the plan a scan builds is what a query
-provider would target.
+What the surface is not: a DataFrame, a SQL engine, a join, a bridge to another columnar library. A
+query over one table has the shape of LINQ ([16-queries.md](16-queries.md)); what is not one, a
+`join` or a `let`, does not compile. An owned `RecordBatch` is where a bridge would attach, and the
+plan a scan builds is what a query provider would target.
 
 ## 1. Packages and namespaces
 
@@ -83,7 +96,9 @@ emits extension members on the probe, the columns and the builder, so that `r.Da
 A record binds to a file once, at the first sink of a scan or at `CreateWriter<TRecord>`: each member
 matches a column by exact name, then by a unique case-insensitive match, and a missing column, an
 ambiguous match or a type that does not fit throws `VortexSchemaException` naming both. A file with
-more columns than the record is fine: **the record is the projection**. Where the mapping leaves room,
+more columns than the record is fine: **a scan reads the columns its query names** — the record's
+members for batches and records, the elements of a `Select`, the keys and inputs of an aggregate —
+so the record is the projection of a scan that delivers it. Where the mapping leaves room,
 the generator decides: an `enum` is its underlying integer on the columns and an enum symbol on the
 probe; a `DateTimeOffset` member without a declared zone is UTC; a list of records and a nullable
 registered extension are refused with VX1005.
@@ -93,8 +108,10 @@ registered extension are refused with VX1005.
 ### 5.1 `Scan<TRecord>`
 
 `file.Scan<TRecord>()` reads the columns the record names and nothing else. `Where` adds a predicate,
-`Rows` a range or a set of row indices, `OrderBy` a key order, and `With(ScanOptions)` the scan's
-batch cap, prefetch, degree, compaction and switches (`Scan/Scan.Typed.cs`, `Scan/ScanOptions.cs`). A
+`Rows` a range or a set of row indices, `OrderBy` or `OrderByDescending` a key order, and
+`With(ScanOptions)` the scan's batch cap, prefetch, degree, compaction and switches
+(`Scan/Scan.Typed.cs`, `Scan/ScanOptions.cs`); `Select` and `GroupBy` turn it into a query of values
+or of groups (§5.5). A
 scan is consumed with `await foreach`, whatever the source: there is no synchronous enumeration. The
 batch is **borrowed** — valid until the next `MoveNextAsync`, the contract of a `PipeReader`'s buffer —
 and the loop body runs synchronously between two batches, so a `ref struct` in it is legal. Under
@@ -115,7 +132,12 @@ exactly what is pushed down**:
 | `r.Celsius == null`, `r.Celsius.IsNull` | nullity, never unknown ([08-semantics.md](08-semantics.md) §3) |
 | `r.City.StartsWith("Par")`, `r.City.Like("P_r%")`, `r.Pages.Contains(42)` | text and list predicates ([12-index-reads.md](12-index-reads.md) §6) |
 | `r.High > r.Low` | column against column of one type |
+| `r.At.Truncate(CalendarUnit.Day) == day`, `r.Price.Bucket(10m) >= 100m` | a function of a column; non-decreasing, so the zone maps still prune ([16-queries.md](16-queries.md) §3) |
 | `r.Day >= "900"`, `r.Day % 2 == 0`, `Math.Abs(r.Celsius) > 1` | **does not compile**: a literal of the wrong type, or no pushdown |
+
+The same symbols are every lambda's: the keys of a `GroupBy`, the inputs of an aggregate, the
+elements of a `Select`; and the results of a group compare in the `Where` that follows a `GroupBy`
+as columns do in a filter ([16-queries.md](16-queries.md)).
 
 A captured local is read once, when the lambda runs, and an optional filter is two `Where` calls,
 since the second joins with `AND`. A literal is compared **exactly**, never rounded into the column's
@@ -145,44 +167,74 @@ lengths ([encoded-forms.md](../guide/encoded-forms.md)). With `ScanOptions.Compa
 filtered scan delivers each live block whole with its `Selection` instead of copying the surviving
 rows: a filter that keeps half a block copies nothing ([selection.md](../guide/selection.md)).
 
-### 5.5 Aggregates and group by
+### 5.5 Queries: select, group, aggregate
 
-An aggregate is an operator of the scan, not a loop the caller writes (`Aggregation/`, `Scan/Scan.Agg*.cs`).
-It runs block by block on the encoded form, never materializes a batch, keeps one state per chunk
-when the session allows parallelism, and merges them at the end; its memory is the number of groups.
-What each block lets it skip:
+A projection, a group by and an aggregate are operators of the scan, not loops the caller writes
+(`Aggregation/`, `Scan/Scan.Agg*.cs`, `Scan/Scan.Grouping.cs`), and they read as LINQ does, in
+method or query syntax:
 
-| block | count, minimum, maximum, sum | group by |
-|---|---|---|
-| settled by the file or zone statistics | read from them, nothing decoded | |
-| constant | value × count | one group |
-| run-end | per run, weighted by its length | by run |
-| dictionary | over the distinct values, when every row is selected | by code, an array indexed by code, no hashing |
-| frame of reference, bit-packing, delta | vectorized unpack, the base applied once | |
-| a key the statistics say is sorted | | by run detection, no hashing |
-| alp, zstd, fsst | the decode, then the plain kernel | |
+```csharp
+Scan<CityHour> hourly =
+    (from r in file.Scan<Reading>()
+     where r.Day >= 900
+     group r by (Hour: r.At.Truncate(CalendarUnit.Hour), r.City) into g
+     where g.Count() > 10
+     orderby g.Key.Hour, g.Average(x => x.Celsius) descending
+     select (g.Key.Hour, g.Key.City, g.Count(), g.Average(x => x.Celsius)))
+    .As<CityHour>();
+```
+
+`GroupBy` takes one symbol or a tuple of them, whose names become the key's: `g.Key.Hour`. The
+group's aggregates take a lambda over the rows, as LINQ's do, and the rows' probe exists only inside
+it: a column that is neither a key nor aggregated does not compile. `Where`, `OrderBy`, `ThenBy`,
+`Skip` and `Take` on the groups are a filter, an order and a top-k the engine applies. `Select` of
+one value delivers an `Aggregation<T>`, one `T` per group; `Select` of several delivers an
+`Aggregation` that a record reads, as many values as the record has members, through
+`As<TRecord>()`. `Select` on a scan delivers a `Projection<T>` or a `Projection` of computed values
+the same way. `As<TRecord>()` turns any of them into a `Scan<TRecord>` over the result, which the
+result's columns fill, and on which every operator and sink of a scan runs again: a filter, a group
+by of the groups, a write. `AggAsync<TResult>` answers a whole scan into a record the same way.
+
+A query runs block by block on the encoded form — a dictionary key by code, a run-end key by run, a
+sorted key by run detection, a constant one whole — and never hands a batch to the caller's code. It
+**flows**: its result is a stream of batches, delivered as soon as each is final. A group by on a
+key the statistics prove ordered, or a function of one that keeps the order, closes its groups as
+the key moves on and delivers them then, holding the open ones only; on any other key it holds one
+state per group, at any degree, and delivers at the end of its input. The whole semantics, from the
+flow and the catalog of aggregates to the order of groups and the engine's strategies, is
+[16-queries.md](16-queries.md).
 
 A caller's aggregator implements `IAggregator` and receives the plain form, or
-`IEncodedAggregator` to receive runs and dictionaries too. An integer sum runs in 128 bits, exact
-whatever the order of rows or the cut of a parallel aggregation, and throws only when the result does
-not fit; floats skip NaN, as the statistics do; a null key is a group of its own. Group-by results
-come in key order when the key source is ordered, and in no promised order otherwise.
+`IEncodedAggregator` to receive runs and dictionaries too. A sum is exact whatever the order of rows
+or the cut of a parallel aggregation: an integer sum is delivered as a 64-bit integer, or as its own
+type when it is one already, throwing only when the total does not fit it; a float sum is the same
+bits at every degree and under every cut of the data into chunks, files or objects. Floats skip
+NaN, as the statistics do; a null key is a group of its own. Groups come in the order a query asks
+for, and in no promised order without one.
 
 ### 5.6 The sinks
 
-| sink | returns | pays |
-|---|---|---|
-| `await foreach` | borrowed `Columns<TRecord>` | nothing per batch |
-| `ToBatchesAsync()` | owned `RecordBatch`es | one copy per batch into pooled buffers |
-| `ToRecordsAsync()` | `IAsyncEnumerable<TRecord>` | a copy per row; an allocation per row for text, lists and nested classes |
-| `CountAsync`, `AnyAsync`, `MinAsync`, `MaxAsync`, `SumAsync`, `AvgAsync`, `CountDistinctAsync` | one value | the statistics when they settle it, blocks otherwise ([12-index-reads.md](12-index-reads.md) §4) |
-| `AggAsync(a => (…))` | several answers, one pass | the same |
-| `GroupBy(…).AggAsync(…)` | one row per group | one state per group |
-| `ExplainAsync()` | the `ScanPlan` | statistics and zone maps, never data |
+| sink | returns | pays | first answer |
+|---|---|---|---|
+| `await foreach` | borrowed `Columns<TRecord>` | nothing per batch | the first split |
+| `ToBatchesAsync()` | owned `RecordBatch`es | one copy per batch into pooled buffers | the first split |
+| `ToRecordsAsync()` | `IAsyncEnumerable<TRecord>` | a copy per row; an allocation per row for text, lists and nested classes | the first split |
+| `Select(r => e)` | `Projection<T>`, a value computed per row | the same as `ToRecordsAsync`, for the columns its element names | the first split |
+| `Select(r => (…)).As<TRecord>()` | a `Scan<TRecord>` of values computed per row | nothing per batch, for the columns its elements name | the first split |
+| `CountAsync`, `AnyAsync`, `MinAsync`, `MaxAsync`, `SumAsync`, `AverageAsync`, `CountDistinctAsync`, `AggregateAsync`, `AggAsync(a => e)` | one value | the statistics when they settle it, blocks otherwise ([12-index-reads.md](12-index-reads.md) §4) | at once when the statistics settle it, the end of the pass otherwise |
+| `AggAsync<TResult>(a => (…))` | several answers, one pass, into the record `TResult` | the same | the same |
+| `GroupBy(…).Select(g => r)` | `Aggregation<T>`, one value per group | one state per group, the open groups only on a key that streams; `k` groups for a top-k | the first group closed on a key that streams, the end of the pass otherwise |
+| `GroupBy(…).Select(g => (…)).As<TRecord>()` | a `Scan<TRecord>` over the groups, its batches borrowed | the same, and nothing per batch nor per group | the same |
+| `writer.WriteAsync(scan)` | the batches of any scan, written as they come | the writer's own work; a rollup builds no record | — |
+| `ExplainAsync()` | the `ScanPlan` | statistics and zone maps, never data | — |
 
-**LINQ starts after a sink.** `ToRecordsAsync` yields an `IAsyncEnumerable<TRecord>`, so
-`System.Linq.AsyncEnumerable` applies to it, on materialized rows, and the boundary is visible in the
-code: everything before the sink is pushed, nothing after it is ([read-rows.md](../guide/read-rows.md)).
+**The plan ends at the sink.** A query has LINQ's names and syntax up to its last operator, and
+everything up to there is pushed. Past it, `Projection<T>`, `Aggregation<T>` and `ToRecordsAsync`'s
+`IAsyncEnumerable<TRecord>` are enumerables of values, so `System.Linq.AsyncEnumerable` applies to
+them, on materialized values; only the members the query types define themselves — `Skip`, `Take`,
+`ToListAsync`, `ToArrayAsync`, `As<TRecord>`, `Distinct` — win over it and stay in the plan. A query
+of several values is not enumerable: `As<TRecord>` hands it, like any result, to a scan, where the
+plan goes on ([16-queries.md](16-queries.md) §1, [read-rows.md](../guide/read-rows.md)).
 
 ### 5.7 The key cursor
 
@@ -224,8 +276,8 @@ form.
 | `ScanOptions` | batch cap, prefetch, degree, `Compact`, and the `Pruning` and `UseIndexes` switches, which exist to check the structures, never to change a result |
 | `VortexWriteOptions` | blocks and chunk targets, the compression profile and per-column hints, the target edition, statistics, string bounds, the index policy, the identity, user metadata, the degree |
 | `IndexPolicy`, `EncodingHint`, `CompressionProfile` | [10-indexes.md](10-indexes.md) §6, [11-write-strategy.md](11-write-strategy.md) §3.4 |
-| `ScanPlan`, `PruningStep`, `CountPlan`, `OrderPlan`, `KeyPlan` | the plan before a read: blocks, live blocks, segments and bytes to read, what each structure pruned and what consulting it cost, how a count and an order will be answered |
-| `ScanStatistics` | the same quantities, measured after the scan |
+| `ScanPlan`, `PruningStep`, `CountPlan`, `OrderPlan`, `KeyPlan`, `GroupPlan` | the plan before a read: blocks, live blocks, segments and bytes to read, what each structure pruned and what consulting it cost, how a count, an order and a group by will be answered ([16-queries.md](16-queries.md) §10) |
+| `ScanStatistics` | the same quantities, measured after the scan, with the time to its first batch, the groups, the most held at once, and how each key block was grouped |
 | `WriteReport` | what the writer chose, per column and per chunk, and every index built or abandoned |
 | `VortexDiagnostics` | the names of the meter and the activity source ([09-contracts.md](09-contracts.md) §5) |
 | `VortexException` and its three kinds | a malformed file, an unsupported component with its id and `ComponentKind`, a schema that does not fit ([03-architecture.md](03-architecture.md) §5) |
@@ -257,8 +309,13 @@ the build fails when one stops holding:
 | a question the statistics answer reads nothing | no request after the open for a count, a minimum or a maximum on a file with statistics |
 | a dictionary or run-end aggregate does not decode | `BlocksDecoded` is 0 for a group by on a dictionary column and a sum over runs |
 | a chunk is decoded once per scan, whatever runs it | the values decoded equal rows × columns at every prefetch and degree, and for a parallel aggregation |
-| what cannot be pushed down does not compile | `tests/MustNotCompile` builds with exactly the expected diagnostics |
-| the surface does not drift | `PublicSurfaceTests` against `PublicSurface.txt` |
+| a query's answers and order do not depend on its syntax, its degree or the cut of its data | method and query syntax build one plan; every answer, float sums included, the same bits at every degree, over two row orders, and over a dataset cut into several objects, before and after compaction ([16-queries.md](16-queries.md) §13) |
+| the first batch waits for the first split | the time to first batch of a scan, a projection, a `Distinct` and a group by that streams, flat over two files sixteen times apart, locally and over the HTTP source with latency |
+| memory is the window and the open state | `LiveMemoryTests`: a streaming group by's peak flat as its groups grow a hundredfold, a top-k's proportional to `k`, a high-cardinality group by's at most its groups' |
+| a `Take` reads what it uses | `Requests` and `BlocksDecoded` bounded by the splits that hold its rows and the window |
+| a group by is no slower than the loop by hand | a throughput axis per key form, the hand-written loops of the guide as floor |
+| what cannot be pushed down does not compile | `tests/MustNotCompile` builds with exactly the expected diagnostics, a column outside an aggregate, `let` and `join` included |
+| the surface does not drift | `PublicSurfaceTests` against `PublicSurface.txt`, and rule 6: a member that returns an awaitable or a terminal stream ends in `Async`, a builder does not |
 | `vxdump` uses the public surface only | it compiles without access to internals |
 
 The analyzers ship in `Vorticity.Generators` ([diagnostics.md](../guide/diagnostics.md)):
@@ -273,16 +330,23 @@ The analyzers ship in `Vorticity.Generators` ([diagnostics.md](../guide/diagnost
 | VX1006 | a record type, or a type containing it, that is not `partial` |
 | VX1007 | a type that cannot be a record: generic, `ref struct`, static, abstract, file-local, or without a usable constructor |
 | VX1008 | a member the reader cannot fill |
+| VX1009 | a component of a `GroupBy` key that is not a symbol of the scan: a literal, a captured value |
+| VX1010 | an `As<TRecord>()` or an `AggAsync<TResult>` whose record members do not take the selected values, position by position |
+| VX1011 | several selected values read without a record: enumerated, or awaited without `TResult`; it names `As<TRecord>()` and the record to declare |
 
 VX1001 to VX1004 are warnings; VX1005 to VX1008 are errors, and the generator emits nothing for a type
-that has one.
+that has one; VX1009 and VX1010 are errors, since what they flag throws when the query is built, and
+VX1011 goes with the compiler's own error, to name the fix.
 
 ## 10. The satellites
 
 - **`Vorticity.Dataset`**: `VortexDataset.Scan<TRecord>()` returns the same `Scan<TRecord>` as a
   file, over every object of the version the handle read, which a later commit does not move; a
   batch's `StartRow` and a cursor's `Row` are positions in the dataset, and a cursor walks both ways
-  as a file's does. `DeleteAsync` and `UpdateAsync` take the same lambda as `Where`, and
+  as a file's does. Its objects are opened ahead of the one being read and read side by side at a
+  degree above one, so the first batch waits for the first object and no object boundary stalls the
+  stream; every query of [16-queries.md](16-queries.md) runs over it, an object a range of a parallel
+  aggregation. `DeleteAsync` and `UpdateAsync` take the same lambda as `Where`, and
   `EvolveSchemaAsync` a `VortexSchema` and the renamed columns. The store seam, the maintenance calls,
   what each costs and how a change of rows or of schema commits are [13-dataset.md](13-dataset.md).
 - **`Vorticity.RowEncoding`**: `RowEncoder`, `RowSortField`, `RowKeys` and `RowKeyEncoder`
