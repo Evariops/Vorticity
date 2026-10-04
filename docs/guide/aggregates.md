@@ -386,6 +386,14 @@ dictionary or run-end block included.
   sorted keys, nothing measurable.
 * **Encoded steps need generic instantiation at run time.** Under Native AOT the scan calls `Step`
   with the canonical form instead ([native-aot.md](native-aot.md)).
+* **The first passes of a process run on code the JIT has not optimized yet.** Tiered compilation
+  starts every method unoptimized and recompiles the ones called often, so the best of three passes
+  of a query on one lane takes about half as long again as its steady state: 15 to 16 ms against
+  10 for `GroupBy(City)`, 23 against 16 for `GroupBy(City, Day)`. A library cannot choose this for
+  its host. The host can: with `<TieredCompilation>false</TieredCompilation>` in its project, every
+  method is optimized on its first call, at the cost of a slower start, and in this sample the
+  steady state is then no slower, often faster (13 ms for `GroupBy(City, Day)`, 4.8 for Welford
+  against 6.5). Under Native AOT, nothing is left to warm.
 
 The figures come from one run of the sample on the demonstration file of a million rows, on a
 machine of 14 cores; each timing is the best of three passes.
