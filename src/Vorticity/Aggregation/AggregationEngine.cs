@@ -158,10 +158,19 @@ internal sealed class AggregationPlan
         return [.. rows.ConvertAll(row => (row.Row, row.Columns.ToArray()))];
     }
 
-    /// <summary>The index of the groups of one partition.</summary>
+    /// <summary>
+    /// The index of the groups of one partition: a key of one column by its own index, of two to
+    /// four by their indexes' numbers packed into a word, of more by their values encoded into bytes.
+    /// </summary>
     /// <param name="sorted">Whether the statistics say the key of one column is sorted.</param>
-    /// <param name="bounds">The values the statistics bound an integer key of one column to.</param>
-    internal GroupKeys CreateKeys(bool sorted, KeyBounds? bounds = null) => Keys.Length > 1 ? new CompositeKeys(Keys) : Single(Keys[0], sorted, bounds);
+    /// <param name="facts">What the statistics say of each column, which a composite's parts and a bounded integer read.</param>
+    internal GroupKeys CreateKeys(bool sorted, KeyFacts? facts = null) => Keys.Length switch
+    {
+        1 => Single(Keys[0], sorted, sorted ? null : facts?.Bounds[0]),
+        2 => new PackedKeys<ulong>(Keys, facts),
+        3 or 4 => new PackedKeys<UInt128>(Keys, facts),
+        _ => new CompositeKeys(Keys),
+    };
 
     /// <summary>The index of a key of one column.</summary>
     internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null) =>
@@ -311,7 +320,7 @@ internal sealed class AggregationPartition
     private ZoneSettling.Scratch? _settledScratch;
 
     internal AggregationPartition(
-        AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null, KeyBounds? bounds = null)
+        AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null, KeyFacts? facts = null)
     {
         _columns = columns;
         _inputs = inputs;
@@ -325,7 +334,7 @@ internal sealed class AggregationPartition
             Slots[i] = settled[i] ?? plan.Aggregates[i].Create(source);
         }
 
-        Keys = plan.Grouped ? plan.CreateKeys(sorted, bounds) : null;
+        Keys = plan.Grouped ? plan.CreateKeys(sorted, facts) : null;
         if (streaming >= 0 && _keyCount > 1)
         {
             _streaming = streaming;
@@ -493,6 +502,16 @@ internal sealed class AggregationPartition
         int before = Keys.Count;
         bool ranged = Keys.Assign(arena, _nodes.AsSpan(0, _keyCount), rows, selection, _rowGroups, _ranges);
         int groups = Keys.Count;
+        if (ranged && _componentKeys is not null)
+        {
+            // The component each group holds is read row by row: a composite key's ranges spread first.
+            Span<int> fill = _rowGroups.AsSpan(0, rows);
+            for (int r = 0; r < _ranges.Count; r++)
+            {
+                fill[_ranges.StartAt(r).._ranges.EndAt(r)].Fill(_ranges.GroupAt(r));
+            }
+        }
+
         LastValueGroup = _componentKeys is null
             ? LastValue(ranged, rows, selection, LastValueGroup)
             : Components(arena, rows, selection, before, groups);
@@ -518,7 +537,7 @@ internal sealed class AggregationPartition
         // An aggregate folds a batch's ranges in one call. Ranges this short, a key in runs of
         // seven rows, are folded row by row by an aggregate a range costs more than its rows.
         bool shortRanges = (long)_ranges.Count * ShortRange > batch.SelectedRows;
-        bool filled = false;
+        bool filled = _componentKeys is not null;
         for (int i = 0; i < Slots.Length; i++)
         {
             if (!Folds(i))
@@ -841,7 +860,7 @@ internal static class AggregationEngine
 
         (ColumnShape[] columns, int[] inputs) = Columns(plan, settled);
         bool sorted = plan.Keys.Length == 1 && IsSorted(source, plan.Keys[0]);
-        KeyBounds? bounds = plan.Keys.Length == 1 && !sorted ? Bounds(source, plan.Keys[0]) : null;
+        KeyFacts? facts = plan.Grouped ? Facts(source, plan.Keys) : null;
         ScanSpec pass = PassSpec(spec, columns, plan, source.Schema);
 
         // The blocks the zone maps answer are not read: the pass's mask has them dead, and each
@@ -868,7 +887,7 @@ internal static class AggregationEngine
         RowRange[]? ranges = Ranges(source, pass, degree);
         if (ranges is null)
         {
-            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, bounds: bounds);
+            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts);
             if (settling is not null)
             {
                 only.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
@@ -884,7 +903,7 @@ internal static class AggregationEngine
             partitions = new AggregationPartition[Math.Min(degree, ranges.Length)];
             for (int p = 0; p < partitions.Length; p++)
             {
-                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, bounds: bounds);
+                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts);
             }
 
             await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, cancellationToken).ConfigureAwait(false);
@@ -1033,8 +1052,22 @@ internal static class AggregationEngine
         return index < statistics.Count && statistics[index].TryGetIsSorted(out bool sorted) && sorted;
     }
 
+    /// <summary>What the statistics say of each column of a key: whether it is sorted, and what bounds it.</summary>
+    internal static KeyFacts Facts(ScanSource source, ColumnShape[] keys)
+    {
+        bool[] sorted = new bool[keys.Length];
+        KeyBounds?[] bounds = new KeyBounds?[keys.Length];
+        for (int k = 0; k < keys.Length; k++)
+        {
+            sorted[k] = IsSorted(source, keys[k]);
+            bounds[k] = Bounds(source, keys[k]);
+        }
+
+        return new KeyFacts(sorted, bounds);
+    }
+
     /// <summary>
-    /// The smallest and the largest value of an integer key of one column, when the file statistics
+    /// The smallest and the largest value of an integer column of a key, when the file statistics
     /// hold them exactly: what bounds a table of its groups (<see cref="FixedKeys{TValue}"/>).
     /// </summary>
     internal static KeyBounds? Bounds(ScanSource source, ColumnShape key)

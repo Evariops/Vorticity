@@ -149,6 +149,10 @@ public partial record struct Named(string Name, long Value);
 [VortexRecord]
 public partial record struct KeyTotal(int Key, long Count, long Total);
 
+/// <summary>A pair of keys, its rows and the total of their values.</summary>
+[VortexRecord]
+public partial record struct PairTotal(int First, int Second, long Count, long Total);
+
 /// <summary>A text key's rows.</summary>
 [VortexRecord]
 public partial record struct NameCount(string Name, long Count);

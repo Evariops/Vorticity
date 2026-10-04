@@ -210,8 +210,12 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
         int streaming = Streaming(_query);
+
+        // The streaming component is sorted, which its part of a composite key reads as runs.
+        KeyFacts facts = AggregationEngine.Facts(host.Source, plan.Keys);
+        facts.Sorted[streaming] = true;
         _partition = new AggregationPartition(
-            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, streaming, host.Source);
+            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, streaming, host.Source, facts);
 
         // The blocks the zone maps settle are folded in the order of the rows, which the groups
         // close in.
@@ -253,7 +257,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             async (rows, token) =>
             {
                 AggregationPartition range = new AggregationPartition(
-                    plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, streaming, host.Source);
+                    plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, streaming, host.Source, facts);
                 if (settling is not null)
                 {
                     range.Settle(settling, rows);

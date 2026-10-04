@@ -41,6 +41,10 @@ internal static class EngineScenarios
         yield return ("draws", new Scenario("group by random int (100k groups), count sum", (file, run) => DrawsAsync(file, run, d => d.K100k), 10_000));
         yield return ("draws", new Scenario("group by random int (1M groups), count sum", (file, run) => DrawsAsync(file, run, d => d.K1M), 100_000));
 
+        // 6b: a key of two fixed-width columns, at a few thousand groups and at nearly a group a row.
+        yield return ("draws", new Scenario("group by (random int, random int) (4 000 groups), count sum", (file, run) => PairsAsync(file, run, d => d.K4, d => d.K1000)));
+        yield return ("draws", new Scenario("group by (random int, random int) (1.8M groups), count sum", (file, run) => PairsAsync(file, run, d => d.K100k, d => d.K100), 100_000));
+
         // 6d2: a hot key and a long tail, and keys each seen twenty times.
         yield return ("skewed", new Scenario("group by skewed key (one key 30 %, 1M rare), count sum", KeyedAsync, 100_000));
         yield return ("medium", new Scenario("group by medium key (200k keys x 20), count sum", KeyedAsync, 10_000));
@@ -243,6 +247,21 @@ internal static class EngineScenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    private static async Task<long> PairsAsync(VortexFile file, Run run, Func<Probe<Draw>, Sym<int>> first, Func<Probe<Draw>, Sym<int>> second)
+    {
+        long rows = 0;
+        await foreach (Columns<PairTotal> groups in run.Track(file.Scan<Draw>()
+            .GroupBy(d => (first(d), second(d)))
+            .Select(g => (g.Key.Item1, g.Key.Item2, g.Count(), g.Sum(d => d.Value))))
+            .As<PairTotal>())
+        {
+            run.Answer();
+            rows += Sum(groups.Column<long>(2).Values);
         }
 
         return rows;

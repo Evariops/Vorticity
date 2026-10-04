@@ -598,9 +598,9 @@ the caller's code. Keys are numbered as they are met, one state per group per ag
 | sorted by the statistics, canonical | runs detected | one per run |
 | canonical, an integer whose statistics bound it within 2¹⁶ values | a table from the value to its group, in front of the index | one per distinct value met |
 | canonical, any other | per row, a row equal to the one before reusing its group | one per row |
-| composite, every part constant, run-end or sorted | ranges cut at every part's boundaries | one per range |
-| composite, fixed-width parts within 16 bytes | the parts packed into one 128-bit key | one per row |
-| composite, any other | the tuple encoded into bytes, one hash | one per row |
+| composite of two to four parts, every part constant, run-end or sorted | each part grouped by its own index, the ranges cut at every part's boundaries | one per range |
+| composite of two to four parts, any other | each part grouped by its own index, as above, and the parts' numbers packed into one word of 64 or 128 bits; a table indexed by the numbers while their counts' product is under 2¹⁶ | one per tuple met through the table; past it, one per row whose tuple differs from the row before's |
+| composite of five parts or more | the tuple encoded into bytes, one hash | one per row |
 
 A function of a column (§3) groups as the column does, evaluated per code, per run or per value.
 An aggregate takes a batch's ranges in one call. When they are shorter than its batch has words of
