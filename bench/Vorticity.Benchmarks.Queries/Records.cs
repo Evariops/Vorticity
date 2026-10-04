@@ -157,6 +157,10 @@ public partial record struct NameCount(string Name, long Count);
 [VortexRecord]
 public partial record struct UserTop(int User, double? Slowest, DateTime? At);
 
+/// <summary>A user's slowest request.</summary>
+[VortexRecord]
+public partial record struct UserSlowest(int User, double? Slowest);
+
 /// <summary>A day of latencies: the first, the highest, the lowest and the last.</summary>
 [VortexRecord]
 public partial record struct DayBar(DateTime Day, double? Open, double? High, double? Low, double? Close);

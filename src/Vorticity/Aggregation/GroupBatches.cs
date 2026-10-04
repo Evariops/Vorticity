@@ -39,10 +39,18 @@ internal sealed class AggregationQuery : ResultQuery
         Take = take;
         RowFilter = rows;
         Operators = operators;
+        ChosenReader = GroupSelection.ChosenReader(operators);
     }
 
     /// <summary>The conjuncts of the filters on groups that name only the key: they filter the rows.</summary>
     internal VortexExpr? RowFilter { get; }
+
+    /// <summary>
+    /// The first operator on groups that reads a column of a chosen row, before which those columns
+    /// are fetched for the groups left; the number of operators when none does, the columns being
+    /// fetched then for the groups delivered.
+    /// </summary>
+    internal int ChosenReader { get; }
 
     /// <summary>The most groups the last run held at once: every group of a blocking one, the open ones and a batch's closed ones of a streaming one.</summary>
     internal long PeakGroups { get; set; }
@@ -203,9 +211,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> RunAsync()
     {
-        _outcome = await _query.Host.RunAsync(_query.Plan, _cancellationToken, _query.RowFilter).ConfigureAwait(false);
-        _query.PeakGroups = _outcome.Keys?.Count ?? 1;
-        (_groups, _count) = GroupSelection.Apply(_query, _outcome, _cancellationToken);
+        (_outcome, _groups, _count) = await _query.Host.RunAsync(_query, _cancellationToken).ConfigureAwait(false);
         return Next();
     }
 
@@ -367,12 +373,66 @@ internal static class GroupSelection
     /// <summary>The groups a filter evaluates at once: their results' columns stay in the cache.</summary>
     private const int Window = 4_096;
 
-    internal static (int[] Groups, int Count) Apply(AggregationQuery query, AggregationOutcome outcome, CancellationToken cancellationToken)
+    /// <summary>The first of <paramref name="operators"/> that reads a column of a chosen row; their number when none does.</summary>
+    internal static int ChosenReader(GroupOperator[] operators)
     {
-        int[] groups = outcome.Order;
-        int count = groups.Length;
-        GroupOperator[] operators = query.Operators;
         for (int o = 0; o < operators.Length; o++)
+        {
+            bool reads = operators[o] switch
+            {
+                GroupFilter filter => Array.Exists(filter.Fields, field => field.Result is IChosenColumn),
+                GroupOrder order => Array.Exists(order.Keys, key => key.Field.Result is IChosenColumn),
+                _ => false,
+            };
+            if (reads)
+            {
+                return o;
+            }
+        }
+
+        return operators.Length;
+    }
+
+    /// <summary>
+    /// The groups the query delivers, in order: its operators applied to the groups the pass found,
+    /// and the columns of the chosen rows fetched for the groups left before the first operator that
+    /// reads one, or else for the groups the result delivers.
+    /// </summary>
+    /// <param name="query">The query, whose operators and window apply.</param>
+    /// <param name="outcome">The pass's groups and states, where the chosen rows' columns go.</param>
+    /// <param name="spec">The pass's scan, which the fetch takes the rows from.</param>
+    /// <param name="cancellationToken">Cancels the operators and the fetch.</param>
+    internal static async ValueTask<(int[] Groups, int Count)> ApplyAsync(
+        AggregationQuery query, AggregationOutcome outcome, ScanSpec spec, CancellationToken cancellationToken)
+    {
+        int operators = query.Operators.Length;
+        bool chosen = query.Plan.Chosen.Length > 0;
+        int reader = chosen ? query.ChosenReader : operators;
+        (int[] groups, int count) = Apply(query, outcome, 0, reader, outcome.Order, outcome.Order.Length, cancellationToken);
+        if (!chosen)
+        {
+            return (groups, count);
+        }
+
+        if (reader < operators)
+        {
+            await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Metrics, groups.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+            return Apply(query, outcome, reader, operators, groups, count, cancellationToken);
+        }
+
+        // No operator reads them: the result's window alone is read.
+        int from = (int)Math.Min(query.Skip, count);
+        int until = (int)Math.Min(count, Saturated(query.Skip, query.Take));
+        await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Metrics, groups.AsMemory(from, until - from), cancellationToken).ConfigureAwait(false);
+        return (groups, count);
+    }
+
+    /// <summary>Operators <paramref name="start"/> to <paramref name="end"/> of the query, applied in order to the first <paramref name="count"/> of <paramref name="groups"/>.</summary>
+    private static (int[] Groups, int Count) Apply(
+        AggregationQuery query, AggregationOutcome outcome, int start, int end, int[] groups, int count, CancellationToken cancellationToken)
+    {
+        GroupOperator[] operators = query.Operators;
+        for (int o = start; o < end; o++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             switch (operators[o])

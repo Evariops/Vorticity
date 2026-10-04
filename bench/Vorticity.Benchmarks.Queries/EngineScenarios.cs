@@ -26,6 +26,10 @@ internal static class EngineScenarios
         yield return ("names", new Scenario("order by count take 100, text key (1M groups)", TopNamesAsync));
         yield return ("requests", new Scenario("order by max take 10 with its row, 1M groups", SlowestUsersAsync));
         yield return ("requests", new Scenario("ohlc by day (first, max, min, last)", OhlcAsync));
+
+        // 6n: every group's chosen row, read after the pass, against the same query without it.
+        yield return ("requests", new Scenario("max by user with its row, every group (1M groups)", (file, run) => SlowestOfEveryUserAsync(file, run, row: true)));
+        yield return ("requests", new Scenario("max by user, every group (1M groups)", (file, run) => SlowestOfEveryUserAsync(file, run, row: false)));
         yield return ("draws", new Scenario("order by key take 10, random int (1M groups)", FirstKeysAsync));
         yield return ("readings", new Scenario("order by key descending take 7, 1000 days", LastDaysAsync));
         yield return ("draws", new Scenario("take 10 without order, random int (1M groups)", AnyKeysAsync));
@@ -129,6 +133,35 @@ internal static class EngineScenarios
         {
             run.Answer();
             rows += user.User + (user.At is null ? 1 : 0);
+        }
+
+        return rows;
+    }
+
+    private static async Task<long> SlowestOfEveryUserAsync(VortexFile file, Run run, bool row)
+    {
+        long rows = 0;
+        if (row)
+        {
+            await foreach (Columns<UserTop> users in run.Track(file.Scan<Request>()
+                .GroupBy(r => r.UserId)
+                .Select(g => (g.Key, g.Max(r => r.Latency), g.MaxBy(r => r.Latency).At)))
+                .As<UserTop>())
+            {
+                run.Answer();
+                rows += users.RowCount;
+            }
+
+            return rows;
+        }
+
+        await foreach (Columns<UserSlowest> users in run.Track(file.Scan<Request>()
+            .GroupBy(r => r.UserId)
+            .Select(g => (g.Key, g.Max(r => r.Latency))))
+            .As<UserSlowest>())
+        {
+            run.Answer();
+            rows += users.RowCount;
         }
 
         return rows;

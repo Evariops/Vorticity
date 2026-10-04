@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Generic;
+using System.Buffers;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Compute;
@@ -18,8 +18,11 @@ internal abstract class ChosenValues
     /// <summary>Leaves <paramref name="group"/> without a row: its value null, or a value type's default.</summary>
     internal abstract void Clear(int group);
 
-    /// <summary>Reads column <paramref name="node"/> of a fetched batch, its row <c>i</c> going to group <c>groups[i]</c>.</summary>
-    internal abstract void Read(RecordBatch batch, int node, ReadOnlySpan<int> groups);
+    /// <summary>
+    /// Reads column <paramref name="node"/> of a fetched batch whose first row is the take's row
+    /// <paramref name="first"/>: the take's row <c>rows[i]</c> goes to group <c>groups[i]</c>.
+    /// </summary>
+    internal abstract void Read(RecordBatch batch, int node, int first, ReadOnlySpan<int> rows, ReadOnlySpan<int> groups);
 }
 
 /// <summary>The values of a column of chosen rows as <typeparamref name="T"/>, and the groups that have no row.</summary>
@@ -51,13 +54,13 @@ internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
         _missing[group] = true;
     }
 
-    internal override void Read(RecordBatch batch, int node, ReadOnlySpan<int> groups)
+    internal override void Read(RecordBatch batch, int node, int first, ReadOnlySpan<int> rows, ReadOnlySpan<int> groups)
     {
-        Scratch.Grow(ref _scratch, groups.Length);
+        Scratch.Grow(ref _scratch, batch.RowCount);
         ResultValues.Copy(batch, batch.Arena, node, column.Read.Type, column.Read.Extensions, _scratch, null);
         for (int i = 0; i < groups.Length; i++)
         {
-            _values[groups[i]] = _scratch[i];
+            _values[groups[i]] = _scratch[rows[i] - first];
             _missing[groups[i]] = false;
         }
     }
@@ -97,10 +100,11 @@ internal sealed class ChosenResultColumn<T>(string name, VortexType type, Chosen
 }
 
 /// <summary>
-/// The late reading of chosen rows: once a pass has kept each group's row as a position, the
-/// positions of a batch of groups are sorted and taken from the source, for the columns read from
-/// those rows alone, which decodes only them where the encoding allows. Rows of one choice share one
-/// take, whatever number of their columns the selection reads.
+/// The late reading of chosen rows: once a pass has kept each group's rows as positions, the rows
+/// of a set of groups are sorted and taken from the source in one take, each row once whatever
+/// number of choices and groups it serves, for the columns read from them alone, which decodes only
+/// those rows where the encoding allows. A first row and a last that share their chunks decode
+/// them once.
 /// </summary>
 internal static class ChosenFetch
 {
@@ -115,7 +119,7 @@ internal static class ChosenFetch
         AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanMetrics metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
     {
         IChosenColumn[] chosen = outcome.Plan.Chosen;
-        bool[] done = new bool[chosen.Length];
+        (IAggregateNode Row, int[] Columns)[] choices = outcome.Plan.ChosenRows;
         int most = 0;
         foreach (int group in groups.Span)
         {
@@ -127,57 +131,30 @@ internal static class ChosenFetch
             outcome.ChosenOf(chosen[c]).EnsureGroups(most);
         }
 
-        for (int c = 0; c < chosen.Length; c++)
-        {
-            if (done[c])
-            {
-                continue;
-            }
-
-            // The columns read from this row, each once.
-            IAggregateNode row = chosen[c].Row;
-            List<int> columns = [];
-            for (int other = c; other < chosen.Length; other++)
-            {
-                if (!done[other] && chosen[other].Row.Identity.Equals(row.Identity))
-                {
-                    done[other] = true;
-                    columns.Add(other);
-                }
-            }
-
-            await FetchRowAsync(outcome, (AggregateSlot<long>)outcome.SlotOf(row), columns, source, spec, metrics, groups, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    private static async ValueTask FetchRowAsync(
-        AggregationOutcome outcome,
-        AggregateSlot<long> slot,
-        List<int> columns,
-        ScanSource source,
-        ScanSpec spec,
-        ScanMetrics metrics,
-        ReadOnlyMemory<int> groups,
-        CancellationToken cancellationToken)
-    {
-        IChosenColumn[] chosen = outcome.Plan.Chosen;
-        long[] positions = new long[groups.Length];
-        int[] owners = new int[groups.Length];
+        // Each row a group chose, with the choice and the group it serves; a group without a row
+        // for a choice has the choice's columns left empty.
+        long[] positions = new long[groups.Length * choices.Length];
+        long[] owners = new long[positions.Length];
+        int[] ofChoice = new int[choices.Length + 1];
         int count = 0;
-        foreach (int group in groups.Span)
+        for (int r = 0; r < choices.Length; r++)
         {
-            long position = slot.Result(group);
-            if (position >= 0)
+            AggregateSlot<long> slot = (AggregateSlot<long>)outcome.SlotOf(choices[r].Row);
+            foreach (int group in groups.Span)
             {
-                positions[count] = position;
-                owners[count] = group;
-                count++;
-                continue;
-            }
+                long position = slot.Result(group);
+                if (position >= 0)
+                {
+                    positions[count] = position;
+                    owners[count++] = ((long)r << 32) | (uint)group;
+                    ofChoice[r + 1]++;
+                    continue;
+                }
 
-            foreach (int column in columns)
-            {
-                outcome.ChosenOf(chosen[column]).Clear(group);
+                foreach (int column in choices[r].Columns)
+                {
+                    outcome.ChosenOf(chosen[column]).Clear(group);
+                }
             }
         }
 
@@ -186,12 +163,35 @@ internal static class ChosenFetch
             return;
         }
 
-        // A take reads its positions in order; each group has its own row, so they are distinct.
-        Array.Sort(positions, owners, 0, count);
-        FieldMaskBuilder mask = new FieldMaskBuilder();
-        foreach (int column in columns)
+        // A take reads its positions in order, each once: the rows sorted, a row two choices share
+        // read for both. Each choice lists, in that order, the row of the take it reads and the
+        // group it serves.
+        Sort(positions, owners, count);
+        for (int r = 0; r < choices.Length; r++)
         {
-            mask.Include(chosen[column].Read.FieldPath);
+            ofChoice[r + 1] += ofChoice[r];
+        }
+
+        int[] next = ofChoice[..^1];
+        int[] rowOf = new int[count];
+        int[] groupOf = new int[count];
+        int distinct = 0;
+        for (int e = 0; e < count; e++)
+        {
+            if (distinct == 0 || positions[distinct - 1] != positions[e])
+            {
+                positions[distinct++] = positions[e];
+            }
+
+            int at = next[(int)(owners[e] >> 32)]++;
+            rowOf[at] = distinct - 1;
+            groupOf[at] = (int)owners[e];
+        }
+
+        FieldMaskBuilder mask = new FieldMaskBuilder();
+        foreach (IChosenColumn column in chosen)
+        {
+            mask.Include(column.Read.FieldPath);
         }
 
         ScanSpec take = spec with
@@ -199,7 +199,7 @@ internal static class ChosenFetch
             Filter = null,
             MatchesNothing = false,
             Rows = null,
-            Take = positions.AsSpan(0, count).ToArray(),
+            Take = positions.AsSpan(0, distinct).ToArray(),
             Projection = mask.Build(),
             OrderPath = null,
             Descending = false,
@@ -211,27 +211,115 @@ internal static class ChosenFetch
             Options = spec.Options with { Compact = true },
         };
 
-        int at = 0;
+        // Each batch of the take: for each choice, its rows among the batch's, read into its columns.
+        int first = 0;
+        int[] read = ofChoice[..^1];
         await foreach (RecordBatch batch in source.BatchesAsync(take, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             int rows = batch.RowCount;
-            if (at + rows > count)
+            if (first + rows > distinct)
             {
-                throw new InvalidOperationException($"A take of {count} rows delivered more.");
+                throw new InvalidOperationException($"A take of {distinct} rows delivered more.");
             }
 
-            foreach (int column in columns)
+            for (int r = 0; r < choices.Length; r++)
             {
-                int node = FilterEvaluator.Resolve(batch.Arena, batch.RootIndex, chosen[column].Read.Field, rows);
-                outcome.ChosenOf(chosen[column]).Read(batch, node, owners.AsSpan(at, rows));
+                int from = read[r];
+                int until = from;
+                while (until < ofChoice[r + 1] && rowOf[until] < first + rows)
+                {
+                    until++;
+                }
+
+                if (until == from)
+                {
+                    continue;
+                }
+
+                foreach (int column in choices[r].Columns)
+                {
+                    int node = FilterEvaluator.Resolve(batch.Arena, batch.RootIndex, chosen[column].Read.Field, rows);
+                    outcome.ChosenOf(chosen[column]).Read(batch, node, first, rowOf.AsSpan(from, until - from), groupOf.AsSpan(from, until - from));
+                }
+
+                read[r] = until;
             }
 
-            at += rows;
+            first += rows;
         }
 
-        if (at != count)
+        if (first != distinct)
         {
-            throw new InvalidOperationException($"A take of {count} rows delivered {at}.");
+            throw new InvalidOperationException($"A take of {distinct} rows delivered {first}.");
+        }
+    }
+
+    /// <summary>The digits of a position a pass of <see cref="Sort"/> orders by.</summary>
+    private const int DigitBits = 11;
+
+    /// <summary>
+    /// Sorts the first <paramref name="count"/> positions ascending, their owners with them: below
+    /// a few thousand by comparison, above by their digits, from the lowest, each pass stable, as
+    /// many passes as the largest position has digits. A position is a row of the source, so two
+    /// passes order four million rows; a comparison sort of a million would take ten times longer.
+    /// </summary>
+    private static void Sort(long[] positions, long[] owners, int count)
+    {
+        if (count < 4_096)
+        {
+            Array.Sort(positions, owners, 0, count);
+            return;
+        }
+
+        long largest = 0;
+        for (int i = 0; i < count; i++)
+        {
+            largest = Math.Max(largest, positions[i]);
+        }
+
+        long[] fromPositions = positions;
+        long[] fromOwners = owners;
+        long[] intoPositions = ArrayPool<long>.Shared.Rent(count);
+        long[] intoOwners = ArrayPool<long>.Shared.Rent(count);
+        int[] starts = new int[1 << DigitBits];
+        try
+        {
+            for (int shift = 0; shift < 64 && (largest >> shift) > 0; shift += DigitBits)
+            {
+                Array.Clear(starts);
+                for (int i = 0; i < count; i++)
+                {
+                    starts[(int)((fromPositions[i] >> shift) & ((1 << DigitBits) - 1))]++;
+                }
+
+                int start = 0;
+                for (int d = 0; d < starts.Length; d++)
+                {
+                    (starts[d], start) = (start, start + starts[d]);
+                }
+
+                for (int i = 0; i < count; i++)
+                {
+                    int at = starts[(int)((fromPositions[i] >> shift) & ((1 << DigitBits) - 1))]++;
+                    intoPositions[at] = fromPositions[i];
+                    intoOwners[at] = fromOwners[i];
+                }
+
+                (fromPositions, intoPositions) = (intoPositions, fromPositions);
+                (fromOwners, intoOwners) = (intoOwners, fromOwners);
+            }
+
+            if (!ReferenceEquals(fromPositions, positions))
+            {
+                fromPositions.AsSpan(0, count).CopyTo(positions);
+                fromOwners.AsSpan(0, count).CopyTo(owners);
+            }
+        }
+        finally
+        {
+            // The rented pair is whichever two the passes did not leave the result in.
+            ArrayPool<long>.Shared.Return(ReferenceEquals(fromPositions, positions) ? intoPositions : fromPositions);
+            ArrayPool<long>.Shared.Return(ReferenceEquals(fromOwners, owners) ? intoOwners : fromOwners);
         }
     }
 }

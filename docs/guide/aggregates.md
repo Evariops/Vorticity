@@ -165,10 +165,13 @@ and `.City` come from the same reading. A group with no candidate, every value n
 where the member is nullable and a value type's default where it is not.
 
 The pass keeps each group's row as its position and the value it is chosen by; the columns read
-from the rows are fetched after it, for the chosen rows alone, by position, which decodes only those
-rows where the encoding allows. A group by that streams fetches them for each batch of groups it
-closes. A chosen row's column is a result: a `Where` or an `OrderBy` after the group by compares it,
-and an aggregate does not read it.
+from the rows are fetched once the groups are known, by position, which decodes only those rows
+where the encoding allows: for the groups the result delivers, or, when a `Where` or an `OrderBy`
+after the group by compares one, for the groups that reach it. An `OrderByDescending` with a
+`Take(10)` reads ten rows whatever the number of groups, and the first and last rows of a day share
+one read. A group by that streams fetches them for each batch of groups it closes. A chosen row's
+column is a result: a `Where` or an `OrderBy` after the group by compares it, and an aggregate does
+not read it.
 
 ## Buckets of time and of numbers
 

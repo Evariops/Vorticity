@@ -305,7 +305,10 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _keepPending = !all && _closedCount > 0;
     }
 
-    /// <summary>Closes the groups now final, reads their chosen rows, and passes them through the operators, which may read those.</summary>
+    /// <summary>
+    /// Closes the groups now final and passes them through the operators, reading their chosen rows
+    /// before the first operator that reads one, for the groups left, or else for those delivered.
+    /// </summary>
     private async ValueTask CloseAsync(bool all)
     {
         Close(all);
@@ -314,21 +317,28 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             return;
         }
 
-        if (_query.Plan.Chosen.Length > 0)
+        int operators = _query.Operators.Length;
+        bool chosen = _query.Plan.Chosen.Length > 0;
+        int reader = chosen ? _query.ChosenReader : operators;
+        int count = Through(0, reader, _closedCount);
+        if (chosen && count > 0)
         {
-            await ChosenFetch.FetchAsync(_outcome!, _query.Host.Source, _pass!, _query.Host.Metrics, _closed.AsMemory(0, _closedCount), _cancellationToken)
+            await ChosenFetch.FetchAsync(_outcome!, _query.Host.Source, _pass!, _query.Host.Metrics, _closed.AsMemory(0, count), _cancellationToken)
                 .ConfigureAwait(false);
         }
 
-        Through();
+        _closedCount = reader < operators ? Through(reader, operators, count) : count;
     }
 
-    /// <summary>The closed groups through the operators on groups and the result's own window, in the order written.</summary>
-    private void Through()
+    /// <summary>
+    /// The first <paramref name="count"/> closed groups through operators <paramref name="start"/> to
+    /// <paramref name="end"/>, in the order written, and the result's own window after the last; how
+    /// many are left.
+    /// </summary>
+    private int Through(int start, int end, int count)
     {
         GroupOperator[] operators = _query.Operators;
-        int count = _closedCount;
-        for (int o = 0; o < operators.Length && count > 0; o++)
+        for (int o = start; o < end && count > 0; o++)
         {
             switch (operators[o])
             {
@@ -360,7 +370,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             }
         }
 
-        _closedCount = Window(ref _resultSkip, ref _resultTake, count);
+        return end == operators.Length ? Window(ref _resultSkip, ref _resultTake, count) : count;
     }
 
     /// <summary>Passes over the groups a window skips and keeps those it takes, its counters carried from one closed batch to the next.</summary>

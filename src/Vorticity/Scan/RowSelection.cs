@@ -52,8 +52,19 @@ internal sealed class RowSelection
             return new RowSelection([]);
         }
 
+        // A list that ascends already, as the fetch of a grouped query's chosen rows hands it, is
+        // kept in its order: sorting it again would cost a million rows more than reading them.
         long[] sorted = rows.ToArray();
-        Compute.SpanSort.Sort(sorted);
+        int ascending = 1;
+        while (ascending < sorted.Length && sorted[ascending - 1] < sorted[ascending])
+        {
+            ascending++;
+        }
+
+        if (ascending < sorted.Length)
+        {
+            Compute.SpanSort.Sort(sorted);
+        }
 
         int kept = 1;
         CheckRow(sorted[0], rowCount);

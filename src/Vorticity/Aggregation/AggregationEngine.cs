@@ -77,6 +77,7 @@ internal sealed class AggregationPlan
         }
 
         Chosen = [.. chosen];
+        ChosenRows = Rows(Chosen);
         Filters = new FilterPlan(Aggregates);
     }
 
@@ -85,6 +86,9 @@ internal sealed class AggregationPlan
 
     /// <summary>The columns read from chosen rows, each once: fetched after the pass by the rows' positions.</summary>
     internal IChosenColumn[] Chosen { get; }
+
+    /// <summary>The chosen rows, each once, and the columns of <see cref="Chosen"/> read from each.</summary>
+    internal (IAggregateNode Row, int[] Columns)[] ChosenRows { get; }
 
     internal IAggregateNode[] Aggregates { get; }
 
@@ -133,6 +137,25 @@ internal sealed class AggregationPlan
         {
             aggregates.Add(aggregate);
         }
+    }
+
+    /// <summary>The rows <paramref name="chosen"/> are read from, in the order first met, with the columns read from each.</summary>
+    private static (IAggregateNode Row, int[] Columns)[] Rows(IChosenColumn[] chosen)
+    {
+        List<(IAggregateNode Row, List<int> Columns)> rows = [];
+        for (int c = 0; c < chosen.Length; c++)
+        {
+            int row = rows.FindIndex(known => known.Row.Identity.Equals(chosen[c].Row.Identity));
+            if (row < 0)
+            {
+                rows.Add((chosen[c].Row, []));
+                row = rows.Count - 1;
+            }
+
+            rows[row].Columns.Add(c);
+        }
+
+        return [.. rows.ConvertAll(row => (row.Row, row.Columns.ToArray()))];
     }
 
     /// <summary>The index of the groups of one partition.</summary>
@@ -712,6 +735,29 @@ internal abstract class AggregationHost
             }
 
             return outcome;
+        }
+        finally
+        {
+            End();
+        }
+    }
+
+    /// <summary>
+    /// Runs a grouped query that does not stream: its pass, then its operators on groups, the chosen
+    /// rows fetched for the groups the first operator that reads one is given, or else for the
+    /// groups delivered (<see cref="GroupSelection.ApplyAsync"/>).
+    /// </summary>
+    /// <returns>The merged states and keys, and the groups delivered, in order, before the result's window.</returns>
+    internal async ValueTask<(AggregationOutcome Outcome, int[] Groups, int Count)> RunAsync(AggregationQuery query, CancellationToken cancellationToken)
+    {
+        Begin();
+        try
+        {
+            ScanSpec spec = Spec(query.RowFilter);
+            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, query.Plan, cancellationToken).ConfigureAwait(false);
+            query.PeakGroups = outcome.Keys?.Count ?? 1;
+            (int[] groups, int count) = await GroupSelection.ApplyAsync(query, outcome, spec, cancellationToken).ConfigureAwait(false);
+            return (outcome, groups, count);
         }
         finally
         {

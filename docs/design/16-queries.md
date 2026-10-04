@@ -385,11 +385,14 @@ select (g.Key, g.Max(x => x.Celsius), g.MaxBy(x => x.Celsius).At)               
 ```
 
 A chosen row is kept as its position and the value it is chosen by; the columns read from it are
-fetched after, for the chosen rows only, by position — a take, which decodes only those rows where
-the encoding allows ([90-registry.md](90-registry.md)) — unless the groups are so many against the
-rows that carrying the columns along costs less, which the engine decides from both counts. A
-streaming group by fetches them per batch of groups it closes. Columns read from one chosen row share
-it: `g.MaxBy(x => x.Celsius).At` and `.City` are one row. When `MinBy` or `MaxBy` has no candidate,
+fetched once the groups are known, by position: for the groups the result delivers, or, when a
+`Where` or an `OrderBy` on groups reads one, for the groups that reach the first of them. One take
+serves every chosen row, each row once whatever the choices it serves, and decodes only those rows
+where the encoding allows ([90-registry.md](90-registry.md)): a top ten reads the chunks of ten rows,
+and an open and a close read their chunks once. Carrying the columns along in the pass would spare
+only the take's second decode, a few percent of a query that reads every group's row, so the engine
+always fetches. A streaming group by fetches them per batch of groups it closes, after its operators.
+Columns read from one chosen row share it: `g.MaxBy(x => x.Celsius).At` and `.City` are one row. When `MinBy` or `MaxBy` has no candidate,
 its columns are null, or the default of a value type that is not nullable. The order is the file's
 at every degree of parallelism: a range of rows keeps its own, and the merge keeps the earlier
 range's row. A chosen row's column is a result and not a row: it is no aggregate's input, and
@@ -669,7 +672,7 @@ does not hide it:
 | `GroupPlan.Aggregates` | the aggregates once deduplicated, those the statistics settle, the filters of filtered groups and the columns they add to the pass |
 | `GroupPlan.RowFilter` | the conjuncts of a `Where` on keys moved to the rows (§6.2) |
 | `GroupPlan.Order` | none, streamed, a heap of `k`, or a sort of every group |
-| `GroupPlan.ChosenRows` | the chosen rows fetched by position after the pass, or carried along |
+| `GroupPlan.ChosenRows` | the chosen rows, and the operator before which they are fetched, in one take, for the groups left: the first that reads one, or the result's window |
 | `GroupPlan.Ranges`, `Partitioned` | how many ranges aggregate concurrently, and whether they partition by key |
 | `GroupPlan.Memory` | the memory the statistics bound, when they bound the groups: a direct-index key's range, a streaming key's open groups |
 

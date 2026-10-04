@@ -19,6 +19,8 @@ public sealed partial class ChosenRowTests
 {
     private const int Rows = 50_000;
 
+    private const int ChunkRows = 1_024;
+
     private static readonly string[] Symbols = ["AAPL", "MSFT", "NVDA", "ORCL", "SAP", "VOD"];
 
     private static readonly string[] Venues = ["XNAS", "XNYS", "BATS", "IEXG"];
@@ -167,7 +169,163 @@ public sealed partial class ChosenRowTests
         }
     }
 
+    [Fact]
+    public async Task ATopKReadsTheRowsOfTheGroupsItDeliversAlone()
+    {
+        Trade[] rows = Trades();
+        string path = await WriteAsync(rows, Chunked);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+
+            // The ten minutes of the highest prices, and the size of the row of each.
+            int[] top = [.. rows.Select((row, position) => (row, position)).GroupBy(r => r.row.Minute)
+                .Select(g => (Minute: g.Key, High: g.Where(r => r.row.Price is double p && !double.IsNaN(p)).MaxBy(r => r.row.Price!.Value)))
+                .OrderByDescending(g => g.High.row.Price).ThenBy(g => g.Minute)
+                .Take(10)
+                .Select(g => g.High.position)];
+            (List<int> sizes, ScanStatistics reads) = await HighestAsync(file, 10, row: true);
+            Assert.Equal(top.Select(position => rows[position].Size), sizes);
+
+            // What the rows cost: one chunk for one row; the chunks of the ten for ten; every
+            // chunk for every group. The pass is the same with the rows or without them.
+            ScanStatistics one = Fetched((await HighestAsync(file, 1, row: true)).Reads, (await HighestAsync(file, 1, row: false)).Reads);
+            ScanStatistics ten = Fetched(reads, (await HighestAsync(file, 10, row: false)).Reads);
+            ScanStatistics all = Fetched((await HighestAsync(file, int.MaxValue, row: true)).Reads, (await HighestAsync(file, int.MaxValue, row: false)).Reads);
+            int chunks = top.Select(position => position / ChunkRows).Distinct().Count();
+            Assert.True(one.Requests > 0 && one.BlocksDecoded > 0, $"{one}");
+            Assert.True(ten.Requests <= chunks * one.Requests, $"{ten.Requests} requests for the rows of {chunks} chunks, {one.Requests} for one");
+            Assert.True(ten.BlocksDecoded <= chunks * one.BlocksDecoded, $"{ten.BlocksDecoded} blocks for the rows of {chunks} chunks, {one.BlocksDecoded} for one");
+            Assert.True(all.Requests >= (Rows / ChunkRows) * one.Requests, $"{all.Requests} requests for every group's row");
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task AFirstAndALastShareOneTake()
+    {
+        Trade[] rows = Trades();
+        string path = await WriteAsync(rows, Chunked);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+
+            // Every chunk holds the first and the last rows of minutes: a take of both reads each
+            // chunk once, as a take of the first alone does. Forced to block, each query reads
+            // every group's rows in one fetch.
+            Aggregation<long> none = file.Scan<Trade>().GroupBy(r => r.Minute).Select(g => g.Count());
+            none.Plan.Blocking = true;
+            await none.ToListAsync(Ct);
+            Aggregation<double?> opens = file.Scan<Trade>().GroupBy(r => r.Minute).Select(g => g.First().Price);
+            opens.Plan.Blocking = true;
+            List<double?> open = await opens.ToListAsync(Ct);
+            Vorticity.Aggregation both = file.Scan<Trade>().GroupBy(r => r.Minute).OrderBy(g => g.Key).Select(g => (g.Key, g.First().Price, g.Last().Price));
+            both.Plan.Blocking = true;
+            List<MinuteEndPrices> ends = await ListAsync(both.As<MinuteEndPrices>());
+
+            Assert.Equal(
+                rows.GroupBy(r => r.Minute).Select(g => new MinuteEndPrices(g.Key, g.First().Price, g.Last().Price)),
+                ends);
+            Assert.Equal(ends.Select(e => e.Open).Order(), open.Order());
+            ScanStatistics first = Fetched(opens.Statistics, none.Statistics);
+            ScanStatistics firstAndLast = Fetched(both.Statistics, none.Statistics);
+            Assert.True(first.Requests > 0, $"{first}");
+            Assert.Equal(first.Requests, firstAndLast.Requests);
+            Assert.Equal(first.BlocksDecoded, firstAndLast.BlocksDecoded);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ThousandsOfGroupsReadTheRowsOfEachOfTheirChoices(bool blocking)
+    {
+        Trade[] rows = Trades();
+        string path = await WriteAsync(rows, Chunked);
+        try
+        {
+            // Four thousand groups and three choices: blocking, twelve thousand rows sorted by
+            // their digits and taken at once; streaming, a take for each batch of groups closed.
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            Vorticity.Aggregation ends = file.Scan<Trade>()
+                .GroupBy(r => (r.Minute, r.Venue))
+                .OrderBy(g => g.Key)
+                .Select(g => (g.Key.Minute, g.Key.Venue, g.First().Price, g.Last().Size, g.MaxBy(x => x.Size).Symbol));
+            ends.Plan.Blocking = blocking;
+            List<VenueEnds> read = await ListAsync(ends.As<VenueEnds>());
+            Assert.True(read.Count > 3_000, $"{read.Count} groups");
+            Assert.Equal(
+                rows.GroupBy(r => (r.Minute, r.Venue)).OrderBy(g => g.Key.Minute).ThenBy(g => g.Key.Venue, StringComparer.Ordinal)
+                    .Select(g => new VenueEnds(g.Key.Minute, g.Key.Venue, g.First().Price, g.Last().Size, g.MaxBy(r => r.Size).Symbol)),
+                read);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task AFilterOnAChosenRowAfterATakeReadsTheGroupsTaken()
+    {
+        Trade[] rows = Trades();
+        string path = await WriteAsync(rows, Chunked);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            Aggregation<int> filtered = file.Scan<Trade>().GroupBy(r => r.Minute)
+                .OrderByDescending(g => g.Count(x => x.Size > 20)).ThenBy(g => g.Key)
+                .Take(10)
+                .Where(g => g.Last().Size > 10)
+                .Select(g => g.Key);
+            List<int> minutes = await filtered.ToListAsync(Ct);
+            Assert.Equal(
+                rows.GroupBy(r => r.Minute).OrderByDescending(g => g.Count(x => x.Size > 20)).ThenBy(g => g.Key).Take(10).Where(g => g.Last().Size > 10).Select(g => g.Key),
+                minutes);
+
+            // The filter reads the last rows of the ten minutes taken, not of the thousand.
+            Aggregation<int> unread = file.Scan<Trade>().GroupBy(r => r.Minute)
+                .OrderByDescending(g => g.Count(x => x.Size > 20)).ThenBy(g => g.Key)
+                .Take(10)
+                .Select(g => g.Key);
+            await unread.ToListAsync(Ct);
+            Assert.True(Fetched(filtered.Statistics, unread.Statistics).Requests <= 20, $"{Fetched(filtered.Statistics, unread.Statistics)}");
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
+
+    /// <summary>Chunks of one block of 1 024 rows: a take reads the chunks of its rows alone.</summary>
+    private static VortexWriteOptions Chunked => new VortexWriteOptions { RowBlockSize = ChunkRows, ChunkTargetBytes = 1 << 12 };
+
+    /// <summary>What the chosen rows' fetch read: a query's reads less those of the same query without them.</summary>
+    private static ScanStatistics Fetched(ScanStatistics with, ScanStatistics without) =>
+        new ScanStatistics(0, 0, with.Requests - without.Requests, with.BytesRequested - without.BytesRequested, with.BlocksDecoded - without.BlocksDecoded, 0, 0);
+
+    /// <summary>The <paramref name="take"/> minutes of the highest prices: the size of the row of each, or the price alone; and what the query read.</summary>
+    private static async Task<(List<int> Sizes, ScanStatistics Reads)> HighestAsync(VortexFile file, int take, bool row)
+    {
+        if (row)
+        {
+            Aggregation<int> sizes = file.Scan<Trade>().GroupBy(r => r.Minute).OrderByDescending(g => g.Max(x => x.Price)).Take(take).Select(g => g.MaxBy(x => x.Price).Size);
+            return (await sizes.ToListAsync(Ct), sizes.Statistics);
+        }
+
+        Aggregation<double?> prices = file.Scan<Trade>().GroupBy(r => r.Minute).OrderByDescending(g => g.Max(x => x.Price)).Take(take).Select(g => g.Max(x => x.Price));
+        await prices.ToListAsync(Ct);
+        return ([], prices.Statistics);
+    }
 
     /// <summary>The row of the largest or smallest value, the first on a tie, nulls and NaN never.</summary>
     private static Trade? Best(Trade[] rows, Func<Trade, double?> by, bool max)
@@ -217,12 +375,12 @@ public sealed partial class ChosenRowTests
         return rows;
     }
 
-    private static async Task<string> WriteAsync(Trade[] rows)
+    private static async Task<string> WriteAsync(Trade[] rows, VortexWriteOptions? options = null)
     {
         string directory = Path.Combine(AppContext.BaseDirectory, "chosen-rows");
         Directory.CreateDirectory(directory);
         string path = Path.Combine(directory, $"trades-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
-        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Trade>(path))
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Trade>(path, options))
         {
             await writer.WriteAsync<Trade>(rows, Ct);
             await writer.CompleteAsync(Ct);
@@ -245,4 +403,10 @@ public sealed partial class ChosenRowTests
 
     [VortexRecord]
     public partial record struct MinuteEnds(int Minute, string FirstVenue, string LastSymbol, int? Biggest);
+
+    [VortexRecord]
+    public partial record struct MinuteEndPrices(int Minute, double? Open, double? Close);
+
+    [VortexRecord]
+    public partial record struct VenueEnds(int Minute, string Venue, double? Open, int LastSize, string? BiggestSymbol);
 }
