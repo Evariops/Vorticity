@@ -151,7 +151,7 @@ internal sealed class CountSlot : AggregateSlot<long>
     {
         if (groups > _counts.Length)
         {
-            Array.Resize(ref _counts, Math.Max(groups, _counts.Length * 2));
+            Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
         _groups = Math.Max(_groups, groups);
@@ -215,7 +215,7 @@ internal sealed class ExistsSlot(bool all) : AggregateSlot<bool>
     {
         if (groups > _seen.Length)
         {
-            Array.Resize(ref _seen, Math.Max(groups, _seen.Length * 2));
+            Array.Resize(ref _seen, Scratch.Capacity(groups, _seen.Length));
         }
 
         _groups = Math.Max(_groups, groups);

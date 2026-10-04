@@ -30,3 +30,15 @@ public partial record struct SumAndCount(double Sum, long Count);
 /// <summary>A text key, the rows a filter keeps of its group, and whether one row answers another.</summary>
 [VortexRecord]
 public partial record struct CityFiltered(string City, long Kept, bool Any);
+
+/// <summary>A row of a file of sorted names: a key that streams, in text, with a day in front of it.</summary>
+[VortexRecord]
+public partial record struct SortedName(string Name, int Day, double Value);
+
+/// <summary>A name's rows and the mean of their values.</summary>
+[VortexRecord]
+public partial record struct NameMean(string Name, long Count, double? Mean);
+
+/// <summary>A day's name and its rows.</summary>
+[VortexRecord]
+public partial record struct DayNameCount(int Day, string Name, long Count);

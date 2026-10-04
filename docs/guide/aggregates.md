@@ -328,7 +328,10 @@ Welford(Celsius), degree 14        1.3 ms  980000 values, mean 30.0000, variance
 Parallelism is the session's, 1 by default: a library does not take a host's cores without being
 asked. With it, chunks aggregate concurrently, one state per group per chunk, and `Merge` joins
 them: the same answers, 3.5 times faster for the composite group by on 14 cores, 3.7 times for the
-Welford fold. `ScanOptions.DegreeOfParallelism` overrides the session for one scan
+Welford fold. A group by whose key streams streams on every lane too: ranges of rows are grouped
+side by side and each follows the one before it in the order of the rows, so the groups still come
+out in key order as they close, the first ones once the first block is grouped, and the memory is
+that of the ranges in flight. `ScanOptions.DegreeOfParallelism` overrides the session for one scan
 ([threads.md](threads.md)).
 
 ## Decimals, at any precision

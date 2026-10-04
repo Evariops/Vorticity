@@ -479,52 +479,76 @@ internal static class GroupSelection
     internal static (int[] Groups, int Count) Filter(
         AggregationQuery query, AggregationOutcome outcome, GroupFilter filter, int[] groups, int count, CancellationToken cancellationToken)
     {
-        ResultColumn[] columns = new ResultColumn[filter.Fields.Length];
-        VortexField[] fields = new VortexField[columns.Length];
-        for (int i = 0; i < columns.Length; i++)
+        using GroupFilterRun run = new GroupFilterRun(query, filter);
+        int[] kept = groups.AsSpan(0, count).ToArray();
+        return (kept, run.Keep(outcome, kept, count, cancellationToken));
+    }
+
+    /// <summary>
+    /// A filter on groups and what it reads their results into: the columns, a store, an arena and
+    /// the evaluator, made once for every batch of groups a stream closes.
+    /// </summary>
+    internal sealed class GroupFilterRun : IDisposable
+    {
+        private readonly ResultColumn[] _columns;
+        private readonly StructStore _store;
+        private readonly CanonicalArena _arena;
+        private readonly FilterEvaluator _evaluator;
+        private byte[] _states = [];
+
+        internal GroupFilterRun(AggregationQuery query, GroupFilter filter)
         {
-            columns[i] = filter.Fields[i].Column(query.Keys);
-            fields[i] = new VortexField(columns[i].Name, columns[i].Type);
+            _columns = new ResultColumn[filter.Fields.Length];
+            VortexField[] fields = new VortexField[_columns.Length];
+            for (int i = 0; i < _columns.Length; i++)
+            {
+                _columns[i] = filter.Fields[i].Column(query.Keys);
+                fields[i] = new VortexField(_columns[i].Name, _columns[i].Type);
+            }
+
+            VortexSessionOptions options = query.Session.Options;
+            _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
+            _arena = new CanonicalArena(64, options.EnginePool);
+            _evaluator = new FilterEvaluator(filter.Predicate);
         }
 
-        VortexSessionOptions options = query.Session.Options;
-        StructStore store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
-        CanonicalArena arena = new CanonicalArena(64, options.EnginePool);
-        FilterEvaluator evaluator = new FilterEvaluator(filter.Predicate);
-        byte[] states = new byte[Math.Min(Window, Math.Max(count, 1))];
-        int[] kept = new int[count];
-        int keptCount = 0;
-        try
+        /// <summary>Keeps in place, in their order, the first <paramref name="count"/> of <paramref name="groups"/> the filter keeps; their number.</summary>
+        internal int Keep(AggregationOutcome outcome, int[] groups, int count, CancellationToken cancellationToken)
         {
+            Scratch.Grow(ref _states, Math.Min(Window, Math.Max(count, 1)));
+            int kept = 0;
             for (int first = 0; first < count; first += Window)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 int n = Math.Min(Window, count - first);
                 ReadOnlySpan<int> window = groups.AsSpan(first, n);
-                store.Truncate(0);
-                for (int c = 0; c < columns.Length; c++)
+                _store.Truncate(0);
+                for (int c = 0; c < _columns.Length; c++)
                 {
-                    columns[c].Append(outcome, store.Children[c], window);
+                    _columns[c].Append(outcome, _store.Children[c], window);
                 }
 
-                arena.ResetKeepingBlocks();
-                int root = store.Build(arena, n);
-                evaluator.Evaluate(arena, root, n, states.AsSpan(0, n));
+                _arena.ResetKeepingBlocks();
+                int root = _store.Build(_arena, n);
+                _evaluator.Evaluate(_arena, root, n, _states.AsSpan(0, n));
+
+                // A group kept moves to the front, never past one not read yet.
                 for (int i = 0; i < n; i++)
                 {
-                    if (states[i] == Trilean.True)
+                    if (_states[i] == Trilean.True)
                     {
-                        kept[keptCount++] = window[i];
+                        groups[kept++] = groups[first + i];
                     }
                 }
             }
-        }
-        finally
-        {
-            store.Release();
-            arena.Reset();
+
+            return kept;
         }
 
-        return (kept, keptCount);
+        public void Dispose()
+        {
+            _store.Release();
+            _arena.Reset();
+        }
     }
 }

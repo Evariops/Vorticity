@@ -275,6 +275,10 @@ internal sealed class AggregationPartition
     private int[] _componentOf = [];
     private int[] _componentRows = [];
 
+    // What following the partition of the next range maps its groups and its component's values with.
+    private int[] _followMap = [];
+    private int[] _followComponents = [];
+
     // The blocks the zone maps settled in the partition's rows, the next to fold and the end.
     private ZoneSettling? _settling;
     private int _settledNext;
@@ -579,6 +583,48 @@ internal sealed class AggregationPartition
         }
 
         return previous;
+    }
+
+    /// <summary>
+    /// Folds in the partition of the range of rows after this one's, as its batches would have been
+    /// folded: its groups mapped onto this one's by key, the new ones numbered after, in the order
+    /// they were met; the streaming component of each, and the last value met, carried over.
+    /// </summary>
+    internal void Follow(AggregationPartition next)
+    {
+        int before = Keys!.Count;
+        Scratch.Grow(ref _followMap, next.Keys!.Count);
+        Span<int> map = _followMap.AsSpan(0, next.Keys.Count);
+        next.Keys.MergeInto(Keys, map);
+        for (int i = 0; i < Slots.Length; i++)
+        {
+            Slots[i].EnsureGroups(Keys.Count);
+            if (_inputs[i] != Settled)
+            {
+                Slots[i].MergeFrom(next.Slots[i], map);
+            }
+        }
+
+        if (_componentKeys is null)
+        {
+            LastValueGroup = next.LastValueGroup >= 0 ? map[next.LastValueGroup] : LastValueGroup;
+            return;
+        }
+
+        // The values of the streaming component the new groups hold, in this partition's numbers.
+        Scratch.Grow(ref _followComponents, next._componentKeys!.Count);
+        Span<int> components = _followComponents.AsSpan(0, next._componentKeys.Count);
+        next._componentKeys.MergeInto(_componentKeys, components);
+        Scratch.Grow(ref _componentOf, Keys.Count);
+        for (int g = 0; g < map.Length; g++)
+        {
+            if (map[g] >= before)
+            {
+                _componentOf[map[g]] = components[next._componentOf[g]];
+            }
+        }
+
+        LastValueGroup = next.LastValueGroup >= 0 ? components[next.LastValueGroup] : LastValueGroup;
     }
 
     /// <summary>Folds another partition into this one, its groups mapped onto this one's by key.</summary>
@@ -977,7 +1023,51 @@ internal static class AggregationEngine
         return parts.Count > 1 ? [.. parts] : null;
     }
 
-    private static async Task RunPartitionAsync(ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPartition partition, CancellationToken cancellationToken)
+    /// <summary>
+    /// The rows of a pass that streams cut at the plan's boundaries into ranges that double from a
+    /// block up to a quarter of a lane's share, or null when it runs as one stream: a degree of
+    /// one, a take by position, a source that is not a file, rows of one range. The first range
+    /// answers after a block; the later ones are long enough for their merge to cost little against
+    /// their rows.
+    /// </summary>
+    internal static RowRange[]? StreamingRanges(ScanSource source, ScanSpec spec, int degree)
+    {
+        if (degree <= 1 || spec.Take is not null || spec.MatchesNothing || source is not FileScanSource file)
+        {
+            return null;
+        }
+
+        LayoutTree tree = file.File.LayoutTree;
+        RowRange whole = new RowRange(0, tree.Root.RowCount);
+        RowRange rows = spec.Rows is { } asked ? asked.Intersect(whole) : whole;
+        long blockRows = SplitPlan.NaturalBatchRows(tree);
+        if (rows.IsEmpty || blockRows <= 0)
+        {
+            return null;
+        }
+
+        FieldMask mask = spec.Projection ?? FieldMask.All;
+        SplitPlan plan = SplitPlan.Compute(tree, rows, in mask, blockRows);
+        long most = Math.Max(blockRows, rows.Length / (degree * 4L));
+        List<RowRange> parts = [];
+        long start = rows.Start;
+        long target = blockRows;
+        for (int b = 0; b < plan.BoundaryCount; b++)
+        {
+            long at = plan.BoundaryAt(b);
+            if (at > start && at < rows.End && at - start >= target)
+            {
+                parts.Add(new RowRange(start, at));
+                start = at;
+                target = Math.Min(target * 2, most);
+            }
+        }
+
+        parts.Add(new RowRange(start, rows.End));
+        return parts.Count > 1 ? [.. parts] : null;
+    }
+
+    internal static async Task RunPartitionAsync(ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPartition partition, CancellationToken cancellationToken)
     {
         long start = Stopwatch.GetTimestamp();
         await foreach (RecordBatch batch in source.BatchesAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))

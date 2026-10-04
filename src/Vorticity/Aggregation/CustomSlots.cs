@@ -18,7 +18,7 @@ internal sealed class CustomSlot<T, TAggregator, TState> : AggregateSlot<TState>
     {
         if (groups > _states.Length)
         {
-            Array.Resize(ref _states, Math.Max(groups, _states.Length * 2));
+            Array.Resize(ref _states, Scratch.Capacity(groups, _states.Length));
         }
 
         for (int g = _groups; g < groups; g++)
@@ -95,7 +95,7 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<
     {
         if (groups > _states.Length)
         {
-            Array.Resize(ref _states, Math.Max(groups, _states.Length * 2));
+            Array.Resize(ref _states, Scratch.Capacity(groups, _states.Length));
         }
 
         for (int g = _groups; g < groups; g++)

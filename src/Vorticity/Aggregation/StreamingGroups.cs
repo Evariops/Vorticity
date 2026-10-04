@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Compute;
 using Vorticity.Types;
 using Vorticity.Writing;
 
@@ -50,6 +52,15 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
     // When the pass began, for the plan's last run.
     private long _started;
+
+    // Each filter on groups and what it reads their results into, by the operator's place.
+    private GroupSelection.GroupFilterRun?[]? _filters;
+
+    // On several lanes: the ranges grouped side by side, what each did, and the time spent
+    // following them.
+    private StreamingRanges? _ranges;
+    private List<AggregationRun.Lane>? _lanes;
+    private long _mergeTicks;
 
     internal StreamingGroupBatches(AggregationQuery query, CancellationToken cancellationToken)
     {
@@ -106,7 +117,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     public async ValueTask<bool> MoveNextAsync()
     {
-        if (_inner is null)
+        if (_partition is null)
         {
             await StartAsync().ConfigureAwait(false);
         }
@@ -133,15 +144,29 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             }
 
             _cancellationToken.ThrowIfCancellationRequested();
+            if (_ranges is not null)
+            {
+                // A range grouped on its lane follows the rows before it, as its batches would have.
+                if (await _ranges.NextAsync().ConfigureAwait(false) is not { } range)
+                {
+                    await DrainAsync().ConfigureAwait(false);
+                    continue;
+                }
+
+                long merging = Stopwatch.GetTimestamp();
+                _partition!.Follow(range);
+                _mergeTicks += Stopwatch.GetTimestamp() - merging;
+                (_lanes ??= []).Add(new AggregationRun.Lane(range.ActiveTicks, range.Ranges, range.GroupsAtEnd));
+                _query.PeakGroups = Math.Max(_query.PeakGroups, _partition.Keys!.Count);
+                await CloseAsync(all: false).ConfigureAwait(false);
+                continue;
+            }
+
             if (!await _inner!.MoveNextAsync().ConfigureAwait(false))
             {
-                // The end of the rows closes every group, the null group last, once the blocks
-                // the zone maps settled after the last batch are in.
-                _drained = true;
+                // The blocks the zone maps settled after the last batch are folded before the end.
                 _partition!.Finish();
-                _query.Plan.LastRun = new AggregationRun(
-                    [new AggregationRun.Lane(System.Diagnostics.Stopwatch.GetTimestamp() - _started, 1, _partition.Keys!.Count)], 0, 0);
-                await CloseAsync(all: true).ConfigureAwait(false);
+                await DrainAsync().ConfigureAwait(false);
                 continue;
             }
 
@@ -151,9 +176,24 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         }
     }
 
+    /// <summary>The end of the rows: every group closes, the null group last, and the plan keeps what the run did.</summary>
+    private async ValueTask DrainAsync()
+    {
+        _drained = true;
+        _query.Plan.LastRun = _lanes is null
+            ? new AggregationRun([new AggregationRun.Lane(Stopwatch.GetTimestamp() - _started, 1, _partition!.Keys!.Count)], 0, 0)
+            : new AggregationRun([.. _lanes], _mergeTicks, _lanes.Count);
+        await CloseAsync(all: true).ConfigureAwait(false);
+    }
+
     public async ValueTask DisposeAsync()
     {
         Release();
+        if (_ranges is not null)
+        {
+            await _ranges.DisposeAsync().ConfigureAwait(false);
+        }
+
         if (_inner is not null)
         {
             await _inner.DisposeAsync().ConfigureAwait(false);
@@ -165,24 +205,64 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         AggregationHost host = _query.Host;
         host.Begin();
         _begun = true;
-        _started = System.Diagnostics.Stopwatch.GetTimestamp();
+        _started = Stopwatch.GetTimestamp();
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
+        int streaming = Streaming(_query);
         _partition = new AggregationPartition(
-            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, Streaming(_query), host.Source);
+            plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, streaming, host.Source);
 
         // The blocks the zone maps settle are folded in the order of the rows, which the groups
         // close in.
-        if (await ZoneSettling.PlanAsync(host.Source, pass, plan, host.Metrics, _cancellationToken).ConfigureAwait(false) is { } settling)
+        ZoneSettling? settling = await ZoneSettling.PlanAsync(host.Source, pass, plan, host.Metrics, _cancellationToken).ConfigureAwait(false);
+        if (settling is not null)
         {
             pass = settling.Pass(pass);
-            _partition.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
+        }
+
+        _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
+        int degree = pass.Options.DegreeOfParallelism > 0 ? pass.Options.DegreeOfParallelism : host.Source.Session.Options.MaxDegreeOfParallelism;
+        if (AggregationEngine.StreamingRanges(host.Source, pass, degree) is not { } ranges)
+        {
+            if (settling is not null)
+            {
+                _partition.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
+            }
+
+            _pass = pass;
+            _inner = host.Source.BatchesAsync(pass, host.Metrics).GetAsyncEnumerator(_cancellationToken);
+            return;
+        }
+
+        // On several lanes, each range of rows is grouped on its own, and the ranges follow one
+        // another here in the order of the rows: the structures are read once for all of them.
+        if (settling is null && pass.Filter is { } filter && pass.Options.Pruning && host.Source is FileScanSource file)
+        {
+            BlockMask? live = await ZonePruningPlan
+                .RefineAsync(file.File, file.File.LayoutTree, FunctionFieldExpr.Ranges(filter), _cancellationToken, steps: null, host.Metrics, pass.Options.UseIndexes)
+                .ConfigureAwait(false);
+            pass = pass with { Pruned = true, Live = live };
         }
 
         _pass = pass;
-        _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
-        _inner = host.Source.BatchesAsync(pass, host.Metrics).GetAsyncEnumerator(_cancellationToken);
+        ScanSpec lane = pass with { Options = pass.Options with { DegreeOfParallelism = 1, Prefetch = 0 } };
+        _ranges = new StreamingRanges(
+            ranges,
+            degree,
+            async (rows, token) =>
+            {
+                AggregationPartition range = new AggregationPartition(
+                    plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, streaming, host.Source);
+                if (settling is not null)
+                {
+                    range.Settle(settling, rows);
+                }
+
+                await AggregationEngine.RunPartitionAsync(host.Source, lane with { Rows = rows }, host.Metrics, range, token).ConfigureAwait(false);
+                return range;
+            },
+            _cancellationToken);
     }
 
     /// <summary>
@@ -254,9 +334,10 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             {
                 case GroupFilter filter:
                 {
-                    (int[] kept, int keptCount) = GroupSelection.Filter(_query, _outcome!, filter, _closed, count, _cancellationToken);
-                    kept.AsSpan(0, keptCount).CopyTo(_closed);
-                    count = keptCount;
+                    // The filter's columns, store and evaluator, kept from one closed batch to the next.
+                    _filters ??= new GroupSelection.GroupFilterRun?[operators.Length];
+                    GroupSelection.GroupFilterRun run = _filters[o] ??= new GroupSelection.GroupFilterRun(_query, filter);
+                    count = run.Keep(_outcome!, _closed, count, _cancellationToken);
                     break;
                 }
 
@@ -357,13 +438,102 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private void Release()
     {
         _done = true;
+        _ranges?.Stop();
         _current?.Dispose();
         _store?.Release();
         _arena?.Reset();
+        if (_filters is not null)
+        {
+            foreach (GroupSelection.GroupFilterRun? run in _filters)
+            {
+                run?.Dispose();
+            }
+
+            _filters = null;
+        }
         if (_begun && !_ended)
         {
             _ended = true;
             _query.Host.End();
+        }
+    }
+}
+
+/// <summary>
+/// The ranges of a streaming group by's rows, each grouped on a lane of its own and handed back whole
+/// in the order of the rows: as many ranges in flight as the degree, so that the memory is theirs
+/// and a range's groups go out once it and those before it are done. Every range started is a task
+/// awaited, here or when the stream is disposed, and cancelled when what is left is not wanted.
+/// </summary>
+internal sealed class StreamingRanges : IAsyncDisposable
+{
+    private readonly RowRange[] _ranges;
+    private readonly Func<RowRange, CancellationToken, Task<AggregationPartition>> _group;
+    private readonly Task<AggregationPartition>?[] _flight;
+    private readonly CancellationTokenSource _stop;
+    private int _next;
+    private int _started;
+
+    internal StreamingRanges(
+        RowRange[] ranges, int degree, Func<RowRange, CancellationToken, Task<AggregationPartition>> group, CancellationToken cancellationToken)
+    {
+        _ranges = ranges;
+        _group = group;
+        _flight = new Task<AggregationPartition>?[Math.Max(1, Math.Min(degree, ranges.Length))];
+        _stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    }
+
+    /// <summary>The partition of the next range once it is grouped, or null after the last.</summary>
+    internal async ValueTask<AggregationPartition?> NextAsync()
+    {
+        Start();
+        if (_next == _ranges.Length)
+        {
+            return null;
+        }
+
+        int at = _next % _flight.Length;
+        AggregationPartition partition = await _flight[at]!.ConfigureAwait(false);
+        _flight[at] = null;
+        _next++;
+        Start();
+        return partition;
+    }
+
+    /// <summary>Stops the ranges in flight: what is left of the rows is not wanted.</summary>
+    internal void Stop() => _stop.Cancel();
+
+    public async ValueTask DisposeAsync()
+    {
+        await _stop.CancelAsync().ConfigureAwait(false);
+
+        // Their outcome is no one's now, a failure included: awaited, so that nothing is left running.
+        List<Task> running = [];
+        foreach (Task<AggregationPartition>? grouping in _flight)
+        {
+            if (grouping is not null)
+            {
+                running.Add(grouping);
+            }
+        }
+
+        await Task.WhenAll(running).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        _stop.Dispose();
+    }
+
+    /// <summary>
+    /// Starts the ranges the window has room for, on the pool, in the order of the rows: the pool
+    /// takes them in that order, so the range waited for is never queued behind the others. The
+    /// first is a block, which answers as the first batch of one stream would.
+    /// </summary>
+    private void Start()
+    {
+        while (_started < _ranges.Length && _started - _next < _flight.Length)
+        {
+            RowRange rows = _ranges[_started];
+            CancellationToken token = _stop.Token;
+            _flight[_started % _flight.Length] = Task.Run(() => _group(rows, token), token);
+            _started++;
         }
     }
 }

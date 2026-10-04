@@ -17,7 +17,7 @@ internal sealed class RowSlot(bool last) : AggregateSlot<long>
     {
         if (groups > _rows.Length)
         {
-            Array.Resize(ref _rows, Math.Max(groups, _rows.Length * 2));
+            Array.Resize(ref _rows, Scratch.Capacity(groups, _rows.Length));
         }
 
         _rows.AsSpan(_groups, Math.Max(groups - _groups, 0)).Fill(-1);
@@ -125,7 +125,7 @@ internal sealed class ChosenBySlot<TValue>(bool max, StorageKind kind) : Aggrega
     {
         if (groups > _rows.Length)
         {
-            int length = Math.Max(groups, _rows.Length * 2);
+            int length = Scratch.Capacity(groups, _rows.Length);
             Array.Resize(ref _rows, length);
             Array.Resize(ref _best, length);
         }

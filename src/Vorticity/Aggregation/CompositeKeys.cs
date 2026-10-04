@@ -128,19 +128,8 @@ internal sealed class CompositeKeys : GroupKeys
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        byte[][] kept = new byte[groups.Length][];
-        for (int i = 0; i < groups.Length; i++)
-        {
-            kept[i] = _table.KeyOf(groups[i]).ToArray();
-        }
-
-        // A group is its key's number in the table: numbered again in order as they go back in.
-        _table.Clear();
-        foreach (byte[] key in kept)
-        {
-            _table.GetOrAdd(key, out _);
-        }
-
+        // A group is its key's number in the table: the table keeps them, numbered again in order.
+        _table.Retain(groups);
         Count = groups.Length;
     }
 

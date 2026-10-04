@@ -713,7 +713,19 @@ internal static class Scratch
     {
         if (array.Length < length)
         {
-            array = new T[Math.Max(length, array.Length * 2)];
+            array = new T[Capacity(length, array.Length)];
         }
+    }
+
+    /// <summary>
+    /// The length an array of <paramref name="current"/> elements grows to so that it holds
+    /// <paramref name="needed"/>: twice its length at least, rounded up to a power of two. A group by
+    /// that streams holds, at each batch, the open group of the last besides its own: sized exactly
+    /// by the first batch, every array would grow again at the second.
+    /// </summary>
+    internal static int Capacity(int needed, int current)
+    {
+        long wanted = Math.Max(needed, 2L * current);
+        return wanted > 1L << 30 ? Array.MaxLength : (int)BitOperations.RoundUpToPowerOf2((uint)wanted);
     }
 }

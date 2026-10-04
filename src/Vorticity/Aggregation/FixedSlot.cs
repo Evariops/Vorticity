@@ -42,7 +42,7 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
     {
         if (groups > _states.Length)
         {
-            Array.Resize(ref _states, Math.Max(groups, _states.Length * 2));
+            Array.Resize(ref _states, Scratch.Capacity(groups, _states.Length));
         }
 
         for (int g = _groups; g < groups; g++)
@@ -325,7 +325,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
     {
         if (groups > _counts.Length)
         {
-            Array.Resize(ref _counts, Math.Max(groups, _counts.Length * 2));
+            Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
         _groups = Math.Max(_groups, groups);

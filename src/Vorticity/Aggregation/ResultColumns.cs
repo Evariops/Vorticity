@@ -76,7 +76,7 @@ internal sealed class ValueResultColumn<T> : ResultColumn
 
         if (_values.Length < groups.Length)
         {
-            _values = new T[Math.Max(groups.Length, _values.Length * 2)];
+            _values = new T[Scratch.Capacity(groups.Length, _values.Length)];
         }
 
         Span<T> values = _values.AsSpan(0, groups.Length);

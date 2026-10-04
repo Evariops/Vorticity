@@ -133,7 +133,7 @@ internal sealed class BoolSlot<TResult> : AggregateSlot<TResult>
     {
         if (groups > _flags.Length)
         {
-            Array.Resize(ref _flags, Math.Max(groups, _flags.Length * 2));
+            Array.Resize(ref _flags, Scratch.Capacity(groups, _flags.Length));
         }
 
         _groups = Math.Max(_groups, groups);

@@ -39,7 +39,7 @@ internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
     {
         if (groups > _values.Length)
         {
-            int length = Math.Max(groups, _values.Length * 2);
+            int length = Scratch.Capacity(groups, _values.Length);
             Array.Resize(ref _values, length);
             Array.Resize(ref _missing, length);
         }

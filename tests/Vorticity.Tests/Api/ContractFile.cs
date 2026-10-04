@@ -141,3 +141,41 @@ internal static class ContractFile
         return path;
     }
 }
+
+/// <summary>
+/// Names sorted, two hundred rows each, a day every thousand rows, and a value: a key that streams,
+/// in text, and the same with the day in front of it; written in chunks of a megabyte, as the
+/// contract's table is, so that a scan of it makes many reads.
+/// </summary>
+internal static class SortedNames
+{
+    internal const int Rows = 250_000;
+
+    private static readonly Lazy<Task<string>> Written = new Lazy<Task<string>>(WriteAsync);
+
+    /// <summary>The path of the file, written on first use.</summary>
+    internal static Task<string> PathAsync() => Written.Value;
+
+    /// <summary>Row <paramref name="row"/> of the file.</summary>
+    internal static SortedName Row(int row) =>
+        new SortedName(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"n{row / 200:D5}"), row / 1_000, row % 100);
+
+    private static async Task<string> WriteAsync()
+    {
+        string directory = System.IO.Path.Combine(AppContext.BaseDirectory, "contract");
+        Directory.CreateDirectory(directory);
+        string path = System.IO.Path.Combine(directory, $"names-{Environment.ProcessId}.vortex");
+        AppDomain.CurrentDomain.ProcessExit += (_, _) => System.IO.File.Delete(path);
+
+        SortedName[] rows = new SortedName[Rows];
+        for (int row = 0; row < Rows; row++)
+        {
+            rows[row] = Row(row);
+        }
+
+        await using VortexFileWriter writer = VortexSession.Default.CreateWriter<SortedName>(path, new VortexWriteOptions { ChunkTargetBytes = 1 << 20 });
+        await writer.WriteAsync<SortedName>(rows, CancellationToken.None);
+        await writer.CompleteAsync(CancellationToken.None);
+        return path;
+    }
+}

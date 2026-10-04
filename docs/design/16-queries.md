@@ -194,7 +194,12 @@ At a degree above one, the splits of a scan decode on their lanes and come back 
 through a bounded window ([09-contracts.md](09-contracts.md) §2). A streaming operator runs on that
 ordered stream — decode, the heavy part, is parallel, and grouping a sorted key costs one lookup per
 run — or runs per range of rows and joins the groups that straddle two ranges; either way its
-batches go out in order. A blocking operator runs per range on its lanes and merges (§9.4): nothing
+batches go out in order. A group by that streams does the second at a degree above one: grouping
+is as heavy as decoding on a composite or a custom aggregate, and one thread would hold the lanes
+back. Its ranges are cut at the file's boundaries, the first a block and each next one twice as
+long up to a quarter of a lane's share, as many in flight as lanes; each is grouped on its lane,
+and follows the groups still open in the order of the rows, which merges the group that straddles
+the boundary and carries the last value met. A blocking operator runs per range on its lanes and merges (§9.4): nothing
 it holds goes out before its input ends, so it has no order to keep while it runs.
 
 ### 2.6 The first batch of each source

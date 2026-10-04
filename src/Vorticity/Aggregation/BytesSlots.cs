@@ -194,7 +194,7 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
     {
         if (groups > _best.Length)
         {
-            int grown = Math.Max(groups, _best.Length * 2);
+            int grown = Scratch.Capacity(groups, _best.Length);
             Array.Resize(ref _best, grown);
             Array.Resize(ref _lengths, grown);
         }
@@ -293,7 +293,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
     {
         if (groups > _counts.Length)
         {
-            Array.Resize(ref _counts, Math.Max(groups, _counts.Length * 2));
+            Array.Resize(ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
         _groups = Math.Max(_groups, groups);

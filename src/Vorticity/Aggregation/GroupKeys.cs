@@ -597,23 +597,23 @@ internal sealed class BytesKeys : GroupKeys
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
-        // The kept keys copied out before the table is emptied and filled with them again.
-        byte[][] kept = new byte[groups.Length][];
+        // The entries of the kept keys, which ascend with their groups, the null group having none:
+        // listed where the groups of the entries go, which are numbered again below.
         int nullGroup = -1;
+        int kept = 0;
         for (int i = 0; i < groups.Length; i++)
         {
             if (groups[i] == _null)
             {
                 nullGroup = i;
-                kept[i] = [];
+                continue;
             }
-            else
-            {
-                kept[i] = _table.KeyOf(_entryOfGroup[groups[i]]).ToArray();
-            }
+
+            _groupOfEntry[kept++] = _entryOfGroup[groups[i]];
         }
 
-        _table.Clear();
+        _table.Retain(_groupOfEntry.AsSpan(0, kept));
+        int entry = 0;
         for (int i = 0; i < groups.Length; i++)
         {
             if (i == nullGroup)
@@ -622,9 +622,8 @@ internal sealed class BytesKeys : GroupKeys
                 continue;
             }
 
-            int entry = _table.GetOrAdd(kept[i], out _);
             _groupOfEntry[entry] = i;
-            _entryOfGroup[i] = entry;
+            _entryOfGroup[i] = entry++;
         }
 
         _null = nullGroup;

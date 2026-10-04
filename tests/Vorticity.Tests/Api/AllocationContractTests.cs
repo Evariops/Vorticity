@@ -162,8 +162,58 @@ public sealed class AllocationContractTests
             ("SumAsync, filtered", filtered, async scan => await scan.SumAsync(r => r.Day)),
         ];
 
+        List<string> failures = await BetweenReadsAsync(source, sinks);
+        Assert.True(failures.Count == 0, string.Join("\n", failures));
+    }
+
+    /// <summary>
+    /// A group by that streams folds its batches on the thread that reads them, closes the groups a
+    /// batch finishes and keeps the open ones: on a sorted text key and on a composite one, with and
+    /// without a filter on its groups, its result read as batches, nothing between its reads.
+    /// </summary>
+    [Fact]
+    public async Task AStreamingGroupByAllocatesNothingBetweenItsReads()
+    {
+        ReleaseOnlyCeilings.Require();
+        SamplingSource source = new SamplingSource(await SortedNames.PathAsync());
+        await using VortexFile file = await VortexSession.Default.OpenAsync(source, cancellationToken: TestContext.Current.CancellationToken);
+
+        Func<Scan<SortedName>> all = () => file.Scan<SortedName>().With(Sequential);
+        (string Sink, Func<Scan<SortedName>> Scan, Func<Scan<SortedName>, Task> Run)[] sinks =
+        [
+            ("a text key", all, scan => ReadAsync(scan.GroupBy(n => n.Name).Select(g => (g.Key, g.Count(), g.Average(n => n.Value))).As<NameMean>())),
+            ("a text key, a filter on its groups", all, scan => ReadAsync(scan.GroupBy(n => n.Name).Where(g => g.Count() > 100).Select(g => (g.Key, g.Count(), g.Average(n => n.Value))).As<NameMean>())),
+            ("a composite key", all, scan => ReadAsync(scan.GroupBy(n => (n.Day, n.Name)).Select(g => (g.Key.Day, g.Key.Name, g.Count())).As<DayNameCount>())),
+            ("a composite key, a filter on its groups", all, scan => ReadAsync(scan.GroupBy(n => (n.Day, n.Name)).Where(g => g.Count() > 100).Select(g => (g.Key.Day, g.Key.Name, g.Count())).As<DayNameCount>())),
+        ];
+
+        List<string> failures = await BetweenReadsAsync(source, sinks);
+        Assert.True(failures.Count == 0, string.Join("\n", failures));
+    }
+
+    /// <summary>Reads a result as the batches it is, borrowed, touching nothing a group would allocate: its groups.</summary>
+    private static async Task<long> ReadAsync<T>(Scan<T> groups)
+        where T : IVortexRecord<T>
+    {
+        long count = 0;
+        await foreach (Columns<T> batch in groups)
+        {
+            count += batch.RowCount;
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// What each sink's thread allocated from its read of the second split's segments to its last
+    /// read, once warm: the failures, a line each.
+    /// </summary>
+    private static async Task<List<string>> BetweenReadsAsync<T>(
+        SamplingSource source, (string Sink, Func<Scan<T>> Scan, Func<Scan<T>, Task> Run)[] sinks)
+        where T : IVortexRecord<T>
+    {
         List<string> failures = [];
-        foreach ((string sink, Func<Scan<Reading>> scan, Func<Scan<Reading>, Task> run) in sinks)
+        foreach ((string sink, Func<Scan<T>> scan, Func<Scan<T>, Task> run) in sinks)
         {
             for (int i = 0; i < WarmUp; i++)
             {
@@ -205,7 +255,7 @@ public sealed class AllocationContractTests
             }
         }
 
-        Assert.True(failures.Count == 0, string.Join("\n", failures));
+        return failures;
     }
 
     [Fact]

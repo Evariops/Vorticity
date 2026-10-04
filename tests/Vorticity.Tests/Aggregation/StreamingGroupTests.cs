@@ -95,11 +95,14 @@ public sealed partial class StreamingGroupTests
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
             int seconds = rows.Select(r => r.Second).Distinct().Count();
 
-            // Streaming: one lane groups, holding a batch's groups.
+            // Streaming on four lanes: ranges grouped side by side, each followed by the next in the
+            // order of the rows, holding the open groups and a range's.
             Aggregation<long> streamed = file.Scan<Tick>().GroupBy(r => r.Second).Select(g => g.Count());
             List<long> counts = await streamed.ToListAsync(Ct);
             AggregationPlan plan = ((AggregationQuery)streamed.Query).Plan;
-            Assert.Single(plan.LastRun!.Lanes);
+            Assert.True(plan.LastRun!.Lanes.Length > 4, $"{plan.LastRun.Lanes.Length} ranges");
+            Assert.Equal(plan.LastRun.Lanes.Length, plan.LastRun.MergeParts);
+            Assert.Equal(rows.Length, counts.Sum());
             Assert.True(((AggregationQuery)streamed.Query).PeakGroups < seconds);
 
             // Forced to block: the same groups, every one held, from a lane per range, merged.
