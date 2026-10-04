@@ -66,6 +66,49 @@ public sealed class LocalFileSourceTests
     }
 
     [Fact]
+    public async Task ABatchOfManySegmentsBeforeAMappingGivesEachItsBytes()
+    {
+        // Enough segments that the positional reads run on several threads at once: each slot still
+        // gets its own bytes, segments of no bytes and repeats among them, and nothing maps the file.
+        byte[] content = Pattern(FileLength);
+        using TempFile file = new TempFile(content);
+        await using LocalFileSource source = LocalFileSource.Open(file.Path_);
+        ISegmentReader reader = source;
+        using (SegmentRequestSet set = new SegmentRequestSet())
+        {
+            (int Slot, int Offset, int Length)[] expected = new (int, int, int)[100];
+            for (int i = 0; i < expected.Length; i++)
+            {
+                int offset = i * 397 % (FileLength - 600);
+                int length = i % 10 == 0 ? 0 : 1 + (i * 37 % 500);
+                expected[i] = (set.Add(Spec((ulong)offset, (uint)length, (byte)(i % 4))), offset, length);
+            }
+
+            await reader.ReadManyAsync(set, CancellationToken.None);
+            Assert.True(set.IsPopulated);
+            foreach ((int slot, int offset, int length) in expected)
+            {
+                Assert.True(set.GetBuffer(slot).Span.SequenceEqual(content.AsSpan(offset, length)), $"{offset}+{length}");
+            }
+        }
+
+        Assert.False(source.IsMapped);
+
+        // One segment past the end refuses the whole batch, which stays unread.
+        using (SegmentRequestSet set = new SegmentRequestSet())
+        {
+            for (int i = 0; i < 40; i++)
+            {
+                set.Add(Spec((ulong)(i * 100), 50));
+            }
+
+            set.Add(Spec(FileLength - 10, 20));
+            await Assert.ThrowsAnyAsync<VortexFormatException>(async () => await reader.ReadManyAsync(set, CancellationToken.None));
+            Assert.False(set.IsPopulated);
+        }
+    }
+
+    [Fact]
     public async Task AReadPastTheFileIsRefusedPositionallyAsMapped()
     {
         using TempFile file = new TempFile(Pattern(FileLength));

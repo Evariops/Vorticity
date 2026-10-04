@@ -1,5 +1,6 @@
 using System;
 using System.Buffers;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -7,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Indexes;
 using Vorticity.Types;
@@ -52,6 +54,9 @@ internal sealed class BloomBuilder : IndexBuilder
 
     /// <summary>The recent hashes a string column's rows are checked against, a power of two.</summary>
     private const int RecentHashes = 1024;
+
+    /// <summary>The recent views a string column's rows are checked against before their bytes are read: 32 sets of two.</summary>
+    private const int RecentViews = 64;
 
     /// <summary>The blocks `Auto` watches for a column that repeats one set.</summary>
     private const int RepeatBlocks = 4;
@@ -411,6 +416,9 @@ internal sealed class BloomBuilder : IndexBuilder
                 Span<byte> trigram = stackalloc byte[Trigrams.Length];
                 Span<ulong> hashes = stackalloc ulong[CheckStride];
                 Span<ulong> recent = stackalloc ulong[RecentHashes];
+                Span<ulong> seen = stackalloc ulong[2 * RecentViews];
+                ReadOnlySpan<byte> views = node.Views.Span;
+                ReadOnlySpan<VortexBuffer> buffers = node.DataBuffers;
                 int gathered = 0;
                 bool fold = _policy.CaseInsensitive;
                 _rawBytes += 16L * count;
@@ -418,8 +426,12 @@ internal sealed class BloomBuilder : IndexBuilder
                 {
                     if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
                     {
-                        ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
-                        _rawBytes += value.Length;
+                        if (Seen(seen, views, row, ref _rawBytes))
+                        {
+                            continue;
+                        }
+
+                        ReadOnlySpan<byte> value = ValueAt(views, buffers, row);
                         for (int i = 0; i + Trigrams.Length <= value.Length; i++)
                         {
                             Trigrams.Copy(value.Slice(i, Trigrams.Length), fold, trigram);
@@ -440,15 +452,21 @@ internal sealed class BloomBuilder : IndexBuilder
             {
                 Span<ulong> hashes = stackalloc ulong[CheckStride];
                 Span<ulong> recent = stackalloc ulong[RecentHashes];
+                Span<ulong> seen = stackalloc ulong[2 * RecentViews];
+                ReadOnlySpan<byte> views = node.Views.Span;
+                ReadOnlySpan<VortexBuffer> buffers = node.DataBuffers;
                 int gathered = 0;
                 _rawBytes += 16L * count;
                 for (int row = start; row < start + count; row++)
                 {
                     if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
                     {
-                        ReadOnlySpan<byte> value = LiteralReader.ViewAt(node, row);
-                        _rawBytes += value.Length;
-                        if (Fresh(recent, SplitBlockBloom.Hash(value, hash), hashes, ref gathered))
+                        if (Seen(seen, views, row, ref _rawBytes))
+                        {
+                            continue;
+                        }
+
+                        if (Fresh(recent, SplitBlockBloom.Hash(ValueAt(views, buffers, row), hash), hashes, ref gathered))
                         {
                             block.AddRange(hashes);
                             gathered = 0;
@@ -532,6 +550,49 @@ internal sealed class BloomBuilder : IndexBuilder
         seen = value;
         hashes[gathered++] = value;
         return gathered == hashes.Length;
+    }
+
+    /// <summary>
+    /// Counts the bytes of row <paramref name="row"/>'s value, and returns whether its view is one
+    /// this call has seen, after which it remembers it.
+    /// </summary>
+    /// <remarks>
+    /// Two equal views are one value, inline or in a buffer, so a value seen in the call has been
+    /// gathered already, with every hash it makes: its bytes need not be read, nor hashed, again.
+    /// <see cref="Fresh"/> drops a repeated value only once it is hashed, and a column of few
+    /// strings spends most of its time on those hashes and on reaching the bytes. The views seen
+    /// are a table on the stack, sets of two picked by a mix of the view, the newer first: two
+    /// values that share a set both stay, where one slot a set lost two of a column's five labels
+    /// on every row. A miss only costs the hash it would have saved. The empty view is the empty
+    /// slot, and always goes on.
+    /// </remarks>
+    private static bool Seen(Span<ulong> seen, ReadOnlySpan<byte> views, int row, ref long rawBytes)
+    {
+        ulong low = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref MemoryMarshal.GetReference(views), row * 16));
+        ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref MemoryMarshal.GetReference(views), (row * 16) + 8));
+        rawBytes += (uint)low;
+        int set = 4 * (int)(((low ^ high) * 0x9E37_79B9_7F4A_7C15UL) >> (64 - 5));
+        if ((low | high) != 0
+            && ((seen[set] == low && seen[set + 1] == high) || (seen[set + 2] == low && seen[set + 3] == high)))
+        {
+            return true;
+        }
+
+        seen[set + 2] = seen[set];
+        seen[set + 3] = seen[set + 1];
+        seen[set] = low;
+        seen[set + 1] = high;
+        return false;
+    }
+
+    /// <summary>Row <paramref name="row"/>'s value: in its view up to twelve bytes, in its data buffer past that.</summary>
+    private static ReadOnlySpan<byte> ValueAt(ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> buffers, int row)
+    {
+        ReadOnlySpan<byte> view = views.Slice(row * 16, 16);
+        int size = BinaryPrimitives.ReadInt32LittleEndian(view);
+        return size <= 12
+            ? view.Slice(4, size)
+            : buffers[BinaryPrimitives.ReadInt32LittleEndian(view[8..])].Span.Slice(BinaryPrimitives.ReadInt32LittleEndian(view[12..]), size);
     }
 
     /// <summary>

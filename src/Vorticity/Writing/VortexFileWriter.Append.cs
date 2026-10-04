@@ -604,15 +604,24 @@ public sealed partial class VortexFileWriter
 
                 columns[field] = OldColumn.From(statistics, field, rows, hasZones, blocks, chunks[field], keptChunks);
                 columns[field].Strings = hasZones ? strings : null;
+            }
 
-                // The report's entry of each chunk kept, from the tail of its segment.
-                string[] kept = new string[keptChunks];
+            // The report's entry of each chunk kept, from the tail of its segment: every column's
+            // chunks in one request, a read per chunk and column that a cold file serves at the
+            // device's latency each when they are asked for one after the other.
+            List<(LayoutNode Flat, DType DType)> keptFlats = new List<(LayoutNode, DType)>(fields * keptChunks);
+            for (int field = 0; field < fields; field++)
+            {
                 for (int c = 0; c < keptChunks; c++)
                 {
-                    kept[c] = await WrittenAs.ReadAsync(file, chunks[field][c].Flat, dtype, encodings, cancellationToken).ConfigureAwait(false);
+                    keptFlats.Add((chunks[field][c].Flat, schema.GetField(field)));
                 }
+            }
 
-                columns[field].KeptEncodings = kept;
+            string[] keptLabels = await WrittenAs.ReadManyAsync(file, keptFlats, encodings, cancellationToken).ConfigureAwait(false);
+            for (int field = 0; field < fields; field++)
+            {
+                columns[field].KeptEncodings = keptLabels.AsSpan(field * keptChunks, keptChunks).ToArray();
             }
 
             // The re-opened chunk, owned: the file is closed before the append writes.

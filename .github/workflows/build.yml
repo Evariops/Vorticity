@@ -309,6 +309,27 @@ jobs:
             echo "spec/ matches upstream develop"
           fi
 
+  # The check the branch rule requires, by the name the rule gives it: it passes when every job
+  # above it passed, so the rule names one check however the jobs are split. It runs whatever they
+  # end as, since a required check that is skipped counts as passed.
+  checks:
+    name: build, test and cross-check
+    needs: [test, package, crosscheck]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            if [ "$result" != success ]; then
+              echo "a job ended $result: $RESULTS"
+              exit 1
+            fi
+          done
+
   # A published release's packages go to nuget.org, under the Evariops account. Trusted Publishing trades
   # the job's GitHub OIDC token for an API key that lives an hour, so no key is stored here; the
   # policy nuget.org holds names this repository, this file (build.yml) and the release

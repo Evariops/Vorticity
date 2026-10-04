@@ -53,6 +53,12 @@ public sealed partial class ZstdDecompressor
     /// </summary>
     private byte[] _callHistory = [];
 
+    /// <summary>
+    /// Whether the call fills its destination with the start of the frame's content and stops there:
+    /// <see cref="DecompressPrefix"/>'s, which every other call leaves false.
+    /// </summary>
+    private bool _prefix;
+
     /// <summary>Creates a decoder without a dictionary.</summary>
     public ZstdDecompressor()
     {
@@ -161,6 +167,59 @@ public sealed partial class ZstdDecompressor
         catch (ZstdException e)
         {
             return Refuse(e);
+        }
+    }
+
+    /// <summary>
+    /// Decompresses the start of the frame that starts <paramref name="source"/>: as much of its
+    /// content as <paramref name="destination"/> holds, or all of it when the content is shorter,
+    /// with <paramref name="dictionary"/> as <see cref="Decompress(ReadOnlySpan{byte}, Span{byte}, ReadOnlySpan{byte}, out int, out int)"/>
+    /// takes it. A frame whose declared content fits is decoded and checked whole; otherwise nothing
+    /// past the destination's end is decoded, so nothing past it is checked: the rest of its block
+    /// and the blocks after it, the content size and the checksum.
+    /// </summary>
+    /// <remarks>
+    /// A frame's sequences run in order, so its start costs what it holds: a value near the start
+    /// of a frame is reached without executing the matches that fill the rest of it.
+    /// </remarks>
+    /// <param name="source">A zstd frame, possibly followed by other data, which is left alone.</param>
+    /// <param name="destination">Where the start of the frame's content is written.</param>
+    /// <param name="dictionary">A dictionary as <see cref="Decompress(ReadOnlySpan{byte}, Span{byte}, ReadOnlySpan{byte}, out int, out int)"/> takes it; empty for none.</param>
+    /// <param name="bytesWritten">The bytes written: the destination's length, unless the content is shorter.</param>
+    /// <returns>
+    /// <see cref="OperationStatus.Done"/> once the destination is full or the frame decoded; otherwise
+    /// what <see cref="Decompress(ReadOnlySpan{byte}, Span{byte}, ReadOnlySpan{byte}, out int, out int)"/> returns.
+    /// </returns>
+    internal OperationStatus DecompressPrefix(
+        ReadOnlySpan<byte> source, Span<byte> destination, ReadOnlySpan<byte> dictionary, out int bytesWritten)
+    {
+        bytesWritten = 0;
+        if (destination.IsEmpty)
+        {
+            LastError = ZstdError.None;
+            return OperationStatus.Done;
+        }
+
+        if (TryGetFrameContentSize(source, out ulong size) && size <= (ulong)destination.Length)
+        {
+            return Decompress(source, destination, dictionary, out _, out bytesWritten);
+        }
+
+        _prefix = true;
+        try
+        {
+            ReadOnlySpan<byte> history = UseDictionary(dictionary, out DictionaryEntropy? entropy, out uint id);
+            bytesWritten = DecompressFrame(source, destination, history, entropy, id, out _);
+            LastError = ZstdError.None;
+            return OperationStatus.Done;
+        }
+        catch (ZstdException e)
+        {
+            return Refuse(e);
+        }
+        finally
+        {
+            _prefix = false;
         }
     }
 
@@ -337,7 +396,7 @@ public sealed partial class ZstdDecompressor
             Throw.Error(ZstdError.DictionaryMismatch);
         }
 
-        if (header.HasContentSize && header.ContentSize > (ulong)destination.Length)
+        if (header.HasContentSize && header.ContentSize > (ulong)destination.Length && !_prefix)
         {
             Throw.Error(ZstdError.DestinationTooSmall);
         }
@@ -374,7 +433,14 @@ public sealed partial class ZstdDecompressor
 
                     if (blockSize > destination.Length - op)
                     {
-                        Throw.Error(ZstdError.DestinationTooSmall);
+                        if (!_prefix)
+                        {
+                            Throw.Error(ZstdError.DestinationTooSmall);
+                        }
+
+                        // The destination ends in this block: its start, and the call is done.
+                        BulkCopy.Copy(source.Slice(ip, destination.Length - op), destination.Slice(op));
+                        return destination.Length;
                     }
 
                     BulkCopy.Copy(source.Slice(ip, blockSize), destination.Slice(op));
@@ -395,7 +461,13 @@ public sealed partial class ZstdDecompressor
 
                     if (blockSize > destination.Length - op)
                     {
-                        Throw.Error(ZstdError.DestinationTooSmall);
+                        if (!_prefix)
+                        {
+                            Throw.Error(ZstdError.DestinationTooSmall);
+                        }
+
+                        destination.Slice(op).Fill(source[ip]);
+                        return destination.Length;
                     }
 
                     destination.Slice(op, blockSize).Fill(source[ip]);
@@ -416,7 +488,7 @@ public sealed partial class ZstdDecompressor
 
                     // With the next block compressed too, both at once (see ZstdDecompressor.Pairs.cs).
                     int next = ip + blockSize;
-                    if (!lastBlock && _lastBlockSequences >= MinPairSequences && PairsBlocks
+                    if (!lastBlock && !_prefix && _lastBlockSequences >= MinPairSequences && PairsBlocks
                         && TryPeekCompressedBlock(source, next, header.BlockSizeMax, out int nextSize, out bool nextLast)
                         && WorthPairing(source, ip, blockSize, next + FrameFormat.BlockHeaderSize, nextSize))
                     {
@@ -431,6 +503,10 @@ public sealed partial class ZstdDecompressor
                     else
                     {
                         op += DecodeCompressedBlock(source, ip, blockSize, destination, op, header.BlockSizeMax, history);
+                        if (_prefix && op == destination.Length)
+                        {
+                            return op;
+                        }
                     }
 
                     ip = next;
