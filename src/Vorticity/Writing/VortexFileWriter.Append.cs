@@ -339,7 +339,7 @@ public sealed partial class VortexFileWriter
         ColumnWriter writer = _columns[field];
         BlockStats all = writer.Chunk(0, writer.Blocks.Count);
         BlockStats fresh = writer.Chunk(append.Boundary, writer.Blocks.Count - append.Boundary);
-        DType column = _isTabular ? _schema.GetField(field) : _schema;
+        DType column = Stored(_isTabular ? _schema.GetField(field) : _schema);
 
         // Nulls: the old blocks' zones are exact, the new blocks' counts too.
         if (old.HasZones || append.Boundary == 0)
@@ -574,13 +574,16 @@ public sealed partial class VortexFileWriter
                 ZoneString?[]? strings = dtype.Kind is (DTypeKind.Utf8 or DTypeKind.Binary)
                     ? new ZoneString?[boundary]
                     : null;
+
+                // An extension over a number is bounded as its storage is.
+                bool bounded = Stored(dtype).Kind == DTypeKind.Primitive;
                 for (int z = 0; z < boundary; z++)
                 {
                     long zoneRows = Math.Min(blockRows, rows - ((long)z * blockRows));
                     byte scheme = dictBlocks[field].Contains(z) ? (byte)(ColumnScheme.Dict + 1) : (byte)0;
                     if (!hasZones)
                     {
-                        blocks[z] = BlockStats.Summary(zoneRows, 0, dtype.Kind == DTypeKind.Primitive, null, null, scheme);
+                        blocks[z] = BlockStats.Summary(zoneRows, 0, bounded, null, null, scheme);
                         continue;
                     }
 
@@ -588,13 +591,13 @@ public sealed partial class VortexFileWriter
                     if (!bounds.HasNullCount)
                     {
                         hasZones = false;
-                        blocks[z] = BlockStats.Summary(zoneRows, 0, dtype.Kind == DTypeKind.Primitive, null, null, scheme);
+                        blocks[z] = BlockStats.Summary(zoneRows, 0, bounded, null, null, scheme);
                         continue;
                     }
 
                     bool exact = bounds.IsExact && bounds.HasMin && bounds.HasMax;
                     blocks[z] = BlockStats.Summary(
-                        zoneRows, bounds.NullCount, dtype.Kind == DTypeKind.Primitive,
+                        zoneRows, bounds.NullCount, bounded,
                         exact ? bounds.Min : null, exact ? bounds.Max : null, scheme);
                     if (strings is not null)
                     {

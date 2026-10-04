@@ -132,7 +132,10 @@ present is above 10, but one in fifty is missing, so `All` is false. Two `Where`
 keep. In `AggAsync`, `a.Where`, `a.Count(p)`, `a.Any` and `a.All` do the same over the scan's rows.
 
 Each predicate is evaluated once a batch, however many aggregates read it, and its columns join the
-pass.
+pass. On a million requests grouped by endpoint, the count, the failures and their mean latency took
+3.4 ms in one pass, and the failures alone, filtered before the group by, 4.6 ms. A filter written
+before the group by is still the one to write when the other rows are not wanted and the zone maps
+can skip blocks with it.
 
 ## Chosen rows
 
@@ -165,10 +168,67 @@ The pass keeps each group's row as its position and the value it is chosen by; t
 from the rows are fetched after it, for the chosen rows alone, by position, which decodes only those
 rows where the encoding allows. A group by that streams fetches them for each batch of groups it
 closes. A chosen row's column is a result: a `Where` or an `OrderBy` after the group by compares it,
-and an aggregate does not read it. On a million requests grouped by endpoint, the count, the failures and their mean latency took
-3.4 ms in one pass, and the failures alone, filtered before the group by, 4.6 ms. A filter written
-before the group by is still the one to write when the other rows are not wanted and the zone maps
-can skip blocks with it.
+and an aggregate does not read it.
+
+## Buckets of time and of numbers
+
+```csharp
+TimeZoneInfo paris = TimeZoneInfo.FindSystemTimeZoneById("Europe/Paris");
+DateTime second = new DateTime(2026, 9, 2, 0, 0, 0, DateTimeKind.Utc);
+Scan<Visit> day = visitFile.Scan<Visit>().Where(v => v.StartedAt.Truncate(CalendarUnit.Day) == second);
+await foreach (VisitHour hour in day
+    .GroupBy(v => v.StartedAt.Truncate(CalendarUnit.Hour, paris))
+    .Select(g => (g.Key, g.Count(), g.Average(v => v.DurationMs)))
+    .As<VisitHour>()
+    .ToRecordsAsync())
+
+[VortexRecord]
+public partial record struct VisitHour(DateTime Hour, long Visits, double? MeanMs);
+```
+
+```
+GroupBy(StartedAt, by hour)        0.8 ms  24 hours; 5 blocks decoded
+  2026-09-02 02:00 Paris  1200 visits, mean 29400 ms
+  2026-09-02 03:00 Paris  1200 visits, mean 30600 ms
+  ...
+```
+
+`Truncate(unit)` is the start of the `Minute`, `Hour`, `Day`, `Week` (from Monday), `Month`,
+`Quarter` or `Year` holding an instant or a date, `Truncate(unit, zone)` the same on a zone's
+calendar, and `Bucket(width)` the bucket of a `TimeSpan` holding an instant, counted from
+1970-01-01. Each is a column of the column's type, valid wherever a column is: a key, a filter, an
+aggregate's input, a selection. A `DateTime` is truncated as it is stored, here in UTC, so the day
+is the UTC day and its hours, on Paris's calendar, start at 02:00 in Paris. On a zone's calendar each
+instant takes its interval's offset: the autumn's repeated hour is two hours, and its day one of 25
+hours. A `DateTimeOffset` read from a zoned column is truncated on its column's calendar. A null
+stays null.
+
+The filter is not evaluated through the function. A comparison of a function with a constant is the
+range of the column it stands for, the day `StartedAt >= 2026-09-02 && StartedAt < 2026-09-03`, so
+the zone maps, the statistics and a sorted column prune, count and locate it as they would the range
+written by hand: the scan decoded the 5 blocks of 13 that hold the day. The instants being sorted,
+their hours are too, and the group by streams, an hour at a time.
+
+On a number, `Bucket(width)` is `⌊v / w⌋ × w`, in integers for an integer column and rounded to the
+column's type for a float:
+
+```csharp
+.GroupBy(v => v.DurationMs.Bucket(15_000))
+.Select(g => (g.Key, g.Count()))
+.As<DurationBucket>()
+```
+
+```
+  from      0 ms  25000 visits
+  from  15000 ms  15000 visits
+  ...
+  from  75000 ms  15000 visits
+```
+
+A comparison with a float's bucket, an `In` over a function and two functions compared are evaluated
+through the function, and prune by the zones' bounds taken through it. A decimal's bucket is not
+there yet. A function has no key source of its own, so it cannot be the key of a scan's `OrderBy` or
+of `Keys`.
 
 ## An aggregator of your own
 

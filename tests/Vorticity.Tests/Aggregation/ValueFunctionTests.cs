@@ -186,14 +186,16 @@ public sealed partial class ValueFunctionTests
             {
                 ScanPlan byFunction = await file.Scan<Reading>().Where(function).ExplainAsync(Ct);
                 ScanPlan byRange = await file.Scan<Reading>().Where(range).ExplainAsync(Ct);
+                Assert.True(byFunction.LiveBlocks < byFunction.Blocks / 4, $"{byFunction.LiveBlocks} of {byFunction.Blocks} blocks live: {string.Join(", ", byFunction.Pruning)}");
                 Assert.Equal(byRange.LiveBlocks, byFunction.LiveBlocks);
                 Assert.Equal(byRange.Pruning.Select(s => (s.Structure, s.BlocksPruned)), byFunction.Pruning.Select(s => (s.Structure, s.BlocksPruned)));
                 Assert.Equal(await file.Scan<Reading>().Where(range).CountAsync(Ct), await file.Scan<Reading>().Where(function).CountAsync(Ct));
             }
 
-            // A day is a block or two of the sorted instants, located like the range it stands for.
+            // A day is a block or two of the sorted instants, which the zone maps keep alone.
             ScanPlan oneDay = await file.Scan<Reading>().Where(pairs[0].Function).ExplainAsync(Ct);
             Assert.True(oneDay.LiveBlocks <= 2, $"{oneDay.LiveBlocks} of {oneDay.Blocks} blocks live");
+            Assert.Equal(oneDay.Blocks - oneDay.LiveBlocks, Assert.Single(oneDay.Pruning, step => step.Structure == "zone map").BlocksPruned);
 
             // A scan's order and a key cursor walk a column's key source, which a function has not.
             Assert.Throws<ArgumentException>(() => file.Scan<Reading>().OrderBy(r => r.At.Truncate(CalendarUnit.Day)));
