@@ -648,9 +648,12 @@ At a degree above one the rows are cut at chunk boundaries into ranges, each agg
 its own. A range pre-aggregates while its keys repeat; when its groups approach its rows — keys that
 rarely repeat, a user or a session id — it stops, and partitions its rows by the hash of their key
 among the lanes, so that each lane owns a slice of the keys and every group has one state: memory is
-then the number of groups, not the degree times it. The ranges' groups merge part by part, each part
-a task the query awaits, never a thread blocked on others. A chosen row and a tie keep the earlier
-range's. On a dataset, a range is an object, or a part of a large one, and an object's statistics
+then the number of groups, not the degree times it. The ranges' groups merge part by part: the key
+space is cut by the top bits of a hash of the keys seeded for the merge, apart from the tables' own,
+each part merged from every range by a task the query awaits, never a thread blocked on others, and
+the parts are read as one, without a copy; a composite's indexes of its columns merge once, first.
+With few groups, or too few lanes for the parts to pay, the ranges merge in series into the one
+holding the most. A chosen row and a tie keep the earlier range's. On a dataset, a range is an object, or a part of a large one, and an object's statistics
 settle what a file's would ([13-dataset.md](13-dataset.md)). A group by that streams runs as §2.5
 says.
 

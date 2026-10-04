@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Compute;
 using Vorticity.Writing;
@@ -84,7 +86,46 @@ internal abstract class GroupKeys
     internal abstract GroupKeys Fresh();
 
     /// <summary>Adds this partition's keys to <paramref name="target"/>; group <c>g</c> here is <c>map[g]</c> there.</summary>
-    internal abstract void MergeInto(GroupKeys target, Span<int> map);
+    internal void MergeInto(GroupKeys target, Span<int> map) => MergeInto(target, Numbers.Upto(Count), map);
+
+    /// <summary>
+    /// Adds the keys of <paramref name="groups"/> to <paramref name="target"/>; group
+    /// <c>groups[i]</c> here is <c>map[i]</c> there: the part of a partition a task of a parallel
+    /// merge takes.
+    /// </summary>
+    internal abstract void MergeInto(GroupKeys target, ReadOnlySpan<int> groups, Span<int> map);
+
+    /// <summary>
+    /// The part of a parallel merge each group's key falls in: the top bits, past
+    /// <paramref name="shift"/>, of a hash of the key under <paramref name="seed"/>, the same for one
+    /// key in every partition of a query whatever its group there; the first part for the null group.
+    /// </summary>
+    internal abstract void Parts(ulong seed, int shift, Span<byte> parts);
+
+    /// <summary>An empty index a part of a parallel merge is merged into: <see cref="Fresh"/>, or one sharing what the partitions were rebased on.</summary>
+    internal virtual GroupKeys ForPart() => Fresh();
+
+    /// <summary>Makes room for <paramref name="groups"/> groups at once, where the index can: the part of a merge, whose keys the partitions count.</summary>
+    internal virtual void Reserve(int groups)
+    {
+    }
+
+    /// <summary>
+    /// Readies the indexes of a parallel merge's partitions, this one the first of them, for their
+    /// hashes and their merge in parts: what they share is merged once, a composite's indexes of its
+    /// columns, so that a key has the same words in every partition. Nothing for a key of one column.
+    /// </summary>
+    internal virtual Task RebaseAsync(GroupKeys[] partitions, CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <summary>
+    /// Group <paramref name="a"/> here and group <paramref name="b"/> of <paramref name="other"/>, an
+    /// index of the same kind and the same merge, by component <paramref name="component"/> of their
+    /// keys, as <see cref="CompareKeys(int, int, int)"/> orders them: what orders the parts of a
+    /// parallel merge read as one.
+    /// </summary>
+    /// <exception cref="NotSupportedException">The keys are not ordered here (<see cref="Orders"/>).</exception>
+    internal virtual int CompareKeys(GroupKeys other, int a, int b, int component) =>
+        throw new NotSupportedException("These keys are ordered by the column of their values.");
 
     /// <summary>The groups in the order they are delivered: by key, nulls last, when <paramref name="sorted"/>; as first seen otherwise.</summary>
     internal abstract int[] Order(bool sorted);
@@ -109,10 +150,11 @@ internal abstract class GroupKeys
     internal virtual int NullNumber => -1;
 
     /// <summary>
-    /// Whether <see cref="CompareKeys"/> orders the groups by component <paramref name="component"/>
-    /// of their keys as the column of those keys would, so that an order breaks its ties without the
-    /// keys built: an integer's, a decimal's, a text's, a boolean's; not a float's, whose NaN and
-    /// zeros the column orders apart from their values' comparison, nor a composite's parts.
+    /// Whether <see cref="CompareKeys(int, int, int)"/> orders the groups by component
+    /// <paramref name="component"/> of their keys as the column of those keys would, so that an order
+    /// breaks its ties without the keys built: an integer's, a decimal's, a text's, a boolean's, a
+    /// composite's part of one of those; not a float's, whose NaN and zeros the column orders apart
+    /// from their values' comparison.
     /// </summary>
     internal virtual bool Orders(int component) => false;
 
@@ -177,6 +219,30 @@ internal abstract class GroupKeys
 
 /// <summary>The smallest and the largest value of an integer key, as the file statistics hold them exactly.</summary>
 internal readonly record struct KeyBounds(long Min, long Max);
+
+/// <summary>
+/// The hash a parallel merge cuts the keys by: a mix of 64 bits under a seed drawn once a merge, the
+/// same in every partition, apart from each table's own hash, which a table may draw again alone:
+/// a key hashed by its table could fall in two parts. The default hash of an integer is its value,
+/// whose high bits cut nothing.
+/// </summary>
+internal static class MergeHash
+{
+    /// <summary>A key of two words, every bit of each reaching every bit of the hash.</summary>
+    internal static ulong Of(ulong low, ulong high, ulong seed) => Mix(Mix(low ^ seed) ^ high);
+
+    /// <summary>A key of bytes.</summary>
+    internal static ulong Of(ReadOnlySpan<byte> bytes, ulong seed) => System.IO.Hashing.XxHash3.HashToUInt64(bytes, unchecked((long)seed));
+
+    private static ulong Mix(ulong x)
+    {
+        x ^= x >> 33;
+        x *= 0xFF51_AFD7_ED55_8CCDUL;
+        x ^= x >> 33;
+        x *= 0xC4CE_B9FE_1A85_EC53UL;
+        return x ^ (x >> 33);
+    }
+}
 
 /// <summary>
 /// A key of one fixed-width column: a hash map from the storage value to its group, and a group for
@@ -394,6 +460,18 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds);
 
+    /// <summary>A part of a merge is merged into, never assigned rows: no table of groups.</summary>
+    internal override GroupKeys ForPart() => new FixedKeys<TValue>(_shape, _sorted);
+
+    internal override void Reserve(int groups)
+    {
+        _index.Reserve(groups);
+        if (_keys.Length < groups)
+        {
+            Array.Resize(ref _keys, groups);
+        }
+    }
+
     internal override int NullNumber => _null;
 
     /// <summary>A float orders its NaN last and its zeros together, which its comparison does not.</summary>
@@ -450,15 +528,38 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         Renumbered();
     }
 
-    internal override void MergeInto(GroupKeys target, Span<int> map)
+    internal override void MergeInto(GroupKeys target, ReadOnlySpan<int> groups, Span<int> map)
     {
         FixedKeys<TValue> into = (FixedKeys<TValue>)target;
-        for (int g = 0; g < Count; g++)
+        for (int i = 0; i < groups.Length; i++)
         {
-            map[g] = g == _null ? into.NullGroup() : into.Lookup(_keys[g]);
+            int g = groups[i];
+            map[i] = g == _null ? into.NullGroup() : into.Lookup(_keys[g]);
         }
 
         MergeSeen(target);
+    }
+
+    internal override void Parts(ulong seed, int shift, Span<byte> parts)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            (ulong low, ulong high) = KeyWords.Of(_keys[g]);
+            parts[g] = g == _null ? (byte)0 : (byte)(MergeHash.Of(low, high, seed) >> shift);
+        }
+    }
+
+    internal override int CompareKeys(GroupKeys other, int a, int b, int component)
+    {
+        FixedKeys<TValue> right = (FixedKeys<TValue>)other;
+        bool leftNull = a == _null;
+        bool rightNull = b == right._null;
+        if (leftNull || rightNull)
+        {
+            return leftNull == rightNull ? 0 : leftNull ? 1 : -1;
+        }
+
+        return _keys[a].CompareTo(right._keys[b]);
     }
 
     internal override int[] Order(bool sorted)
@@ -778,15 +879,37 @@ internal sealed class BytesKeys : GroupKeys
         Renumbered();
     }
 
-    internal override void MergeInto(GroupKeys target, Span<int> map)
+    internal override void MergeInto(GroupKeys target, ReadOnlySpan<int> groups, Span<int> map)
     {
         BytesKeys into = (BytesKeys)target;
-        for (int g = 0; g < Count; g++)
+        for (int i = 0; i < groups.Length; i++)
         {
-            map[g] = g == _null ? into.NullGroup() : into.Lookup(_table.KeyOf(_entryOfGroup[g]));
+            int g = groups[i];
+            map[i] = g == _null ? into.NullGroup() : into.Lookup(_table.KeyOf(_entryOfGroup[g]));
         }
 
         MergeSeen(target);
+    }
+
+    internal override void Parts(ulong seed, int shift, Span<byte> parts)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            parts[g] = g == _null ? (byte)0 : (byte)(MergeHash.Of(_table.KeyOf(_entryOfGroup[g]), seed) >> shift);
+        }
+    }
+
+    internal override int CompareKeys(GroupKeys other, int a, int b, int component)
+    {
+        BytesKeys right = (BytesKeys)other;
+        bool leftNull = a == _null;
+        bool rightNull = b == right._null;
+        if (leftNull || rightNull)
+        {
+            return leftNull == rightNull ? 0 : leftNull ? 1 : -1;
+        }
+
+        return _table.KeyOf(_entryOfGroup[a]).SequenceCompareTo(right._table.KeyOf(right._entryOfGroup[b]));
     }
 
     internal override int[] Order(bool sorted)
@@ -936,16 +1059,27 @@ internal sealed class BoolKeys : GroupKeys
         Count = groups.Length;
     }
 
-    internal override void MergeInto(GroupKeys target, Span<int> map)
+    internal override void MergeInto(GroupKeys target, ReadOnlySpan<int> groups, Span<int> map)
     {
         BoolKeys into = (BoolKeys)target;
-        for (int g = 0; g < Count; g++)
+        for (int i = 0; i < groups.Length; i++)
         {
-            map[g] = into.GroupOf(_keyOf[g]);
+            map[i] = into.GroupOf(_keyOf[groups[i]]);
         }
 
         MergeSeen(target);
     }
+
+    /// <summary>False and true by their codes, the null group, code 2, to the first part.</summary>
+    internal override void Parts(ulong seed, int shift, Span<byte> parts)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            parts[g] = _keyOf[g] == 2 ? (byte)0 : (byte)(MergeHash.Of(_keyOf[g] + 1UL, 0, seed) >> shift);
+        }
+    }
+
+    internal override int CompareKeys(GroupKeys other, int a, int b, int component) => _keyOf[a].CompareTo(((BoolKeys)other)._keyOf[b]);
 
     internal override int[] Order(bool sorted)
     {

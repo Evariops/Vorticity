@@ -133,15 +133,23 @@ internal sealed class CompositeKeys : GroupKeys
         Count = groups.Length;
     }
 
-    internal override void MergeInto(GroupKeys target, Span<int> map)
+    internal override void MergeInto(GroupKeys target, ReadOnlySpan<int> groups, Span<int> map)
     {
         CompositeKeys into = (CompositeKeys)target;
-        for (int g = 0; g < Count; g++)
+        for (int i = 0; i < groups.Length; i++)
         {
-            map[g] = into.GroupOf(_table.KeyOf(g));
+            map[i] = into.GroupOf(_table.KeyOf(groups[i]));
         }
 
         MergeSeen(target);
+    }
+
+    internal override void Parts(ulong seed, int shift, Span<byte> parts)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            parts[g] = (byte)(MergeHash.Of(_table.KeyOf(g), seed) >> shift);
+        }
     }
 
     internal override int[] Order(bool sorted) => Identity(Count);

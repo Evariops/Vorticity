@@ -135,11 +135,16 @@ internal sealed class FixedDistinctSlotBefore<TValue> : AggregateSlot<long>
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        foreach (DistinctEntry<TValue> entry in ((FixedDistinctSlotBefore<TValue>)other)._seen)
+        FixedDistinctSlotBefore<TValue> source = (FixedDistinctSlotBefore<TValue>)other;
+        ReadOnlySpan<int> targets = from.Length == source._groups ? into : Distinct.Targets(source._groups, from, into);
+        foreach (DistinctEntry<TValue> entry in source._seen)
         {
-            Add(map[entry.Group], entry.Value);
+            if (targets[entry.Group] >= 0)
+            {
+                Add(targets[entry.Group], entry.Value);
+            }
         }
     }
 

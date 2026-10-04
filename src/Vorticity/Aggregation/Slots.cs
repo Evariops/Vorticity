@@ -67,7 +67,20 @@ internal abstract class AggregateSlot
     }
 
     /// <summary>Merges the same aggregate of another partition, whose group <c>g</c> is this one's <c>map[g]</c>.</summary>
-    internal abstract void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map);
+    internal void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map) => MergeFrom(other, Numbers.Upto(map.Length), map);
+
+    /// <summary>
+    /// Merges groups <paramref name="from"/> of the same aggregate of another partition into this
+    /// one's groups <paramref name="into"/>, pair by pair: the part of a partition a parallel merge
+    /// hands one of its tasks.
+    /// </summary>
+    internal abstract void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into);
+
+    /// <summary>
+    /// The groups of several partitions merged apart, read as one: group <c>g</c> is group
+    /// <c>g - offsets[p]</c> of <c>parts[p]</c>, <c>p</c> the last whose offset is at or below it.
+    /// </summary>
+    internal abstract AggregateSlot Joined(AggregateSlot[] parts, int[] offsets);
 
     /// <summary>
     /// Keeps the states of <paramref name="groups"/> alone, group <c>groups[i]</c> becoming group
@@ -89,6 +102,132 @@ internal abstract class AggregateSlot<TResult> : AggregateSlot
             into[i] = Result(groups[i]);
         }
     }
+
+    internal override AggregateSlot Joined(AggregateSlot[] parts, int[] offsets) => new JoinedSlot<TResult>(parts, offsets);
+}
+
+/// <summary>The numbers 0, 1, 2 and on, shared: the groups of a whole partition for a merge that takes them all.</summary>
+internal static class Numbers
+{
+    private static int[] s_numbers = [];
+
+    /// <summary>The first <paramref name="count"/> numbers.</summary>
+    internal static ReadOnlySpan<int> Upto(int count)
+    {
+        int[] numbers = s_numbers;
+        if (numbers.Length < count)
+        {
+            // A wider array replaces the field whole: a reader holds one long enough, whichever.
+            numbers = new int[Scratch.Capacity(count, numbers.Length)];
+            for (int i = 0; i < numbers.Length; i++)
+            {
+                numbers[i] = i;
+            }
+
+            s_numbers = numbers;
+        }
+
+        return numbers.AsSpan(0, count);
+    }
+}
+
+/// <summary>
+/// The answers of an aggregate merged in parts, read as one slot: each group's answer from the part
+/// that holds it, a mean too where the parts hold one.
+/// </summary>
+internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) : AggregateSlot<TResult>, IMeanSlot
+{
+    private int[] _local = [];
+
+    internal override TResult Result(int group)
+    {
+        int part = JoinedParts.PartOf(offsets, group);
+        return ((AggregateSlot<TResult>)parts[part]).Result(group - offsets[part]);
+    }
+
+    /// <summary>The groups a run at a time of one part, their numbers in it: a batch in delivery order comes in long runs.</summary>
+    internal override void Results(ReadOnlySpan<int> groups, Span<TResult> into)
+    {
+        Scratch.Grow(ref _local, groups.Length);
+        int start = 0;
+        while (start < groups.Length)
+        {
+            int part = JoinedParts.PartOf(offsets, groups[start]);
+            int low = offsets[part];
+            int high = part + 1 < offsets.Length ? offsets[part + 1] : int.MaxValue;
+            int end = start;
+            while (end < groups.Length && groups[end] >= low && groups[end] < high)
+            {
+                _local[end] = groups[end] - low;
+                end++;
+            }
+
+            ((AggregateSlot<TResult>)parts[part]).Results(_local.AsSpan(start, end - start), into[start..end]);
+            start = end;
+        }
+    }
+
+    public double? Mean(int group)
+    {
+        int part = JoinedParts.PartOf(offsets, group);
+        return ((IMeanSlot)parts[part]).Mean(group - offsets[part]);
+    }
+
+    internal override void EnsureGroups(int groups) => throw JoinedParts.Read();
+
+    internal override void StepRange(in BatchInput input, int start, int end, int group) => throw JoinedParts.Read();
+
+    internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups) => throw JoinedParts.Read();
+
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into) => throw JoinedParts.Read();
+
+    internal override void Keep(ReadOnlySpan<int> groups) => throw JoinedParts.Read();
+}
+
+/// <summary>What the slots of distinct values share, whose pairs are keyed by group: a merge of some of their groups.</summary>
+internal static class Distinct
+{
+    /// <summary>The group each of <paramref name="groups"/> groups merges into, -1 for one not merged, from the pairs <paramref name="from"/> and <paramref name="into"/>.</summary>
+    internal static int[] Targets(int groups, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
+    {
+        int[] targets = new int[groups];
+        Array.Fill(targets, -1);
+        for (int i = 0; i < from.Length; i++)
+        {
+            targets[from[i]] = into[i];
+        }
+
+        return targets;
+    }
+}
+
+/// <summary>What the slots and keys merged in parts share: which part holds a group.</summary>
+internal static class JoinedParts
+{
+    /// <summary>The part holding <paramref name="group"/>: the last whose offset is at or below it.</summary>
+    internal static int PartOf(int[] offsets, int group)
+    {
+        int low = 0;
+        int high = offsets.Length - 1;
+        while (low < high)
+        {
+            int middle = (low + high + 1) >> 1;
+            if (offsets[middle] <= group)
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+
+        return low;
+    }
+
+    /// <summary>A joined slot or index is read, never stepped nor merged again.</summary>
+    internal static InvalidOperationException Read() =>
+        new InvalidOperationException("The groups merged in parts are read, not stepped or merged again.");
 }
 
 /// <summary>A slot whose states are a sum's, which hold a mean as well.</summary>
@@ -116,7 +255,7 @@ internal sealed class MeanView(IMeanSlot sum) : AggregateSlot<double?>
     {
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
     }
 
@@ -146,7 +285,7 @@ internal sealed class SettledSlot<TResult> : AggregateSlot<TResult>
     {
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
     }
 
@@ -212,12 +351,12 @@ internal sealed class CountSlot : AggregateSlot<long>
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        CountSlot from = (CountSlot)other;
-        for (int g = 0; g < from._groups; g++)
+        long[] counts = ((CountSlot)other)._counts;
+        for (int i = 0; i < from.Length; i++)
         {
-            _counts[map[g]] += from._counts[g];
+            _counts[into[i]] += counts[from[i]];
         }
     }
 
@@ -281,12 +420,12 @@ internal sealed class ExistsSlot(bool all) : AggregateSlot<bool>
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        ExistsSlot from = (ExistsSlot)other;
-        for (int g = 0; g < from._groups; g++)
+        bool[] seen = ((ExistsSlot)other)._seen;
+        for (int i = 0; i < from.Length; i++)
         {
-            _seen[map[g]] |= from._seen[g];
+            _seen[into[i]] |= seen[from[i]];
         }
     }
 

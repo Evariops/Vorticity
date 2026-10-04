@@ -305,12 +305,12 @@ internal sealed class FixedSlot<TValue, TState, TOp, TResult> : AggregateSlot<TR
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        FixedSlot<TValue, TState, TOp, TResult> from = (FixedSlot<TValue, TState, TOp, TResult>)other;
-        for (int g = 0; g < from._groups; g++)
+        TState[] states = ((FixedSlot<TValue, TState, TOp, TResult>)other)._states;
+        for (int i = 0; i < from.Length; i++)
         {
-            TOp.Merge(ref _states[map[g]], in from._states[g]);
+            TOp.Merge(ref _states[into[i]], in states[from[i]]);
         }
     }
 
@@ -535,11 +535,19 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        foreach (DistinctEntry<TValue> entry in ((FixedDistinctSlot<TValue>)other)._seen)
+        // The pairs are keyed by group: each one's group found in the groups merged, which are every
+        // one of the other's, or a part of them whose targets a table gives.
+        FixedDistinctSlot<TValue> source = (FixedDistinctSlot<TValue>)other;
+        ReadOnlySpan<int> targets = from.Length == source._groups ? into : Distinct.Targets(source._groups, from, into);
+        foreach (DistinctEntry<TValue> entry in source._seen)
         {
-            Add(map[entry.Group], entry.Value);
+            int target = targets[entry.Group];
+            if (target >= 0)
+            {
+                Add(target, entry.Value);
+            }
         }
     }
 
@@ -633,14 +641,19 @@ internal readonly record struct DistinctEntry<TValue>(int Group, TValue Value)
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public override int GetHashCode()
     {
-        (ulong low, ulong high) = Words(Value);
+        (ulong low, ulong high) = KeyWords.Of(Value);
         return KeyHash.Chained(low, high, Group);
     }
+}
 
+/// <summary>A fixed-width value as the words a hash reads.</summary>
+internal static class KeyWords
+{
     /// <summary>A value's bits as two words, zero-extended, a float's made one pattern per value.</summary>
     /// <remarks>Cast rather than read through a reference, which would take the value through memory before the multiply.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static (ulong Low, ulong High) Words(TValue value)
+    internal static (ulong Low, ulong High) Of<TValue>(TValue value)
+        where TValue : unmanaged
     {
         if (typeof(TValue) == typeof(double))
         {

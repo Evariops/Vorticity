@@ -43,14 +43,14 @@ internal sealed class RowSlot(bool last) : AggregateSlot<long>
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        RowSlot from = (RowSlot)other;
-        for (int g = 0; g < from._groups; g++)
+        long[] rows = ((RowSlot)other)._rows;
+        for (int i = 0; i < from.Length; i++)
         {
-            if (from._rows[g] >= 0)
+            if (rows[from[i]] >= 0)
             {
-                Choose(ref _rows[map[g]], from._rows[g]);
+                Choose(ref _rows[into[i]], rows[from[i]]);
             }
         }
     }
@@ -154,14 +154,15 @@ internal sealed class ChosenBySlot<TValue>(bool max, StorageKind kind) : Aggrega
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        ChosenBySlot<TValue> from = (ChosenBySlot<TValue>)other;
-        for (int g = 0; g < from._groups; g++)
+        ChosenBySlot<TValue> source = (ChosenBySlot<TValue>)other;
+        for (int i = 0; i < from.Length; i++)
         {
-            if (from._rows[g] >= 0)
+            int g = from[i];
+            if (source._rows[g] >= 0)
             {
-                Consider(map[g], from._best[g], from._rows[g]);
+                Consider(into[i], source._best[g], source._rows[g]);
             }
         }
     }

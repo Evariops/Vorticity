@@ -1,6 +1,8 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -328,12 +330,7 @@ internal sealed class AggregationPartition
         _nodes = new int[columns.Length];
         _filterOf = plan.Filters.FilterOf;
         _masks = plan.Filters.Filters.Length > 0 ? new FilterMasks(plan.Filters) : null;
-        Slots = new AggregateSlot[settled.Length];
-        for (int i = 0; i < settled.Length; i++)
-        {
-            Slots[i] = settled[i] ?? plan.Aggregates[i].Create(source);
-        }
-
+        Slots = NewSlots(plan, settled, source);
         Keys = plan.Grouped ? plan.CreateKeys(sorted, facts) : null;
         if (streaming >= 0 && _keyCount > 1)
         {
@@ -353,6 +350,18 @@ internal sealed class AggregationPartition
     internal AggregateSlot[] Slots { get; }
 
     internal GroupKeys? Keys { get; }
+
+    /// <summary>A slot for each aggregate of the plan: the settled one, or a new one.</summary>
+    internal static AggregateSlot[] NewSlots(AggregationPlan plan, AggregateSlot?[] settled, ScanSource? source)
+    {
+        AggregateSlot[] slots = new AggregateSlot[settled.Length];
+        for (int i = 0; i < settled.Length; i++)
+        {
+            slots[i] = settled[i] ?? plan.Aggregates[i].Create(source);
+        }
+
+        return slots;
+    }
 
     /// <summary>The time the partition's passes took, in <see cref="Stopwatch"/> ticks: the lane's active time.</summary>
     internal long ActiveTicks { get; set; }
@@ -909,18 +918,269 @@ internal static class AggregationEngine
             await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, cancellationToken).ConfigureAwait(false);
         }
 
-        AggregationPartition merged = partitions[0];
         long merging = Stopwatch.GetTimestamp();
+        (GroupKeys? keys, AggregateSlot[] slots, int parts) = await MergeAsync(partitions, plan, settled, inputs, degree, source, cancellationToken).ConfigureAwait(false);
+        plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging, parts);
+
+        // Groups as they were first met, or part after part: an order is asked for, with OrderBy.
+        int[] order = keys is null ? [0] : keys.Order(sorted: false);
+        return new AggregationOutcome(plan, slots, keys, order);
+    }
+
+    /// <summary>The parts a parallel merge cuts the key space into, at most.</summary>
+    private const int MostParts = 256;
+
+    /// <summary>The groups of the largest partition a part takes at least: with fewer, handing out a part costs more than merging it.</summary>
+    private const int PartGroups = 512;
+
+    /// <summary>
+    /// The partitions' groups merged into one outcome. With few groups, in series, into the partition
+    /// that holds the most, whose cells stay where they are. With many, the key space cut into parts
+    /// by the top bits of a hash of the keys seeded for the merge, a power of two of them, at most
+    /// twice the degree: each part merged from every partition by a task the merge's workers take
+    /// from a queue, and the parts read as one, without a copy.
+    /// </summary>
+    /// <returns>The merged keys and slots, and the parts merged: the partitions merged into the largest, in series.</returns>
+    private static async ValueTask<(GroupKeys? Keys, AggregateSlot[] Slots, int Parts)> MergeAsync(
+        AggregationPartition[] partitions, AggregationPlan plan, AggregateSlot?[] settled, int[] inputs, int degree, ScanSource source, CancellationToken cancellationToken)
+    {
+        int largest = 0;
         for (int p = 1; p < partitions.Length; p++)
         {
-            merged.MergeFrom(partitions[p]);
+            largest = (partitions[p].Keys?.Count ?? 0) > (partitions[largest].Keys?.Count ?? 0) ? p : largest;
         }
 
-        plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging);
-        GroupKeys? keys = merged.Keys;
-        // Groups as they were first met: an order is asked for, with OrderBy.
-        int[] order = keys is null ? [0] : keys.Order(sorted: false);
-        return new AggregationOutcome(plan, merged.Slots, keys, order);
+        // In parts, every entry of every partition goes into a fresh table, at twice what an entry
+        // costs the merge in series once its part is cut and its table made: they pay when a worker's
+        // share of that is below the entries the series would merge into the largest. Measured, two
+        // lanes merge faster in series, eight in parts, four about alike.
+        AggregationPartition biggest = partitions[largest];
+        int parts = biggest.Keys is null ? 1 : Parts(degree, biggest.Keys.Count);
+        long entries = 0;
+        foreach (AggregationPartition partition in partitions)
+        {
+            entries += partition.Keys?.Count ?? 0;
+        }
+
+        long serial = entries - (biggest.Keys?.Count ?? 0);
+        if (partitions.Length == 1 || parts == 1 || 2 * entries >= Math.Min(degree, parts) * serial)
+        {
+            for (int p = 0; p < partitions.Length; p++)
+            {
+                if (p != largest)
+                {
+                    biggest.MergeFrom(partitions[p]);
+                }
+            }
+
+            return (biggest.Keys, biggest.Slots, partitions.Length - 1);
+        }
+
+        using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        CancellationToken token = failed.Token;
+        GroupKeys[] keysOf = new GroupKeys[partitions.Length];
+        for (int p = 0; p < partitions.Length; p++)
+        {
+            keysOf[p] = partitions[p].Keys!;
+        }
+
+        // What the partitions share is merged once: a composite's indexes of its columns.
+        await keysOf[0].RebaseAsync(keysOf, token).ConfigureAwait(false);
+
+        // Each partition's groups by part, a task each: hashed, counted, placed.
+        ulong seed = ((ulong)Random.Shared.NextInt64() << 1) | 1;
+        int shift = 64 - BitOperations.Log2((uint)parts);
+        int[][] placed = new int[partitions.Length][];
+        int[][] starts = new int[partitions.Length][];
+        Task[] cutting = new Task[partitions.Length];
+        for (int p = 0; p < partitions.Length; p++)
+        {
+            int partition = p;
+            cutting[p] = Task.Run(() => (placed[partition], starts[partition]) = Cut(keysOf[partition], seed, shift, parts), token);
+        }
+
+        await GuardedAsync(cutting, failed).ConfigureAwait(false);
+
+        // Each part merged from every partition, the parts taken from a queue. A part's groups are
+        // reserved before they come: as many as its largest partition sends while no part is done,
+        // then its entries at the rate of groups to entries the parts done had.
+        GroupKeys[] partKeys = new GroupKeys[parts];
+        AggregateSlot[][] partSlots = new AggregateSlot[parts][];
+        int taken = -1;
+        long doneGroups = 0;
+        long doneEntries = 0;
+        object done = new object();
+        Task[] workers = new Task[Math.Min(degree, parts)];
+        for (int w = 0; w < workers.Length; w++)
+        {
+            workers[w] = Task.Run(
+                () =>
+                {
+                    int[] map = [];
+                    int part;
+                    while ((part = Interlocked.Increment(ref taken)) < parts)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        int entries = 0;
+                        int most = 0;
+                        for (int p = 0; p < partitions.Length; p++)
+                        {
+                            int sent = starts[p][part + 1] - starts[p][part];
+                            entries += sent;
+                            most = Math.Max(most, sent);
+                        }
+
+                        int reserve = most;
+                        lock (done)
+                        {
+                            if (doneEntries > 0)
+                            {
+                                reserve = (int)Math.Clamp(entries * 1.1 * doneGroups / doneEntries, most, entries);
+                            }
+                        }
+
+                        GroupKeys keys = keysOf[0].ForPart();
+                        keys.Reserve(reserve);
+                        AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source);
+                        foreach (AggregateSlot slot in slots)
+                        {
+                            slot.EnsureGroups(reserve);
+                        }
+
+                        for (int p = 0; p < partitions.Length; p++)
+                        {
+                            int from = starts[p][part];
+                            int count = starts[p][part + 1] - from;
+                            if (count == 0)
+                            {
+                                continue;
+                            }
+
+                            ReadOnlySpan<int> groups = placed[p].AsSpan(from, count);
+                            Scratch.Grow(ref map, count);
+                            Span<int> into = map.AsSpan(0, count);
+                            keysOf[p].MergeInto(keys, groups, into);
+                            for (int s = 0; s < slots.Length; s++)
+                            {
+                                slots[s].EnsureGroups(keys.Count);
+                                if (inputs[s] != AggregationPartition.Settled)
+                                {
+                                    slots[s].MergeFrom(partitions[p].Slots[s], groups, into);
+                                }
+                            }
+                        }
+
+                        partKeys[part] = keys;
+                        partSlots[part] = slots;
+                        lock (done)
+                        {
+                            doneGroups += keys.Count;
+                            doneEntries += entries;
+                        }
+                    }
+                },
+                token);
+        }
+
+        await GuardedAsync(workers, failed).ConfigureAwait(false);
+        return Joined(partKeys, partSlots, parts);
+    }
+
+    /// <summary>The parts a merge cuts its keys into: a power of two, at most twice the degree, and a part of <see cref="PartGroups"/> groups of the largest partition at least.</summary>
+    private static int Parts(int degree, int largest)
+    {
+        int most = Math.Min(MostParts, Math.Min(2 * degree, largest / PartGroups));
+        return most < 2 ? 1 : 1 << BitOperations.Log2((uint)most);
+    }
+
+    /// <summary>A partition's groups placed by part, the top bits of their keys' hashes; where each part's begin, and the end.</summary>
+    private static (int[] Placed, int[] Starts) Cut(GroupKeys keys, ulong seed, int shift, int parts)
+    {
+        int count = keys.Count;
+        byte[] partOf = ArrayPool<byte>.Shared.Rent(count);
+        try
+        {
+            keys.Parts(seed, shift, partOf.AsSpan(0, count));
+            int[] starts = new int[parts + 1];
+            for (int g = 0; g < count; g++)
+            {
+                starts[partOf[g] + 1]++;
+            }
+
+            for (int part = 0; part < parts; part++)
+            {
+                starts[part + 1] += starts[part];
+            }
+
+            int[] next = starts[..^1];
+            int[] placed = new int[count];
+            for (int g = 0; g < count; g++)
+            {
+                placed[next[partOf[g]]++] = g;
+            }
+
+            return (placed, starts);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(partOf);
+        }
+    }
+
+    /// <summary>The parts read as one, the empty ones left out.</summary>
+    private static (GroupKeys Keys, AggregateSlot[] Slots, int Parts) Joined(GroupKeys[] partKeys, AggregateSlot[][] partSlots, int parts)
+    {
+        List<int> kept = [];
+        for (int part = 0; part < parts; part++)
+        {
+            if (partKeys[part].Count > 0)
+            {
+                kept.Add(part);
+            }
+        }
+
+        if (kept.Count == 0)
+        {
+            kept.Add(0);
+        }
+
+        GroupKeys[] keys = new GroupKeys[kept.Count];
+        int[] offsets = new int[kept.Count];
+        int total = 0;
+        for (int k = 0; k < kept.Count; k++)
+        {
+            keys[k] = partKeys[kept[k]];
+            offsets[k] = total;
+            total += keys[k].Count;
+        }
+
+        AggregateSlot[] slots = new AggregateSlot[partSlots[0].Length];
+        for (int s = 0; s < slots.Length; s++)
+        {
+            AggregateSlot[] ofSlot = new AggregateSlot[kept.Count];
+            for (int k = 0; k < kept.Count; k++)
+            {
+                ofSlot[k] = partSlots[kept[k]][s];
+            }
+
+            slots[s] = ofSlot[0].Joined(ofSlot, offsets);
+        }
+
+        return (new JoinedKeys(keys, offsets, total), slots, parts);
+    }
+
+    /// <summary>Awaits <paramref name="tasks"/>, cancelling the others through <paramref name="failed"/> once one fails.</summary>
+    private static async Task GuardedAsync(Task[] tasks, CancellationTokenSource failed)
+    {
+        try
+        {
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+        catch
+        {
+            await failed.CancelAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     /// <summary>
@@ -1248,7 +1508,7 @@ internal static class AggregationEngine
     }
 
     /// <summary>What the partitions did, gathered once they have merged into the first: the plan's last run.</summary>
-    private static AggregationRun Gathered(AggregationPartition[] partitions, long mergeTicks)
+    private static AggregationRun Gathered(AggregationPartition[] partitions, long mergeTicks, int mergeParts)
     {
         AggregationRun.Lane[] lanes = new AggregationRun.Lane[partitions.Length];
         for (int p = 0; p < lanes.Length; p++)
@@ -1256,7 +1516,7 @@ internal static class AggregationEngine
             lanes[p] = new AggregationRun.Lane(partitions[p].ActiveTicks, partitions[p].Ranges, partitions[p].GroupsAtEnd);
         }
 
-        return new AggregationRun(lanes, mergeTicks, partitions.Length - 1);
+        return new AggregationRun(lanes, mergeTicks, mergeParts);
     }
 
     /// <summary>

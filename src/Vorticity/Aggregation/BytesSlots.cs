@@ -220,14 +220,15 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>
         BytesWalk.Rows(ref sink, input, groups, ref _rows);
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        BytesExtremeSlot<TResult> from = (BytesExtremeSlot<TResult>)other;
-        for (int g = 0; g < from._groups; g++)
+        BytesExtremeSlot<TResult> source = (BytesExtremeSlot<TResult>)other;
+        for (int i = 0; i < from.Length; i++)
         {
-            if (from._lengths[g] >= 0)
+            int g = from[i];
+            if (source._lengths[g] >= 0)
             {
-                Offer(map[g], from._best[g].AsSpan(0, from._lengths[g]));
+                Offer(into[i], source._best[g].AsSpan(0, source._lengths[g]));
             }
         }
     }
@@ -311,13 +312,21 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>
         BytesWalk.Rows(ref sink, input, groups, ref _rows);
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        ByteKeyTable from = ((BytesDistinctSlot)other)._seen;
-        for (int i = 0; i < from.Count; i++)
+        // The pairs are keyed by group: each one's group found in the groups merged, which are every
+        // one of the other's, or a part of them whose targets a table gives.
+        BytesDistinctSlot source = (BytesDistinctSlot)other;
+        ReadOnlySpan<int> targets = from.Length == source._groups ? into : Distinct.Targets(source._groups, from, into);
+        ByteKeyTable seen = source._seen;
+        for (int i = 0; i < seen.Count; i++)
         {
-            ReadOnlySpan<byte> key = from.KeyOf(i);
-            Add(map[BinaryPrimitives.ReadInt32LittleEndian(key)], key[4..]);
+            ReadOnlySpan<byte> key = seen.KeyOf(i);
+            int target = targets[BinaryPrimitives.ReadInt32LittleEndian(key)];
+            if (target >= 0)
+            {
+                Add(target, key[4..]);
+            }
         }
     }
 

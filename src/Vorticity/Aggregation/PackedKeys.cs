@@ -1,6 +1,8 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Writing;
 
@@ -76,7 +78,10 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     private int[] _renumbered = [];
     private int[] _held = [];
 
-    internal PackedKeys(ColumnShape[] shapes, KeyFacts? facts)
+    /// <param name="shapes">The key's columns.</param>
+    /// <param name="facts">What the statistics say of them.</param>
+    /// <param name="shared">The indexes of the columns, shared by the parts of a parallel merge; fresh ones when null.</param>
+    internal PackedKeys(ColumnShape[] shapes, KeyFacts? facts, GroupKeys[]? shared = null)
     {
         _shapes = shapes;
         _facts = facts;
@@ -88,13 +93,17 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         _shifts = new int[shapes.Length];
         for (int p = 0; p < shapes.Length; p++)
         {
-            _parts[p] = AggregationPlan.Single(shapes[p], facts?.Sorted[p] ?? false, facts?.Bounds[p]);
+            _parts[p] = shared?[p] ?? AggregationPlan.Single(shapes[p], facts?.Sorted[p] ?? false, facts?.Bounds[p]);
             _ids[p] = [];
             _partRanges[p] = new GroupRanges();
             _bits[p] = 2;
         }
 
-        Rebuild();
+        // A part of a merge is merged into, never assigned rows: no table of numbers.
+        if (shared is null)
+        {
+            Rebuild();
+        }
     }
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
@@ -511,12 +520,25 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         }
     }
 
-    internal override void MergeInto(GroupKeys target, Span<int> map)
+    internal override void MergeInto(GroupKeys target, ReadOnlySpan<int> groups, Span<int> map)
     {
+        PackedKeys<TKey> into = (PackedKeys<TKey>)target;
+        if (ReferenceEquals(into._parts[0], _parts[0]))
+        {
+            // Both read the same indexes of the columns, rebased for a merge in parts: the words are
+            // the same.
+            for (int i = 0; i < groups.Length; i++)
+            {
+                map[i] = into.Lookup(_keys[groups[i]]);
+            }
+
+            MergeSeen(target);
+            return;
+        }
+
         // The parts' numbers here become their numbers in the target's parts, then each tuple its
         // group there. The target's table learns them as its rows meet them: a tuple new to it had
         // no slot, and its next batch covers its parts' new numbers first.
-        PackedKeys<TKey> into = (PackedKeys<TKey>)target;
         int[][] partMaps = new int[_parts.Length][];
         for (int p = 0; p < _parts.Length; p++)
         {
@@ -525,17 +547,109 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         }
 
         Span<int> ids = stackalloc int[_parts.Length];
+        for (int i = 0; i < groups.Length; i++)
+        {
+            TKey key = _keys[groups[i]];
+            for (int p = 0; p < _parts.Length; p++)
+            {
+                ids[p] = partMaps[p][Id(key, p)];
+            }
+
+            map[i] = into.Lookup(Pack(ids));
+        }
+
+        MergeSeen(target);
+    }
+
+    /// <summary>By the word's hash, once the partitions are rebased on shared indexes of the columns: the same tuple, the same word everywhere.</summary>
+    internal override void Parts(ulong seed, int shift, Span<byte> parts)
+    {
+        for (int g = 0; g < Count; g++)
+        {
+            (ulong low, ulong high) = KeyWords.Of(_keys[g]);
+            parts[g] = (byte)(MergeHash.Of(low, high, seed) >> shift);
+        }
+    }
+
+    internal override GroupKeys ForPart() => new PackedKeys<TKey>(_shapes, _facts, _parts);
+
+    internal override void Reserve(int groups)
+    {
+        if (_keys.Length < groups)
+        {
+            Array.Resize(ref _keys, groups);
+        }
+
+        int slots = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(32, groups * 2));
+        if (_hashed.Length < slots)
+        {
+            Rehash(slots);
+        }
+    }
+
+    internal override int CompareKeys(GroupKeys other, int a, int b, int component) =>
+        _parts[component].CompareKeys(Id(_keys[a], component), Id(((PackedKeys<TKey>)other)._keys[b], component), 0);
+
+    /// <summary>
+    /// The indexes of the columns of every partition merged into this one's, a task per column, then
+    /// each partition's words rewritten with their numbers there, a task per partition: the indexes
+    /// are merged once, not once per part of the merge.
+    /// </summary>
+    internal override async Task RebaseAsync(GroupKeys[] partitions, CancellationToken cancellationToken)
+    {
+        int[][][] maps = new int[partitions.Length][][];
+        for (int l = 1; l < partitions.Length; l++)
+        {
+            maps[l] = new int[_parts.Length][];
+        }
+
+        Task[] columns = new Task[_parts.Length];
+        for (int p = 0; p < _parts.Length; p++)
+        {
+            int part = p;
+            columns[p] = Task.Run(
+                () =>
+                {
+                    for (int l = 1; l < partitions.Length; l++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        GroupKeys from = ((PackedKeys<TKey>)partitions[l])._parts[part];
+                        maps[l][part] = new int[from.Count];
+                        from.MergeInto(_parts[part], maps[l][part]);
+                    }
+                },
+                cancellationToken);
+        }
+
+        await Task.WhenAll(columns).ConfigureAwait(false);
+        Task[] rewrites = new Task[partitions.Length - 1];
+        for (int l = 1; l < partitions.Length; l++)
+        {
+            PackedKeys<TKey> lane = (PackedKeys<TKey>)partitions[l];
+            int[][] laneMaps = maps[l];
+            rewrites[l - 1] = Task.Run(() => lane.Rewrite(laneMaps, _parts), cancellationToken);
+        }
+
+        await Task.WhenAll(rewrites).ConfigureAwait(false);
+    }
+
+    /// <summary>Every word with each part's number taken through <paramref name="maps"/>, and the indexes of the columns those numbers are in.</summary>
+    private void Rewrite(int[][] maps, GroupKeys[] parts)
+    {
+        Span<int> ids = stackalloc int[_parts.Length];
         for (int g = 0; g < Count; g++)
         {
             for (int p = 0; p < _parts.Length; p++)
             {
-                ids[p] = partMaps[p][Id(_keys[g], p)];
+                ids[p] = maps[p][Id(_keys[g], p)];
             }
 
-            map[g] = into.Lookup(Pack(ids));
+            _keys[g] = Pack(ids);
         }
 
-        MergeSeen(target);
+        // Its own slots and table no longer find the words; a rebased index is read, not assigned.
+        parts.CopyTo(_parts, 0);
+        _table = null;
     }
 
     internal override int[] Order(bool sorted) => Identity(Count);

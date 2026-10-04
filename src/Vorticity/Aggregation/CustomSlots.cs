@@ -57,12 +57,12 @@ internal sealed class CustomSlot<T, TAggregator, TState> : AggregateSlot<TState>
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        CustomSlot<T, TAggregator, TState> from = (CustomSlot<T, TAggregator, TState>)other;
-        for (int g = 0; g < from._groups; g++)
+        TState[] states = ((CustomSlot<T, TAggregator, TState>)other)._states;
+        for (int i = 0; i < from.Length; i++)
         {
-            TAggregator.Merge(ref _states[map[g]], in from._states[g]);
+            TAggregator.Merge(ref _states[into[i]], in states[from[i]]);
         }
     }
 
@@ -249,12 +249,12 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        EncodedCustomSlot<T, TAggregator, TState> from = (EncodedCustomSlot<T, TAggregator, TState>)other;
-        for (int g = 0; g < from._groups; g++)
+        TState[] states = ((EncodedCustomSlot<T, TAggregator, TState>)other)._states;
+        for (int i = 0; i < from.Length; i++)
         {
-            TAggregator.Merge(ref _states[map[g]], in from._states[g]);
+            TAggregator.Merge(ref _states[into[i]], in states[from[i]]);
         }
     }
 

@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Numerics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
@@ -115,7 +116,11 @@ public sealed partial class StreamingGroupTests
             Assert.Equal(seconds, ((AggregationQuery)blocked.Query).PeakGroups);
             AggregationRun run = plan.LastRun!;
             Assert.Equal(4, run.Lanes.Length);
-            Assert.Equal(3, run.MergeParts);
+
+            // Merged in parts, a power of two, at most twice the lanes, a part taking 512 groups of
+            // the largest lane at least; in series below, the other lanes into the largest.
+            int most = Math.Min(2 * run.Lanes.Length, run.Lanes.Max(lane => lane.Groups) / 512);
+            Assert.Equal(most < 2 ? run.Lanes.Length - 1 : 1 << BitOperations.Log2((uint)most), run.MergeParts);
             Assert.All(run.Lanes.Where(lane => lane.Ranges > 0), lane => Assert.True(lane.ActiveTicks > 0 && lane.Groups > 0));
             Assert.True(run.Lanes.Sum(lane => lane.Ranges) > 4, $"{run.Lanes.Sum(lane => lane.Ranges)} ranges");
             Assert.True(run.Lanes.Sum(lane => lane.Groups) >= seconds);

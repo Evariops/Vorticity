@@ -171,12 +171,12 @@ internal sealed class BoolSlot<TResult> : AggregateSlot<TResult>
         }
     }
 
-    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> map)
+    internal override void MergeFrom(AggregateSlot other, ReadOnlySpan<int> from, ReadOnlySpan<int> into)
     {
-        BoolSlot<TResult> from = (BoolSlot<TResult>)other;
-        for (int g = 0; g < from._groups; g++)
+        BoolSlot<TResult> source = (BoolSlot<TResult>)other;
+        for (int i = 0; i < from.Length; i++)
         {
-            _flags[map[g]] |= from._flags[g];
+            _flags[into[i]] |= source._flags[from[i]];
         }
     }
 
