@@ -58,7 +58,13 @@ public sealed partial class Scan<TRecord>
     public Scan<TRecord> Where(Func<Probe<TRecord>, Predicate> predicate)
     {
         ArgumentNullException.ThrowIfNull(predicate);
-        _filter &= predicate(new Probe<TRecord>(Binding));
+        Predicate rows = predicate(new Probe<TRecord>(Binding));
+        if (rows.Node is { } node && Aggregating.GroupPredicates.ReadsResults(node))
+        {
+            throw new InvalidOperationException("A filter on rows compares columns: an aggregate is a result of a group, filtered by a Where after the GroupBy.");
+        }
+
+        _filter &= rows;
         return this;
     }
 

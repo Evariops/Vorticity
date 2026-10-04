@@ -84,7 +84,7 @@ internal enum ComparisonOp : byte
 }
 
 /// <summary>A column reference, by dotted path.</summary>
-internal sealed class FieldExpr : VortexExpr
+internal class FieldExpr : VortexExpr
 {
     // An empty segment is the schema's business, not this constructor's: a field name may be
     // empty, so nothing is refused here and a path that names nothing fails at the scan, which

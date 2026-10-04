@@ -42,6 +42,9 @@ internal abstract class ResultNode<T> : SymNode, IResultNode
     /// <param name="keys">The columns of the group key.</param>
     public abstract ResultColumn Column(string name, ColumnShape[] keys);
 
+    /// <summary>The result as a filter compares it, a column of the groups' results; null for a result that is not compared this way.</summary>
+    internal virtual ColumnSym? Comparable => null;
+
     public ResultColumn Column(VortexField member, ColumnShape[] keys, int position, Type record)
     {
         VortexType natural = Column(member.Name, keys).Type;
@@ -116,6 +119,15 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
 
     /// <summary>How a state that is a record is read and written, for a custom aggregate whose state is one.</summary>
     internal IVortexRecord? Record { get; }
+
+    /// <summary>The name of the aggregate's column where a filter or an order on groups reads it, the same for one aggregate wherever it is written.</summary>
+    internal string HiddenName => $"${Identity.Kind}({Identity.Input}):{Identity.Result.FullName}:{Identity.Detail?.FullName}";
+
+    internal override ColumnSym? Comparable => _comparable ??= Kind == AggregateKind.Custom
+        ? throw new InvalidOperationException($"'{this}' is the state of a custom aggregator, which has no order: compare a value a built-in aggregate delivers.")
+        : new ColumnSym(new ResultFieldExpr(HiddenName, this, -1), ResultTypes.Of<T>(this, Record), null, null, -1, []);
+
+    private ColumnSym? _comparable;
 
     public AggregateKind Kind { get; }
 

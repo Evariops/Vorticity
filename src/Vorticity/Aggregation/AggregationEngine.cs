@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Compute;
+using Vorticity.Expressions;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
@@ -309,12 +310,12 @@ internal abstract class AggregationHost
 
     internal abstract void End();
 
-    internal async ValueTask<AggregationOutcome> RunAsync(AggregationPlan plan, CancellationToken cancellationToken)
+    internal async ValueTask<AggregationOutcome> RunAsync(AggregationPlan plan, CancellationToken cancellationToken, VortexExpr? rows = null)
     {
         Begin();
         try
         {
-            return await AggregationEngine.RunAsync(Source, Spec(), Metrics, plan, cancellationToken).ConfigureAwait(false);
+            return await AggregationEngine.RunAsync(Source, Spec(rows), Metrics, plan, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -323,10 +324,17 @@ internal abstract class AggregationHost
     }
 
     /// <summary>The plan of the pass the aggregation would run, before the statistics settle any of it.</summary>
-    internal ValueTask<ScanPlan> ExplainAsync(AggregationPlan plan, CancellationToken cancellationToken)
+    internal ValueTask<ScanPlan> ExplainAsync(AggregationPlan plan, CancellationToken cancellationToken, VortexExpr? rows = null)
     {
         (ColumnShape[] columns, _) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
-        return Source.ExplainAsync(AggregationEngine.PassSpec(Spec(), columns), cancellationToken);
+        return Source.ExplainAsync(AggregationEngine.PassSpec(Spec(rows), columns), cancellationToken);
+    }
+
+    /// <summary>The scan's spec, its filter joined with <paramref name="rows"/>: the conjuncts on a group's key, which filter rows.</summary>
+    internal ScanSpec Spec(VortexExpr? rows)
+    {
+        ScanSpec spec = Spec();
+        return rows is null ? spec : spec with { Filter = spec.Filter is { } filter ? Expr.Logical(true, filter, rows) : rows };
     }
 }
 

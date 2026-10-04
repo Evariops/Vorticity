@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
+using Vorticity.Expressions;
 
 namespace Vorticity;
 
@@ -22,17 +23,119 @@ public sealed class GroupedScan<TRecord, TKey>
     private readonly TKey _key;
     private readonly SymNode[] _components;
     private readonly ColumnShape[] _keys;
+    private readonly VortexExpr? _rows;
+    private readonly GroupOperator[] _operators;
 
     internal GroupedScan(Scan<TRecord> scan, TKey key, SymNode[] components)
+        : this(scan, key, components, Shapes(components), null, [])
+    {
+    }
+
+    private GroupedScan(Scan<TRecord> scan, TKey key, SymNode[] components, ColumnShape[] keys, VortexExpr? rows, GroupOperator[] operators)
     {
         _scan = scan;
         _key = key;
         _components = components;
-        _keys = new ColumnShape[components.Length];
-        for (int i = 0; i < components.Length; i++)
+        _keys = keys;
+        _rows = rows;
+        _operators = operators;
+    }
+
+    /// <summary>
+    /// Keeps the groups <paramref name="predicate"/> is true for: <c>Where(g =&gt; g.Count() &gt; 10)</c>,
+    /// <c>where g.Count() &gt; 10</c> in a query. A conjunct that names only components of the key,
+    /// before any order, <c>Skip</c> or <c>Take</c>, filters the rows instead, and prunes as their
+    /// filter does.
+    /// </summary>
+    /// <param name="predicate">A lambda over the group, comparing its key's components and its aggregates; run once, now.</param>
+    /// <returns>The groups kept.</returns>
+    /// <exception cref="InvalidOperationException">The predicate compares a column that is neither a component of the key nor an aggregate, or a custom aggregator's state.</exception>
+    public GroupedScan<TRecord, TKey> Where(Func<Group<TRecord, TKey>, Predicate> predicate)
+    {
+        ArgumentNullException.ThrowIfNull(predicate);
+        Predicate kept = predicate(Group());
+        if (kept.IsAll)
         {
-            _keys[i] = new ColumnShape((ColumnSym)components[i]);
+            return this;
         }
+
+        if (kept.IsNone)
+        {
+            return With(_rows, new GroupWindow(0, 0));
+        }
+
+        // A conjunct on the key alone keeps whole groups, which its rows' filter keeps too, as long
+        // as no order or window has chosen among the groups before it.
+        bool rowsDecide = Array.TrueForAll(_operators, op => op is GroupFilter);
+        List<VortexExpr> conjuncts = [];
+        GroupPredicates.Conjuncts(kept.Node!, conjuncts);
+        List<VortexExpr> rows = [];
+        List<VortexExpr> results = [];
+        List<FieldExpr> fields = [];
+        foreach (VortexExpr conjunct in conjuncts)
+        {
+            fields.Clear();
+            GroupPredicates.Fields(conjunct, fields);
+            bool onResults = false;
+            foreach (FieldExpr field in fields)
+            {
+                onResults |= field is ResultFieldExpr;
+                if (field is not ResultFieldExpr && ComponentOf(field) < 0)
+                {
+                    throw new InvalidOperationException(
+                        $"'{field.Path}' is a column of the rows, neither a component of the key nor an aggregate: a filter on groups compares the group's results.");
+                }
+            }
+
+            if (!onResults && rowsDecide)
+            {
+                rows.Add(conjunct);
+            }
+            else
+            {
+                results.Add(GroupPredicates.Rewrite(conjunct, field => field as ResultFieldExpr ?? KeyField(ComponentOf(field))));
+            }
+        }
+
+        VortexExpr? pushed = GroupPredicates.And(_rows, rows);
+        if (results.Count == 0)
+        {
+            return new GroupedScan<TRecord, TKey>(_scan, _key, _components, _keys, pushed, _operators);
+        }
+
+        VortexExpr filter = GroupPredicates.And(null, results)!;
+        fields.Clear();
+        GroupPredicates.Fields(filter, fields);
+        List<ResultFieldExpr> read = [];
+        foreach (FieldExpr field in fields)
+        {
+            if (field is ResultFieldExpr result && !read.Exists(known => known.Path == result.Path))
+            {
+                read.Add(result);
+            }
+        }
+
+        return With(pushed, new GroupFilter(filter, [.. read]));
+    }
+
+    /// <summary>The groups past the first <paramref name="count"/>, in the order they come at this point.</summary>
+    /// <param name="count">The groups to pass over.</param>
+    /// <returns>The groups kept.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> is negative.</exception>
+    public GroupedScan<TRecord, TKey> Skip(int count)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+        return With(_rows, new GroupWindow(count, long.MaxValue));
+    }
+
+    /// <summary>The first <paramref name="count"/> groups, in the order they come at this point.</summary>
+    /// <param name="count">The groups to keep at most.</param>
+    /// <returns>The groups kept.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> is negative.</exception>
+    public GroupedScan<TRecord, TKey> Take(int count)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+        return With(_rows, new GroupWindow(0, count));
     }
 
     /// <summary>One result per group: <c>Select(g =&gt; g.Count())</c>.</summary>
@@ -79,17 +182,62 @@ public sealed class GroupedScan<TRecord, TKey>
         return nodes;
     }
 
+    private static ColumnShape[] Shapes(SymNode[] components)
+    {
+        ColumnShape[] keys = new ColumnShape[components.Length];
+        for (int i = 0; i < components.Length; i++)
+        {
+            keys[i] = new ColumnShape((ColumnSym)components[i]);
+        }
+
+        return keys;
+    }
+
     private Group<TRecord, TKey> Group() => new Group<TRecord, TKey>(_scan.Binding, _key);
+
+    private GroupedScan<TRecord, TKey> With(VortexExpr? rows, GroupOperator next) =>
+        new GroupedScan<TRecord, TKey>(_scan, _key, _components, _keys, rows, [.. _operators, next]);
+
+    /// <summary>The component of the key <paramref name="field"/> reads, or -1.</summary>
+    private int ComponentOf(FieldExpr field)
+    {
+        for (int i = 0; i < _components.Length; i++)
+        {
+            if (string.Equals(((ColumnSym)_components[i]).Field.Path, field.Path, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private static ResultFieldExpr KeyField(int component) => new ResultFieldExpr($"$key{component}", null, component);
 
     private AggregationQuery Query(IResultNode[] nodes)
     {
-        SymNode[] results = new SymNode[nodes.Length];
-        for (int i = 0; i < nodes.Length; i++)
+        // Every aggregate the operators read is computed with the selection's, and not delivered.
+        List<SymNode> results = [];
+        foreach (IResultNode node in nodes)
         {
-            results[i] = (SymNode)nodes[i];
+            results.Add((SymNode)node);
         }
 
-        return new AggregationQuery(_scan.Host, new AggregationPlan(results, _keys), nodes, _keys);
+        foreach (GroupOperator op in _operators)
+        {
+            if (op is GroupFilter filter)
+            {
+                foreach (ResultFieldExpr field in filter.Fields)
+                {
+                    if (field.Result is SymNode aggregate)
+                    {
+                        results.Add(aggregate);
+                    }
+                }
+            }
+        }
+
+        return new AggregationQuery(_scan.Host, new AggregationPlan([.. results], _keys), nodes, _keys, _rows, _operators);
     }
 }
 

@@ -4,6 +4,8 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Compute;
+using Vorticity.Expressions;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -19,12 +21,13 @@ internal sealed class AggregationQuery : ResultQuery
 {
     private VortexSchema? _schema;
 
-    internal AggregationQuery(AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys)
-        : this(host, plan, nodes, keys, Natural(nodes, keys), 0, long.MaxValue)
+    internal AggregationQuery(AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, VortexExpr? rows = null, GroupOperator[]? operators = null)
+        : this(host, plan, nodes, keys, Natural(nodes, keys), 0, long.MaxValue, rows, operators ?? [])
     {
     }
 
-    private AggregationQuery(AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, ResultColumn[] columns, long skip, long take)
+    private AggregationQuery(
+        AggregationHost host, AggregationPlan plan, IResultNode[] nodes, ColumnShape[] keys, ResultColumn[] columns, long skip, long take, VortexExpr? rows, GroupOperator[] operators)
     {
         Host = host;
         Plan = plan;
@@ -33,7 +36,15 @@ internal sealed class AggregationQuery : ResultQuery
         Columns = columns;
         Skip = skip;
         Take = take;
+        RowFilter = rows;
+        Operators = operators;
     }
+
+    /// <summary>The conjuncts of the filters on groups that name only the key: they filter the rows.</summary>
+    internal VortexExpr? RowFilter { get; }
+
+    /// <summary>What follows the group by before its <c>Select</c>, in the order written.</summary>
+    internal GroupOperator[] Operators { get; }
 
     internal AggregationHost Host { get; }
 
@@ -82,7 +93,7 @@ internal sealed class AggregationQuery : ResultQuery
     internal override ResultQuery Limit(long skip, long take)
     {
         (long from, long count) = Within(Skip, Take, skip, take);
-        return new AggregationQuery(Host, Plan, Nodes, Keys, Columns, from, count);
+        return new AggregationQuery(Host, Plan, Nodes, Keys, Columns, from, count, RowFilter, Operators);
     }
 
     internal override IVortexRecord? RecordOf(int column) => Columns[column].Record;
@@ -102,7 +113,7 @@ internal sealed class AggregationQuery : ResultQuery
             columns[i] = Nodes[i].Column(record[i], Keys, i, type);
         }
 
-        return new AggregationQuery(Host, Plan, Nodes, Keys, columns, Skip, Take);
+        return new AggregationQuery(Host, Plan, Nodes, Keys, columns, Skip, Take, RowFilter, Operators);
     }
 
     /// <summary>The result's batches: the query runs when the first is asked for.</summary>
@@ -111,7 +122,7 @@ internal sealed class AggregationQuery : ResultQuery
     /// <summary>The result's batches, as the stream that knows the run they come from.</summary>
     internal GroupBatches Groups(CancellationToken cancellationToken) => new GroupBatches(this, cancellationToken);
 
-    internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => Host.ExplainAsync(Plan, cancellationToken);
+    internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => Host.ExplainAsync(Plan, cancellationToken, RowFilter);
 
     /// <summary>Each element's column of its own type, named <c>Item1</c> and on as a tuple's elements are.</summary>
     private static ResultColumn[] Natural(IResultNode[] nodes, ColumnShape[] keys)
@@ -141,6 +152,8 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     private readonly CancellationToken _cancellationToken;
     private readonly int _batchRows;
     private AggregationOutcome? _outcome;
+    private int[] _groups = [];
+    private int _count;
     private int _next;
     private StructStore? _store;
     private CanonicalArena? _arena;
@@ -185,20 +198,21 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> RunAsync()
     {
-        _outcome = await _query.Host.RunAsync(_query.Plan, _cancellationToken).ConfigureAwait(false);
+        _outcome = await _query.Host.RunAsync(_query.Plan, _cancellationToken, _query.RowFilter).ConfigureAwait(false);
+        (_groups, _count) = GroupSelection.Apply(_query, _outcome, _cancellationToken);
         return Next();
     }
 
     private bool Next()
     {
         AggregationOutcome outcome = _outcome!;
-        int[] order = outcome.Order;
+        int[] order = _groups;
         if (_next == 0 && _query.Skip > 0)
         {
-            _next = (int)Math.Min(_query.Skip, order.Length);
+            _next = (int)Math.Min(_query.Skip, _count);
         }
 
-        long end = _query.Take == long.MaxValue ? order.Length : Math.Min(order.Length, _query.Skip + _query.Take);
+        long end = _query.Take == long.MaxValue ? _count : Math.Min(_count, _query.Skip + _query.Take);
         if (_next >= end)
         {
             Release();
@@ -335,5 +349,97 @@ internal sealed class ValueEnumerator<T> : IAsyncEnumerator<T>
         ResultValues.Copy(batch, arena, column, _type, _extensions, _values, _record);
         _count = rows;
         return rows > 0;
+    }
+}
+
+/// <summary>
+/// The groups a query delivers, in order, once its pass has run: its operators on groups applied
+/// in the order written to the groups the pass found.
+/// </summary>
+internal static class GroupSelection
+{
+    /// <summary>The groups a filter evaluates at once: their results' columns stay in the cache.</summary>
+    private const int Window = 4_096;
+
+    internal static (int[] Groups, int Count) Apply(AggregationQuery query, AggregationOutcome outcome, CancellationToken cancellationToken)
+    {
+        int[] groups = outcome.Order;
+        int count = groups.Length;
+        foreach (GroupOperator op in query.Operators)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            switch (op)
+            {
+                case GroupFilter filter:
+                    (groups, count) = Filter(query, outcome, filter, groups, count, cancellationToken);
+                    break;
+                case GroupWindow window:
+                {
+                    int from = (int)Math.Min(window.Skip, count);
+                    int kept = (int)Math.Min(count - from, window.Take);
+                    groups = groups.AsSpan(from, kept).ToArray();
+                    count = kept;
+                    break;
+                }
+
+                default:
+                    throw new InvalidOperationException($"An operator on groups of kind {op.GetType().Name} is not known.");
+            }
+        }
+
+        return (groups, count);
+    }
+
+    /// <summary>The groups the filter keeps, evaluated on the columns of the results it reads, a window of groups at a time.</summary>
+    private static (int[] Groups, int Count) Filter(
+        AggregationQuery query, AggregationOutcome outcome, GroupFilter filter, int[] groups, int count, CancellationToken cancellationToken)
+    {
+        ResultColumn[] columns = new ResultColumn[filter.Fields.Length];
+        VortexField[] fields = new VortexField[columns.Length];
+        for (int i = 0; i < columns.Length; i++)
+        {
+            columns[i] = filter.Fields[i].Column(query.Keys);
+            fields[i] = new VortexField(columns[i].Name, columns[i].Type);
+        }
+
+        VortexSessionOptions options = query.Session.Options;
+        StructStore store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
+        CanonicalArena arena = new CanonicalArena(64, options.EnginePool);
+        FilterEvaluator evaluator = new FilterEvaluator(filter.Predicate);
+        byte[] states = new byte[Math.Min(Window, Math.Max(count, 1))];
+        int[] kept = new int[count];
+        int keptCount = 0;
+        try
+        {
+            for (int first = 0; first < count; first += Window)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                int n = Math.Min(Window, count - first);
+                ReadOnlySpan<int> window = groups.AsSpan(first, n);
+                store.Truncate(0);
+                for (int c = 0; c < columns.Length; c++)
+                {
+                    columns[c].Append(outcome, store.Children[c], window);
+                }
+
+                arena.ResetKeepingBlocks();
+                int root = store.Build(arena, n);
+                evaluator.Evaluate(arena, root, n, states.AsSpan(0, n));
+                for (int i = 0; i < n; i++)
+                {
+                    if (states[i] == Trilean.True)
+                    {
+                        kept[keptCount++] = window[i];
+                    }
+                }
+            }
+        }
+        finally
+        {
+            store.Release();
+            arena.Reset();
+        }
+
+        return (kept, keptCount);
     }
 }

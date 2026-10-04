@@ -33,7 +33,9 @@ public readonly struct Sym<T> : ISymbol
                 $"Element {position + 1} of the projection, '{this}', is not a column of the scan: a projection reads columns, and an aggregate belongs to a group.");
 
     internal ColumnSym Column =>
-        Node as ColumnSym ?? throw new InvalidOperationException("Only a column can be compared; an aggregate or a group key is a result, not a filter.");
+        Node as ColumnSym
+        ?? (Node as Aggregating.ResultNode<T>)?.Comparable
+        ?? throw new InvalidOperationException("Only a column or an aggregate can be compared: a filter on groups compares the group's key and its aggregates.");
 
     /// <summary>The rows whose value equals <paramref name="value"/>; <c>== null</c> is <see cref="IsNull"/>.</summary>
     public static Predicate operator ==(Sym<T> column, T value) => SymLowering.Compare(column.Column, ComparisonOp.Equal, value);

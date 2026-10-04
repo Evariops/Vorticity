@@ -830,6 +830,9 @@ Vorticity:     property TKey Key { get; }
 Vorticity: sealed class Vorticity.GroupedScan<TRecord, TKey>
 Vorticity:     method Aggregation Select(Func<Group<TRecord, TKey>, ITuple>)
 Vorticity:     method Aggregation<T> Select<T>(Func<Group<TRecord, TKey>, Sym<T>>)
+Vorticity:     method GroupedScan<TRecord, TKey> Skip(int)
+Vorticity:     method GroupedScan<TRecord, TKey> Take(int)
+Vorticity:     method GroupedScan<TRecord, TKey> Where(Func<Group<TRecord, TKey>, Predicate>)
 Vorticity: interface Vorticity.IAggregator<T, TState>
 Vorticity:     method TState Seed()
 Vorticity:     method void Merge(ref TState, in TState)
