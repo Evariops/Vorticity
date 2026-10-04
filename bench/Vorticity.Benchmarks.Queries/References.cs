@@ -31,7 +31,9 @@ internal static class References
         ("custom aggregator against built-ins, run-end key", "group by city (run-end), welford", "group by city (run-end), count avg", 1.136),
         ("filtered group against the filter before the group by", "group by endpoint (dictionary), errors in the group", "group by endpoint (dictionary), errors filtered before", 0.826),
         ("first batch of a full scan, 16M against 1M", "first batch, full scan, 16M", "first batch, full scan", 1.081),
-        ("first batch of a filtered scan, 16M against 1M", "first batch, scan filtered everywhere, 16M", "first batch, scan filtered everywhere", 5.176),
+        // Brought down from 5.176 by 6f: a scan whose filter no exact source can serve no longer
+        // walks the whole file's zones before its first batch, to weigh asking one.
+        ("first batch of a filtered scan, 16M against 1M", "first batch, scan filtered everywhere, 16M", "first batch, scan filtered everywhere", 1.221),
         ("first group of a sorted key, 16M against 1M", "first group, group by day (sorted), 16M", "first group, group by day (sorted)", 1.254),
 
         // At equal work: a count and an integer sum on both sides, where the axes above also pay

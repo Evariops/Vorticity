@@ -207,10 +207,14 @@ it holds goes out before its input ends, so it has no order to keep while it run
 
 ### 2.6 The first batch of each source
 
-* **A file.** The structures that prune — zone maps, indexes — are read ahead of the decode window
-  rather than over the whole file before the first batch: those of the first window first, those of
-  the rest in one coalesced read behind them. The plan is unchanged and each segment is still read
-  once ([14-public-api.md](14-public-api.md) §9); only when moves, for one request more.
+* **A file.** The first batch of a filtered scan waits for the zone maps of the columns it filters,
+  one segment each however many zones it holds, then for the first window's data: a file sixteen
+  times larger asks for as many segments. Nothing walks the whole file's zones before it. The scan
+  weighs asking an exact source — a sorted column, sorted runs — for the rows it proves only where the
+  file may hold one, which its statistics and its index directory say without a read. Reading the
+  first window's zones before the others' would leave the first batch behind the same two dependent
+  reads, save the bytes of the other zones, and cost a request more: the zone maps are read whole
+  ([14-public-api.md](14-public-api.md) §9).
 * **A dataset.** The first batch waits for the first object alone. Once the consumer reads past it,
   under a prefetch, the next object is opened, and its first batch read and decoded, while the one
   before it is read: an object's open, its first request and its first decode wait on nothing the

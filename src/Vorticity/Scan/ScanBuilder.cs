@@ -833,6 +833,7 @@ internal sealed class ScanBuilder
     {
         Compute.ZonePruner? zones = pruning.Zones;
         if (_orderPath is not null || !_compact || !_prune || _filter is null || _take is not null || pruning.Located
+            || !Keys.ExactCover.MayExist(_file, _filter, _indexes)
             || !FilteredBatches.MayFitBatch(plan, natural, zones, pruning.Live))
         {
             return (null, null, null);

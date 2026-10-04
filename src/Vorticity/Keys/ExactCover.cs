@@ -60,6 +60,22 @@ internal sealed class ExactCover : IAsyncDisposable
     internal long Count { get; }
 
     /// <summary>
+    /// Whether <paramref name="file"/> may hold an exact source for <paramref name="filter"/>, told
+    /// without a read: the one column every leaf tests is sorted by the file's statistics, or the
+    /// file's indexes may serve it. Without, <see cref="TryCreateAsync"/> declines, and whatever a
+    /// scan would weigh before asking it is weighed for nothing.
+    /// </summary>
+    /// <param name="file">The open file.</param>
+    /// <param name="filter">The scan's predicate.</param>
+    /// <param name="indexes">Whether the index directory may serve.</param>
+    internal static bool MayExist(VortexFile file, VortexExpr filter, bool indexes)
+    {
+        string? path = null;
+        return OneColumn(filter, ref path) && path is not null
+            && (KeyCursorBuilder.StatedSorted(file, path) || (indexes && file.HasIndexDirectory));
+    }
+
+    /// <summary>
     /// The cover of <paramref name="filter"/>, or null when no exact source serves the whole of it.
     /// </summary>
     /// <param name="file">The open file.</param>
