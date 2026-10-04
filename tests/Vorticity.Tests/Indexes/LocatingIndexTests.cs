@@ -503,26 +503,23 @@ public sealed class LocatingIndexTests
 
         internal long Length { get; }
 
+        /// <summary>The fixture under <paramref name="policy"/>, written once a run and opened for each test.</summary>
         internal static async Task<Written> CreateAsync(WritePolicy policy, int budgetPerMille = 1_000_000)
         {
-            string path = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(), $"vorticity-locating-{Guid.NewGuid():N}.vortex");
-            WriteReport report = await WriteAsync(path, new VortexWriteOptions
-            {
-                RowBlockSize = Block,
-                DataBlockTargetBytes = null,
-                WritePolicy = policy,
-                IndexBudgetPerMille = budgetPerMille,
-            });
+            (string path, WriteReport report) = await SharedFiles.GetAsync(
+                $"{nameof(LocatingIndexTests)}/{SharedFiles.Describe(policy)}/{budgetPerMille}",
+                path => WriteAsync(path, new VortexWriteOptions
+                {
+                    RowBlockSize = Block,
+                    DataBlockTargetBytes = null,
+                    WritePolicy = policy,
+                    IndexBudgetPerMille = budgetPerMille,
+                }));
             long length = new System.IO.FileInfo(path).Length;
             return new Written(path, await VortexFile.OpenAsync(path), report, length);
         }
 
-        public async ValueTask DisposeAsync()
-        {
-            await File.DisposeAsync();
-            System.IO.File.Delete(Path);
-        }
+        public ValueTask DisposeAsync() => File.DisposeAsync();
 
         private static async Task<WriteReport> WriteAsync(string path, VortexWriteOptions options)
         {

@@ -1198,9 +1198,8 @@ public sealed class SortedRunsCursorTests
         /// <summary>The fixture, every column but `row` indexed with <paramref name="policy"/>.</summary>
         internal static async Task<Written> CreateAsync(IndexSpec policy, Func<ISegmentReader, ISegmentReader>? wrap = null)
         {
-            string path = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(), $"vorticity-runs-{Guid.NewGuid():N}.vortex");
-            await WriteAsync(path, policy);
+            string path = await SharedFiles.GetAsync(
+                $"{nameof(SortedRunsCursorTests)}/{SharedFiles.Describe(policy)}", file => WriteAsync(file, policy));
             if (wrap is null)
             {
                 return new Written(path, await VortexFile.OpenAsync(path, CancellationToken.None));
@@ -1210,11 +1209,7 @@ public sealed class SortedRunsCursorTests
             return new Written(path, await VortexFile.OpenAsync(source, new VortexOpenOptions(), CancellationToken.None));
         }
 
-        public async ValueTask DisposeAsync()
-        {
-            await File.DisposeAsync();
-            System.IO.File.Delete(Path);
-        }
+        public ValueTask DisposeAsync() => File.DisposeAsync();
 
         private static async Task WriteAsync(string path, IndexSpec policy)
         {

@@ -351,22 +351,18 @@ public sealed class AutoIndexTests
 
         internal static async Task<Written> CreateAsync(WritePolicy policy)
         {
-            string path = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(), $"vorticity-auto-{Guid.NewGuid():N}.vortex");
-            WriteReport report = await WriteAsync(path, new VortexWriteOptions
-            {
-                RowBlockSize = Block,
-                DataBlockTargetBytes = null,
-                WritePolicy = policy,
-            });
+            (string path, WriteReport report) = await SharedFiles.GetAsync(
+                $"{nameof(AutoIndexTests)}/{SharedFiles.Describe(policy)}",
+                file => WriteAsync(file, new VortexWriteOptions
+                {
+                    RowBlockSize = Block,
+                    DataBlockTargetBytes = null,
+                    WritePolicy = policy,
+                }));
             return new Written(path, await VortexFile.OpenAsync(path), report);
         }
 
-        public async ValueTask DisposeAsync()
-        {
-            await File.DisposeAsync();
-            System.IO.File.Delete(Path);
-        }
+        public ValueTask DisposeAsync() => File.DisposeAsync();
 
         private static async Task<WriteReport> WriteAsync(string path, VortexWriteOptions options)
         {

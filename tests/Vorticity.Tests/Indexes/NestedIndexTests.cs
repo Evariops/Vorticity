@@ -285,17 +285,12 @@ public sealed class NestedIndexTests
 
         internal static async Task<Written> CreateAsync(bool indexed)
         {
-            string path = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(), $"vorticity-nested-{Guid.NewGuid():N}.vortex");
-            WriteReport report = await WriteAsync(path, indexed);
+            (string path, WriteReport report) = await SharedFiles.GetAsync(
+                $"{nameof(NestedIndexTests)}/{indexed}", file => WriteAsync(file, indexed));
             return new Written(path, await VortexFile.OpenAsync(path, CancellationToken.None), report);
         }
 
-        public async ValueTask DisposeAsync()
-        {
-            await File.DisposeAsync();
-            System.IO.File.Delete(Path);
-        }
+        public ValueTask DisposeAsync() => File.DisposeAsync();
 
         internal static async Task<WriteReport> WriteAsync(string path, bool indexed)
         {

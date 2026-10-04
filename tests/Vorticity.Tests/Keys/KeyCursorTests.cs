@@ -676,11 +676,8 @@ public sealed class KeyCursorTests
     /// <summary>The fixture: six columns, five of them sorted, written with their statistics.</summary>
     private sealed class Written : IAsyncDisposable
     {
-        private readonly string _path;
-
-        private Written(string path, VortexFile file)
+        private Written(VortexFile file)
         {
-            _path = path;
             File = file;
         }
 
@@ -688,21 +685,15 @@ public sealed class KeyCursorTests
 
         internal static async Task<Written> CreateAsync(bool verify = false)
         {
-            string path = System.IO.Path.Combine(
-                System.IO.Path.GetTempPath(), $"vorticity-keys-{Guid.NewGuid():N}.vortex");
-            await WriteAsync(path);
+            string path = await SharedFiles.GetAsync(nameof(KeyCursorTests), WriteAsync);
             VortexOpenOptions options = new VortexOpenOptions
             {
                 Read = new VortexReadOptions { VerifyStatistics = verify },
             };
-            return new Written(path, await VortexFile.OpenAsync(path, options, CancellationToken.None));
+            return new Written(await VortexFile.OpenAsync(path, options, CancellationToken.None));
         }
 
-        public async ValueTask DisposeAsync()
-        {
-            await File.DisposeAsync();
-            System.IO.File.Delete(_path);
-        }
+        public ValueTask DisposeAsync() => File.DisposeAsync();
 
         private static async Task WriteAsync(string path)
         {
