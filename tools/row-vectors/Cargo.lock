@@ -767,8 +767,8 @@ name = "row-vectors"
 version = "0.1.0"
 dependencies = [
  "vortex-array",
- "vortex-buffer",
- "vortex-error",
+ "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
+ "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
  "vortex-row",
 ]
 
@@ -971,9 +971,9 @@ dependencies = [
  "tracing",
  "uuid",
  "vortex-array-macros",
- "vortex-buffer",
+ "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
  "vortex-compute",
- "vortex-error",
+ "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
  "vortex-flatbuffers",
  "vortex-mask",
  "vortex-proto",
@@ -1002,7 +1002,21 @@ dependencies = [
  "bytes",
  "itertools",
  "simdutf8",
- "vortex-error",
+ "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
+]
+
+[[package]]
+name = "vortex-buffer"
+version = "0.1.0"
+source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
+dependencies = [
+ "allocator-api2",
+ "arrow-buffer",
+ "bitvec",
+ "bytes",
+ "itertools",
+ "simdutf8",
+ "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.87.0)",
 ]
 
 [[package]]
@@ -1010,7 +1024,7 @@ name = "vortex-compute"
 version = "0.1.0"
 source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2304122d0d0423332fcb77a3"
 dependencies = [
- "vortex-buffer",
+ "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
 ]
 
 [[package]]
@@ -1025,13 +1039,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "vortex-error"
+version = "0.1.0"
+source = "git+https://github.com/vortex-data/vortex?tag=0.87.0#9a08b82dc683cd3fff8dcde834c382141f425f48"
+dependencies = [
+ "arrow-schema",
+ "jiff",
+ "prost",
+]
+
+[[package]]
 name = "vortex-flatbuffers"
 version = "0.1.0"
 source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2304122d0d0423332fcb77a3"
 dependencies = [
  "flatbuffers",
- "vortex-buffer",
- "vortex-error",
+ "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
+ "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
 ]
 
 [[package]]
@@ -1040,8 +1064,8 @@ version = "0.1.0"
 source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2304122d0d0423332fcb77a3"
 dependencies = [
  "itertools",
- "vortex-buffer",
- "vortex-error",
+ "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
+ "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
 ]
 
 [[package]]
@@ -1060,8 +1084,8 @@ source = "git+https://github.com/vortex-data/vortex?tag=0.86.1#d1fe2dc46d2b947a2
 dependencies = [
  "smallvec",
  "vortex-array",
- "vortex-buffer",
- "vortex-error",
+ "vortex-buffer 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
+ "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
  "vortex-mask",
  "vortex-session",
 ]
@@ -1074,7 +1098,7 @@ dependencies = [
  "arc-swap",
  "lasso",
  "parking_lot",
- "vortex-error",
+ "vortex-error 0.1.0 (git+https://github.com/vortex-data/vortex?tag=0.86.1)",
  "vortex-utils",
 ]
 
