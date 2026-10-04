@@ -78,6 +78,40 @@ public sealed partial class KeyTopTests
         }
     }
 
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task TheFirstGroupsWithoutAnOrderAreExactAndOneLaneHoldsThemAlone(int degree)
+    {
+        (Row[] rows, string path) = await WriteAsync();
+        try
+        {
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+
+            // Ten groups, which ones not promised, each with every one of its rows.
+            Vorticity.Aggregation some = Scan(file).GroupBy(r => r.Key).Take(10).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value), g.First().Value));
+            AggregationQuery query = (AggregationQuery)some.Query;
+            Assert.True(KeyTop.FirstOf(query) is { FirstMet: true });
+            List<KeyStats> read = await ListAsync(some.As<KeyStats>());
+            Assert.Equal(10, read.Count);
+            Dictionary<int, KeyStats> all = rows.GroupBy(r => r.Key).ToDictionary(g => g.Key, g => new KeyStats(g.Key, g.Count(), g.Sum(r => r.Value), g.First().Value));
+            Assert.All(read, group => Assert.Equal(all[group.Key], group));
+            Assert.Equal(10, read.Select(group => group.Key).Distinct().Count());
+
+            // One lane holds the first met alone; several hold every group, which they merge.
+            Assert.True(degree > 1 || query.PeakGroups <= 15 + BatchRows, $"{query.PeakGroups} groups held for ten of {Keys}");
+
+            // A filter or an order first: not this top.
+            Assert.Null(KeyTop.FirstOf((AggregationQuery)Scan(file).GroupBy(r => r.Key).Where(g => g.Count() > 1).Take(10).Select(g => g.Count()).Query));
+            Assert.Null(KeyTop.FirstOf((AggregationQuery)Scan(file).GroupBy(r => r.Key).OrderBy(g => g.Count()).Take(10).Select(g => g.Count()).Query));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     private static Scan<Row> Scan(VortexFile file) => file.Scan<Row>().With(new ScanOptions { BatchRows = BatchRows });
@@ -122,9 +156,14 @@ public sealed partial class KeyTopTests
             rows[row] = new Row(key, level, $"n{(long)row * 31 % 3_001:D4}", row % 1_000, key % 97);
         }
 
-        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path))
+        // In chunks of two thousand rows, so that several lanes take ranges of them in turn.
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Row>(path, new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 16 << 10 }))
         {
-            await writer.WriteAsync<Row>(rows, Ct);
+            for (int first = 0; first < rows.Length; first += 2_048)
+            {
+                await writer.WriteAsync<Row>(rows.AsSpan(first, Math.Min(2_048, rows.Length - first)), Ct);
+            }
+
             await writer.CompleteAsync(Ct);
         }
 

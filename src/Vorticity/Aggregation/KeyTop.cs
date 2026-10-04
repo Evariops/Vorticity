@@ -22,20 +22,26 @@ internal sealed class KeyTop
     internal const long MostKept = 100_000;
 
     private readonly AggregationQuery _query;
-    private readonly GroupOrder _order;
+    private readonly GroupOrder? _order;
     private readonly int _keep;
     private readonly int _ceiling;
     private long _peak;
 
-    private KeyTop(AggregationQuery query, GroupOrder order, int keep)
+    private KeyTop(AggregationQuery query, GroupOrder? order, int keep)
     {
         _query = query;
         _order = order;
         _keep = keep;
         _ceiling = keep + ((keep + 1) / 2);
-        Descending = order.Keys[0].Descending;
-        _narrows = query.Keys.Length == 1 && order.Keys.Length == 1;
+        Descending = order is { } ordered && ordered.Keys[0].Descending;
+        _narrows = order is not null && query.Keys.Length == 1 && order.Keys.Length == 1;
     }
+
+    /// <summary>
+    /// Whether the top keeps the groups first met, for a window with no order before it: exact on one
+    /// lane alone, since lanes would each keep groups the others drop.
+    /// </summary>
+    internal bool FirstMet => _order is null;
 
     // Whether the order is the one key's alone, which a lane's frontier compares a row's key to.
     private readonly bool _narrows;
@@ -86,6 +92,36 @@ internal sealed class KeyTop
         return reach is > 0 and <= MostKept ? new KeyTop(query, order, (int)reach) : null;
     }
 
+    /// <summary>
+    /// The top of <paramref name="query"/> that keeps the groups first met, or null: windows open the
+    /// operators, or the result's own closes none, and reach no further than <see cref="MostKept"/>
+    /// groups, which come in no order promised. On one lane, a group made once the top is full is
+    /// dropped, again whenever its key comes back, and those kept hold every one of their rows.
+    /// </summary>
+    internal static KeyTop? FirstOf(AggregationQuery query)
+    {
+        GroupOperator[] operators = query.Operators;
+        if (!query.Plan.Grouped || (operators.Length > 0 && operators[0] is not GroupWindow))
+        {
+            return null;
+        }
+
+        long start = 0;
+        long reach = long.MaxValue;
+        int o = 0;
+        for (; o < operators.Length && operators[o] is GroupWindow window; o++)
+        {
+            (start, reach) = Narrowed(start, reach, window.Skip, window.Take);
+        }
+
+        if (o == operators.Length)
+        {
+            (start, reach) = Narrowed(start, reach, query.Skip, query.Take);
+        }
+
+        return reach is > 0 and <= MostKept ? new KeyTop(query, null, (int)reach) : null;
+    }
+
     /// <summary>A window of <paramref name="skip"/> and <paramref name="take"/> over the groups from <paramref name="start"/> on, of which those before <paramref name="reach"/> are left.</summary>
     private static (long Start, long Reach) Narrowed(long start, long reach, long skip, long take)
     {
@@ -104,7 +140,15 @@ internal sealed class KeyTop
         GroupKeys keys = partition.Keys!;
         int count = keys.Count;
         partition.PeakGroups = Math.Max(partition.PeakGroups, count);
-        if (count > (final ? _keep : _ceiling))
+        if (_order is null)
+        {
+            // The first met are the first numbered: the others go.
+            if (count > (final ? _keep : _ceiling))
+            {
+                partition.Keep(Numbers.Upto(_keep));
+            }
+        }
+        else if (count > (final ? _keep : _ceiling))
         {
             int[] groups = ArrayPool<int>.Shared.Rent(count);
             try

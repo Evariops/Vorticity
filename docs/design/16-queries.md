@@ -512,6 +512,12 @@ are then ranked by their key, read from the groups' index where it orders as the
 a top-k on a count that a million text keys share copies none of them. Under no order, or an order a
 streaming group by already delivers, a `Take` stops the read once it is served (§2.4).
 
+Under no order, on a key that does not stream, the windows that open the operators reach `Skip + Take`
+groups, which ones not promised: one lane keeps the first it meets alone, the others dropped once
+they pass one and a half times as many, and again whenever their key comes back, so the groups kept
+hold every one of their rows. Several lanes hold every group, since each would keep groups the others
+drop.
+
 An order on the key alone, the windows right after it, need not hold the other groups at all: each
 lane of the pass keeps the `Skip + Take` best keys it has met, ranked as the result ranks them, and
 trims back to them once they pass one and a half times as many. A key trimmed lies past the worst a

@@ -842,8 +842,9 @@ internal abstract class AggregationHost
         {
             ScanSpec spec = Spec(query.RowFilter);
 
-            // The first groups of an order on the key: each lane keeps the best it has met alone.
-            KeyTop? top = KeyTop.Of(query);
+            // The first groups of an order on the key: each lane keeps the best it has met alone; with
+            // no order, one lane keeps the first it met.
+            KeyTop? top = KeyTop.Of(query) ?? KeyTop.FirstOf(query);
             AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, query.Plan, cancellationToken, top).ConfigureAwait(false);
             query.PeakGroups = Math.Max(top?.Peak ?? 0, outcome.Keys?.Count ?? 1);
             (int[] groups, int count) = await GroupSelection.ApplyAsync(query, outcome, spec, cancellationToken).ConfigureAwait(false);
@@ -970,7 +971,7 @@ internal static class AggregationEngine
             partitions = new AggregationPartition[Math.Min(degree, ranges.Length)];
             for (int p = 0; p < partitions.Length; p++)
             {
-                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts) { Top = top };
+                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts) { Top = top is { FirstMet: true } ? null : top };
             }
 
             await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, cancellationToken).ConfigureAwait(false);
