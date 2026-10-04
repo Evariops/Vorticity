@@ -90,7 +90,8 @@ internal sealed class KeyRange
             case LogicalExpr { IsAnd: true } and:
                 return Take(and.Left) && Take(and.Right);
 
-            case ComparisonExpr comparison when comparison.Field.Path == _path
+            // A function of the key is not the key, whose summaries the range reads.
+            case ComparisonExpr comparison when comparison.Field.Path == _path && comparison.Field is not Compute.FunctionFieldExpr
                 && comparison.Value.Kind != FilterLiteralKind.Null:
                 FilterLiteral value = comparison.Value;
                 switch (comparison.Op)

@@ -2259,6 +2259,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             ColumnWriter writer = _columns[field];
             BlockStats merged = writer.Chunk(0, writer.Blocks.Count);
 
+            // An extension's order and bounds are its storage's, which a child writer keeps: a
+            // timestamp's are its integers', the domain its filters compare in.
+            DType stored = column;
+            ColumnWriter storage = writer;
+            while (stored.Kind == DTypeKind.Extension)
+            {
+                stored = stored.StorageType;
+                storage = storage.Descend(0, 1);
+            }
+
+            BlockStats ordered = ReferenceEquals(storage, writer) ? merged : storage.Chunk(0, storage.Blocks.Count);
+
             ArrayStatsValues values = default;
             values.MinPrecision = StatPrecision.Exact;
             values.MaxPrecision = StatPrecision.Exact;
@@ -2269,12 +2281,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             else if (merged.IsPresent)
             {
                 values.NullCount = (ulong)merged.NullCount;
-                values.IsSorted = merged.IsSorted;
-                values.IsStrictSorted = merged.IsStrictSorted;
-                if (merged.HasBounds && column.Kind == DTypeKind.Primitive)
+                if (ordered.IsPresent)
                 {
-                    values.Min = ScalarProtobuf.SerializeValue(Bound(scalars, column.PType, merged.Min));
-                    values.Max = ScalarProtobuf.SerializeValue(Bound(scalars, column.PType, merged.Max));
+                    values.IsSorted = ordered.IsSorted;
+                    values.IsStrictSorted = ordered.IsStrictSorted;
+                    if (ordered.HasBounds && stored.Kind == DTypeKind.Primitive)
+                    {
+                        values.Min = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, ordered.Min));
+                        values.Max = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, ordered.Max));
+                    }
                 }
             }
 

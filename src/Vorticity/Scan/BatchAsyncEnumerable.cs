@@ -1007,7 +1007,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
 
         return _evaluator?.Filter switch
         {
-            ComparisonExpr comparison when comparison.Field.SegmentsUtf8.Length == 1 =>
+            // A function of the column is not the column, whose encoding answers for its own values.
+            ComparisonExpr comparison when comparison.Field.SegmentsUtf8.Length == 1 && comparison.Field is not Compute.FunctionFieldExpr =>
                 new PushedPredicate(comparison.Field, comparison.Op, comparison.Value, Prefix: false),
             StringMatchExpr { Op: StringMatchOp.StartsWith } match
                 when match.Field.SegmentsUtf8.Length == 1 && match.Pattern.Kind == FilterLiteralKind.Bytes =>

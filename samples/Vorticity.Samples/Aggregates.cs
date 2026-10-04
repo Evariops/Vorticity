@@ -132,6 +132,63 @@ internal static class Aggregates
         await using VortexFile visitFile = await VortexFile.OpenAsync(visits);
         long total = await visitFile.Scan<Visit>().SumAsync(v => v.DurationMs);
         Console.WriteLine($"SumAsync(v => v.DurationMs), an int column: {total} as a long");
+
+        // A day of visits, hour by hour on Paris's calendar: the day's filter is the range of
+        // instants it stands for, and the hours of sorted instants stream.
+        TimeZoneInfo paris = TimeZoneInfo.FindSystemTimeZoneById("Europe/Paris");
+        DateTime second = new DateTime(2026, 9, 2, 0, 0, 0, DateTimeKind.Utc);
+        await BestOfThreeAsync("GroupBy(StartedAt, by hour)", async () =>
+        {
+            lines = new string[3];
+            int hours = 0;
+            Scan<Visit> day = visitFile.Scan<Visit>().Where(v => v.StartedAt.Truncate(CalendarUnit.Day) == second);
+            await foreach (VisitHour hour in day
+                .GroupBy(v => v.StartedAt.Truncate(CalendarUnit.Hour, paris))
+                .Select(g => (g.Key, g.Count(), g.Average(v => v.DurationMs)))
+                .As<VisitHour>()
+                .ToRecordsAsync())
+            {
+                if (hours < lines.Length)
+                {
+                    lines[hours] = $"  {TimeZoneInfo.ConvertTimeFromUtc(hour.Hour, paris):yyyy-MM-dd HH:mm} Paris  {hour.Visits} visits, mean {hour.MeanMs:F0} ms";
+                }
+
+                hours++;
+            }
+
+            return $"{hours} hours; {day.Statistics.BlocksDecoded} blocks decoded";
+        });
+
+        foreach (string line in lines)
+        {
+            Console.WriteLine(line);
+        }
+
+        await BestOfThreeAsync("GroupBy(DurationMs, buckets)", async () =>
+        {
+            lines = new string[6];
+            int bucket = 0;
+            await foreach ((int from, long count) in visitFile.Scan<Visit>()
+                .GroupBy(v => v.DurationMs.Bucket(15_000))
+                .Select(g => (g.Key, g.Count()))
+                .As<DurationBucket>()
+                .ToRecordsAsync())
+            {
+                if (bucket < lines.Length)
+                {
+                    lines[bucket] = $"  from {from,6} ms  {count} visits";
+                }
+
+                bucket++;
+            }
+
+            return $"{bucket} buckets";
+        });
+
+        foreach (string line in lines)
+        {
+            Console.WriteLine(line);
+        }
     }
 
     private static string Describe(WelfordState s, Scan<Reading> scan) =>
@@ -305,3 +362,11 @@ public partial record struct CityHottest(string City, double? First, double? Hot
 /// <summary>A city's readings, the hot ones and their mean, and two questions about all of them.</summary>
 [VortexRecord]
 public partial record struct CityHeat(string City, long Rows, long Hot, double? HotMean, bool AnyTop, bool AllWarm);
+
+/// <summary>An hour of visits: its start, how many began in it, and their mean duration.</summary>
+[VortexRecord]
+public partial record struct VisitHour(DateTime Hour, long Visits, double? MeanMs);
+
+/// <summary>A bucket of durations, from its lower end: how many visits fell in it.</summary>
+[VortexRecord]
+public partial record struct DurationBucket(int From, long Visits);

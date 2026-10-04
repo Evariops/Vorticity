@@ -139,7 +139,7 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
         _settle = filter is null ? settle : null;
         Record = record;
         Filter = filter;
-        Identity = new AggregateIdentity(kind, input?.Path, typeof(T), detail, filter?.Key);
+        Identity = new AggregateIdentity(kind, input?.Key, typeof(T), detail, filter?.Key);
     }
 
     /// <summary>How a state that is a record is read and written, for a custom aggregate whose state is one.</summary>

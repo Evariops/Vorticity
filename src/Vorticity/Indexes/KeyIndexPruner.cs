@@ -371,11 +371,12 @@ internal sealed class KeyIndexPruner
                 Plan(logical.Right);
                 break;
 
-            case ComparisonExpr { Op: ComparisonOp.Equal } equal when _columns.TryGetValue(equal.Field.Path, out Column? column):
+            // A function of a column is not the column, whose keys the index holds.
+            case ComparisonExpr { Op: ComparisonOp.Equal, Field: not Compute.FunctionFieldExpr } equal when _columns.TryGetValue(equal.Field.Path, out Column? column):
                 _leaves[expr] = new Leaf(column, column.Ask(equal.Value), 1);
                 break;
 
-            case InExpr @in when _columns.TryGetValue(@in.Field.Path, out Column? column):
+            case InExpr { Field: not Compute.FunctionFieldExpr } @in when _columns.TryGetValue(@in.Field.Path, out Column? column):
                 _leaves[expr] = new Leaf(column, column.Ask(@in.Values), 1);
                 break;
 
@@ -486,10 +487,10 @@ internal sealed class KeyIndexPruner
                 CollectEqualities(logical.Left, into, seen, matches);
                 CollectEqualities(logical.Right, into, seen, matches);
                 break;
-            case ComparisonExpr { Op: ComparisonOp.Equal } equal:
+            case ComparisonExpr { Op: ComparisonOp.Equal, Field: not Compute.FunctionFieldExpr } equal:
                 Add(into, seen, equal.Field.Path, equal.Value);
                 break;
-            case InExpr @in:
+            case InExpr { Field: not Compute.FunctionFieldExpr } @in:
                 foreach (FilterLiteral value in @in.Values)
                 {
                     Add(into, seen, @in.Field.Path, value);

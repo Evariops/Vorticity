@@ -127,6 +127,13 @@ public sealed partial class Scan<TRecord>
     {
         ArgumentNullException.ThrowIfNull(key);
         ColumnSym column = key(new Probe<TRecord>(Binding)).Column;
+        if (column.Field is Compute.FunctionFieldExpr)
+        {
+            throw new ArgumentException(
+                $"'{column.Field.Key}' is a function of a column: a scan's order walks a column's key source, and a function of one has none. Order the groups of a GroupBy by it instead.",
+                nameof(key));
+        }
+
         _orderPath = column.Field.Path;
         _descending = descending;
         return this;

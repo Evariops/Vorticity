@@ -709,7 +709,9 @@ internal sealed class ObjectColumns
 
         string[] renamed = field.Segments is { } segments ? (string[])segments.Clone() : field.Path.Split('.');
         renamed[0] = _file.GetFieldName(_sources[column]);
-        return new FieldExpr(renamed);
+
+        // A value expression keeps its functions over the column's name in the object.
+        return field is Compute.FunctionFieldExpr function ? function.Over(new FieldExpr(renamed)) : new FieldExpr(renamed);
     }
 
     /// <summary>The dataset column a path starts from, or null when it names none, which the filter's check has already refused.</summary>

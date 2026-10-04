@@ -142,6 +142,9 @@ internal class FieldExpr : VortexExpr
     /// <summary>The dotted path, e.g. <c>payload.size</c>.</summary>
     public string Path { get; }
 
+    /// <summary>What makes two references one value: the path, and the function a value expression applies to it.</summary>
+    internal virtual string Key => Path;
+
     /// <summary>The path's segments as UTF-8, encoded once at construction.</summary>
     internal byte[][] SegmentsUtf8 { get; }
 

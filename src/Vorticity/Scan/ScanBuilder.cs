@@ -263,6 +263,7 @@ internal sealed class ScanBuilder
     public ScanBuilder Where(VortexExpr filter)
     {
         ArgumentNullException.ThrowIfNull(filter);
+        filter = Compute.FunctionFieldExpr.Ranges(filter);
 
         List<FieldExpr> paths = [];
         FieldsOf(filter, paths);

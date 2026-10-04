@@ -266,6 +266,11 @@ internal sealed class ExactCover : IAsyncDisposable
         {
             case LogicalExpr logical:
                 return OneColumn(logical.Left, ref path) && OneColumn(logical.Right, ref path);
+
+            // A function of the column is not the column its keys are.
+            case ComparisonExpr { Field: Compute.FunctionFieldExpr }:
+            case InExpr { Field: Compute.FunctionFieldExpr }:
+                return false;
             case ComparisonExpr comparison:
                 leaf = comparison.Field.Path;
                 break;

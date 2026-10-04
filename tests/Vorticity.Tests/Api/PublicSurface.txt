@@ -68,6 +68,15 @@ Vorticity:     property Selection Selection { get; }
 Vorticity:     property VortexSchema Schema { get; }
 Vorticity:     property int RowCount { get; }
 Vorticity:     property long StartRow { get; }
+Vorticity: enum Vorticity.CalendarUnit
+Vorticity:     const CalendarUnit Day = 2
+Vorticity:     const CalendarUnit Hour = 1
+Vorticity:     const CalendarUnit Minute = 0
+Vorticity:     const CalendarUnit Month = 4
+Vorticity:     const CalendarUnit Quarter = 5
+Vorticity:     const CalendarUnit Week = 3
+Vorticity:     const CalendarUnit Year = 6
+Vorticity:     field byte value__
 Vorticity: ref struct Vorticity.Column<T>
 Vorticity:     method Column<T> Canonical()
 Vorticity:     method DictionaryView<T> AsDictionary()
@@ -1386,26 +1395,82 @@ Vorticity:     method Predicate get_IsFalse(Sym<Nullable<bool>>)
 Vorticity:     method Predicate get_IsFalse(Sym<bool>)
 Vorticity:     method Predicate get_IsTrue(Sym<Nullable<bool>>)
 Vorticity:     method Predicate get_IsTrue(Sym<bool>)
+Vorticity:     method Sym<DateOnly> Truncate(Sym<DateOnly>, CalendarUnit)
+Vorticity:     method Sym<DateTime> Bucket(Sym<DateTime>, TimeSpan)
+Vorticity:     method Sym<DateTime> Truncate(Sym<DateTime>, CalendarUnit)
+Vorticity:     method Sym<DateTime> Truncate(Sym<DateTime>, CalendarUnit, TimeZoneInfo)
+Vorticity:     method Sym<DateTimeOffset> Bucket(Sym<DateTimeOffset>, TimeSpan)
+Vorticity:     method Sym<DateTimeOffset> Truncate(Sym<DateTimeOffset>, CalendarUnit)
+Vorticity:     method Sym<DateTimeOffset> Truncate(Sym<DateTimeOffset>, CalendarUnit, TimeZoneInfo)
+Vorticity:     method Sym<Nullable<DateOnly>> Truncate(Sym<Nullable<DateOnly>>, CalendarUnit)
+Vorticity:     method Sym<Nullable<DateTime>> Bucket(Sym<Nullable<DateTime>>, TimeSpan)
+Vorticity:     method Sym<Nullable<DateTime>> Truncate(Sym<Nullable<DateTime>>, CalendarUnit)
+Vorticity:     method Sym<Nullable<DateTime>> Truncate(Sym<Nullable<DateTime>>, CalendarUnit, TimeZoneInfo)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> Bucket(Sym<Nullable<DateTimeOffset>>, TimeSpan)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> Truncate(Sym<Nullable<DateTimeOffset>>, CalendarUnit)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> Truncate(Sym<Nullable<DateTimeOffset>>, CalendarUnit, TimeZoneInfo)
+Vorticity:     method Sym<Nullable<T>> Bucket<T>(Sym<Nullable<T>>, T)
+Vorticity:     method Sym<T> Bucket<T>(Sym<T>, T)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$2FDA5503ABB056406F404D2C3F724432
 Vorticity:     property Predicate IsFalse { get; }
 Vorticity:     property Predicate IsTrue { get; }
 Vorticity: static class Vorticity.SymExtensions.<G>$2FDA5503ABB056406F404D2C3F724432.<M>$45632EF05320A0BB5831059236BB90A9
 Vorticity:     method void <Extension>$(Sym<Nullable<bool>>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$37A6A56DEBF90248B270BF9600C76F4F<$T0>
+Vorticity:     method Sym<Nullable<$T0>> Bucket($T0)
+Vorticity: static class Vorticity.SymExtensions.<G>$37A6A56DEBF90248B270BF9600C76F4F<$T0>.<M>$E8787F4DF31CF81B4F002AF712E79BE1<T>
+Vorticity:     method void <Extension>$(Sym<Nullable<T>>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$4C7D5077080AC1A5394CB5178E1F0FF5
 Vorticity:     property Predicate IsFalse { get; }
 Vorticity:     property Predicate IsTrue { get; }
 Vorticity: static class Vorticity.SymExtensions.<G>$4C7D5077080AC1A5394CB5178E1F0FF5.<M>$AD8954592AA6B6EFEE0F97DE6EB2A6F2
 Vorticity:     method void <Extension>$(Sym<bool>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$6481DB3B8496EF24A8B4D82EC49CBCCC
+Vorticity:     method Sym<Nullable<DateTime>> Bucket(TimeSpan)
+Vorticity:     method Sym<Nullable<DateTime>> Truncate(CalendarUnit)
+Vorticity:     method Sym<Nullable<DateTime>> Truncate(CalendarUnit, TimeZoneInfo)
+Vorticity: static class Vorticity.SymExtensions.<G>$6481DB3B8496EF24A8B4D82EC49CBCCC.<M>$05A32DB3B6BCF7480F227C1E2B084CC1
+Vorticity:     method void <Extension>$(Sym<Nullable<DateTime>>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$837CA7DEF17F2A1F96954268115A8702<$T0>
+Vorticity:     method Sym<$T0> Bucket($T0)
+Vorticity: static class Vorticity.SymExtensions.<G>$837CA7DEF17F2A1F96954268115A8702<$T0>.<M>$97A91C006A20D00A21379E1385636A2B<T>
+Vorticity:     method void <Extension>$(Sym<T>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$9FD7CB55BBCFCC43139C4DC27427F569<$T0>
 Vorticity:     method Predicate Contains(string)
 Vorticity:     method Predicate Like(string, char = default)
 Vorticity:     method Predicate StartsWith(string)
 Vorticity: static class Vorticity.SymExtensions.<G>$9FD7CB55BBCFCC43139C4DC27427F569<$T0>.<M>$11D95F825AC5B1981DF8EE81FD632C33<TText>
 Vorticity:     method void <Extension>$(Sym<TText>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$BC2720612D8AE328D11DE5900A0E2A60
+Vorticity:     method Sym<DateTimeOffset> Bucket(TimeSpan)
+Vorticity:     method Sym<DateTimeOffset> Truncate(CalendarUnit)
+Vorticity:     method Sym<DateTimeOffset> Truncate(CalendarUnit, TimeZoneInfo)
+Vorticity: static class Vorticity.SymExtensions.<G>$BC2720612D8AE328D11DE5900A0E2A60.<M>$02CBDF742757546B6108C4B3A47BD312
+Vorticity:     method void <Extension>$(Sym<DateTimeOffset>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$C26378F2564A7844C73FC7E4557F5858
+Vorticity:     method Sym<Nullable<DateTimeOffset>> Bucket(TimeSpan)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> Truncate(CalendarUnit)
+Vorticity:     method Sym<Nullable<DateTimeOffset>> Truncate(CalendarUnit, TimeZoneInfo)
+Vorticity: static class Vorticity.SymExtensions.<G>$C26378F2564A7844C73FC7E4557F5858.<M>$21F15FE805CE18ECA6AD1ED0B1A88D70
+Vorticity:     method void <Extension>$(Sym<Nullable<DateTimeOffset>>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$CD5378EFB2B8229DCF512DC88FCF147E
+Vorticity:     method Sym<DateTime> Bucket(TimeSpan)
+Vorticity:     method Sym<DateTime> Truncate(CalendarUnit)
+Vorticity:     method Sym<DateTime> Truncate(CalendarUnit, TimeZoneInfo)
+Vorticity: static class Vorticity.SymExtensions.<G>$CD5378EFB2B8229DCF512DC88FCF147E.<M>$FC0B9E86E4687206BB9562D48775659E
+Vorticity:     method void <Extension>$(Sym<DateTime>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$E0D6CAEBC5588315D1F9E8D0E660501F<$T0>
 Vorticity:     method Predicate Contains($T0)
 Vorticity: static class Vorticity.SymExtensions.<G>$E0D6CAEBC5588315D1F9E8D0E660501F<$T0>.<M>$0C067B9E5293CA1AC30165E45D016CDA<T>
 Vorticity:     method void <Extension>$(Sym<ReadOnlyMemory<T>>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$E412C00DCF027ADFA82B3CB917C81ACE
+Vorticity:     method Sym<Nullable<DateOnly>> Truncate(CalendarUnit)
+Vorticity: static class Vorticity.SymExtensions.<G>$E412C00DCF027ADFA82B3CB917C81ACE.<M>$D37DDC74FCB779DE31A9312DF712328C
+Vorticity:     method void <Extension>$(Sym<Nullable<DateOnly>>)
+Vorticity: sealed class Vorticity.SymExtensions.<G>$E4B1ED5526513B78501FC93560F57992
+Vorticity:     method Sym<DateOnly> Truncate(CalendarUnit)
+Vorticity: static class Vorticity.SymExtensions.<G>$E4B1ED5526513B78501FC93560F57992.<M>$5A3764AF8CDFD5F03F3968F88BD7F5FD
+Vorticity:     method void <Extension>$(Sym<DateOnly>)
 Vorticity: static class Vorticity.TextColumnBuilderExtensions
 Vorticity:     method Span<byte> GetSpan<TText>(ColumnBuilder<TText>, int = default)
 Vorticity:     method void Append<TText, TValue>(ColumnBuilder<TText>, TValue)

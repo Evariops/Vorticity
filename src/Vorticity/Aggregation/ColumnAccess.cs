@@ -58,8 +58,11 @@ internal sealed class ColumnShape
 
     internal string Path => Column.Field.Path;
 
-    /// <summary>Whether both shapes read the same column.</summary>
-    internal bool Is(ColumnShape other) => string.Equals(Path, other.Path, StringComparison.Ordinal);
+    /// <summary>What makes two shapes one value: the column's path, and the function a value expression applies to it.</summary>
+    internal string Key => Column.Field.Key;
+
+    /// <summary>Whether both shapes read the same values: the same column through the same functions.</summary>
+    internal bool Is(ColumnShape other) => string.Equals(Key, other.Key, StringComparison.Ordinal);
 
     internal VortexUnsupportedException Unsupported(string what) =>
         new VortexUnsupportedException(Type.ToString(), ComponentKind.Feature, $"'{Path}' is {Type}, which {what} does not read.");

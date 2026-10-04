@@ -1558,6 +1558,11 @@ internal sealed class ZonePruner : IBlockPruner
 
     private ZoneColumn? Find(FieldExpr field)
     {
+        if (field is FunctionFieldExpr function)
+        {
+            return Through(function);
+        }
+
         for (int i = 0; i < _columns.Length; i++)
         {
             if (ReferenceEquals(_columns[i].Field, field) ||
@@ -1569,6 +1574,41 @@ internal sealed class ZonePruner : IBlockPruner
 
         return null;
     }
+
+    /// <summary>
+    /// The zones of a value expression: its column's, each bound through the function, which,
+    /// non-decreasing, maps a zone's bounds to the bounds of its values; a bound it does not map is
+    /// left unknown. Built once per function and kept for the pruner's life.
+    /// </summary>
+    private ZoneColumn? Through(FunctionFieldExpr function)
+    {
+        System.Collections.Concurrent.ConcurrentDictionary<string, ZoneColumn?> through =
+            _through ?? System.Threading.Interlocked.CompareExchange(ref _through, new(StringComparer.Ordinal), null) ?? _through!;
+        return through.GetOrAdd(function.Key, _ =>
+        {
+            if (Find(function.Column) is not { HasStatistics: true } column)
+            {
+                return null;
+            }
+
+            ZoneBounds[] zones = new ZoneBounds[column.ZoneCount];
+            for (int zone = 0; zone < zones.Length; zone++)
+            {
+                ZoneBounds bounds = column.Bounds(zone);
+                FilterLiteral low = default;
+                FilterLiteral high = default;
+                bool min = bounds.HasMin && function.Function.TryMap(bounds.Min, out low);
+                bool max = bounds.HasMax && function.Function.TryMap(bounds.Max, out high);
+                zones[zone] = ZoneBounds.Create(
+                    low, min, high, max, bounds.IsExact && min && max,
+                    bounds.NullCount, bounds.HasNullCount, bounds.NanCount, bounds.HasNanCount);
+            }
+
+            return new ZoneColumn(function, column.ZoneLength, column.RowCount, zones, column.IsDecimal);
+        });
+    }
+
+    private System.Collections.Concurrent.ConcurrentDictionary<string, ZoneColumn?>? _through;
 
     private static ComparisonOp Negate(ComparisonOp op) => op switch
     {

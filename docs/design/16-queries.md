@@ -21,7 +21,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 2 ✅ | results as batches: a query's result is a stream of batches, `As<TRecord>` a `Scan<TRecord>` over it; one value comes as itself, several into a record, and the overloads by arity go; `Select`, `Distinct` and `Take` on a scan; the writer takes a scan | §2.1, §6.1, §7, §8 |
 > | 3 ✅ | after the group by: `Where`, `OrderBy`, `ThenBy`, `Skip`, `Take`, the top-k; the group by and the `Distinct` that stream; groups in the order asked for | §2.2–§2.4, §6 |
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
-> | 5 | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
+> | 5, `Truncate` and `Bucket` ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6 | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps | §2.5, §2.6, §9 |
 
 ## 1. The shape
@@ -219,19 +219,29 @@ scan's `OrderBy`, which walks a column's key source ([12-index-reads.md](12-inde
 | `Truncate(CalendarUnit unit)` | `DateTime`, `DateTimeOffset`, `DateOnly`, and their nullable forms | the start of the unit holding the value: `Minute`, `Hour`, `Day`, `Week` (Monday, ISO 8601), `Month`, `Quarter`, `Year`; a `DateOnly` takes the units from `Day` up |
 | `Truncate(CalendarUnit unit, TimeZoneInfo zone)` | `DateTime`, `DateTimeOffset` | the same, on the calendar of `zone`: a day in Paris starts at 22:00 or 23:00 UTC |
 | `Bucket(TimeSpan width)` | `DateTime`, `DateTimeOffset` | `epoch + ⌊(value − epoch) / width⌋ × width`, the epoch 1970-01-01T00:00Z, the storage's own origin |
-| `Bucket(T width)` | integers, floats, decimals | `⌊value / width⌋ × width` |
+| `Bucket(T width)` | integers, floats | `⌊value / width⌋ × width`, in integers for an integer, rounded to the column's type for a float |
 
 The result has the column's type. A naive or UTC timestamp, bound as `DateTime`, is truncated as it
 is stored; a zoned one, bound as `DateTimeOffset`, on the calendar of its column's zone unless a zone
 is given ([07-dotnet-mapping.md](07-dotnet-mapping.md) §3). A null stays null and a NaN stays NaN.
 A width that is not positive, that the column's unit cannot divide, or a unit finer than a
-`DateOnly`'s day, throws `ArgumentOutOfRangeException` when the lambda runs. `CalendarUnit` is not
-`TimeUnit`, which is the unit a timestamp is stored in.
+`DateOnly`'s day, throws `ArgumentOutOfRangeException` when the lambda runs; a decimal's bucket is
+not there yet and throws `NotSupportedException`. `CalendarUnit` is not `TimeUnit`, which is the
+unit a timestamp is stored in.
 
-Both functions are **non-decreasing**, and three things follow:
+Over integers both functions are **floors**: non-decreasing, never above the value, and where the
+floor would fall below the storage's least value they give that value, so that one function holds
+over the whole storage. A zone's calendar holds over the years a `DateTime` holds; an instant before
+them takes the storage's least value, one after them the start of the last unit they hold. Three
+things follow:
 
-1. In a filter, a zone's bounds go through the function and prune as the column's would:
-   `r.At.Truncate(CalendarUnit.Day) == day` skips the zones the bounds put on other days.
+1. In a filter, a comparison with a constant is the range of the column's values whose image
+   compares so: `r.At.Truncate(CalendarUnit.Day) == day` is `r.At >= day && r.At < day + 1 day`,
+   the least value whose image reaches the constant found by bisection on the function. The scan
+   takes the range, so every structure of the column — zone maps, statistics, sorted runs, indexes —
+   prunes, counts and locates for it as for the range written by hand; a null row is unknown to
+   both, under a negation too. Where there is no such range — a float's bucket, an `In`, two
+   columns compared — a zone's bounds go through the function and prune as the column's would.
 2. A key the statistics say is sorted stays sorted through it, so it still groups by runs (§9.1)
    and still streams (§2.3).
 3. A block whose bounds go to one value holds one key, and §9.3 answers some aggregates of it from
@@ -240,9 +250,10 @@ Both functions are **non-decreasing**, and three things follow:
 On the encoded form a function is evaluated once per dictionary value, per run and per constant,
 and per value on a canonical block, in the storage's integers: a timestamp's `i64` in its unit,
 months and years by a days-from-civil computation, no `DateTime` per value. A zone is applied
-through its offset intervals over the block's bounds — two transitions a year where daylight saving
-holds — so a value takes its interval's offset, an integer truncation and the offset back: no
-search among boundaries. The autumn's repeated hour is two hours, with two offsets, so two buckets.
+through its offset intervals, the transitions of a year found the first time an instant of it is
+met and kept — two a year where daylight saving holds — so a value takes its interval's offset, an
+integer truncation and the offset back: a look among the two or three intervals of its year. The
+autumn's repeated hour is two hours, with two offsets, so two buckets.
 
 Other functions — date parts, text functions, a coalesce — will take the same path: a function on a
 symbol, evaluated where the block lies.

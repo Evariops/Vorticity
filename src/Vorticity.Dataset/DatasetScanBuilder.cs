@@ -82,7 +82,7 @@ internal sealed class DatasetScanBuilder
     /// <summary>Keeps the rows the predicate selects.</summary>
     public DatasetScanBuilder Where(VortexExpr filter)
     {
-        _filter = filter;
+        _filter = Compute.FunctionFieldExpr.Ranges(filter);
         return this;
     }
 

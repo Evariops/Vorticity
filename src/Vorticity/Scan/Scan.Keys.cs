@@ -13,6 +13,7 @@ public sealed partial class Scan<TRecord>
     /// <param name="column">The key column.</param>
     /// <returns>The cursor's builder.</returns>
     /// <exception cref="InvalidOperationException">The scan has a filter or selects rows: a cursor walks the whole column.</exception>
+    /// <exception cref="ArgumentException">The column is a function of one, which has no key source.</exception>
     public KeyCursorBuilder<TKey> Keys<TKey>(Func<Probe<TRecord>, Sym<TKey>> column)
     {
         ArgumentNullException.ThrowIfNull(column);
@@ -22,6 +23,11 @@ public sealed partial class Scan<TRecord>
         }
 
         ColumnSym key = column(new Probe<TRecord>(Binding)).Column;
+        if (key.Field is Compute.FunctionFieldExpr)
+        {
+            throw new ArgumentException($"'{key.Field.Key}' is a function of a column, which has no key source of its own.", nameof(column));
+        }
+
         return new KeyCursorBuilder<TKey>(Source, key, _options.UseIndexes);
     }
 }
