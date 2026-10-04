@@ -50,6 +50,9 @@ internal sealed class DistinctQuery : ResultQuery
 
     internal long Take { get; }
 
+    /// <summary>The most values the last run held at once: every one met, or a batch's on a column that streams.</summary>
+    internal long PeakValues { get; set; }
+
     internal override VortexSchema Schema
     {
         get
@@ -142,16 +145,15 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
 {
     private readonly DistinctQuery _query;
     private readonly CancellationToken _cancellationToken;
-    private readonly GroupRanges _ranges = new GroupRanges();
-    private readonly int[] _nodes;
     private IAsyncEnumerator<RecordBatch>? _inner;
-    private GroupKeys? _keys;
+    private AggregationPartition? _partition;
     private AggregationOutcome? _outcome;
     private StructStore? _store;
     private CanonicalArena? _arena;
     private RecordBatch? _current;
-    private int[] _rowGroups = [];
     private int[] _groups = [];
+    private int[] _open = [];
+    private int _streaming = -1;
     private long _met;
     private bool _begun;
     private bool _ended;
@@ -160,7 +162,6 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     {
         _query = query;
         _cancellationToken = cancellationToken;
-        _nodes = new int[query.Keys.Length];
     }
 
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
@@ -182,8 +183,18 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
                 PositionsUnread = true,
                 Options = projection.Host.Spec().Options with { Compact = false },
             };
-            _keys = _query.Plan.CreateKeys(sorted: false);
-            _outcome = new AggregationOutcome(_query.Plan, [], _keys, []);
+
+            // A group by with no aggregate; on a column the statistics say is sorted, a value
+            // below the last one met never comes back, so the index forgets it.
+            AggregationPlan plan = _query.Plan;
+            for (int c = 0; c < plan.Keys.Length && _streaming < 0; c++)
+            {
+                _streaming = AggregationEngine.IsSorted(projection.Host.Source, plan.Keys[c]) ? c : -1;
+            }
+
+            (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, []);
+            _partition = new AggregationPartition(plan, [], columns, inputs, sorted: _streaming == 0 && plan.Keys.Length == 1, _streaming);
+            _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
             _inner = projection.Host.Source.BatchesAsync(spec, projection.Metrics).GetAsyncEnumerator(_cancellationToken);
         }
 
@@ -212,38 +223,19 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     /// <summary>The values <paramref name="batch"/> is the first to hold, inside the window, as the current batch; false when there are none.</summary>
     private bool Meet(RecordBatch batch, long end)
     {
-        int rows = batch.RowCount;
-        if (rows == 0 || batch.SelectedRows == 0)
-        {
-            return false;
-        }
-
-        CanonicalArena arena = batch.Arena;
-        int root = batch.RootIndex;
-        ColumnShape[] keys = _query.Keys;
-        for (int c = 0; c < keys.Length; c++)
-        {
-            int node = FilterEvaluator.Resolve(arena, root, keys[c].Field, rows);
-            while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
-            {
-                node = arena.GetNode(node).StorageIndex;
-            }
-
-            _nodes[c] = node;
-        }
-
-        GroupKeys index = _keys!;
+        AggregationPartition partition = _partition!;
+        GroupKeys index = partition.Keys!;
         int before = index.Count;
-        Scratch.Grow(ref _rowGroups, rows);
-        _ranges.Clear();
-        index.Assign(arena, _nodes, rows, batch.SelectionWords, _rowGroups, _ranges);
+        partition.Process(batch);
         int after = index.Count;
+        _query.PeakValues = Math.Max(_query.PeakValues, after);
         long first = _met;
         _met += after - before;
         long low = Math.Max(_query.Skip, first);
         long high = Math.Min(end, _met);
         if (high <= low)
         {
+            Forget(after > before);
             return false;
         }
 
@@ -269,7 +261,41 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         own.ResetKeepingBlocks();
         int result = store.Build(own, count);
         _current = RecordBatch.Over(own, result, low - _query.Skip, _current);
+        Forget(after > before);
         return true;
+    }
+
+    /// <summary>
+    /// On a key that streams, the values no row to come can hold again, forgotten once delivered:
+    /// every one but the last met of the sorted component, and its null. The memory is then the
+    /// values of one value of it, not every value met.
+    /// </summary>
+    private void Forget(bool met)
+    {
+        if (_streaming < 0 || !met)
+        {
+            return;
+        }
+
+        AggregationPartition partition = _partition!;
+        int count = partition.Keys!.Count;
+        int last = partition.LastValueGroup;
+        int nullComponent = partition.ComponentNull;
+        Scratch.Grow(ref _open, count);
+        int open = 0;
+        for (int g = 0; g < count; g++)
+        {
+            int component = partition.ComponentOf(g);
+            if (component == last || component == nullComponent)
+            {
+                _open[open++] = g;
+            }
+        }
+
+        if (open < count)
+        {
+            partition.Keep(_open.AsSpan(0, open));
+        }
     }
 
     private StructStore Store()

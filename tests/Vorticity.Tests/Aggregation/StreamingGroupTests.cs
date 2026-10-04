@@ -150,6 +150,33 @@ public sealed partial class StreamingGroupTests
         }
     }
 
+    [Fact]
+    public async Task ADistinctOnASortedColumnHoldsABatchOfValues()
+    {
+        (Tick[] rows, string path) = await WriteAsync();
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            Aggregation<int> seconds = file.Scan<Tick>().Select(r => r.Second).Distinct();
+            List<int> expected = [.. rows.Select(r => r.Second).Distinct()];
+            Assert.Equal(expected, await seconds.ToListAsync(Ct));
+            long peak = ((DistinctQuery)seconds.Query).PeakValues;
+            Assert.True(peak * 3 < expected.Count, $"the distinct held {peak} values of {expected.Count}");
+
+            // Its nulls first, then the values in order; the null comes once.
+            Assert.Equal(rows.Select(r => r.Hour).Distinct(), await file.Scan<Tick>().Select(r => r.Hour).Distinct().ToListAsync(Ct));
+
+            // A column that does not stream holds every value it met.
+            Aggregation<int> shuffled = file.Scan<Tick>().Select(r => r.Shuffled).Distinct();
+            Assert.Equal(rows.Select(r => r.Shuffled).Distinct().Count(), (await shuffled.ToListAsync(Ct)).Count);
+            Assert.Equal(rows.Select(r => r.Shuffled).Distinct().Count(), ((DistinctQuery)shuffled.Query).PeakValues);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     private static async Task<List<T>> ListAsync<T>(Scan<T> scan)
