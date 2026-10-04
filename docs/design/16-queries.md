@@ -20,7 +20,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 1 ✅ | `Select` on a grouped scan, its overloads by arity kept until stage 2, named keys, `Average` and `AverageAsync`, `OrderByDescending` on a scan, aggregates deduplicated by structure, the naming rule | §1, §4, §5.5 |
 > | 2 ✅ | results as batches: a query's result is a stream of batches, `As<TRecord>` a `Scan<TRecord>` over it; one value comes as itself, several into a record, and the overloads by arity go; `Select`, `Distinct` and `Take` on a scan; the writer takes a scan | §2.1, §6.1, §7, §8 |
 > | 3 ✅ | after the group by: `Where`, `OrderBy`, `ThenBy`, `Skip`, `Take`, the top-k; the group by and the `Distinct` that stream; groups in the order asked for | §2.2–§2.4, §6 |
-> | 4, the filtered group ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
+> | 4, the filtered group and reproducible sums ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6 | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps | §2.5, §2.6, §9 |
 
@@ -316,19 +316,26 @@ give — a 64-bit state where they prove it, 128 bits where they prove nothing: 
 engine's choice, the exactness the promise.
 
 **A float sum is the same bits** at every degree of parallelism, in every order of rows, and under
-every cut of the data into chunks, files or objects, so compacting a dataset changes no sum. Each
-value is split at boundaries fixed once per query, from the largest magnitude the statistics give
-and the number of rows (the pre-rounding of Demmel and Nguyen); each part is accumulated exactly, so
-adding partials is exact in any order, and the parts are added up in one fixed order at the end.
-The number of parts follows the rows, so that the last part's unit lies at 2⁻⁵³ of the largest
-magnitude, a double's precision there: two parts up to about 2²⁵ rows, three up to 2⁴². The error
-is then the final rounding and the bits a value holds below that unit, which makes the sum more
-accurate than a plain one, whose error grows with the rows.
-Where the statistics give no bound, the boundaries follow the largest value met, an indexed sum
-whose partials realign on merge, and the promise holds. A sum holding +∞ and not −∞ is +∞, one
-holding both is NaN, as IEEE 754 gives. An average is that sum over the count; a variance comes
-from the reproducible sums of `x − c` and `(x − c)²`, `c` the midpoint of the column's bounds, fixed
-per query.
+every cut of the data into chunks, files or objects, so compacting a dataset changes no sum. It is
+an indexed sum (Demmel and Nguyen; ReproBLAS): bins on one grid of exponents for every sum, bin
+`j`'s unit `2^(27j − 1074)`, of which each sum keeps three, the bin its largest value calls for and
+the two below, at least 53 bits under that value. A value is split from the top bin down by the
+pre-rounding of an extractor `1.5 · 2^52` units wide, each part an integer of its bin's unit; a bin
+above a value takes nothing of it, so its parts do not depend on when the sum's top moved, and each
+bin is the exact sum of its parts in a long. When the top moves up, the bins it leaves below the
+three fall out, as a final top that high would not keep them either; nothing carries from one bin
+into another, which a later drop would make depend on the order. The answer is the bins' exact
+total rounded once, to the nearest double. The error is then that rounding and the bits values hold
+more than 53 below the largest one, which makes the sum more accurate than a plain one, whose error
+grows with the rows.
+
+The top is each sum's own, from its own values, and no statistics are read: a group of small values
+keeps its precision beside a group of large ones, a result's scan and a dataset sum as a file does,
+and a filter changes no grid. A part is at most 2^26 units, so a sum takes 2^36 values, some 69
+billion, in one group or one scan, and throws `OverflowException` past them rather than lose its
+exactness. A NaN is skipped; a sum holding +∞ and not −∞ is +∞, one holding both is NaN, as IEEE 754
+gives. An average is that sum over the count; a variance comes from the reproducible sums of
+`x − c` and `(x − c)²`, `c` the midpoint of the column's bounds, fixed per query.
 
 Every answer of §5 is therefore the same bits at every degree and in every cut, but those that
 depend on the order of rows by definition: `First`, `Last`, and a tie of `MinBy` or `MaxBy`.
@@ -669,7 +676,7 @@ A query left early, by `break`, a `Take` or a cancellation, disposes as §2.4 sa
 | joins, `let`, a query over a group's rows | one table, no binding per row |
 | a synchronous twin, `ToList()` | async only where there is I/O, and no synchronous twin of an asynchronous call ([03-architecture.md](03-architecture.md) §1) |
 | an implicit order of groups | it changed with the writer's encodings; an order is asked for (§6.3) |
-| a switch to plain float sums | the reproducible sum costs about 1 to 2 % of a pass (§13) and is more accurate; a second semantics would be a second test matrix |
+| a switch to plain float sums | the reproducible sum costs nothing measurable on a pass over runs or a sorted key, a fifth more on a group by keyed row by row, a third more at a million groups, whose 32 bytes a group leave the cache (§13); it is more accurate, and a second semantics would be a second test matrix |
 | approximate distinct counts, quantiles, grouping sets | later, as aggregates and as operators of the same pipeline |
 | aggregates on the tool path | a later surface, over the same engine |
 
@@ -693,12 +700,12 @@ A query left early, by `break`, a `Take` or a cancellation, disposes as §2.4 sa
 
 The figures this document quotes come from measurements made while it was written, on an arm64
 machine of 14 cores: a million groups delivered as rows with a string key, 41 ms and 46 MiB, as
-batches 2 ms; a reproducible float sum of two parts against a plain one, 0.21 against 0.14 ns a value
-over a column, 0.99 against 0.88 grouped by a thousand keys, 2.01 against 1.37 by a million, with
-one bit pattern over every cut of sixteen million values where the plain sum gave seven, and the
-exact sum where the plain one was 1.7 × 10⁻¹⁴ off; a pass costing 4.4 ns a row for a fold over a
-column and 32 ns for a composite group by, which the sum's overhead is set against. Stage 0 turns
-each into a gate.
+batches 2 ms; the indexed sum against a plain one, a count and a mean of a million rows grouped by a
+run-end key in 12.3 ms against 13.5, by a dictionary key in 4.0 against 3.2, over a million groups
+in 46 against 34 ms and 103 against 77 MiB, with one bit pattern over every cut of sixteen million
+values where the plain sum gave seven, and the exact sum where the plain one was 1.7 × 10⁻¹⁴ off; a
+pass costing 4.4 ns a row for a fold over a column and 32 ns for a composite group by, which the
+sum's overhead is set against. Stage 0 turns each into a gate.
 
 ## 14. From the 0.4 surface
 

@@ -98,9 +98,9 @@ internal static class Aggregators
                 PType.U16 => static () => new FixedSlot<ushort, SumState<UInt128>, UnsignedSum<ushort>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
                 PType.U32 => static () => new FixedSlot<uint, SumState<UInt128>, UnsignedSum<uint>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
                 PType.U64 => static () => new FixedSlot<ulong, SumState<UInt128>, UnsignedSum<ulong>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                PType.F16 => static () => new FixedSlot<Half, SumState<double>, FloatSum<Half>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                PType.F32 => static () => new FixedSlot<float, SumState<double>, FloatSum<float>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                _ => static () => new FixedSlot<double, SumState<double>, FloatSum<double>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
+                PType.F16 => static () => new FixedSlot<Half, IndexedSum, IndexedFloatSum<Half>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
+                PType.F32 => static () => new FixedSlot<float, IndexedSum, IndexedFloatSum<float>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
+                _ => static () => new FixedSlot<double, IndexedSum, IndexedFloatSum<double>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
             },
             StorageKind.Decimal or StorageKind.Decimal256 => DecimalSumSlot<T>(shape),
             _ => throw shape.Unsupported("a sum"),
@@ -149,9 +149,9 @@ internal static class Aggregators
                     PType.U16 => static () => new FixedSlot<ushort, SumState<UInt128>, UnsignedSum<ushort>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
                     PType.U32 => static () => new FixedSlot<uint, SumState<UInt128>, UnsignedSum<uint>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
                     PType.U64 => static () => new FixedSlot<ulong, SumState<UInt128>, UnsignedSum<ulong>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    PType.F16 => static () => new FixedSlot<Half, SumState<double>, FloatSum<Half>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    PType.F32 => static () => new FixedSlot<float, SumState<double>, FloatSum<float>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    _ => static () => new FixedSlot<double, SumState<double>, FloatSum<double>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
+                    PType.F16 => static () => new FixedSlot<Half, IndexedSum, IndexedFloatSum<Half>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
+                    PType.F32 => static () => new FixedSlot<float, IndexedSum, IndexedFloatSum<float>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
+                    _ => static () => new FixedSlot<double, IndexedSum, IndexedFloatSum<double>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
                 };
                 break;
             case StorageKind.Decimal when shape.Type.Precision <= 18:
@@ -392,12 +392,8 @@ internal static class Aggregators
 
                 return false;
             case StorageKind.Primitive:
-                if (statistics.TryGetSum(out double floating))
-                {
-                    value = T.CreateChecked(floating);
-                    return true;
-                }
-
+                // A float sum is the indexed sum's, the same bits under every cut; the writer's is
+                // a plain one, whose last bits follow its order.
                 return false;
             case StorageKind.Decimal when typeof(T) == typeof(decimal) && shape.Type.Precision + 10 <= 28:
                 if (statistics.TryGetSum(out decimal total))
@@ -421,7 +417,6 @@ internal static class Aggregators
         }
 
         double sum;
-        long nans = 0;
         switch (shape.Kind)
         {
             case StorageKind.Primitive when shape.PType.IsSignedInteger():
@@ -441,15 +436,8 @@ internal static class Aggregators
                 sum = unsigned;
                 break;
             case StorageKind.Primitive:
-                // The mean skips a NaN as the sum does, so the count must too.
-                if (!statistics.TryGetSum(out double floating) || !statistics.TryGetNanCount(out ulong nanCount) || nanCount > long.MaxValue)
-                {
-                    return false;
-                }
-
-                sum = floating;
-                nans = (long)nanCount;
-                break;
+                // A float mean is the indexed sum's over the count, which the writer's sum is not.
+                return false;
             case StorageKind.Decimal when shape.Type.Precision + 10 <= 28:
                 if (!statistics.TryGetSum(out decimal total))
                 {
@@ -462,7 +450,7 @@ internal static class Aggregators
                 return false;
         }
 
-        long count = view.Rows - nulls - nans;
+        long count = view.Rows - nulls;
         value = count > 0 ? sum / count : null;
         return true;
     }

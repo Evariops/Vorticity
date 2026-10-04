@@ -137,60 +137,6 @@ internal readonly struct UnsignedSum<TValue> : IValueOp<TValue, SumState<UInt128
     }
 }
 
-/// <summary>A sum of floating-point values in a double, NaN skipped.</summary>
-internal readonly struct FloatSum<TValue> : IValueOp<TValue, SumState<double>>
-    where TValue : unmanaged, INumberBase<TValue>
-{
-    public static SumState<double> Seed() => default;
-
-    public static void Add(ref SumState<double> state, TValue value)
-    {
-        double widened = double.CreateTruncating(value);
-        if (!double.IsNaN(widened))
-        {
-            state.Sum += widened;
-            state.Count++;
-        }
-    }
-
-    public static void AddWeighted(ref SumState<double> state, TValue value, long count)
-    {
-        double widened = double.CreateTruncating(value);
-        if (!double.IsNaN(widened))
-        {
-            state.Sum += widened * count;
-            state.Count += count;
-        }
-    }
-
-    public static void AddSpan(ref SumState<double> state, ReadOnlySpan<TValue> values)
-    {
-        state.Sum += SumKernels.Float(values, out long counted);
-        state.Count += counted;
-    }
-
-    public static void Merge(ref SumState<double> into, in SumState<double> other)
-    {
-        into.Sum += other.Sum;
-        into.Count += other.Count;
-    }
-
-    /// <remarks>
-    /// The rows left out read as zero, which adds nothing, and the NaN the kernel skips among the
-    /// run are all rows kept: zero is not NaN. A NaN would do as well for the sum, but a sum with a
-    /// NaN in it is the kernel's slow path.
-    /// </remarks>
-    [SkipLocalsInit]
-    public static void AddWords(ref SumState<double> state, ReadOnlySpan<TValue> block, ReadOnlySpan<ulong> words)
-    {
-        Span<TValue> selected = stackalloc TValue[WordFold.Run * 64];
-        selected = selected[..block.Length];
-        WordFold.Select(block, words, TValue.Zero, selected);
-        state.Sum += SumKernels.Float<TValue>(selected, out long counted);
-        state.Count += WordFold.Count(words) - (selected.Length - counted);
-    }
-}
-
 /// <summary>A sum of unscaled decimals in 128 bits, checked.</summary>
 internal readonly struct DecimalSum : IValueOp<Int128, SumState<Int128>>
 {

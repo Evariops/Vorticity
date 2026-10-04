@@ -260,6 +260,12 @@ dictionary or run-end block included.
   the file statistics; `SumAsync` and `AverageAsync` read the column ([scan-a-table.md](scan-a-table.md)).
 * **NaN is skipped** by a float sum, mean, minimum and maximum, and counted as one value by a
   distinct count. An aggregation ignores the scan's `OrderBy`.
+* **A float sum is the same bits** at every degree, in every order of the rows and however the
+  data is cut into files or objects, and closer to the exact sum than a plain one: each value is
+  split into three integer parts on a grid of exponents, summed exactly, and the total is rounded
+  once. It takes 69 billion values in one group or one scan, and throws `OverflowException` past
+  them. Grouped row by row, it costs about a fifth more than a plain sum would; over runs and
+  sorted keys, nothing measurable.
 * **Encoded steps need generic instantiation at run time.** Under Native AOT the scan calls `Step`
   with the canonical form instead ([native-aot.md](native-aot.md)).
 
