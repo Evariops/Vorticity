@@ -103,7 +103,6 @@ internal static class SidecarValues
 
         DecoderBootstrap.Ensure();
 
-        bool sawLayout = false;
         bool ok = true;
         foreach (string line in System.IO.File.ReadLines(CorpusColumns.PathOf(entry, ".jsonl")))
         {
@@ -112,9 +111,8 @@ internal static class SidecarValues
             switch (root.GetProperty("kind").GetString())
             {
                 case "layout":
-                    sawLayout = true;
-                    ok &= LayoutIsWalkable(root.GetProperty("tree"));
-                    break;
+                    // The third line, after the header and the dtype: nothing past it decides.
+                    return ok && LayoutIsWalkable(root.GetProperty("tree"));
                 case "dtype":
                     ok &= root.GetProperty("tree").GetProperty("kind").GetString()
                         is not ("map" or "union" or "variant");
@@ -124,7 +122,7 @@ internal static class SidecarValues
             }
         }
 
-        return sawLayout && ok;
+        return false;
     }
 
     /// <summary>The sidecar's independently computed null count for the root path.</summary>

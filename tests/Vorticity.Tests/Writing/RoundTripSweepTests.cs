@@ -14,6 +14,7 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -114,7 +115,7 @@ public sealed class RoundTripSweepTests
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
 
             await using VortexFile source = await VortexFile.OpenAsync(
-                entry.Path, OpenOptionsFor(entry), CancellationToken.None);
+                entry.Path, await CorpusSweep.OpenOptionsForAsync(entry.Path), CancellationToken.None);
             // WITH INDEXES, so that the whole corpus crosses the rule that a file with an index
             // opens and scans in a strict Rust 0.86.1 reader, without error and without
             // configuration. The files take four policies in turn, budget lifted: a Bloom
@@ -285,89 +286,43 @@ public sealed class RoundTripSweepTests
         }
     }
 
-    /// <summary>Writes one corpus file out and reads it back, comparing every value.</summary>
+    /// <summary>
+    /// Writes one corpus file out and reads it back, comparing every value: by digest against the
+    /// plain scan of the original, and by line where a row differs. The file written is the one the
+    /// size ratchet weighs, written once for both.
+    /// </summary>
     /// <returns>How many rows were compared.</returns>
     private static async Task<int> RoundTrip(CorpusEntry entry)
     {
-        string written = Path.Combine(Path.GetTempPath(), $"vorticity-{Guid.NewGuid():N}.vortex");
-        try
+        string written = await CorpusSweep.RewriteAsync(entry.Path);
+        await using (VortexFile target = await VortexFile.OpenAsync(written, CancellationToken.None))
         {
-            List<string> original = [];
-            DType schema;
-
-            await using (VortexFile source = await VortexFile.OpenAsync(
-                entry.Path, OpenOptionsFor(entry), CancellationToken.None))
-            {
-                schema = source.DType;
-                await using VortexFileWriter writer = VortexFileWriter.Create(written, schema);
-                await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
-                    .WithCancellation(CancellationToken.None))
-                {
-                    Values.DescribeRows(batch, original);
-                    await writer.WriteAsync(batch, CancellationToken.None);
-                }
-
-                await writer.CompleteAsync(CancellationToken.None);
-            }
-
-            List<string> readBack = [];
-            await using (VortexFile target = await VortexFile.OpenAsync(written, CancellationToken.None))
-            {
-                if (target.RowCount != entry.RowCount)
-                {
-                    throw new InvalidOperationException(
-                        $"wrote {entry.RowCount} rows and read back {target.RowCount}");
-                }
-
-                await foreach (RecordBatch batch in target.ScanBuilder().ExecuteAsync()
-                    .WithCancellation(CancellationToken.None))
-                {
-                    Values.DescribeRows(batch, readBack);
-                }
-            }
-
-            if (original.Count != readBack.Count)
+            if (target.RowCount != entry.RowCount)
             {
                 throw new InvalidOperationException(
-                    $"wrote {original.Count} values and read back {readBack.Count}");
+                    $"wrote {entry.RowCount} rows and read back {target.RowCount}");
             }
-
-            for (int i = 0; i < original.Count; i++)
-            {
-                if (!string.Equals(original[i], readBack[i], StringComparison.Ordinal))
-                {
-                    throw new InvalidOperationException(
-                        $"value {i} was '{original[i]}' and read back '{readBack[i]}'");
-                }
-            }
-
-            return (int)entry.RowCount;
         }
-        finally
+
+        List<UInt128> original = await CorpusSweep.PlainAsync(entry.Path);
+        List<UInt128> readBack = await CorpusSweep.DigestAsync(written);
+        if (original.Count != readBack.Count)
         {
-            if (System.IO.File.Exists(written))
-            {
-                System.IO.File.Delete(written);
-            }
+            throw new InvalidOperationException(
+                $"wrote {original.Count} values and read back {readBack.Count}");
         }
-    }
 
-    /// <summary>
-    /// Open options for one entry: the schema supplied out of band when the file has no dtype
-    /// segment.
-    /// </summary>
-    /// <param name="entry">The corpus entry about to be opened.</param>
-    /// <remarks>
-    /// <c>types/no_dtype_segment</c> is the corpus's only such file, and it is in scope. Opening it
-    /// without a DType is a <c>VortexFormatException</c> BY CONTRACT, so a failure on it would be
-    /// the sweep calling the wrong overload rather than anything about the round trip. The donor is
-    /// a real file with the identical schema, which is the same approach
-    /// <c>Phase1CompositionTests</c> takes.
-    /// </remarks>
-    private static VortexOpenOptions OpenOptionsFor(CorpusEntry entry) =>
-        entry.HasDTypeSegment
-            ? VortexOpenOptions.Default
-            : new VortexOpenOptions { DType = OutOfBandSchema.Value };
+        int differs = CollectionsMarshal.AsSpan(original).CommonPrefixLength(CollectionsMarshal.AsSpan(readBack));
+        if (differs < original.Count)
+        {
+            List<string> lines = await CorpusSweep.DescribeAsync(entry.Path);
+            List<string> read = await CorpusSweep.DescribeAsync(written);
+            throw new InvalidOperationException(
+                $"value {differs} was '{lines[differs]}' and read back '{read[differs]}'");
+        }
+
+        return (int)entry.RowCount;
+    }
 
     /// <summary>A struct of booleans, primitives, strings and bytes: what a leaf entry summarises plainly.</summary>
     private static bool PlainColumns(DType schema)
@@ -441,17 +396,4 @@ public sealed class RoundTripSweepTests
 
         return false;
     }
-
-    private static readonly Lazy<DType> OutOfBandSchema = new Lazy<DType>(static () =>
-    {
-        VortexFile donor = VortexFile
-            .OpenAsync(
-                CorpusManifest.Get("types/user_metadata_segments").Path,
-                VortexOpenOptions.Default,
-                CancellationToken.None)
-            .AsTask()
-            .GetAwaiter()
-            .GetResult();
-        return donor.DType;
-    });
 }

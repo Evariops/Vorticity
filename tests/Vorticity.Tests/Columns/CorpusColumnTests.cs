@@ -5,6 +5,7 @@
 // understands (vortex.flat, vortex.struct, vortex.zoned), whose array encodings this build decodes,
 // and whose root dtype is in scope. dict and chunked layouts are read by the layout tests.
 using System;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -16,28 +17,18 @@ namespace Vorticity.Tests.Columns;
 
 public sealed class CorpusColumnTests
 {
-    public static TheoryData<string> WalkableEntries
-    {
-        get
-        {
-            TheoryData<string> data = [];
-            foreach (string entry in CorpusColumns.Entries())
-            {
-                if (SidecarValues.IsWalkable(entry))
-                {
-                    data.Add(entry);
-                }
-            }
+    /// <summary>The walkable entries, decided once: discovery and the floor below both read them.</summary>
+    private static readonly Lazy<string[]> Walkable =
+        new(() => [.. CorpusColumns.Entries().Where(SidecarValues.IsWalkable)]);
 
-            return data;
-        }
-    }
+    public static TheoryData<string> WalkableEntries => [.. Walkable.Value];
 
     [Fact]
     public void TheCorpusSweepIsNotEmpty()
     {
         // A helper that silently matched nothing would turn this whole file into a no-op.
-        Assert.True(WalkableEntries.Count > 400, $"only {WalkableEntries.Count} entries matched");
+        int count = Walkable.Value.Length;
+        Assert.True(count > 400, $"only {count} entries matched");
     }
 
     [Theory]

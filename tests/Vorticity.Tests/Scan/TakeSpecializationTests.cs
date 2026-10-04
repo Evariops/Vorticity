@@ -17,6 +17,7 @@
 // the same block or the same run.
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -44,38 +45,35 @@ public sealed class TakeSpecializationTests
 
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
-            List<string> all = await ReadAll(entry.Path);
+            // The full scan's rows and the take's, by digest; described only where they differ.
+            List<UInt128> all = await CorpusSweep.PlainAsync(entry.Path);
             if (all.Count < 2)
             {
                 continue;
             }
 
             long[] wanted = Indices(all.Count);
-            List<string> expected = [];
-            foreach (long index in wanted)
-            {
-                expected.Add(all[(int)index]);
-            }
-
-            List<string> taken = await ReadTake(entry.Path, wanted);
+            List<UInt128> taken = await ReadTake<UInt128>(entry.Path, wanted, Values.DigestRows);
             files++;
             rows += taken.Count;
 
-            if (!Same(expected, taken))
+            if (!taken.SequenceEqual(wanted.Select(index => all[(int)index])))
             {
+                List<string> lines = await ReadAll(entry.Path);
+                List<string> takenLines = await ReadTake<string>(entry.Path, wanted, Values.DescribeRows);
                 failures.Append(entry.Id)
                     .Append(": take returned ")
-                    .Append(taken.Count)
+                    .Append(takenLines.Count)
                     .Append(" values, expected ")
-                    .Append(expected.Count)
+                    .Append(wanted.Length)
                     .Append('\n');
-                for (int i = 0; i < Math.Min(expected.Count, taken.Count); i++)
+                for (int i = 0; i < Math.Min(wanted.Length, takenLines.Count); i++)
                 {
-                    if (expected[i] != taken[i])
+                    if (lines[(int)wanted[i]] != takenLines[i])
                     {
                         failures.Append("    row ").Append(wanted[i])
-                            .Append(": full scan ").Append(expected[i])
-                            .Append(", take ").Append(taken[i]).Append('\n');
+                            .Append(": full scan ").Append(lines[(int)wanted[i]])
+                            .Append(", take ").Append(takenLines[i]).Append('\n');
                         break;
                     }
                 }
@@ -492,28 +490,10 @@ public sealed class TakeSpecializationTests
         return [.. wanted];
     }
 
-    private static bool Same(List<string> expected, List<string> actual)
-    {
-        if (expected.Count != actual.Count)
-        {
-            return false;
-        }
-
-        for (int i = 0; i < expected.Count; i++)
-        {
-            if (expected[i] != actual[i])
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
     private static async Task<List<string>> ReadAll(string path)
     {
         List<string> values = [];
-        await using VortexFile file = await VortexFile.OpenAsync(path, OpenOptionsFor(path), CancellationToken.None);
+        await using VortexFile file = await VortexFile.OpenAsync(path, await CorpusSweep.OpenOptionsForAsync(path), CancellationToken.None);
         await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
@@ -523,41 +503,18 @@ public sealed class TakeSpecializationTests
         return values;
     }
 
-    private static async Task<List<string>> ReadTake(string path, long[] wanted)
+    private static Task<List<string>> ReadTake(string path, long[] wanted) => ReadTake<string>(path, wanted, Values.DescribeRows);
+
+    private static async Task<List<T>> ReadTake<T>(string path, long[] wanted, Action<RecordBatch, List<T>> read)
     {
-        List<string> values = [];
-        await using VortexFile file = await VortexFile.OpenAsync(path, OpenOptionsFor(path), CancellationToken.None);
+        List<T> values = [];
+        await using VortexFile file = await VortexFile.OpenAsync(path, await CorpusSweep.OpenOptionsForAsync(path), CancellationToken.None);
         await foreach (RecordBatch batch in file.ScanBuilder().Take(wanted).ExecuteAsync()
             .WithCancellation(CancellationToken.None))
         {
-            Values.DescribeRows(batch, values);
+            read(batch, values);
         }
 
         return values;
     }
-
-    /// <summary>Open options for a corpus path: the schema out of band when the file has none.</summary>
-    /// <param name="path">The corpus file about to be opened.</param>
-    /// <remarks>
-    /// <c>types/no_dtype_segment</c> reached this sweep only when <c>vortex.map</c> gained a decoder
-    /// and the file became in-scope. Opening it without a DType is a <c>VortexFormatException</c>,
-    /// so the donor is a real corpus file with the identical schema.
-    /// </remarks>
-    private static VortexOpenOptions OpenOptionsFor(string path) =>
-        path.Contains("no_dtype_segment", StringComparison.Ordinal)
-            ? new VortexOpenOptions { DType = OutOfBandSchema.Value }
-            : VortexOpenOptions.Default;
-
-    private static readonly Lazy<DType> OutOfBandSchema = new Lazy<DType>(static () =>
-    {
-        VortexFile donor = VortexFile
-            .OpenAsync(
-                CorpusManifest.Get("types/user_metadata_segments").Path,
-                VortexOpenOptions.Default,
-                CancellationToken.None)
-            .AsTask()
-            .GetAwaiter()
-            .GetResult();
-        return donor.DType;
-    });
 }
