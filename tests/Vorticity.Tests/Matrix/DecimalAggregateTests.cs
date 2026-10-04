@@ -5,6 +5,7 @@
 // on the way to a result that fits does not: a decimal(76, 10) column holding the largest value and
 // its opposite in turn sums to a small number, and the answer must be that number.
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -103,22 +104,25 @@ public sealed class DecimalAggregateTests
     private sealed record Written(string Path, Columns Rows);
 
     /// <summary>
-    /// Each shape's rows written once for both tests, under Auto, and their decimal members kept:
-    /// the rows themselves, ninety members each, are dropped once written.
+    /// Each shape's file under Auto, the matrix's own, and the decimal members of its rows, kept once
+    /// a shape rather than the rows themselves, ninety members each.
     /// </summary>
     private static async Task<Written> WrittenAsync(Shape shape)
     {
-        (string path, Columns rows) = await SharedFiles.GetAsync($"{nameof(DecimalAggregateTests)}/{shape}", async path =>
-        {
-            AllTypes[] rows = MatrixRows.Build(shape);
-            await TypeEncodingMatrixTests.WriteAsync(path, rows, EncodingHint.Auto, CancellationToken.None);
-            return new Columns(
-                [.. rows.Select(r => (decimal?)r.Dec8)], [.. rows.Select(r => (decimal?)r.Dec16)], [.. rows.Select(r => (decimal?)r.Dec32)],
-                [.. rows.Select(r => (decimal?)r.Dec64)], [.. rows.Select(r => (decimal?)r.Dec128)], [.. rows.Select(r => r.Dec128N)],
-                [.. rows.Select(r => (VortexDecimal?)r.Wide128)], [.. rows.Select(r => (VortexDecimal?)r.Wide256)], [.. rows.Select(r => r.Wide256N)],
-                [.. rows.Select(r => r.State)]);
-        });
-        return new Written(path, rows);
+        (string path, _) = await TypeEncodingMatrixTests.WrittenAsync(shape, EncodingHint.Auto);
+        return new Written(path, await Decimals.GetOrAdd(shape, key => new Lazy<Task<Columns>>(() => Task.Run(() => ColumnsOf(key)))).Value);
+    }
+
+    private static readonly ConcurrentDictionary<Shape, Lazy<Task<Columns>>> Decimals = new();
+
+    private static Columns ColumnsOf(Shape shape)
+    {
+        AllTypes[] rows = MatrixRows.Build(shape);
+        return new Columns(
+            [.. rows.Select(r => (decimal?)r.Dec8)], [.. rows.Select(r => (decimal?)r.Dec16)], [.. rows.Select(r => (decimal?)r.Dec32)],
+            [.. rows.Select(r => (decimal?)r.Dec64)], [.. rows.Select(r => (decimal?)r.Dec128)], [.. rows.Select(r => r.Dec128N)],
+            [.. rows.Select(r => (VortexDecimal?)r.Wide128)], [.. rows.Select(r => (VortexDecimal?)r.Wide256)], [.. rows.Select(r => r.Wide256N)],
+            [.. rows.Select(r => r.State)]);
     }
 
     // ------------------------------------------------------------------------------ the checks

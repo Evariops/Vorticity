@@ -1,4 +1,5 @@
-// Files a test class writes once and every one of its tests reads.
+// Files written once a run and read by every test that needs them: a class's fixture, or a file of
+// the type matrix, which other classes read as well.
 //
 // A fixture written for each test of a class is the same bytes written again: the index and key
 // cursor classes would write theirs over a hundred times a run, and writing is more than half of

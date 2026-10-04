@@ -18,6 +18,7 @@ using System.IO;
 using System.IO.Hashing;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -54,59 +55,60 @@ public sealed class TypeEncodingMatrixTests
     {
         Decoders.EnsureRegistered();
         CancellationToken ct = TestContext.Current.CancellationToken;
-        AllTypes[] rows = MatrixRows.Build(shape);
-        string path = Temp();
+        (string path, WriteReport report) = await WrittenAsync(shape, hint);
+
+        // The read-back, once per distinct file: a hint that leaves every column of a shape as
+        // another hint does writes the same bytes, which read back alike -- 30 of the 112 cases
+        // -- so the cases of one file share its read-back, and its failure.
+        UInt128 content = XxHash128.HashToUInt128(await System.IO.File.ReadAllBytesAsync(path, ct));
+        (EncodingHint first, Lazy<Task> readBack) = ReadBacks.GetOrAdd(
+            content, _ => (hint, new Lazy<Task>(() => ReadBackAsync(path, shape, hint))));
         try
         {
-            WriteReport report = await WriteAsync(path, rows, hint, ct);
-
-            // The read-back, once per distinct file: a hint that leaves every column of a shape as
-            // another hint does writes the same bytes, which read back alike -- 30 of the 112 cases
-            // -- so the cases of one file share its read-back, and its failure.
-            UInt128 content = XxHash128.HashToUInt128(await System.IO.File.ReadAllBytesAsync(path, ct));
-            (EncodingHint first, Lazy<Task> readBack) = ReadBacks.GetOrAdd(
-                content, _ => (hint, new Lazy<Task>(() => ReadBackAsync(path, rows, shape, hint))));
-            try
-            {
-                await readBack.Value;
-            }
-            catch (Exception error) when (first != hint)
-            {
-                Assert.Fail($"{shape} under {hint} writes the file {first} writes, whose read-back failed:\n{error.Message}");
-            }
-
-            // The lists a builder filled are contiguous, and go out as `vortex.list`, one offset a
-            // row, as the reference writes them; only the entries of a map stay a list view.
-            Assert.Contains("vortex.list", await ArrayIdsAsync(path, ct));
-
-            // The scheme the table says the hint writes, on every chunk of every column it names.
-            List<string> misses = [];
-            foreach (ColumnWriteReport column in report.Columns)
-            {
-                if (Expected(column.Path, shape, hint) is not string scheme)
-                {
-                    continue;
-                }
-
-                foreach (string written in column.Encodings)
-                {
-                    if (!Matches(written, scheme))
-                    {
-                        misses.Add($"{column.Path}: {written}, expected {scheme}");
-                        break;
-                    }
-                }
-            }
-
-            Assert.True(misses.Count == 0, $"{shape} under {hint}:\n  " + string.Join("\n  ", misses));
-
-            await ExportAsync(shape, hint, rows, ct);
+            await readBack.Value;
         }
-        finally
+        catch (Exception error) when (first != hint)
         {
-            System.IO.File.Delete(path);
+            Assert.Fail($"{shape} under {hint} writes the file {first} writes, whose read-back failed:\n{error.Message}");
         }
+
+        // The lists a builder filled are contiguous, and go out as `vortex.list`, one offset a
+        // row, as the reference writes them; only the entries of a map stay a list view.
+        Assert.Contains("vortex.list", await ArrayIdsAsync(path, ct));
+
+        // The scheme the table says the hint writes, on every chunk of every column it names.
+        List<string> misses = [];
+        foreach (ColumnWriteReport column in report.Columns)
+        {
+            if (Expected(column.Path, shape, hint) is not string scheme)
+            {
+                continue;
+            }
+
+            foreach (string written in column.Encodings)
+            {
+                if (!Matches(written, scheme))
+                {
+                    misses.Add($"{column.Path}: {written}, expected {scheme}");
+                    break;
+                }
+            }
+        }
+
+        Assert.True(misses.Count == 0, $"{shape} under {hint}:\n  " + string.Join("\n  ", misses));
+
+        await ExportAsync(shape, hint, ct);
     }
+
+    /// <summary>
+    /// The file of <paramref name="shape"/> written under <paramref name="hint"/>, and the writer's
+    /// report: written once a run, for the matrix, its canonical twin, and the tests that read the
+    /// same rows under the same hint.
+    /// </summary>
+    internal static Task<(string Path, WriteReport Report)> WrittenAsync(Shape shape, EncodingHint hint) =>
+        SharedFiles.GetAsync(
+            $"{nameof(TypeEncodingMatrixTests)}/{shape}/{hint}",
+            path => WriteAsync(path, MatrixRows.Build(shape), hint, CancellationToken.None));
 
     /// <summary>
     /// The read-back of one distinct file, shared by the cases that write it: no case's cancellation
@@ -118,35 +120,35 @@ public sealed class TypeEncodingMatrixTests
     /// The file's rows, member by member, as the record reads them, and its values, column by
     /// column, as the file stores them: the canonical twin's.
     /// </summary>
-    private static async Task ReadBackAsync(string path, AllTypes[] rows, Shape shape, EncodingHint hint)
+    private static async Task ReadBackAsync(string path, Shape shape, EncodingHint hint)
     {
         // The rows, member by member, as the record reads them, each compared as it arrives and
-        // dropped: the matrix reads over a million records, and holding a file's worth of them kept
-        // the collector busier than the reads.
+        // dropped: the matrix reads over a million records, and holding a file's worth of them keeps
+        // the collector busier than the reads. Compared by digest with the rows written, rendered
+        // once per shape; the rows are built again only to say what differs.
+        UInt128[] expected = await ExpectedAsync(shape);
         int read = 0;
-        StringBuilder expected = new StringBuilder();
         StringBuilder actual = new StringBuilder();
+        XxHash128 hash = new XxHash128();
         await using (VortexFile file = await VortexFile.OpenAsync(path))
         {
             await foreach (AllTypes row in file.Scan<AllTypes>().ToRecordsAsync())
             {
-                if (read == rows.Length)
+                if (read == expected.Length)
                 {
-                    Assert.Fail($"{shape} under {hint}: more than the {rows.Length} rows written");
+                    Assert.Fail($"{shape} under {hint}: more than the {expected.Length} rows written");
                 }
 
-                Render(rows[read], expected.Clear());
-                Render(row, actual.Clear());
-                if (!expected.Equals(actual))
+                if (Digest(Render(row, actual.Clear()), hash) != expected[read])
                 {
-                    Assert.Fail($"{shape} under {hint}, row {read}:\n  wrote {expected}\n  read  {actual}");
+                    Assert.Fail($"{shape} under {hint}, row {read}:\n  wrote {Render(MatrixRows.Build(shape)[read], new StringBuilder())}\n  read  {actual}");
                 }
 
                 read++;
             }
         }
 
-        Assert.Equal(rows.Length, read);
+        Assert.Equal(expected.Length, read);
 
         // The values, column by column, as the file stores them: the same as the canonical twin's.
         // Compared by digest, and described line by line only when they differ.
@@ -156,24 +158,49 @@ public sealed class TypeEncodingMatrixTests
         if (differs < Math.Max(values.Length, twinValues.Length))
         {
             // The digests decide; the lines say what differs.
-            string twin = Temp();
-            try
-            {
-                await WriteAsync(twin, rows, EncodingHint.Canonical, CancellationToken.None);
-                Assert.Equal(await DescribeAsync(twin, CancellationToken.None), await DescribeAsync(path, CancellationToken.None));
-            }
-            finally
-            {
-                System.IO.File.Delete(twin);
-            }
+            (string twin, _) = await WrittenAsync(shape, EncodingHint.Canonical);
+            Assert.Equal(await DescribeAsync(twin, CancellationToken.None), await DescribeAsync(path, CancellationToken.None));
 
             Assert.Fail($"{shape} under {hint}: row {differs} of {values.Length} differs from the canonical twin's {twinValues.Length}");
         }
     }
 
     /// <summary>
-    /// The digest of each row of a shape's canonical twin. Every hint's file must hold the twin's
-    /// values, so the twin is written and read once per shape rather than once per hint.
+    /// The digest of each row of a shape as <see cref="Render"/> writes it: what every hint's file
+    /// must read back as, rendered once per shape rather than once per file.
+    /// </summary>
+    private static readonly ConcurrentDictionary<Shape, Lazy<Task<UInt128[]>>> Expectations = new();
+
+    private static Task<UInt128[]> ExpectedAsync(Shape shape) =>
+        Expectations.GetOrAdd(shape, key => new Lazy<Task<UInt128[]>>(() => Task.Run(() =>
+        {
+            AllTypes[] rows = MatrixRows.Build(key);
+            UInt128[] digests = new UInt128[rows.Length];
+            StringBuilder text = new StringBuilder();
+            XxHash128 hash = new XxHash128();
+            for (int row = 0; row < rows.Length; row++)
+            {
+                digests[row] = Digest(Render(rows[row], text.Clear()), hash);
+            }
+
+            return digests;
+        }))).Value;
+
+    private static UInt128 Digest(StringBuilder text, XxHash128 hash)
+    {
+        foreach (ReadOnlyMemory<char> chunk in text.GetChunks())
+        {
+            hash.Append(MemoryMarshal.AsBytes(chunk.Span));
+        }
+
+        UInt128 digest = hash.GetCurrentHashAsUInt128();
+        hash.Reset();
+        return digest;
+    }
+
+    /// <summary>
+    /// The digest of each row of a shape's canonical twin, the file written under Canonical: every
+    /// hint's file must hold its values, so it is read once per shape rather than once per hint.
     /// </summary>
     private static readonly ConcurrentDictionary<Shape, Lazy<Task<UInt128[]>>> Twins = new();
 
@@ -181,16 +208,8 @@ public sealed class TypeEncodingMatrixTests
         Twins.GetOrAdd(shape, key => new Lazy<Task<UInt128[]>>(async () =>
         {
             // Shared by the cases of the shape, so no one case's cancellation ends it.
-            string twin = Temp();
-            try
-            {
-                await WriteAsync(twin, MatrixRows.Build(key), EncodingHint.Canonical, CancellationToken.None);
-                return await DigestAsync(twin, CancellationToken.None);
-            }
-            finally
-            {
-                System.IO.File.Delete(twin);
-            }
+            (string twin, _) = await WrittenAsync(key, EncodingHint.Canonical);
+            return await DigestAsync(twin, CancellationToken.None);
         })).Value;
 
     // ------------------------------------------------------------------------------ the table
@@ -468,7 +487,7 @@ public sealed class TypeEncodingMatrixTests
     /// the first rows only, in blocks of 1 024, so that the reference's scalar-by-scalar comparison
     /// still crosses blocks and chunks without spending minutes on every list of every row.
     /// </summary>
-    private static async Task ExportAsync(Shape shape, EncodingHint hint, AllTypes[] rows, CancellationToken ct)
+    private static async Task ExportAsync(Shape shape, EncodingHint hint, CancellationToken ct)
     {
         string? root = Environment.GetEnvironmentVariable("VORTICITY_WRITE_MATRIX");
         if (string.IsNullOrEmpty(root))
@@ -476,6 +495,7 @@ public sealed class TypeEncodingMatrixTests
             return;
         }
 
+        AllTypes[] rows = MatrixRows.Build(shape);
         const int Exported = 4_096;
         AllTypes[] head = rows.AsSpan(0, Math.Min(Exported, rows.Length)).ToArray();
         string name = Path.Combine("matrix", shape.ToString().ToLowerInvariant() + ".vortex");
