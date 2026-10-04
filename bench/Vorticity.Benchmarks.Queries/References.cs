@@ -18,24 +18,30 @@ internal static class References
     internal const double Margin = 1.15;
 
     /// <summary>The axis, its numerator and denominator scenarios, and the reference ratio, or null before calibration.</summary>
+    /// <remarks>
+    /// Calibrated on 2026-10-04 at the end of the engine stage's bench (6j), on an M-series machine
+    /// of 14 cores under a load of 4 to 6: each reference is the higher ratio of two runs of 7 and 9
+    /// rounds at degrees 1 and 14, so the first ones are loose and come down as the stage's lines
+    /// earn it, or at a quiet calibration. "degree N" is one lane per processor, 14 there.
+    /// </remarks>
     internal static readonly IReadOnlyList<(string Axis, string Measured, string Floor, double? Reference)> Axes =
     [
-        ("run-end key against the hand loop", "group by city (run-end), count avg", "hand loop city (run-end), count sum", null),
-        ("dictionary key against the hand loop", "group by endpoint (dictionary), count avg", "hand loop endpoint (dictionary), count sum", null),
-        ("custom aggregator against built-ins, run-end key", "group by city (run-end), welford", "group by city (run-end), count avg", null),
-        ("filtered group against the filter before the group by", "group by endpoint (dictionary), errors in the group", "group by endpoint (dictionary), errors filtered before", null),
-        ("first batch of a full scan, 16M against 1M", "first batch, full scan, 16M", "first batch, full scan", null),
-        ("first batch of a filtered scan, 16M against 1M", "first batch, scan filtered everywhere, 16M", "first batch, scan filtered everywhere", null),
-        ("first group of a sorted key, 16M against 1M", "first group, group by day (sorted), 16M", "first group, group by day (sorted)", null),
+        ("run-end key against the hand loop", "group by city (run-end), count avg", "hand loop city (run-end), count sum", 0.884),
+        ("dictionary key against the hand loop", "group by endpoint (dictionary), count avg", "hand loop endpoint (dictionary), count sum", 2.117),
+        ("custom aggregator against built-ins, run-end key", "group by city (run-end), welford", "group by city (run-end), count avg", 1.136),
+        ("filtered group against the filter before the group by", "group by endpoint (dictionary), errors in the group", "group by endpoint (dictionary), errors filtered before", 0.826),
+        ("first batch of a full scan, 16M against 1M", "first batch, full scan, 16M", "first batch, full scan", 1.081),
+        ("first batch of a filtered scan, 16M against 1M", "first batch, scan filtered everywhere, 16M", "first batch, scan filtered everywhere", 5.176),
+        ("first group of a sorted key, 16M against 1M", "first group, group by day (sorted), 16M", "first group, group by day (sorted)", 1.254),
 
         // At equal work: a count and an integer sum on both sides, where the axes above also pay
         // for the reproducible float sums of the operator.
-        ("run-end key, an int sum against the hand loop", "group by city (run-end), count sum of an int", "hand loop city (run-end), count sum of an int", null),
-        ("dictionary key, an int sum against the hand loop", "group by endpoint (dictionary), count sum of an int", "hand loop endpoint (dictionary), count sum of an int", null),
+        ("run-end key, an int sum against the hand loop", "group by city (run-end), count sum of an int", "hand loop city (run-end), count sum of an int", 0.510),
+        ("dictionary key, an int sum against the hand loop", "group by endpoint (dictionary), count sum of an int", "hand loop endpoint (dictionary), count sum of an int", 2.180),
 
         // A key that streams against the same query forced to block, on every lane: what streaming
         // costs in throughput where the blocking pass runs its ranges side by side.
-        ("streaming against blocking, (City, Day), degree N", "group by city day (composite), count avg, degree N", "group by city day (composite), count avg, blocking, degree N", null),
-        ("streaming against blocking, Welford, degree N", "group by day (sorted), welford, degree N", "group by day (sorted), welford, blocking, degree N", null),
+        ("streaming against blocking, (City, Day), degree N", "group by city day (composite), count avg, degree N", "group by city day (composite), count avg, blocking, degree N", 5.761),
+        ("streaming against blocking, Welford, degree N", "group by day (sorted), welford, degree N", "group by day (sorted), welford, blocking, degree N", 7.465),
     ];
 }
