@@ -18,8 +18,8 @@ anchored in the Rust reference, in both directions. Tests use xUnit v3 on Micros
 - The FlatBuffers and Protobuf readers on hand-built bytes: a missing vtable field reads its
   default, an empty vector, an absent optional table, and a truncated or over-long input fails with
   `VortexFormatException` and nothing else.
-- Every SIMD kernel against a scalar reference over random inputs, and the whole suite again with
-  hardware intrinsics disabled, in CI.
+- Every SIMD kernel against a scalar reference over random inputs; in CI, again with hardware
+  intrinsics disabled, every test class that reaches a scalar fallback and the conformance corpus.
 - The FastLanes transposition: `untranspose(transpose(i)) == i` for every `i` of a block, as the
   reference asserts.
 - Every operator against the full materialization it replaces: a projection, a filter, a take, a

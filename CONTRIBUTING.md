@@ -50,10 +50,10 @@ Pick the row that matches what moved; doing more is always allowed, doing less i
 
 | what moved | run |
 |---|---|
-| a decoder, a canonical form, the scan, the filter | the suite in both intrinsic modes · `bench/gate.sh` · `--throughput --check` |
+| a decoder, a canonical form, the scan, the filter | the suite · `tests/scalar-pass.sh` · `bench/gate.sh` · `--throughput --check` |
 | the compressor, a plan, the blob, the writer, with no intent to change a byte | the same · `bench/crosscheck.sh` · `--throughput --write --check` |
 | bytes on disk, deliberately | the same, plus the corpus byte count before and after in the commit message |
-| indexes, keys, the dataset | the suite in both modes · `bench/gate.sh` |
+| indexes, keys, the dataset | the suite · `tests/scalar-pass.sh` · `bench/gate.sh` |
 | a public signature, a visibility, an XML summary | the suite · a Release build with no warning · the public surface record updated in the same commit |
 | the bench or the tools | `bench/gate.sh`, and the command you touched, once |
 | documents and comments only | a Release build, so the `<see cref>` links still resolve |
@@ -62,7 +62,7 @@ What each command costs, so you can choose knowingly:
 
 ```
 dotnet test Vorticity.slnx -c Release                                             ~1 min
-DOTNET_EnableHWIntrinsic=0 dotnet test Vorticity.slnx -c Release                  ~1 min
+bash tests/scalar-pass.sh                                                          ~15 s
 bash bench/gate.sh                                                                  ~70 s
 bash bench/crosscheck.sh                                                            ~80 s
 dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput --check  ~55 s
