@@ -31,7 +31,6 @@ using Xunit;
 
 namespace Vorticity.Tests.Scan;
 
-[Collection(nameof(AllocationCollection))]
 public sealed class BlockPruningDecodeTests
 {
     /// <summary>Rows per block, and so per zone and per split.</summary>
