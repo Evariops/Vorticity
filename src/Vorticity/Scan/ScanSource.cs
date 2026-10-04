@@ -101,6 +101,9 @@ internal abstract class ScanSource
         max = FilterLiteral.Null;
         return false;
     }
+
+    /// <summary>The rows of the whole source, whatever a scan keeps of them; -1 when they are not known before it is read.</summary>
+    internal virtual long RowBound => -1;
 }
 
 /// <summary>A scan over one open file, compiled to the engine's builder.</summary>
@@ -229,6 +232,8 @@ internal sealed class FileScanSource : ScanSource
         return statistics.HasMin && statistics.HasMax
             && FileStatisticsPruner.TryLiteral(statistics.Min, out min) && FileStatisticsPruner.TryLiteral(statistics.Max, out max);
     }
+
+    internal override long RowBound => _file.RowCount;
 
     internal override async ValueTask<IKeyWalker> OpenKeysAsync(string path, bool distinct, bool indexes, CancellationToken cancellationToken) =>
         await KeysOf(path, distinct, indexes).OpenAsync(cancellationToken).ConfigureAwait(false);

@@ -253,10 +253,13 @@ dictionary or run-end block included.
 
 ## Watch out
 
-* **A sum has the column's type.** It accumulates exactly in 128 bits and throws when the result
-  does not fit: `SumAsync(v => v.DurationMs)` over the `int` column of the visits file throws
-  `OverflowException`. Sum it with an aggregator whose state is a `long`, as `Welford` keeps a
-  `long` count.
+* **A sum widens what could overflow.** An `sbyte`, `short` or `int` column sums as a `long`, a
+  `byte`, `ushort` or `uint` one as a `ulong`, a `Half` or a `float` one as a `double`:
+  `SumAsync(v => v.DurationMs)` over the `int` column of the visits file is a `long`, where it used
+  to overflow an `int`. A `long`, a `ulong` or a `decimal` column sums as itself, exactly, and
+  throws `OverflowException` only when the exact total does not fit it. The engine keeps 64 bits a
+  group where the file statistics prove the rows times the column's largest value fit them, and 128
+  otherwise.
 * **The file carries no sum.** `MinAsync`, `MaxAsync` and `CountAsync` without a filter answer from
   the file statistics; `SumAsync` and `AverageAsync` read the column ([scan-a-table.md](scan-a-table.md)).
 * **NaN is skipped** by a float sum, mean, minimum and maximum, and counted as one value by a

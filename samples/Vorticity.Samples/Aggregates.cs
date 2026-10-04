@@ -105,17 +105,12 @@ internal static class Aggregates
             return Describe(await scan.AggregateAsync<double, Welford<double>, WelfordState>(r => r.Celsius), scan);
         });
 
+        // An int column sums as a long, which nothing on the way overflows; a long column sums as
+        // itself, and throws when the exact total does not fit one.
         string visits = await Demo.VisitsAsync();
         await using VortexFile visitFile = await VortexFile.OpenAsync(visits);
-        try
-        {
-            int total = await visitFile.Scan<Visit>().SumAsync(v => v.DurationMs);
-            Console.WriteLine($"sum of DurationMs: {total}");
-        }
-        catch (OverflowException error)
-        {
-            Console.WriteLine($"SumAsync(v => v.DurationMs): {error.GetType().Name}: {error.Message}");
-        }
+        long total = await visitFile.Scan<Visit>().SumAsync(v => v.DurationMs);
+        Console.WriteLine($"SumAsync(v => v.DurationMs), an int column: {total} as a long");
     }
 
     private static string Describe(WelfordState s, Scan<Reading> scan) =>

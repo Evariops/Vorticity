@@ -366,11 +366,11 @@ public sealed partial class ResultScanTests
     public partial record struct CityMean(string City, double? Mean);
 
     [VortexRecord]
-    public partial record struct Totals(long Count, int Pages, string? LastCity, double? MeanSeconds);
+    public partial record struct Totals(long Count, long Pages, string? LastCity, double? MeanSeconds);
 
     /// <summary>Twelve results of a group, past the eight the selections by arity stopped at.</summary>
     [VortexRecord]
     public partial record struct Wide(
-        string City, int Day, long Count, int Pages, int MinPages, int MaxPages, double? MeanPages, long DistinctPages,
+        string City, int Day, long Count, long Pages, int MinPages, int MaxPages, double? MeanPages, long DistinctPages,
         double Seconds, double? MinSeconds, double? MaxSeconds, double? MeanSeconds);
 }

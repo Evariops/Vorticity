@@ -36,6 +36,63 @@ public sealed partial class Scan<TRecord>
         where T : struct, INumber<T> =>
         ScalarAsync(Aggregators.Sum<T>(Aggregators.Input(Binding, column)), cancellationToken);
 
+    /// <summary>The sum of <paramref name="column"/> over the rows the scan keeps, as a long, which no sum of narrower integers overflows on the way.</summary>
+    /// <param name="column">The column.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The sum; zero when no row holds a value.</returns>
+    public ValueTask<long> SumAsync(Func<Probe<TRecord>, Sym<sbyte>> column, CancellationToken cancellationToken = default) => WidenedAsync<long, sbyte>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{sbyte}}, CancellationToken)"/>
+    public ValueTask<long> SumAsync(Func<Probe<TRecord>, Sym<sbyte?>> column, CancellationToken cancellationToken = default) => WidenedAsync<long, sbyte?>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{sbyte}}, CancellationToken)"/>
+    public ValueTask<long> SumAsync(Func<Probe<TRecord>, Sym<short>> column, CancellationToken cancellationToken = default) => WidenedAsync<long, short>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{sbyte}}, CancellationToken)"/>
+    public ValueTask<long> SumAsync(Func<Probe<TRecord>, Sym<short?>> column, CancellationToken cancellationToken = default) => WidenedAsync<long, short?>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{sbyte}}, CancellationToken)"/>
+    public ValueTask<long> SumAsync(Func<Probe<TRecord>, Sym<int>> column, CancellationToken cancellationToken = default) => WidenedAsync<long, int>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{sbyte}}, CancellationToken)"/>
+    public ValueTask<long> SumAsync(Func<Probe<TRecord>, Sym<int?>> column, CancellationToken cancellationToken = default) => WidenedAsync<long, int?>(column, cancellationToken);
+
+    /// <summary>The sum of <paramref name="column"/> over the rows the scan keeps, as an unsigned long, which no sum of narrower integers overflows on the way.</summary>
+    /// <param name="column">The column.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The sum; zero when no row holds a value.</returns>
+    public ValueTask<ulong> SumAsync(Func<Probe<TRecord>, Sym<byte>> column, CancellationToken cancellationToken = default) => WidenedAsync<ulong, byte>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{byte}}, CancellationToken)"/>
+    public ValueTask<ulong> SumAsync(Func<Probe<TRecord>, Sym<byte?>> column, CancellationToken cancellationToken = default) => WidenedAsync<ulong, byte?>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{byte}}, CancellationToken)"/>
+    public ValueTask<ulong> SumAsync(Func<Probe<TRecord>, Sym<ushort>> column, CancellationToken cancellationToken = default) => WidenedAsync<ulong, ushort>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{byte}}, CancellationToken)"/>
+    public ValueTask<ulong> SumAsync(Func<Probe<TRecord>, Sym<ushort?>> column, CancellationToken cancellationToken = default) => WidenedAsync<ulong, ushort?>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{byte}}, CancellationToken)"/>
+    public ValueTask<ulong> SumAsync(Func<Probe<TRecord>, Sym<uint>> column, CancellationToken cancellationToken = default) => WidenedAsync<ulong, uint>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{byte}}, CancellationToken)"/>
+    public ValueTask<ulong> SumAsync(Func<Probe<TRecord>, Sym<uint?>> column, CancellationToken cancellationToken = default) => WidenedAsync<ulong, uint?>(column, cancellationToken);
+
+    /// <summary>The sum of <paramref name="column"/> over the rows the scan keeps, as a double: the reproducible sum of its values.</summary>
+    /// <param name="column">The column.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <returns>The sum; zero when no row holds a value.</returns>
+    public ValueTask<double> SumAsync(Func<Probe<TRecord>, Sym<float>> column, CancellationToken cancellationToken = default) => WidenedAsync<double, float>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{float}}, CancellationToken)"/>
+    public ValueTask<double> SumAsync(Func<Probe<TRecord>, Sym<float?>> column, CancellationToken cancellationToken = default) => WidenedAsync<double, float?>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{float}}, CancellationToken)"/>
+    public ValueTask<double> SumAsync(Func<Probe<TRecord>, Sym<Half>> column, CancellationToken cancellationToken = default) => WidenedAsync<double, Half>(column, cancellationToken);
+
+    /// <inheritdoc cref="SumAsync(Func{Probe{TRecord}, Sym{float}}, CancellationToken)"/>
+    public ValueTask<double> SumAsync(Func<Probe<TRecord>, Sym<Half?>> column, CancellationToken cancellationToken = default) => WidenedAsync<double, Half?>(column, cancellationToken);
+
     /// <summary>The mean of <paramref name="column"/> over the rows the scan keeps: the sum and the null count of the statistics when they settle it.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
@@ -44,6 +101,10 @@ public sealed partial class Scan<TRecord>
     public ValueTask<double?> AverageAsync<T>(Func<Probe<TRecord>, Sym<T>> column, CancellationToken cancellationToken = default)
         where T : INumber<T> =>
         ScalarAsync(Aggregators.Average(Aggregators.Input(Binding, column)), cancellationToken);
+
+    private ValueTask<TSum> WidenedAsync<TSum, TColumn>(Func<Probe<TRecord>, Sym<TColumn>> column, CancellationToken cancellationToken)
+        where TSum : INumber<TSum> =>
+        ScalarAsync(Aggregators.Sum<TSum>(Aggregators.Input(Binding, column)), cancellationToken);
 
     /// <summary>The mean of the non-null values of a nullable <paramref name="column"/> over the rows the scan keeps.</summary>
     /// <typeparam name="T">The column's type, without its nullability.</typeparam>

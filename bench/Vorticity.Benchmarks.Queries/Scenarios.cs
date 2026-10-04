@@ -30,6 +30,7 @@ internal static class Scenarios
         yield return ("requests", new Scenario("group by endpoint (dictionary), errors filtered before", ErrorsFilteredBeforeAsync));
         yield return ("requests", new Scenario("group by user (1M groups), count avg", GroupByUserAsync, 100_000));
         yield return ("requests", new Scenario("group by user (1M groups), as records", GroupByUserRecordsAsync, 100_000));
+        yield return ("requests", new Scenario("group by user (1M groups), count sum of an int", GroupByUserDurationsAsync, 100_000));
         yield return ("readings", new Scenario("first batch, full scan", FirstBatchAsync));
         yield return ($"readings-{large}", new Scenario($"first batch, full scan, {large / 1_000_000}M", FirstBatchAsync));
         yield return ("readings", new Scenario("first batch, scan filtered everywhere", FirstFilteredBatchAsync));
@@ -267,6 +268,22 @@ internal static class Scenarios
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
+        }
+
+        return rows;
+    }
+
+    /// <summary>An integer sum over a million groups: the state the statistics let the engine narrow.</summary>
+    private static async Task<long> GroupByUserDurationsAsync(VortexFile file, Run run)
+    {
+        long rows = 0;
+        await foreach (Columns<UserDurations> groups in file.Scan<Request>()
+            .GroupBy(r => r.UserId)
+            .Select(g => (g.Key, g.Count(), g.Sum(r => r.DurationMs)))
+            .As<UserDurations>())
+        {
+            run.Answer();
+            rows += Sum(groups.Column<long>(1).Values) + (Sum(groups.Column<long>(2).Values) > 0 ? 0 : 1);
         }
 
         return rows;

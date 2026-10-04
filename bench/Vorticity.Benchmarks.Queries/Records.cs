@@ -129,6 +129,10 @@ public partial record struct EndpointStats(string Endpoint, long Count, double? 
 [VortexRecord]
 public partial record struct EndpointErrors(string Endpoint, long Count, long Errors, double? ErrorMean);
 
+/// <summary>A user's requests and the time they took.</summary>
+[VortexRecord]
+public partial record struct UserDurations(int User, long Count, long Duration);
+
 /// <summary>A user's requests and their mean latency.</summary>
 [VortexRecord]
 public partial record struct UserStats(int User, long Count, double? Mean);

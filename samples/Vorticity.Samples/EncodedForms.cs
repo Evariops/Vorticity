@@ -60,7 +60,7 @@ internal static class EncodedForms
                 .GroupBy(v => v.Referrer)
                 .Select(g => (g.Key, g.Count(), g.Sum(v => v.DurationMs)))
                 .As<ReferrerVisits>();
-            await foreach ((string? referrer, long count, int duration) in byReferrer.ToRecordsAsync())
+            await foreach ((string? referrer, long count, long duration) in byReferrer.ToRecordsAsync())
             {
                 byGroup[referrer ?? "(null)"] = (count, duration);
             }
@@ -271,4 +271,4 @@ public partial record struct CityTotal(string City, double Total);
 
 /// <summary>A referrer, its visits and their total duration.</summary>
 [VortexRecord]
-public partial record struct ReferrerVisits(string? Referrer, long Visits, int Duration);
+public partial record struct ReferrerVisits(string? Referrer, long Visits, long Duration);

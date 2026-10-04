@@ -91,6 +91,60 @@ public readonly struct Group<TRecord, TKey>
         where T : struct, INumber<T> =>
         Aggregators.Filtered(Aggregators.Sum<T>(Aggregators.Input(_binding, column)), _filter);
 
+    /// <summary>The sum of <paramref name="column"/> in the group, as a long, which no sum of narrower integers overflows on the way.</summary>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the sum.</returns>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<sbyte>> column) => Widened<long, sbyte>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{sbyte}})"/>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<sbyte?>> column) => Widened<long, sbyte?>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{sbyte}})"/>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<short>> column) => Widened<long, short>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{sbyte}})"/>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<short?>> column) => Widened<long, short?>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{sbyte}})"/>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<int>> column) => Widened<long, int>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{sbyte}})"/>
+    public Sym<long> Sum(Func<Probe<TRecord>, Sym<int?>> column) => Widened<long, int?>(column);
+
+    /// <summary>The sum of <paramref name="column"/> in the group, as an unsigned long, which no sum of narrower integers overflows on the way.</summary>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the sum.</returns>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<byte>> column) => Widened<ulong, byte>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{byte}})"/>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<byte?>> column) => Widened<ulong, byte?>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{byte}})"/>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<ushort>> column) => Widened<ulong, ushort>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{byte}})"/>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<ushort?>> column) => Widened<ulong, ushort?>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{byte}})"/>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<uint>> column) => Widened<ulong, uint>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{byte}})"/>
+    public Sym<ulong> Sum(Func<Probe<TRecord>, Sym<uint?>> column) => Widened<ulong, uint?>(column);
+
+    /// <summary>The sum of <paramref name="column"/> in the group, as a double: the reproducible sum of its values.</summary>
+    /// <param name="column">The column.</param>
+    /// <returns>The symbol of the sum.</returns>
+    public Sym<double> Sum(Func<Probe<TRecord>, Sym<float>> column) => Widened<double, float>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{float}})"/>
+    public Sym<double> Sum(Func<Probe<TRecord>, Sym<float?>> column) => Widened<double, float?>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{float}})"/>
+    public Sym<double> Sum(Func<Probe<TRecord>, Sym<Half>> column) => Widened<double, Half>(column);
+
+    /// <inheritdoc cref="Sum(Func{Probe{TRecord}, Sym{float}})"/>
+    public Sym<double> Sum(Func<Probe<TRecord>, Sym<Half?>> column) => Widened<double, Half?>(column);
+
     /// <summary>The smallest non-null value of <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
@@ -163,6 +217,11 @@ public readonly struct Group<TRecord, TKey>
         where T : unmanaged
         where TAggregator : IAggregator<T, TState> =>
         Aggregators.Filtered(Aggregators.Custom<T, TAggregator, TState>(Aggregators.Input(_binding, column)), _filter);
+
+    /// <summary>The sum of a column of <typeparamref name="TColumn"/> as a <typeparamref name="TSum"/>, wider than the column's.</summary>
+    private Sym<TSum> Widened<TSum, TColumn>(Func<Probe<TRecord>, Sym<TColumn>> column)
+        where TSum : INumber<TSum> =>
+        Aggregators.Filtered(Aggregators.Sum<TSum>(Aggregators.Input(_binding, column)), _filter);
 
     /// <summary>The state <typeparamref name="TAggregator"/> folds a nullable <paramref name="column"/> into, per group.</summary>
     /// <typeparam name="T">The column's storage type.</typeparam>

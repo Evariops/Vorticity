@@ -86,28 +86,82 @@ internal static class Aggregators
     internal static Sym<T> Sum<T>(ColumnShape shape)
         where T : INumber<T>
     {
-        Func<AggregateSlot<T>> create = shape.Kind switch
+        Func<ScanSource?, AggregateSlot<T>> create = shape.Kind switch
         {
             StorageKind.Primitive => shape.PType switch
             {
-                PType.I8 => static () => new FixedSlot<sbyte, SumState<Int128>, SignedSum<sbyte>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                PType.I16 => static () => new FixedSlot<short, SumState<Int128>, SignedSum<short>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                PType.I32 => static () => new FixedSlot<int, SumState<Int128>, SignedSum<int>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                PType.I64 => static () => new FixedSlot<long, SumState<Int128>, SignedSum<long>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                PType.U8 => static () => new FixedSlot<byte, SumState<UInt128>, UnsignedSum<byte>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                PType.U16 => static () => new FixedSlot<ushort, SumState<UInt128>, UnsignedSum<ushort>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                PType.U32 => static () => new FixedSlot<uint, SumState<UInt128>, UnsignedSum<uint>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                PType.U64 => static () => new FixedSlot<ulong, SumState<UInt128>, UnsignedSum<ulong>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Sum)),
-                PType.F16 => static () => new FixedSlot<Half, IndexedSum, IndexedFloatSum<Half>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
-                PType.F32 => static () => new FixedSlot<float, IndexedSum, IndexedFloatSum<float>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
-                _ => static () => new FixedSlot<double, IndexedSum, IndexedFloatSum<double>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
+                PType.I8 => Signed<sbyte, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
+                PType.I16 => Signed<short, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
+                PType.I32 => Signed<int, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
+                PType.I64 => Signed<long, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
+                PType.U8 => Unsigned<byte, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
+                PType.U16 => Unsigned<ushort, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
+                PType.U32 => Unsigned<uint, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
+                PType.U64 => Unsigned<ulong, T>(shape, static s => T.CreateChecked(s.Sum), static s => T.CreateChecked(s.Sum)),
+                PType.F16 => static _ => new FixedSlot<Half, IndexedSum, IndexedFloatSum<Half>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
+                PType.F32 => static _ => new FixedSlot<float, IndexedSum, IndexedFloatSum<float>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
+                _ => static _ => new FixedSlot<double, IndexedSum, IndexedFloatSum<double>, T>(StorageKind.Primitive, static s => T.CreateChecked(s.Value)),
             },
-            StorageKind.Decimal or StorageKind.Decimal256 => DecimalSumSlot<T>(shape),
+            StorageKind.Decimal or StorageKind.Decimal256 => Unsourced(DecimalSumSlot<T>(shape)),
             _ => throw shape.Unsupported("a sum"),
         };
 
         return new Sym<T>(new AggregateNode<T>(AggregateKind.Sum, shape, create, (StatisticsView view, out T value) => SettleSum(shape, view, out value)));
     }
+
+    /// <summary>
+    /// The state of a sum of signed integers, chosen as the run starts: 64 bits where the source's
+    /// statistics prove its rows times the column's largest magnitude stay below 2^63, so that no sum
+    /// of any of them overflows; 128 bits where they prove nothing. The width is the engine's, the
+    /// exactness the promise.
+    /// </summary>
+    private static Func<ScanSource?, AggregateSlot<TResult>> Signed<TValue, TResult>(
+        ColumnShape shape, Func<SumState<long>, TResult> narrow, Func<SumState<Int128>, TResult> wide)
+        where TValue : unmanaged, IBinaryInteger<TValue> =>
+        source => Proven(source, shape, (UInt128)long.MaxValue)
+            ? new FixedSlot<TValue, SumState<long>, NarrowSignedSum<TValue>, TResult>(StorageKind.Primitive, narrow)
+            : new FixedSlot<TValue, SumState<Int128>, SignedSum<TValue>, TResult>(StorageKind.Primitive, wide);
+
+    /// <summary>The state of a sum of unsigned integers: 64 bits where the statistics prove its rows times its largest value stay below 2^64.</summary>
+    private static Func<ScanSource?, AggregateSlot<TResult>> Unsigned<TValue, TResult>(
+        ColumnShape shape, Func<SumState<ulong>, TResult> narrow, Func<SumState<UInt128>, TResult> wide)
+        where TValue : unmanaged, IBinaryInteger<TValue> =>
+        source => Proven(source, shape, ulong.MaxValue)
+            ? new FixedSlot<TValue, SumState<ulong>, NarrowUnsignedSum<TValue>, TResult>(StorageKind.Primitive, narrow)
+            : new FixedSlot<TValue, SumState<UInt128>, UnsignedSum<TValue>, TResult>(StorageKind.Primitive, wide);
+
+    /// <summary>Whether the source's rows times the column's largest magnitude, from its statistics, stay at or below <paramref name="limit"/>.</summary>
+    private static bool Proven(ScanSource? source, ColumnShape shape, UInt128 limit)
+    {
+        if (source is null || source.RowBound < 0
+            || !source.TryBounds(shape.Column.FieldPath, out Expressions.FilterLiteral min, out Expressions.FilterLiteral max)
+            || !TryMagnitude(min, out UInt128 low) || !TryMagnitude(max, out UInt128 high))
+        {
+            return false;
+        }
+
+        // Each magnitude is below 2^64 and the rows below 2^63: the product fits 128 bits.
+        return UInt128.Max(low, high) * (ulong)source.RowBound <= limit;
+    }
+
+    private static bool TryMagnitude(Expressions.FilterLiteral bound, out UInt128 magnitude)
+    {
+        switch (bound.Kind)
+        {
+            case Expressions.FilterLiteralKind.Signed:
+                magnitude = (UInt128)Int128.Abs(bound.SignedValue);
+                return true;
+            case Expressions.FilterLiteralKind.Unsigned:
+                magnitude = bound.UnsignedValue;
+                return true;
+            default:
+                magnitude = UInt128.Zero;
+                return false;
+        }
+    }
+
+    /// <summary>A state that takes nothing from the run's source.</summary>
+    private static Func<ScanSource?, AggregateSlot<T>> Unsourced<T>(Func<AggregateSlot<T>> create) => _ => create();
 
     /// <summary>The sum of a decimal column as a <see cref="VortexDecimal"/>, exact at any precision.</summary>
     internal static Sym<VortexDecimal> SumDecimal(ColumnShape shape) =>
@@ -135,43 +189,43 @@ internal static class Aggregators
 
     internal static Sym<double?> Average(ColumnShape shape)
     {
-        Func<AggregateSlot<double?>> create;
+        Func<ScanSource?, AggregateSlot<double?>> create;
         switch (shape.Kind)
         {
             case StorageKind.Primitive:
                 create = shape.PType switch
                 {
-                    PType.I8 => static () => new FixedSlot<sbyte, SumState<Int128>, SignedSum<sbyte>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    PType.I16 => static () => new FixedSlot<short, SumState<Int128>, SignedSum<short>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    PType.I32 => static () => new FixedSlot<int, SumState<Int128>, SignedSum<int>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    PType.I64 => static () => new FixedSlot<long, SumState<Int128>, SignedSum<long>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    PType.U8 => static () => new FixedSlot<byte, SumState<UInt128>, UnsignedSum<byte>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    PType.U16 => static () => new FixedSlot<ushort, SumState<UInt128>, UnsignedSum<ushort>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    PType.U32 => static () => new FixedSlot<uint, SumState<UInt128>, UnsignedSum<uint>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    PType.U64 => static () => new FixedSlot<ulong, SumState<UInt128>, UnsignedSum<ulong>, double?>(StorageKind.Primitive, static s => Mean(s.Sum, s.Count)),
-                    PType.F16 => static () => new FixedSlot<Half, IndexedSum, IndexedFloatSum<Half>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
-                    PType.F32 => static () => new FixedSlot<float, IndexedSum, IndexedFloatSum<float>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
-                    _ => static () => new FixedSlot<double, IndexedSum, IndexedFloatSum<double>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
+                    PType.I8 => Signed<sbyte, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
+                    PType.I16 => Signed<short, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
+                    PType.I32 => Signed<int, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
+                    PType.I64 => Signed<long, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
+                    PType.U8 => Unsigned<byte, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
+                    PType.U16 => Unsigned<ushort, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
+                    PType.U32 => Unsigned<uint, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
+                    PType.U64 => Unsigned<ulong, double?>(shape, static s => Mean(s.Sum, s.Count), static s => Mean(s.Sum, s.Count)),
+                    PType.F16 => static _ => new FixedSlot<Half, IndexedSum, IndexedFloatSum<Half>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
+                    PType.F32 => static _ => new FixedSlot<float, IndexedSum, IndexedFloatSum<float>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
+                    _ => static _ => new FixedSlot<double, IndexedSum, IndexedFloatSum<double>, double?>(StorageKind.Primitive, static s => Mean(s.Value, s.Count)),
                 };
                 break;
             case StorageKind.Decimal when shape.Type.Precision <= 18:
             {
                 double unit = Math.Pow(10, shape.Type.Scale);
-                create = () => new FixedSlot<Int128, SumState<Int128>, DecimalSum, double?>(StorageKind.Decimal, s => s.Count == 0 ? null : (double)s.Sum / unit / s.Count);
+                create = _ => new FixedSlot<Int128, SumState<Int128>, DecimalSum, double?>(StorageKind.Decimal, s => s.Count == 0 ? null : (double)s.Sum / unit / s.Count);
                 break;
             }
 
             case StorageKind.Decimal:
             {
                 double unit = Math.Pow(10, shape.Type.Scale);
-                create = () => new FixedSlot<Int128, SumState<WideSum>, WideDecimalSum, double?>(StorageKind.Decimal, s => s.Count == 0 ? null : s.Sum.ToDouble() / unit / s.Count);
+                create = _ => new FixedSlot<Int128, SumState<WideSum>, WideDecimalSum, double?>(StorageKind.Decimal, s => s.Count == 0 ? null : s.Sum.ToDouble() / unit / s.Count);
                 break;
             }
 
             case StorageKind.Decimal256:
             {
                 double unit = Math.Pow(10, shape.Type.Scale);
-                create = () => new FixedSlot<Int256, SumState<WideSum>, Decimal256Sum, double?>(StorageKind.Decimal256, s => s.Count == 0 ? null : s.Sum.ToDouble() / unit / s.Count);
+                create = _ => new FixedSlot<Int256, SumState<WideSum>, Decimal256Sum, double?>(StorageKind.Decimal256, s => s.Count == 0 ? null : s.Sum.ToDouble() / unit / s.Count);
                 break;
             }
 

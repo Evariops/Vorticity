@@ -145,6 +145,9 @@ internal sealed class FixedDistinctSlotBefore<TValue> : AggregateSlot<long>
 
     internal override long Result(int group) => _counts[group];
 
+    // The benchmarks fold and merge; no group by of theirs streams.
+    internal override void Keep(ReadOnlySpan<int> groups) => throw new NotSupportedException("The original slot predates the group by that streams.");
+
     private void Add(int group, TValue value)
     {
         if (_seen.Add(new DistinctEntry<TValue>(group, value)))
