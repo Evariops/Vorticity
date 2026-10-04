@@ -20,6 +20,7 @@
     <InternalsVisibleTo Include="Vorticity.Conformance" />
     <InternalsVisibleTo Include="Vorticity.Benchmarks" />
     <InternalsVisibleTo Include="Vorticity.Benchmarks.Scenarios" />
+    <InternalsVisibleTo Include="vortex-queries" />
   </ItemGroup>
 
   <!-- XxHash3-64 for the write path's distinct table and the Bloom filters. It is first-party

@@ -48,6 +48,9 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private RecordBatch? _current;
     private long _position;
 
+    // When the pass began, for the plan's last run.
+    private long _started;
+
     internal StreamingGroupBatches(AggregationQuery query, CancellationToken cancellationToken)
     {
         _query = query;
@@ -136,6 +139,8 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 // the zone maps settled after the last batch are in.
                 _drained = true;
                 _partition!.Finish();
+                _query.Plan.LastRun = new AggregationRun(
+                    [new AggregationRun.Lane(System.Diagnostics.Stopwatch.GetTimestamp() - _started, 1, _partition.Keys!.Count)], 0, 0);
                 await CloseAsync(all: true).ConfigureAwait(false);
                 continue;
             }
@@ -160,6 +165,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         AggregationHost host = _query.Host;
         host.Begin();
         _begun = true;
+        _started = System.Diagnostics.Stopwatch.GetTimestamp();
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);

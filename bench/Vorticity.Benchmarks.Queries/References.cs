@@ -27,5 +27,15 @@ internal static class References
         ("first batch of a full scan, 16M against 1M", "first batch, full scan, 16M", "first batch, full scan", null),
         ("first batch of a filtered scan, 16M against 1M", "first batch, scan filtered everywhere, 16M", "first batch, scan filtered everywhere", null),
         ("first group of a sorted key, 16M against 1M", "first group, group by day (sorted), 16M", "first group, group by day (sorted)", null),
+
+        // At equal work: a count and an integer sum on both sides, where the axes above also pay
+        // for the reproducible float sums of the operator.
+        ("run-end key, an int sum against the hand loop", "group by city (run-end), count sum of an int", "hand loop city (run-end), count sum of an int", null),
+        ("dictionary key, an int sum against the hand loop", "group by endpoint (dictionary), count sum of an int", "hand loop endpoint (dictionary), count sum of an int", null),
+
+        // A key that streams against the same query forced to block, on every lane: what streaming
+        // costs in throughput where the blocking pass runs its ranges side by side.
+        ("streaming against blocking, (City, Day), degree N", "group by city day (composite), count avg, degree N", "group by city day (composite), count avg, blocking, degree N", null),
+        ("streaming against blocking, Welford, degree N", "group by day (sorted), welford, degree N", "group by day (sorted), welford, blocking, degree N", null),
     ];
 }

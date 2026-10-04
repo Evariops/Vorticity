@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
@@ -94,6 +95,15 @@ internal sealed class AggregationPlan
 
     internal bool Grouped => Keys.Length > 0;
 
+    /// <summary>
+    /// Whether a key that streams is grouped as one that does not all the same: the switch the
+    /// bench and the tests compare the two paths with. Every query made from the plan sees it.
+    /// </summary>
+    internal bool Blocking { get; set; }
+
+    /// <summary>What the plan's last run did, lane by lane, and its merge; null before one.</summary>
+    internal AggregationRun? LastRun { get; set; }
+
     /// <summary>The result a symbol stands for.</summary>
     /// <exception cref="InvalidOperationException">The symbol is a column, not an aggregate or a key.</exception>
     internal static ResultNode<T> Result<T>(Sym<T> symbol) => Result(symbol, []);
@@ -153,6 +163,23 @@ internal sealed class AggregationPlan
             StorageKind.Bytes => new BytesKeys(key, sorted),
             _ => throw key.Unsupported("a group key"),
         };
+}
+
+/// <summary>
+/// What a run of an aggregation did: each lane's active time, the ranges it took and its groups at
+/// the end of its pass, then the merge of the lanes' groups. Each lane counts on its own, in its
+/// partition, and the counts are gathered at the end, so that no counter is shared between lanes.
+/// </summary>
+/// <param name="Lanes">Each lane's counts, in the order of its rows.</param>
+/// <param name="MergeTicks">The merge's time, in <see cref="Stopwatch"/> ticks.</param>
+/// <param name="MergeParts">The partitions merged into the first.</param>
+internal sealed record AggregationRun(AggregationRun.Lane[] Lanes, long MergeTicks, int MergeParts)
+{
+    /// <summary>One lane's counts.</summary>
+    /// <param name="ActiveTicks">The time its passes took, in <see cref="Stopwatch"/> ticks.</param>
+    /// <param name="Ranges">The ranges of rows it read.</param>
+    /// <param name="Groups">Its groups at the end of its pass, before the merge.</param>
+    internal readonly record struct Lane(long ActiveTicks, int Ranges, int Groups);
 }
 
 /// <summary>An aggregation that has run: the merged states and keys, and the order of the groups.</summary>
@@ -287,6 +314,15 @@ internal sealed class AggregationPartition
     internal AggregateSlot[] Slots { get; }
 
     internal GroupKeys? Keys { get; }
+
+    /// <summary>The time the partition's passes took, in <see cref="Stopwatch"/> ticks: the lane's active time.</summary>
+    internal long ActiveTicks { get; set; }
+
+    /// <summary>The ranges of rows the partition read.</summary>
+    internal int Ranges { get; set; }
+
+    /// <summary>The partition's groups when its last pass ended, before any merge.</summary>
+    internal int GroupsAtEnd { get; set; }
 
     /// <summary>
     /// The group of the last row read whose key is not null, or -1: the group a key that streams
@@ -754,11 +790,13 @@ internal static class AggregationEngine
         }
 
         AggregationPartition merged = partitions[0];
+        long merging = Stopwatch.GetTimestamp();
         for (int p = 1; p < partitions.Length; p++)
         {
             merged.MergeFrom(partitions[p]);
         }
 
+        plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - merging);
         GroupKeys? keys = merged.Keys;
         // Groups as they were first met: an order is asked for, with OrderBy.
         int[] order = keys is null ? [0] : keys.Order(sorted: false);
@@ -941,12 +979,28 @@ internal static class AggregationEngine
 
     private static async Task RunPartitionAsync(ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPartition partition, CancellationToken cancellationToken)
     {
+        long start = Stopwatch.GetTimestamp();
         await foreach (RecordBatch batch in source.BatchesAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             partition.Process(batch);
         }
 
         partition.Finish();
+        partition.ActiveTicks += Stopwatch.GetTimestamp() - start;
+        partition.Ranges++;
+        partition.GroupsAtEnd = partition.Keys?.Count ?? 1;
+    }
+
+    /// <summary>What the partitions did, gathered once they have merged into the first: the plan's last run.</summary>
+    private static AggregationRun Gathered(AggregationPartition[] partitions, long mergeTicks)
+    {
+        AggregationRun.Lane[] lanes = new AggregationRun.Lane[partitions.Length];
+        for (int p = 0; p < lanes.Length; p++)
+        {
+            lanes[p] = new AggregationRun.Lane(partitions[p].ActiveTicks, partitions[p].Ranges, partitions[p].GroupsAtEnd);
+        }
+
+        return new AggregationRun(lanes, mergeTicks, partitions.Length - 1);
     }
 
     private static async Task RunParallelAsync(

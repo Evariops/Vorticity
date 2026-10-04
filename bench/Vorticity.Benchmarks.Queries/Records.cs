@@ -133,6 +133,46 @@ public partial record struct EndpointErrors(string Endpoint, long Count, long Er
 [VortexRecord]
 public partial record struct UserDurations(int User, long Count, long Duration);
 
+/// <summary>Keys of 4 to a million values and two values to aggregate, stored canonical.</summary>
+[VortexRecord]
+public partial record struct Draw(int K4, int K100, int K1000, int K100k, int K1M, long Value, double Price);
+
+/// <summary>A key and a value.</summary>
+[VortexRecord]
+public partial record struct Keyed(int Key, long Value);
+
+/// <summary>A text key and a value.</summary>
+[VortexRecord]
+public partial record struct Named(string Name, long Value);
+
+/// <summary>An integer key's rows and the sum of their values.</summary>
+[VortexRecord]
+public partial record struct KeyTotal(int Key, long Count, long Total);
+
+/// <summary>A text key's rows.</summary>
+[VortexRecord]
+public partial record struct NameCount(string Name, long Count);
+
+/// <summary>A user's slowest request and when it came.</summary>
+[VortexRecord]
+public partial record struct UserTop(int User, double? Slowest, DateTime? At);
+
+/// <summary>A day of latencies: the first, the highest, the lowest and the last.</summary>
+[VortexRecord]
+public partial record struct DayBar(DateTime Day, double? Open, double? High, double? Low, double? Close);
+
+/// <summary>A day's readings.</summary>
+[VortexRecord]
+public partial record struct DayCount(int Day, long Count);
+
+/// <summary>A city's readings and the sum of their days, an integer.</summary>
+[VortexRecord]
+public partial record struct CityDays(string City, long Count, long Days);
+
+/// <summary>An endpoint's requests and the sum of their durations, an integer.</summary>
+[VortexRecord]
+public partial record struct EndpointDurations(string Endpoint, long Count, long Duration);
+
 /// <summary>A day's requests, the fastest and the slowest.</summary>
 [VortexRecord]
 public partial record struct InstantDay(DateTime Day, long Count, int? Fastest, double? Slowest);

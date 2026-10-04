@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Threading.Tasks;
+using Vorticity.Aggregating;
 
 namespace Vorticity.Benchmarks.Queries;
 
@@ -24,6 +25,23 @@ internal sealed class Run
 
     /// <summary>The most live managed bytes over the baseline seen at an answer, in a memory pass.</summary>
     internal long Live { get; private set; }
+
+    /// <summary>The plan of the aggregation the query runs, when it says which: its last run is the engine's counts.</summary>
+    internal AggregationPlan? Plan { get; private set; }
+
+    /// <summary>Names the aggregation whose engine counts the bench reports.</summary>
+    internal Aggregation Track(Aggregation aggregation)
+    {
+        Plan = ((AggregationQuery)aggregation.Query).Plan;
+        return aggregation;
+    }
+
+    /// <summary>Names the aggregation whose engine counts the bench reports.</summary>
+    internal Aggregation<T> Track<T>(Aggregation<T> aggregation)
+    {
+        Plan = ((AggregationQuery)aggregation.Query).Plan;
+        return aggregation;
+    }
 
     /// <summary>Called for every answer the query hands out: a batch, a group, a row.</summary>
     internal void Answer()
@@ -49,7 +67,8 @@ internal sealed class Run
 /// <param name="Allocated">Managed bytes allocated by every thread in the best round.</param>
 /// <param name="Live">The most live managed bytes held at an answer, from the memory pass.</param>
 /// <param name="Result">What the query returned, so that the work cannot be skipped and two sides can be compared.</param>
-internal readonly record struct Measurement(double Millis, double FirstMillis, long Allocated, long Live, long Result);
+/// <param name="Engine">The engine's counts in the best round, lane by lane, when the query tracks its aggregation.</param>
+internal readonly record struct Measurement(double Millis, double FirstMillis, long Allocated, long Live, long Result, AggregationRun? Engine = null);
 
 internal static class Measure
 {
@@ -65,6 +84,7 @@ internal static class Measure
         double first = 0;
         long allocated = 0;
         long result = 0;
+        AggregationRun? engine = null;
         for (int i = 0; i < rounds; i++)
         {
             // A continuation runs on the stack of the operation that completed it: until the stack
@@ -84,6 +104,7 @@ internal static class Measure
                 best = millis;
                 first = run.First?.TotalMilliseconds ?? millis;
                 allocated = bytes;
+                engine = run.Plan?.LastRun;
             }
         }
 
@@ -94,6 +115,6 @@ internal static class Measure
         long baseline = GC.GetTotalMemory(forceFullCollection: true);
         Run memory = new Run(Stopwatch.StartNew(), baseline, probeEvery);
         await query(memory).ConfigureAwait(false);
-        return new Measurement(best, first, allocated, memory.Live, result);
+        return new Measurement(best, first, allocated, memory.Live, result, engine);
     }
 }

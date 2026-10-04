@@ -107,6 +107,71 @@ internal static class Fixtures
         return path;
     }
 
+    /// <summary>
+    /// Keys of 4, 100, 1 000, 100 000 and 1 000 000 values in a scattered order, stored canonical:
+    /// what a table of keys, a merge and a top-k on the key are judged on, whatever the encodings.
+    /// The two largest are a permutation of the row numbers, each value as many times as the others.
+    /// </summary>
+    internal static ValueTask<string> DrawsAsync(int rows) => WriteOnceAsync($"draws-{rows}.vortex", rows, canonical: true, row =>
+    {
+        ulong mix = Mix((ulong)row);
+        int scattered = (int)((long)row * 7_919 % 1_000_000);
+        return new Draw(
+            (int)(mix % 4), (int)((mix >> 8) % 100), (int)((mix >> 16) % 1_000), scattered % 100_000, scattered,
+            (long)((mix >> 24) % 10_000), (mix >> 12) % 100_000 / 100.0);
+    });
+
+    /// <summary>A key one row in three holds, the other rows over a million rare keys: a hot key and a long tail.</summary>
+    internal static ValueTask<string> SkewedAsync(int rows) => WriteOnceAsync($"skewed-{rows}.vortex", rows, canonical: true, row =>
+    {
+        ulong mix = Mix((ulong)row);
+        return new Keyed(mix % 10 < 3 ? 0 : 1 + (int)((mix >> 8) % 1_000_000), (long)((mix >> 32) % 1_000));
+    });
+
+    /// <summary>Two hundred thousand keys, each seen about twenty times: the cardinality where routing a key costs at each of its rows.</summary>
+    internal static ValueTask<string> MediumAsync(int rows) => WriteOnceAsync($"medium-{rows}.vortex", rows, canonical: true, row =>
+    {
+        ulong mix = Mix((ulong)row);
+        return new Keyed((int)((mix >> 8) % 200_000), (long)((mix >> 32) % 1_000));
+    });
+
+    /// <summary>A text key of a million values, each as often as the others, in a scattered order, stored canonical.</summary>
+    internal static ValueTask<string> NamesAsync(int rows) => WriteOnceAsync($"names-{rows}.vortex", rows, canonical: true, row =>
+        new Named(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"user-{(long)row * 7_919 % 1_000_000:D7}"), (long)(Mix((ulong)row) % 1_000)));
+
+    /// <summary>The file <paramref name="name"/> of <paramref name="rows"/> rows made by <paramref name="row"/>, written on first use; every column canonical when <paramref name="canonical"/>.</summary>
+    private static async ValueTask<string> WriteOnceAsync<T>(string name, int rows, bool canonical, Func<int, T> row)
+        where T : IVortexRecord<T>
+    {
+        string path = Path.Combine(Directory, name);
+        if (System.IO.File.Exists(path))
+        {
+            return path;
+        }
+
+        string partial = path + ".partial";
+        VortexWriteOptions options = canonical ? new VortexWriteOptions { Compression = CompressionProfile.None } : new VortexWriteOptions();
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<T>(partial, options))
+        {
+            T[] block = new T[writer.BlockRows];
+            for (int first = 0; first < rows; first += block.Length)
+            {
+                int count = Math.Min(block.Length, rows - first);
+                for (int i = 0; i < count; i++)
+                {
+                    block[i] = row(first + i);
+                }
+
+                await writer.WriteAsync<T>(block.AsSpan(0, count)).ConfigureAwait(false);
+            }
+
+            await writer.CompleteAsync().ConfigureAwait(false);
+        }
+
+        System.IO.File.Move(partial, path, overwrite: true);
+        return path;
+    }
+
     /// <summary>SplitMix64: a fixed, well-spread stream from the row number.</summary>
     private static ulong Mix(ulong x)
     {

@@ -44,9 +44,9 @@ internal static class Scenarios
     private static async Task<long> GroupByCityAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach (Columns<CityStats> groups in file.Scan<Reading>()
+        await foreach (Columns<CityStats> groups in run.Track(file.Scan<Reading>()
             .GroupBy(r => r.City)
-            .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius)))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius))))
             .As<CityStats>())
         {
             run.Answer();
@@ -126,9 +126,9 @@ internal static class Scenarios
     private static async Task<long> GroupByDayAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach (Columns<DayStats> groups in file.Scan<Reading>()
+        await foreach (Columns<DayStats> groups in run.Track(file.Scan<Reading>()
             .GroupBy(r => r.Day)
-            .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius)))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius))))
             .As<DayStats>())
         {
             run.Answer();
@@ -141,9 +141,9 @@ internal static class Scenarios
     private static async Task<long> GroupByCityDayAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach (Columns<CityDayStats> groups in file.Scan<Reading>()
+        await foreach (Columns<CityDayStats> groups in run.Track(file.Scan<Reading>()
             .GroupBy(r => (r.City, r.Day))
-            .Select(g => (g.Key.City, g.Key.Day, g.Count(), g.Average(r => r.Celsius)))
+            .Select(g => (g.Key.City, g.Key.Day, g.Count(), g.Average(r => r.Celsius))))
             .As<CityDayStats>())
         {
             run.Answer();
@@ -156,9 +156,9 @@ internal static class Scenarios
     private static async Task<long> GroupByEndpointAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach (Columns<EndpointStats> groups in file.Scan<Request>()
+        await foreach (Columns<EndpointStats> groups in run.Track(file.Scan<Request>()
             .GroupBy(r => r.Endpoint)
-            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency)))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency))))
             .As<EndpointStats>())
         {
             run.Answer();
@@ -298,9 +298,9 @@ internal static class Scenarios
     private static async Task<long> GroupByUserAsync(VortexFile file, Run run)
     {
         long rows = 0;
-        await foreach (Columns<UserStats> groups in file.Scan<Request>()
+        await foreach (Columns<UserStats> groups in run.Track(file.Scan<Request>()
             .GroupBy(r => r.UserId)
-            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency)))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency))))
             .As<UserStats>())
         {
             run.Answer();

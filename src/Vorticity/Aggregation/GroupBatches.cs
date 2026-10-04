@@ -124,7 +124,7 @@ internal sealed class AggregationQuery : ResultQuery
 
     /// <summary>The result's batches: as the groups close, on a key that streams; once the pass has run, on any other.</summary>
     internal IAsyncEnumerator<RecordBatch> Groups(CancellationToken cancellationToken) =>
-        StreamingGroupBatches.Streaming(this) >= 0 ? new StreamingGroupBatches(this, cancellationToken) : new GroupBatches(this, cancellationToken);
+        !Plan.Blocking && StreamingGroupBatches.Streaming(this) >= 0 ? new StreamingGroupBatches(this, cancellationToken) : new GroupBatches(this, cancellationToken);
 
     internal override ValueTask<ScanPlan> ExplainAsync(CancellationToken cancellationToken) => Host.ExplainAsync(Plan, cancellationToken, RowFilter);
 
