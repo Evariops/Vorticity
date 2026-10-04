@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Security.Cryptography;
 using Vorticity.Zstd.Tests.Support;
 using Xunit;
@@ -16,32 +17,22 @@ namespace Vorticity.Zstd.Tests.Differential;
 /// </summary>
 public sealed class DecodeCorpusTests
 {
-    public static TheoryData<string> Frames()
-    {
-        var data = new TheoryData<string>();
-        if (!TestData.Has("decodecorpus"))
-        {
-            data.Add(TestData.Missing);
-            return data;
-        }
-
-        foreach (string set in new[] { "small", "plain", "large", "dict" })
-        {
-            foreach (string line in File.ReadAllLines(TestData.PathOf(Path.Combine("decodecorpus", set, "manifest.txt"))))
-            {
-                data.Add(set + "/" + line);
-            }
-        }
-
-        return data;
-    }
+    /// <summary>The sets of frames, a theory row each; the row decodes every frame of its set.</summary>
+    public static TheoryData<string> Sets() =>
+        TestData.Has("decodecorpus") ? ["small", "plain", "large", "dict"] : [TestData.Missing];
 
     [Theory]
-    [MemberData(nameof(Frames))]
-    public void Decodes_to_the_original(string entry)
+    [MemberData(nameof(Sets))]
+    public void Decodes_to_the_original(string set)
     {
         TestData.Require("decodecorpus");
+        Cases.CheckAll(
+            File.ReadAllLines(TestData.PathOf(Path.Combine("decodecorpus", set, "manifest.txt"))).Select(line => set + "/" + line),
+            Decode);
+    }
 
+    private static void Decode(string entry)
+    {
         // "set/name size sha256"
         string[] parts = entry.Split(' ');
         string set = parts[0][..parts[0].IndexOf('/', StringComparison.Ordinal)];

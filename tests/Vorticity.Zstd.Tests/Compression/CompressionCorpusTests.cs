@@ -1,6 +1,8 @@
 using System;
 using System.Buffers;
+using System.Collections.Generic;
 using System.IO.Compression;
+using System.Linq;
 using Vorticity.Zstd.Internal;
 using Vorticity.Zstd.Tests.Differential;
 using Vorticity.Zstd.Tests.Support;
@@ -20,9 +22,19 @@ public static class CompressionCorpus
     private static readonly int[] BlockSizes = [70_000, 131_071, 131_072, 131_073, 262_145, 400_000];
     private static readonly int[] ExactLevels = [-131072, -50, -5, -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
 
-    public static TheoryData<string> Small() => Cases(SmallSizes, ExactLevels);
+    /// <summary>The kinds of content, a theory row each.</summary>
+    public static TheoryData<string> Kinds() => [.. DataKinds.All];
 
-    public static TheoryData<string> Blocks() => Cases(BlockSizes, ExactLevels);
+    /// <summary>A kind and a size around the block boundary, a theory row each.</summary>
+    public static MatrixTheoryData<string, int> KindsAndBlockSizes() => new(DataKinds.All, BlockSizes);
+
+    /// <summary>Every size of a few kilobytes at most, of <paramref name="kind"/>, at every level.</summary>
+    public static IEnumerable<string> Small(string kind) =>
+        from size in SmallSizes from level in ExactLevels select CorpusCase.Name(kind, size, level);
+
+    /// <summary>One size around the block boundary, of <paramref name="kind"/>, at every level.</summary>
+    public static IEnumerable<string> Blocks(string kind, int size) =>
+        from level in ExactLevels select CorpusCase.Name(kind, size, level);
 
     /// <summary>Several megabytes: many blocks, split before their match finding, and windows that slide.</summary>
     public static TheoryData<string> Large()
@@ -39,37 +51,9 @@ public static class CompressionCorpus
         return data;
     }
 
-    public static TheoryData<string> Checksums()
-    {
-        var data = new TheoryData<string>();
-        foreach (string kind in DataKinds.All)
-        {
-            foreach (int size in new[] { 0, 127, 131_073 })
-            {
-                data.Add(CorpusCase.Name(kind, size, 1, "chk"));
-                data.Add(CorpusCase.Name(kind, size, 3, "chk"));
-            }
-        }
-
-        return data;
-    }
-
-    private static TheoryData<string> Cases(int[] sizes, int[] levels)
-    {
-        var data = new TheoryData<string>();
-        foreach (string kind in DataKinds.All)
-        {
-            foreach (int size in sizes)
-            {
-                foreach (int level in levels)
-                {
-                    data.Add(CorpusCase.Name(kind, size, level));
-                }
-            }
-        }
-
-        return data;
-    }
+    /// <summary>A content checksum, of <paramref name="kind"/>, over one block, a single one and none.</summary>
+    public static IEnumerable<string> Checksums(string kind) =>
+        from size in new[] { 0, 127, 131_073 } from level in new[] { 1, 3 } select CorpusCase.Name(kind, size, level, "chk");
 
     /// <summary>Whether Vorticity.Zstd implements the strategy libzstd uses for this level and size.</summary>
     public static bool IsByteExact(int level, int size) =>
@@ -188,15 +172,15 @@ public static class CompressionCorpus
 public sealed class SmallCompressionTests
 {
     [Theory]
-    [MemberData(nameof(CompressionCorpus.Small), MemberType = typeof(CompressionCorpus))]
-    public void Compresses_like_libzstd(string name) => CompressionCorpus.Check(name);
+    [MemberData(nameof(CompressionCorpus.Kinds), MemberType = typeof(CompressionCorpus))]
+    public void Compresses_like_libzstd(string kind) => Cases.CheckAll(CompressionCorpus.Small(kind), CompressionCorpus.Check);
 }
 
 public sealed class BlockCompressionTests
 {
     [Theory]
-    [MemberData(nameof(CompressionCorpus.Blocks), MemberType = typeof(CompressionCorpus))]
-    public void Compresses_like_libzstd(string name) => CompressionCorpus.Check(name);
+    [MemberData(nameof(CompressionCorpus.KindsAndBlockSizes), MemberType = typeof(CompressionCorpus))]
+    public void Compresses_like_libzstd(string kind, int size) => Cases.CheckAll(CompressionCorpus.Blocks(kind, size), CompressionCorpus.Check);
 }
 
 public sealed class LargeCompressionTests
@@ -209,6 +193,6 @@ public sealed class LargeCompressionTests
 public sealed class ChecksumCompressionTests
 {
     [Theory]
-    [MemberData(nameof(CompressionCorpus.Checksums), MemberType = typeof(CompressionCorpus))]
-    public void Compresses_like_libzstd(string name) => CompressionCorpus.Check(name);
+    [MemberData(nameof(CompressionCorpus.Kinds), MemberType = typeof(CompressionCorpus))]
+    public void Compresses_like_libzstd(string kind) => Cases.CheckAll(CompressionCorpus.Checksums(kind), CompressionCorpus.Check);
 }

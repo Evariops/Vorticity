@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.IO.Compression;
+using System.Linq;
 using Vorticity.Zstd.Tests.Differential;
 using Vorticity.Zstd.Tests.Support;
 using Xunit;
@@ -20,29 +21,17 @@ public sealed class DictionaryCompressionTests
 
     private static readonly int[] Levels = [-5, -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22];
 
-    public static TheoryData<string> Cases()
-    {
-        var data = new TheoryData<string>();
-        foreach (string kind in new[] { "text", "json", "walk64", "mixed", "zeros", "urls" })
-        {
-            foreach (string type in new[] { "trained", "raw" })
-            {
-                foreach (int level in Levels)
-                {
-                    foreach (int size in Sizes)
-                    {
-                        data.Add(CorpusCase.Name(kind, size, level, "dict=" + type));
-                    }
-                }
-            }
-        }
+    private static readonly string[] Kinds = ["text", "json", "walk64", "mixed", "zeros", "urls"];
 
-        return data;
-    }
+    /// <summary>A kind and a type of dictionary, a theory row each; the row checks every level and size.</summary>
+    public static MatrixTheoryData<string, string> KindsAndTypes() => new(Kinds, ["trained", "raw"]);
 
     [Theory]
-    [MemberData(nameof(Cases))]
-    public void Compresses_like_libzstd(string name)
+    [MemberData(nameof(KindsAndTypes))]
+    public void Compresses_like_libzstd(string kind, string type) =>
+        Cases.CheckAll(from level in Levels from size in Sizes select CorpusCase.Name(kind, size, level, "dict=" + type), Check);
+
+    private static void Check(string name)
     {
         CorpusCase @case = CorpusCase.Parse(name);
         byte[] data = @case.Data;

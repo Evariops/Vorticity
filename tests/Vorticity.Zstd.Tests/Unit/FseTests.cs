@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Vorticity.Zstd.Internal;
+using Vorticity.Zstd.Tests.Support;
 using Xunit;
 
 namespace Vorticity.Zstd.Tests.Unit;
@@ -12,20 +13,12 @@ namespace Vorticity.Zstd.Tests.Unit;
 /// </summary>
 public sealed class FseTests
 {
-    public static TheoryData<int> Seeds()
-    {
-        var data = new TheoryData<int>();
-        for (int i = 0; i < 400; i++)
-        {
-            data.Add(i);
-        }
+    [Fact]
+    public void Random_distributions_read_back() =>
+        Cases.CheckAll(Enumerable.Range(0, 400), RandomDistributionReadsBack, seed => $"seed {seed}");
 
-        return data;
-    }
-
-    [Theory]
-    [MemberData(nameof(Seeds))]
-    public void Random_distributions_read_back(int seed)
+    /// <summary>Four hundred random distributions, each written and read back.</summary>
+    private static void RandomDistributionReadsBack(int seed)
     {
         var random = new Random(seed);
         int maxSymbol = random.Next(4) switch { 0 => 35, 1 => 52, 2 => 31, _ => 255 };
