@@ -199,6 +199,19 @@ internal sealed class AggregationPartition
             Slots[i].EnsureGroups(groups);
         }
 
+        if (ranged && (long)_ranges.Count * ShortRange > batch.SelectedRows)
+        {
+            // Ranges this short cost more to dispatch, one call per aggregate and per range, than
+            // to fold row by row: a key in runs of seven rows is a per-row key, and folds as one.
+            Span<int> rowGroups = _rowGroups.AsSpan(0, rows);
+            for (int r = 0; r < _ranges.Count; r++)
+            {
+                rowGroups[_ranges.StartAt(r).._ranges.EndAt(r)].Fill(_ranges.GroupAt(r));
+            }
+
+            ranged = false;
+        }
+
         if (!ranged)
         {
             ReadOnlySpan<int> rowGroups = _rowGroups.AsSpan(0, rows);
@@ -250,6 +263,13 @@ internal sealed class AggregationPartition
 
     /// <summary>The input of an aggregate settled before the scan, which is never stepped.</summary>
     internal const int Settled = -2;
+
+    /// <summary>
+    /// The rows a range of one group must average for its batch to be folded a range at a time:
+    /// below, the call per aggregate and per range outweighs the rows it folds, and the batch is
+    /// folded row by row instead.
+    /// </summary>
+    internal const int ShortRange = 64;
 
     private BatchInput Input(long number, CanonicalArena arena, int slot, int rows, ReadOnlySpan<ulong> selection)
     {

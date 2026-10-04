@@ -845,21 +845,25 @@ internal static class RowMasks
         return into;
     }
 
-    /// <summary>The rows of <paramref name="mask"/> inside [<paramref name="start"/>, <paramref name="end"/>), in <paramref name="scratch"/>.</summary>
-    internal static ReadOnlySpan<ulong> Clip(ReadOnlySpan<ulong> mask, int rows, int start, int end, ref ulong[] scratch, out int count)
+    /// <summary>
+    /// The rows of <paramref name="mask"/> inside [<paramref name="start"/>, <paramref name="end"/>), as a
+    /// selection over <paramref name="scratch"/>: only the range's words are written, which every
+    /// other word of the scratch leaves zero, and <see cref="Unclip"/> clears them again once the
+    /// selection is read. A range costs its own words, not its block's.
+    /// </summary>
+    internal static Selection Window(ReadOnlySpan<ulong> mask, int rows, int start, int end, ref ulong[] scratch)
     {
         int words = (rows + 63) >> 6;
         Scratch.Grow(ref scratch, words);
         Span<ulong> into = scratch.AsSpan(0, words);
-        into.Clear();
-        count = 0;
         if (end <= start)
         {
-            return into;
+            return new Selection(into, rows, 0, 0, 0);
         }
 
         int first = start >> 6;
         int last = (end - 1) >> 6;
+        int count = 0;
         for (int w = first; w <= last; w++)
         {
             ulong word = mask.IsEmpty ? ulong.MaxValue : (w < mask.Length ? mask[w] : 0);
@@ -881,7 +885,17 @@ internal static class RowMasks
             count += BitOperations.PopCount(word);
         }
 
-        return into;
+        return new Selection(into, rows, count, first, last + 1);
+    }
+
+    /// <summary>Gives back the words <see cref="Window"/> wrote for [<paramref name="start"/>, <paramref name="end"/>), cleared, as it found them.</summary>
+    internal static void Unclip(ulong[] scratch, int start, int end)
+    {
+        if (end > start)
+        {
+            int first = start >> 6;
+            scratch.AsSpan(first, ((end - 1) >> 6) - first + 1).Clear();
+        }
     }
 }
 

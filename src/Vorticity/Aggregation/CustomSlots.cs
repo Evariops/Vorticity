@@ -38,11 +38,13 @@ internal sealed class CustomSlot<T, TAggregator, TState> : AggregateSlot<TState>
             return;
         }
 
-        ReadOnlySpan<ulong> words = RowMasks.Clip(input.Selection, input.Rows, start, end, ref _clip, out int count);
-        if (count > 0)
+        Selection rows = RowMasks.Window(input.Selection, input.Rows, start, end, ref _clip);
+        if (rows.Count > 0)
         {
-            TAggregator.Step(ref _states[group], values, valid, new Selection(words, input.Rows, count));
+            TAggregator.Step(ref _states[group], values, valid, rows);
         }
+
+        RowMasks.Unclip(_clip, start, end);
     }
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)
@@ -121,12 +123,22 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<
 
                 ReadOnlySpan<T> values = FixedReader.Values(arena, runs, StorageKind.Primitive, ref _values, out _);
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
-                ReadOnlySpan<ulong> words = RowMasks.Clip(rows, input.Rows, start, end, ref _clip, out int count);
-                if (count > 0)
+                if (start == 0 && end == input.Rows && rows.IsEmpty)
                 {
-                    TAggregator.StepRunEnd(ref state, ends, values, new Selection(words, input.Rows, count));
+                    TAggregator.StepRunEnd(ref state, ends, values, new Selection(input.Rows));
+                    return;
                 }
 
+                // The runs the range overlaps, not the block's: a range costs its own runs.
+                Selection window = RowMasks.Window(rows, input.Rows, start, end, ref _clip);
+                if (window.Count > 0)
+                {
+                    int first = Runs.FirstEndingAfter(ends, start);
+                    int past = Math.Min(Runs.FirstEndingAfter(ends, end - 1) + 1, ends.Length);
+                    TAggregator.StepRunEnd(ref state, ends[first..past], values[first..past], window);
+                }
+
+                RowMasks.Unclip(_clip, start, end);
                 return;
             }
 
@@ -140,12 +152,19 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<
 
                 ReadOnlySpan<T> dictionary = FixedReader.Values(arena, entries, StorageKind.Primitive, ref _values, out _);
                 ReadOnlySpan<ulong> rows = _rows.And(input, input.Selection, ArenaWords.Validity(arena, node));
-                ReadOnlySpan<ulong> words = RowMasks.Clip(rows, input.Rows, start, end, ref _clip, out int count);
-                if (count > 0)
+                if (start == 0 && end == input.Rows && rows.IsEmpty)
                 {
-                    TAggregator.StepDictionary(ref state, codes, dictionary, new Selection(words, input.Rows, count));
+                    TAggregator.StepDictionary(ref state, codes, dictionary, new Selection(input.Rows));
+                    return;
                 }
 
+                Selection window = RowMasks.Window(rows, input.Rows, start, end, ref _clip);
+                if (window.Count > 0)
+                {
+                    TAggregator.StepDictionary(ref state, codes, dictionary, window);
+                }
+
+                RowMasks.Unclip(_clip, start, end);
                 return;
             }
 
@@ -161,11 +180,13 @@ internal sealed class EncodedCustomSlot<T, TAggregator, TState> : AggregateSlot<
             return;
         }
 
-        ReadOnlySpan<ulong> kept = RowMasks.Clip(input.Selection, input.Rows, start, end, ref _clip, out int selected);
-        if (selected > 0)
+        Selection kept = RowMasks.Window(input.Selection, input.Rows, start, end, ref _clip);
+        if (kept.Count > 0)
         {
-            TAggregator.Step(ref state, canonical, valid, new Selection(kept, input.Rows, selected));
+            TAggregator.Step(ref state, canonical, valid, kept);
         }
+
+        RowMasks.Unclip(_clip, start, end);
     }
 
     internal override void StepRows(in BatchInput input, ReadOnlySpan<int> groups)

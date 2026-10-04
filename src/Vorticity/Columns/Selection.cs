@@ -18,6 +18,11 @@ public readonly ref struct Selection
     private readonly int _length;
     private readonly int _count;
 
+    // The words that may hold a set bit, [_firstWord, _endWord): a selection of a range of rows
+    // inside a block is enumerated over the range's words, not the block's.
+    private readonly int _firstWord;
+    private readonly int _endWord;
+
     internal Selection(int length)
     {
         _words = default;
@@ -27,10 +32,18 @@ public readonly ref struct Selection
     }
 
     internal Selection(ReadOnlySpan<ulong> words, int length, int count)
+        : this(words, length, count, 0, words.Length)
+    {
+    }
+
+    /// <summary>A selection whose set bits all lie in words [<paramref name="firstWord"/>, <paramref name="endWord"/>), every other word zero.</summary>
+    internal Selection(ReadOnlySpan<ulong> words, int length, int count, int firstWord, int endWord)
     {
         _words = words;
         _length = length;
         _count = count;
+        _firstWord = firstWord;
+        _endWord = endWord;
         IsAll = false;
     }
 
@@ -58,7 +71,7 @@ public readonly ref struct Selection
 
     /// <summary>The selected rows, in order.</summary>
     /// <returns>The enumerator.</returns>
-    public Enumerator GetEnumerator() => new Enumerator(_words, _length, IsAll);
+    public Enumerator GetEnumerator() => new Enumerator(_words, _length, IsAll, _firstWord, _endWord);
 
     /// <summary>Walks the selected rows by <see cref="BitOperations.TrailingZeroCount(ulong)"/>, sixty-four rows per word.</summary>
     public ref struct Enumerator
@@ -66,16 +79,18 @@ public readonly ref struct Selection
         private readonly ReadOnlySpan<ulong> _words;
         private readonly int _length;
         private readonly bool _all;
+        private readonly int _endWord;
         private int _word;
         private ulong _bits;
         private int _current;
 
-        internal Enumerator(ReadOnlySpan<ulong> words, int length, bool all)
+        internal Enumerator(ReadOnlySpan<ulong> words, int length, bool all, int firstWord, int endWord)
         {
             _words = words;
             _length = length;
             _all = all;
-            _word = -1;
+            _endWord = Math.Min(endWord, words.Length);
+            _word = firstWord - 1;
             _bits = 0;
             _current = -1;
         }
@@ -95,7 +110,7 @@ public readonly ref struct Selection
 
             while (_bits == 0)
             {
-                if (++_word >= _words.Length)
+                if (++_word >= _endWord)
                 {
                     return false;
                 }

@@ -56,7 +56,11 @@ public interface IEncodedAggregator<T, TState> : IAggregator<T, TState>
 
     /// <summary>Folds a run-end block: runs of equal values.</summary>
     /// <param name="state">The group's state.</param>
-    /// <param name="runEnds">The exclusive end of each run, relative to the block.</param>
+    /// <param name="runEnds">
+    /// The exclusive end of each run, relative to the block: the block's runs, or only those a range
+    /// of its rows overlaps, the first of which then starts, as far as the aggregator can tell, at the
+    /// block's first row. <paramref name="rows"/> says which rows of them to fold.
+    /// </param>
     /// <param name="values">One value per run.</param>
     /// <param name="rows">The rows to fold; each holds a value.</param>
     static abstract void StepRunEnd(ref TState state, ReadOnlySpan<uint> runEnds, ReadOnlySpan<T> values, Selection rows);
