@@ -337,6 +337,14 @@ out in key order as they close, the first ones once the first block is grouped, 
 that of the ranges in flight. `ScanOptions.DegreeOfParallelism` overrides the session for one scan
 ([threads.md](threads.md)).
 
+The first groups of an order on the key cost what they keep. `OrderBy(g => g.Key).Take(10)` keeps,
+on each lane, the ten best keys it has met, trimmed back as others come, and a row whose integer key
+lies past them is not grouped at all: a key of a million values is held ten groups a lane at a time.
+On a sorted key, `OrderByDescending(g => g.Key).Take(7)` reads the file's chunks from the last one
+back and stops once the seventh group is out. A top on an aggregate,
+`OrderByDescending(g => g.Count()).Take(10)`, holds every group to the end, since a count is known
+only then.
+
 ## Decimals, at any precision
 
 A decimal column sums exactly, whatever its precision and its row count: the total is kept in 320

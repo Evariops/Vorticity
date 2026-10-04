@@ -150,8 +150,9 @@ What this promises, each a gate (§13):
 * **The first batch of a streaming query waits for its first split**, not for the file: its time to
   first batch does not grow with the file.
 * **Memory is the window and the open state**: a streaming group by holds the groups still open,
-  whatever the number it delivers; a top-k holds `k`; a blocking group by one state per group at
-  any degree (§9.4); nothing is held per row read.
+  whatever the number it delivers; a top-k on the key, one and a half times `k` groups a lane and a
+  batch's; a blocking group by, a top-k on an aggregate among them, one state per group at any
+  degree (§9.4), since a group's value is known only at its end; nothing is held per row read.
 * **Nothing is allocated per batch** in steady state on every path that delivers batches, and nothing
   per group on the path that delivers groups as batches (§7.1).
 
@@ -504,6 +505,14 @@ are then ranked by their key, read from the groups' index where it orders as the
 a top-k on a count that a million text keys share copies none of them. Under no order, or an order a
 streaming group by already delivers, a `Take` stops the read once it is served (§2.4).
 
+An order on the key alone, the windows right after it, need not hold the other groups at all: each
+lane of the pass keeps the `Skip + Take` best keys it has met, ranked as the result ranks them, and
+trims back to them once they pass one and a half times as many. A key trimmed lies past the worst a
+lane keeps, which only gets better, so it never comes back into the top, and the groups kept hold all
+their rows. Once a lane has trimmed, a row whose integer key lies past the worst it keeps is neither
+grouped nor folded. A filter on the groups before the window keeps every group, since it could take
+some of the top out.
+
 The operators apply in the order written, as in LINQ: a `Where` after a `Take` filters the groups
 taken.
 
@@ -685,8 +694,9 @@ their chunks end, and the ranges then find them open. No object settles (§9.3)
 
 A blocking group by holds one state per group (§9.4 keeps it so at any degree), each of the width
 §5.1 lets the engine choose, its keys once, and its output a batch at a time; a streaming one holds
-its open groups; a top-k its `k`; a projection and a `Distinct` on a column that streams, their
-window. Nothing is held per row read.
+its open groups; a top-k on the key one and a half times `k` a lane, and a batch's (§6); one on an
+aggregate every group, as a blocking group by; a projection and a `Distinct` on a column that
+streams, their window. Nothing is held per row read.
 
 ## 10. Plan and statistics
 
@@ -750,7 +760,7 @@ A query left early, by `break`, a `Take` or a cancellation, disposes as §2.4 sa
 | answers do not depend on the degree or the cut | every answer of §5 but the order-bound ones, float sums included, the same bits at degrees 1 to the machine's, over a file written in two row orders, and over a dataset cut into 1, 2 and 7 objects, before and after compaction |
 | a `Where` on keys prunes as a filter | `LiveBlocks` equal to the equivalent `Where` on rows |
 | the first batch waits for the first split | the time to first batch of a scan, a projection, a `Distinct` and a group by that streams, on two files sixteen times apart in size, locally and over the HTTP source with latency (`tests/Vorticity.Tests/IO/HttpRangeSegmentSource.cs`) |
-| memory is the window and the open state | `LiveMemoryTests`: a streaming group by's peak flat as its groups grow a hundredfold; a top-k's proportional to `k`; a high-cardinality group by's at most the groups', not the degree times them |
+| memory is the window and the open state | `LiveMemoryTests`: a streaming group by's peak flat as its groups grow a hundredfold; a high-cardinality group by's at most the groups', not the degree times them. `KeyTopTests`: a top-k on the key's groups held within the degree times one and a half `k` and a batch, at degrees 1 and 4 |
 | a `Take` reads what it uses | `Requests` and `BlocksDecoded` of a `Take(n)` bounded by the splits that hold `n` results and the window |
 | nothing is allocated per batch, nor per group as batches | `ScanAllocationTests` extended to the result stream, `As` and the projection |
 | a short range costs its rows | a complexity probe whose time per row stays flat as runs shorten |

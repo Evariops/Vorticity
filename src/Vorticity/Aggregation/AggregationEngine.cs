@@ -448,8 +448,24 @@ internal sealed class AggregationPartition
         (_settledNext, _settledEnd) = settling.Within(rows);
     }
 
+    /// <summary>The first groups of an order on the key the query takes, which the partition keeps alone as it goes; null to keep every group.</summary>
+    internal KeyTop? Top { get; init; }
+
+    /// <summary>The groups the partition held at most since its top last counted them.</summary>
+    internal int PeakGroups { get; set; }
+
+    /// <summary>The worst of the groups the top kept at its last trim, which no row past it joins; -1 before.</summary>
+    internal int TopFrontier { get; set; } = -1;
+
+    // The batch's selection less the rows past the top's frontier.
+    private ulong[] _narrowed = [];
+
     /// <summary>Folds the settled blocks no batch came after: what the end of the rows leaves.</summary>
-    internal void Finish() => FoldSettled(long.MaxValue);
+    internal void Finish()
+    {
+        FoldSettled(long.MaxValue);
+        Top?.Trim(this, final: true);
+    }
 
     internal void Process(RecordBatch batch)
     {
@@ -463,6 +479,7 @@ internal sealed class AggregationPartition
         }
 
         Fold(batch);
+        Top?.Trim(this, final: false);
     }
 
     /// <summary>Folds the settled blocks that start before row <paramref name="before"/>, in their order.</summary>
@@ -498,6 +515,21 @@ internal sealed class AggregationPartition
             }
 
             _nodes[c] = node;
+        }
+
+        // A row whose key lies past the worst of the top's groups is not grouped, nor folded.
+        if (TopFrontier >= 0)
+        {
+            int words = (rows + 63) >> 6;
+            Scratch.Grow(ref _narrowed, words);
+            if (Keys!.Narrow(arena, _nodes.AsSpan(0, _keyCount), rows, selection, TopFrontier, Top!.Descending, _narrowed))
+            {
+                selection = _narrowed.AsSpan(0, words);
+                if (selection.IndexOfAnyExcept(0UL) < 0)
+                {
+                    return;
+                }
+            }
         }
 
         _masks?.Evaluate(arena, root, rows, selection);
@@ -806,8 +838,11 @@ internal abstract class AggregationHost
         try
         {
             ScanSpec spec = Spec(query.RowFilter);
-            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, query.Plan, cancellationToken).ConfigureAwait(false);
-            query.PeakGroups = outcome.Keys?.Count ?? 1;
+
+            // The first groups of an order on the key: each lane keeps the best it has met alone.
+            KeyTop? top = KeyTop.Of(query);
+            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, query.Plan, cancellationToken, top).ConfigureAwait(false);
+            query.PeakGroups = Math.Max(top?.Peak ?? 0, outcome.Keys?.Count ?? 1);
             (int[] groups, int count) = await GroupSelection.ApplyAsync(query, outcome, spec, cancellationToken).ConfigureAwait(false);
             return (outcome, groups, count);
         }
@@ -840,7 +875,7 @@ internal abstract class AggregationHost
 internal static class AggregationEngine
 {
     internal static async ValueTask<AggregationOutcome> RunAsync(
-        ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPlan plan, CancellationToken cancellationToken)
+        ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPlan plan, CancellationToken cancellationToken, KeyTop? top = null)
     {
         IAggregateNode[] aggregates = plan.Aggregates;
         AggregateSlot?[] settled = new AggregateSlot?[aggregates.Length];
@@ -916,7 +951,7 @@ internal static class AggregationEngine
                 : null);
         if (ranges is null)
         {
-            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts);
+            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts) { Top = top };
             if (settling is not null)
             {
                 only.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
@@ -932,7 +967,7 @@ internal static class AggregationEngine
             partitions = new AggregationPartition[Math.Min(degree, ranges.Length)];
             for (int p = 0; p < partitions.Length; p++)
             {
-                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts);
+                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, facts: facts) { Top = top };
             }
 
             await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, cancellationToken).ConfigureAwait(false);

@@ -146,6 +146,15 @@ internal abstract class GroupKeys
     /// </summary>
     internal abstract void Keep(ReadOnlySpan<int> groups);
 
+    /// <summary>
+    /// The rows of <paramref name="selection"/> whose key does not lie past the key of group
+    /// <paramref name="frontier"/> in an order on it, into <paramref name="narrowed"/>, or false when
+    /// these keys do not tell: the rows a top that holds its best groups need not group. A null lies
+    /// past every value, and the frontier's own key is kept.
+    /// </summary>
+    internal virtual bool Narrow(
+        CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int frontier, bool descending, Span<ulong> narrowed) => false;
+
     /// <summary>The group of the null key, or -1 when there is none: of a key of one column.</summary>
     internal virtual int NullNumber => -1;
 
@@ -286,6 +295,47 @@ internal sealed class FixedKeys<TValue> : GroupKeys
     private static readonly bool Integers =
         typeof(TValue) == typeof(sbyte) || typeof(TValue) == typeof(short) || typeof(TValue) == typeof(int) || typeof(TValue) == typeof(long)
         || typeof(TValue) == typeof(byte) || typeof(TValue) == typeof(ushort) || typeof(TValue) == typeof(uint) || typeof(TValue) == typeof(ulong);
+
+    /// <summary>
+    /// A column of integers read as it is, whose order is their values': the encoded forms, which
+    /// group per run or per code, and the floats, whose NaN and zeros an order places apart from
+    /// their values, are left whole.
+    /// </summary>
+    internal override bool Narrow(
+        CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int frontier, bool descending, Span<ulong> narrowed)
+    {
+        int node = nodes[0];
+        StorageKind kind = _shape.Kind;
+        if (!Integers || frontier == _null || FixedReader.EncodingOf(arena, node, kind) != ColumnEncoding.Canonical)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<TValue> values = FixedReader.Values(arena, node, kind, ref _values, out ReadOnlySpan<ulong> validity);
+        TValue edge = _keys[frontier];
+        int words = (rows + 63) >> 6;
+        for (int w = 0; w < words; w++)
+        {
+            ulong word = selection.IsEmpty ? (w < words - 1 || (rows & 63) == 0 ? ulong.MaxValue : (1UL << (rows & 63)) - 1) : selection[w];
+            if (!validity.IsEmpty)
+            {
+                word &= validity[w];
+            }
+
+            ulong kept = 0;
+            while (word != 0)
+            {
+                int bit = System.Numerics.BitOperations.TrailingZeroCount(word);
+                int order = values[(w << 6) + bit].CompareTo(edge);
+                kept |= (descending ? order >= 0 : order <= 0) ? 1UL << bit : 0;
+                word &= word - 1;
+            }
+
+            narrowed[w] = kept;
+        }
+
+        return true;
+    }
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
     {
