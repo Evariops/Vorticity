@@ -797,8 +797,20 @@ internal static class AggregationEngine
             pass = settling.Pass(pass);
         }
 
+        // On several lanes the structures are read once, before the rows are cut, so that the cut
+        // shares the live blocks, not the file's: a filter that keeps a few contiguous blocks keeps
+        // every lane busy, rather than the one whose rows hold them. The settling read them already.
+        int degree = Degree(source, pass);
+        if (settling is null && degree > 1 && pass.Take is null && pass.Filter is { } kept && pass.Options.Pruning && source is FileScanSource file)
+        {
+            BlockMask? live = await ZonePruningPlan
+                .RefineAsync(file.File, file.File.LayoutTree, FunctionFieldExpr.Ranges(kept), cancellationToken, steps: null, metrics, pass.Options.UseIndexes)
+                .ConfigureAwait(false);
+            pass = pass with { Pruned = true, Live = live };
+        }
+
         AggregationPartition[] partitions;
-        RowRange[]? ranges = Partition(source, pass);
+        RowRange[]? ranges = Ranges(source, pass, degree);
         if (ranges is null)
         {
             AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source);
@@ -812,27 +824,15 @@ internal static class AggregationEngine
         }
         else
         {
-            partitions = new AggregationPartition[ranges.Length];
+            // A worker per lane, each with its partition from one range to the next: the merge
+            // stays in as many parts as lanes, however many ranges the queue holds.
+            partitions = new AggregationPartition[Math.Min(degree, ranges.Length)];
             for (int p = 0; p < partitions.Length; p++)
             {
                 partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source);
-                if (settling is not null)
-                {
-                    partitions[p].Settle(settling, ranges[p]);
-                }
             }
 
-            // One read of the zone maps and indexes for every range, as a single scan would make,
-            // rather than one per range; the settling read them already.
-            if (settling is null && pass.Filter is { } filter && pass.Options.Pruning && source is FileScanSource file)
-            {
-                BlockMask? live = await ZonePruningPlan
-                    .RefineAsync(file.File, file.File.LayoutTree, filter, cancellationToken, steps: null, metrics, pass.Options.UseIndexes)
-                    .ConfigureAwait(false);
-                pass = pass with { Pruned = true, Live = live };
-            }
-
-            await RunParallelAsync(source, pass, metrics, partitions, ranges, cancellationToken).ConfigureAwait(false);
+            await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, cancellationToken).ConfigureAwait(false);
         }
 
         AggregationPartition merged = partitions[0];
@@ -978,13 +978,22 @@ internal static class AggregationEngine
         return index < statistics.Count && statistics[index].TryGetIsSorted(out bool sorted) && sorted;
     }
 
+    /// <summary>The lanes a pass may take: the scan's own degree, or its session's.</summary>
+    private static int Degree(ScanSource source, ScanSpec spec) =>
+        spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : source.Session.Options.MaxDegreeOfParallelism;
+
     /// <summary>
-    /// The scan's rows cut at chunk boundaries into as many ranges as its degree of parallelism, or
-    /// null when it runs as one: a degree of one, a take by position, or a source that is not a file.
+    /// The ranges of rows a queue hands its lanes: about <see cref="RangesPerLane"/> a lane, of as
+    /// many live rows each, cut at the plan's boundaries, a dead block joining the range before it;
+    /// null when the pass runs as one range: a degree of one, a take by position, a source that is
+    /// not a file, or live rows too few for two ranges of a block each.
     /// </summary>
-    private static RowRange[]? Partition(ScanSource source, ScanSpec spec)
+    /// <remarks>
+    /// The live rows are the mask's when the pass has one, so that a filter keeping a few contiguous
+    /// blocks shares them among the lanes rather than leaving them to the one whose rows hold them.
+    /// </remarks>
+    private static RowRange[]? Ranges(ScanSource source, ScanSpec spec, int degree)
     {
-        int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : source.Session.Options.MaxDegreeOfParallelism;
         if (degree <= 1 || spec.Take is not null || spec.MatchesNothing || source is not FileScanSource file)
         {
             return null;
@@ -993,34 +1002,72 @@ internal static class AggregationEngine
         LayoutTree tree = file.File.LayoutTree;
         RowRange whole = new RowRange(0, tree.Root.RowCount);
         RowRange rows = spec.Rows is { } asked ? asked.Intersect(whole) : whole;
-        if (rows.IsEmpty)
+        long blockRows = SplitPlan.NaturalBatchRows(tree);
+        if (rows.IsEmpty || blockRows <= 0)
         {
             return null;
         }
 
         FieldMask mask = spec.Projection ?? FieldMask.All;
-        SplitPlan plan = SplitPlan.Compute(tree, rows, in mask, SplitPlan.NaturalBatchRows(tree));
-        List<RowRange> parts = [];
-        long previous = rows.Start;
-        int next = 1;
-        for (int k = 1; k < degree; k++)
+        SplitPlan plan = SplitPlan.Compute(tree, rows, in mask, blockRows);
+        BlockMask? live = spec.Pruned ? spec.Live : null;
+        long alive = Live(live, rows);
+        long count = Math.Min(degree * (long)RangesPerLane, alive / blockRows);
+        if (count < 2)
         {
-            long target = rows.Start + (rows.Length * k / degree);
-            while (next < plan.BoundaryCount - 1 && plan.BoundaryAt(next) < target)
+            return null;
+        }
+
+        long share = alive / count;
+        List<RowRange> parts = [];
+        long start = rows.Start;
+        long held = 0;
+        long previous = rows.Start;
+        for (int b = 0; b < plan.BoundaryCount; b++)
+        {
+            long at = plan.BoundaryAt(b);
+            if (at <= previous || at >= rows.End)
             {
-                next++;
+                continue;
             }
 
-            long cut = plan.BoundaryAt(Math.Min(next, plan.BoundaryCount - 1));
-            if (cut > previous && cut < rows.End)
+            held += Live(live, new RowRange(previous, at));
+            previous = at;
+            if (held >= share && parts.Count < count - 1)
             {
-                parts.Add(new RowRange(previous, cut));
-                previous = cut;
+                parts.Add(new RowRange(start, at));
+                start = at;
+                held = 0;
             }
         }
 
-        parts.Add(new RowRange(previous, rows.End));
+        parts.Add(new RowRange(start, rows.End));
         return parts.Count > 1 ? [.. parts] : null;
+    }
+
+    /// <summary>The ranges a queue holds per lane: enough for a lane on a slow core to leave its last one to the others.</summary>
+    private const int RangesPerLane = 4;
+
+    /// <summary>The live rows of <paramref name="rows"/>: every one without a mask.</summary>
+    private static long Live(BlockMask? live, RowRange rows)
+    {
+        if (live is null)
+        {
+            return rows.Length;
+        }
+
+        long count = 0;
+        int first = (int)(rows.Start / live.BlockRows);
+        int last = (int)((rows.End - 1) / live.BlockRows);
+        for (int block = first; block <= last && block < live.BlockCount; block++)
+        {
+            if (live.IsLive(block))
+            {
+                count += live.BlockRange(block).Intersect(rows).Length;
+            }
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -1093,25 +1140,41 @@ internal static class AggregationEngine
         return new AggregationRun(lanes, mergeTicks, partitions.Length - 1);
     }
 
-    private static async Task RunParallelAsync(
-        ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPartition[] partitions, RowRange[] ranges, CancellationToken cancellationToken)
+    /// <summary>
+    /// Runs the ranges on a worker per partition, each taking the next range of the queue as it
+    /// finishes one and folding it into its partition: a lane on a slow core takes fewer, and no
+    /// lane waits on the others while ranges are left.
+    /// </summary>
+    private static async Task RunQueueAsync(
+        ScanSource source, ScanSpec spec, ScanMetrics metrics, AggregationPartition[] partitions, RowRange[] ranges, ZoneSettling? settling,
+        CancellationToken cancellationToken)
     {
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         CancellationToken token = failed.Token;
+
+        // The degree is the parallelism: a partition already runs on the pool, and decoding ahead
+        // inside each one would put twice the degree's lanes on it.
+        ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 } };
+        int[] next = [-1];
         Task[] lanes = new Task[partitions.Length];
         for (int p = 0; p < partitions.Length; p++)
         {
             AggregationPartition partition = partitions[p];
-
-            // The degree is the parallelism: a partition already runs on the pool, and decoding
-            // ahead inside each one would put twice the degree's lanes on it.
-            ScanSpec lane = spec with { Rows = ranges[p], Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 } };
             lanes[p] = Task.Run(
                 async () =>
                 {
                     try
                     {
-                        await RunPartitionAsync(source, lane, metrics, partition, token).ConfigureAwait(false);
+                        int at;
+                        while ((at = Interlocked.Increment(ref next[0])) < ranges.Length)
+                        {
+                            if (settling is not null)
+                            {
+                                partition.Settle(settling, ranges[at]);
+                            }
+
+                            await RunPartitionAsync(source, lane with { Rows = ranges[at] }, metrics, partition, token).ConfigureAwait(false);
+                        }
                     }
                     catch
                     {

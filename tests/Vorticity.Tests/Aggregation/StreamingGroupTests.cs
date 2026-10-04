@@ -105,16 +105,18 @@ public sealed partial class StreamingGroupTests
             Assert.Equal(rows.Length, counts.Sum());
             Assert.True(((AggregationQuery)streamed.Query).PeakGroups < seconds);
 
-            // Forced to block: the same groups, every one held, from a lane per range, merged.
+            // Forced to block: the same groups, every one held, from four lanes taking ranges from a
+            // queue, merged; without an order, in an order not promised.
             Aggregation<long> blocked = file.Scan<Tick>().GroupBy(r => r.Second).Select(g => g.Count());
             plan = ((AggregationQuery)blocked.Query).Plan;
             plan.Blocking = true;
-            Assert.Equal(counts, await blocked.ToListAsync(Ct));
+            Assert.Equal(counts.Order(), (await blocked.ToListAsync(Ct)).Order());
             Assert.Equal(seconds, ((AggregationQuery)blocked.Query).PeakGroups);
             AggregationRun run = plan.LastRun!;
             Assert.Equal(4, run.Lanes.Length);
             Assert.Equal(3, run.MergeParts);
-            Assert.All(run.Lanes, lane => Assert.True(lane.Ranges == 1 && lane.ActiveTicks > 0 && lane.Groups > 0));
+            Assert.All(run.Lanes, lane => Assert.True(lane.Ranges >= 1 && lane.ActiveTicks > 0 && lane.Groups > 0));
+            Assert.True(run.Lanes.Sum(lane => lane.Ranges) > 4, $"{run.Lanes.Sum(lane => lane.Ranges)} ranges");
             Assert.True(run.Lanes.Sum(lane => lane.Groups) >= seconds);
         }
         finally

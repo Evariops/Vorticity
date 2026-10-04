@@ -122,6 +122,10 @@ public sealed class GroupedScan<TRecord, TKey>
     /// <param name="count">The groups to pass over.</param>
     /// <returns>The groups kept.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> is negative.</exception>
+    /// <remarks>
+    /// Without an order before it, on a key that does not stream, which groups it passes over is
+    /// not promised: on several lanes, the groups come in the order the lanes met them.
+    /// </remarks>
     public GroupedScan<TRecord, TKey> Skip(int count)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(count);
@@ -132,6 +136,11 @@ public sealed class GroupedScan<TRecord, TKey>
     /// <param name="count">The groups to keep at most.</param>
     /// <returns>The groups kept.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="count"/> is negative.</exception>
+    /// <remarks>
+    /// Without an order before it, on a key that does not stream, which groups it keeps is not
+    /// promised: on several lanes, the groups come in the order the lanes met them, which their
+    /// queue of ranges decides. An order makes them the first: <c>OrderBy(g =&gt; g.Key).Take(n)</c>.
+    /// </remarks>
     public GroupedScan<TRecord, TKey> Take(int count)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(count);
