@@ -25,4 +25,9 @@
     <None Remove="forged/**" />
   </ItemGroup>
 
+  <!-- Every test runs beside the others, each row of a theory a test of its own: tests/xunit.runner.json. -->
+  <ItemGroup>
+    <None Include="../xunit.runner.json" Link="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

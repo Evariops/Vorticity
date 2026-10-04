@@ -61,8 +61,8 @@ Pick the row that matches what moved; doing more is always allowed, doing less i
 What each command costs, so you can choose knowingly:
 
 ```
-dotnet test Vorticity.slnx -c Release                                             ~1 min
-bash tests/scalar-pass.sh                                                          ~15 s
+dotnet test Vorticity.slnx -c Release                                           ~1.5 min
+bash tests/scalar-pass.sh                                                          ~10 s
 bash bench/gate.sh                                                                  ~70 s
 bash bench/crosscheck.sh                                                            ~80 s
 dotnet run -c Release --project bench/Vorticity.Benchmarks -- --throughput --check  ~55 s
@@ -84,6 +84,18 @@ reference keeps, so the ratio gates are red by construction and mean nothing the
 `bench/crosscheck.sh` is the only oracle that catches a fault our reader and our writer share: it
 writes the corpus with this library and has Vortex Rust read it back, scalar by scalar. Needs
 `cargo`.
+
+## Tests run side by side
+
+Every test runs beside every other, and each row of a theory is a test of its own:
+`tests/xunit.runner.json` sets xunit's `parallelMode` to `all` and pre-enumerates theories, for
+the three test projects. A test therefore owns what it writes, a temporary file of its own or a
+file of `SharedFiles`, which a run writes once and its tests only read, and changes nothing another
+test reads.
+
+A test that measures the process rather than its own work, such as its allocations, the blocks
+finalized anywhere, its live memory or a JIT that has settled, joins one of the collections that
+run alone, one test at a time: `AllocationCollection`, `FinalizerCollection`, `AdviceCollection`.
 
 ## The ratchet rule
 
