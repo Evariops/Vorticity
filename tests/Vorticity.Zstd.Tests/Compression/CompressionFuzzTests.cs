@@ -70,7 +70,7 @@ public sealed class CompressionFuzzTests
                 Corpus.AssertSameBytes(CompressionCorpus.Libzstd(data, level, checksum: false, longDistance), output.AsSpan(0, written), name);
             }
 
-            CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name);
+            CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name, libzstds: CompressionCorpus.IsByteExact(level, size));
         }
     }
 
@@ -155,7 +155,7 @@ public sealed class CompressorReuseTests
                     Corpus.AssertSameBytes(CompressionCorpus.Libzstd(data, level, checksum: false), output.AsSpan(0, written), name);
                 }
 
-                CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name);
+                CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name, libzstds: CompressionCorpus.IsByteExact(level, size));
             }
         }
     }
@@ -212,6 +212,6 @@ public sealed class GoldenCompressionTests
             Corpus.AssertSameBytes(CompressionCorpus.Libzstd(data, level, checksum: false), output.AsSpan(0, written), name);
         }
 
-        CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name);
+        CompressionCorpus.AssertDecodes(output.AsSpan(0, written), data, name, libzstds: CompressionCorpus.IsByteExact(level, data.Length));
     }
 }

@@ -56,14 +56,11 @@ public sealed class DictionaryCompressionTests
         Assert.Equal(OperationStatus.Done, compressor.Compress(data, output, out _, out int written));
         Corpus.AssertSameBytes(expected, output.AsSpan(0, written), name);
 
-        // Decoded with the dictionary, by Vorticity.Zstd and by libzstd.
+        // Decoded with the dictionary by Vorticity.Zstd: the frame is libzstd's own, so libzstd decodes it.
         byte[] decoded = new byte[data.Length];
         var decoder = new ZstdDecompressor(dictionary);
         Assert.Equal(OperationStatus.Done, decoder.Decompress(output.AsSpan(0, written), decoded, out _, out int decodedSize));
         Corpus.AssertSameBytes(data, decoded.AsSpan(0, decodedSize), name);
-        byte[] nativeDecoded = new byte[Math.Max(1, data.Length)];
-        Assert.Equal(OperationStatus.Done, NativeZstd.Decompress(output.AsSpan(0, written), nativeDecoded, native, out _, out int nativeSize));
-        Corpus.AssertSameBytes(data, nativeDecoded.AsSpan(0, nativeSize), name);
 
         // Again on the same compressor, whose tables carry over from frame to frame.
         Assert.Equal(OperationStatus.Done, compressor.Compress(data, output, out _, out int again));
