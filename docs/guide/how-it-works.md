@@ -121,7 +121,7 @@ on purpose, and the engine can change under them.
 | `Vorticity.RowEncoding` | the byte-sortable row encoding, experimental: [row-keys.md](row-keys.md) |
 
 Only the first is needed to read or write a file, and it depends on nothing beyond the shared
-framework but `System.IO.Hashing`.
+framework but `System.IO.Hashing` and `Vorticity.Zstd`, this repository's managed Zstandard.
 
 ## Where to read further
 

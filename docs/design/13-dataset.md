@@ -625,7 +625,7 @@ summaries its entry carries, keyed by the names it had, never describe another c
 a former name prunes nothing for the new one, which is conservative and ends at the next rewrite.
 
 **Reading an object of an earlier schema.** When an object's dtype is the version's — every object
-written since the last change — its read is its own scan, as before, after one comparison of dtypes
+written since the last change — its read is its own scan, after one comparison of dtypes
 whose hashes are cached. Otherwise its columns are mapped when it opens, and each batch its own scan
 delivers is reshaped in the batch's arena: a struct over its fields in the dataset's order, a missing
 column filled with nulls, a column written non-nullable declared nullable over the same buffers,

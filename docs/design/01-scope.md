@@ -23,9 +23,9 @@ component and its state.
 ## 2. What Vorticity is
 
 A reader and a writer of Vortex files for .NET 11, with no third-party dependency: the FlatBuffers
-and Protobuf runtimes are written here, and the one package the core references is the first-party
-`System.IO.Hashing` ([03-architecture.md](03-architecture.md) §1). It is compatible with Native AOT
-and trimming.
+and Protobuf runtimes are written here, and so is the Zstandard codec, `Vorticity.Zstd`; the one
+other package the core references is the first-party `System.IO.Hashing`
+([03-architecture.md](03-architecture.md) §1). It is compatible with Native AOT and trimming.
 
 | package | what it holds |
 |---|---|
@@ -33,6 +33,7 @@ and trimming.
 | `Vorticity.Generators` | the `[VortexRecord]` source generator and the analyzers VX1001 to VX1008, build-time only |
 | `Vorticity.Dataset` | a versioned dataset over an object store ([13-dataset.md](13-dataset.md)); experimental, `VX0001` |
 | `Vorticity.RowEncoding` | the byte-sortable row encoding ([06-row-encoding.md](06-row-encoding.md)); experimental, `VX0002`, because upstream reserves the right to change it |
+| `Vorticity.Zstd` | Zstandard compression and decompression in managed C#, which the core's `vortex.zstd` and `vortex.zstd_buffers` go through ([its README](../../src/Vorticity.Zstd/README.md)) |
 | `vxdump` | the inspection tool, written against the public surface only |
 
 ## 3. What it reads
@@ -41,7 +42,7 @@ and trimming.
   component of the core editions up to `core2026.08.3`, `vortex.zstd_buffers` from the draft
   `zstd2026.02.0` edition, and the three Rust writes outside every edition when an upstream flag
   asks for them: `fastlanes.delta`, `vortex.patched` and the experimental `vortex.list` layout.
-- **Every file from Rust 0.36.0 to the version the conformance corpus is pinned to**, 0.86.1 today,
+- **Every file from Rust 0.36.0 to the version the conformance corpus is pinned to**, 0.86.1,
   value for value ([04-conformance.md](04-conformance.md)).
 - **Lazily.** An id this library does not know fails only the read that needs it: an unprojected
   column may use one, and a zone-map aggregate nobody knows only disables its pruning
@@ -53,7 +54,7 @@ and trimming.
 ## 4. What it writes
 
 - **Files every Rust reader of the target edition opens.** The target is `VortexEditions.Default`,
-  `core2026.08.3` today, read by Vortex Rust from 0.85.0; lower targets are honoured by dropping
+  `core2026.08.3`, read by Vortex Rust from 0.85.0; lower targets are honoured by dropping
   what they cannot carry, and refused where a column needs a component the target lacks
   ([90-registry.md](90-registry.md)). The reference reads every file this writer produces, value
   for value, in CI.

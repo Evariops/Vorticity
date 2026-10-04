@@ -435,7 +435,7 @@ internal static class RatioCheck
         ["filtered scan, half the rows"] = new(0.300, 7, 0.060),   // 5 passes, spread 0.282-0.300; was 0.259 on the old harness, +15.8%
         ["scattered take, 64 of 64 splits"] = new(0.227, 4, 0.020),   // 5 passes, spread 0.223-0.227; was 0.205 on the old harness, +10.7%
         ["rewritten zoned, reference's"] = new(0.319, 2, 0.016),   // 5 passes, spread 0.316-0.321; was 0.313 on the old harness, +1.9%; held at a three-pass calibration of this binary, the five peaking at 0.321
-        ["rewritten zoned, ours"] = new(0.924, 2, 0.031),   // 5 passes, spread 0.910-0.939; was 0.914 on the old harness, +1.1%; held at a three-pass calibration of this binary, the five peaking at 0.939
+        ["rewritten zoned, ours"] = new(0.676, 2, 0.015),   // 3 passes, spread 0.666-0.676; was 0.924, -26.8%: its zstd column decompressed by Vorticity.Zstd rather than the runtime's libzstd
         ["rewritten high card, reference's"] = new(0.959, 27, 0.025),   // 5 passes, spread 0.936-0.959; was 0.762 on the old harness, +25.9%
         ["rewritten high card, ours"] = new(0.994, 23, 0.027),   // 5 passes, spread 0.968-0.994; was 0.842 on the old harness, +18.1%
         ["key order, sorted column, 1% band"] = new(0.795, 12, 0.025),   // 5 passes, spread 0.775-0.795; was 0.718 on the old harness, +10.7%

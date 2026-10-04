@@ -1,7 +1,6 @@
 using System;
 using System.Buffers;
 using System.Buffers.Binary;
-using System.IO.Compression;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -12,6 +11,7 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;
+using Vorticity.Zstd;
 
 namespace Vorticity.Writing;
 
@@ -666,7 +666,7 @@ internal readonly struct ZstdPlan
         for (int block = 0, from = 0; block < blocks; block++)
         {
             int to = frames[(block * FrameFields) + 1];
-            bound += ZstandardEncoder.GetMaxCompressedLength(to - from);
+            bound += ZstdCompressor.GetMaxCompressedLength(to - from);
             from = to;
         }
 
@@ -749,7 +749,7 @@ internal readonly struct ZstdPlan
                 continue;
             }
 
-            int room = (int)ZstandardEncoder.GetMaxCompressedLength(to - from);
+            int room = ZstdCompressor.GetMaxCompressedLength(to - from);
             int slot = count * ZstdFrames.Fields;
             plan[slot] = from;
             plan[slot + 1] = to;
@@ -822,24 +822,27 @@ internal readonly struct ZstdPlan
     /// worst case.
     /// </summary>
     /// <remarks>
-    /// A zstd compression context is a megabyte of native memory, and the one-shot makes and frees
-    /// one per call: a trial per column per chunk, most of which lose. The workspace's encoder keeps
-    /// one for the whole file, created by the first trial. The frame is the same either way: the
-    /// input is whole and the room is the worst case, so the frame is written by the one call that
-    /// ends it, with the content size in its header, exactly as the one-shot writes it.
+    /// A zstd compressor's tables are two megabytes, and a trial is made per column per chunk, most
+    /// of which lose. The workspace's compressor serves the whole file, taken by the first trial; a
+    /// trial without a workspace takes one from the process's for the frame. The frame is the same
+    /// either way, the content size in its header: a compressor's frames do not depend on what it
+    /// compressed before.
     /// </remarks>
     private static bool TryCompress(
         ArrayBlobWriter.Workspace? workspace, ReadOnlySpan<byte> input, Span<byte> destination, out int written)
     {
-        if (workspace is null)
+        ZstdCompressor encoder = workspace?.Zstd ?? ZstdEncoders.Rent();
+        try
         {
-            return ZstandardEncoder.TryCompress(input, destination, out written) && written > 0;
+            return encoder.Compress(input, destination, out _, out written) == OperationStatus.Done;
         }
-
-        ZstandardEncoder encoder = workspace.Zstd;
-        encoder.Reset();
-        OperationStatus status = encoder.Compress(input, destination, out int consumed, out written, isFinalBlock: true);
-        return status == OperationStatus.Done && consumed == input.Length && written > 0;
+        finally
+        {
+            if (workspace is null)
+            {
+                ZstdEncoders.Return(encoder);
+            }
+        }
     }
 
     /// <summary>On a primitive column, keep zstd only when it saves at least a quarter.</summary>

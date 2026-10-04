@@ -321,11 +321,9 @@ public sealed class PathAllocationTests
         // decode to the next rather than built by each: 1 536 bytes less on this file's one chunk,
         // and on a column of many chunks of many-bin tables a few hundred kilobytes a chunk.
         ("scan, vortex.pco", "encodings/pco", 2_824, FullScan),
-        // A node's frames go through one decoder, reset between frames, rather than the one-shot
-        // `ZstandardDecoder.TryDecompress`, which builds and tears down a native decompression
-        // context per call; and the decoder is the process's, taken by the scan's context and
-        // given back when it is disposed, so a warm scan builds none: 104 bytes and 96 KB of
-        // native state less than one decoder a scan.
+        // A node's frames go through one Vorticity.Zstd decompressor rather than one each, and the
+        // decompressor is the process's, taken by the scan's context and given back when it is
+        // disposed, so a warm scan builds none: its tables and buffers are 160 KB at least.
         ("scan, vortex.zstd", "encodings/zstd", 2_824, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.

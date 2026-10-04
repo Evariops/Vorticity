@@ -113,7 +113,7 @@ The row encoder's contract is one property, byte order equals tuple order, and a
 
 Files written under the oldest edition must stay readable, and the corpus holds files written under
 each edition from `core2025.05.0` on: the files of the older editions are what catches a reader
-that hard-codes today's encodings. They are written by the pinned 0.86.1 generator restricted to
+that hard-codes the encodings of the newest edition. They are written by the pinned 0.86.1 generator restricted to
 each edition, which is the same component set as the 0.36.0 floor with a modern writer; files from
 a 0.36.0 writer itself would need a second, older generator.
 

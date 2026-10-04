@@ -1,17 +1,17 @@
 # Compaction: when it runs, and what a store that cannot delete does to it
 
-**Status: built (§6).** What exists is [13-dataset.md](13-dataset.md) §5 and what this document
-added to it: one planner, whose jobs run one per `CompactAsync` call, per turn of a background loop,
+Compaction is [13-dataset.md](13-dataset.md) §5 together with what this document describes: one
+planner, whose jobs run one per `CompactAsync` call, per turn of a background loop,
 or in the commit that takes level 0 past its ceiling (§2); a plan that descends the trees rather
 than reading them (§3); purges of marks, and long vectors out of line (§4); and a profile for a
 store under a retention lock (§5). This document weighs the ways to drive the same work: inline in a
 writer's commit, on demand, or in the background. It also weighs what a store under a retention lock
 changes, when it refuses to delete or overwrite an object before a date: S3 Object Lock, Azure
 immutable blob storage, a GCS bucket lock. Nothing here changes the commit protocol. The format
-gains the tallies in a page's summary and a pointer in each level of a header (§3), a vector's
-reference in an entry (§4) and the locked store in a header (§5). A page written before the tallies
-still reads, and a reader that knows no vector out of line refuses such an entry rather than
-reading it wrong.
+carries the tallies in a page's summary and a pointer in each level of a header (§3), a vector's
+reference in an entry (§4) and the locked store in a header (§5). A page without tallies still
+reads, and a reader that knows no vector out of line refuses such an entry rather than reading it
+wrong.
 
 ## 1. What compaction buys, and what it costs
 
@@ -32,12 +32,12 @@ times before it settles.
 
 Three costs are left over, and this document is about them:
 
-1. **Who pays, and when.** Today it is whoever calls `CompactAsync`, when they do. Until then a
+1. **Who pays, and when.** On demand, whoever calls `CompactAsync`, when they do; until then a
    dataset reports its lag, and lookups touch the extra objects.
-2. **Planning read every leaf.** `PlanCompactionAsync` walked every level's tree, since the bytes of
-   a level were recorded nowhere else. At the 40 objects of the churn that is nothing. At a
-   tebibyte of 4 MiB objects it is 262 144 entries of a few hundred bytes each: about a thousand
-   pages and a hundred megabytes, on every plan. A plan now descends instead (§3).
+2. **Planning.** With a level's bytes recorded nowhere but in its leaves, a plan would walk every
+   level's tree: nothing at the 40 objects of the churn, but at a tebibyte of 4 MiB objects 262 144
+   entries of a few hundred bytes each, about a thousand pages and a hundred megabytes, on every
+   plan. A plan descends instead (§3).
 3. **Marks in levels no merge reaches.** Level 4 of a ten-million-row dataset is rewritten only when
    level 3 overflows into it, and the top level never is. The marks there last until a delete would
    pass an object's share or its vector's cap, and that delete then rewrites the object itself.
@@ -66,7 +66,7 @@ bounded to level 0, and to inputs under a byte budget: past it, the job is left 
 and the writer returns at once. Inline mode suits a dataset with one writer and no process to spare.
 The writer is the one party that knows level 0 just grew.
 
-**Built** (`DatasetOptions.InlineCompactionBytes`, 0 by default): an append, an import, a
+**Implementation** (`DatasetOptions.InlineCompactionBytes`, 0 by default): an append, an import, a
 replacement or a change that adds to level 0 runs the level-0 job before it returns, when the job
 reads no more than the budget. The commit stands whatever befalls the job: one that fails, or that
 the caller cancels, leaves level 0 for the next commit or another driver, and the caller is told the
@@ -74,7 +74,7 @@ commit's outcome. On the churn the same bytes are written either way; inline, th
 the writers' commits, and an append takes 0.9 to 1.1 ms on average rather than 0.5 to 0.7, its 99th
 percentile 6 to 9 ms rather than 3.
 
-**On demand.** The model today. `PlanCompactionAsync` says what is due and what it costs, and
+**On demand.** The default. `PlanCompactionAsync` says what is due and what it costs, and
 `CompactAsync` runs one job. The application loops, from a scheduled task or after a batch of
 commits. It is the right default for a library, because the library never starts a thread of its own.
 It stays the primitive the other two drivers are made of.
@@ -100,7 +100,7 @@ The waste is avoided without any object that coordinates:
 The first costs nothing and needs the number of loops. The second costs one request per level a job
 touches, and needs nothing.
 
-**Built.** `RunCompactionAsync` takes a `CompactionSchedule`: the options it plans against,
+**Implementation.** `RunCompactionAsync` takes a `CompactionSchedule`: the options it plans against,
 `BytesPerSecond`, the `Idle` sleep, and `Loops` and `Loop` for loops that know one another. The
 planner ranks the due jobs so that no two read or write one level (a job on levels that share
 nothing never takes another's input), and a loop takes the one ranked at its index; a descent and a
@@ -112,26 +112,26 @@ minute outlasts most jobs.
 
 ## 3. Planning in the depth of the tree
 
-**Built.** Each thing the planner needs now comes from where a commit already writes:
+Each thing the planner needs comes from where a commit already writes:
 
-| what the plan needs | read before | read now |
+| what the plan needs | by reading every leaf | by descending |
 |---|---|---|
 | a level's bytes, against its capacity | the sum of every leaf's bytes | the tallies on its top page, which the header carries: every page's summary carries the tally of what lies under it, folded by a commit as it folds the bounds |
 | the objects a level-0 job takes | level 0's leaves | the same, since level 0 holds at most eight |
 | which object of a full level goes down | every leaf of the level, then the largest | one descent along the largest tally, which finds the same object |
-| the object past where the level's last job stopped | nothing | one descent along the keys, past the pointer the header records with the level |
+| the object past where the level's last job stopped | — | one descent along the keys, past the pointer the header records with the level |
 | where a tiered run ends | every leaf of every level | one descent per other level, to its first object past the run's start |
 | the objects of the next level a job meets | every leaf of that level | a walk that skips each subtree whose bounds lie outside the job's range |
 | the objects over their fragments | every leaf | a walk into the subtrees whose tally holds one |
-| which objects hold the most marks | nothing | the sum of marked rows in every tally, for the purge of §4 |
+| which objects hold the most marks | — | the sum of marked rows in every tally, for the purge of §4 |
 
-A plan now reads the header, one path per full level and the job's own objects. A cold plan over
+A plan reads the header, one path per full level and the job's own objects. A cold plan over
 125 000 objects asks the store for two pages, where reading every leaf asks for 124. The tallies
 follow the rule the rows summed up the tree already follow: each commit rewrites the path above an
-entry it changes, so a tally costs no page the commit does not already write. A page written before
-tallies carries none, and a level holding one is planned by its leaves until a commit rewrites it.
+entry it changes, so a tally costs no page the commit does not already write. A level holding a page
+without tallies is planned by its leaves until a commit rewrites that page.
 
-**Then the pointer, and the tiered plan.** Each level of a header carries a pointer, the tree key the
+**The pointer, and the tiered plan.** Each level of a header carries a pointer, the tree key the
 level's last job stopped at, as LevelDB keeps one (`CompactionOptions.Pick = RoundRobin`). A job
 records it with its replacement, which moves it when the replacement applies and leaves it when the
 job is abandoned; every commit after carries it, and a level that empties forgets it. The next job of
@@ -141,9 +141,10 @@ the end of one descent along the keys, as the largest is at the end of one along
 two picks cost a plan the same.
 
 They do not cost the writes the same. The churn on ten million rows, 30 000 commits, takes the same
-jobs either way for its first 15 000 or so. With two seeds of three the round robin then wrote 6 %
+jobs either way for its first 15 000 or so. With two seeds of three the round robin then writes 6 %
 more in compaction, 2 149 and 2 146 MiB against 2 032 and 2 019, and 16 % more in the objects the
-updates and deletes wrote themselves; the third seed took the same jobs throughout. So a leveled dataset keeps the largest first by default (`CompactionPick.Auto`).
+updates and deletes write themselves; the third seed takes the same jobs throughout. So a leveled
+dataset keeps the largest first by default (`CompactionPick.Auto`).
 
 A tiered job concatenates a run of one level's objects that nothing else sits between, and where
 the runs are is a fact of every level's order. The longest of them is found only by reading every
@@ -159,8 +160,8 @@ so the two take the same runs there, and the round robin is a tiered dataset's d
 
 A **purge** is a job with one input: an object rewritten alone, without its marked rows, in its own
 level. Its keys lie inside the old range, as a rewrite by a delete does (13-dataset.md §12). It is the
-missing trigger of the top level. That level is never compacted into itself, because its objects are
-key-disjoint and, until marks, held no dead row. Now they do.
+trigger the top level otherwise lacks. That level is never compacted into itself, because its objects
+are key-disjoint: its only dead rows are those a delete marks.
 
 **When.** An object is purged when its marks pass a threshold below the delete's own: half the
 share, or half the vector cap. The object is then rewritten by maintenance, not by the delete of an
@@ -168,9 +169,9 @@ application that asked to remove ten rows. Purges are ranked by the bytes they f
 write. For one object that is its marked share, and the descent of §3 finds it.
 
 **What it saves.** A vector lives in its object's leaf entry. Every commit that marks a row in any
-object of a page writes that page again. While a level's pages fit the header's inline room, 192 KiB,
-every commit carried them too, marks or not, until headers left such pages out (below). So a page's
-bytes grow with the vectors it holds, and so did every commit's.
+object of a page writes that page again, so a page's bytes grow with the vectors it holds. A header,
+whose inline room is 192 KiB, leaves such pages out (below), so that the commits of other levels do
+not carry them.
 
 The churn measures it on ten million rows. Each update or delete takes ten keys in a row, one run in
 one of the 31 objects of level 4, and those objects' entries share one leaf page. A commit writes
@@ -180,30 +181,30 @@ start being rewritten after 15 000 commits, and a commit writes 63 to 101 KiB fr
 growing. A purge that keeps the vectors under their cap keeps that page, and every header, smaller
 than the cap would let them grow.
 
-**Built** (`CompactionTrigger.Marks`), at half a delete's bounds, and ranked by how due an object is:
+**Implementation** (`CompactionTrigger.Marks`), at half a delete's bounds, and ranked by how due an object is:
 its marked share or its vector, over half its bound, whichever is further. The tallies carry the
 largest share and the largest vector under every page, so the plan walks only to objects that may be
 due. On the churn the purges move the rewrites more than they remove them. Once the vectors have
 filled, a commit writes about 56 KiB rather than 77, compaction about 83 KiB rather than 65, and the
 two together the same 140; the reads and the store are the same. What they buy is where a rewrite
 happens: in compaction rather than inside a user's delete, which a background driver (§2) takes off
-the write path altogether, and the fold the top level lacked. What a commit writes of the vectors is
+the write path altogether, and the fold the top level otherwise lacks. What a commit writes of the vectors is
 then the leaf page of the objects it marks, which only vectors out of line would shrink.
 
-**A second copy, removed.** Every commit wrote the pages it changed twice: in its pages region, and
-inlined in its header so that the read opening the commit would hold them. The region follows the
-header, so a page that ends inside that read needs no copy: the reader keeps the part of the region
-the read brought back. On the churn this took 39 % off a commit object, 26.6 KiB to 16.2 on average
-over the first 15 000 commits, and costs a reader nothing. What a header still carries is pages
-other commits wrote: every level's that fits, save the leaves with marks (below).
+**No second copy.** A commit writes the pages it changes once, in its pages region. The region follows
+the header, so a page that ends inside the read opening the commit needs no copy in the header: the
+reader keeps the part of the region that read brings back. Inlined in the header as well, those pages
+would make a commit object 39 % larger on the churn, 26.6 KiB on average over the first 15 000
+commits against 16.2, for nothing a reader needs. What a header carries is pages other commits
+wrote: every level's that fits, save the leaves with marks (below).
 
-**Out of the header, built.** A header leaves out a leaf whose entries carry marks when its commit
+**Out of the header.** A header leaves out a leaf whose entries carry marks when its commit
 did not write it, and says instead where the version that wrote it keeps its pages: a mark costs only
 the commits that change its own level. A reader that opens the version reads that page when it walks
 the level, in one ranged read. A handle keeps from one version to the next the pages it read and the
 regions its last versions' open reads held (13-dataset.md §3), so neither its commits nor its
-refreshes read the page again until a commit changes it. On the churn a commit object is 30 % smaller,
-16.2 KiB to 11.3 on average over the first 15 000 commits, and every read asks for what it asked for.
+refreshes read the page again until a commit changes it. On the churn this makes a commit object 30 %
+smaller, 11.3 KiB on average over the first 15 000 commits against 16.2, at the same reads.
 
 **Out of line, the alternative.** A vector could be written once into the commit object that made
 it, as an index fragment is (13-dataset.md §6.4), and the entry would name it by reference. Pages
@@ -215,7 +216,7 @@ past its inline size, and how Iceberg stores every one, in a Puffin file. It is 
 scatters single rows over many objects, each commit then changing many vectors. A delete on the
 clustering key writes a run of a few bytes, which an inline vector already handles well.
 
-**Out of line, built**, for a vector past 256 bytes. The commit that writes the entry puts the
+**Out of line**, for a vector past 256 bytes. The commit that writes the entry puts the
 vector's bytes into its own commit object and the entry carries a reference in their place, its
 length of zero, which no vector in an entry has, telling a reader that knows only vectors in line to
 refuse the entry. The entry keeps its count of marked rows, so a plan, a tally and a count without a
@@ -223,9 +224,9 @@ filter still need no read. A rent reads the vector beside the object's open, thr
 pages: the region the read opening the commit holds, the handle's cache, where the writer leaves
 what it wrote, or one ranged read checked by the reference's hash. Vacuum keeps the commit object a
 vector lies in, a repack moves the vector as it moves a fragment, and verify reads every vector.
-On the churn a commit object stays flat once the vectors have grown, 7.5 to 10 KiB a commit where it
-grew to 15, at the same requests: the leaf page an object's marks rewrite carries a reference of
-37 bytes for each, where it carried up to a kilobyte.
+On the churn a commit object stays flat once the vectors have grown, 7.5 to 10 KiB a commit where
+vectors in line grow it to 15, at the same requests: the leaf page an object's marks rewrite carries
+a reference of 37 bytes for each, where a vector in line takes up to a kilobyte.
 
 ## 5. Stores that cannot delete
 
@@ -281,7 +282,7 @@ is for. A lock is the store keeping its promise longer.
   fan-out, or tiered compaction without a clustering key, since each merge is paid for the term;
 - vacuum aware of the retention date.
 
-**Built.** `ObjectHead` carries `RetainUntil` and `LegalHold`, which a store under a lock reports,
+**Implementation.** `ObjectHead` carries `RetainUntil` and `LegalHold`, which a store under a lock reports,
 and vacuum deletes only what is past both its window and the lock: the rest is `Locked`, with the
 date the first of it may go, `NextUnlock`. `DatasetOptions.LockedStore`, fixed at creation and
 carried by every header, is the profile: every handle on the dataset marks whatever an object's size
@@ -298,25 +299,24 @@ to destroy them before, by design. Physical erasure under such a lock is impossi
 and so is not in this design. The known answer is crypto-shredding, an encryption key per data
 subject destroyed in place of the rows. It belongs to the store library or to the application.
 
-## 6. What to build, in order
+## 6. What the library implements
 
-1. **Planning in the depth of the tree** (§3). Built: a tally in every page's summary, one descent to
+1. **Planning in the depth of the tree** (§3): a tally in every page's summary, one descent to
    the largest object or to the one past a level's pointer, one per level to where a tiered run
    ends, and walks that skip what the bounds and tallies rule out.
-2. **Purge jobs** (§4). Built: a trigger `Marks` after the levels' bounds and before the fragments,
-   at half a delete's bounds. The churn measures a commit's bytes with and without it: the purges
-   move a fifth of them into compaction and leave the total as it was.
-3. **The background driver** (§2). Built: `RunCompactionAsync`, with a byte budget and one job at
+2. **Purge jobs** (§4): a trigger `Marks` after the levels' bounds and before the fragments, at half
+   a delete's bounds. The churn measures a commit's bytes with and without it: the purges move a
+   fifth of them into compaction and leave the total the same.
+3. **The background driver** (§2): `RunCompactionAsync`, with a byte budget and one job at
    a time, loops that know one another spread by the rank of independent jobs, and leases for those
    that cannot count one another.
-4. **Inline level-0 compaction** (§2). Built: `DatasetOptions.InlineCompactionBytes`, off by
+4. **Inline level-0 compaction** (§2): `DatasetOptions.InlineCompactionBytes`, off by
    default, bounded by its byte budget.
-5. **The locked-store profile** (§5), and the retention date on the seam. Built:
+5. **The locked-store profile** (§5), and the retention date on the seam:
    `DatasetOptions.LockedStore`, and `ObjectHead.RetainUntil` and `LegalHold`.
-6. **Marked pages out of the header, and vectors out of line** (§4). Built: over a handle that keeps
+6. **Marked pages out of the header, and vectors out of line** (§4): over a handle that keeps
    its pages across versions, a header leaves out a marked leaf its commit did not write, and a
    vector past 256 bytes lies in the commit object that wrote it.
 
-Each step is measured the way the churn measures the dataset today, from the first commit to the
-ten-thousandth ([13-dataset.md](13-dataset.md) §15): a step that does not keep every cost flat is
-not done.
+Each is measured the way the churn measures the dataset, from the first commit to the
+ten-thousandth ([13-dataset.md](13-dataset.md) §15), and keeps every cost flat.

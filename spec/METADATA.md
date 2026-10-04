@@ -7,7 +7,7 @@ there is nothing to vendor verbatim and the tag numbers had to be transcribed. T
 file is: the transcription, with the upstream source path recorded for every message so it can be
 re-verified.
 
-Transcribed 2026-09-12 from `vortex-data/vortex@develop`. **The tag numbers are the contract.**
+Transcribed from `vortex-data/vortex` at the ref [README.md](README.md) pins. **The tag numbers are the contract.**
 An encoding id is frozen: a reader-visible change gets a new id, never a silent extension
 ([02-format.md](../docs/design/02-format.md) §5.3). Unknown *field numbers* are skipped; values outside a
 contract's domain are rejected.
@@ -86,9 +86,8 @@ the comment *"HACK: Because the scalar is stored in the buffers, we do not need 
 metadata at all"*, and `deserialize` requires `buffers.len() == 1` and reads the
 Protobuf `ScalarValue` from `buffers[0]`, decoded against the node's inherited DType.
 
-An earlier revision of this file said the scalar was in the metadata. It is not — corrected
-2026-09-12 against the 0.86.1 source and confirmed against the corpus, where all 494 files
-containing a `vortex.constant` node report `nbuffers:1, metadata_len:0`.
+The corpus agrees: all 494 files containing a `vortex.constant` node report `nbuffers:1,
+metadata_len:0`.
 
 ### `vortex.sequence` — `encodings/sequence/src/array.rs`
 ```proto
@@ -230,9 +229,8 @@ frame-of-reference value: `serialize` returns `ScalarValue::to_proto_bytes(array
 dtype)"*, and `deserialize` does `ScalarValue::from_proto_bytes(metadata, dtype, session)`.
 Zero buffers, exactly one child.
 
-An earlier revision of this file listed `fastlanes.for` under "Empty metadata". It is not — an
-empty payload decodes to a null reference value, which upstream rejects. Corrected 2026-09-12;
-75 corpus files are affected.
+Its metadata is never empty: an empty payload decodes to a null reference value, which upstream
+rejects. 75 corpus files carry one.
 
 ### Empty metadata
 `vortex.null`, `vortex.primitive`, `vortex.varbinview`, `vortex.struct`, `vortex.chunked`,
@@ -296,9 +294,9 @@ An unknown aggregate `id` disables that aggregate's pruning and must never fail 
 
 ### `vortex.chunked`, `vortex.struct`
 Empty metadata. Chunk offsets derive from children `row_count`s, whose sum must equal the parent's.
-One caveat recorded in `layout.fbs` itself: `ChunkedLayout` historically used the first metadata
-byte as a flag indicating whether the first child is the statistics table for the other chunks.
-Treat a non-empty chunked metadata as that flag, not as an error.
+One caveat recorded in `layout.fbs` itself: in older files, the first metadata byte of a
+`ChunkedLayout` is a flag indicating whether the first child is the statistics table for the other
+chunks. Treat a non-empty chunked metadata as that flag, not as an error.
 
 ### `vortex.stats` — legacy ancestor of `vortex.zoned`
 Read by the same machinery. `LegacyStatsMetadata` carries `zone_len` plus a `ZoneMapSchema`
@@ -308,26 +306,22 @@ so it is what every file older than `core2026.08.0` uses. Not optional.
 
 ---
 
-## Corrections this transcription forces on our own docs
+## What the transcription establishes
 
-Two of our documents state something the reference contradicts. Both were plausible and both are
-wrong; they are recorded here and fixed at their source.
-
-1. **Decimal precision goes to 76, not 38, and is backed by `i256`, not `i128`.**
+1. **Decimal precision goes to 76, backed by `i256` above 38.**
    `vortex-array/src/dtype/decimal/mod.rs` sets `MAX_PRECISION = <i256>::MAX_PRECISION = 76` and
    `MAX_SCALE = 76`, and `DecimalType` has an `I256 = 5` case selected for precision 39–76.
    `DecimalDType::try_new` validates: `1 <= precision <= 76`; `scale <= 76`; and
    `scale <= precision` **only when `scale > 0`** — negative scale is legal and is not bounded
-   below beyond `i8`. [07-dotnet-mapping.md](../docs/design/07-dotnet-mapping.md) §2 claimed precision 38 /
-   `i128` and that "Decimal256 does not exist in the DType union". It does, and .NET has no
-   `Int256`, so one has to be written. (The row encoder's own 19–38 → `i128` table stays correct:
-   `vortex-row` genuinely does not support `Decimal256` — [06-row-encoding.md](../docs/design/06-row-encoding.md) §6.)
+   below beyond `i8`. `Decimal256` is in the DType union, and .NET has no `Int256`, so one is
+   written ([07-dotnet-mapping.md](../docs/design/07-dotnet-mapping.md) §2). The row encoder's
+   19–38 → `i128` table is unaffected: `vortex-row` does not support `Decimal256`
+   ([06-row-encoding.md](../docs/design/06-row-encoding.md) §6).
 
 2. **`vortex.constant` metadata is empty and its scalar is in buffer 0**, and **`fastlanes.for`
    carries a bare `ScalarValue` in its metadata** rather than nothing. Both are documented in
-   their own entries above. The first revision of THIS file got both wrong in opposite
-   directions, which is a fair warning about how far a plausible reading of the vtable can be
-   from what `serialize`/`deserialize` actually do. Read those two functions, not the struct.
+   their own entries above. A plausible reading of the vtable can be far from what
+   `serialize`/`deserialize` actually do: read those two functions, not the struct.
 
 3. **A Protobuf `ScalarValue` cannot be interpreted without its DType.** The wire form carries no
    type tag of its own, so `from_proto_bytes` takes the DType as a parameter. This is what makes a

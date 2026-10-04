@@ -5,13 +5,13 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using System.Buffers.Binary;
-using System.IO.Compression;
 using System.Text;
 using System.Text.Unicode;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
 using Vorticity.Buffers;
 using Vorticity.Types;
+using Vorticity.Zstd;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
@@ -36,9 +36,6 @@ internal sealed class ZstdDecoder : ArrayDecoder
 
     /// <summary>Bytes of the little-endian length prefix in front of every stored value.</summary>
     private const int ValueLengthPrefix = sizeof(uint);
-
-    /// <summary>The compression level a dictionary is created at: the one whose tables are smallest.</summary>
-    private const int FastestLevel = 1;
 
     /// <summary>The shared, stateless instance.</summary>
     public static readonly ZstdDecoder Instance = new ZstdDecoder();
@@ -516,76 +513,59 @@ internal sealed class ZstdDecoder : ArrayDecoder
         }
 
         int firstBuffer = (hasDictionary ? 1 : 0) + firstFrame;
-        ZstandardDictionary? dictionary = null;
-        ZstandardDecoder? owned = null;
-        try
+        ReadOnlySpan<byte> dictionary = default;
+        if (hasDictionary)
         {
-            if (hasDictionary)
-            {
-                VortexBuffer raw = node.GetBuffer(0);
-                if (raw.Length != metadata.DictionarySize)
-                {
-                    CompressedThrow.Format(
-                        $"{Id} declares a {metadata.DictionarySize}-byte dictionary but its " +
-                        $"buffer holds {raw.Length}.");
-                }
-
-                // Allocates native state, so it is built only for a file that actually carries a
-                // dictionary - which no default writer produces - and for that node alone. Every
-                // other frame goes through the context's decoder, built once for the scan.
-                //
-                // Only ever decompressed with, the dictionary is still given a compression table by
-                // the platform, sized by the level it is created at: level 1's is the smallest, and
-                // building the dictionary and its decoder costs about two thirds of what the
-                // default level's does.
-                dictionary = ZstandardDictionary.Create(raw.Span, FastestLevel);
-                owned = new ZstandardDecoder(dictionary);
-            }
-
-            ZstandardDecoder decoder = owned ?? context.Scan.Zstd;
-            int written = 0;
-            for (int i = 0; i < usedFrames; i++)
-            {
-                ReadOnlySpan<byte> frame = node.GetBuffer(firstBuffer + i).Span;
-                RequireDeclaredContentSize(frame, frames[firstFrame + i].UncompressedSize, firstFrame + i);
-
-                // Bounded by what is left of the planned total, so a frame that expands further
-                // than advertised is refused by the decoder rather than overrunning.
-                Span<byte> region = destination[written..];
-                decoder.Reset();
-                System.Buffers.OperationStatus status =
-                    decoder.Decompress(frame, region, out _, out int produced);
-                if (status != System.Buffers.OperationStatus.Done)
-                {
-                    CompressedThrow.Format(
-                        $"{Id} frame {firstFrame + i} did not decompress into the {region.Length} bytes its " +
-                        "metadata left for it.");
-                }
-
-                // The ASCII sweep runs here rather than over the finished heap. The frames
-                // partition the stream, written back to back from 0 with sizes summing to `total`,
-                // so "every frame is ASCII" and "the heap is ASCII" say the same thing and the
-                // guarantee handed to `BuildViews` is untouched. Testing each region right after
-                // it is written keeps the bytes in cache instead of paying a second pass over the
-                // whole heap.
-                if (scanAscii && allAscii)
-                {
-                    allAscii = Ascii.IsValid(region[..produced]);
-                }
-
-                written += produced;
-            }
-
-            if (written != total)
+            VortexBuffer raw = node.GetBuffer(0);
+            if (raw.Length != metadata.DictionarySize)
             {
                 CompressedThrow.Format(
-                    $"{Id} frames decompressed to {written} bytes; their metadata declared {total}.");
+                    $"{Id} declares a {metadata.DictionarySize}-byte dictionary but its " +
+                    $"buffer holds {raw.Length}.");
             }
+
+            dictionary = raw.Span;
         }
-        finally
+
+        // The context's decompressor, with the dictionary or without: it reads the dictionary where
+        // the node has it, and builds its tables once for the frames and decodes that give the same.
+        ZstdDecompressor decoder = context.Scan.Zstd;
+        int written = 0;
+        for (int i = 0; i < usedFrames; i++)
         {
-            owned?.Dispose();
-            dictionary?.Dispose();
+            ReadOnlySpan<byte> frame = node.GetBuffer(firstBuffer + i).Span;
+            RequireDeclaredContentSize(frame, frames[firstFrame + i].UncompressedSize, firstFrame + i);
+
+            // Bounded by what is left of the planned total, so a frame that expands further
+            // than advertised is refused by the decoder rather than overrunning.
+            Span<byte> region = destination[written..];
+            System.Buffers.OperationStatus status =
+                decoder.Decompress(frame, region, dictionary, out _, out int produced);
+            if (status != System.Buffers.OperationStatus.Done)
+            {
+                CompressedThrow.Format(
+                    $"{Id} frame {firstFrame + i} did not decompress into the {region.Length} bytes its " +
+                    "metadata left for it.");
+            }
+
+            // The ASCII sweep runs here rather than over the finished heap. The frames
+            // partition the stream, written back to back from 0 with sizes summing to `total`,
+            // so "every frame is ASCII" and "the heap is ASCII" say the same thing and the
+            // guarantee handed to `BuildViews` is untouched. Testing each region right after
+            // it is written keeps the bytes in cache instead of paying a second pass over the
+            // whole heap.
+            if (scanAscii && allAscii)
+            {
+                allAscii = Ascii.IsValid(region[..produced]);
+            }
+
+            written += produced;
+        }
+
+        if (written != total)
+        {
+            CompressedThrow.Format(
+                $"{Id} frames decompressed to {written} bytes; their metadata declared {total}.");
         }
 
         return output;
@@ -815,12 +795,12 @@ internal sealed class ZstdDecoder : ArrayDecoder
     private static void RequireDeclaredContentSize(
         ReadOnlySpan<byte> frame, ulong declared, int index)
     {
-        if (!ZstandardDecoder.TryGetMaxDecompressedLength(frame, out long content))
+        if (!ZstdDecompressor.TryGetFrameContentSize(frame, out ulong content))
         {
             CompressedThrow.Format($"{Id} frame {index} does not declare a content size.");
         }
 
-        if ((ulong)content != declared)
+        if (content != declared)
         {
             CompressedThrow.Format(
                 $"{Id} frame {index} metadata declares {declared} uncompressed bytes, but its " +

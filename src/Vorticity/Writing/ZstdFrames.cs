@@ -1,18 +1,18 @@
 using System;
 using System.Buffers;
-using System.IO.Compression;
 using System.Threading;
+using Vorticity.Zstd;
 
 namespace Vorticity.Writing;
 
 /// <summary>
 /// The frames of one zstd column as the items of a <see cref="WorkFan"/>, each compressed into a
 /// room of its own in the destination, for the caller to close up behind them: a frame is the same
-/// bytes whichever thread and encoder write it, so the column is the one a single thread writes.
+/// bytes whichever thread and compressor write it, so the column is the one a single thread writes.
 /// </summary>
 /// <remarks>
 /// Rented by a workspace and given back with it, so that its frame table serves every column of
-/// every file. A frame takes an encoder from the process's and gives it back, a lock and a reset
+/// every file. A frame takes a compressor from the process's and gives it back, a lock each way
 /// against the tens of microseconds the frame costs. The input and the destination are pointers the
 /// caller keeps pinned until <see cref="Compress"/> returns, which is after every frame has run.
 /// </remarks>
@@ -118,12 +118,11 @@ internal sealed unsafe class ZstdFrames : IFanWork
         int to = _plan[at + 1];
         ReadOnlySpan<byte> source = new ReadOnlySpan<byte>(_input + from, to - from);
         Span<byte> room = new Span<byte>(_output + _plan[at + 2], _plan[at + 3]);
-        ZstandardEncoder encoder = ZstdEncoders.Rent();
+        ZstdCompressor encoder = ZstdEncoders.Rent();
         try
         {
-            encoder.Reset();
-            OperationStatus status = encoder.Compress(source, room, out int consumed, out int written, isFinalBlock: true);
-            if (status == OperationStatus.Done && consumed == source.Length && written > 0)
+            OperationStatus status = encoder.Compress(source, room, out _, out int written);
+            if (status == OperationStatus.Done)
             {
                 _plan[at + 4] = written;
             }

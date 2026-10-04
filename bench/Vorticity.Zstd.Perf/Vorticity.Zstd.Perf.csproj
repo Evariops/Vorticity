@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Zstd.Perf</RootNamespace>
+    <AssemblyName>Vorticity.Zstd.Perf</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+
+    <!-- The way Vorticity ships: Native AOT, code for the machine it runs on. -->
+    <PublishAot>true</PublishAot>
+    <IlcInstructionSet>native</IlcInstructionSet>
+    <PublishTrimmed>true</PublishTrimmed>
+    <IsAotCompatible>true</IsAotCompatible>
+    <!-- The native link asks Xcode for its version to choose a linker flag; with the command line
+         tools alone that question fails, so the flag is decided here. -->
+    <UseLdClassicXCodeLinker>false</UseLdClassicXCodeLinker>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Vorticity.Zstd/Vorticity.Zstd.csproj" />
+    <Compile Include="../Vorticity.Zstd.Shared/*.cs" LinkBase="Shared" />
+    <Compile Include="../../tests/Vorticity.Zstd.Tests/Support/DataKinds.cs" LinkBase="Shared" />
+  </ItemGroup>
+
+</Project>

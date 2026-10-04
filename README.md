@@ -1,7 +1,29 @@
 # Vorticity
 
 A **pure .NET, dependency-free** implementation of the [Vortex](https://vortex.dev) columnar
-file format (LF AI & Data, formerly SpiralDB).
+file format (LF AI & Data).
+
+## Performance
+
+**Faster than Vortex's Rust implementation on most of what is measured**, process against process
+on the same machine, both sides doing the same work. A table of four columns and 1,048,576 rows,
+Native AOT on an Apple M4 Pro, Rust's time over Vorticity's:
+
+| scenario | one core | all 14 cores |
+|---|---:|---:|
+| read every column | 1.98x | 2.31x |
+| read one column of four | 2.23x | 2.24x |
+| filter, 1 % of the rows | 1.35x | 2.89x |
+| filter, half the rows | 2.05x | 2.31x |
+| take 1,000 scattered rows | 1.59x | 1.17x |
+| write the table back out | 2.39x | 1.37x |
+
+Per encoding, on one core: decoding faster on 50 of 57 files (median 1.27x), taking rows faster
+from all 57 (median 1.14x), writing faster on all 56 (median 3.82x). A scan allocates next to
+nothing per batch. [How it is measured](#how-performance-is-measured), and every figure on [the
+benchmark page](docs/guide/benchmarks.md).
+
+## Features
 
 * **A typed surface.** A `[VortexRecord]` declares the columns; filters and aggregates are C#
   lambdas the scan pushes down to the file, and what cannot be pushed down does not compile.
@@ -12,22 +34,18 @@ file format (LF AI & Data, formerly SpiralDB).
   whatever the source; there is no synchronous path to choose.
 * Conformant to the published spec (`VTXF` v1, `core2026.08.3` edition).
 * Validated by **cross-testing** against the Rust reference implementation.
-* **Faster than the Rust reference implementation on most of what is measured**, process against
-  process on the same machine, both sides doing the same work: a speedup of 1.15x to 2.10x on one
-  core and 1.42x to 2.81x on all cores on a whole table, slower on a take of scattered rows on one
-  core; per encoding, a median of 1.16x when decoding and 3.64x when writing
-  ([Performance](#performance)).
 
 No third-party package: the base class library, plus `System.IO.Hashing`, first party, for the
-hashes of the write path and the Bloom filters.
+hashes of the write path and the Bloom filters, and `Vorticity.Zstd`, this repository's managed
+Zstandard, for `vortex.zstd`.
 
 **What parity means here.** Files written by this library are read by Vortex Rust, and every value
 in them reads back equal — that is the parity claimed and the cross-check is what proves it. It is
 not byte parity: the same data is encoded differently on the two sides by design, and a file from
 one is not expected to match the other byte for byte.
 
-**Status.** This project was developed with the help of LLMs. Until v1.0, it may be subject to
-breaking changes.
+**Status.** This project is developed with the help of LLMs. Its API may change in breaking ways
+before v1.0.
 
 ## A first look
 
@@ -116,48 +134,29 @@ at the same version as the core.
 | Document | Contents |
 |---|---|
 | [docs/guide/](docs/guide/README.md) | **Using the library**: pages named by what you are trying to do, each one a program the samples project compiles and runs |
-| [docs/guide/benchmarks.md](docs/guide/benchmarks.md) | Every figure the bench publishes: what this costs against the Rust implementation, and each kernel against the loop it replaced |
-| [docs/guide/benchmarks-x64.md](docs/guide/benchmarks-x64.md) | The same sections from an x64 machine, a Zen 4 processor under Windows; its comparisons with Rust are withdrawn until measured again |
+| [docs/guide/benchmarks.md](docs/guide/benchmarks.md) | Every figure the bench publishes: what this costs against the Rust implementation, and each kernel against its baseline |
+| [docs/guide/benchmarks-x64.md](docs/guide/benchmarks-x64.md) | The sections that compare Vorticity with itself, from an x64 machine, a Zen 4 processor under Windows |
 | [docs/design/](docs/design/README.md) | **Why it is shaped this way**: the design documents, from the scope to the byte layout to the public API |
 
-## Performance
+## How performance is measured
 
 Vorticity is measured against Vortex's Rust implementation on the same files and the same
 machine, built with Native AOT, on one core and on all of them: a table read and written, every
-encoding decoded, taken from and written, and each hot loop against the one it replaced. Both sides
+encoding decoded, taken from and written, and each hot loop against its baseline. Both sides
 do the same work: each maps the file and reads it where it lies, decodes every value it returns,
 and hands what it writes to a sink that keeps nothing; on one core, Rust is timed under the faster
 of its two ways of splitting a scan. The speedup is Rust's time over Vorticity's: above 1.00x,
-Vorticity is faster.
+Vorticity is faster. The table above is read from the file Vorticity writes.
 
-A table of four columns and 1,048,576 rows, both sides reading the file Vorticity wrote, on an
-Apple M4 Pro:
+Per encoding, Vorticity is well ahead on text, nested and compressed integer columns (`varbin`
+5.70x, `struct` 5.10x, `map` 3.11x, `pco` 2.96x), and level or behind on 7 files by a fifth at
+most: booleans that start at a bit offset (0.80x and 0.99x), masked columns (0.93x to 0.99x),
+`onpair` (0.97x) and `decimal` (1.00x). Its file is no more than 5 % larger than Rust's, or
+smaller, on 45 of 56. Both readers warmed up in one process, Rust is faster on 2 of 19 cases: a
+prefix filter on FSST strings (0.93x) and a band over bit-packed integers (0.98x).
 
-| scenario | speedup, one core | speedup, all 14 cores |
-|---|---:|---:|
-| read every column | 1.17x | 1.73x |
-| read one column of four | 2.10x | 2.06x |
-| filter, 1 % of the rows | 1.15x | 2.81x |
-| filter, half the rows | 1.32x | 1.73x |
-| take 1,000 scattered rows | 0.88x | 1.42x |
-| write the table back out | 1.97x | 1.43x |
-
-Per encoding, on one core, Vorticity decodes 40 of 57 files faster than Rust, a median speedup of
-1.16x: well ahead on text, nested and compressed integer columns (`struct` 6.22x, `varbin` 5.18x,
-`pco` 2.90x, `map` 2.42x), behind on run-end (0.76x) and on a column chunked inside one array
-(0.38x). It takes rows faster from 23 of 57 (median 0.89x), and writes 56 of 56 faster (median
-3.64x), its file no more than 5 % larger than Rust's, or smaller, on 44 of them. Both readers warmed
-up in one process, Rust is faster on 2 of 19 cases: a prefix filter on FSST strings (0.87x) and a
-band over bit-packed integers (0.96x).
-
-**Corrected on 2026-10-02.** The figures published before that date came from a harness that
-charged Rust for work Vorticity did not do, and favoured Vorticity: a median speedup of about 3x
-per encoding when decoding and 4.5x when taking rows, where the same files now give 1.16x and 0.89x.
-[The benchmark page](docs/guide/benchmarks.md) says what changed.
-
-A scan allocates next to nothing per batch. Every figure is on one page, [the benchmark page](docs/guide/benchmarks.md),
-each section with the machine and the commit it was measured on; [its x64
-twin](docs/guide/benchmarks-x64.md) awaits an x64 machine to measure its comparisons again.
-[docs/design/05-benchmarks.md](docs/design/05-benchmarks.md) says what is compared and how, and
-[bench/README.md](bench/README.md) how to run each instrument: `bench/gate.sh` runs everything that
-gates a commit.
+Every figure is on [the benchmark page](docs/guide/benchmarks.md), each section with the machine
+and the commit it was measured on, and [its x64 twin](docs/guide/benchmarks-x64.md) holds the
+sections measured on x64. [docs/design/05-benchmarks.md](docs/design/05-benchmarks.md) says what is
+compared and how, and [bench/README.md](bench/README.md) how to run each instrument: `bench/gate.sh`
+runs everything that gates a commit.

@@ -24,3 +24,11 @@ M:System.Runtime.CompilerServices.ValueTaskAwaiter.GetResult; await the value ta
 M:System.Runtime.CompilerServices.ValueTaskAwaiter`1.GetResult; await the value task. Legitimate only to observe one whose IsCompletedSuccessfully has just been checked, which needs a suppression saying so.
 M:System.Threading.Tasks.Task.RunSynchronously; there is no synchronous path through this library.
 M:System.Threading.Thread.Sleep(System.Int32); blocking a pool thread. Use Task.Delay in async code; in a test, wait on the thing that actually changes.
+# ---------------------------------------------------------------- zstd
+# vortex.zstd and vortex.zstd_buffers go through Vorticity.Zstd, this repository's managed zstd:
+# nothing native per scan or per writer, and faster than the runtime's libzstd at decompression.
+T:System.IO.Compression.ZstandardDecoder; decompress with Vorticity.Zstd.ZstdDecompressor, the scan's through ScanContext.Zstd (pooled by ZstdDecoders).
+T:System.IO.Compression.ZstandardEncoder; compress with Vorticity.Zstd.ZstdCompressor, the writer's through Workspace.Zstd (pooled by ZstdEncoders).
+T:System.IO.Compression.ZstandardDictionary; pass the dictionary's bytes to the ZstdDecompressor or ZstdCompressor constructor of Vorticity.Zstd.
+T:System.IO.Compression.ZstandardCompressionOptions; Vorticity.Zstd.ZstdCompressor takes its level and dictionary in its constructor.
+T:System.IO.Compression.ZstandardStream; Vorticity.Zstd compresses and decompresses whole frames in memory: ZstdCompressor, ZstdDecompressor.

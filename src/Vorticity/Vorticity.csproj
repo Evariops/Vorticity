@@ -22,13 +22,19 @@
     <InternalsVisibleTo Include="Vorticity.Benchmarks.Scenarios" />
   </ItemGroup>
 
-  <!-- The one runtime dependency: XxHash3-64 for the write path's distinct table and the Bloom
-       filters. It is first-party (dotnet/runtime, MIT) but is not carried by the shared framework,
-       so it has to be referenced. Porting it would make it our own hash to maintain against
-       upstream's, and FNV-1a byte-at-a-time costs a fifth to a half of every string column's
-       write. -->
+  <!-- XxHash3-64 for the write path's distinct table and the Bloom filters. It is first-party
+       (dotnet/runtime, MIT) but is not carried by the shared framework, so it has to be
+       referenced. Porting it would make it our own hash to maintain against upstream's, and FNV-1a
+       byte-at-a-time costs a fifth to a half of every string column's write. -->
   <ItemGroup>
     <PackageReference Include="System.IO.Hashing" />
+  </ItemGroup>
+
+  <!-- vortex.zstd and vortex.zstd_buffers, read and written by this repository's own zstd rather
+       than by the libzstd the runtime ships: managed, so it allocates nothing native and runs
+       wherever .NET does, and faster than the runtime's at decompression. -->
+  <ItemGroup>
+    <ProjectReference Include="../Vorticity.Zstd/Vorticity.Zstd.csproj" />
   </ItemGroup>
 
   <!-- Compile-time enforcement of the bans in BannedSymbols.txt. Build-time only: PrivateAssets

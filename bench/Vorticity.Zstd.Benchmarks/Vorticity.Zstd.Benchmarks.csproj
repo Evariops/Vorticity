@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Zstd.Benchmarks</RootNamespace>
+    <AssemblyName>Vorticity.Zstd.Benchmarks</AssemblyName>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <!-- BenchmarkDotNet's generated bootstrapper trips analyzers the library's settings make errors. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BenchmarkDotNet" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Vorticity.Zstd/Vorticity.Zstd.csproj" />
+    <Compile Include="../Vorticity.Zstd.Shared/*.cs" LinkBase="Shared" />
+    <Compile Include="../../tests/Vorticity.Zstd.Tests/Support/DataKinds.cs" LinkBase="Shared" />
+  </ItemGroup>
+
+</Project>

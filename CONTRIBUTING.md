@@ -12,7 +12,7 @@ dotnet test Vorticity.slnx -c Release
 dotnet publish tools/vxdump -c Release -r <rid>      # Native AOT, ~5 MB, no trim warning
 ```
 
-Two things are not in the repository, both deliberately, and each one refuses with the command
+Three things are not in the repository, all deliberately, and each one refuses with the command
 that produces it rather than with a stack trace.
 
 **The Rust shim, for anything that compares against the reference.** `--ffi-check` and
@@ -32,6 +32,15 @@ is not the place for half a gigabyte that a script reproduces.
 ```
 bench/gen-throughput.sh                              # once; or point VORTICITY_THROUGHPUT_CORPUS
                                                      # at a directory that already holds them
+```
+
+**Vorticity.Zstd's test data**: zstd's golden files and a corpus of frames from zstd's decodecorpus,
+binary files written from zstd 1.5.7's sources rather than committed. The tests that read them are
+skipped without them, and fail in CI, whose workflow writes them first.
+The script needs `curl`, `tar` and a C compiler.
+
+```
+tools/native-ref/testdata.sh                         # once
 ```
 
 ## What to run before a change is done
@@ -116,8 +125,8 @@ Comments cite things like `BENCH-AUDIT.md B19`, `PERF-AUDIT-v2.md Z1b`, `WRITE-A
 
 **These are not links, and the files are not in this repository.** They are the maintainers'
 engineering journals — measurement sessions, profiles, the argument behind a decision — written in
-French and kept out of the published tree. A reference of that shape dates a decision and names
-where its evidence was recorded. Read the comment around it: it is written to stand on its own, and
+French and kept out of the published tree. A reference of that shape names where the evidence
+behind a decision is recorded. Read the comment around it: it is written to stand on its own, and
 the reference is there so that whoever has the journals can find the measurement, not so that you
 can follow a link.
 

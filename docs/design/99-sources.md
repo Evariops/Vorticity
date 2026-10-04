@@ -1,7 +1,6 @@
 # Sources and how to re-verify them
 
-This specification was derived from primary sources on 2026-09-11, against Vortex **0.86.1**
-(published the same day; previous release 0.85.0, 2026-08-21).
+This specification is derived from primary sources, against Vortex **0.86.1**.
 
 ## Primary sources
 

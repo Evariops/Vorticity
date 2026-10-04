@@ -34,10 +34,10 @@ finds.
 | anything, want a direction | no argument at all | **1 min** | the four default classes, 17 benchmarks, fast profile |
 | a number about to be written down | `-- --full fastlanes` | 1–4 min | the reference profile, on the ONE class concerned |
 | a read path | `-- --ratio-check [axis…]` | 56 s, or 5 s for one axis | the twenty-six axes against Rust, interleaved, each held to a ceiling |
-| a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the loop it replaced |
+| a bitmap kernel | `-- BitmapKernel` | 15 s | each of `Classify`, `CountSet`, `CopyRange`, `PackBytes` against the plain loop it stands in for |
 | a gather, a tile, a dictionary | `-- RowKernel` | 9 s | `Gather`, `GatherMasked`, `Tile` against the per-row type switch each replaced |
 | a string heap cut into views | `-- ViewKernel` | 9 s | `SumLengths`, `BuildFromLengths`, `RequireAscending` against the per-row loops |
-| the OnPair token concatenation | `-- OnPairKernel` | 6 s | the bulk of an OnPair scan, against the per-code switch it replaced |
+| the OnPair token concatenation | `-- OnPairKernel` | 6 s | the bulk of an OnPair scan, against the per-code switch it stands in for |
 | whether your change moved anything | `bench/compare.sh --record before <filter>`, then `--record after`, then `bench/compare.sh before after` | 2x the class | Mann-Whitney per case: Faster / Same / Slower |
 | a decoder | `-- --throughput <family>` | ~30 s | ns/value per encoding at a million rows, against Rust. **Reports, never gates**: a run of one file is +32% on our side, the JIT not finished with it |
 | the writer, or a decoder | `-- --throughput --check` | 54 s | the same, as a gate over all 57 files |
@@ -82,9 +82,9 @@ Three mechanisms, finest first:
 **`-- --help` lists every mode**, its flags and what each costs. `--full`, `--explore` and `--inprocess` are ours and are consumed before BenchmarkDotNet sees the
 rest, so `-- --full fastlanes` works as written. Everything else is forwarded.
 
-**`--full` runs out of process; the fast profile does not.** BenchmarkDotNet 0.16.0-preview.1 is the
-first version that can build a `net11.0` host, so the reference profile now gets process isolation
-per case, GC and runtime jobs, and `--disasm`.
+**`--full` runs out of process; the fast profile does not.** BenchmarkDotNet 0.16.0-preview.1, the
+first version that can build a `net11.0` host, gives the reference profile process isolation per
+case, GC and runtime jobs, and `--disasm`.
 It costs the host's build: `--full` on a two-case class is 2 min 10 rather than 7 s, which is why
 the fast profile stays in this process. `--full --inprocess` is the escape hatch.
 
@@ -177,11 +177,9 @@ behind `--explore`.
 answered their question once and do not guard against anything. They stay runnable and stay out of
 the default run: 17 benchmarks become 39 with `--explore`.
 
-Classes have been deleted rather than demoted whenever another instrument measured the same thing
-with a better estimator, and the journals name the replacement for each. `RewrittenComparison` went
-that way, its unique question — our own bytes, read by both readers — being the four `rewritten`
-axes of `--ratio-check`. The numbers they produced are not lost: they are in the maintainers'
-journals and in the commits.
+A class is deleted rather than demoted when another instrument measures the same thing with a
+better estimator: our own bytes read by both readers, for one, are the four `rewritten` axes of
+`--ratio-check`.
 
 ## The gates, and their ceilings
 
@@ -223,13 +221,12 @@ journals and in the commits.
 
   **`--write`** reads each file back out into a sink that keeps nothing, against `vxbench_write`,
   which gives the reference's writer the rows as our reader gives ours, decoded and a constant kept
-  as one value, and hands its bytes to a sink that keeps nothing too (it was a `Vec<u8>` that grew
-  to hold the file, until 2026-10-02): the read is inside the measurement on both sides, so subtract
-  the scan axis before reading the quotient as a statement about writers. With `--out`, the page
-  prints each writer's bytes beside its time, because a writer can be fast by compressing less. It
-  has its own ratchet table of 56 references, and it reports an encoding it cannot write rather than
-  dying on it — today that is `parquet_variant` alone, and it is the reference that declines: its
-  variant, decoded, keeps a lazy slice its writer cannot serialize.
+  as one value, and hands its bytes to a sink that keeps nothing too: the read is inside the
+  measurement on both sides, so subtract the scan axis before reading the quotient as a statement
+  about writers. With `--out`, the page prints each writer's bytes beside its time, because a writer
+  can be fast by compressing less. It has its own ratchet table of 56 references, and it reports an
+  encoding it cannot write rather than dying on it — that is `parquet_variant` alone, and it is the
+  reference that declines: its variant, decoded, keeps a lazy slice its writer cannot serialize.
 
   `--quick` (23 s instead of 70) shortens the warm-up and the per-file budget: a direction, not a
   gate. `--recalibrate N` prints a replacement reference table, as it does for `--ratio-check`.
@@ -245,7 +242,7 @@ pass is the one thing this directory forbids outright.
 so the rounds are paired and a per-round ratio is a sample; the median of those ratios is what is
 held, with a 95% bootstrap interval around it. A ratio is `OVER` only when the *whole* interval is
 above the ceiling, `STALE` only when all of it is under 0.85 × reference, and `noisy` when the median
-is over but the interval straddles — which used to be reported as a failure and was a coin toss.
+is over but the interval straddles, which a single run cannot decide.
 Rounds keep coming until half the interval is within 5% of the median, and a call shorter than the
 timer's noise floor is repeated inside one timed round (the `k` column). The `mde` column is the
 smallest change that axis can currently see.
@@ -298,16 +295,7 @@ together, the three throughput tables before the fingerprint.
 and a run can come out red with no byte changed. Replay three times: two reds out of three is a
 regression, otherwise it is noise.
 
-## Where the rest lives
+## Where the figures live
 
-The figures are on [the benchmark page](../docs/guide/benchmarks.md). What follows are engineering
-journals: French, dated, and kept outside the repository. They are named and not linked, because
-the name is the reference.
-
-| file | what it holds |
-|---|---|
-| `bench-PROFILE.md` | the CPU profiling session: what actually costs, as opposed to what should |
-| `bench-ALLOCATIONS.md`, `bench-BRANCHING.md`, `bench-STRUCTURE.md` | the three code audits |
-| `bench-PERF-AUDIT.md` | v1, the archive: three passes, 41 steps, the negative results |
-| `PERF-AUDIT-v2.md` | the open work list |
-| `BENCH-AUDIT.md` | this instrument, audited: what every figure above comes from |
+The figures are on [the benchmark page](../docs/guide/benchmarks.md), each section dated and signed
+with the machine and the commit it was measured on.

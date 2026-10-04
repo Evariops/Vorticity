@@ -1,7 +1,7 @@
 # Benchmarks
 
-How Vorticity is measured against Vortex's Rust implementation, and its kernels against the code
-they replaced: what is compared (§1), what a caller sees (§2), the ratios the gates hold in one
+How Vorticity is measured against Vortex's Rust implementation, and its kernels against their
+baselines: what is compared (§1), what a caller sees (§2), the ratios the gates hold in one
 process (§3), each decoder (§4), allocations (§5), and the instruments (§6). The figures are on one
 page, [the benchmark page](../guide/benchmarks.md), each section written by the instrument that
 measures it; [bench/README.md](../../bench/README.md) says how to run each one.
@@ -25,17 +25,6 @@ measures it; [bench/README.md](../../bench/README.md) says how to run each one.
   builds a chunk made of smaller arrays in one piece, three to six times slower on those. Neither
   wins everywhere, so on one core every Rust figure is the faster of the two, measured on the spot,
   file by file and axis by axis; on all cores Rust keeps its default, whose splits spread its work.
-* **What that replaced** (2026-10-02). The reference used to read with `open_path`, which copies
-  every segment it needs into buffers of its own, while our side read a mapping, and in the
-  instruments that open their file every round, a mapping a previous round had left it; a column
-  stored in its plain form was then a copy on Rust's side and a view of untouched pages on ours. The
-  reference expanded every constant column, which ours keeps whole; its writer wrote into a
-  `Vec<u8>` that grew to hold the file, where ours counted bytes; the count axis had it decode every
-  column of every row kept, and the uncorrelated key-order axis gave it the positions of the rows;
-  and it read the per-encoding files, one chunk of a million rows each, under its default split,
-  which decoded each of them ten times. Every one of those was a cost on Rust's side alone, and the
-  figures published before that date carried them: by up to twelve times on the decoders of plain
-  columns, ten on a projection of one column in fifty, ten again on every string-heavy file.
 * **Each side built for speed.** Vorticity as a Native AOT binary for the machine's instruction
   set. Vortex 0.86.1 built as upstream builds its own benchmarks: mimalloc, `-C target-cpu=native`,
   one codegen unit, no LTO, upstream's `release_debug` profile and the `RUSTFLAGS` of its benchmark
@@ -112,7 +101,7 @@ million rows and six columns, and of fifty columns.
 [In one process](../guide/benchmarks.md#in-one-process-after-warm-up) has the figures.
 
 * **`open to first batch` is a latency.** Both sides decode their first batch. Rust's first batch
-  costs most of what its whole scan does on this file, 1.4 ms of 1.6 on 2026-10-02, where ours costs
+  costs most of what its whole scan does on this file, 1.4 ms of 1.6, where ours costs
   a fifth of ours. The speedup is on the time to the first row, and nothing more.
 * **Where the reference has no counterpart, it answers the same question its own way.** A
   key-ordered read of a band is held against Rust's filtered scan of that band, which returns the
@@ -215,7 +204,7 @@ its sections of the benchmark page and leaves the others:
 | the ratio gate | §3, both sides in one process | `--ratio-check` |
 | the per-encoding gates | §4's take and write, in one process | `--throughput`, with `--take` or `--write`; `--check` holds each file to its ceiling |
 | the trade-offs | every profile and hint on twenty column shapes, and what the advice picks on them | `--tradeoffs`, and `--advise` |
-| BenchmarkDotNet | one kernel against the loop it replaced, on one clock | a class name: `fastlanes` |
+| BenchmarkDotNet | one kernel against its baseline, on one clock | a class name: `fastlanes` |
 | the ratchets | §5 | `dotnet test Vorticity.slnx -c Release` |
 
 Rust is driven through [tools/vxbench-rs](../../tools/vxbench-rs), built against the same
