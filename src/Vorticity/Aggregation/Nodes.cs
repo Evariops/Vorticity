@@ -49,7 +49,7 @@ internal abstract class ResultNode<T> : SymNode, IResultNode
         if (!Takes(target, out string? reason))
         {
             throw new VortexSchemaException(
-                $"Element {position + 1} of the selection, {this}, is a {ClrFit.Name(typeof(T))}, which member '{member.Name}' of {record.Name}, a column of {target}, does not take: {reason}");
+                $"Element {position + 1} of the selection, {this}, is of type {ClrFit.Name(typeof(T))}, which member '{member.Name}' of {record.Name}, a column of {target}, does not take: {reason}");
         }
 
         if (natural.IsNullable && !target.IsNullable)

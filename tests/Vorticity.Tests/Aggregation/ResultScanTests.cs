@@ -88,21 +88,24 @@ public sealed partial class ResultScanTests
         try
         {
             await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
-            VortexSchemaException fewer = Assert.Throws<VortexSchemaException>(
-                () => file.Scan<Visit>().GroupBy(r => r.City).Select(g => (g.Key, g.Count(), g.Max(x => x.Day))).As<CityCount>());
+
+            // Through a value the selection was kept in, which VX1010 does not see into: the refusal
+            // at run time is what is tested.
+            Vorticity.Aggregation three = file.Scan<Visit>().GroupBy(r => r.City).Select(g => (g.Key, g.Count(), g.Max(x => x.Day)));
+            VortexSchemaException fewer = Assert.Throws<VortexSchemaException>(() => three.As<CityCount>());
             Assert.Contains("2 members and the selection 3 elements", fewer.Message, StringComparison.Ordinal);
 
-            VortexSchemaException narrower = Assert.Throws<VortexSchemaException>(
-                () => file.Scan<Visit>().GroupBy(r => r.City).Select(g => (g.Key, g.Count())).As<CityNarrowCount>());
+            Vorticity.Aggregation counted = file.Scan<Visit>().GroupBy(r => r.City).Select(g => (g.Key, g.Count()));
+            VortexSchemaException narrower = Assert.Throws<VortexSchemaException>(() => counted.As<CityNarrowCount>());
             Assert.Contains("Element 2", narrower.Message, StringComparison.Ordinal);
             Assert.Contains("'Count'", narrower.Message, StringComparison.Ordinal);
 
-            VortexSchemaException notNullable = Assert.Throws<VortexSchemaException>(
-                () => file.Scan<Visit>().GroupBy(r => r.City).Select(g => (g.Key, g.Average(x => x.Pages))).As<CityPlainMean>());
+            Vorticity.Aggregation averaged = file.Scan<Visit>().GroupBy(r => r.City).Select(g => (g.Key, g.Average(x => x.Pages)));
+            VortexSchemaException notNullable = Assert.Throws<VortexSchemaException>(() => averaged.As<CityPlainMean>());
             Assert.Contains("may be null", notNullable.Message, StringComparison.Ordinal);
 
-            await Assert.ThrowsAsync<VortexSchemaException>(
-                async () => await file.Scan<Visit>().AggAsync<CityCount>(a => (a.Count(), a.Count()), Ct));
+            Func<Aggregates<Visit>, System.Runtime.CompilerServices.ITuple> twoCounts = a => (a.Count(), a.Count());
+            await Assert.ThrowsAsync<VortexSchemaException>(async () => await file.Scan<Visit>().AggAsync<CityCount>(twoCounts, Ct));
         }
         finally
         {
@@ -159,6 +162,43 @@ public sealed partial class ResultScanTests
         finally
         {
             System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public async Task AResultIsWrittenAsItComes()
+    {
+        (Visit[] rows, string path) = await WriteAsync();
+        string rollup = path + ".daily.vortex";
+        string copy = path + ".copy.vortex";
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<CityDayCount>(rollup))
+            {
+                await writer.WriteAsync(Daily(file), Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Visit>(copy))
+            {
+                await writer.WriteAsync(file.Scan<Visit>().Where(r => r.Day < 2), Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            await using VortexFile written = await VortexFile.OpenAsync(rollup, Ct);
+            Assert.Equal(
+                Sorted(rows.GroupBy(r => (r.City, r.Day)).Select(g => new CityDayCount(g.Key.City, g.Key.Day, g.Count()))),
+                Sorted(await ListAsync(written.Scan<CityDayCount>())));
+
+            await using VortexFile copied = await VortexFile.OpenAsync(copy, Ct);
+            Assert.Equal(rows.Where(r => r.Day < 2), await ListAsync(copied.Scan<Visit>()));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+            System.IO.File.Delete(rollup);
+            System.IO.File.Delete(copy);
         }
     }
 

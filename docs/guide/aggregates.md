@@ -5,8 +5,11 @@ own, on as many cores as the session allows.
 
 ```csharp
 Scan<Reading> recent = file.Scan<Reading>().Where(r => r.Day >= 900);
-(double? min, double? max, long n, long cities) = await recent
-    .AggAsync(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
+Summary s = await recent
+    .AggAsync<Summary>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.Count(), a.CountDistinct(r => r.City)));
+
+[VortexRecord]
+public partial record struct Summary(double? Min, double? Max, long Rows, long Cities);
 ```
 
 ```
@@ -15,8 +18,10 @@ AggAsync, four answers             2.3 ms  min 10.1, max 49.9, 100000 rows, 8 ci
 
 ## Several answers in one pass
 
-`AggAsync` takes a lambda over an `Aggregates<Reading>` and returns a tuple of one to eight answers,
-computed in a single pass over the rows the scan keeps. The members are `Count()`,
+`AggAsync` takes a lambda over an `Aggregates<Reading>` and computes its answers in a single pass
+over the rows the scan keeps: one answer comes as itself, `await scan.AggAsync(a => a.Count())`,
+and several, of any number, go into the record `AggAsync<TResult>` names, whose members take them
+in order, each of its answer's type or of its nullable form. The members of `a` are `Count()`,
 `CountDistinct`, `Sum`, `Min`, `Max`, `Average` and `Aggregate`, each over a column named as in a
 filter. Like a filter, the lambda runs once and describes the work; nothing is evaluated per row in
 your code. Here the `Where` let the zone maps skip 109 blocks, and the four answers came from the
@@ -32,13 +37,17 @@ what each encoding lets it skip.
 ## Group by
 
 ```csharp
-Aggregation<(string, double?, WelfordState)> byCity = file.Scan<Reading>()
+Scan<CitySpread> byCity = file.Scan<Reading>()
     .GroupBy(r => r.City)
-    .Select(g => (g.Key, g.Average(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)));
-await foreach ((string city, double? mean, WelfordState state) in byCity)
+    .Select(g => (g.Key, g.Average(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)))
+    .As<CitySpread>();
+await foreach (CitySpread city in byCity.ToRecordsAsync())
 {
-    lines[line++] = $"  {city,-10} mean {mean:F4}  variance {state.Variance:F4}";
+    lines[line++] = $"  {city.City,-10} mean {city.Mean:F4}  variance {city.State.Variance:F4}";
 }
+
+[VortexRecord]
+public partial record struct CitySpread(string City, double? Mean, WelfordState State);
 ```
 
 ```
@@ -49,24 +58,38 @@ await foreach ((string city, double? mean, WelfordState state) in byCity)
 ```
 
 `Welford<double>` is the aggregator of the next section, a mean and a variance in one pass.
-`g.Key` is the key, and the other members of `g` are those of `Aggregates`. The result is an
-`Aggregation<T>`, enumerated with `await foreach`, with its own `ExplainAsync` and `Statistics`. A
-composite key is a tuple of columns, of any length, whose names are the key's, `g.Key.City` and
+`g.Key` is the key, and the other members of `g` are those of `Aggregates`. A selection of one
+value, `Select(g => g.Count())`, is an `Aggregation<long>`, enumerated with `await foreach`, a
+`long` per group. Several values have no .NET type until a record gives them one: the selection is
+an `Aggregation`, and `As<TRecord>()` makes it a `Scan<TRecord>` of the result, whose members take
+the values in order. It is read as a file's scan is: as batches, the default, whose columns are
+borrowed and allocate nothing per group, or as records through `ToRecordsAsync()`, a record per
+group. A state is a column like the others: `WelfordState` is a `[VortexRecord]`, three columns
+in one.
+
+A composite key is a tuple of columns, of any length, whose names are the key's, `g.Key.City` and
 `g.Key.Day`:
 
 ```csharp
 await foreach (var (city, day, total, state) in file.Scan<Reading>()
     .GroupBy(r => (r.City, r.Day))
-    .Select(g => (g.Key.City, g.Key.Day, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))))
+    .Select(g => (g.Key.City, g.Key.Day, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)))
+    .As<CityDaySpread>()
+    .ToRecordsAsync())
 ```
 
 The same query in query syntax is the same plan:
 
 ```csharp
-from r in file.Scan<Reading>()
-group r by (r.City, r.Day) into g
-select (g.Key.City, g.Key.Day, g.Sum(x => x.Celsius))
+(from r in file.Scan<Reading>()
+ group r by (r.City, r.Day) into g
+ select (g.Key.City, g.Key.Day, g.Sum(x => x.Celsius)))
+.As<CityDayTotal>()
 ```
+
+The result's scan is a scan: a `Where` filters its batches, a `GroupBy` aggregates it again, the
+daily from the hourly, `CountAsync` and the other single answers read it, and a writer writes it,
+`writer.WriteAsync(result)`, a batch at a time.
 
 Groups arrive in key order, nulls last, when the key comes from a dictionary or from a column the
 statistics say is sorted, and in no promised order otherwise; a null key is a group of its own.

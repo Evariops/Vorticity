@@ -261,6 +261,24 @@ internal static class RecordAnalysis
         return null;
     }
 
+    /// <summary>
+    /// The members of <paramref name="type"/> that are columns, by name and declared type, in the
+    /// order the generator gives them: what an analyzer matches the elements of a selection against.
+    /// </summary>
+    internal static List<(string Name, ITypeSymbol Type)> ColumnMembers(INamedTypeSymbol type, KnownSymbols known, Compilation compilation, CancellationToken cancellationToken)
+    {
+        List<(string Name, ITypeSymbol Type)> members = [];
+        foreach (Candidate candidate in Candidates(type, PrimaryConstructor(type, cancellationToken), compilation))
+        {
+            if (!IsIgnored(Attributes(candidate), known))
+            {
+                members.Add((candidate.Member.Name, TypeOf(candidate.Member)));
+            }
+        }
+
+        return members;
+    }
+
     private static IMethodSymbol? PrimaryConstructor(INamedTypeSymbol type, CancellationToken cancellationToken)
     {
         foreach (IMethodSymbol constructor in type.InstanceConstructors)

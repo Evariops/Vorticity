@@ -99,9 +99,27 @@ long hotDays = await file.Scan<Reading>()
 
 double? mean = await file.Scan<Reading>().AverageAsync(r => r.Celsius);
 
-(double? min, double? max, long cities) = await file.Scan<Reading>()
+Spread spread = await file.Scan<Reading>()
     .Where(r => r.Day >= 900)
-    .AggAsync(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.CountDistinct(r => r.City)));
+    .AggAsync<Spread>(a => (a.Min(r => r.Celsius), a.Max(r => r.Celsius), a.CountDistinct(r => r.City)));
+
+[VortexRecord]
+public partial record struct Spread(double? Min, double? Max, long Cities);   // several answers go into a record
+```
+
+A group by is a query too, and its result a scan of a record, read as batches like a file's:
+
+```csharp
+await foreach (var (city, readings, mean) in file.Scan<Reading>()
+    .GroupBy(r => r.City)
+    .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius)))
+    .As<CityMean>())
+{
+    ReadOnlySpan<long> counts = readings.Values;          // one value per city, no copy
+}
+
+[VortexRecord]
+public partial record struct CityMean(string City, long Readings, double? Mean);
 ```
 
 Rows, when rows are what you need, are a sink you ask for and pay for: `ToRecordsAsync()` yields
