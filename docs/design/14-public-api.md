@@ -229,12 +229,13 @@ for, and in no promised order without one.
 | `ExplainAsync()` | the `ScanPlan` | statistics and zone maps, never data | — |
 
 **The plan ends at the sink.** A query has LINQ's names and syntax up to its last operator, and
-everything up to there is pushed. Past it, `Projection<T>`, `Aggregation<T>` and `ToRecordsAsync`'s
-`IAsyncEnumerable<TRecord>` are enumerables of values, so `System.Linq.AsyncEnumerable` applies to
-them, on materialized values; only the members the query types define themselves — `Skip`, `Take`,
-`ToListAsync`, `ToArrayAsync`, `As<TRecord>`, `Distinct` — win over it and stay in the plan. A query
-of several values is not enumerable: `As<TRecord>` hands it, like any result, to a scan, where the
-plan goes on ([16-queries.md](16-queries.md) §1, [read-rows.md](../guide/read-rows.md)).
+everything up to there is pushed. Past it are values: `ToRecordsAsync()` and `ToValuesAsync()` hand
+them out as an `IAsyncEnumerable<T>`, to which `System.Linq.AsyncEnumerable` applies, on
+materialized values. A query is enumerated, like a scan, by the pattern of `await foreach` rather
+than as an `IAsyncEnumerable<T>`, since what returns a stream to await carries `Async`; its own
+`Skip`, `Take`, `ToListAsync`, `ToArrayAsync`, `As<TRecord>` and `Distinct` stay in the plan. A
+query of several values is not enumerable: `As<TRecord>` hands it, like any result, to a scan, where
+the plan goes on ([16-queries.md](16-queries.md) §1, [read-rows.md](../guide/read-rows.md)).
 
 ### 5.7 The key cursor
 

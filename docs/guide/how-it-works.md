@@ -88,7 +88,7 @@ pool, overlapping the next decode with your work on the current one, and hands y
 which the compiler keeps inside the loop body. Nothing is copied for you and nothing is left to
 dispose. What you want beyond borrowed columns is a sink you choose, and pay for: `ToBatchesAsync`
 copies each batch once into buffers you own, `ToRecordsAsync` builds rows, and `CountAsync`,
-`SumAsync`, `GroupBy(…).AggAsync(…)` run as operators of the scan, on the encoded blocks, reading
+`SumAsync`, `GroupBy(…).Select(…)` run as operators of the scan, on the encoded blocks, reading
 from the statistics when those suffice. `ExplainAsync` is the plan before; `Statistics` is what
 the scan did, after. See [scan-a-table.md](scan-a-table.md) and
 [statistics-and-pruning.md](statistics-and-pruning.md).

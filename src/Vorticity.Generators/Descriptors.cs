@@ -86,4 +86,14 @@ internal static class Descriptors
         isEnabledByDefault: true,
         "Reading rows builds each record through a constructor whose parameters are members, then sets the other members. Give the member a setter or an init accessor, make it a constructor parameter, or mark it [VortexIgnore].",
         HelpLink + "vx1008");
+
+    public static readonly DiagnosticDescriptor KeyComponentNotASymbol = new DiagnosticDescriptor(
+        "VX1009",
+        "A component of a group key is not a column",
+        "Component {0} of the key, '{1}', is a {2}, not a symbol of the scan's columns; GroupBy throws when it is built",
+        "Usage",
+        DiagnosticSeverity.Error,
+        isEnabledByDefault: true,
+        "A group key is a column of the scan, or a tuple of them: r => (r.City, r.Day). A literal or a captured value is the same for every row and groups nothing.",
+        HelpLink + "vx1009");
 }

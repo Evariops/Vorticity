@@ -21,6 +21,7 @@ internal sealed class KnownSymbols
         RunEndView = compilation.GetTypeByMetadataName("Vorticity.RunEndView`1");
         RecordBatch = compilation.GetTypeByMetadataName("Vorticity.RecordBatch");
         TypedScan = compilation.GetTypeByMetadataName("Vorticity.Scan`1");
+        Sym = compilation.GetTypeByMetadataName("Vorticity.Sym`1");
         ToolScan = compilation.GetTypeByMetadataName("Vorticity.Scan");
         FilterHandler = compilation.GetTypeByMetadataName("Vorticity.FilterHandler");
         RowRange = compilation.GetTypeByMetadataName("Vorticity.RowRange");
@@ -78,6 +79,9 @@ internal sealed class KnownSymbols
     public INamedTypeSymbol? DictionaryView { get; }
 
     public INamedTypeSymbol? RunEndView { get; }
+
+    /// <summary>The symbol of a column, an aggregate or a key in a scan's lambdas.</summary>
+    public INamedTypeSymbol? Sym { get; }
 
     public INamedTypeSymbol? RecordBatch { get; }
 

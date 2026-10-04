@@ -49,7 +49,7 @@ internal static class StreamToAnObject
 
         await using (VortexFile file = await session.OpenAsync(new MemorySegmentSource(uploaded.Bytes)))
         {
-            Console.WriteLine($"read back from the uploaded bytes: {file.RowCount} rows, mean {await file.Scan<Reading>().AvgAsync(r => r.Celsius):F4}");
+            Console.WriteLine($"read back from the uploaded bytes: {file.RowCount} rows, mean {await file.Scan<Reading>().AverageAsync(r => r.Celsius):F4}");
         }
 
         using (MemoryStream stream = new MemoryStream())

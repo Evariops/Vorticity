@@ -41,7 +41,7 @@ public sealed class CustomAggregatorTests
             Dictionary<int, (SumCount Plain, SumCount Coded, SumCount Runs, SumCount Canonical)> folded = [];
             await foreach ((int key, SumCount plain, SumCount coded, SumCount runs, SumCount canonical) in scan
                 .GroupBy(r => r.Key)
-                .AggAsync(g => (
+                .Select(g => (
                     g.Key,
                     g.Aggregate<double, EncodedSum, SumCount>(r => r.Plain),
                     g.Aggregate<double, EncodedSum, SumCount>(r => r.Coded),

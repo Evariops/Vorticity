@@ -72,7 +72,7 @@ internal static partial class CopyAFile
         Console.WriteLine($"a projected copy, Day and Celsius: {report.RowCount} rows, {report.Bytes.Total} bytes, in {clock.ElapsedMilliseconds} ms");
 
         await using VortexFile copy = await session.OpenAsync(output);
-        Console.WriteLine($"the projected copy reads back: {copy.Schema}, {copy.RowCount} rows, mean {await copy.Scan<DayAndCelsius>().AvgAsync(r => r.Celsius):F4}");
+        Console.WriteLine($"the projected copy reads back: {copy.Schema}, {copy.RowCount} rows, mean {await copy.Scan<DayAndCelsius>().AverageAsync(r => r.Celsius):F4}");
 
         try
         {

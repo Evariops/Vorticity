@@ -9,7 +9,7 @@ internal enum AggregateKind : byte
     Sum,
     Min,
     Max,
-    Avg,
+    Average,
     Custom,
 }
 
@@ -21,10 +21,23 @@ internal abstract class ResultNode<T> : SymNode
     internal abstract Func<int, T> Bind(AggregationOutcome outcome);
 }
 
+/// <summary>
+/// What makes two aggregates one: the same function over the same input, delivered as the same type,
+/// by the same aggregator. The <c>g.Count()</c> of a filter, an order and a selection is one state.
+/// </summary>
+/// <param name="Kind">The function.</param>
+/// <param name="Input">The input's path; null for a count of rows.</param>
+/// <param name="Result">The type the answer is delivered as.</param>
+/// <param name="Detail">The caller's aggregator, for a custom aggregate.</param>
+internal readonly record struct AggregateIdentity(AggregateKind Kind, string? Input, Type Result, Type? Detail);
+
 /// <summary>An aggregate, whatever its result type: what the engine plans and steps.</summary>
 internal interface IAggregateNode
 {
     AggregateKind Kind { get; }
+
+    /// <summary>What makes this aggregate the same as another, written elsewhere in the query.</summary>
+    AggregateIdentity Identity { get; }
 
     /// <summary>The column it reads; null for a count of rows.</summary>
     ColumnShape? Input { get; }
@@ -44,15 +57,18 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
     private readonly Func<AggregateSlot<T>> _create;
     private readonly Settler<T>? _settle;
 
-    internal AggregateNode(AggregateKind kind, ColumnShape? input, Func<AggregateSlot<T>> create, Settler<T>? settle)
+    internal AggregateNode(AggregateKind kind, ColumnShape? input, Func<AggregateSlot<T>> create, Settler<T>? settle, Type? detail = null)
     {
         Kind = kind;
         Input = input;
         _create = create;
         _settle = settle;
+        Identity = new AggregateIdentity(kind, input?.Path, typeof(T), detail);
     }
 
     public AggregateKind Kind { get; }
+
+    public AggregateIdentity Identity { get; }
 
     public ColumnShape? Input { get; }
 
@@ -66,41 +82,27 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
     public override string ToString() => Input is null ? $"{Kind}()" : $"{Kind}({Input.Path})";
 }
 
-/// <summary>A group's key, or one component of a composite key.</summary>
+/// <summary>A component of a group's key, delivered as a result.</summary>
 internal interface IKeyNode
 {
-    /// <summary>The component; -1 for the whole key.</summary>
+    /// <summary>The component's position in the key.</summary>
     int Component { get; }
 }
 
 internal sealed class KeyNode<T> : ResultNode<T>, IKeyNode
 {
-    private readonly Func<GroupKeys, Func<int, T>> _reader;
+    private readonly string _name;
 
-    internal KeyNode(int component, Func<GroupKeys, Func<int, T>> reader)
+    internal KeyNode(int component, string name)
     {
         Component = component;
-        _reader = reader;
+        _name = name;
     }
 
     public int Component { get; }
 
     internal override Func<int, T> Bind(AggregationOutcome outcome) =>
-        _reader(outcome.Keys ?? throw new InvalidOperationException("A group key is a result of a grouped scan only."));
+        (outcome.Keys ?? throw new InvalidOperationException("A group key is a result of a grouped scan only.")).Reader<T>(Component);
 
-    public override string ToString() => Component < 0 ? "Key" : $"Key.Item{Component + 1}";
-}
-
-/// <summary>The components of a composite group key.</summary>
-internal static class KeyItems
-{
-    internal static Sym<TItem> Item<TKey, TItem>(Sym<TKey> key, int component)
-    {
-        if (key.Node is not KeyNode<TKey> { Component: < 0 })
-        {
-            throw new InvalidOperationException($"Item{component + 1} reads a component of the key of a group, g.Key.");
-        }
-
-        return new Sym<TItem>(new KeyNode<TItem>(component, keys => keys.Reader<TItem>(component)));
-    }
+    public override string ToString() => $"Key({_name})";
 }

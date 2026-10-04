@@ -97,7 +97,7 @@ long hotDays = await file.Scan<Reading>()
     .Where(r => r.Day >= 900 && r.City == "Paris" && r.Celsius > 30.0)
     .CountAsync();
 
-double? mean = await file.Scan<Reading>().AvgAsync(r => r.Celsius);
+double? mean = await file.Scan<Reading>().AverageAsync(r => r.Celsius);
 
 (double? min, double? max, long cities) = await file.Scan<Reading>()
     .Where(r => r.Day >= 900)

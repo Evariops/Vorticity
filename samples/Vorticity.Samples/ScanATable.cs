@@ -44,11 +44,11 @@ internal static class ScanATable
         {
             Stopwatch clock = Stopwatch.StartNew();
             Scan<Reading> scan = file.Scan<Reading>();
-            mean = await scan.AvgAsync(r => r.Celsius);
+            mean = await scan.AverageAsync(r => r.Celsius);
             (avg, avgTime) = (scan.Statistics, clock.Elapsed);
         }
 
-        Console.WriteLine($"AvgAsync: mean {mean:F4}, {avgTime.TotalMilliseconds:F1} ms");
+        Console.WriteLine($"AverageAsync: mean {mean:F4}, {avgTime.TotalMilliseconds:F1} ms");
         Console.WriteLine($"  {avg.BlocksDecoded} blocks decoded, {avg.Requests} requests, {avg.BytesRequested} bytes");
 
         FieldStatistics celsiusStatistics = file.Statistics[1];
@@ -58,8 +58,8 @@ internal static class ScanATable
 
         bool hasDaySum = file.Statistics[0].TryGetSum(out long daySum);
         Scan<Reading> days = file.Scan<Reading>();
-        double? meanDay = await days.AvgAsync(r => r.Day);
-        Console.WriteLine($"file statistics of Day: sum {(hasDaySum ? daySum.ToString() : "absent")}; AvgAsync(r => r.Day) {meanDay}, {days.Statistics.Requests} requests");
+        double? meanDay = await days.AverageAsync(r => r.Day);
+        Console.WriteLine($"file statistics of Day: sum {(hasDaySum ? daySum.ToString() : "absent")}; AverageAsync(r => r.Day) {meanDay}, {days.Statistics.Requests} requests");
 
         long defaultBytes = await AllocatedAsync(file, new ScanOptions());
         (long defaultBatches, _, _) = await BatchesAsync(file, new ScanOptions());

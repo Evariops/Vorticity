@@ -40,7 +40,7 @@ internal static class Scenarios
         long rows = 0;
         await foreach ((string city, long count, double? mean) in file.Scan<Reading>()
             .GroupBy(r => r.City)
-            .AggAsync(g => (g.Key, g.Count(), g.Avg(r => r.Celsius))).ConfigureAwait(false))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius))))
         {
             run.Answer();
             rows += count + (city.Length > 0 && mean > 0 ? 0 : 1);
@@ -54,7 +54,7 @@ internal static class Scenarios
         long rows = 0;
         await foreach ((string city, WelfordState state) in file.Scan<Reading>()
             .GroupBy(r => r.City)
-            .AggAsync(g => (g.Key, g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))).ConfigureAwait(false))
+            .Select(g => (g.Key, g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))))
         {
             run.Answer();
             rows += state.Count + (city.Length > 0 ? 0 : 1);
@@ -121,7 +121,7 @@ internal static class Scenarios
         long rows = 0;
         await foreach ((int day, long count, double? mean) in file.Scan<Reading>()
             .GroupBy(r => r.Day)
-            .AggAsync(g => (g.Key, g.Count(), g.Avg(r => r.Celsius))).ConfigureAwait(false))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Celsius))))
         {
             run.Answer();
             rows += count + (day >= 0 && mean > 0 ? 0 : 1);
@@ -135,7 +135,7 @@ internal static class Scenarios
         long rows = 0;
         await foreach ((string city, int day, long count, double? mean) in file.Scan<Reading>()
             .GroupBy(r => (r.City, r.Day))
-            .AggAsync(g => (g.Key.Item1, g.Key.Item2, g.Count(), g.Avg(r => r.Celsius))).ConfigureAwait(false))
+            .Select(g => (g.Key.City, g.Key.Day, g.Count(), g.Average(r => r.Celsius))))
         {
             run.Answer();
             rows += count + (city.Length > 0 && day >= 0 && mean > 0 ? 0 : 1);
@@ -149,7 +149,7 @@ internal static class Scenarios
         long rows = 0;
         await foreach ((string endpoint, long count, double? mean) in file.Scan<Request>()
             .GroupBy(r => r.Endpoint)
-            .AggAsync(g => (g.Key, g.Count(), g.Avg(r => r.Latency))).ConfigureAwait(false))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency))))
         {
             run.Answer();
             rows += count + (endpoint.Length > 0 && mean > 0 ? 0 : 1);
@@ -222,7 +222,7 @@ internal static class Scenarios
         long rows = 0;
         await foreach ((int user, long count, double? mean) in file.Scan<Request>()
             .GroupBy(r => r.UserId)
-            .AggAsync(g => (g.Key, g.Count(), g.Avg(r => r.Latency))).ConfigureAwait(false))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency))))
         {
             run.Answer();
             rows += count + (user >= 0 && mean >= 0 ? 0 : 1);
@@ -258,7 +258,7 @@ internal static class Scenarios
     {
         await foreach ((int day, long count) in file.Scan<Reading>()
             .GroupBy(r => r.Day)
-            .AggAsync(g => (g.Key, g.Count())).ConfigureAwait(false))
+            .Select(g => (g.Key, g.Count())))
         {
             run.Answer();
             return count + day;

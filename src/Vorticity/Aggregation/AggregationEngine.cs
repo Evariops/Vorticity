@@ -10,7 +10,7 @@ using Vorticity.Types;
 
 namespace Vorticity.Aggregating;
 
-/// <summary>What an aggregation computes: its aggregates, distinct by identity, and the columns of its group key.</summary>
+/// <summary>What an aggregation computes: its aggregates, one of each (<see cref="AggregateIdentity"/>), and the columns of its group key.</summary>
 internal sealed class AggregationPlan
 {
     internal AggregationPlan(ReadOnlySpan<SymNode> results, ColumnShape[] keys)
@@ -22,7 +22,7 @@ internal sealed class AggregationPlan
             switch (node)
             {
                 case IAggregateNode aggregate:
-                    if (!aggregates.Exists(known => ReferenceEquals(known, aggregate)))
+                    if (!aggregates.Exists(known => known.Identity.Equals(aggregate.Identity)))
                     {
                         aggregates.Add(aggregate);
                     }
@@ -48,11 +48,26 @@ internal sealed class AggregationPlan
 
     /// <summary>The result a symbol stands for.</summary>
     /// <exception cref="InvalidOperationException">The symbol is a column, not an aggregate or a key.</exception>
-    internal static ResultNode<T> Result<T>(Sym<T> symbol) =>
-        symbol.Node as ResultNode<T>
-        ?? throw new InvalidOperationException($"'{symbol}' is not an aggregate: a result is an aggregate of the lambda's argument, or the group's key.");
+    internal static ResultNode<T> Result<T>(Sym<T> symbol) => Result(symbol, []);
 
-    internal int IndexOf(IAggregateNode node) => Array.FindIndex(Aggregates, known => ReferenceEquals(known, node));
+    /// <summary>The result a symbol of a grouped scan's lambda stands for: an aggregate, or a component of the key, known by identity.</summary>
+    /// <exception cref="InvalidOperationException">The symbol is neither.</exception>
+    internal static ResultNode<T> Result<T>(Sym<T> symbol, SymNode[] components)
+    {
+        if (symbol.Node is ResultNode<T> result)
+        {
+            return result;
+        }
+
+        int component = Array.IndexOf(components, symbol.Node);
+        return component >= 0
+            ? new KeyNode<T>(component, symbol.Node.ToString() ?? string.Empty)
+            : throw new InvalidOperationException(
+                $"'{symbol}' is neither an aggregate nor a component of the key: a result is an aggregate of the group, or g.Key.");
+    }
+
+    /// <summary>The slot of <paramref name="node"/>: the one aggregate of the plan it is the same as.</summary>
+    internal int IndexOf(IAggregateNode node) => Array.FindIndex(Aggregates, known => known.Identity.Equals(node.Identity));
 
     /// <summary>The index of the groups of one partition.</summary>
     internal GroupKeys CreateKeys(bool sorted)

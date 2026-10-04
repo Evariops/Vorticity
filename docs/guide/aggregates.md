@@ -17,14 +17,14 @@ AggAsync, four answers             2.3 ms  min 10.1, max 49.9, 100000 rows, 8 ci
 
 `AggAsync` takes a lambda over an `Aggregates<Reading>` and returns a tuple of one to eight answers,
 computed in a single pass over the rows the scan keeps. The members are `Count()`,
-`CountDistinct`, `Sum`, `Min`, `Max`, `Avg` and `Aggregate`, each over a column named as in a
+`CountDistinct`, `Sum`, `Min`, `Max`, `Average` and `Aggregate`, each over a column named as in a
 filter. Like a filter, the lambda runs once and describes the work; nothing is evaluated per row in
 your code. Here the `Where` let the zone maps skip 109 blocks, and the four answers came from the
 14 left, of which one had a column brought to the canonical form; the others were read as runs and
 dictionaries.
 
 For one answer there are the sinks of the scan itself: `CountAsync`, `AnyAsync`, `MinAsync`,
-`MaxAsync`, `SumAsync`, `AvgAsync`, `CountDistinctAsync` and `AggregateAsync`. An aggregate runs
+`MaxAsync`, `SumAsync`, `AverageAsync`, `CountDistinctAsync` and `AggregateAsync`. An aggregate runs
 block by block on the encoded form, never hands a batch to your code, keeps one state per chunk,
 and merges the states at the end; §5.5 of [14-public-api.md](../design/14-public-api.md) tables
 what each encoding lets it skip.
@@ -34,7 +34,7 @@ what each encoding lets it skip.
 ```csharp
 Aggregation<(string, double?, WelfordState)> byCity = file.Scan<Reading>()
     .GroupBy(r => r.City)
-    .AggAsync(g => (g.Key, g.Avg(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)));
+    .Select(g => (g.Key, g.Average(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)));
 await foreach ((string city, double? mean, WelfordState state) in byCity)
 {
     lines[line++] = $"  {city,-10} mean {mean:F4}  variance {state.Variance:F4}";
@@ -51,12 +51,21 @@ await foreach ((string city, double? mean, WelfordState state) in byCity)
 `Welford<double>` is the aggregator of the next section, a mean and a variance in one pass.
 `g.Key` is the key, and the other members of `g` are those of `Aggregates`. The result is an
 `Aggregation<T>`, enumerated with `await foreach`, with its own `ExplainAsync` and `Statistics`. A
-composite key has up to four columns, reached as `g.Key.Item1` to `Item4`:
+composite key is a tuple of columns, of any length, whose names are the key's, `g.Key.City` and
+`g.Key.Day`:
 
 ```csharp
 await foreach (var (city, day, total, state) in file.Scan<Reading>()
     .GroupBy(r => (r.City, r.Day))
-    .AggAsync(g => (g.Key.Item1, g.Key.Item2, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))))
+    .Select(g => (g.Key.City, g.Key.Day, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))))
+```
+
+The same query in query syntax is the same plan:
+
+```csharp
+from r in file.Scan<Reading>()
+group r by (r.City, r.Day) into g
+select (g.Key.City, g.Key.Day, g.Sum(x => x.Celsius))
 ```
 
 Groups arrive in key order, nulls last, when the key comes from a dictionary or from a column the
@@ -167,7 +176,7 @@ converted once, at the end:
 ```csharp
 decimal total = await file.Scan<Invoice>().SumAsync(i => i.Amount);          // decimal(18, 2): as decimal
 VortexDecimal wide = await file.Scan<Ledger>().SumAsync(l => l.Balance);     // decimal(76, 10): as VortexDecimal
-double? mean = await file.Scan<Ledger>().AvgAsync(l => l.Balance);
+double? mean = await file.Scan<Ledger>().AverageAsync(l => l.Balance);
 ```
 
 A sum as `VortexDecimal` carries 38 digits while it fits them, as a SQL sum of a narrower decimal
@@ -184,7 +193,7 @@ dictionary or run-end block included.
   `OverflowException`. Sum it with an aggregator whose state is a `long`, as `Welford` keeps a
   `long` count.
 * **The file carries no sum.** `MinAsync`, `MaxAsync` and `CountAsync` without a filter answer from
-  the file statistics; `SumAsync` and `AvgAsync` read the column ([scan-a-table.md](scan-a-table.md)).
+  the file statistics; `SumAsync` and `AverageAsync` read the column ([scan-a-table.md](scan-a-table.md)).
 * **NaN is skipped** by a float sum, mean, minimum and maximum, and counted as one value by a
   distinct count. An aggregation ignores the scan's `OrderBy`.
 * **Encoded steps need generic instantiation at run time.** Under Native AOT the scan calls `Step`

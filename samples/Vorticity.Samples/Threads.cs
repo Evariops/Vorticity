@@ -134,7 +134,7 @@ internal static class Threads
     private static async Task<long> GroupAsync(Scan<Reading> scan)
     {
         long groups = 0;
-        await foreach ((string city, double? mean) in scan.GroupBy(r => r.City).AggAsync(g => (g.Key, g.Avg(r => r.Celsius))))
+        await foreach ((string city, double? mean) in scan.GroupBy(r => r.City).Select(g => (g.Key, g.Average(r => r.Celsius))))
         {
             groups += city.Length > 0 && mean > 0 ? 1 : 0;
         }

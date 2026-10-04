@@ -13,7 +13,7 @@ namespace Vorticity;
 /// A lambda over <see cref="Probe{TRecord}"/> runs once, when the scan is built: a breakpoint in it
 /// sees symbols, not values, and hits once. Arithmetic is not pushed down and does not compile.
 /// </remarks>
-public readonly struct Sym<T>
+public readonly struct Sym<T> : ISymbol
 {
     internal Sym(SymNode node)
     {
@@ -21,6 +21,8 @@ public readonly struct Sym<T>
     }
 
     internal SymNode Node { get; }
+
+    SymNode ISymbol.Node => Node;
 
     internal ColumnSym Column =>
         Node as ColumnSym ?? throw new InvalidOperationException("Only a column can be compared; an aggregate or a group key is a result, not a filter.");
@@ -145,6 +147,12 @@ public readonly struct Sym<T>
 /// <summary>What a <see cref="Sym{T}"/> stands for.</summary>
 internal abstract class SymNode
 {
+}
+
+/// <summary>A symbol whatever its type: what a tuple of symbols, read through <see cref="System.Runtime.CompilerServices.ITuple"/>, holds.</summary>
+internal interface ISymbol
+{
+    SymNode Node { get; }
 }
 
 /// <summary>A column of the scanned file, with the type the file gives it.</summary>

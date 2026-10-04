@@ -54,7 +54,7 @@ public sealed class GroupHashTests
 
             await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
             Dictionary<long, long> counts = [];
-            Aggregation<(long, long)> groups = file.Scan<Keyed>().GroupBy(r => r.Key).AggAsync(g => (g.Key, g.Count()));
+            Aggregation<(long, long)> groups = file.Scan<Keyed>().GroupBy(r => r.Key).Select(g => (g.Key, g.Count()));
             await foreach ((long key, long count) in groups.WithCancellation(TestContext.Current.CancellationToken))
             {
                 counts.Add(key, count);

@@ -67,17 +67,17 @@ public readonly struct Aggregates<TRecord>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the mean; null when no row holds a value.</returns>
-    public Sym<double?> Avg<T>(Func<Probe<TRecord>, Sym<T>> column)
+    public Sym<double?> Average<T>(Func<Probe<TRecord>, Sym<T>> column)
         where T : INumber<T> =>
-        Aggregators.Avg(Aggregators.Input(_binding, column));
+        Aggregators.Average(Aggregators.Input(_binding, column));
 
     /// <summary>The mean of the non-null values of a nullable <paramref name="column"/>.</summary>
     /// <typeparam name="T">The column's type, without its nullability.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the mean; null when no row holds a value.</returns>
-    public Sym<double?> Avg<T>(Func<Probe<TRecord>, Sym<T?>> column)
+    public Sym<double?> Average<T>(Func<Probe<TRecord>, Sym<T?>> column)
         where T : struct, INumber<T> =>
-        Aggregators.Avg(Aggregators.Input(_binding, column));
+        Aggregators.Average(Aggregators.Input(_binding, column));
 
     /// <summary>The state <typeparamref name="TAggregator"/> folds <paramref name="column"/> into.</summary>
     /// <typeparam name="T">The column's storage type.</typeparam>

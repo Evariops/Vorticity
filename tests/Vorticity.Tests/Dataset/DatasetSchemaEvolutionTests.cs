@@ -118,7 +118,7 @@ public sealed class DatasetSchemaEvolutionTests
                 Assert.Equal(keys, (await dataset.Scan<MeterV2>().OrderBy(r => r.Key).ToRecordsAsync(ct).ToListAsync(ct)).Select(row => row.Key));
                 Assert.Equal(
                     [.. keys.AsEnumerable().Reverse()],
-                    (await dataset.Scan<MeterV2>().OrderBy(r => r.Key, descending: true).ToRecordsAsync(ct).ToListAsync(ct)).Select(row => row.Key));
+                    (await dataset.Scan<MeterV2>().OrderByDescending(r => r.Key).ToRecordsAsync(ct).ToListAsync(ct)).Select(row => row.Key));
                 Assert.Equal(
                     expected.Where(row => row.Temperature is null).Select(row => row.Key).Order(),
                     (await dataset.Scan<MeterV2>().Where(r => r.Temperature.IsNull).OrderBy(r => r.Key).ToRecordsAsync(ct).ToListAsync(ct)).Select(row => row.Key));

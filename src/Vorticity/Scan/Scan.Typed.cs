@@ -96,12 +96,21 @@ public sealed partial class Scan<TRecord>
         return this;
     }
 
-    /// <summary>Delivers the rows in the order of <paramref name="key"/>, from its key source: a column the statistics say is sorted, or a sorted-runs index.</summary>
+    /// <summary>Delivers the rows in the ascending order of <paramref name="key"/>, from its key source: a column the statistics say is sorted, or a sorted-runs index.</summary>
     /// <typeparam name="TKey">The key column's type.</typeparam>
     /// <param name="key">The key column.</param>
-    /// <param name="descending">Whether the order is reversed; a null key comes last either way.</param>
     /// <returns>This scan.</returns>
-    public Scan<TRecord> OrderBy<TKey>(Func<Probe<TRecord>, Sym<TKey>> key, bool descending = false)
+    /// <remarks>A null key comes last; <c>orderby r.Key</c> in a query is this.</remarks>
+    public Scan<TRecord> OrderBy<TKey>(Func<Probe<TRecord>, Sym<TKey>> key) => Ordered(key, descending: false);
+
+    /// <summary>Delivers the rows in the descending order of <paramref name="key"/>, from its key source.</summary>
+    /// <typeparam name="TKey">The key column's type.</typeparam>
+    /// <param name="key">The key column.</param>
+    /// <returns>This scan.</returns>
+    /// <remarks>A null key comes last here too; <c>orderby r.Key descending</c> in a query is this.</remarks>
+    public Scan<TRecord> OrderByDescending<TKey>(Func<Probe<TRecord>, Sym<TKey>> key) => Ordered(key, descending: true);
+
+    private Scan<TRecord> Ordered<TKey>(Func<Probe<TRecord>, Sym<TKey>> key, bool descending)
     {
         ArgumentNullException.ThrowIfNull(key);
         ColumnSym column = key(new Probe<TRecord>(Binding)).Column;

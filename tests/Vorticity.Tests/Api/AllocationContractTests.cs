@@ -141,11 +141,11 @@ public sealed class AllocationContractTests
         (string Sink, Func<Scan<Reading>> Scan, Func<Scan<Reading>, Task> Run)[] sinks =
         [
             ("SumAsync", all, async scan => await scan.SumAsync(r => r.Day)),
-            ("AvgAsync", all, async scan => await scan.AvgAsync(r => r.Celsius)),
+            ("AverageAsync", all, async scan => await scan.AverageAsync(r => r.Celsius)),
             ("AggAsync", all, async scan => await scan.AggAsync(a => (a.Sum(r => r.Celsius), a.Count()))),
             ("GroupBy", all, async scan =>
             {
-                await foreach ((string, long) group in scan.GroupBy(r => r.City).AggAsync(g => (g.Key, g.Count())))
+                await foreach ((string, long) group in scan.GroupBy(r => r.City).Select(g => (g.Key, g.Count())))
                 {
                     GC.KeepAlive(group.Item1);
                 }

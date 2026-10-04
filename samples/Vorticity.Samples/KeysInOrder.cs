@@ -100,8 +100,8 @@ internal static class KeysInOrder
 
     private static async Task OrderedScanAsync(VortexFile file)
     {
-        Scan<Reading> ordered = file.Scan<Reading>().OrderBy(r => r.Day, descending: true);
-        ScanPlan plan = await file.Scan<Reading>().OrderBy(r => r.Day, descending: true).ExplainAsync();
+        Scan<Reading> ordered = file.Scan<Reading>().OrderByDescending(r => r.Day);
+        ScanPlan plan = await file.Scan<Reading>().OrderByDescending(r => r.Day).ExplainAsync();
         Console.WriteLine($"ordered scan: source {plan.Order?.Source}, {plan.Order?.Runs} run, {plan.Order?.Entries} entries, descending {plan.Order?.Descending}");
 
         int batches = 0;

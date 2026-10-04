@@ -18,6 +18,7 @@ diagnostic's help link points at its section below.
 | [VX1006](#vx1006) | error | a record type, or a type containing it, is not `partial` |
 | [VX1007](#vx1007) | error | a type cannot be a record at all |
 | [VX1008](#vx1008) | error | a record member cannot be filled when rows are read |
+| [VX1009](#vx1009) | error | a component of a group key is not a column |
 
 ## VX1001
 
@@ -311,3 +312,23 @@ A private setter on the record's own member is fine: the generated code is part 
 **Fix:** give the member a setter or an `init` accessor, make it a constructor parameter, or mark
 a computed member `[VortexIgnore]`. For a `required` member you ignore, remove `required`, or put
 `[SetsRequiredMembers]` on the constructor that reading uses.
+
+## VX1009
+
+**A component of a group key is not a column.** Error.
+
+A group by takes a column of the scan, or a tuple of them, and each row falls into the group of its
+values. A literal, or a value captured from outside the lambda, is the same for every row: it
+groups nothing, and `GroupBy` refuses it with `ArgumentException` when it is built. The analyzer
+flags it in the tuple, in method and in query syntax.
+
+```csharp
+file.Scan<Reading>().GroupBy(r => (r.City, 42));          // VX1009: component 2, '42', is an int
+
+from r in file.Scan<Reading>()
+group r by (r.Day, "all") into g                          // VX1009: component 2, '"all"', is a string
+select (g.Key.Day, g.Count());
+```
+
+**Fix:** group by the columns alone, `r => (r.City, r.Day)`. A constant that should appear in every
+row of the result belongs to C# after the query.

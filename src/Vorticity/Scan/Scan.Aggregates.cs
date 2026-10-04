@@ -41,18 +41,18 @@ public sealed partial class Scan<TRecord>
     /// <param name="column">The column.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The mean; null when no row holds a value.</returns>
-    public ValueTask<double?> AvgAsync<T>(Func<Probe<TRecord>, Sym<T>> column, CancellationToken cancellationToken = default)
+    public ValueTask<double?> AverageAsync<T>(Func<Probe<TRecord>, Sym<T>> column, CancellationToken cancellationToken = default)
         where T : INumber<T> =>
-        ScalarAsync(Aggregators.Avg(Aggregators.Input(Binding, column)), cancellationToken);
+        ScalarAsync(Aggregators.Average(Aggregators.Input(Binding, column)), cancellationToken);
 
     /// <summary>The mean of the non-null values of a nullable <paramref name="column"/> over the rows the scan keeps.</summary>
     /// <typeparam name="T">The column's type, without its nullability.</typeparam>
     /// <param name="column">The column.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     /// <returns>The mean; null when no row holds a value.</returns>
-    public ValueTask<double?> AvgAsync<T>(Func<Probe<TRecord>, Sym<T?>> column, CancellationToken cancellationToken = default)
+    public ValueTask<double?> AverageAsync<T>(Func<Probe<TRecord>, Sym<T?>> column, CancellationToken cancellationToken = default)
         where T : struct, INumber<T> =>
-        ScalarAsync(Aggregators.Avg(Aggregators.Input(Binding, column)), cancellationToken);
+        ScalarAsync(Aggregators.Average(Aggregators.Input(Binding, column)), cancellationToken);
 
     /// <summary>The number of distinct non-null values of <paramref name="column"/> among the rows the scan keeps; a dictionary block counts its codes, not its rows.</summary>
     /// <typeparam name="T">The column's type.</typeparam>

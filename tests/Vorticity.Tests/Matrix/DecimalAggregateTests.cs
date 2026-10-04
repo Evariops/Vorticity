@@ -31,16 +31,16 @@ public sealed class DecimalAggregateTests
         await using VortexFile file = await VortexFile.OpenAsync(written.Path, ct);
         Func<Scan<AllTypes>> scan = file.Scan<AllTypes>;
 
-        await Check(rows.Dec8, 1, () => scan().SumAsync(r => r.Dec8, ct), () => scan().AvgAsync(r => r.Dec8, ct), () => N(scan().MinAsync(r => r.Dec8, ct)), () => N(scan().MaxAsync(r => r.Dec8, ct)), () => scan().CountDistinctAsync(r => r.Dec8, ct));
-        await Check(rows.Dec16, 2, () => scan().SumAsync(r => r.Dec16, ct), () => scan().AvgAsync(r => r.Dec16, ct), () => N(scan().MinAsync(r => r.Dec16, ct)), () => N(scan().MaxAsync(r => r.Dec16, ct)), () => scan().CountDistinctAsync(r => r.Dec16, ct));
-        await Check(rows.Dec32, 2, () => scan().SumAsync(r => r.Dec32, ct), () => scan().AvgAsync(r => r.Dec32, ct), () => N(scan().MinAsync(r => r.Dec32, ct)), () => N(scan().MaxAsync(r => r.Dec32, ct)), () => scan().CountDistinctAsync(r => r.Dec32, ct));
-        await Check(rows.Dec64, 4, () => scan().SumAsync(r => r.Dec64, ct), () => scan().AvgAsync(r => r.Dec64, ct), () => N(scan().MinAsync(r => r.Dec64, ct)), () => N(scan().MaxAsync(r => r.Dec64, ct)), () => scan().CountDistinctAsync(r => r.Dec64, ct));
-        await Check(rows.Dec128, 10, () => scan().SumAsync(r => r.Dec128, ct), () => scan().AvgAsync(r => r.Dec128, ct), () => N(scan().MinAsync(r => r.Dec128, ct)), () => N(scan().MaxAsync(r => r.Dec128, ct)), () => scan().CountDistinctAsync(r => r.Dec128, ct));
-        await Check(rows.Dec128N, 10, () => scan().SumAsync(r => r.Dec128N, ct), () => scan().AvgAsync(r => r.Dec128N, ct), () => N(scan().MinAsync(r => r.Dec128N, ct)), () => N(scan().MaxAsync(r => r.Dec128N, ct)), () => scan().CountDistinctAsync(r => r.Dec128N, ct));
+        await Check(rows.Dec8, 1, () => scan().SumAsync(r => r.Dec8, ct), () => scan().AverageAsync(r => r.Dec8, ct), () => N(scan().MinAsync(r => r.Dec8, ct)), () => N(scan().MaxAsync(r => r.Dec8, ct)), () => scan().CountDistinctAsync(r => r.Dec8, ct));
+        await Check(rows.Dec16, 2, () => scan().SumAsync(r => r.Dec16, ct), () => scan().AverageAsync(r => r.Dec16, ct), () => N(scan().MinAsync(r => r.Dec16, ct)), () => N(scan().MaxAsync(r => r.Dec16, ct)), () => scan().CountDistinctAsync(r => r.Dec16, ct));
+        await Check(rows.Dec32, 2, () => scan().SumAsync(r => r.Dec32, ct), () => scan().AverageAsync(r => r.Dec32, ct), () => N(scan().MinAsync(r => r.Dec32, ct)), () => N(scan().MaxAsync(r => r.Dec32, ct)), () => scan().CountDistinctAsync(r => r.Dec32, ct));
+        await Check(rows.Dec64, 4, () => scan().SumAsync(r => r.Dec64, ct), () => scan().AverageAsync(r => r.Dec64, ct), () => N(scan().MinAsync(r => r.Dec64, ct)), () => N(scan().MaxAsync(r => r.Dec64, ct)), () => scan().CountDistinctAsync(r => r.Dec64, ct));
+        await Check(rows.Dec128, 10, () => scan().SumAsync(r => r.Dec128, ct), () => scan().AverageAsync(r => r.Dec128, ct), () => N(scan().MinAsync(r => r.Dec128, ct)), () => N(scan().MaxAsync(r => r.Dec128, ct)), () => scan().CountDistinctAsync(r => r.Dec128, ct));
+        await Check(rows.Dec128N, 10, () => scan().SumAsync(r => r.Dec128N, ct), () => scan().AverageAsync(r => r.Dec128N, ct), () => N(scan().MinAsync(r => r.Dec128N, ct)), () => N(scan().MaxAsync(r => r.Dec128N, ct)), () => scan().CountDistinctAsync(r => r.Dec128N, ct));
 
-        await CheckWide(rows.Wide128, 6, () => scan().SumAsync(r => r.Wide128, ct), () => scan().AvgAsync(r => r.Wide128, ct), () => N(scan().MinAsync(r => r.Wide128, ct)), () => N(scan().MaxAsync(r => r.Wide128, ct)), () => scan().CountDistinctAsync(r => r.Wide128, ct));
-        await CheckWide(rows.Wide256, 10, () => scan().SumAsync(r => r.Wide256, ct), () => scan().AvgAsync(r => r.Wide256, ct), () => N(scan().MinAsync(r => r.Wide256, ct)), () => N(scan().MaxAsync(r => r.Wide256, ct)), () => scan().CountDistinctAsync(r => r.Wide256, ct));
-        await CheckWide(rows.Wide256N, 10, () => scan().SumAsync(r => r.Wide256N, ct), () => scan().AvgAsync(r => r.Wide256N, ct), () => N(scan().MinAsync(r => r.Wide256N, ct)), () => N(scan().MaxAsync(r => r.Wide256N, ct)), () => scan().CountDistinctAsync(r => r.Wide256N, ct));
+        await CheckWide(rows.Wide128, 6, () => scan().SumAsync(r => r.Wide128, ct), () => scan().AverageAsync(r => r.Wide128, ct), () => N(scan().MinAsync(r => r.Wide128, ct)), () => N(scan().MaxAsync(r => r.Wide128, ct)), () => scan().CountDistinctAsync(r => r.Wide128, ct));
+        await CheckWide(rows.Wide256, 10, () => scan().SumAsync(r => r.Wide256, ct), () => scan().AverageAsync(r => r.Wide256, ct), () => N(scan().MinAsync(r => r.Wide256, ct)), () => N(scan().MaxAsync(r => r.Wide256, ct)), () => scan().CountDistinctAsync(r => r.Wide256, ct));
+        await CheckWide(rows.Wide256N, 10, () => scan().SumAsync(r => r.Wide256N, ct), () => scan().AverageAsync(r => r.Wide256N, ct), () => N(scan().MinAsync(r => r.Wide256N, ct)), () => N(scan().MaxAsync(r => r.Wide256N, ct)), () => scan().CountDistinctAsync(r => r.Wide256N, ct));
     }
 
     [Theory]
@@ -55,7 +55,7 @@ public sealed class DecimalAggregateTests
 
         // In one pass: the answers a single scan computes together are the ones computed apart.
         (VortexDecimal? min, VortexDecimal? max, long distinct, double? mean) = await file.Scan<AllTypes>()
-            .AggAsync(a => (a.Min(r => r.Wide256), a.Max(r => r.Wide256), a.CountDistinct(r => r.Wide256), a.Avg(r => r.Wide256)), ct);
+            .AggAsync(a => (a.Min(r => r.Wide256), a.Max(r => r.Wide256), a.CountDistinct(r => r.Wide256), a.Average(r => r.Wide256)), ct);
         List<BigInteger> wide = rows.Wide256.Select(v => Unscaled(v!.Value, 10)).ToList();
         Assert.Equal(wide.Min(), Unscaled(min!.Value, 10));
         Assert.Equal(wide.Max(), Unscaled(max!.Value, 10));
@@ -67,7 +67,7 @@ public sealed class DecimalAggregateTests
             .GroupBy(r => r.state).ToDictionary(g => g.Key, g => g.Select(r => r.Item2).ToList());
         var byState = file.Scan<AllTypes>()
             .GroupBy(r => r.State)
-            .AggAsync(g => (g.Key, g.Max(r => r.Wide128), g.Avg(r => r.Wide128)));
+            .Select(g => (g.Key, g.Max(r => r.Wide128), g.Average(r => r.Wide128)));
         int seen = 0;
         await foreach ((Status state, VortexDecimal groupMax, double? groupMean) in byState.WithCancellation(ct))
         {
@@ -84,7 +84,7 @@ public sealed class DecimalAggregateTests
         int keys = 0;
         await foreach ((VortexDecimal key, long count) in file.Scan<AllTypes>()
             .GroupBy(r => r.Wide256)
-            .AggAsync(g => (g.Key, g.Count())).WithCancellation(ct))
+            .Select(g => (g.Key, g.Count())).WithCancellation(ct))
         {
             BigInteger unscaled = Unscaled(key, 10);
             Assert.Equal(occurrences[unscaled], count);

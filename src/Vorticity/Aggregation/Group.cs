@@ -5,23 +5,23 @@ using Vorticity.Aggregating;
 namespace Vorticity;
 
 /// <summary>
-/// One group of a grouped scan, for the lambda of <c>AggAsync</c>: its key, and the aggregates of
+/// One group of a grouped scan, for the lambda of <c>Select</c>: its key, and the aggregates of
 /// <see cref="Aggregates{TRecord}"/> over the group's rows.
 /// </summary>
 /// <typeparam name="TRecord">The record the scan is typed by.</typeparam>
-/// <typeparam name="TKey">The key: one column's type, or the tuple of a composite key, whose components are <c>Key.Item1</c> to <c>Key.Item4</c>.</typeparam>
+/// <typeparam name="TKey">The key: the symbol of one column, or the tuple of symbols of a composite key, under the names the key's lambda gave them.</typeparam>
 public readonly struct Group<TRecord, TKey>
 {
     private readonly RecordBinding? _binding;
 
-    internal Group(RecordBinding binding, Sym<TKey> key)
+    internal Group(RecordBinding binding, TKey key)
     {
         _binding = binding;
         Key = key;
     }
 
-    /// <summary>The group's key.</summary>
-    public Sym<TKey> Key { get; }
+    /// <summary>The group's key: the symbol of its column, or the tuple of symbols of a composite key, each a result of the group.</summary>
+    public TKey Key { get; }
 
     /// <summary>The binding the aggregates read their columns through, for the extensions that add aggregates.</summary>
     internal RecordBinding? Binding => _binding;
@@ -71,17 +71,17 @@ public readonly struct Group<TRecord, TKey>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the mean; null when no row of the group holds a value.</returns>
-    public Sym<double?> Avg<T>(Func<Probe<TRecord>, Sym<T>> column)
+    public Sym<double?> Average<T>(Func<Probe<TRecord>, Sym<T>> column)
         where T : INumber<T> =>
-        Aggregators.Avg(Aggregators.Input(_binding, column));
+        Aggregators.Average(Aggregators.Input(_binding, column));
 
     /// <summary>The mean of the non-null values of a nullable <paramref name="column"/> in the group.</summary>
     /// <typeparam name="T">The column's type, without its nullability.</typeparam>
     /// <param name="column">The column.</param>
     /// <returns>The symbol of the mean.</returns>
-    public Sym<double?> Avg<T>(Func<Probe<TRecord>, Sym<T?>> column)
+    public Sym<double?> Average<T>(Func<Probe<TRecord>, Sym<T?>> column)
         where T : struct, INumber<T> =>
-        Aggregators.Avg(Aggregators.Input(_binding, column));
+        Aggregators.Average(Aggregators.Input(_binding, column));
 
     /// <summary>The state <typeparamref name="TAggregator"/> folds <paramref name="column"/> into, per group.</summary>
     /// <typeparam name="T">The column's storage type.</typeparam>

@@ -166,7 +166,7 @@ public sealed class DistinctHashTests
             Dictionary<long, long> counts = [];
             Aggregation<(long, long)> distinct = file.Scan<Grouped>()
                 .GroupBy(r => r.Group)
-                .AggAsync(g => (g.Key, g.CountDistinct(r => r.Value)));
+                .Select(g => (g.Key, g.CountDistinct(r => r.Value)));
             await foreach ((long group, long count) in distinct.WithCancellation(TestContext.Current.CancellationToken))
             {
                 counts.Add(group, count);

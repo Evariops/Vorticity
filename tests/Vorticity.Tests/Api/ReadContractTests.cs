@@ -55,7 +55,7 @@ public sealed class ReadContractTests
         // A parallel aggregation runs one scan per partition, cut at chunk boundaries.
         Scan<Reading> grouped = file.Scan<Reading>().With(options);
         long counted = 0;
-        await foreach ((string, long) group in grouped.GroupBy(r => r.City).AggAsync(g => (g.Key, g.Count())).WithCancellation(TestContext.Current.CancellationToken))
+        await foreach ((string, long) group in grouped.GroupBy(r => r.City).Select(g => (g.Key, g.Count())).WithCancellation(TestContext.Current.CancellationToken))
         {
             counted += group.Item2;
         }
@@ -223,7 +223,7 @@ public sealed class ReadContractTests
             break;
         }
 
-        Aggregation<(string, long)> groups = file.Scan<Reading>().GroupBy(r => r.City).AggAsync(g => (g.Key, g.Count()));
+        Aggregation<(string, long)> groups = file.Scan<Reading>().GroupBy(r => r.City).Select(g => (g.Key, g.Count()));
         long grouped = 0;
         await foreach ((string, long) group in groups.WithCancellation(TestContext.Current.CancellationToken))
         {

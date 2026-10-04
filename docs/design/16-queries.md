@@ -17,7 +17,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | stage | what lands | sections |
 > |---|---|---|
 > | 0 | the measures: time to first batch, peak memory, allocations, a group-by matrix, and their baselines | §13 |
-> | 1 | `Select` on a grouped scan, its overloads by arity kept until stage 2, named keys, `Average` and `AverageAsync`, `OrderByDescending` on a scan, aggregates deduplicated by structure, the naming rule | §1, §4, §5.5 |
+> | 1 ✅ | `Select` on a grouped scan, its overloads by arity kept until stage 2, named keys, `Average` and `AverageAsync`, `OrderByDescending` on a scan, aggregates deduplicated by structure, the naming rule | §1, §4, §5.5 |
 > | 2 | results as batches: a query's result is a stream of batches, `As<TRecord>` a `Scan<TRecord>` over it; one value comes as itself, several into a record, and the overloads by arity go; `Select`, `Distinct` and `Take` on a scan; the writer takes a scan | §2.1, §6.1, §7, §8 |
 > | 3 | after the group by: `Where`, `OrderBy`, `ThenBy`, `Skip`, `Take`, the top-k; the group by and the `Distinct` that stream; groups in the order asked for | §2.2–§2.4, §6 |
 > | 4 | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
@@ -75,7 +75,7 @@ number of values.
 | `GroupedScan` | `Select(g => r)`; `Select(g => (r1, r2, …))` | `Aggregation<T>`; `Aggregation`, of several values (§6.1) |
 | `Aggregation<T>`, `Aggregation`, `Projection<T>`, `Projection` | `Skip`, `Take`; `Distinct()` on a projection | the same kind; an aggregation for `Distinct` |
 | `Aggregation<T>`, `Aggregation`, `Projection<T>`, `Projection` | `As<TRecord>()` | `Scan<TRecord>` over the result (§7.1) |
-| `Aggregation<T>`, `Projection<T>` | `ToListAsync`, `ToArrayAsync` | `ValueTask<…>` (§7.2) |
+| `Aggregation<T>`, `Projection<T>` | `WithCancellation`; `ToListAsync`, `ToArrayAsync`; `ToValuesAsync` | the same kind; `ValueTask<…>` (§7.2); `IAsyncEnumerable<T>` |
 | `Scan<TRecord>` | `AggAsync(a => e)`, `AggAsync<TResult>(a => (e1, e2, …))`, `CountAsync`, `AverageAsync` and the other single answers | `ValueTask<…>` (§8) |
 
 **Builders and runs.** An operator that returns a query describes it and runs nothing; `await
@@ -86,13 +86,16 @@ members — is in the schema the open read. The one read a binding may make is t
 of the operating system, once, when a zoned timestamp binds
 ([07-dotnet-mapping.md](07-dotnet-mapping.md) §3); the BCL has no asynchronous form of it.
 
-**Where the plan ends.** `Aggregation<T>` and `Projection<T>`, of one value, are
-`IAsyncEnumerable<T>`. An operator they do not define comes from `System.Linq.AsyncEnumerable` and
-runs on the values they deliver; their own members win over those extensions, so a `Skip`, a
-`Take`, a `ToListAsync` or an `As` written after the `select` stays in the plan, while a `Where`, an
-`OrderBy` or a `GroupBy` written there is LINQ to objects: correct, and not pushed. `Aggregation` and
-`Projection`, of several values, are not enumerable at all: `As<TRecord>()` is how they are read.
-Either way, `As<TRecord>()` returns a scan, on which the plan's own operators go on (§7.1).
+**Where the plan ends.** `Aggregation<T>` and `Projection<T>`, of one value, are enumerated with
+`await foreach`, by the pattern a scan is enumerated by rather than as an `IAsyncEnumerable<T>`:
+VSTHRD200, an error in this repository, has a method that returns a stream to await end in `Async`,
+and `Select` builds a query. `WithCancellation` gives them a token as it gives a scan one, and
+`ToValuesAsync()` hands their values to `System.Linq.AsyncEnumerable`, whose operators then run on
+the values delivered: a `Where`, an `OrderBy` or a `GroupBy` written there is LINQ to objects,
+correct and not pushed, while their own `Skip`, `Take`, `ToListAsync` and `As` stay in the plan.
+`Aggregation` and `Projection`, of several values, are not enumerable at all: `As<TRecord>()` is how
+they are read. Either way, `As<TRecord>()` returns a scan, on which the plan's own operators go on
+(§7.1).
 
 **What does not compile**, which is where a query over one table ends:
 

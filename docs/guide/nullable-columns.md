@@ -89,7 +89,7 @@ tell you which case you are in.
 double sum = await file.Scan<Reading>().SumAsync(r => r.Celsius);
 ```
 
-`SumAsync`, `AvgAsync` and the other aggregates take a nullable column and skip its nulls, block
+`SumAsync`, `AverageAsync` and the other aggregates take a nullable column and skip its nulls, block
 by block, inside the scan, on the encoded form where the encoding allows it and in parallel when the
 session allows it. Here it is the fastest of the four and has nothing to get wrong
 ([aggregates.md](aggregates.md)).

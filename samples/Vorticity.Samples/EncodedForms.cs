@@ -29,7 +29,7 @@ internal static class EncodedForms
             grouped.Clear();
             Aggregation<(string, double)> byCity = file.Scan<Reading>()
                 .GroupBy(r => r.City)
-                .AggAsync(g => (g.Key, g.Sum(r => r.Celsius)));
+                .Select(g => (g.Key, g.Sum(r => r.Celsius)));
             await foreach ((string city, double total) in byCity)
             {
                 grouped[city] = total;
@@ -57,7 +57,7 @@ internal static class EncodedForms
             byGroup.Clear();
             Aggregation<(string?, long, int)> byReferrer = visitFile.Scan<Visit>()
                 .GroupBy(v => v.Referrer)
-                .AggAsync(g => (g.Key, g.Count(), g.Sum(v => v.DurationMs)));
+                .Select(g => (g.Key, g.Count(), g.Sum(v => v.DurationMs)));
             await foreach ((string? referrer, long count, int duration) in byReferrer)
             {
                 byGroup[referrer ?? "(null)"] = (count, duration);

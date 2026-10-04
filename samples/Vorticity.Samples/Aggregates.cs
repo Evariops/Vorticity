@@ -27,7 +27,7 @@ internal static class Aggregates
             int line = 0;
             Aggregation<(string, double?, WelfordState)> byCity = file.Scan<Reading>()
                 .GroupBy(r => r.City)
-                .AggAsync(g => (g.Key, g.Avg(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)));
+                .Select(g => (g.Key, g.Average(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius)));
             await foreach ((string city, double? mean, WelfordState state) in byCity)
             {
                 lines[line++] = $"  {city,-10} mean {mean:F4}  variance {state.Variance:F4}";
@@ -99,7 +99,7 @@ internal static class Aggregates
         (string City, int Day, double Variance) widest = default;
         await foreach (var (city, day, total, state) in file.Scan<Reading>()
             .GroupBy(r => (r.City, r.Day))
-            .AggAsync(g => (g.Key.Item1, g.Key.Item2, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))))
+            .Select(g => (g.Key.City, g.Key.Day, g.Sum(r => r.Celsius), g.Aggregate<double, Welford<double>, WelfordState>(r => r.Celsius))))
         {
             groups++;
             if (state.Variance > widest.Variance && total > 0)

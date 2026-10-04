@@ -34,14 +34,14 @@ public static class DecimalAggregates
         /// <summary>The mean of a decimal <paramref name="column"/>, from its exact sum.</summary>
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the mean; null when no row holds a value.</returns>
-        public Sym<double?> Avg(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
-            Aggregators.Avg(Aggregators.Input(aggregates.Binding, column));
+        public Sym<double?> Average(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
+            Aggregators.Average(Aggregators.Input(aggregates.Binding, column));
 
         /// <summary>The mean of the non-null values of a nullable decimal <paramref name="column"/>.</summary>
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the mean; null when no row holds a value.</returns>
-        public Sym<double?> Avg(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
-            Aggregators.Avg(Aggregators.Input(aggregates.Binding, column));
+        public Sym<double?> Average(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
+            Aggregators.Average(Aggregators.Input(aggregates.Binding, column));
     }
 
     extension<TRecord, TKey>(Group<TRecord, TKey> group)
@@ -61,14 +61,14 @@ public static class DecimalAggregates
         /// <summary>The mean of a decimal <paramref name="column"/> in the group.</summary>
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the mean; null when no row of the group holds a value.</returns>
-        public Sym<double?> Avg(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
-            Aggregators.Avg(Aggregators.Input(group.Binding, column));
+        public Sym<double?> Average(Func<Probe<TRecord>, Sym<VortexDecimal>> column) =>
+            Aggregators.Average(Aggregators.Input(group.Binding, column));
 
         /// <summary>The mean of the non-null values of a nullable decimal <paramref name="column"/> in the group.</summary>
         /// <param name="column">The column.</param>
         /// <returns>The symbol of the mean.</returns>
-        public Sym<double?> Avg(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
-            Aggregators.Avg(Aggregators.Input(group.Binding, column));
+        public Sym<double?> Average(Func<Probe<TRecord>, Sym<VortexDecimal?>> column) =>
+            Aggregators.Average(Aggregators.Input(group.Binding, column));
     }
 
     extension<TRecord>(Scan<TRecord> scan)
@@ -94,14 +94,14 @@ public static class DecimalAggregates
         /// <param name="column">The column.</param>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>The mean; null when no row holds a value.</returns>
-        public ValueTask<double?> AvgAsync(Func<Probe<TRecord>, Sym<VortexDecimal>> column, CancellationToken cancellationToken = default) =>
-            scan.ScalarAsync(Aggregators.Avg(Aggregators.Input(scan.Binding, column)), cancellationToken);
+        public ValueTask<double?> AverageAsync(Func<Probe<TRecord>, Sym<VortexDecimal>> column, CancellationToken cancellationToken = default) =>
+            scan.ScalarAsync(Aggregators.Average(Aggregators.Input(scan.Binding, column)), cancellationToken);
 
         /// <summary>The mean of the non-null values of a nullable decimal <paramref name="column"/> over the rows the scan keeps.</summary>
         /// <param name="column">The column.</param>
         /// <param name="cancellationToken">Cancels the reads.</param>
         /// <returns>The mean; null when no row holds a value.</returns>
-        public ValueTask<double?> AvgAsync(Func<Probe<TRecord>, Sym<VortexDecimal?>> column, CancellationToken cancellationToken = default) =>
-            scan.ScalarAsync(Aggregators.Avg(Aggregators.Input(scan.Binding, column)), cancellationToken);
+        public ValueTask<double?> AverageAsync(Func<Probe<TRecord>, Sym<VortexDecimal?>> column, CancellationToken cancellationToken = default) =>
+            scan.ScalarAsync(Aggregators.Average(Aggregators.Input(scan.Binding, column)), cancellationToken);
     }
 }

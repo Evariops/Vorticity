@@ -116,7 +116,7 @@ a dictionary can serve it, since it needs keys without rows; on the sorted `Day`
 ## Batches in key order
 
 ```csharp
-Scan<Reading> ordered = file.Scan<Reading>().OrderBy(r => r.Day, descending: true);
+Scan<Reading> ordered = file.Scan<Reading>().OrderByDescending(r => r.Day);
 ```
 
 The batches then arrive in the key's order rather than the file's, from the same sources a cursor

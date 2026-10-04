@@ -18,7 +18,7 @@ internal static class Aggregators
         ArgumentNullException.ThrowIfNull(column);
         if (binding is null)
         {
-            throw new InvalidOperationException("An aggregate is built inside the lambda of AggAsync or Agg, which hands it its columns.");
+            throw new InvalidOperationException("An aggregate is built inside the lambda of Select or AggAsync, which hands it its columns.");
         }
 
         return new ColumnShape(column(new Probe<TRecord>(binding)).Column);
@@ -109,7 +109,7 @@ internal static class Aggregators
         };
     }
 
-    internal static Sym<double?> Avg(ColumnShape shape)
+    internal static Sym<double?> Average(ColumnShape shape)
     {
         Func<AggregateSlot<double?>> create;
         switch (shape.Kind)
@@ -155,7 +155,7 @@ internal static class Aggregators
                 throw shape.Unsupported("a mean");
         }
 
-        return new Sym<double?>(new AggregateNode<double?>(AggregateKind.Avg, shape, create, (StatisticsView view, out double? value) => SettleAvg(shape, view, out value)));
+        return new Sym<double?>(new AggregateNode<double?>(AggregateKind.Average, shape, create, (StatisticsView view, out double? value) => SettleAvg(shape, view, out value)));
     }
 
     internal static Sym<T?> Extreme<T>(ColumnShape shape, bool max)
@@ -197,7 +197,7 @@ internal static class Aggregators
                 $"'{shape.Path}' is {shape.Type}; an aggregator over {ClrFit.Name(typeof(T))} reads a column stored as {ClrFit.Name(typeof(T))}.");
         }
 
-        return new Sym<TState>(new AggregateNode<TState>(AggregateKind.Custom, shape, CustomFactory<T, TAggregator, TState>.Create, null));
+        return new Sym<TState>(new AggregateNode<TState>(AggregateKind.Custom, shape, CustomFactory<T, TAggregator, TState>.Create, null, typeof(TAggregator)));
     }
 
     private static Func<AggregateSlot<TState>> EncodedFactory<T, TAggregator, TState>()

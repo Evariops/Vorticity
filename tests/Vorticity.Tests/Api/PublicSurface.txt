@@ -1,6 +1,6 @@
 Vorticity: struct Vorticity.Aggregates<TRecord>
-Vorticity:     method Sym<Nullable<double>> Avg<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
-Vorticity:     method Sym<Nullable<double>> Avg<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
+Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<T> Max<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<T> Min<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<T> Sum<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
@@ -9,7 +9,9 @@ Vorticity:     method Sym<TState> Aggregate<T, TAggregator, TState>(Func<Probe<T
 Vorticity:     method Sym<TState> Aggregate<T, TAggregator, TState>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<long> Count()
 Vorticity:     method Sym<long> CountDistinct<T>(Func<Probe<TRecord>, Sym<T>>)
-Vorticity: sealed class Vorticity.Aggregation<TResult> : IAsyncEnumerable<TResult>
+Vorticity: sealed class Vorticity.Aggregation<TResult>
+Vorticity:     method Aggregation<TResult> WithCancellation(CancellationToken)
+Vorticity:     method IAsyncEnumerable<TResult> ToValuesAsync(CancellationToken = default)
 Vorticity:     method IAsyncEnumerator<TResult> GetAsyncEnumerator(CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     property ScanStatistics Statistics { get; }
@@ -668,35 +670,35 @@ Vorticity:     property int Proven { get; init; }
 Vorticity:     property int Pruned { get; init; }
 Vorticity:     property long Rows { get; init; }
 Vorticity: static class Vorticity.DecimalAggregates
-Vorticity:     method Sym<Nullable<double>> Avg<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
-Vorticity:     method Sym<Nullable<double>> Avg<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
-Vorticity:     method Sym<Nullable<double>> Avg<TRecord>(Aggregates<TRecord>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
-Vorticity:     method Sym<Nullable<double>> Avg<TRecord>(Aggregates<TRecord>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
+Vorticity:     method Sym<Nullable<double>> Average<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<Nullable<double>> Average<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
+Vorticity:     method Sym<Nullable<double>> Average<TRecord>(Aggregates<TRecord>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<Nullable<double>> Average<TRecord>(Aggregates<TRecord>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
 Vorticity:     method Sym<VortexDecimal> Sum<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
 Vorticity:     method Sym<VortexDecimal> Sum<TRecord, TKey>(Group<TRecord, TKey>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
 Vorticity:     method Sym<VortexDecimal> Sum<TRecord>(Aggregates<TRecord>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>)
 Vorticity:     method Sym<VortexDecimal> Sum<TRecord>(Aggregates<TRecord>, Func<Probe<TRecord>, Sym<VortexDecimal>>)
-Vorticity:     method ValueTask<Nullable<double>> AvgAsync<TRecord>(Scan<TRecord>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>, CancellationToken = default)
-Vorticity:     method ValueTask<Nullable<double>> AvgAsync<TRecord>(Scan<TRecord>, Func<Probe<TRecord>, Sym<VortexDecimal>>, CancellationToken = default)
+Vorticity:     method ValueTask<Nullable<double>> AverageAsync<TRecord>(Scan<TRecord>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>, CancellationToken = default)
+Vorticity:     method ValueTask<Nullable<double>> AverageAsync<TRecord>(Scan<TRecord>, Func<Probe<TRecord>, Sym<VortexDecimal>>, CancellationToken = default)
 Vorticity:     method ValueTask<VortexDecimal> SumAsync<TRecord>(Scan<TRecord>, Func<Probe<TRecord>, Sym<Nullable<VortexDecimal>>>, CancellationToken = default)
 Vorticity:     method ValueTask<VortexDecimal> SumAsync<TRecord>(Scan<TRecord>, Func<Probe<TRecord>, Sym<VortexDecimal>>, CancellationToken = default)
 Vorticity: sealed class Vorticity.DecimalAggregates.<G>$1EBB15957CA0249D4A0D301558178D06<$T0>
-Vorticity:     method Sym<Nullable<double>> Avg(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>)
-Vorticity:     method Sym<Nullable<double>> Avg(Func<Probe<$T0>, Sym<VortexDecimal>>)
+Vorticity:     method Sym<Nullable<double>> Average(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<Nullable<double>> Average(Func<Probe<$T0>, Sym<VortexDecimal>>)
 Vorticity:     method Sym<VortexDecimal> Sum(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>)
 Vorticity:     method Sym<VortexDecimal> Sum(Func<Probe<$T0>, Sym<VortexDecimal>>)
 Vorticity: static class Vorticity.DecimalAggregates.<G>$1EBB15957CA0249D4A0D301558178D06<$T0>.<M>$6F3873FFCE579848283ACAD2693430B7<TRecord>
 Vorticity:     method void <Extension>$(Aggregates<TRecord>)
 Vorticity: sealed class Vorticity.DecimalAggregates.<G>$72DE36724C555033F8204B840E249439<$T0>
-Vorticity:     method ValueTask<Nullable<double>> AvgAsync(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>, CancellationToken = default)
-Vorticity:     method ValueTask<Nullable<double>> AvgAsync(Func<Probe<$T0>, Sym<VortexDecimal>>, CancellationToken = default)
+Vorticity:     method ValueTask<Nullable<double>> AverageAsync(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>, CancellationToken = default)
+Vorticity:     method ValueTask<Nullable<double>> AverageAsync(Func<Probe<$T0>, Sym<VortexDecimal>>, CancellationToken = default)
 Vorticity:     method ValueTask<VortexDecimal> SumAsync(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>, CancellationToken = default)
 Vorticity:     method ValueTask<VortexDecimal> SumAsync(Func<Probe<$T0>, Sym<VortexDecimal>>, CancellationToken = default)
 Vorticity: static class Vorticity.DecimalAggregates.<G>$72DE36724C555033F8204B840E249439<$T0>.<M>$085E8D515B6E4BA70E5E605D6D3E8173<TRecord>
 Vorticity:     method void <Extension>$(Scan<TRecord>)
 Vorticity: sealed class Vorticity.DecimalAggregates.<G>$C1E42583B8013135E71F75E7D46AEC83<$T0, $T1>
-Vorticity:     method Sym<Nullable<double>> Avg(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>)
-Vorticity:     method Sym<Nullable<double>> Avg(Func<Probe<$T0>, Sym<VortexDecimal>>)
+Vorticity:     method Sym<Nullable<double>> Average(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>)
+Vorticity:     method Sym<Nullable<double>> Average(Func<Probe<$T0>, Sym<VortexDecimal>>)
 Vorticity:     method Sym<VortexDecimal> Sum(Func<Probe<$T0>, Sym<Nullable<VortexDecimal>>>)
 Vorticity:     method Sym<VortexDecimal> Sum(Func<Probe<$T0>, Sym<VortexDecimal>>)
 Vorticity: static class Vorticity.DecimalAggregates.<G>$C1E42583B8013135E71F75E7D46AEC83<$T0, $T1>.<M>$198C58B7997C7BFF248392BF61EDAD42<TRecord, TKey>
@@ -803,8 +805,8 @@ Vorticity:     ctor FilterHandler(int, int, Scan)
 Vorticity:     method void AppendFormatted<T>(T)
 Vorticity:     method void AppendLiteral(string)
 Vorticity: struct Vorticity.Group<TRecord, TKey>
-Vorticity:     method Sym<Nullable<double>> Avg<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
-Vorticity:     method Sym<Nullable<double>> Avg<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
+Vorticity:     method Sym<Nullable<double>> Average<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<T> Max<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<T> Min<T>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<T> Sum<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>)
@@ -813,16 +815,16 @@ Vorticity:     method Sym<TState> Aggregate<T, TAggregator, TState>(Func<Probe<T
 Vorticity:     method Sym<TState> Aggregate<T, TAggregator, TState>(Func<Probe<TRecord>, Sym<T>>)
 Vorticity:     method Sym<long> Count()
 Vorticity:     method Sym<long> CountDistinct<T>(Func<Probe<TRecord>, Sym<T>>)
-Vorticity:     property Sym<TKey> Key { get; }
+Vorticity:     property TKey Key { get; }
 Vorticity: sealed class Vorticity.GroupedScan<TRecord, TKey>
-Vorticity:     method Aggregation<T1> AggAsync<T1>(Func<Group<TRecord, TKey>, Sym<T1>>)
-Vorticity:     method Aggregation<ValueTuple<T1, T2, T3, T4, T5, T6, T7, ValueTuple<T8>>> AggAsync<T1, T2, T3, T4, T5, T6, T7, T8>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>, Sym<T5>, Sym<T6>, Sym<T7>, ValueTuple<Sym<T8>>>>)
-Vorticity:     method Aggregation<ValueTuple<T1, T2, T3, T4, T5, T6, T7>> AggAsync<T1, T2, T3, T4, T5, T6, T7>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>, Sym<T5>, Sym<T6>, Sym<T7>>>)
-Vorticity:     method Aggregation<ValueTuple<T1, T2, T3, T4, T5, T6>> AggAsync<T1, T2, T3, T4, T5, T6>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>, Sym<T5>, Sym<T6>>>)
-Vorticity:     method Aggregation<ValueTuple<T1, T2, T3, T4, T5>> AggAsync<T1, T2, T3, T4, T5>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>, Sym<T5>>>)
-Vorticity:     method Aggregation<ValueTuple<T1, T2, T3, T4>> AggAsync<T1, T2, T3, T4>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>>>)
-Vorticity:     method Aggregation<ValueTuple<T1, T2, T3>> AggAsync<T1, T2, T3>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>>>)
-Vorticity:     method Aggregation<ValueTuple<T1, T2>> AggAsync<T1, T2>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>>>)
+Vorticity:     method Aggregation<T1> Select<T1>(Func<Group<TRecord, TKey>, Sym<T1>>)
+Vorticity:     method Aggregation<ValueTuple<T1, T2, T3, T4, T5, T6, T7, ValueTuple<T8>>> Select<T1, T2, T3, T4, T5, T6, T7, T8>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>, Sym<T5>, Sym<T6>, Sym<T7>, ValueTuple<Sym<T8>>>>)
+Vorticity:     method Aggregation<ValueTuple<T1, T2, T3, T4, T5, T6, T7>> Select<T1, T2, T3, T4, T5, T6, T7>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>, Sym<T5>, Sym<T6>, Sym<T7>>>)
+Vorticity:     method Aggregation<ValueTuple<T1, T2, T3, T4, T5, T6>> Select<T1, T2, T3, T4, T5, T6>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>, Sym<T5>, Sym<T6>>>)
+Vorticity:     method Aggregation<ValueTuple<T1, T2, T3, T4, T5>> Select<T1, T2, T3, T4, T5>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>, Sym<T5>>>)
+Vorticity:     method Aggregation<ValueTuple<T1, T2, T3, T4>> Select<T1, T2, T3, T4>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>, Sym<T4>>>)
+Vorticity:     method Aggregation<ValueTuple<T1, T2, T3>> Select<T1, T2, T3>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>, Sym<T3>>>)
+Vorticity:     method Aggregation<ValueTuple<T1, T2>> Select<T1, T2>(Func<Group<TRecord, TKey>, ValueTuple<Sym<T1>, Sym<T2>>>)
 Vorticity: interface Vorticity.IAggregator<T, TState>
 Vorticity:     method TState Seed()
 Vorticity:     method void Merge(ref TState, in TState)
@@ -1107,22 +1109,21 @@ Vorticity:     method ValueTask DisposeAsync()
 Vorticity:     method ValueTask<bool> MoveNextAsync()
 Vorticity:     property BatchView Current { get; }
 Vorticity: sealed class Vorticity.Scan<TRecord>
-Vorticity:     method GroupedScan<TRecord, TKey> GroupBy<TKey>(Func<Probe<TRecord>, Sym<TKey>>)
-Vorticity:     method GroupedScan<TRecord, ValueTuple<TKey1, TKey2, TKey3, TKey4>> GroupBy<TKey1, TKey2, TKey3, TKey4>(Func<Probe<TRecord>, ValueTuple<Sym<TKey1>, Sym<TKey2>, Sym<TKey3>, Sym<TKey4>>>)
-Vorticity:     method GroupedScan<TRecord, ValueTuple<TKey1, TKey2, TKey3>> GroupBy<TKey1, TKey2, TKey3>(Func<Probe<TRecord>, ValueTuple<Sym<TKey1>, Sym<TKey2>, Sym<TKey3>>>)
-Vorticity:     method GroupedScan<TRecord, ValueTuple<TKey1, TKey2>> GroupBy<TKey1, TKey2>(Func<Probe<TRecord>, ValueTuple<Sym<TKey1>, Sym<TKey2>>>)
+Vorticity:     method GroupedScan<TRecord, Sym<T>> GroupBy<T>(Func<Probe<TRecord>, Sym<T>>)
+Vorticity:     method GroupedScan<TRecord, TKey> GroupBy<TKey>(Func<Probe<TRecord>, TKey>)
 Vorticity:     method IAsyncEnumerable<RecordBatch> ToBatchesAsync(CancellationToken = default)
 Vorticity:     method IAsyncEnumerable<TRecord> ToRecordsAsync(CancellationToken = default)
 Vorticity:     method KeyCursorBuilder<TKey> Keys<TKey>(Func<Probe<TRecord>, Sym<TKey>>)
-Vorticity:     method Scan<TRecord> OrderBy<TKey>(Func<Probe<TRecord>, Sym<TKey>>, bool = default)
+Vorticity:     method Scan<TRecord> OrderBy<TKey>(Func<Probe<TRecord>, Sym<TKey>>)
+Vorticity:     method Scan<TRecord> OrderByDescending<TKey>(Func<Probe<TRecord>, Sym<TKey>>)
 Vorticity:     method Scan<TRecord> Rows(ReadOnlySpan<long>)
 Vorticity:     method Scan<TRecord> Rows(RowRange)
 Vorticity:     method Scan<TRecord> Where(Func<Probe<TRecord>, Predicate>)
 Vorticity:     method Scan<TRecord> With(ScanOptions)
 Vorticity:     method Scan<TRecord> WithCancellation(CancellationToken)
 Vorticity:     method Scan<TRecord>.AsyncEnumerator<TRecord> GetAsyncEnumerator(CancellationToken = default)
-Vorticity:     method ValueTask<Nullable<double>> AvgAsync<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, CancellationToken = default)
-Vorticity:     method ValueTask<Nullable<double>> AvgAsync<T>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
+Vorticity:     method ValueTask<Nullable<double>> AverageAsync<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, CancellationToken = default)
+Vorticity:     method ValueTask<Nullable<double>> AverageAsync<T>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
 Vorticity:     method ValueTask<ScanPlan> ExplainAsync(CancellationToken = default)
 Vorticity:     method ValueTask<T1> AggAsync<T1>(Func<Aggregates<TRecord>, Sym<T1>>, CancellationToken = default)
 Vorticity:     method ValueTask<T> MaxAsync<T>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
@@ -1219,7 +1220,7 @@ Vorticity:     property int Count { get; }
 Vorticity: ref struct Vorticity.Selection.Enumerator
 Vorticity:     method bool MoveNext()
 Vorticity:     property int Current { get; }
-Vorticity: struct Vorticity.Sym<T>
+Vorticity: struct Vorticity.Sym<T> : ISymbol
 Vorticity:     method Predicate Between(T, T)
 Vorticity:     method Predicate In(ReadOnlySpan<T>)
 Vorticity:     method Predicate op_Equality(Sym<T>, Sym<T>)
@@ -1258,27 +1259,6 @@ Vorticity:     method Predicate get_IsFalse(Sym<Nullable<bool>>)
 Vorticity:     method Predicate get_IsFalse(Sym<bool>)
 Vorticity:     method Predicate get_IsTrue(Sym<Nullable<bool>>)
 Vorticity:     method Predicate get_IsTrue(Sym<bool>)
-Vorticity:     method Sym<T1> get_Item1<T1, T2, T3, T4>(Sym<ValueTuple<T1, T2, T3, T4>>)
-Vorticity:     method Sym<T1> get_Item1<T1, T2, T3>(Sym<ValueTuple<T1, T2, T3>>)
-Vorticity:     method Sym<T1> get_Item1<T1, T2>(Sym<ValueTuple<T1, T2>>)
-Vorticity:     method Sym<T2> get_Item2<T1, T2, T3, T4>(Sym<ValueTuple<T1, T2, T3, T4>>)
-Vorticity:     method Sym<T2> get_Item2<T1, T2, T3>(Sym<ValueTuple<T1, T2, T3>>)
-Vorticity:     method Sym<T2> get_Item2<T1, T2>(Sym<ValueTuple<T1, T2>>)
-Vorticity:     method Sym<T3> get_Item3<T1, T2, T3, T4>(Sym<ValueTuple<T1, T2, T3, T4>>)
-Vorticity:     method Sym<T3> get_Item3<T1, T2, T3>(Sym<ValueTuple<T1, T2, T3>>)
-Vorticity:     method Sym<T4> get_Item4<T1, T2, T3, T4>(Sym<ValueTuple<T1, T2, T3, T4>>)
-Vorticity: sealed class Vorticity.SymExtensions.<G>$178674A47B1524A2A57C07176E2251D3<$T0, $T1>
-Vorticity:     property Sym<$T0> Item1 { get; }
-Vorticity:     property Sym<$T1> Item2 { get; }
-Vorticity: static class Vorticity.SymExtensions.<G>$178674A47B1524A2A57C07176E2251D3<$T0, $T1>.<M>$F941CA975043E27AC21DA81F3A9BEFD3<T1, T2>
-Vorticity:     method void <Extension>$(Sym<ValueTuple<T1, T2>>)
-Vorticity: sealed class Vorticity.SymExtensions.<G>$2A0DD3D1B056A436E7191D62AC72C09D<$T0, $T1, $T2, $T3>
-Vorticity:     property Sym<$T0> Item1 { get; }
-Vorticity:     property Sym<$T1> Item2 { get; }
-Vorticity:     property Sym<$T2> Item3 { get; }
-Vorticity:     property Sym<$T3> Item4 { get; }
-Vorticity: static class Vorticity.SymExtensions.<G>$2A0DD3D1B056A436E7191D62AC72C09D<$T0, $T1, $T2, $T3>.<M>$187709A915EA766CEFB74B3AA65917AF<T1, T2, T3, T4>
-Vorticity:     method void <Extension>$(Sym<ValueTuple<T1, T2, T3, T4>>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$2FDA5503ABB056406F404D2C3F724432
 Vorticity:     property Predicate IsFalse { get; }
 Vorticity:     property Predicate IsTrue { get; }
@@ -1295,12 +1275,6 @@ Vorticity:     method Predicate Like(string, char = default)
 Vorticity:     method Predicate StartsWith(string)
 Vorticity: static class Vorticity.SymExtensions.<G>$9FD7CB55BBCFCC43139C4DC27427F569<$T0>.<M>$11D95F825AC5B1981DF8EE81FD632C33<TText>
 Vorticity:     method void <Extension>$(Sym<TText>)
-Vorticity: sealed class Vorticity.SymExtensions.<G>$D489FCED4180751A1CA917D33BC59DC8<$T0, $T1, $T2>
-Vorticity:     property Sym<$T0> Item1 { get; }
-Vorticity:     property Sym<$T1> Item2 { get; }
-Vorticity:     property Sym<$T2> Item3 { get; }
-Vorticity: static class Vorticity.SymExtensions.<G>$D489FCED4180751A1CA917D33BC59DC8<$T0, $T1, $T2>.<M>$F8EBC9A891D57DDA1DBA2A1D69BC59EA<T1, T2, T3>
-Vorticity:     method void <Extension>$(Sym<ValueTuple<T1, T2, T3>>)
 Vorticity: sealed class Vorticity.SymExtensions.<G>$E0D6CAEBC5588315D1F9E8D0E660501F<$T0>
 Vorticity:     method Predicate Contains($T0)
 Vorticity: static class Vorticity.SymExtensions.<G>$E0D6CAEBC5588315D1F9E8D0E660501F<$T0>.<M>$0C067B9E5293CA1AC30165E45D016CDA<T>
