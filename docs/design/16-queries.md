@@ -21,7 +21,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 2 ✅ | results as batches: a query's result is a stream of batches, `As<TRecord>` a `Scan<TRecord>` over it; one value comes as itself, several into a record, and the overloads by arity go; `Select`, `Distinct` and `Take` on a scan; the writer takes a scan | §2.1, §6.1, §7, §8 |
 > | 3 ✅ | after the group by: `Where`, `OrderBy`, `ThenBy`, `Skip`, `Take`, the top-k; the group by and the `Distinct` that stream; groups in the order asked for | §2.2–§2.4, §6 |
 > | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
-> | 5, `Truncate` and `Bucket` ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
+> | 5 ✅ | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6 | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps | §2.5, §2.6, §9 |
 
 ## 1. The shape
@@ -621,6 +621,14 @@ map, and the block is not decoded when no other aggregate needs it. A zone map h
 `group r by r.At.Truncate(CalendarUnit.Day)` with counts and extremes reads the zone maps and the
 blocks that straddle midnight, and nothing else. The same bounds give the finality of §2.3 and the
 bounds of §5.1.
+
+Only a key with a function asks the zone maps for this: a column's own zone holds one key only when
+it holds one value, which its encoding folds as one already. A block settles when the filter's zone
+maps prove it keeps the block whole, no key column holds a null or a NaN in it, and every aggregate
+is a count of the rows, a minimum or a maximum. It is folded in the order of the rows, as a block of
+as many rows holding each column's minimum and, on its last row, its maximum, so that a sorted key
+still streams and the groups come in the order they would have. A dataset's objects do not settle:
+their files count the rows a deletion removed.
 
 ### 9.4 Parallelism and the merge
 

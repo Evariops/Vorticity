@@ -133,6 +133,14 @@ public partial record struct EndpointErrors(string Endpoint, long Count, long Er
 [VortexRecord]
 public partial record struct UserDurations(int User, long Count, long Duration);
 
+/// <summary>A day's requests, the fastest and the slowest.</summary>
+[VortexRecord]
+public partial record struct InstantDay(DateTime Day, long Count, int? Fastest, double? Slowest);
+
+/// <summary>An hour's requests and their mean latency.</summary>
+[VortexRecord]
+public partial record struct InstantHour(DateTime Hour, long Count, double? Mean);
+
 /// <summary>A user's requests and their mean latency.</summary>
 [VortexRecord]
 public partial record struct UserStats(int User, long Count, double? Mean);

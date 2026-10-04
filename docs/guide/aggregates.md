@@ -209,6 +209,13 @@ the zone maps, the statistics and a sorted column prune, count and locate it as 
 written by hand: the scan decoded the 5 blocks of 13 that hold the day. The instants being sorted,
 their hours are too, and the group by streams, an hour at a time.
 
+When every aggregate is a count, a minimum or a maximum, a block whose rows all fall in one bucket
+is not read at all: its zone map gives the bucket, the block's rows and the extremes of its columns,
+and the group by decodes only the blocks that straddle a boundary. On a log of a million requests,
+one a second, the days with their count, their fastest and their slowest request took 1.3 ms, against
+4.1 ms reading every block. Under a filter, a block is left to its zone map when the zone maps prove
+the filter keeps it whole.
+
 On a number, `Bucket(width)` is `⌊v / w⌋ × w`, in integers for an integer column and rounded to the
 column's type for a float:
 

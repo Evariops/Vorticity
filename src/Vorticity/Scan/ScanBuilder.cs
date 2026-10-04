@@ -581,9 +581,21 @@ internal sealed class ScanBuilder
         // The wrapper exists for the filter's own two jobs -- prune before reading, skip emptied
         // batches after -- and a take needs the second of them too: a split whose wanted rows are
         // all it holds still produces a batch, but one gathered down to nothing must not.
-        return _filter is null && _take is null
-            ? batches
-            : new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live };
+        if (_filter is null && _take is null)
+        {
+            // A mask with no filter is an aggregation's: the blocks its zone maps answered, which
+            // no split reads.
+            return _pruned && _live is not null ? new LiveBatches(batches, _live) : batches;
+        }
+
+        return new FilteredBatches(batches, _filter, _prune, _indexes, rows) { Refined = _pruned, Live = _live };
+    }
+
+    /// <summary>The batches of an unfiltered scan that reads only the splits a mask keeps.</summary>
+    private sealed class LiveBatches(BatchAsyncEnumerable batches, BlockMask live) : IAsyncEnumerable<RecordBatch>
+    {
+        public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
+            batches.GetAsyncEnumerator(live, cancellationToken);
     }
 
     /// <summary>Hands the scan a sink it adds its counters to as it runs.</summary>

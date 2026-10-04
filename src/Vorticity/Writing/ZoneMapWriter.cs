@@ -440,7 +440,8 @@ internal static class ZoneMapWriter
         return Arrays.Validity.Bitmap(node);
     }
 
-    private static void Write(Span<byte> destination, PType ptype, FilterLiteral value)
+    /// <summary>A bound as the bytes of a value of <paramref name="ptype"/>, little-endian, filling <paramref name="destination"/>.</summary>
+    internal static void Write(Span<byte> destination, PType ptype, FilterLiteral value)
     {
         switch (ptype)
         {

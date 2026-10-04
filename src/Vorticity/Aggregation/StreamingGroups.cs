@@ -105,7 +105,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     {
         if (_inner is null)
         {
-            Start();
+            await StartAsync().ConfigureAwait(false);
         }
 
         while (true)
@@ -132,8 +132,10 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             _cancellationToken.ThrowIfCancellationRequested();
             if (!await _inner!.MoveNextAsync().ConfigureAwait(false))
             {
-                // The end of the rows closes every group, the null group last.
+                // The end of the rows closes every group, the null group last, once the blocks
+                // the zone maps settled after the last batch are in.
                 _drained = true;
+                _partition!.Finish();
                 await CloseAsync(all: true).ConfigureAwait(false);
                 continue;
             }
@@ -153,7 +155,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         }
     }
 
-    private void Start()
+    private async ValueTask StartAsync()
     {
         AggregationHost host = _query.Host;
         host.Begin();
@@ -161,9 +163,18 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
-        _pass = pass;
         _partition = new AggregationPartition(
             plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, Streaming(_query), host.Source);
+
+        // The blocks the zone maps settle are folded in the order of the rows, which the groups
+        // close in.
+        if (await ZoneSettling.PlanAsync(host.Source, pass, plan, host.Metrics, _cancellationToken).ConfigureAwait(false) is { } settling)
+        {
+            pass = settling.Pass(pass);
+            _partition.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
+        }
+
+        _pass = pass;
         _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
         _inner = host.Source.BatchesAsync(pass, host.Metrics).GetAsyncEnumerator(_cancellationToken);
     }

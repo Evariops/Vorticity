@@ -31,6 +31,8 @@ internal static class Scenarios
         yield return ("requests", new Scenario("group by user (1M groups), count avg", GroupByUserAsync, 100_000));
         yield return ("requests", new Scenario("group by user (1M groups), as records", GroupByUserRecordsAsync, 100_000));
         yield return ("requests", new Scenario("group by user (1M groups), count sum of an int", GroupByUserDurationsAsync, 100_000));
+        yield return ("requests", new Scenario("group by day of instants (zones), count min max", GroupByInstantDayAsync));
+        yield return ("requests", new Scenario("group by hour of instants (function), count avg", GroupByInstantHourAsync, 10));
         yield return ("readings", new Scenario("first batch, full scan", FirstBatchAsync));
         yield return ($"readings-{large}", new Scenario($"first batch, full scan, {large / 1_000_000}M", FirstBatchAsync));
         yield return ("readings", new Scenario("first batch, scan filtered everywhere", FirstFilteredBatchAsync));
@@ -158,6 +160,41 @@ internal static class Scenarios
             .GroupBy(r => r.Endpoint)
             .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency)))
             .As<EndpointStats>())
+        {
+            run.Answer();
+            rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);
+        }
+
+        return rows;
+    }
+
+    /// <summary>
+    /// The days of a log sorted by instant, with what a zone holds: a count and two extremes, which
+    /// the zone maps give for the blocks between two midnights, read for the others.
+    /// </summary>
+    private static async Task<long> GroupByInstantDayAsync(VortexFile file, Run run)
+    {
+        long rows = 0;
+        await foreach (Columns<InstantDay> groups in file.Scan<Request>()
+            .GroupBy(r => r.At.Truncate(CalendarUnit.Day))
+            .Select(g => (g.Key, g.Count(), g.Min(r => r.DurationMs), g.Max(r => r.Latency)))
+            .As<InstantDay>())
+        {
+            run.Answer();
+            rows += Sum(groups.Column<long>(1).Values);
+        }
+
+        return rows;
+    }
+
+    /// <summary>The hours of the same log with a mean, which no zone holds: the function evaluated on every block.</summary>
+    private static async Task<long> GroupByInstantHourAsync(VortexFile file, Run run)
+    {
+        long rows = 0;
+        await foreach (Columns<InstantHour> groups in file.Scan<Request>()
+            .GroupBy(r => r.At.Truncate(CalendarUnit.Hour))
+            .Select(g => (g.Key, g.Count(), g.Average(r => r.Latency)))
+            .As<InstantHour>())
         {
             run.Answer();
             rows += Sum(groups.Column<long>(1).Values) + (groups.Column<double?>(2).NullCount == 0 ? 0 : 1);

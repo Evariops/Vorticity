@@ -248,6 +248,12 @@ internal sealed class AggregationPartition
     private int[] _componentOf = [];
     private int[] _componentRows = [];
 
+    // The blocks the zone maps settled in the partition's rows, the next to fold and the end.
+    private ZoneSettling? _settling;
+    private int _settledNext;
+    private int _settledEnd;
+    private ZoneSettling.Scratch? _settledScratch;
+
     internal AggregationPartition(AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null)
     {
         _columns = columns;
@@ -340,7 +346,45 @@ internal sealed class AggregationPartition
         }
     }
 
+    /// <summary>
+    /// Hands the partition the blocks the zone maps settled within <paramref name="rows"/>, its
+    /// own: each is folded when the rows before it are, before the batch after it, or at the end.
+    /// </summary>
+    internal void Settle(ZoneSettling settling, RowRange rows)
+    {
+        _settling = settling;
+        (_settledNext, _settledEnd) = settling.Within(rows);
+    }
+
+    /// <summary>Folds the settled blocks no batch came after: what the end of the rows leaves.</summary>
+    internal void Finish() => FoldSettled(long.MaxValue);
+
     internal void Process(RecordBatch batch)
+    {
+        if (_settling is not null)
+        {
+            FoldSettled(batch.StartRow);
+            if (_settledNext < _settledEnd && _settling.Start(_settledNext) < batch.StartRow + batch.RowCount)
+            {
+                throw new InvalidOperationException("A block the zone maps settled lies in a batch the scan read.");
+            }
+        }
+
+        Fold(batch);
+    }
+
+    /// <summary>Folds the settled blocks that start before row <paramref name="before"/>, in their order.</summary>
+    private void FoldSettled(long before)
+    {
+        ZoneSettling? settling = _settling;
+        while (settling is not null && _settledNext < _settledEnd && settling.Start(_settledNext) < before)
+        {
+            _settledScratch ??= settling.NewScratch();
+            Fold(settling.Batch(_settledNext++, _settledScratch));
+        }
+    }
+
+    private void Fold(RecordBatch batch)
     {
         int rows = batch.RowCount;
         if (rows == 0 || batch.SelectedRows == 0)
@@ -663,11 +707,24 @@ internal static class AggregationEngine
         bool sorted = plan.Keys.Length == 1 && IsSorted(source, plan.Keys[0]);
         ScanSpec pass = PassSpec(spec, columns, plan, source.Schema);
 
+        // The blocks the zone maps answer are not read: the pass's mask has them dead, and each
+        // partition folds them as its rows reach them.
+        ZoneSettling? settling = await ZoneSettling.PlanAsync(source, pass, plan, metrics, cancellationToken).ConfigureAwait(false);
+        if (settling is not null)
+        {
+            pass = settling.Pass(pass);
+        }
+
         AggregationPartition[] partitions;
         RowRange[]? ranges = Partition(source, pass);
         if (ranges is null)
         {
             AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source);
+            if (settling is not null)
+            {
+                only.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
+            }
+
             await RunPartitionAsync(source, pass, metrics, only, cancellationToken).ConfigureAwait(false);
             partitions = [only];
         }
@@ -677,11 +734,15 @@ internal static class AggregationEngine
             for (int p = 0; p < partitions.Length; p++)
             {
                 partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source);
+                if (settling is not null)
+                {
+                    partitions[p].Settle(settling, ranges[p]);
+                }
             }
 
             // One read of the zone maps and indexes for every range, as a single scan would make,
-            // rather than one per range.
-            if (pass.Filter is { } filter && pass.Options.Pruning && source is FileScanSource file)
+            // rather than one per range; the settling read them already.
+            if (settling is null && pass.Filter is { } filter && pass.Options.Pruning && source is FileScanSource file)
             {
                 BlockMask? live = await ZonePruningPlan
                     .RefineAsync(file.File, file.File.LayoutTree, filter, cancellationToken, steps: null, metrics, pass.Options.UseIndexes)
@@ -884,6 +945,8 @@ internal static class AggregationEngine
         {
             partition.Process(batch);
         }
+
+        partition.Finish();
     }
 
     private static async Task RunParallelAsync(
