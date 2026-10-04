@@ -596,15 +596,17 @@ the caller's code. Keys are numbered as they are met, one state per group per ag
 | run-end | one range per run | one per run |
 | dictionary | by code: a table from code to group, kept while blocks view the same values | one per distinct code met |
 | sorted by the statistics, canonical | runs detected | one per run |
-| an integer whose statistics bound it within 2¹⁶ values | a direct index from the value | none |
+| canonical, an integer whose statistics bound it within 2¹⁶ values | a table from the value to its group, in front of the index | one per distinct value met |
 | canonical, any other | per row, a row equal to the one before reusing its group | one per row |
 | composite, every part constant, run-end or sorted | ranges cut at every part's boundaries | one per range |
 | composite, fixed-width parts within 16 bytes | the parts packed into one 128-bit key | one per row |
 | composite, any other | the tuple encoded into bytes, one hash | one per row |
 
 A function of a column (§3) groups as the column does, evaluated per code, per run or per value.
-A range of fewer rows than its batch has words of selection, 1 024 for 65 536 rows, is folded row by
-row with the per-row path: a key of short runs costs what a per-row key costs, never more.
+An aggregate takes a batch's ranges in one call. When they are shorter than its batch has words of
+selection, 1 024 for 65 536 rows, an aggregate a range costs more than its rows folds them row by
+row, so that a key of short runs costs what a per-row key costs, never more; a count, and a sum, a
+minimum or a maximum of a run-end or constant column, take the ranges whatever their length.
 
 ### 9.2 Aggregates, block by block
 

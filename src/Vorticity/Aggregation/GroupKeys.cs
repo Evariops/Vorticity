@@ -175,23 +175,51 @@ internal abstract class GroupKeys
     }
 }
 
-/// <summary>A key of one fixed-width column: a hash map from the storage value to its group, and a group for null.</summary>
+/// <summary>The smallest and the largest value of an integer key, as the file statistics hold them exactly.</summary>
+internal readonly record struct KeyBounds(long Min, long Max);
+
+/// <summary>
+/// A key of one fixed-width column: a hash map from the storage value to its group, and a group for
+/// null. An integer key the statistics bound to <see cref="DirectValues"/> values has a table from
+/// the value to its group in front of the map, so that a value is hashed once a partition.
+/// </summary>
 internal sealed class FixedKeys<TValue> : GroupKeys
     where TValue : unmanaged, IEquatable<TValue>, IComparable<TValue>
 {
+    /// <summary>The most values a table of groups covers: 2^16, a quarter of a megabyte.</summary>
+    internal const long DirectValues = 1 << 16;
+
     private readonly ColumnShape _shape;
     private readonly bool _sorted;
+    private readonly KeyBounds? _bounds;
     private GroupIndex<TValue> _index = new GroupIndex<TValue>();
     private TValue[] _keys = new TValue[16];
     private int _null = -1;
     private TValue[] _values = [];
     private ValuesCache<TValue> _entries;
 
-    internal FixedKeys(ColumnShape shape, bool sorted)
+    // The group of each value from the statistics' smallest, -1 for a value not met yet: what the
+    // index would answer, read without a hash.
+    private readonly int[]? _direct;
+    private readonly long _directMin;
+
+    internal FixedKeys(ColumnShape shape, bool sorted, KeyBounds? bounds = null)
     {
         _shape = shape;
         _sorted = sorted;
+        _bounds = bounds;
+        if (Integers && bounds is { } known && known.Max >= known.Min && (ulong)(known.Max - known.Min) < DirectValues)
+        {
+            _direct = new int[(int)(known.Max - known.Min + 1)];
+            _direct.AsSpan().Fill(-1);
+            _directMin = known.Min;
+        }
     }
+
+    /// <summary>Whether the values are integers, which a table of groups can be indexed by.</summary>
+    private static readonly bool Integers =
+        typeof(TValue) == typeof(sbyte) || typeof(TValue) == typeof(short) || typeof(TValue) == typeof(int) || typeof(TValue) == typeof(long)
+        || typeof(TValue) == typeof(byte) || typeof(TValue) == typeof(ushort) || typeof(TValue) == typeof(uint) || typeof(TValue) == typeof(ulong);
 
     internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
     {
@@ -276,6 +304,12 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             return true;
         }
 
+        if (_direct is not null)
+        {
+            Direct(canonical, validity, rows, selection, rowGroups);
+            return false;
+        }
+
         RowCursor selected = new RowCursor(selection, 0, rows);
         bool hasLast = false;
         TValue last = default;
@@ -302,7 +336,63 @@ internal sealed class FixedKeys<TValue> : GroupKeys
         return false;
     }
 
-    internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted);
+    /// <summary>
+    /// Each selected row's group read from the table of groups, a value not met yet looked up in
+    /// the index once; a value past the statistics' bounds, which exact statistics never leave, in
+    /// the index alone.
+    /// </summary>
+    private void Direct(ReadOnlySpan<TValue> canonical, ReadOnlySpan<ulong> validity, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups)
+    {
+        int[] direct = _direct!;
+        long min = _directMin;
+        RowCursor selected = new RowCursor(selection, 0, rows);
+        while (selected.Next(out int row))
+        {
+            if (!StorageValues.IsValid(validity, row))
+            {
+                rowGroups[row] = NullGroup();
+                continue;
+            }
+
+            TValue value = canonical[row];
+            ulong slot = (ulong)(Integer(value) - min);
+            if (slot >= (ulong)direct.Length)
+            {
+                rowGroups[row] = Lookup(value);
+                continue;
+            }
+
+            int group = direct[(int)slot];
+            if (group < 0)
+            {
+                group = direct[(int)slot] = Lookup(value);
+            }
+
+            rowGroups[row] = group;
+        }
+    }
+
+    /// <summary>An integer value as a long; an unsigned one past the longs as a negative, which no table holds.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static long Integer(TValue value) =>
+        typeof(TValue) == typeof(sbyte) ? Unsafe.BitCast<TValue, sbyte>(value)
+        : typeof(TValue) == typeof(short) ? Unsafe.BitCast<TValue, short>(value)
+        : typeof(TValue) == typeof(int) ? Unsafe.BitCast<TValue, int>(value)
+        : typeof(TValue) == typeof(long) ? Unsafe.BitCast<TValue, long>(value)
+        : typeof(TValue) == typeof(byte) ? Unsafe.BitCast<TValue, byte>(value)
+        : typeof(TValue) == typeof(ushort) ? Unsafe.BitCast<TValue, ushort>(value)
+        : typeof(TValue) == typeof(uint) ? Unsafe.BitCast<TValue, uint>(value)
+        : (long)Unsafe.BitCast<TValue, ulong>(value);
+
+    /// <summary>Where the table of groups holds <paramref name="value"/>'s group; false past its bounds.</summary>
+    private bool DirectSlot(TValue value, out int slot)
+    {
+        ulong at = (ulong)(Integer(value) - _directMin);
+        slot = (int)at;
+        return at < (ulong)_direct!.Length;
+    }
+
+    internal override GroupKeys Fresh() => new FixedKeys<TValue>(_shape, _sorted, _bounds);
 
     internal override int NullNumber => _null;
 
@@ -323,6 +413,18 @@ internal sealed class FixedKeys<TValue> : GroupKeys
 
     internal override void Keep(ReadOnlySpan<int> groups)
     {
+        // The table of groups forgets every group's number, then learns the kept ones' new ones.
+        if (_direct is int[] direct)
+        {
+            for (int g = 0; g < Count; g++)
+            {
+                if (g != _null && DirectSlot(_keys[g], out int slot))
+                {
+                    direct[slot] = -1;
+                }
+            }
+        }
+
         int nullGroup = -1;
         for (int i = 0; i < groups.Length; i++)
         {
@@ -336,6 +438,10 @@ internal sealed class FixedKeys<TValue> : GroupKeys
             if (i != nullGroup)
             {
                 _index.Slot(_keys[i], out _) = i;
+                if (_direct is not null && DirectSlot(_keys[i], out int slot))
+                {
+                    _direct[slot] = i;
+                }
             }
         }
 

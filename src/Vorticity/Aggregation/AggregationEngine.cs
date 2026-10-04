@@ -159,22 +159,24 @@ internal sealed class AggregationPlan
     }
 
     /// <summary>The index of the groups of one partition.</summary>
-    internal GroupKeys CreateKeys(bool sorted) => Keys.Length > 1 ? new CompositeKeys(Keys) : Single(Keys[0], sorted);
+    /// <param name="sorted">Whether the statistics say the key of one column is sorted.</param>
+    /// <param name="bounds">The values the statistics bound an integer key of one column to.</param>
+    internal GroupKeys CreateKeys(bool sorted, KeyBounds? bounds = null) => Keys.Length > 1 ? new CompositeKeys(Keys) : Single(Keys[0], sorted, bounds);
 
     /// <summary>The index of a key of one column.</summary>
-    internal static GroupKeys Single(ColumnShape key, bool sorted) =>
+    internal static GroupKeys Single(ColumnShape key, bool sorted, KeyBounds? bounds = null) =>
         key.Kind switch
         {
             StorageKind.Primitive => key.PType switch
             {
-                PType.I8 => new FixedKeys<sbyte>(key, sorted),
-                PType.I16 => new FixedKeys<short>(key, sorted),
-                PType.I32 => new FixedKeys<int>(key, sorted),
-                PType.I64 => new FixedKeys<long>(key, sorted),
-                PType.U8 => new FixedKeys<byte>(key, sorted),
-                PType.U16 => new FixedKeys<ushort>(key, sorted),
-                PType.U32 => new FixedKeys<uint>(key, sorted),
-                PType.U64 => new FixedKeys<ulong>(key, sorted),
+                PType.I8 => new FixedKeys<sbyte>(key, sorted, bounds),
+                PType.I16 => new FixedKeys<short>(key, sorted, bounds),
+                PType.I32 => new FixedKeys<int>(key, sorted, bounds),
+                PType.I64 => new FixedKeys<long>(key, sorted, bounds),
+                PType.U8 => new FixedKeys<byte>(key, sorted, bounds),
+                PType.U16 => new FixedKeys<ushort>(key, sorted, bounds),
+                PType.U32 => new FixedKeys<uint>(key, sorted, bounds),
+                PType.U64 => new FixedKeys<ulong>(key, sorted, bounds),
                 PType.F16 => new FixedKeys<Half>(key, sorted),
                 PType.F32 => new FixedKeys<float>(key, sorted),
                 _ => new FixedKeys<double>(key, sorted),
@@ -308,7 +310,8 @@ internal sealed class AggregationPartition
     private int _settledEnd;
     private ZoneSettling.Scratch? _settledScratch;
 
-    internal AggregationPartition(AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null)
+    internal AggregationPartition(
+        AggregationPlan plan, AggregateSlot?[] settled, ColumnShape[] columns, int[] inputs, bool sorted, int streaming = -1, ScanSource? source = null, KeyBounds? bounds = null)
     {
         _columns = columns;
         _inputs = inputs;
@@ -322,7 +325,7 @@ internal sealed class AggregationPartition
             Slots[i] = settled[i] ?? plan.Aggregates[i].Create(source);
         }
 
-        Keys = plan.Grouped ? plan.CreateKeys(sorted) : null;
+        Keys = plan.Grouped ? plan.CreateKeys(sorted, bounds) : null;
         if (streaming >= 0 && _keyCount > 1)
         {
             _streaming = streaming;
@@ -838,6 +841,7 @@ internal static class AggregationEngine
 
         (ColumnShape[] columns, int[] inputs) = Columns(plan, settled);
         bool sorted = plan.Keys.Length == 1 && IsSorted(source, plan.Keys[0]);
+        KeyBounds? bounds = plan.Keys.Length == 1 && !sorted ? Bounds(source, plan.Keys[0]) : null;
         ScanSpec pass = PassSpec(spec, columns, plan, source.Schema);
 
         // The blocks the zone maps answer are not read: the pass's mask has them dead, and each
@@ -864,7 +868,7 @@ internal static class AggregationEngine
         RowRange[]? ranges = Ranges(source, pass, degree);
         if (ranges is null)
         {
-            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source);
+            AggregationPartition only = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, bounds: bounds);
             if (settling is not null)
             {
                 only.Settle(settling, pass.Rows ?? new RowRange(0, long.MaxValue));
@@ -880,7 +884,7 @@ internal static class AggregationEngine
             partitions = new AggregationPartition[Math.Min(degree, ranges.Length)];
             for (int p = 0; p < partitions.Length; p++)
             {
-                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source);
+                partitions[p] = new AggregationPartition(plan, settled, columns, inputs, sorted, source: source, bounds: bounds);
             }
 
             await RunQueueAsync(source, pass, metrics, partitions, ranges, settling, cancellationToken).ConfigureAwait(false);
@@ -1028,6 +1032,37 @@ internal static class AggregationEngine
         VortexFileStatistics statistics = file.File.Statistics;
         return index < statistics.Count && statistics[index].TryGetIsSorted(out bool sorted) && sorted;
     }
+
+    /// <summary>
+    /// The smallest and the largest value of an integer key of one column, when the file statistics
+    /// hold them exactly: what bounds a table of its groups (<see cref="FixedKeys{TValue}"/>).
+    /// </summary>
+    internal static KeyBounds? Bounds(ScanSource source, ColumnShape key)
+    {
+        if (key.Kind != StorageKind.Primitive || !key.PType.IsInteger() || source is not FileScanSource file || !file.File.HasFileStatistics
+            || key.Column.FieldPath.Length != 1 || !file.File.Schema.RootIsStruct || key.Column.FieldPath[0] >= file.File.Statistics.Count)
+        {
+            return null;
+        }
+
+        FieldStatistics statistics = file.File.Statistics[key.Column.FieldPath[0]];
+        return key.PType switch
+        {
+            PType.I8 => Bounds<sbyte>(statistics),
+            PType.I16 => Bounds<short>(statistics),
+            PType.I32 => Bounds<int>(statistics),
+            PType.I64 => Bounds<long>(statistics),
+            PType.U8 => Bounds<byte>(statistics),
+            PType.U16 => Bounds<ushort>(statistics),
+            PType.U32 => Bounds<uint>(statistics),
+            _ => Bounds<ulong>(statistics),
+        };
+    }
+
+    /// <summary>The statistics' extremes, read as the column's own type and widened; an unsigned one past the longs saturated, which no table takes.</summary>
+    private static KeyBounds? Bounds<T>(FieldStatistics statistics)
+        where T : System.Numerics.IBinaryInteger<T> =>
+        statistics.TryGetMin(out T min) && statistics.TryGetMax(out T max) ? new KeyBounds(long.CreateSaturating(min), long.CreateSaturating(max)) : null;
 
     /// <summary>The lanes a pass may take: the scan's own degree, or its session's.</summary>
     private static int Degree(ScanSource source, ScanSpec spec) =>
