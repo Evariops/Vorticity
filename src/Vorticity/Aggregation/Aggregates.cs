@@ -63,6 +63,29 @@ public readonly struct Aggregates<TRecord>
     public Sym<bool> All(Func<Probe<TRecord>, Predicate> predicate) =>
         Aggregators.Exists(RowFilter.And(_filter, Aggregators.Rows(_binding, predicate), holds: false), all: true);
 
+    /// <summary>
+    /// The first row the scan keeps in file order, the order its rows lie in the source, whatever its
+    /// <c>OrderBy</c>; its columns are results: <c>a.First().Price</c>.
+    /// </summary>
+    /// <returns>A probe of the row, whose columns are read after the pass.</returns>
+    public Probe<TRecord> First() => Chosen(AggregateKind.First, null);
+
+    /// <summary>The last row the scan keeps in file order; its columns are results.</summary>
+    /// <returns>A probe of the row, whose columns are read after the pass.</returns>
+    public Probe<TRecord> Last() => Chosen(AggregateKind.Last, null);
+
+    /// <summary>The row holding the smallest value of <paramref name="by"/>, the first in file order of equal ones; a null or a NaN is never one.</summary>
+    /// <typeparam name="T">The column's type.</typeparam>
+    /// <param name="by">The column the row is chosen by.</param>
+    /// <returns>A probe of the row; its columns are null, or a value type's default, when no row holds a value.</returns>
+    public Probe<TRecord> MinBy<T>(Func<Probe<TRecord>, Sym<T>> by) => Chosen(AggregateKind.MinBy, Aggregators.Input(_binding, by));
+
+    /// <summary>The row holding the largest value of <paramref name="by"/>, the first in file order of equal ones; a null or a NaN is never one.</summary>
+    /// <typeparam name="T">The column's type.</typeparam>
+    /// <param name="by">The column the row is chosen by.</param>
+    /// <returns>A probe of the row; its columns are null, or a value type's default, when no row holds a value.</returns>
+    public Probe<TRecord> MaxBy<T>(Func<Probe<TRecord>, Sym<T>> by) => Chosen(AggregateKind.MaxBy, Aggregators.Input(_binding, by));
+
     /// <summary>The number of distinct non-null values of <paramref name="column"/>.</summary>
     /// <typeparam name="T">The column's type.</typeparam>
     /// <param name="column">The column.</param>
@@ -217,6 +240,13 @@ public readonly struct Aggregates<TRecord>
     private Sym<TSum> Widened<TSum, TColumn>(Func<Probe<TRecord>, Sym<TColumn>> column)
         where TSum : INumber<TSum> =>
         Aggregators.Filtered(Aggregators.Sum<TSum>(Aggregators.Input(_binding, column)), _filter);
+
+    /// <summary>A probe of the row a choice keeps, of the rows the filter keeps.</summary>
+    private Probe<TRecord> Chosen(AggregateKind kind, ColumnShape? by) =>
+        new Probe<TRecord>(
+            _binding ?? throw new InvalidOperationException("A chosen row is taken inside the lambda of AggAsync, which hands it its columns."),
+            null,
+            Aggregators.Chosen(kind, by, _filter));
 
     /// <summary>The state <typeparamref name="TAggregator"/> folds a nullable <paramref name="column"/> into; the aggregator reads its validity.</summary>
     /// <typeparam name="T">The column's storage type.</typeparam>

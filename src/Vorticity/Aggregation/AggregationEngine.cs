@@ -18,29 +18,39 @@ internal sealed class AggregationPlan
     {
         Keys = keys;
         List<IAggregateNode> aggregates = [];
+        List<IChosenColumn> chosen = [];
         foreach (SymNode node in results)
         {
             switch (node)
             {
                 case IAggregateNode aggregate:
-                    if (!aggregates.Exists(known => known.Identity.Equals(aggregate.Identity)))
-                    {
-                        aggregates.Add(aggregate);
-                    }
-
+                    Add(aggregates, aggregate);
                     break;
                 case IKeyNode when keys.Length > 0:
                     break;
                 case IKeyNode:
                     throw new InvalidOperationException("A group key is a result of a grouped scan only.");
+                case IChosenColumn column:
+                    // The row is an aggregate, its position; the column is read from it after the pass.
+                    Add(aggregates, column.Row);
+                    if (!chosen.Exists(known => string.Equals(known.Key, column.Key, StringComparison.Ordinal)))
+                    {
+                        chosen.Add(column);
+                    }
+
+                    break;
                 default:
                     throw new InvalidOperationException($"'{node}' is not an aggregate: a result is an aggregate of the lambda's argument, or the group's key.");
             }
         }
 
         Aggregates = [.. aggregates];
+        Chosen = [.. chosen];
         Filters = new FilterPlan(Aggregates);
     }
+
+    /// <summary>The columns read from chosen rows, each once: fetched after the pass by the rows' positions.</summary>
+    internal IChosenColumn[] Chosen { get; }
 
     internal IAggregateNode[] Aggregates { get; }
 
@@ -73,6 +83,14 @@ internal sealed class AggregationPlan
 
     /// <summary>The slot of <paramref name="node"/>: the one aggregate of the plan it is the same as.</summary>
     internal int IndexOf(IAggregateNode node) => Array.FindIndex(Aggregates, known => known.Identity.Equals(node.Identity));
+
+    private static void Add(List<IAggregateNode> aggregates, IAggregateNode aggregate)
+    {
+        if (!aggregates.Exists(known => known.Identity.Equals(aggregate.Identity)))
+        {
+            aggregates.Add(aggregate);
+        }
+    }
 
     /// <summary>The index of the groups of one partition.</summary>
     internal GroupKeys CreateKeys(bool sorted) => Keys.Length > 1 ? new CompositeKeys(Keys) : Single(Keys[0], sorted);
@@ -109,6 +127,7 @@ internal sealed class AggregationOutcome
 {
     private readonly AggregationPlan _plan;
     private readonly AggregateSlot[] _slots;
+    private readonly ChosenValues[] _chosen;
 
     internal AggregationOutcome(AggregationPlan plan, AggregateSlot[] slots, GroupKeys? keys, int[] order)
     {
@@ -116,7 +135,14 @@ internal sealed class AggregationOutcome
         _slots = slots;
         Keys = keys;
         Order = order;
+        _chosen = new ChosenValues[plan.Chosen.Length];
+        for (int c = 0; c < _chosen.Length; c++)
+        {
+            _chosen[c] = plan.Chosen[c].CreateValues();
+        }
     }
+
+    internal AggregationPlan Plan => _plan;
 
     internal GroupKeys? Keys { get; }
 
@@ -129,6 +155,21 @@ internal sealed class AggregationOutcome
         return index >= 0
             ? _slots[index]
             : throw new InvalidOperationException($"'{node}' belongs to another aggregation.");
+    }
+
+    /// <summary>The values of a column of chosen rows, as the last fetch left them.</summary>
+    internal ChosenValues ChosenOf(IChosenColumn column)
+    {
+        IChosenColumn[] chosen = _plan.Chosen;
+        for (int c = 0; c < chosen.Length; c++)
+        {
+            if (string.Equals(chosen[c].Key, column.Key, StringComparison.Ordinal))
+            {
+                return _chosen[c];
+            }
+        }
+
+        throw new InvalidOperationException($"'{column}' belongs to another aggregation.");
     }
 }
 
@@ -146,6 +187,9 @@ internal sealed class AggregationPartition
     private readonly GroupRanges _ranges = new GroupRanges();
     private int[] _rowGroups = [];
     private long _batch;
+
+    // The source's row the current batch starts at, which a chosen row keeps.
+    private long _startRow;
 
     // The component of a composite key that streams, its own index, the component group of each
     // group and of each row of the batch: what tells a group a later row may still join from one
@@ -257,6 +301,7 @@ internal sealed class AggregationPartition
         }
 
         long number = ++_batch;
+        _startRow = batch.StartRow;
         CanonicalArena arena = batch.Arena;
         int root = batch.RootIndex;
         ReadOnlySpan<ulong> selection = batch.SelectionWords;
@@ -450,7 +495,7 @@ internal sealed class AggregationPartition
     {
         int column = _inputs[slot];
         int filter = _filterOf[slot];
-        return new BatchInput(number, arena, column >= 0 ? _nodes[column] : -1, rows, filter < 0 ? selection : _masks!.Selection(filter));
+        return new BatchInput(number, arena, column >= 0 ? _nodes[column] : -1, rows, filter < 0 ? selection : _masks!.Selection(filter), _startRow);
     }
 
     /// <summary>Whether the aggregate has rows of the batch to fold: none when its filter keeps none.</summary>
@@ -478,7 +523,21 @@ internal abstract class AggregationHost
         Begin();
         try
         {
-            return await AggregationEngine.RunAsync(Source, Spec(rows), Metrics, plan, cancellationToken).ConfigureAwait(false);
+            ScanSpec spec = Spec(rows);
+            AggregationOutcome outcome = await AggregationEngine.RunAsync(Source, spec, Metrics, plan, cancellationToken).ConfigureAwait(false);
+            if (plan.Chosen.Length > 0)
+            {
+                // The columns of the chosen rows, read once every group's row is known.
+                int[] groups = new int[outcome.Keys?.Count ?? 1];
+                for (int g = 0; g < groups.Length; g++)
+                {
+                    groups[g] = g;
+                }
+
+                await ChosenFetch.FetchAsync(outcome, Source, spec, Metrics, groups, cancellationToken).ConfigureAwait(false);
+            }
+
+            return outcome;
         }
         finally
         {
@@ -621,7 +680,9 @@ internal static class AggregationEngine
             Projection = mask.Build(),
             KeepEncodings = true,
             SinkDecodes = true,
-            PositionsUnread = true,
+
+            // A chosen row is kept as its place in the source, which the batches then have to number.
+            PositionsUnread = plan.Chosen.Length == 0,
             OrderPath = null,
             Descending = false,
             Options = spec.Options with { Compact = false },

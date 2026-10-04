@@ -1,0 +1,237 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Vorticity.Compute;
+using Vorticity.Layouts;
+using Vorticity.Scanning;
+using Vorticity.Writing;
+
+namespace Vorticity.Aggregating;
+
+/// <summary>The values of one column of the chosen rows, by group: fetched after the pass, read as results.</summary>
+internal abstract class ChosenValues
+{
+    /// <summary>Makes room for groups up to <paramref name="groups"/>.</summary>
+    internal abstract void EnsureGroups(int groups);
+
+    /// <summary>Leaves <paramref name="group"/> without a row: its value null, or a value type's default.</summary>
+    internal abstract void Clear(int group);
+
+    /// <summary>Reads column <paramref name="node"/> of a fetched batch, its row <c>i</c> going to group <c>groups[i]</c>.</summary>
+    internal abstract void Read(RecordBatch batch, int node, ReadOnlySpan<int> groups);
+}
+
+/// <summary>The values of a column of chosen rows as <typeparamref name="T"/>, and the groups that have no row.</summary>
+internal sealed class ChosenValues<T>(ChosenColumnNode<T> column) : ChosenValues
+{
+    private T[] _values = [];
+    private bool[] _missing = [];
+    private T[] _scratch = [];
+
+    /// <summary>The value of <paramref name="group"/>'s chosen row; the default when it has none.</summary>
+    internal T At(int group) => _values[group];
+
+    /// <summary>Whether <paramref name="group"/> has no chosen row: no candidate, or no row its filter keeps.</summary>
+    internal bool Missing(int group) => _missing[group];
+
+    internal override void EnsureGroups(int groups)
+    {
+        if (groups > _values.Length)
+        {
+            int length = Math.Max(groups, _values.Length * 2);
+            Array.Resize(ref _values, length);
+            Array.Resize(ref _missing, length);
+        }
+    }
+
+    internal override void Clear(int group)
+    {
+        _values[group] = default!;
+        _missing[group] = true;
+    }
+
+    internal override void Read(RecordBatch batch, int node, ReadOnlySpan<int> groups)
+    {
+        Scratch.Grow(ref _scratch, groups.Length);
+        ResultValues.Copy(batch, batch.Arena, node, column.Read.Type, column.Read.Extensions, _scratch, null);
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _values[groups[i]] = _scratch[i];
+            _missing[groups[i]] = false;
+        }
+    }
+}
+
+/// <summary>
+/// A column of chosen rows in a result: the values of the groups' rows, and for a group without one
+/// a null where the column holds nulls, a value type's default where it holds none.
+/// </summary>
+internal sealed class ChosenResultColumn<T>(string name, VortexType type, ChosenColumnNode<T> node) : ResultColumn(name, type)
+{
+    private T[] _values = [];
+
+    internal override void Append(AggregationOutcome outcome, ColumnStore store, ReadOnlySpan<int> groups)
+    {
+        ChosenValues<T> chosen = (ChosenValues<T>)outcome.ChosenOf(node);
+        Scratch.Grow(ref _values, groups.Length);
+        for (int i = 0; i < groups.Length; i++)
+        {
+            _values[i] = chosen.At(groups[i]);
+        }
+
+        // Runs of values, and a null for each group without a row where the column takes one.
+        int start = 0;
+        for (int i = 0; i < groups.Length; i++)
+        {
+            if (Type.IsNullable && chosen.Missing(groups[i]))
+            {
+                ElementWriter.Append(store.Leaf, new ReadOnlySpan<T>(_values, start, i - start));
+                store.AppendNull();
+                start = i + 1;
+            }
+        }
+
+        ElementWriter.Append(store.Leaf, new ReadOnlySpan<T>(_values, start, groups.Length - start));
+    }
+}
+
+/// <summary>
+/// The late reading of chosen rows: once a pass has kept each group's row as a position, the
+/// positions of a batch of groups are sorted and taken from the source, for the columns read from
+/// those rows alone, which decodes only them where the encoding allows. Rows of one choice share one
+/// take, whatever number of their columns the selection reads.
+/// </summary>
+internal static class ChosenFetch
+{
+    /// <summary>Fetches the columns of the chosen rows of <paramref name="groups"/> into <paramref name="outcome"/>.</summary>
+    /// <param name="outcome">The aggregation whose slots hold the positions, and where the values go.</param>
+    /// <param name="source">The source the pass read.</param>
+    /// <param name="spec">The pass's scan, whose options the take keeps; its filter is not applied again, the rows being kept already.</param>
+    /// <param name="metrics">Where the take's reads count.</param>
+    /// <param name="groups">The groups whose rows are read.</param>
+    /// <param name="cancellationToken">Cancels the take.</param>
+    internal static async ValueTask FetchAsync(
+        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanMetrics metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
+    {
+        IChosenColumn[] chosen = outcome.Plan.Chosen;
+        bool[] done = new bool[chosen.Length];
+        int most = 0;
+        foreach (int group in groups.Span)
+        {
+            most = Math.Max(most, group + 1);
+        }
+
+        for (int c = 0; c < chosen.Length; c++)
+        {
+            outcome.ChosenOf(chosen[c]).EnsureGroups(most);
+        }
+
+        for (int c = 0; c < chosen.Length; c++)
+        {
+            if (done[c])
+            {
+                continue;
+            }
+
+            // The columns read from this row, each once.
+            IAggregateNode row = chosen[c].Row;
+            List<int> columns = [];
+            for (int other = c; other < chosen.Length; other++)
+            {
+                if (!done[other] && chosen[other].Row.Identity.Equals(row.Identity))
+                {
+                    done[other] = true;
+                    columns.Add(other);
+                }
+            }
+
+            await FetchRowAsync(outcome, (AggregateSlot<long>)outcome.SlotOf(row), columns, source, spec, metrics, groups, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async ValueTask FetchRowAsync(
+        AggregationOutcome outcome,
+        AggregateSlot<long> slot,
+        List<int> columns,
+        ScanSource source,
+        ScanSpec spec,
+        ScanMetrics metrics,
+        ReadOnlyMemory<int> groups,
+        CancellationToken cancellationToken)
+    {
+        IChosenColumn[] chosen = outcome.Plan.Chosen;
+        long[] positions = new long[groups.Length];
+        int[] owners = new int[groups.Length];
+        int count = 0;
+        foreach (int group in groups.Span)
+        {
+            long position = slot.Result(group);
+            if (position >= 0)
+            {
+                positions[count] = position;
+                owners[count] = group;
+                count++;
+                continue;
+            }
+
+            foreach (int column in columns)
+            {
+                outcome.ChosenOf(chosen[column]).Clear(group);
+            }
+        }
+
+        if (count == 0)
+        {
+            return;
+        }
+
+        // A take reads its positions in order; each group has its own row, so they are distinct.
+        Array.Sort(positions, owners, 0, count);
+        FieldMaskBuilder mask = new FieldMaskBuilder();
+        foreach (int column in columns)
+        {
+            mask.Include(chosen[column].Read.FieldPath);
+        }
+
+        ScanSpec take = spec with
+        {
+            Filter = null,
+            MatchesNothing = false,
+            Rows = null,
+            Take = positions.AsSpan(0, count).ToArray(),
+            Projection = mask.Build(),
+            OrderPath = null,
+            Descending = false,
+            KeepEncodings = false,
+            SinkDecodes = false,
+            PositionsUnread = false,
+            Pruned = false,
+            Live = null,
+            Options = spec.Options with { Compact = true },
+        };
+
+        int at = 0;
+        await foreach (RecordBatch batch in source.BatchesAsync(take, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+        {
+            int rows = batch.RowCount;
+            if (at + rows > count)
+            {
+                throw new InvalidOperationException($"A take of {count} rows delivered more.");
+            }
+
+            foreach (int column in columns)
+            {
+                int node = FilterEvaluator.Resolve(batch.Arena, batch.RootIndex, chosen[column].Read.Field, rows);
+                outcome.ChosenOf(chosen[column]).Read(batch, node, owners.AsSpan(at, rows));
+            }
+
+            at += rows;
+        }
+
+        if (at != count)
+        {
+            throw new InvalidOperationException($"A take of {count} rows delivered {at}.");
+        }
+    }
+}

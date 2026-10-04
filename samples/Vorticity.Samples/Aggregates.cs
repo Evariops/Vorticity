@@ -69,6 +69,27 @@ internal static class Aggregates
             Console.WriteLine(line);
         }
 
+        await BestOfThreeAsync("GroupBy(City), chosen rows", async () =>
+        {
+            lines = new string[Demo.Cities.Length];
+            int line = 0;
+            await foreach (CityHottest city in file.Scan<Reading>()
+                .GroupBy(r => r.City)
+                .Select(g => (g.Key, g.First().Celsius, g.Max(r => r.Celsius), g.MaxBy(r => r.Celsius).Day, g.Last().Celsius))
+                .As<CityHottest>()
+                .ToRecordsAsync())
+            {
+                lines[line++] = $"  {city.City,-10} first {city.First}, hottest {city.Hottest} on day {city.HottestDay}, last {city.Last}";
+            }
+
+            return $"{line} groups";
+        });
+
+        foreach (string line in lines)
+        {
+            Console.WriteLine(line);
+        }
+
         await BestOfThreeAsync("Welford(Celsius), encoded", async () =>
         {
             Scan<Reading> scan = file.Scan<Reading>();
@@ -276,6 +297,10 @@ public partial record struct CitySpread(string City, double? Mean, WelfordState 
 /// <summary>A city's day: its total and the state of its variance.</summary>
 [VortexRecord]
 public partial record struct CityDaySpread(string City, int Day, double Total, WelfordState State);
+
+/// <summary>A city's first reading, its hottest and the day of it, and its last.</summary>
+[VortexRecord]
+public partial record struct CityHottest(string City, double? First, double? Hottest, int? HottestDay, double? Last);
 
 /// <summary>A city's readings, the hot ones and their mean, and two questions about all of them.</summary>
 [VortexRecord]

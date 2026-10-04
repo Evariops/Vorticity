@@ -30,6 +30,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private long _resultSkip;
     private long _resultTake;
     private IAsyncEnumerator<RecordBatch>? _inner;
+    private ScanSpec? _pass;
     private AggregationPartition? _partition;
     private AggregationOutcome? _outcome;
     private int[] _closed = [];
@@ -133,13 +134,13 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             {
                 // The end of the rows closes every group, the null group last.
                 _drained = true;
-                Close(all: true);
+                await CloseAsync(all: true).ConfigureAwait(false);
                 continue;
             }
 
             _partition!.Process(_inner.Current);
             _query.PeakGroups = Math.Max(_query.PeakGroups, _partition.Keys!.Count);
-            Close(all: false);
+            await CloseAsync(all: false).ConfigureAwait(false);
         }
     }
 
@@ -160,6 +161,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         AggregationPlan plan = _query.Plan;
         (ColumnShape[] columns, int[] inputs) = AggregationEngine.Columns(plan, new AggregateSlot?[plan.Aggregates.Length]);
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_query.RowFilter), columns, plan, host.Source.Schema);
+        _pass = pass;
         _partition = new AggregationPartition(
             plan, new AggregateSlot?[plan.Aggregates.Length], columns, inputs, sorted: plan.Keys.Length == 1, Streaming(_query), host.Source);
         _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []);
@@ -204,10 +206,24 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
         // The groups closed leave the partition, whether the operators deliver them or not.
         _keepPending = !all && _closedCount > 0;
-        if (_closedCount > 0)
+    }
+
+    /// <summary>Closes the groups now final, reads their chosen rows, and passes them through the operators, which may read those.</summary>
+    private async ValueTask CloseAsync(bool all)
+    {
+        Close(all);
+        if (_closedCount == 0)
         {
-            Through();
+            return;
         }
+
+        if (_query.Plan.Chosen.Length > 0)
+        {
+            await ChosenFetch.FetchAsync(_outcome!, _query.Host.Source, _pass!, _query.Host.Metrics, _closed.AsMemory(0, _closedCount), _cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        Through();
     }
 
     /// <summary>The closed groups through the operators on groups and the result's own window, in the order written.</summary>

@@ -132,7 +132,40 @@ present is above 10, but one in fifty is missing, so `All` is false. Two `Where`
 keep. In `AggAsync`, `a.Where`, `a.Count(p)`, `a.Any` and `a.All` do the same over the scan's rows.
 
 Each predicate is evaluated once a batch, however many aggregates read it, and its columns join the
-pass. On a million requests grouped by endpoint, the count, the failures and their mean latency took
+pass.
+
+## Chosen rows
+
+`g.First()` and `g.Last()` are the group's first and last row in file order, `g.MinBy(r => e)` and
+`g.MaxBy(r => e)` the row holding the smallest and the largest value of `e`. Each is a probe whose
+columns are results of the group:
+
+```csharp
+.Select(g => (g.Key, g.First().Celsius, g.Max(r => r.Celsius), g.MaxBy(r => r.Celsius).Day, g.Last().Celsius))
+.As<CityHottest>()
+
+[VortexRecord]
+public partial record struct CityHottest(string City, double? First, double? Hottest, int? HottestDay, double? Last);
+```
+
+```
+  Paris      first , hottest 49.8 on day 0, last 49.8
+  Lyon       first 10.7, hottest 49.9 on day 0, last 49.9
+  ...
+```
+
+File order is the order the rows the scan keeps lie in the file, whatever its `OrderBy`, and it is
+the same at every degree: of equal values, `MinBy` and `MaxBy` take the first row, and a null or a
+NaN is never chosen. Paris's first row has no temperature, so its `First` is null: `First()` is a
+row, not the first value. Columns read from one chosen row are one row: `g.MaxBy(r => r.Celsius).Day`
+and `.City` come from the same reading. A group with no candidate, every value null, reads null
+where the member is nullable and a value type's default where it is not.
+
+The pass keeps each group's row as its position and the value it is chosen by; the columns read
+from the rows are fetched after it, for the chosen rows alone, by position, which decodes only those
+rows where the encoding allows. A group by that streams fetches them for each batch of groups it
+closes. A chosen row's column is a result: a `Where` or an `OrderBy` after the group by compares it,
+and an aggregate does not read it. On a million requests grouped by endpoint, the count, the failures and their mean latency took
 3.4 ms in one pass, and the failures alone, filtered before the group by, 4.6 ms. A filter written
 before the group by is still the one to write when the other rows are not wanted and the zone maps
 can skip blocks with it.

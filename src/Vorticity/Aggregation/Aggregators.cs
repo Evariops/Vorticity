@@ -21,8 +21,51 @@ internal static class Aggregators
             throw new InvalidOperationException("An aggregate is built inside the lambda of Select or AggAsync, which hands it its columns.");
         }
 
-        return new ColumnShape(column(new Probe<TRecord>(binding)).Column);
+        ColumnSym read = column(new Probe<TRecord>(binding)).Column;
+        if (read.Field is ResultFieldExpr)
+        {
+            throw new InvalidOperationException(
+                $"'{read.Field.Path}' is a result of the group, not a column of its rows: an aggregate reads columns, and a chosen row's column is no aggregate's input.");
+        }
+
+        return new ColumnShape(read);
     }
+
+    /// <summary>
+    /// A group's chosen row, kept as its position: its first or last in file order, or the one
+    /// holding the smallest or largest value of <paramref name="by"/>.
+    /// </summary>
+    internal static AggregateNode<long> Chosen(AggregateKind kind, ColumnShape? by, RowFilter? filter)
+    {
+        Func<AggregateSlot<long>> create = kind switch
+        {
+            AggregateKind.First => static () => new RowSlot(last: false),
+            AggregateKind.Last => static () => new RowSlot(last: true),
+            _ => ChosenBy(by!, kind == AggregateKind.MaxBy),
+        };
+
+        return new AggregateNode<long>(kind, by, create, null, filter: filter);
+    }
+
+    private static Func<AggregateSlot<long>> ChosenBy(ColumnShape by, bool max) => by.Kind switch
+    {
+        StorageKind.Primitive => by.PType switch
+        {
+            PType.I8 => () => new ChosenBySlot<sbyte>(max, StorageKind.Primitive),
+            PType.I16 => () => new ChosenBySlot<short>(max, StorageKind.Primitive),
+            PType.I32 => () => new ChosenBySlot<int>(max, StorageKind.Primitive),
+            PType.I64 => () => new ChosenBySlot<long>(max, StorageKind.Primitive),
+            PType.U8 => () => new ChosenBySlot<byte>(max, StorageKind.Primitive),
+            PType.U16 => () => new ChosenBySlot<ushort>(max, StorageKind.Primitive),
+            PType.U32 => () => new ChosenBySlot<uint>(max, StorageKind.Primitive),
+            PType.U64 => () => new ChosenBySlot<ulong>(max, StorageKind.Primitive),
+            PType.F16 => () => new ChosenBySlot<Half>(max, StorageKind.Primitive),
+            PType.F32 => () => new ChosenBySlot<float>(max, StorageKind.Primitive),
+            _ => () => new ChosenBySlot<double>(max, StorageKind.Primitive),
+        },
+        StorageKind.Decimal => () => new ChosenBySlot<Int128>(max, StorageKind.Decimal),
+        _ => throw by.Unsupported(max ? "a MaxBy" : "a MinBy"),
+    };
 
     /// <summary>The predicate of a filtered group, built over the rows' probe.</summary>
     internal static Predicate Rows<TRecord>(RecordBinding? binding, Func<Probe<TRecord>, Predicate> predicate)

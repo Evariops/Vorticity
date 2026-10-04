@@ -20,7 +20,7 @@ rules every signature follows are [14-public-api.md](14-public-api.md)'s, the en
 > | 1 ✅ | `Select` on a grouped scan, its overloads by arity kept until stage 2, named keys, `Average` and `AverageAsync`, `OrderByDescending` on a scan, aggregates deduplicated by structure, the naming rule | §1, §4, §5.5 |
 > | 2 ✅ | results as batches: a query's result is a stream of batches, `As<TRecord>` a `Scan<TRecord>` over it; one value comes as itself, several into a record, and the overloads by arity go; `Select`, `Distinct` and `Take` on a scan; the writer takes a scan | §2.1, §6.1, §7, §8 |
 > | 3 ✅ | after the group by: `Where`, `OrderBy`, `ThenBy`, `Skip`, `Take`, the top-k; the group by and the `Distinct` that stream; groups in the order asked for | §2.2–§2.4, §6 |
-> | 4, the filtered group, reproducible sums, variance ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
+> | 4, the filtered group, reproducible sums, variance, widened sums, chosen rows ✅ | the catalog: a filtered group, `Count(p)`, `Any`, `All`, `Variance`, `StandardDeviation`, chosen rows, sums widened and reproducible | §5 |
 > | 5 | `Truncate` and `Bucket`; keys settled by the zone maps; groups that stream through them | §3, §9.3 |
 > | 6 | the engine: short ranges, composite and direct-index keys, adaptive partitioning, the parallel merge, datasets read ahead and side by side, pruning ahead of the window, finality from the zone maps | §2.5, §2.6, §9 |
 

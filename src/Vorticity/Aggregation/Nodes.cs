@@ -15,6 +15,10 @@ internal enum AggregateKind : byte
     All,
     Variance,
     StandardDeviation,
+    First,
+    Last,
+    MinBy,
+    MaxBy,
 }
 
 /// <summary>A result of an aggregation, whatever its type: what an element of a selection of several values is.</summary>
@@ -194,6 +198,69 @@ internal sealed class AggregateNode<T> : ResultNode<T>, IAggregateNode
         string of = Input is null ? $"{Kind}()" : $"{Kind}({Input.Path})";
         return Filter is null ? of : $"{of} where {Filter}";
     }
+}
+
+/// <summary>A column read from a group's chosen row, whatever its type: what the plan fetches after the pass.</summary>
+internal interface IChosenColumn
+{
+    /// <summary>The chosen row: the aggregate that keeps its position.</summary>
+    IAggregateNode Row { get; }
+
+    /// <summary>The column read from the row.</summary>
+    ColumnSym Read { get; }
+
+    /// <summary>What makes two columns of chosen rows one: the same row, the same column, the same type.</summary>
+    string Key { get; }
+
+    /// <summary>The column's values by group, for one run.</summary>
+    ChosenValues CreateValues();
+}
+
+/// <summary>
+/// A column of a group's first or last row, or of the row holding a smallest or largest value: a
+/// result, fetched after the pass for the chosen rows alone, by their positions.
+/// </summary>
+/// <typeparam name="T">The column's .NET type.</typeparam>
+internal sealed class ChosenColumnNode<T> : ResultNode<T>, IChosenColumn
+{
+    private ColumnSym? _comparable;
+
+    internal ChosenColumnNode(AggregateNode<long> row, ColumnSym read)
+    {
+        Row = row;
+        Read = read;
+        Key = $"{row.HiddenName}.{read.Field.Path}:{typeof(T).FullName}";
+    }
+
+    public IAggregateNode Row { get; }
+
+    public ColumnSym Read { get; }
+
+    public string Key { get; }
+
+    /// <summary>
+    /// The result's type: the column's, nullable where the row may be missing, the row of a
+    /// smallest or largest value having no candidate or a filtered group no row.
+    /// </summary>
+    private VortexType Natural =>
+        Row.Kind is AggregateKind.MinBy or AggregateKind.MaxBy || Row.Filter is not null ? Read.Type.Nullable : Read.Type;
+
+    internal override ColumnSym? Comparable =>
+        _comparable ??= new ColumnSym(new ResultFieldExpr($"${Key}", this, -1), Natural, Read.Extensions, null, -1, []);
+
+    public ChosenValues CreateValues() => new ChosenValues<T>(this);
+
+    internal override Func<int, T> Bind(AggregationOutcome outcome)
+    {
+        ChosenValues<T> values = (ChosenValues<T>)outcome.ChosenOf(this);
+        return values.At;
+    }
+
+    public override ResultColumn Column(string name, ColumnShape[] keys) => new ChosenResultColumn<T>(name, Natural, this);
+
+    private protected override ResultColumn Typed(VortexField member, ColumnShape[] keys) => new ChosenResultColumn<T>(member.Name, member.Type, this);
+
+    public override string ToString() => $"{Row}.{Read.Field.Path}";
 }
 
 /// <summary>A component of a group's key, delivered as a result.</summary>

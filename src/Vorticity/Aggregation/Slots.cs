@@ -8,14 +8,18 @@ namespace Vorticity.Aggregating;
 /// <summary>One column of one batch, as an aggregate is handed it.</summary>
 internal readonly ref struct BatchInput
 {
-    internal BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection)
+    internal BatchInput(long batch, CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long startRow = 0)
     {
         Batch = batch;
         Arena = arena;
         Node = node;
         Rows = rows;
         Selection = selection;
+        StartRow = startRow;
     }
+
+    /// <summary>The source's row the batch's first row is: what a chosen row is kept as, its position.</summary>
+    internal long StartRow { get; }
 
     /// <summary>The batch's number in its partition, from 1: what a slot keys its per-batch work on.</summary>
     internal long Batch { get; }
