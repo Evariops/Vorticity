@@ -11,6 +11,7 @@ using Vorticity.Keys;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
 using Vorticity.Types;
+using Vorticity.Writing;
 
 namespace Vorticity;
 
@@ -150,10 +151,99 @@ internal sealed class ResultScanSource : ScanSource
     /// <summary>The batches a spec asks of a result.</summary>
     private sealed class Stream(ResultScanSource source, ScanSpec spec) : IAsyncEnumerable<RecordBatch>
     {
-        public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default) =>
-            spec.MatchesNothing
-                ? new Enumerator(source, spec, EmptyBatches.Instance)
-                : new Enumerator(source, spec, source._query.Batches(cancellationToken));
+        public IAsyncEnumerator<RecordBatch> GetAsyncEnumerator(CancellationToken cancellationToken = default)
+        {
+            if (spec.MatchesNothing)
+            {
+                return new Enumerator(source, spec, EmptyBatches.Instance);
+            }
+
+            // An order the result does not arrive in is a sort of the rows kept, held whole.
+            return spec.OrderPath is null
+                ? new Enumerator(source, spec, source._query.Batches(cancellationToken))
+                : new SortedEnumerator(source, spec, source._query.Batches(cancellationToken), cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// The rows a spec keeps of a result, in the order of one of its columns: gathered into one
+    /// batch, sorted by position, nulls last, ties in the result's order, then delivered a batch at
+    /// a time. A blocking stage, holding the rows kept.
+    /// </summary>
+    private sealed class SortedEnumerator : IAsyncEnumerator<RecordBatch>
+    {
+        private readonly ResultScanSource _source;
+        private readonly ScanSpec _spec;
+        private readonly Enumerator _kept;
+        private readonly CancellationToken _cancellationToken;
+        private StructStore? _store;
+        private CanonicalArena? _arena;
+        private RecordBatch? _current;
+        private int[] _positions = [];
+        private int _root;
+        private int _count;
+        private int _next;
+
+        internal SortedEnumerator(ResultScanSource source, ScanSpec spec, IAsyncEnumerator<RecordBatch> inner, CancellationToken cancellationToken)
+        {
+            _source = source;
+            _spec = spec;
+            _cancellationToken = cancellationToken;
+            _kept = new Enumerator(source, spec with { OrderPath = null, Descending = false, Options = spec.Options with { Compact = true } }, inner);
+        }
+
+        public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
+
+        [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
+        public async ValueTask<bool> MoveNextAsync()
+        {
+            if (_store is null)
+            {
+                VortexSchema schema = _spec.Projection is { IsAll: false } mask ? ToolPaths.Project(_source.Schema, mask) : _source.Schema;
+                VortexSessionOptions options = _source.Session.Options;
+                _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(schema, new DTypeArena()), options.EnginePool, options.Extensions);
+                _arena = new CanonicalArena(64, options.EnginePool);
+                while (await _kept.MoveNextAsync().ConfigureAwait(false))
+                {
+                    RecordBatch batch = _kept.Current;
+                    StoreRows.Append(_store, batch.Arena, batch.RootIndex);
+                }
+
+                _count = _store.Rows;
+                _root = _store.Build(_arena, _count);
+                int key = FilterEvaluator.Resolve(_arena, _root, new FieldExpr(_spec.OrderPath!), _count);
+                ColumnOrder order = ColumnOrder.For(_arena, key, schema.IndexOfName(_spec.OrderPath!) is int at and >= 0 ? schema[at].Type : VortexType.Null, _spec.Descending);
+                _positions = new int[_count];
+                for (int i = 0; i < _count; i++)
+                {
+                    _positions[i] = i;
+                }
+
+                GroupSort.Sort(_positions, _count, new ChainOrder([order, ColumnOrder.Positions]), long.MaxValue, _cancellationToken);
+            }
+
+            if (_next >= _count)
+            {
+                _current?.Dispose();
+                return false;
+            }
+
+            _cancellationToken.ThrowIfCancellationRequested();
+            int rows = Math.Min(GroupBatches.BatchRows, _count - _next);
+            int gathered = CanonicalFilter.Apply(_arena!, _root, _positions.AsSpan(_next, rows));
+            _current?.Dispose();
+            _current = RecordBatch.Over(_arena!, gathered, _next, _current);
+            _next += rows;
+            return true;
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _current?.Dispose();
+            await _kept.DisposeAsync().ConfigureAwait(false);
+            _store?.Release();
+            _arena?.Reset();
+        }
     }
 
     /// <summary>A result with no batch: a filter known to match nothing.</summary>

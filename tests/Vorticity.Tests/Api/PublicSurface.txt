@@ -833,6 +833,10 @@ Vorticity:     method Aggregation<T> Select<T>(Func<Group<TRecord, TKey>, Sym<T>
 Vorticity:     method GroupedScan<TRecord, TKey> Skip(int)
 Vorticity:     method GroupedScan<TRecord, TKey> Take(int)
 Vorticity:     method GroupedScan<TRecord, TKey> Where(Func<Group<TRecord, TKey>, Predicate>)
+Vorticity:     method OrderedGroupedScan<TRecord, TKey> OrderBy(Func<Group<TRecord, TKey>, ITuple>)
+Vorticity:     method OrderedGroupedScan<TRecord, TKey> OrderBy<T>(Func<Group<TRecord, TKey>, Sym<T>>)
+Vorticity:     method OrderedGroupedScan<TRecord, TKey> OrderByDescending(Func<Group<TRecord, TKey>, ITuple>)
+Vorticity:     method OrderedGroupedScan<TRecord, TKey> OrderByDescending<T>(Func<Group<TRecord, TKey>, Sym<T>>)
 Vorticity: interface Vorticity.IAggregator<T, TState>
 Vorticity:     method TState Seed()
 Vorticity:     method void Merge(ref TState, in TState)
@@ -1044,6 +1048,16 @@ Vorticity:     property Nullable<long> Entries { get; init; }
 Vorticity:     property bool Descending { get; init; }
 Vorticity:     property int Runs { get; init; }
 Vorticity:     property string Source { get; init; }
+Vorticity: sealed class Vorticity.OrderedGroupedScan<TRecord, TKey>
+Vorticity:     method Aggregation Select(Func<Group<TRecord, TKey>, ITuple>)
+Vorticity:     method Aggregation<T> Select<T>(Func<Group<TRecord, TKey>, Sym<T>>)
+Vorticity:     method GroupedScan<TRecord, TKey> Skip(int)
+Vorticity:     method GroupedScan<TRecord, TKey> Take(int)
+Vorticity:     method GroupedScan<TRecord, TKey> Where(Func<Group<TRecord, TKey>, Predicate>)
+Vorticity:     method OrderedGroupedScan<TRecord, TKey> ThenBy(Func<Group<TRecord, TKey>, ITuple>)
+Vorticity:     method OrderedGroupedScan<TRecord, TKey> ThenBy<T>(Func<Group<TRecord, TKey>, Sym<T>>)
+Vorticity:     method OrderedGroupedScan<TRecord, TKey> ThenByDescending(Func<Group<TRecord, TKey>, ITuple>)
+Vorticity:     method OrderedGroupedScan<TRecord, TKey> ThenByDescending<T>(Func<Group<TRecord, TKey>, Sym<T>>)
 Vorticity: struct Vorticity.Predicate
 Vorticity:     method Predicate op_BitwiseAnd(Predicate, Predicate)
 Vorticity:     method Predicate op_BitwiseOr(Predicate, Predicate)

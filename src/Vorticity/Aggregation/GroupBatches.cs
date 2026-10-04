@@ -365,14 +365,25 @@ internal static class GroupSelection
     {
         int[] groups = outcome.Order;
         int count = groups.Length;
-        foreach (GroupOperator op in query.Operators)
+        GroupOperator[] operators = query.Operators;
+        for (int o = 0; o < operators.Length; o++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            switch (op)
+            switch (operators[o])
             {
                 case GroupFilter filter:
                     (groups, count) = Filter(query, outcome, filter, groups, count, cancellationToken);
                     break;
+                case GroupOrder order:
+                {
+                    // An order followed by a window ranks only the groups the window can keep.
+                    long keep = o + 1 < operators.Length
+                        ? operators[o + 1] is GroupWindow window ? Saturated(window.Skip, window.Take) : long.MaxValue
+                        : Saturated(query.Skip, query.Take);
+                    (groups, count) = Order(query, outcome, order, groups, count, keep, cancellationToken);
+                    break;
+                }
+
                 case GroupWindow window:
                 {
                     int from = (int)Math.Min(window.Skip, count);
@@ -383,11 +394,80 @@ internal static class GroupSelection
                 }
 
                 default:
-                    throw new InvalidOperationException($"An operator on groups of kind {op.GetType().Name} is not known.");
+                    throw new InvalidOperationException($"An operator on groups of kind {operators[o].GetType().Name} is not known.");
             }
         }
 
         return (groups, count);
+    }
+
+    private static long Saturated(long skip, long take) => take == long.MaxValue || skip > long.MaxValue - take ? long.MaxValue : skip + take;
+
+    /// <summary>
+    /// The groups in the order's order, the first <paramref name="keep"/> at most: the columns of the
+    /// results it reads, and of the key, which breaks every tie, built for every group at once.
+    /// </summary>
+    private static (int[] Groups, int Count) Order(
+        AggregationQuery query, AggregationOutcome outcome, GroupOrder order, int[] groups, int count, long keep, CancellationToken cancellationToken)
+    {
+        ColumnShape[] keys = query.Keys;
+        int width = order.Keys.Length + keys.Length;
+        ResultColumn[] columns = new ResultColumn[width];
+        VortexField[] fields = new VortexField[width];
+        for (int i = 0; i < order.Keys.Length; i++)
+        {
+            columns[i] = order.Keys[i].Field.Column(keys);
+        }
+
+        for (int k = 0; k < keys.Length; k++)
+        {
+            columns[order.Keys.Length + k] = new KeyResultColumn($"$tie{k}", keys[k].Type, k);
+        }
+
+        for (int i = 0; i < width; i++)
+        {
+            fields[i] = new VortexField($"${i}", columns[i].Type);
+        }
+
+        VortexSessionOptions options = query.Session.Options;
+        StructStore store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
+        CanonicalArena arena = new CanonicalArena(64, options.EnginePool);
+        try
+        {
+            ReadOnlySpan<int> all = groups.AsSpan(0, count);
+            for (int c = 0; c < width; c++)
+            {
+                columns[c].Append(outcome, store.Children[c], all);
+            }
+
+            int root = store.Build(arena, count);
+            CanonicalNode structure = arena.GetNode(root);
+            ColumnOrder[] orders = new ColumnOrder[width];
+            for (int c = 0; c < width; c++)
+            {
+                orders[c] = ColumnOrder.For(arena, structure.GetFieldIndex(c), columns[c].Type, c < order.Keys.Length && order.Keys[c].Descending);
+            }
+
+            int[] positions = new int[count];
+            for (int i = 0; i < count; i++)
+            {
+                positions[i] = i;
+            }
+
+            int kept = GroupSort.Sort(positions, count, new ChainOrder(orders), keep, cancellationToken);
+            int[] ordered = new int[kept];
+            for (int i = 0; i < kept; i++)
+            {
+                ordered[i] = groups[positions[i]];
+            }
+
+            return (ordered, kept);
+        }
+        finally
+        {
+            store.Release();
+            arena.Reset();
+        }
     }
 
     /// <summary>The groups the filter keeps, evaluated on the columns of the results it reads, a window of groups at a time.</summary>

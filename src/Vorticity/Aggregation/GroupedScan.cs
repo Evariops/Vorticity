@@ -138,6 +138,36 @@ public sealed class GroupedScan<TRecord, TKey>
         return With(_rows, new GroupWindow(0, count));
     }
 
+    /// <summary>The groups in the ascending order of <paramref name="key"/>, nulls last: <c>orderby g.Count()</c> in a query.</summary>
+    /// <typeparam name="T">The result's type.</typeparam>
+    /// <param name="key">A lambda over the group, returning a component of its key or an aggregate.</param>
+    /// <returns>The groups in order; ties are broken by <c>ThenBy</c>, then by the group's key.</returns>
+    /// <exception cref="ArgumentException">The result has no order: a custom aggregator's state.</exception>
+    /// <exception cref="InvalidOperationException">The result is neither a component of the key nor an aggregate.</exception>
+    public OrderedGroupedScan<TRecord, TKey> OrderBy<T>(Func<Group<TRecord, TKey>, Sym<T>> key) => Ordered(Keys(key, descending: false), first: true);
+
+    /// <summary>The groups in the descending order of <paramref name="key"/>, nulls last: <c>orderby g.Count() descending</c> in a query.</summary>
+    /// <typeparam name="T">The result's type.</typeparam>
+    /// <param name="key">A lambda over the group, returning a component of its key or an aggregate.</param>
+    /// <returns>The groups in order; ties are broken by <c>ThenBy</c>, then by the group's key.</returns>
+    /// <exception cref="ArgumentException">The result has no order: a custom aggregator's state.</exception>
+    /// <exception cref="InvalidOperationException">The result is neither a component of the key nor an aggregate.</exception>
+    public OrderedGroupedScan<TRecord, TKey> OrderByDescending<T>(Func<Group<TRecord, TKey>, Sym<T>> key) => Ordered(Keys(key, descending: true), first: true);
+
+    /// <summary>The groups in the ascending order of the elements of a tuple, the first deciding: <c>orderby g.Key</c> on a composite key.</summary>
+    /// <param name="keys">A lambda over the group, returning a tuple of components of its key and aggregates.</param>
+    /// <returns>The groups in order.</returns>
+    /// <exception cref="ArgumentException">An element is not a symbol, or has no order.</exception>
+    /// <exception cref="InvalidOperationException">An element is neither a component of the key nor an aggregate.</exception>
+    public OrderedGroupedScan<TRecord, TKey> OrderBy(Func<Group<TRecord, TKey>, ITuple> keys) => Ordered(Keys(keys, descending: false), first: true);
+
+    /// <summary>The groups in the descending order of the elements of a tuple, the first deciding.</summary>
+    /// <param name="keys">A lambda over the group, returning a tuple of components of its key and aggregates.</param>
+    /// <returns>The groups in order.</returns>
+    /// <exception cref="ArgumentException">An element is not a symbol, or has no order.</exception>
+    /// <exception cref="InvalidOperationException">An element is neither a component of the key nor an aggregate.</exception>
+    public OrderedGroupedScan<TRecord, TKey> OrderByDescending(Func<Group<TRecord, TKey>, ITuple> keys) => Ordered(Keys(keys, descending: true), first: true);
+
     /// <summary>One result per group: <c>Select(g =&gt; g.Count())</c>.</summary>
     /// <typeparam name="T">The result's type.</typeparam>
     /// <param name="result">A lambda over the group, returning its key, a component of it, or an aggregate.</param>
@@ -195,6 +225,61 @@ public sealed class GroupedScan<TRecord, TKey>
 
     private Group<TRecord, TKey> Group() => new Group<TRecord, TKey>(_scan.Binding, _key);
 
+    /// <summary>A first order, or the next key of the order the last operator is.</summary>
+    internal OrderedGroupedScan<TRecord, TKey> Ordered(OrderKey[] keys, bool first)
+    {
+        if (first || _operators.Length == 0 || _operators[^1] is not GroupOrder previous)
+        {
+            return new OrderedGroupedScan<TRecord, TKey>(With(_rows, new GroupOrder(keys)));
+        }
+
+        GroupOperator[] operators = [.. _operators];
+        operators[^1] = new GroupOrder([.. previous.Keys, .. keys]);
+        return new OrderedGroupedScan<TRecord, TKey>(new GroupedScan<TRecord, TKey>(_scan, _key, _components, _keys, _rows, operators));
+    }
+
+    internal OrderKey[] Keys<T>(Func<Group<TRecord, TKey>, Sym<T>> key, bool descending)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        return [new OrderKey(OrderField(key(Group())), descending)];
+    }
+
+    internal OrderKey[] Keys(Func<Group<TRecord, TKey>, ITuple> keys, bool descending)
+    {
+        ArgumentNullException.ThrowIfNull(keys);
+        ITuple tuple = keys(Group()) ?? throw new ArgumentException("The lambda returned no tuple.", nameof(keys));
+        OrderKey[] order = new OrderKey[tuple.Length];
+        for (int i = 0; i < order.Length; i++)
+        {
+            order[i] = new OrderKey(
+                OrderField(tuple[i] as ISymbol ?? throw new ArgumentException($"Element {i + 1} of the order is not a symbol but {tuple[i]?.GetType().Name ?? "null"}.", nameof(keys))),
+                descending);
+        }
+
+        return order;
+    }
+
+    /// <summary>The column of the groups' results an order key reads: an aggregate's, or a component of the key's.</summary>
+    private ResultFieldExpr OrderField(ISymbol symbol)
+    {
+        if (symbol.Node is IAggregateNode { Kind: AggregateKind.Custom } custom)
+        {
+            throw new ArgumentException($"'{custom}' is the state of a custom aggregator, which has no order: order by a value a built-in aggregate delivers.");
+        }
+
+        FieldExpr field = symbol.Compared.Field;
+        if (field is ResultFieldExpr result)
+        {
+            return result;
+        }
+
+        int component = ComponentOf(field);
+        return component >= 0
+            ? KeyField(component)
+            : throw new InvalidOperationException(
+                $"'{field.Path}' is a column of the rows, neither a component of the key nor an aggregate: groups are ordered by their results.");
+    }
+
     private GroupedScan<TRecord, TKey> With(VortexExpr? rows, GroupOperator next) =>
         new GroupedScan<TRecord, TKey>(_scan, _key, _components, _keys, rows, [.. _operators, next]);
 
@@ -235,10 +320,92 @@ public sealed class GroupedScan<TRecord, TKey>
                     }
                 }
             }
+            else if (op is GroupOrder order)
+            {
+                foreach (OrderKey key in order.Keys)
+                {
+                    if (key.Field.Result is SymNode aggregate)
+                    {
+                        results.Add(aggregate);
+                    }
+                }
+            }
         }
 
         return new AggregationQuery(_scan.Host, new AggregationPlan([.. results], _keys), nodes, _keys, _rows, _operators);
     }
+}
+
+/// <summary>
+/// A scan grouped by a key whose groups are in an order: <c>OrderBy(g =&gt; g.Key.Hour).ThenByDescending(g =&gt; g.Count())</c>.
+/// </summary>
+/// <typeparam name="TRecord">The record the scan is typed by.</typeparam>
+/// <typeparam name="TKey">The key: the symbol of one column, or the tuple of symbols of a composite key.</typeparam>
+/// <remarks>
+/// A result orders as its type: numbers by value, −0.0 equal to +0.0 and NaN after +∞, text and
+/// binary bytewise, <c>false</c> before <c>true</c>, temporal values in time; a null comes last in
+/// both directions. Ties past the last key are broken by the group's key, so the order is the same
+/// at every degree of parallelism. An order followed by <c>Take</c> ranks the groups in a heap of
+/// the ones it keeps.
+/// </remarks>
+public sealed class OrderedGroupedScan<TRecord, TKey>
+    where TRecord : IVortexRecord<TRecord>
+{
+    private readonly GroupedScan<TRecord, TKey> _grouped;
+
+    internal OrderedGroupedScan(GroupedScan<TRecord, TKey> grouped) => _grouped = grouped;
+
+    /// <summary>Breaks the ties of the order so far by the ascending order of <paramref name="key"/>.</summary>
+    /// <typeparam name="T">The result's type.</typeparam>
+    /// <param name="key">A lambda over the group, returning a component of its key or an aggregate.</param>
+    /// <returns>The groups in order.</returns>
+    /// <exception cref="ArgumentException">The result has no order.</exception>
+    /// <exception cref="InvalidOperationException">The result is neither a component of the key nor an aggregate.</exception>
+    public OrderedGroupedScan<TRecord, TKey> ThenBy<T>(Func<Group<TRecord, TKey>, Sym<T>> key) => _grouped.Ordered(_grouped.Keys(key, descending: false), first: false);
+
+    /// <summary>Breaks the ties of the order so far by the descending order of <paramref name="key"/>.</summary>
+    /// <typeparam name="T">The result's type.</typeparam>
+    /// <param name="key">A lambda over the group, returning a component of its key or an aggregate.</param>
+    /// <returns>The groups in order.</returns>
+    /// <exception cref="ArgumentException">The result has no order.</exception>
+    /// <exception cref="InvalidOperationException">The result is neither a component of the key nor an aggregate.</exception>
+    public OrderedGroupedScan<TRecord, TKey> ThenByDescending<T>(Func<Group<TRecord, TKey>, Sym<T>> key) => _grouped.Ordered(_grouped.Keys(key, descending: true), first: false);
+
+    /// <summary>Breaks the ties of the order so far by the ascending order of the elements of a tuple.</summary>
+    /// <param name="keys">A lambda over the group, returning a tuple of components of its key and aggregates.</param>
+    /// <returns>The groups in order.</returns>
+    public OrderedGroupedScan<TRecord, TKey> ThenBy(Func<Group<TRecord, TKey>, ITuple> keys) => _grouped.Ordered(_grouped.Keys(keys, descending: false), first: false);
+
+    /// <summary>Breaks the ties of the order so far by the descending order of the elements of a tuple.</summary>
+    /// <param name="keys">A lambda over the group, returning a tuple of components of its key and aggregates.</param>
+    /// <returns>The groups in order.</returns>
+    public OrderedGroupedScan<TRecord, TKey> ThenByDescending(Func<Group<TRecord, TKey>, ITuple> keys) => _grouped.Ordered(_grouped.Keys(keys, descending: true), first: false);
+
+    /// <summary>Keeps the groups <paramref name="predicate"/> is true for, in the order so far.</summary>
+    /// <param name="predicate">A lambda over the group, comparing its key's components and its aggregates.</param>
+    /// <returns>The groups kept, in order.</returns>
+    public GroupedScan<TRecord, TKey> Where(Func<Group<TRecord, TKey>, Predicate> predicate) => _grouped.Where(predicate);
+
+    /// <summary>The groups past the first <paramref name="count"/> in the order.</summary>
+    /// <param name="count">The groups to pass over.</param>
+    /// <returns>The groups kept, in order.</returns>
+    public GroupedScan<TRecord, TKey> Skip(int count) => _grouped.Skip(count);
+
+    /// <summary>The first <paramref name="count"/> groups in the order: a top-k, ranked in a heap of them.</summary>
+    /// <param name="count">The groups to keep at most.</param>
+    /// <returns>The groups kept, in order.</returns>
+    public GroupedScan<TRecord, TKey> Take(int count) => _grouped.Take(count);
+
+    /// <summary>One result per group, in the order: <c>Select(g =&gt; g.Count())</c>.</summary>
+    /// <typeparam name="T">The result's type.</typeparam>
+    /// <param name="result">A lambda over the group, returning its key, a component of it, or an aggregate.</param>
+    /// <returns>The groups' results, computed when enumerated.</returns>
+    public Aggregation<T> Select<T>(Func<Group<TRecord, TKey>, Sym<T>> result) => _grouped.Select(result);
+
+    /// <summary>Several results per group, in the order, read through a record.</summary>
+    /// <param name="results">A lambda over the group, returning a tuple of any length of its key's components and its aggregates.</param>
+    /// <returns>The groups' results, which <see cref="Aggregation.As{TRecord}"/> reads.</returns>
+    public Aggregation Select(Func<Group<TRecord, TKey>, ITuple> results) => _grouped.Select(results);
 }
 
 /// <summary>

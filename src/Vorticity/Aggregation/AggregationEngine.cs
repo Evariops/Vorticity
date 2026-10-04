@@ -418,7 +418,8 @@ internal static class AggregationEngine
         }
 
         GroupKeys? keys = merged.Keys;
-        int[] order = keys is null ? [0] : keys.Order(sorted || (plan.Keys.Length == 1 && keys.OnlyDictionaries));
+        // Groups as they were first met: an order is asked for, with OrderBy.
+        int[] order = keys is null ? [0] : keys.Order(sorted: false);
         return new AggregationOutcome(plan, merged.Slots, keys, order);
     }
 
