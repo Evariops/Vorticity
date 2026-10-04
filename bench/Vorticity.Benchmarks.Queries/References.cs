@@ -40,8 +40,10 @@ internal static class References
         ("dictionary key, an int sum against the hand loop", "group by endpoint (dictionary), count sum of an int", "hand loop endpoint (dictionary), count sum of an int", 2.180),
 
         // A key that streams against the same query forced to block, on every lane: what streaming
-        // costs in throughput where the blocking pass runs its ranges side by side.
-        ("streaming against blocking, (City, Day), degree N", "group by city day (composite), count avg, degree N", "group by city day (composite), count avg, blocking, degree N", 5.761),
-        ("streaming against blocking, Welford, degree N", "group by day (sorted), welford, degree N", "group by day (sorted), welford, blocking, degree N", 7.465),
+        // costs in throughput where the blocking pass runs its ranges side by side. Brought down
+        // from 5.761 and 7.465 by the ranges that stream (6k), measured at 0.85 to 0.89: 1.0 with
+        // the margin is the line's own gate, 15 % at most.
+        ("streaming against blocking, (City, Day), degree N", "group by city day (composite), count avg, degree N", "group by city day (composite), count avg, blocking, degree N", 1.000),
+        ("streaming against blocking, Welford, degree N", "group by day (sorted), welford, degree N", "group by day (sorted), welford, blocking, degree N", 1.000),
     ];
 }
